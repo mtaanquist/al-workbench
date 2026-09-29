@@ -14,7 +14,7 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20261102000000_AddStepUpTools")]
+    [Migration("20261106000000_AddStepUpTools")]
     partial class AddStepUpTools
     {
         /// <inheritdoc />
@@ -1250,6 +1250,22 @@ namespace ALDevToolbox.Data.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
+                    b.Property<Guid?>("BatchId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("package_batch_id");
+
+                    b.Property<int?>("BatchOrder")
+                        .HasColumnType("integer")
+                        .HasColumnName("package_batch_order");
+
+                    b.Property<Guid?>("BcAppId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("package_bc_app_id");
+
+                    b.Property<Guid?>("BcOperationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("package_bc_operation_id");
+
                     b.Property<DateTime?>("CancelledAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("cancelled_at");
@@ -1284,6 +1300,15 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<string>("Outcome")
                         .HasColumnType("text")
                         .HasColumnName("outcome");
+
+                    b.Property<byte[]>("PackageContent")
+                        .HasColumnType("bytea")
+                        .HasColumnName("package_content");
+
+                    b.Property<string>("PackageFileName")
+                        .HasMaxLength(260)
+                        .HasColumnType("character varying(260)")
+                        .HasColumnName("package_file_name");
 
                     b.Property<int>("ProjectId")
                         .HasColumnType("integer")
@@ -3700,6 +3725,12 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("imported_at");
 
+                    b.Property<bool>("IsPrerelease")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_prerelease");
+
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasColumnType("text")
@@ -4260,6 +4291,12 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<DateTime?>("AutoImportLastRunAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("auto_import_last_run_at");
+
+                    b.Property<bool>("AutoImportPreviewsEnabled")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("auto_import_previews_enabled");
 
                     b.Property<bool>("AutoImportReleasesEnabled")
                         .ValueGeneratedOnAdd()
