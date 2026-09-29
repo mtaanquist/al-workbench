@@ -142,6 +142,15 @@ public sealed class BcArtifactIndexTests
     }
 
     [Theory]
+    [InlineData("Business Central 29.0 (DK) Preview", "Business Central 29.0 (DK)")]
+    [InlineData("Business Central 28.2 (DK)", "Business Central 28.2 (DK)")]
+    [InlineData("Preview", "Preview")] // no leading space: not the suffix
+    public void StripPreviewSuffix_only_removes_the_label_suffix(string label, string expected)
+    {
+        BcArtifactIndex.StripPreviewSuffix(label).Should().Be(expected);
+    }
+
+    [Theory]
     [InlineData("bc-onprem:28.2:dk", "28.2", "dk")]
     [InlineData("bc-insider:29.0:w1", "29.0", "w1")]
     public void ParseDedupKey_reads_back_what_FormatDedupKey_wrote(string key, string majorMinor, string country)

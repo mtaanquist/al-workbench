@@ -125,7 +125,7 @@
                     <tr>
                         <td>
                             <a href="@($"/object-explorer/release/{r.Id}")">
-                                <strong>@r.Label</strong>
+                                <strong>@(r.IsPrerelease ? ALDevToolbox.Services.ObjectExplorer.Import.BcArtifactIndex.StripPreviewSuffix(r.Label) : r.Label)</strong>
                             </a>
                             @if (r.IsPrerelease)
                             {

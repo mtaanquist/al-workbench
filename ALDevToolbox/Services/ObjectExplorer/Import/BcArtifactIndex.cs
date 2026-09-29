@@ -171,6 +171,15 @@ public static class BcArtifactIndex
     public const string PreviewLabelSuffix = " Preview";
 
     /// <summary>
+    /// The label without its <see cref="PreviewLabelSuffix"/>, for the places
+    /// that put a "Preview" pill right beside it (release cards, the admin list,
+    /// the detail head) - the stored label keeps the suffix so pickers, the
+    /// palette and MCP still say it on their own. Any other label is returned as is.
+    /// </summary>
+    public static string StripPreviewSuffix(string label) =>
+        label.EndsWith(PreviewLabelSuffix, StringComparison.Ordinal) ? label[..^PreviewLabelSuffix.Length] : label;
+
+    /// <summary>
     /// The explicit dedup key for a first-party OnPrem artifact release:
     /// <c>bc-onprem:{Major}.{Minor}:{cc}</c> (country lower-cased), e.g.
     /// <c>bc-onprem:28.2:dk</c>. Keys at the same Major.Minor + country granularity

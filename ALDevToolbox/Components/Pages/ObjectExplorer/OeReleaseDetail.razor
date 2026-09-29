@@ -38,7 +38,7 @@
 <DetailPage IsLoading="@(_release is null && !_loaded)"
             LoadingText="Loading release..."
             IsNotFound="@(_release is null && _loaded)"
-            Title="@(_release?.Label)"
+            Title="@(_release is { IsPrerelease: true } ? ALDevToolbox.Services.ObjectExplorer.Import.BcArtifactIndex.StripPreviewSuffix(_release.Label) : _release?.Label)"
             PageClass="oe-release"
             ShowMeta="@(_repoUrls.Count > 0 || _release?.IsPrerelease == true)">
     <NotFound>

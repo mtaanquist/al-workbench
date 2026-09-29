@@ -1,4 +1,5 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerService ObjectExplorer
+@using ALDevToolbox.Services.ObjectExplorer.Import
 @using ALDevToolbox.Services.ObjectExplorer
 @using System.Text.RegularExpressions
 
@@ -145,16 +146,12 @@
             // The featured release is then dropped from the grid: rendering it
             // in both places put the same title, version and file count on
             // screen twice, linking to the same page.
-            // A preview build never takes the hero: it's the newest version by
-            // number but not the newest release anyone runs. The hero is the
-            // newest shipped release; previews stay in the grid under their major.
+            // A preview build never takes the hero, and the hero never points at
+            // one: featured there it would read as GA. The hero is the newest
+            // shipped release; previews stay in the grid under their major, pilled.
             var showHero = !searching && _kind == "first_party" && rows.Any(r => !r.IsPrerelease);
             var featured = showHero ? rows.First(r => !r.IsPrerelease) : rows[0];
             var gridRows = showHero ? rows.Where(r => r.Id != featured.Id).ToList() : rows;
-            // The newest preview, when one is ahead of the featured release: the
-            // hero offers it as a secondary link so the person who came for the
-            // next version doesn't have to hunt for it in the grid.
-            var newestPreview = showHero ? rows.FirstOrDefault(r => r.IsPrerelease) : null;
 
             @if (showHero)
             {
@@ -201,13 +198,6 @@
                                 <Icon Name="git-compare" Width="15" Height="15" />
                                 <span>Compare</span>
                             </a>
-                            @if (newestPreview is not null)
-                            {
-                                <a class="btn" href="@($"/object-explorer/release/{newestPreview.Id}")">
-                                    <Icon Name="eye" Width="15" Height="15" />
-                                    <span>Preview of @MajorMinorOf(newestPreview)</span>
-                                </a>
-                            }
                         </div>
                     </div>
                 </div>
@@ -231,7 +221,7 @@
                         {
                             <a class="browse-card oe-card" href="@($"/object-explorer/release/{r.Id}")">
                                 <div class="browse-card__top">
-                                    <span class="browse-card__title">@r.Label</span>
+                                    <span class="browse-card__title">@(r.IsPrerelease ? BcArtifactIndex.StripPreviewSuffix(r.Label) : r.Label)</span>
                                     @if (r.IsPrerelease)
                                     {
                                         <StatusPill Tone="warn" Class="status-pill--inline" title="Pre-release build of an upcoming version. Objects may still change before it ships.">Preview</StatusPill>
@@ -384,13 +374,6 @@
         var m = Regex.Match(r.Label ?? string.Empty, @"\d+(?:\.\d+)+");
         if (m.Success && Version.TryParse(m.Value, out var lv)) return lv;
         return new Version(0, 0);
-    }
-
-    /// <summary>"29.0" for the hero's preview link, from the BC version or, failing that, the label.</summary>
-    private static string MajorMinorOf(ReleaseListItem r)
-    {
-        var v = VersionKey(r);
-        return v.Major > 0 ? $"{v.Major}.{Math.Max(v.Minor, 0)}" : "the next version";
     }
 
     /// <summary>Human "imported N ago" string relative to today (UTC).</summary>
