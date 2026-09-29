@@ -19,7 +19,11 @@
     draws on its rows while and after it runs.
 
     The host hands over the rows at the moment it opens a dialog (UpgradeActionTarget),
-    so its own selection is never touched from here. See .design/environment-updates.md.
+    so its own selection is never touched from here. They must be rows the person may
+    act on: nothing here filters on CanAct (the fleet page does it in SelectedRows), and
+    the service refuses the rest per row. The host is also expected to have awaited
+    DisplayTimeZone.EnsureLoadedAsync, as every page that shows a time does, before a
+    dialog opens. See .design/environment-updates.md.
 *@
 
 @* Both confirms preview exactly what the run will do, row by row, including the
@@ -107,6 +111,12 @@
                ConfirmDisabled="@(_targetVersion is null || !_versionPreview.Any(p => p.WillChange))"
                RequireWord="update"
                WorkingContent="@RunProgress()">
+    @if (_prefillNotOffered is { } missing && _versionOptions.Count > 0)
+    {
+        @* The upgrade's own version, said plainly: picking another for it without a word
+           would be the one wrong thing to have ready. *@
+        <p class="upg-version__none">@missing isn't offered to these environments yet.</p>
+    }
     @if (_versionOptions.Count == 0)
     {
         <p class="upg-version__none">
@@ -162,14 +172,18 @@
 
     /// <summary>
     /// A version to have picked when the version dialog opens - an upgrade's target
-    /// release. Ignored when none of the rows is offered it; the person still confirms.
+    /// release. When none of the rows is offered it, nothing is picked (not even a lone
+    /// other version) and the dialog says so; the person still confirms either way.
     /// </summary>
     [Parameter] public string? PrefillVersion { get; set; }
 
     /// <summary>
     /// A slot (UTC) the Start update dialog opens on, with "Later" chosen - an upgrade's
-    /// planned slot. Ignored once it has passed, so the dialog then opens as it always
-    /// does, on "Immediately".
+    /// planned slot. The picker shows it as a wall clock in the organisation's display
+    /// zone, the way the planner typed it, and each customer is then booked at that wall
+    /// clock in their own zone, as on the fleet page. Never read from a row's zone.
+    /// Ignored once it has passed, so the dialog then opens as it always does, on
+    /// "Immediately".
     /// </summary>
     [Parameter] public DateTime? PrefillSlotUtc { get; set; }
 
@@ -266,6 +280,9 @@
     /// <summary>Every selected row sorted into its group for <see cref="_targetVersion"/>.</summary>
     private List<SelectVersionPreviewRow> _versionPreview = new();
 
+    /// <summary><see cref="PrefillVersion"/> when none of the rows is offered it, for the dialog to say so.</summary>
+    private string? _prefillNotOffered;
+
     // ── Booking an update for a slot instead of running it now ──────────
     //
     // The wall clock the person picks is read in each customer's own time zone, so
@@ -279,6 +296,11 @@
     // ── The three moves ─────────────────────────────────────────────────
 
     /// <summary>Asks to move each target row's update date to the latest allowed, then runs it.</summary>
+    /// <remarks>
+    /// The target's rows must be ones the person may act on - nothing here filters on
+    /// <c>CanAct</c> - and the host must already have awaited
+    /// <c>DisplayTimeZone.EnsureLoadedAsync</c>, which the previews and the slot prefill read.
+    /// </remarks>
     public async Task ConfirmPushAsync(UpgradeActionTarget target)
     {
         _target = target;
@@ -293,6 +315,11 @@
     }
 
     /// <summary>Asks to start each target row's update, now or at a booked slot, then runs it.</summary>
+    /// <remarks>
+    /// The target's rows must be ones the person may act on - nothing here filters on
+    /// <c>CanAct</c> - and the host must already have awaited
+    /// <c>DisplayTimeZone.EnsureLoadedAsync</c>, which the previews and the slot prefill read.
+    /// </remarks>
     public async Task ConfirmUpdateNowAsync(UpgradeActionTarget target)
     {
         _target = target;
@@ -307,6 +334,11 @@
     }
 
     /// <summary>Asks which version the target rows update to next, then runs the change.</summary>
+    /// <remarks>
+    /// The target's rows must be ones the person may act on - nothing here filters on
+    /// <c>CanAct</c> - and the host must already have awaited
+    /// <c>DisplayTimeZone.EnsureLoadedAsync</c>, which the previews and the slot prefill read.
+    /// </remarks>
     public async Task ConfirmSelectVersionAsync(UpgradeActionTarget target)
     {
         _target = target;
@@ -331,6 +363,7 @@
             : new PreviewItem(r.ProjectName, r.EnvironmentName, r.IsProduction,
                 WhyNoPush(r), PreviewGroup.Skipped)).ToList();
 
+        StateHasChanged();
         if (await _pushConfirm.OpenAsync())
         {
             await RunBatchAsync(UpgradeActionKind.PushDateToLatest);
@@ -349,7 +382,7 @@
         if (PrefillSlotUtc is { } planned && planned > DateTime.UtcNow)
         {
             _scheduleLater = true;
-            _slotLocal = LocalTime(rows[0], planned);
+            _slotLocal = Zone.ToDisplay(planned);
         }
         else
         {
@@ -377,6 +410,7 @@
                 $"starts updating to {ShortVersion(r.NextUpdateVersion)}", PreviewGroup.Acting);
         }).ToList();
 
+        StateHasChanged();
         if (await _nowConfirm.OpenAsync())
         {
             await RunBatchAsync(UpgradeActionKind.RunNow);
@@ -395,12 +429,21 @@
         _versionOptions = UpgradeFleetService.OfferedVersions(rows);
         _targetVersion = null;
         _versionPreview = new();
-        var prefill = PrefillVersion is { } wanted
-            ? _versionOptions.FirstOrDefault(o => string.Equals(o.Version, wanted, StringComparison.OrdinalIgnoreCase))
-            : null;
-        if (prefill is not null) PickVersion(prefill.Version);
-        else if (_versionOptions.Count == 1) PickVersion(_versionOptions[0].Version);
+        _prefillNotOffered = null;
+        if (PrefillVersion is { } wanted)
+        {
+            // A version the host asked for and nobody is offered picks nothing: an
+            // upgrade to 28.5 must not open with "Change to 28.4" ready to press.
+            var prefill = _versionOptions.FirstOrDefault(o => string.Equals(o.Version, wanted, StringComparison.OrdinalIgnoreCase));
+            if (prefill is not null) PickVersion(prefill.Version);
+            else _prefillNotOffered = wanted;
+        }
+        else if (_versionOptions.Count == 1)
+        {
+            PickVersion(_versionOptions[0].Version);
+        }
 
+        StateHasChanged();
         if (await _versionConfirm.OpenAsync())
         {
             await RunBatchAsync(UpgradeActionKind.SelectVersion);

@@ -7,7 +7,12 @@ namespace ALDevToolbox.Components.Pages.Upgrades;
 /// when the dialog opens. The page keeps its own selection; the runner only ever sees
 /// this copy of it.
 /// </summary>
-/// <param name="Rows">Every row the dialog lists and the run then works through, in order.</param>
+/// <param name="Rows">
+/// Every row the dialog lists and the run then works through, in order. Only rows the
+/// person may act on (<see cref="UpgradeFleetRow.CanAct"/>): the runner does not filter,
+/// so a host passes its own selection already narrowed, as the fleet page's
+/// <c>SelectedRows</c> does.
+/// </param>
 /// <param name="IsOneRow">
 /// True when the dialog was opened from one row's own menu. The titles go singular, so
 /// the rows ticked for something else and still tinted behind the dialog are plainly
