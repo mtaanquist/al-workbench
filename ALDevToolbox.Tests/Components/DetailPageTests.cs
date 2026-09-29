@@ -67,6 +67,18 @@ public sealed class DetailPageTests : IDisposable
     }
 
     [Fact]
+    public void A_loading_skeleton_replaces_the_plain_loading_block_and_still_draws_no_head()
+    {
+        var cut = _ctx.Render<DetailPage>(p => p
+            .Add(c => c.IsLoading, true)
+            .Add(c => c.Title, "28.5 in November 2026")
+            .Add(c => c.Loading, Html("<div id=\"skeleton\"></div>")));
+
+        cut.Find("div.page").Children.Select(Name).Should().Equal("skeleton");
+        cut.FindAll(".loading-block, h1, .detail-head__title").Should().BeEmpty();
+    }
+
+    [Fact]
     public void Loading_draws_no_head_because_there_is_no_name_to_put_in_it()
     {
         var cut = _ctx.Render<DetailPage>(p => p

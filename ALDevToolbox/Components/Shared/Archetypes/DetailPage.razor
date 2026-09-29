@@ -9,7 +9,8 @@
     thing is not there, or it is - and the head only exists in the third, because
     until then there is no name to put in it:
 
-      loading     a LoadingBlock
+      loading     a LoadingBlock, or the page's own Loading skeleton when its
+                  sheet draws one (the upgrade page's head and rows, #984)
       not found   NotFound: say what is missing and offer the way back. It holds
                   the page's <h1>, since the head is not rendered.
       found       crumbs, head, meta row, ChildContent
@@ -25,7 +26,14 @@
 <div class="page@(string.IsNullOrEmpty(PageClass) ? "" : " " + PageClass)">
     @if (IsLoading)
     {
-        <LoadingBlock Text="@LoadingText" />
+        @if (Loading is not null)
+        {
+            @Loading
+        }
+        else
+        {
+            <LoadingBlock Text="@LoadingText" />
+        }
     }
     else if (IsNotFound)
     {
@@ -65,6 +73,13 @@
 @code {
     [Parameter] public bool IsLoading { get; set; }
     [Parameter] public string LoadingText { get; set; } = "Loading...";
+
+    /// <summary>
+    /// The loading state in place of the plain <see cref="LoadingBlock"/>, for a sheet that
+    /// draws skeletons where the head and the rows will be. Still no head: there is no
+    /// name to put in one yet. The page brings its own <c>LoadingBlock</c> caption.
+    /// </summary>
+    [Parameter] public RenderFragment? Loading { get; set; }
 
     [Parameter] public bool IsNotFound { get; set; }
 

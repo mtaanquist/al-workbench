@@ -1,0 +1,155 @@
+/* The environment picker (UpgradePicker.dc.html, mode="picker").
+
+   A 1000px dialog is a size components.css does not have - .confirm-dialog is 420px and
+   --wide 560px - so the sheet's inline width lives here until the design project adds a
+   size for it (port note in .design/handoff/README.md). The height is fixed so the dialog
+   does not jump as a search narrows the list; only the table scrolls. */
+.upk-dialog {
+    width: min(1000px, 100%);
+    height: min(640px, calc(100vh - 2 * var(--space-5)));
+    min-height: 0;
+    overflow: hidden;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.upk-head {
+    align-items: center;
+    justify-content: space-between;
+}
+
+.upk-head__text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+.upk-head__sub {
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+}
+
+.upk-close {
+    width: 44px;
+    height: 44px;
+    flex: none;
+}
+
+.upk-body {
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    gap: var(--space-3);
+    min-height: 0;
+    overflow: hidden;
+}
+
+.upk-fill,
+.upk-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.upk-fill__label {
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+}
+
+.upk-search { flex: 1 1 220px; }
+
+.upk-filters ::deep .upk-select { width: 140px; }
+.upk-filters ::deep .upk-select--solution { width: 160px; }
+
+.upk-scroll {
+    overflow: auto;
+    min-height: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--r-control);
+}
+
+.upk-table {
+    table-layout: fixed;
+    border: 0;
+}
+
+.upk-col-check { width: 40px; }
+.upk-col-env { width: 36%; }
+.upk-col-short,
+.upk-col-ver { width: 14%; }
+
+.upk-sol {
+    font-weight: var(--fw-medium);
+    color: var(--ink);
+}
+
+/* Production is the one to be careful with, so it reads a shade heavier - not red: the
+   sheet's review settled that red is for failures. */
+.upk-prod {
+    color: var(--ink);
+    font-weight: var(--fw-semibold);
+}
+
+.upk-why {
+    color: var(--ink-3);
+    font-weight: var(--fw-medium);
+}
+
+.upk-why--other { color: var(--warning-text); }
+
+/* A row held by another upgrade, or out of this person's reach, reads as unavailable. */
+.upk-row--locked .upk-sol,
+.upk-row--locked td { color: var(--ink-3); }
+
+.upk-next {
+    color: var(--ink-2);
+    font-size: var(--text-sm);
+}
+
+.upk-foot {
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2) var(--space-3);
+}
+
+.upk-foot__count {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 44px;
+    white-space: nowrap;
+}
+
+.upk-foot__selected {
+    font-size: var(--text-sm);
+    font-weight: var(--fw-medium);
+    color: var(--ink);
+}
+
+.upk-foot__buttons {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-left: auto;
+}
+
+/* Phone: the dialog takes the screen, and the table keeps what fits - the sheet's compact
+   picker drops the three selects and the two narrow columns. */
+@media (max-width: 700px) {
+    .upk-layer { padding: 0; }
+
+    .upk-dialog {
+        width: 100%;
+        height: 100%;
+        max-width: none;
+        border-radius: 0;
+    }
+
+    .upk-filters ::deep .upk-wide,
+    .upk-col-short,
+    .upk-col-next { display: none; }
+
+    .upk-table { table-layout: auto; }
+    .upk-col-env { width: auto; }
+}

@@ -280,6 +280,37 @@ public sealed class ProjectCustomerInfoService
         return rows.OrderBy(c => c.Type).ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
+    /// <summary>
+    /// The one person to ring at each customer, by solution id: the first of the customer's
+    /// own contacts by name, preferring one with a phone number. For a page that lists many
+    /// solutions at once - an upgrade's lines - so it reads every solution's contacts in
+    /// one query rather than one per row. A solution with no customer contact, or one the
+    /// caller cannot see, is absent from the answer rather than refused: the list it feeds
+    /// already shows only what the caller may see, and a blank cell says "nobody recorded".
+    /// </summary>
+    public async Task<Dictionary<int, CustomerContact>> ListCustomerContactsAsync(
+        IReadOnlyCollection<int> projectIds, CancellationToken ct = default)
+    {
+        if (projectIds.Count == 0) return new();
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
+
+        var rows = await _db.OeProjectContacts.AsNoTracking()
+            .Where(c => projectIds.Contains(c.ProjectId) && c.Type == ProjectContactType.Customer)
+            .Where(c => _db.OeProjects.Where(visible).Any(p => p.Id == c.ProjectId && p.DeletedAt == null))
+            .Select(c => new { c.ProjectId, Contact = new CustomerContact(c.Id, c.Type, c.Name, c.Company, c.Email, c.Phone) })
+            .ToListAsync(ct);
+
+        return rows
+            .GroupBy(r => r.ProjectId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select(r => r.Contact)
+                    .OrderBy(c => string.IsNullOrWhiteSpace(c.Phone))
+                    .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
+                    .First());
+    }
+
     /// <summary>Adds a contact, or changes one when <paramref name="contactId"/> is given.</summary>
     public async Task SaveContactAsync(int projectId, int? contactId, CustomerContactInput input, CancellationToken ct = default)
     {

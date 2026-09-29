@@ -51,6 +51,12 @@
     gap: var(--space-2);
 }
 
+/* The upgrade an action was run from. Muted like the who and the when beside it;
+   the link keeps the link colour, since it is the way to that evening's other lines. */
+.eaf__from {
+    color: var(--ink-3);
+}
+
 .eaf__status {
     display: flex;
     align-items: center;

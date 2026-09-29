@@ -1,0 +1,99 @@
+@*
+    One line or a short paragraph of text, asked for in a small dialog: the note under a
+    line's check ("posting OK, reports OK") and the name of the upgrade started from the
+    leftovers. Both are a single value with a limit and a default, and neither is worth a
+    form of its own on the upgrade page (#984).
+
+    Imperative, like ConfirmDialog - returns the text, or null when cancelled:
+
+        var note = await _text.OpenAsync(new("Note on the check", ...));
+
+    The service is the judge of the value; the page shows its refusal as an alert. The
+    maxlength here only mirrors the service's limit, so a paste cannot run past it.
+*@
+
+@if (_open && _ask is { } ask)
+{
+    <div class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="@_titleId"
+         @onkeydown="OnKeyDown" @onkeydown:stopPropagation tabindex="-1">
+        <div class="modal-backdrop" @onclick="Cancel" aria-hidden="true"></div>
+        <form class="confirm-dialog confirm-dialog--wide" @onclick:stopPropagation @onsubmit="Save" @onsubmit:preventDefault>
+            <div class="confirm-dialog__head">
+                <span class="confirm-dialog__icon" aria-hidden="true">
+                    <Icon Name="@ask.Icon" Width="17" Height="17" />
+                </span>
+                <h2 id="@_titleId" class="confirm-dialog__title">@ask.Title</h2>
+            </div>
+            <div class="confirm-dialog__body">
+                <label class="field">
+                    <span class="field__label">@ask.Label</span>
+                    @if (ask.Multiline)
+                    {
+                        <textarea class="textarea" rows="3" maxlength="@ask.MaxLength" placeholder="@ask.Placeholder"
+                                  @bind="_value" @bind:event="oninput" autofocus></textarea>
+                    }
+                    else
+                    {
+                        <input class="input" type="text" maxlength="@ask.MaxLength" placeholder="@ask.Placeholder"
+                               required="@ask.Required" @bind="_value" @bind:event="oninput" autofocus />
+                    }
+                    @if (!string.IsNullOrEmpty(ask.Hint))
+                    {
+                        <span class="field__hint">@ask.Hint</span>
+                    }
+                </label>
+            </div>
+            <div class="confirm-dialog__actions">
+                <button type="button" class="btn" @onclick="Cancel">Cancel</button>
+                <button type="submit" class="btn btn--primary" disabled="@(ask.Required && string.IsNullOrWhiteSpace(_value))">@ask.ConfirmLabel</button>
+            </div>
+        </form>
+    </div>
+}
+
+@code {
+    /// <summary>What to ask, and how.</summary>
+    /// <param name="Icon">The head glyph, a vendored Lucide name.</param>
+    /// <param name="Required">True when a blank answer is not an answer (a name); false when blank clears (a note).</param>
+    public sealed record Ask(
+        string Title, string Label, string ConfirmLabel, string Icon, int MaxLength,
+        string? Value = null, bool Multiline = false, bool Required = false,
+        string? Placeholder = null, string? Hint = null);
+
+    private readonly string _titleId = $"utd-{Guid.NewGuid():N}";
+    private bool _open;
+    private Ask? _ask;
+    private string _value = string.Empty;
+    private TaskCompletionSource<string?>? _tcs;
+
+    /// <summary>True while the dialog is on screen, for a host that holds off timers meanwhile.</summary>
+    public bool IsOpen => _open;
+
+    /// <summary>Opens the dialog and waits for the answer: the text as typed, or null when cancelled.</summary>
+    public Task<string?> OpenAsync(Ask ask)
+    {
+        _ask = ask;
+        _value = ask.Value ?? string.Empty;
+        _open = true;
+        _tcs = new TaskCompletionSource<string?>();
+        StateHasChanged();
+        return _tcs.Task;
+    }
+
+    private void Save() => Finish(_value);
+
+    private void Cancel() => Finish(null);
+
+    private void Finish(string? result)
+    {
+        if (!_open) return;
+        if (result is not null && _ask is { Required: true } && string.IsNullOrWhiteSpace(result)) return;
+        _open = false;
+        _tcs?.TrySetResult(result);
+    }
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") Cancel();
+    }
+}

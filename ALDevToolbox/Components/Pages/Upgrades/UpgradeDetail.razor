@@ -1,0 +1,1560 @@
+@page "/upgrades/{Id:int}"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@rendermode InteractiveServer
+@implements IDisposable
+@inject ALDevToolbox.Services.ObjectExplorer.Bc.EnvironmentUpgradeService Upgrades
+@inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService Actions
+@inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
+@inject ALDevToolbox.Services.ObjectExplorer.Projects.ProjectCustomerInfoService CustomerInfo
+@inject ALDevToolbox.Services.ObjectExplorer.ProjectAccess Access
+@inject IOrganizationContext Org
+@inject NavigationManager Nav
+@inject ILogger<UpgradeDetail> Log
+@inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Domain.Entities.ObjectExplorer
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@using ALDevToolbox.Services.ObjectExplorer.Projects
+
+@*
+    One planned upgrade and its lines (#984, sub-issues D and E): PageUpgrade.dc.html over
+    UpgradeBody.dc.html, on the entity-detail archetype.
+
+    Named user: a member of the upgrade team, the morning after the wave. Eight customers
+    were started at 20:00 last night; this morning they go down the list ticking off each
+    one they have checked, ring the ones that failed, and start again the one that did not
+    run. They know Business Central; they know nothing about this codebase.
+
+    The lines are the check list the morning is worked from, so the page leads with them:
+    what Business Central now says about each environment (Now, from the mirror), the
+    upgrade's own word for it (State), what was last done from here, who checks it, the
+    tick, and who to call. The head holds one primary that follows where the wave is: add
+    environments to an empty one, start the ones not sent yet, then mark it done.
+
+    The three moves go through UpgradeActionRunner, the same dialogs and run loop as the
+    fleet table, filled in from the upgrade's target and planned slot and stamped with its
+    id. After Start update the page watches each update through to its end (UpdateWatch,
+    #982), so a Running line does not stay Running while the page is open.
+
+    A done upgrade is the record of what the wave ran over: no ribbon, no selection, no
+    menus, and a tick or a cross where the checkbox was. Where this departs from the sheet,
+    and why, is in .design/environment-updates.md, "The upgrade's own page".
+*@
+
+<PageTitle>@(_detail?.Upgrade.Name ?? "Upgrade") · AL Workbench</PageTitle>
+
+<DetailPage IsLoading="_loading"
+            IsNotFound="@(_denied || _detail is null)"
+            Title="@_detail?.Upgrade.Name"
+            Subtitle="@(_detail?.Upgrade.Note ?? string.Empty)"
+            PageClass="upd"
+            ShowActions="@(_detail is not null)">
+    <Loading>
+        <nav class="page-head__crumbs" aria-label="Breadcrumb"><a href="/upgrades">Upgrades</a></nav>
+        <div class="detail-head" aria-hidden="true">
+            <div class="upd-skel-head">
+                <span class="skeleton upd-skel upd-skel--title"></span>
+                <span class="skeleton upd-skel upd-skel--sub"></span>
+            </div>
+        </div>
+        <div class="meta-row" aria-hidden="true">
+            @foreach (var width in SkeletonWidths)
+            {
+                <span class="meta-item">
+                    <span class="skeleton upd-skel upd-skel--label"></span>
+                    <span class="skeleton upd-skel upd-skel--value" style="width: @width"></span>
+                </span>
+            }
+        </div>
+        <div class="card">
+            @foreach (var width in SkeletonWidths)
+            {
+                <div class="upd-skel-row" aria-hidden="true">
+                    <span class="skeleton upd-skel upd-skel--box"></span>
+                    <span class="upd-skel-row__text">
+                        <span class="skeleton upd-skel" style="width: @width"></span>
+                        <span class="skeleton upd-skel upd-skel--short"></span>
+                    </span>
+                    <span class="skeleton upd-skel upd-skel--pill"></span>
+                </div>
+            }
+            <LoadingBlock Text="Loading the upgrade and each environment..." UnderTable="true" />
+        </div>
+    </Loading>
+    <NotFound>
+        @if (_denied)
+        {
+            <div class="card">
+                <EmptyState Icon="lock" Title="You don't have access to Upgrades" Heading="true">
+                    <Text>Upgrades act on the customers' live Business Central environments, and access is granted per team. Ask an administrator to add environment updates to one of your teams.</Text>
+                    <Action>
+                        <a class="btn" href="/">
+                            <Icon Name="house" Width="15" Height="15" />
+                            <span>Go to Home</span>
+                        </a>
+                    </Action>
+                </EmptyState>
+            </div>
+        }
+        else
+        {
+            <nav class="page-head__crumbs" aria-label="Breadcrumb">
+                <a href="/upgrades">Upgrades</a>
+                <Icon Name="chevron-right" Width="12" Height="12" />
+                <span>Not found</span>
+            </nav>
+            <div class="card">
+                <EmptyState Icon="search-x" Title="This upgrade does not exist" Heading="true">
+                    <Text>It may have been deleted, or the link is wrong. Upgrades that were marked done are kept in the Archive.</Text>
+                    <Action>
+                        <span class="upd-actions-pair">
+                            <a class="btn" href="/upgrades">Open upgrades</a>
+                            <a class="btn btn--ghost" href="@ArchiveHref">Archive</a>
+                        </span>
+                    </Action>
+                </EmptyState>
+            </div>
+        }
+    </NotFound>
+    <Crumbs>
+        <a href="/upgrades">Upgrades</a>
+        <Icon Name="chevron-right" Width="12" Height="12" />
+        <span>@_detail!.Upgrade.Name</span>
+    </Crumbs>
+    <TitleRow>
+        <StatusPill Tone="@StatusTone(_detail!.Upgrade.Status)">@StatusWord(_detail.Upgrade.Status)</StatusPill>
+    </TitleRow>
+    <Actions>
+        @if (!IsDone)
+        {
+            @foreach (var action in Ribbon())
+            {
+                <button type="button" class="@action.Css"
+                        disabled="@(action.Disabled || Busy)" title="@action.Title" @onclick="action.Run">
+                    <Icon Name="@action.Icon" Width="15" Height="15" />
+                    <span>@action.Label</span>
+                </button>
+            }
+        }
+        <span class="upd-more"><span class="ra">
+            <button type="button" class="btn btn--icon" data-ra-toggle aria-haspopup="menu" aria-expanded="false"
+                    aria-label="More upgrade actions" title="More upgrade actions" disabled="@Busy">
+                <Icon Name="ellipsis-vertical" Width="16" Height="16" />
+            </button>
+            <div class="ra__menu menu" role="menu">
+                @if (IsDone)
+                {
+                    <button type="button" class="menu__item" role="menuitem" @onclick="ReopenAsync">Reopen</button>
+                    <button type="button" class="menu__item" role="menuitem" disabled="@(LeftoverCount == 0)"
+                            title="@LeftoversTitle" @onclick="StartFromLeftoversAsync">New upgrade from the leftovers</button>
+                }
+                else
+                {
+                    @* On a phone only the primary stays in the head; the outline actions
+                       lead this menu instead, as the sheet's compact frame has it. *@
+                    @foreach (var action in Ribbon().Where(a => !a.IsPrimary))
+                    {
+                        <button type="button" class="menu__item upd-phone-only" role="menuitem"
+                                disabled="@action.Disabled" title="@action.Title" @onclick="action.Run">@action.Label</button>
+                    }
+                    <div class="menu__sep upd-phone-only"></div>
+                    <button type="button" class="menu__item" role="menuitem" @onclick="EditDetailsAsync">Edit details</button>
+                    @if (PrimaryAction != PrimaryKind.MarkDone)
+                    {
+                        <button type="button" class="menu__item" role="menuitem" @onclick="MarkDoneAsync">Mark done...</button>
+                    }
+                    @* The engine needs the upgrade done first: while it is open it still holds
+                       these environments, and one environment is on one open upgrade at a
+                       time. So the entry is here, and says what to do first. *@
+                    <button type="button" class="menu__item" role="menuitem" disabled
+                            title="Mark this upgrade done first. Its environments stay on it while it is open.">New upgrade from the leftovers</button>
+                    <div class="menu__sep"></div>
+                    <button type="button" class="menu__item menu__item--danger" role="menuitem" disabled="@AnythingSent"
+                            title="@(AnythingSent ? "Something has already been done from this upgrade, so it stays on the record. Mark it done instead." : null)"
+                            @onclick="DeleteAsync">Delete</button>
+                }
+            </div>
+        </span></span>
+    </Actions>
+    <Meta>
+        <span class="meta-item"><span class="meta-item__label">Target</span><span class="meta-item__value u-num">@_detail!.Upgrade.TargetVersion</span></span>
+        <span class="meta-item">
+            <span class="meta-item__label">Planned</span>
+            <span class="meta-item__value"><Timestamp Value="@_detail.Upgrade.PlannedAt" Format="ddd d MMM, HH:mm" Placeholder="No time set" /></span>
+        </span>
+        <span class="meta-item"><span class="meta-item__label">Environments</span><span class="meta-item__value">@_detail.Lines.Count</span></span>
+        @if (HasLines)
+        {
+            <span class="meta-item"><span class="meta-item__label">Progress</span><span class="meta-item__value">@ProgressText</span></span>
+        }
+        <span class="meta-item">
+            <span class="meta-item__label">Created</span>
+            <span class="meta-item__value">@UpgradeActionRow.NameOf(_detail.Upgrade.CreatedBy), <Timestamp Value="@_detail.Upgrade.CreatedAt" Format="d MMM" /></span>
+        </span>
+        @if (_detail.Upgrade.ClosedAt is { } closedAt)
+        {
+            <span class="meta-item">
+                <span class="meta-item__label">Closed</span>
+                <span class="meta-item__value">@(_detail.Upgrade.ClosedBy is { } by ? UpgradeActionRow.NameOf(by) + ", " : "")<Timestamp Value="@closedAt" Format="ddd d MMM, HH:mm" /></span>
+            </span>
+        }
+    </Meta>
+    <ChildContent>
+        @if (_refusal is not null || _notice is not null)
+        {
+            <div class="upd-alerts">
+                @if (_refusal is { } refusal)
+                {
+                    <Alert Tone="AlertTone.Danger">@refusal</Alert>
+                }
+                @if (_notice is { } notice)
+                {
+                    <Alert Tone="@(notice.Tone == "warn" ? AlertTone.Warn : AlertTone.Info)" Role="status">@notice.Text</Alert>
+                }
+            </div>
+        }
+
+        @if (!HasLines)
+        {
+            <div class="card">
+                <EmptyState Icon="list-plus" Title="No environments yet">
+                    <Text>Add the environments you agreed this upgrade with. You can then move their update dates, start their updates and tick them off here, together. Each environment can be on one open upgrade at a time.</Text>
+                    <Action>
+                        @if (!IsDone)
+                        {
+                            <button type="button" class="btn btn--primary" disabled="@Busy" @onclick="OpenPickerAsync">
+                                <Icon Name="plus" Width="15" Height="15" />
+                                <span>Add environments...</span>
+                            </button>
+                        }
+                    </Action>
+                </EmptyState>
+            </div>
+        }
+        else
+        {
+            @if (!IsDone)
+            {
+                <div class="upd-bar">
+                    <span class="search upd-search">
+                        <Icon Name="search" Width="15" Height="15" Css="search__icon" />
+                        <input class="input" type="search" placeholder="Search environments..."
+                               aria-label="Search solutions and environments"
+                               data-page-search aria-keyshortcuts="F3" title="Search solutions and environments (F3)"
+                               @bind="_search" @bind:event="oninput" @bind:after="ApplyFilters" />
+                    </span>
+                    <Switch Name="upd-mine" Label="Mine" Checked="_mine" CheckedChanged="SetMine" Css="upd-mine" />
+                    <SelectBox Class="upd-state">
+                        <select class="select" aria-label="State" @bind="_stateFilter" @bind:after="ApplyFilters">
+                            <option value="">Every state</option>
+                            @foreach (var state in StateOrder)
+                            {
+                                <option value="@state">@StateWord(state)</option>
+                            }
+                        </select>
+                    </SelectBox>
+                    <span class="upd-bar__spacer"></span>
+                    @if (_selection.Count > 0)
+                    {
+                        <span class="upd-bar__sel">
+                            <span class="upd-bar__count" aria-live="polite">@_selection.Summary(_shown.Select(l => l.Environment.EnvironmentId))</span>
+                            <button type="button" class="btn btn--sm" disabled="@Busy" @onclick="() => MoveAsync(SelectedRows())">Move dates...</button>
+                            <button type="button" class="btn btn--sm" disabled="@Busy" @onclick="() => StartAsync(SelectedRows())">Start update...</button>
+                            <span class="ra">
+                                <button type="button" class="btn btn--sm" data-ra-toggle aria-haspopup="menu" aria-expanded="false" disabled="@Busy">
+                                    <span>More</span>
+                                    <Icon Name="chevron-down" Width="13" Height="13" />
+                                </button>
+                                <div class="ra__menu menu" role="menu">
+                                    <button type="button" class="menu__item" role="menuitem" @onclick="() => VersionAsync(SelectedRows())">Change the next version...</button>
+                                    <button type="button" class="menu__item" role="menuitem" @onclick="() => AssignManyAsync(SelectedLines())">Assign to...</button>
+                                    <div class="menu__sep"></div>
+                                    <button type="button" class="menu__item menu__item--danger" role="menuitem"
+                                            disabled="@SelectedLines().Any(IsSent)"
+                                            title="@(SelectedLines().Any(IsSent) ? "Only environments nothing has been done to from this upgrade can be removed" : null)"
+                                            @onclick="() => RemoveAsync(SelectedLines())">Remove from upgrade</button>
+                                </div>
+                            </span>
+                            <button type="button" class="btn btn--sm btn--ghost" disabled="@Busy" @onclick="ClearSelection">Clear</button>
+                        </span>
+                    }
+                </div>
+            }
+
+            @if (_shown.Count == 0)
+            {
+                <div class="card">
+                    <EmptyState Quiet="true" Title="No environments match">
+                        <Text>Try a shorter search, or show every state.</Text>
+                        <Action>
+                            <button type="button" class="btn" @onclick="ClearFilters">Clear filters</button>
+                        </Action>
+                    </EmptyState>
+                </div>
+            }
+            else
+            {
+                <div class="upd-wide">
+                    <table class="data-table upd-table">
+                        <thead>
+                            <tr>
+                                @if (!IsDone)
+                                {
+                                    <th class="upd-col-check">
+                                        @if (ShownSelectable.Count > 0)
+                                        {
+                                            <label class="check@(_selection.SomeShownPicked(ShownSelectable) ? " is-indeterminate" : "")" aria-label="Select all">
+                                                <input type="checkbox" checked="@_selection.AllShownPicked(ShownSelectable)" disabled="@Busy" @onchange="ToggleAll" />
+                                                <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                            </label>
+                                        }
+                                        else
+                                        {
+                                            <span class="u-sr">Select</span>
+                                        }
+                                    </th>
+                                }
+                                <th class="upd-col-env">Environment</th>
+                                <th class="upd-col-now">Now</th>
+                                <th class="upd-col-state">State</th>
+                                <th class="upd-col-last">Last action</th>
+                                <th class="upd-col-who">Assignee</th>
+                                <th class="upd-col-checked">Checked</th>
+                                <th class="upd-col-contact">Contact</th>
+                                @if (!IsDone)
+                                {
+                                    <th class="data-table__actions upd-col-actions"><span class="u-sr">Actions</span></th>
+                                }
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var line in _shown)
+                            {
+                                var env = line.Environment;
+                                var picked = _selection.Contains(env.EnvironmentId);
+                                <tr @key="line.LineId" class="@RowClass(line, picked)">
+                                    @if (!IsDone)
+                                    {
+                                        <td>
+                                            @if (env.CanAct)
+                                            {
+                                                <label class="check" aria-label="@($"Select {env.ProjectName} {env.EnvironmentName}")">
+                                                    <input type="checkbox" checked="@picked" disabled="@Busy" @onchange="e => TogglePick(env.EnvironmentId, e)" />
+                                                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                                </label>
+                                            }
+                                            else
+                                            {
+                                                <span role="img" aria-label="Locked - you can't manage this solution's updates" title="You can't manage this solution's updates">
+                                                    <Icon Name="lock" Width="13" Height="13" />
+                                                </span>
+                                            }
+                                        </td>
+                                    }
+                                    <td>
+                                        <span class="cell-stack">
+                                            <span class="cell-stack__main upd-sol"><a href="@($"/solutions/{env.ProjectId}")">@env.ProjectName</a></span>
+                                            <span class="cell-stack__sub">
+                                                <a class="@EnvLinkClass(env)" href="@($"/environments/{env.EnvironmentId}")">@env.EnvironmentName</a>
+                                                @if (!SameName(env))
+                                                {
+                                                    @(" ")<span class="@(env.IsProduction ? "upd-prod" : null)">@env.EnvironmentType</span>
+                                                }
+                                            </span>
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <span class="cell-stack">
+                                            <span class="cell-stack__main u-num" title="@env.Version">@UpgradeActionRunner.ShortVersion(env.Version)</span>
+                                            <span class="cell-stack__sub upd-wrap @NowSubClass(line)">@NowSub(line)</span>
+                                        </span>
+                                        @RowNote(env.EnvironmentId, brief: true)
+                                    </td>
+                                    <td><StatusPill Tone="@StateTone(line.State)">@StateWord(line.State)</StatusPill></td>
+                                    <td>
+                                        <span class="cell-stack">
+                                            <span class="cell-stack__main upd-small upd-wrap">@LastHeadline(line)</span>
+                                            <span class="cell-stack__sub upd-wrap">@LastWho(line)</span>
+                                        </span>
+                                    </td>
+                                    <td>@AssigneeCell(line)</td>
+                                    <td>@CheckedCell(line)</td>
+                                    <td>@ContactCell(line)</td>
+                                    @if (!IsDone)
+                                    {
+                                        <td class="data-table__actions">
+                                            @if (env.CanAct)
+                                            {
+                                                @RowMenu(line)
+                                            }
+                                        </td>
+                                    }
+                                </tr>
+                                @if (RowNote(env.EnvironmentId, brief: false) is { } wide)
+                                {
+                                    <tr class="is-subrow upd-result-row @RowClass(line, picked)" @key="@($"result-{line.LineId}")">
+                                        <td colspan="@ColumnCount">@wide</td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+
+                @* The phone frame: one card per line, State and Checked kept, the rest on
+                   one muted line, and the tick and a Call button at 44px. *@
+                <div class="upd-compact">
+                    @foreach (var line in _shown)
+                    {
+                        var env = line.Environment;
+                        <div class="upd-card" @key="@($"card-{line.LineId}")">
+                            <span class="cell-stack upd-card__who">
+                                <span class="cell-stack__main upd-card__sol"><a href="@($"/solutions/{env.ProjectId}")">@env.ProjectName</a></span>
+                                <span class="cell-stack__sub">
+                                    <span class="@(SameName(env) && env.IsProduction ? "upd-prod" : null)">@env.EnvironmentName</span>
+                                    @if (!SameName(env))
+                                    {
+                                        @(" ")<span class="@(env.IsProduction ? "upd-prod" : null)">@env.EnvironmentType</span>
+                                    }
+                                    @(" - ")@UpgradeActionRunner.ShortVersion(env.Version)
+                                </span>
+                            </span>
+                            <StatusPill Tone="@StateTone(line.State)" Class="upd-card__pill">@StateWord(line.State)</StatusPill>
+                            <span class="upd-card__last">@LastHeadline(line), @LastWho(line)@(line.AssigneeName is { } a ? $" - {a}" : "")</span>
+                            <span class="upd-card__foot">
+                                @if (!IsDone)
+                                {
+                                    <label class="check upd-card__check">
+                                        <input type="checkbox" checked="@line.IsChecked" disabled="@(!CanTick(line) || Busy)"
+                                               @onchange="e => ToggleCheckAsync(line, e)" />
+                                        <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                        <span class="upd-card__checktext">
+                                            <span>@CheckLabel(line)</span>
+                                        </span>
+                                    </label>
+                                }
+                                else
+                                {
+                                    <span class="upd-card__checktext">
+                                        <span class="@(line.IsChecked ? "upd-ok" : "upd-bad")">@(line.IsChecked ? CheckLabel(line) : NotCheckedText(line))</span>
+                                        @if (line.Note is { } doneNote)
+                                        {
+                                            <span class="upd-card__note">@doneNote</span>
+                                        }
+                                    </span>
+                                }
+                                <span class="upd-card__acts">
+                                    @if (ContactFor(line) is { Phone: { } phone } contact)
+                                    {
+                                        <a class="btn btn--sm upd-card__call" href="@TelHref(phone)" aria-label="@($"Call {contact.Name}")">
+                                            <Icon Name="phone" Width="14" Height="14" />
+                                            <span>@FirstName(contact.Name)</span>
+                                        </a>
+                                    }
+                                    @if (!IsDone && env.CanAct)
+                                    {
+                                        @RowMenu(line)
+                                    }
+                                </span>
+                            </span>
+                            @if (!IsDone && line.IsChecked && env.CanAct)
+                            {
+                                <button type="button" class="upd-note-button upd-card__notebutton" disabled="@Busy" @onclick="() => EditNoteAsync(line)">
+                                    @(line.Note ?? "Add a note")
+                                </button>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+
+            <div class="pager">
+                <span class="pager__count">@PagerText</span>
+            </div>
+
+            @if (!IsDone && _detail!.Lines.Any(l => !l.Environment.CanAct))
+            {
+                <p class="upd-legend">
+                    <Icon Name="lock" Width="13" Height="13" />
+                    <span>Environments with a padlock belong to a team you're not on, so you can't change them.</span>
+                </p>
+            }
+        }
+    </ChildContent>
+</DetailPage>
+
+@if (_detail is not null && !_denied)
+{
+    <UpgradeActionRunner @ref="_runner"
+                         Pending="_pending"
+                         UpgradeId="Id"
+                         PrefillVersion="@_detail.Upgrade.TargetVersion"
+                         PrefillSlotUtc="_detail.Upgrade.PlannedAt"
+                         OnRunStarted="OnRunStarted"
+                         OnProgress="StateHasChanged"
+                         OnRunFinished="OnRunFinishedAsync" />
+
+    <UpgradePicker @ref="_picker" />
+    <UpgradeDetailsDialog @ref="_details" />
+    <UpgradeTextDialog @ref="_text" />
+    <UpgradeAssignDialog @ref="_assign" People="_people" />
+
+    <ConfirmDialog @ref="_markDoneConfirm" Wide="true" HeadIcon="triangle-alert"
+                   ConfirmButtonClass="btn--primary" ConfirmLabel="Mark done">
+        @if (_markDoneUnchecked.Count > 0)
+        {
+            @* The leftovers first, under their own heading, so "the 3 that failed or never
+               started" in the sentence below points at three rows the reader can see. *@
+            @foreach (var group in MarkDoneGroups())
+            {
+                @if (group.Heading is { } heading)
+                {
+                    <p class="section-label upd-unchecked__head">@heading</p>
+                }
+                <div class="upd-unchecked">
+                    @foreach (var line in group.Lines)
+                    {
+                        <div class="upd-unchecked__row">
+                            <span class="cell-stack upd-unchecked__who">
+                                <span class="cell-stack__main">@line.Environment.ProjectName</span>
+                                <span class="cell-stack__sub">@EnvLabel(line.Environment)</span>
+                            </span>
+                            <StatusPill Tone="@StateTone(line.State)">@StateWord(line.State)</StatusPill>
+                        </div>
+                    }
+                </div>
+            }
+            @if (_markDoneLeftovers > 0)
+            {
+                <p class="upd-unchecked__after">@LeftoversAfterText</p>
+            }
+            @if (_markDoneUnchecked.Where(l => l.State == UpgradeLineState.Running).ToList() is { Count: > 0 } running)
+            {
+                <p class="upd-unchecked__after">@RunningText(running)</p>
+            }
+        }
+    </ConfirmDialog>
+
+    <ConfirmDialog @ref="_deleteConfirm" Title="Delete this upgrade?" ConfirmLabel="Delete upgrade" ConfirmIcon="trash-2" />
+    <ConfirmDialog @ref="_removeConfirm" ConfirmLabel="Remove" ConfirmIcon="trash-2" />
+}
+
+@code {
+    [Parameter] public int Id { get; set; }
+
+    private bool _loading = true;
+    private bool _denied;
+    private EnvironmentUpgradeDetail? _detail;
+
+    /// <summary>The lines on screen after the search, Mine and the state filter.</summary>
+    private List<EnvironmentUpgradeLineRow> _shown = new();
+
+    private List<CustomerPersonOption> _people = new();
+
+    /// <summary>The customer's own contact per solution on the upgrade, read once for all of them.</summary>
+    private Dictionary<int, CustomerContact> _contacts = new();
+
+    /// <summary>The bookings still waiting on this upgrade's environments, from here or elsewhere.</summary>
+    private List<UpgradeActionRow> _pending = new();
+
+    /// <summary>
+    /// The ticked lines, by environment id. A search, Mine or the state filter never unticks
+    /// one (#985): the list is short, but the morning's work is "these three", found one at
+    /// a time. Only a re-read drops a tick, for a line that has gone or is out of reach.
+    /// </summary>
+    private readonly SelectionSet _selection = new();
+
+    private string _search = string.Empty;
+    private bool _mine;
+    private string _stateFilter = string.Empty;
+
+    private UpgradeNotice? _notice;
+    private string? _refusal;
+
+    /// <summary>True while one of the page's own writes is in flight; its controls wait for it.</summary>
+    private bool _working;
+
+    private UpgradeActionRunner? _runner;
+    private UpdateWatch? _watch;
+    private UpgradePicker? _picker;
+    private UpgradeDetailsDialog? _details;
+    private UpgradeTextDialog? _text;
+    private UpgradeAssignDialog? _assign;
+    private ConfirmDialog? _markDoneConfirm;
+    private ConfirmDialog? _deleteConfirm;
+    private ConfirmDialog? _removeConfirm;
+
+    /// <summary>The lines the Mark done confirm names, taken when it opens.</summary>
+    private List<EnvironmentUpgradeLineRow> _markDoneUnchecked = new();
+    private int _markDoneLeftovers;
+
+    private static readonly string[] SkeletonWidths = ["60%", "45%", "70%", "52%", "64%"];
+
+    private static readonly UpgradeLineState[] StateOrder =
+    [
+        UpgradeLineState.Planned, UpgradeLineState.DateMoved, UpgradeLineState.Booked, UpgradeLineState.Running,
+        UpgradeLineState.Updated, UpgradeLineState.Failed, UpgradeLineState.Checked,
+    ];
+
+    /// <summary>
+    /// Where the not-found state's Archive button goes. The Open / Archive / Fleet views of
+    /// /upgrades are built alongside this page; this is the address that page reads for
+    /// its Archive view.
+    /// </summary>
+    internal const string ArchiveHref = "/upgrades?view=archive";
+
+    private bool IsDone => _detail?.Upgrade.IsClosed == true;
+    private bool HasLines => _detail is { Lines.Count: > 0 };
+    private bool Running => _runner?.IsRunning == true;
+    private bool Busy => _working || Running;
+
+    private bool DialogOpen =>
+        _runner?.IsDialogOpen == true || _picker?.IsOpen == true || _details?.IsOpen == true
+        || _text?.IsOpen == true || _assign?.IsOpen == true
+        || _markDoneConfirm?.IsOpen == true || _deleteConfirm?.IsOpen == true || _removeConfirm?.IsOpen == true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Zone.EnsureLoadedAsync();
+        var snapshot = await Access.GetSnapshotAsync();
+        // The grant is deliberately not in the sign-in claims, so the page asks the same
+        // service the sidebar does, as the fleet page does.
+        if (!snapshot.CanUseEnvironmentOps)
+        {
+            _denied = true;
+            _loading = false;
+            return;
+        }
+
+        _watch = new UpdateWatch(Connection, Log, InvokeAsync,
+            paused: () => Busy || DialogOpen || _denied,
+            find: FindRow, replace: ReplaceRow, afterTick: AfterWatchTickAsync);
+        _people = await CustomerInfo.ListAssignableUsersAsync();
+        await LoadAsync();
+        _loading = false;
+    }
+
+    public void Dispose() => _watch?.Dispose();
+
+    /// <summary>
+    /// Reads the upgrade, its lines and what hangs off them. Every write re-reads rather
+    /// than patching the rows, because a line's state is derived from the mirror and the
+    /// actions together and the page must say what the engine says.
+    /// </summary>
+    private async Task LoadAsync()
+    {
+        _detail = await Upgrades.GetAsync(Id);
+        if (_detail is null)
+        {
+            _shown = new();
+            return;
+        }
+
+        var environmentIds = _detail.Lines.Select(l => l.Environment.EnvironmentId).ToHashSet();
+        _pending = (await Actions.ListPendingAsync()).Where(a => environmentIds.Contains(a.EnvironmentId)).ToList();
+        _contacts = await CustomerInfo.ListCustomerContactsAsync(
+            _detail.Lines.Select(l => l.Environment.ProjectId).Distinct().ToList());
+
+        _selection.Prune(IsDone ? [] : _detail.Lines.Where(l => l.Environment.CanAct).Select(l => l.Environment.EnvironmentId));
+        ApplyFilters();
+        if (!IsDone) _watch?.JoinUnderWay(_detail.Lines.Select(l => l.Environment));
+    }
+
+    // ── Filters and the selection ───────────────────────────────────────
+
+    private void ApplyFilters()
+    {
+        if (_detail is null) return;
+        IEnumerable<EnvironmentUpgradeLineRow> q = _detail.Lines;
+        var term = _search.Trim();
+        if (term.Length > 0)
+        {
+            q = q.Where(l =>
+                l.Environment.ProjectName.Contains(term, StringComparison.OrdinalIgnoreCase)
+                || (l.Environment.ProjectShortName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+                || l.Environment.EnvironmentName.Contains(term, StringComparison.OrdinalIgnoreCase));
+        }
+        if (_mine)
+        {
+            var me = Org.CurrentUserId;
+            q = q.Where(l => me is not null && l.AssigneeUserId == me);
+        }
+        if (Enum.TryParse<UpgradeLineState>(_stateFilter, out var state))
+        {
+            q = q.Where(l => l.State == state);
+        }
+        _shown = _selection.Shown(q, _detail.Lines, l => l.Environment.EnvironmentId, (_search, _mine, _stateFilter)).ToList();
+    }
+
+    private void SetMine(bool on)
+    {
+        _mine = on;
+        ApplyFilters();
+    }
+
+    private void ClearFilters()
+    {
+        _search = string.Empty;
+        _mine = false;
+        _stateFilter = string.Empty;
+        ApplyFilters();
+    }
+
+    /// <summary>The ticked-able lines on screen, what the header checkbox covers.</summary>
+    private List<int> ShownSelectable => _shown.Where(l => l.Environment.CanAct).Select(l => l.Environment.EnvironmentId).ToList();
+
+    private void ToggleAll(ChangeEventArgs e) => _selection.ToggleShown(ShownSelectable, e.Value is true);
+
+    private void TogglePick(int environmentId, ChangeEventArgs e) => _selection.Set(environmentId, e.Value is true);
+
+    private void ClearSelection() => _selection.Clear();
+
+    /// <summary>Every ticked line, on screen or not: the commands act on all of them, and each dialog names them first.</summary>
+    private List<EnvironmentUpgradeLineRow> SelectedLines() =>
+        _detail?.Lines.Where(l => l.Environment.CanAct && _selection.Contains(l.Environment.EnvironmentId)).ToList() ?? [];
+
+    private List<UpgradeFleetRow> SelectedRows() => SelectedLines().Select(l => l.Environment).ToList();
+
+    private string RowClass(EnvironmentUpgradeLineRow line, bool picked) =>
+        (picked ? "is-selected" : "") + (line.Environment.CanAct || IsDone ? "" : " upd-row--locked");
+
+    private int ColumnCount => IsDone ? 7 : 9;
+
+    // ── The ribbon ──────────────────────────────────────────────────────
+
+    private enum PrimaryKind { Add, Start, MarkDone }
+
+    /// <summary>
+    /// The one primary follows where the wave is: nothing on it yet, then lines to start,
+    /// then - once every line has an answer or has been checked - calling it done.
+    /// </summary>
+    private PrimaryKind PrimaryAction =>
+        !HasLines ? PrimaryKind.Add
+        : _detail!.Upgrade.Status == UpgradeStatus.Updated || _detail.Lines.All(l => l.IsChecked) ? PrimaryKind.MarkDone
+        : PrimaryKind.Start;
+
+    private sealed record RibbonAction(string Label, string Icon, bool IsPrimary, bool Disabled, string? Title, Func<Task> Run)
+    {
+        /// <summary>The button's classes, set by <see cref="Ribbon"/>, which knows whether the page has lines.</summary>
+        public string Css { get; init; } = "btn";
+    }
+
+    private IEnumerable<EnvironmentUpgradeLineRow> Actionable => _detail?.Lines.Where(l => l.Environment.CanAct) ?? [];
+
+    /// <summary>The lines "Start update..." in the head runs over: the ones nothing has been sent for yet.</summary>
+    private List<UpgradeFleetRow> NotSentRows() => Actionable
+        .Where(l => l.State is UpgradeLineState.Planned or UpgradeLineState.DateMoved)
+        .Select(l => l.Environment).ToList();
+
+    /// <summary>The lines whose date is still worth moving: not started, or booked for later.</summary>
+    private List<UpgradeFleetRow> MovableRows() => Actionable
+        .Where(l => l.State is UpgradeLineState.Planned or UpgradeLineState.DateMoved or UpgradeLineState.Booked)
+        .Select(l => l.Environment).ToList();
+
+    /// <summary>The lines not yet on the target: everything but updated, checked and running.</summary>
+    private List<UpgradeFleetRow> NotOnTargetRows() => Actionable
+        .Where(l => l.State is UpgradeLineState.Planned or UpgradeLineState.DateMoved or UpgradeLineState.Booked or UpgradeLineState.Failed)
+        .Select(l => l.Environment).ToList();
+
+    private List<RibbonAction> Ribbon()
+    {
+        var primary = PrimaryAction;
+        var noLines = !HasLines;
+        var notSent = NotSentRows();
+        var movable = MovableRows();
+        var notOnTarget = NotOnTargetRows();
+
+        var add = new RibbonAction("Add environments...", "plus", primary == PrimaryKind.Add, false, null, OpenPickerAsync);
+        var move = new RibbonAction("Move dates...", "calendar", false, noLines || movable.Count == 0,
+            noLines ? "Add environments first"
+            : movable.Count == 0 ? "No environment here is still waiting for its update"
+            : $"Moves the update date to the latest allowed: {Count(movable.Count)}",
+            () => MoveAsync(movable));
+        var start = new RibbonAction("Start update...", "zap", primary == PrimaryKind.Start, noLines || notSent.Count == 0,
+            noLines ? "Add environments first"
+            : notSent.Count == 0 ? "Every environment on this upgrade has been started"
+            : $"Starts the update on the environments not started yet: {Count(notSent.Count)}",
+            () => StartAsync(notSent));
+        var version = new RibbonAction("Change the next version...", "tag", false, noLines || notOnTarget.Count == 0,
+            noLines ? "Add environments first"
+            : notOnTarget.Count == 0 ? "Every environment is updated or updating"
+            : $"Sets the version each one updates to next: {Count(notOnTarget.Count)}",
+            () => VersionAsync(notOnTarget));
+
+        List<RibbonAction> ribbon = primary switch
+        {
+            PrimaryKind.Add => [add, move, start, version],
+            PrimaryKind.Start => [start, add, move, version],
+            _ => [new RibbonAction("Mark done...", "circle-check", true, false, null, MarkDoneAsync), add, move, start, version],
+        };
+        return ribbon.Select(a => a with { Css = RibbonClass(a) }).ToList();
+    }
+
+    private static string Count(int n) => n == 1 ? "1 environment" : $"{n} environments";
+
+    // ── The three moves, through the runner ─────────────────────────────
+
+    private Task MoveAsync(List<UpgradeFleetRow> rows, bool one = false) =>
+        _runner is null || rows.Count == 0 ? Task.CompletedTask
+            : _runner.ConfirmPushAsync(one ? UpgradeActionTarget.ForRow(rows[0]) : UpgradeActionTarget.ForSelection(rows));
+
+    private Task StartAsync(List<UpgradeFleetRow> rows, bool one = false) =>
+        _runner is null || rows.Count == 0 ? Task.CompletedTask
+            : _runner.ConfirmUpdateNowAsync(one ? UpgradeActionTarget.ForRow(rows[0]) : UpgradeActionTarget.ForSelection(rows));
+
+    private Task VersionAsync(List<UpgradeFleetRow> rows, bool one = false) =>
+        _runner is null || rows.Count == 0 ? Task.CompletedTask
+            : _runner.ConfirmSelectVersionAsync(one ? UpgradeActionTarget.ForRow(rows[0]) : UpgradeActionTarget.ForSelection(rows));
+
+    private void OnRunStarted()
+    {
+        _notice = null;
+        _refusal = null;
+    }
+
+    /// <summary>
+    /// Re-reads the upgrade so the lines say what the engine now derives, then watches the
+    /// updates the run started (#982). The summary goes up after the re-read: it is the sign
+    /// the run is over.
+    /// </summary>
+    private async Task OnRunFinishedAsync(UpgradeRunOutcome outcome)
+    {
+        await LoadAsync();
+        _notice = outcome.Notice;
+        if (_watch is null) return;
+        foreach (var environmentId in _watch.WatchStarted(outcome.Started))
+        {
+            _runner?.ForgetResult(environmentId);
+        }
+    }
+
+    // ── The watch ───────────────────────────────────────────────────────
+
+    private UpgradeFleetRow? FindRow(int environmentId) =>
+        _detail?.Lines.FirstOrDefault(l => l.Environment.EnvironmentId == environmentId)?.Environment;
+
+    private void ReplaceRow(UpgradeFleetRow row)
+    {
+        if (_detail is null) return;
+        var index = _detail.Lines.FindIndex(l => l.Environment.EnvironmentId == row.EnvironmentId);
+        if (index >= 0) _detail.Lines[index] = _detail.Lines[index] with { Environment = row };
+    }
+
+    /// <summary>
+    /// After a tick that read something new, the line's state is the engine's to derive
+    /// again - Running becomes Updated or Failed from the mirror the re-read just wrote.
+    /// </summary>
+    private async Task AfterWatchTickAsync(bool changed)
+    {
+        if (changed) await LoadAsync();
+        StateHasChanged();
+    }
+
+    // ── Header moves ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Runs one of the page's own writes: refusals from the service come back as the alert
+    /// at the top of the lines, never as a raw exception.
+    /// </summary>
+    private async Task<bool> WriteAsync(Func<Task> write)
+    {
+        _refusal = null;
+        _notice = null;
+        _working = true;
+        try
+        {
+            await write();
+            return true;
+        }
+        catch (PlanValidationException ex)
+        {
+            _refusal = UpgradeActionRunner.FirstMessage(ex);
+            return false;
+        }
+        catch (ProjectAccessDeniedException ex)
+        {
+            _refusal = ex.Message;
+            return false;
+        }
+        finally
+        {
+            _working = false;
+        }
+    }
+
+    private async Task OpenPickerAsync()
+    {
+        if (_picker is null || _detail is null) return;
+        var picked = await _picker.OpenAsync(_detail.Upgrade.Id, _detail.Upgrade.Name, _detail.Upgrade.TargetVersion,
+            _detail.Lines.Select(l => l.Environment.EnvironmentId));
+        if (picked is not { Count: > 0 }) return;
+
+        AddUpgradeLinesResult? result = null;
+        if (await WriteAsync(async () => result = await Upgrades.AddLinesAsync(Id, picked)))
+        {
+            await LoadAsync();
+            _notice = AddedNotice(result!);
+        }
+    }
+
+    /// <summary>What adding did, in one line: how many went on, and each refusal in its own words.</summary>
+    internal static UpgradeNotice AddedNotice(AddUpgradeLinesResult result)
+    {
+        var parts = new List<string>();
+        parts.Add(result.Added.Count switch
+        {
+            0 => "No environments were added",
+            1 => "Added 1 environment",
+            var n => $"Added {n} environments",
+        });
+        if (result.AlreadyOnIt.Count > 0) parts.Add($"{result.AlreadyOnIt.Count} already on it");
+        var text = string.Join(", ", parts) + ".";
+        if (result.Refused.Count > 0)
+        {
+            text += " " + string.Join(" ", result.Refused.Values);
+        }
+        return new UpgradeNotice(text, result.Refused.Count > 0 ? "warn" : "info", false);
+    }
+
+    private async Task EditDetailsAsync()
+    {
+        if (_details is null || _detail is null) return;
+        if (await _details.OpenAsync(_detail.Upgrade))
+        {
+            await LoadAsync();
+            _notice = new UpgradeNotice("Saved the upgrade's details.", "info", false);
+        }
+    }
+
+    private async Task MarkDoneAsync()
+    {
+        if (_markDoneConfirm is null || _detail is null) return;
+        var name = _detail.Upgrade.Name;
+        var total = _detail.Lines.Count;
+        _markDoneUnchecked = _detail.Lines.Where(l => !l.IsChecked).ToList();
+        _markDoneLeftovers = _markDoneUnchecked.Count(l => EnvironmentUpgradeLineState.IsLeftover(l.State));
+        var open = _markDoneUnchecked.Count;
+
+        var title = open == 0
+            ? "Mark this upgrade done?"
+            : $"{open} of {total} {(open == 1 ? "is" : "are")} not checked yet. Mark done anyway?";
+        var message = open == 0
+            ? $"Every environment is checked. \"{name}\" moves to the Archive and becomes read-only."
+            : $"\"{name}\" moves to the Archive and becomes read-only. The environments not ticked off stay that way in the record.";
+
+        StateHasChanged();
+        if (!await _markDoneConfirm.OpenAsync(title, message, "Mark done", "btn--primary")) return;
+
+        var left = 0;
+        if (await WriteAsync(async () => left = await Upgrades.CloseAsync(Id)))
+        {
+            _selection.Clear();
+            await LoadAsync();
+            _notice = new UpgradeNotice(left == 0
+                ? "Marked done. It is in the Archive now."
+                : $"Marked done with {left} still unchecked. It is in the Archive now.", "info", false);
+        }
+    }
+
+    private async Task ReopenAsync()
+    {
+        if (await WriteAsync(() => Upgrades.ReopenAsync(Id)))
+        {
+            await LoadAsync();
+            _notice = new UpgradeNotice("Reopened. The upgrade is open again.", "info", false);
+        }
+    }
+
+    private sealed record MarkDoneGroup(string? Heading, List<EnvironmentUpgradeLineRow> Lines);
+
+    /// <summary>
+    /// The unchecked lines in the Mark done confirm: the leftovers under a heading of their
+    /// own, then the rest. One group, unheaded, when all of them are one kind.
+    /// </summary>
+    private List<MarkDoneGroup> MarkDoneGroups()
+    {
+        var leftovers = _markDoneUnchecked.Where(l => EnvironmentUpgradeLineState.IsLeftover(l.State)).ToList();
+        var rest = _markDoneUnchecked.Where(l => !EnvironmentUpgradeLineState.IsLeftover(l.State)).ToList();
+        if (leftovers.Count == 0 || rest.Count == 0) return [new MarkDoneGroup(null, _markDoneUnchecked)];
+        return
+        [
+            new MarkDoneGroup($"Failed or never started ({leftovers.Count})", leftovers),
+            new MarkDoneGroup($"The rest, not checked yet ({rest.Count})", rest),
+        ];
+    }
+
+    private static string RunningText(List<EnvironmentUpgradeLineRow> running) => running.Count == 1
+        ? $"{running[0].Environment.ProjectName} {running[0].Environment.EnvironmentName} is still updating."
+        : $"{running.Count} of them are still updating.";
+
+    /// <summary>"Production", or "Test (Sandbox)" when the name is not the type.</summary>
+    private static string EnvLabel(UpgradeFleetRow env) =>
+        SameName(env) ? env.EnvironmentName : $"{env.EnvironmentName} ({env.EnvironmentType})";
+
+    private string LeftoversAfterText => _markDoneLeftovers == _markDoneUnchecked.Count
+        ? "Afterwards, \"New upgrade from the leftovers\" in the menu starts a new upgrade with these."
+        : $"Afterwards, \"New upgrade from the leftovers\" in the menu starts a new upgrade with the {(_markDoneLeftovers == 1 ? "one" : _markDoneLeftovers.ToString(System.Globalization.CultureInfo.InvariantCulture))} that failed or never started.";
+
+    private int LeftoverCount => _detail?.Lines.Count(l => EnvironmentUpgradeLineState.IsLeftover(l.State)) ?? 0;
+
+    private string LeftoversTitle => LeftoverCount switch
+    {
+        0 => "Every environment was updated or checked, so nothing is left over",
+        1 => "Starts a new upgrade with the one environment that failed or never started",
+        var n => $"Starts a new upgrade with the {n} environments that failed or never started",
+    };
+
+    private async Task StartFromLeftoversAsync()
+    {
+        if (_text is null || _detail is null) return;
+        var name = await _text.OpenAsync(new UpgradeTextDialog.Ask(
+            "New upgrade from the leftovers", "Name", "Create upgrade", "plus",
+            EnvironmentUpgradeService.NameMaxLength,
+            Value: $"{_detail.Upgrade.Name} - second pass", Required: true,
+            Hint: $"It goes to {_detail.Upgrade.TargetVersion} too and keeps this upgrade's note, with the {Count(LeftoverCount)} that failed or never started."));
+        if (name is null) return;
+
+        var newId = 0;
+        if (await WriteAsync(async () => newId = await Upgrades.CreateFromLeftoversAsync(Id, name)))
+        {
+            Nav.NavigateTo($"/upgrades/{newId}");
+        }
+    }
+
+    private bool AnythingSent => _detail?.Lines.Any(IsSent) == true;
+
+    private async Task DeleteAsync()
+    {
+        if (_deleteConfirm is null || _detail is null) return;
+        var n = _detail.Lines.Count;
+        var message = n == 0
+            ? $"\"{_detail.Upgrade.Name}\" is removed. It has no environments on it."
+            : $"\"{_detail.Upgrade.Name}\" is removed, and its {Count(n)} are free to go on another upgrade. Nothing was done from it, so nothing is lost from the record.";
+        if (!await _deleteConfirm.OpenAsync("Delete this upgrade?", message, "Delete upgrade", "btn--danger", "trash-2")) return;
+
+        if (await WriteAsync(() => Upgrades.DeleteAsync(Id)))
+        {
+            Nav.NavigateTo("/upgrades");
+        }
+    }
+
+    // ── Lines ───────────────────────────────────────────────────────────
+
+    /// <summary>True once anything has been done to the line's environment from this upgrade: it is then part of the record.</summary>
+    private static bool IsSent(EnvironmentUpgradeLineRow line) => line.LastAction is not null;
+
+    private async Task RemoveAsync(List<EnvironmentUpgradeLineRow> lines)
+    {
+        if (_removeConfirm is null || lines.Count == 0 || lines.Any(IsSent)) return;
+        var one = lines.Count == 1;
+        var title = one
+            ? $"Take {lines[0].Environment.ProjectName} {lines[0].Environment.EnvironmentName} off the upgrade?"
+            : $"Take these {lines.Count} environments off the upgrade?";
+        var message = "Nothing has been done to " + (one ? "it" : "them") + " from this upgrade yet. "
+            + (one ? "It" : "They") + " can go on another upgrade afterwards.";
+        if (!await _removeConfirm.OpenAsync(title, message, "Remove", "btn--danger", "trash-2")) return;
+
+        if (await WriteAsync(async () =>
+            {
+                foreach (var line in lines) await Upgrades.RemoveLineAsync(line.LineId);
+            }))
+        {
+            foreach (var line in lines) _selection.Set(line.Environment.EnvironmentId, false);
+            await LoadAsync();
+            _notice = new UpgradeNotice(one ? "Took 1 environment off the upgrade." : $"Took {lines.Count} environments off the upgrade.", "info", false);
+        }
+        else
+        {
+            await LoadAsync();
+        }
+    }
+
+    private async Task AssignAsync(EnvironmentUpgradeLineRow line, int? userId)
+    {
+        if (await WriteAsync(() => Upgrades.AssignAsync(line.LineId, userId)))
+        {
+            await LoadAsync();
+        }
+    }
+
+    private async Task AssignManyAsync(List<EnvironmentUpgradeLineRow> lines)
+    {
+        if (_assign is null || lines.Count == 0) return;
+        var current = lines.Select(l => l.AssigneeUserId).Distinct().ToList();
+        var title = lines.Count == 1
+            ? $"Who checks {lines[0].Environment.ProjectName} {lines[0].Environment.EnvironmentName}?"
+            : $"Who checks these {lines.Count} environments?";
+        var choice = await _assign.OpenAsync(title, current.Count == 1 ? current[0] ?? 0 : null);
+        if (choice is null) return;
+
+        if (await WriteAsync(async () =>
+            {
+                foreach (var line in lines) await Upgrades.AssignAsync(line.LineId, choice.UserId);
+            }))
+        {
+            await LoadAsync();
+        }
+        else
+        {
+            await LoadAsync();
+        }
+    }
+
+    /// <summary>
+    /// A line's tick can be set once there is something to check - the update went through,
+    /// or failed and somebody looked - and taken off again once set. Before the update it
+    /// waits, and says so.
+    /// </summary>
+    private static bool CanTick(EnvironmentUpgradeLineRow line) =>
+        line.Environment.CanAct
+        && line.State is UpgradeLineState.Updated or UpgradeLineState.Failed or UpgradeLineState.Checked;
+
+    private async Task ToggleCheckAsync(EnvironmentUpgradeLineRow line, ChangeEventArgs e)
+    {
+        var on = e.Value is true;
+        if (await WriteAsync(() => Upgrades.SetCheckedAsync(line.LineId, on, line.Note)))
+        {
+            await LoadAsync();
+        }
+        else
+        {
+            await LoadAsync();
+        }
+    }
+
+    private async Task EditNoteAsync(EnvironmentUpgradeLineRow line)
+    {
+        if (_text is null) return;
+        var note = await _text.OpenAsync(new UpgradeTextDialog.Ask(
+            $"Note on {line.Environment.ProjectName} {line.Environment.EnvironmentName}", "What did you check?", "Save note",
+            "pencil", EnvironmentUpgradeService.LineNoteMaxLength,
+            Value: line.Note, Multiline: true, Placeholder: "e.g. Posting OK, reports OK"));
+        if (note is null) return;
+        if (await WriteAsync(() => Upgrades.SetCheckedAsync(line.LineId, line.IsChecked, note)))
+        {
+            await LoadAsync();
+        }
+    }
+
+    private UpgradeActionRow? BookingFor(EnvironmentUpgradeLineRow line) =>
+        _pending.Where(a => a.EnvironmentId == line.Environment.EnvironmentId && a.Kind == UpgradeActionKind.RunNow)
+            .OrderBy(a => a.ExecuteAfter).FirstOrDefault();
+
+    private async Task CancelBookingAsync(int actionId)
+    {
+        if (await WriteAsync(() => Actions.CancelUpgradeActionAsync(actionId)))
+        {
+            _runner?.ClearResults();
+            await LoadAsync();
+            _notice = new UpgradeNotice("The booked update was cancelled.", "info", false);
+        }
+    }
+
+    // ── Cells ───────────────────────────────────────────────────────────
+
+    /// <summary>A line's own commands, the same menu in the table and on the phone card.</summary>
+    private RenderFragment RowMenu(EnvironmentUpgradeLineRow line) => __builder =>
+    {
+        var env = line.Environment;
+        <RowActions Label="@($"Actions for {env.ProjectName} {env.EnvironmentName}")">
+            <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => MoveAsync([env], one: true)">Move date...</button>
+            <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => StartAsync([env], one: true)">Start update...</button>
+            <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => VersionAsync([env], one: true)">Change the next version...</button>
+            <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => AssignManyAsync([line])">Assign to...</button>
+            @if (BookingFor(line) is { } booking)
+            {
+                <button type="button" class="menu__item" role="menuitem" disabled="@Busy" @onclick="() => CancelBookingAsync(booking.Id)">Cancel booking</button>
+            }
+            <div class="menu__sep"></div>
+            <button type="button" class="menu__item menu__item--danger" role="menuitem"
+                    disabled="@(IsSent(line) || Busy)"
+                    title="@(IsSent(line) ? "Something has already been done to this environment from this upgrade, so it stays on it." : null)"
+                    @onclick="() => RemoveAsync([line])">Remove from upgrade</button>
+        </RowActions>
+    };
+
+    /// <summary>
+    /// The head's buttons. With no lines yet, "Add environments..." is the primary in the
+    /// empty state below, so the head's copy of it is outline: one primary on the page.
+    /// </summary>
+    private string RibbonClass(RibbonAction action) =>
+        action.IsPrimary && HasLines ? "btn btn--primary" : action.IsPrimary ? "btn" : "btn upd-outline";
+
+    private RenderFragment AssigneeCell(EnvironmentUpgradeLineRow line) => __builder =>
+    {
+        var editable = !IsDone && line.Environment.CanAct;
+        if (!editable)
+        {
+            if (line.AssigneeName is { } name)
+            {
+                <span class="upd-assignee">
+                    <span class="activity__avatar upd-avatar" aria-hidden="true">@Avatar.Initials(name)</span>
+                    <span>@name</span>
+                </span>
+            }
+            return;
+        }
+
+        <span class="ra">
+            @* Set, it is the person; blank, a quiet Assign. Either way one toggle for the
+               one menu of people. *@
+            <button type="button" class="@(line.AssigneeName is null ? "btn btn--sm btn--ghost upd-assign" : "upd-assignee upd-assignee--button")"
+                    data-ra-toggle aria-haspopup="menu" aria-expanded="false" disabled="@Busy"
+                    aria-label="@(line.AssigneeName is { } who
+                        ? $"Assigned to {who}. Change who checks {line.Environment.ProjectName} {line.Environment.EnvironmentName}"
+                        : $"Assign someone to check {line.Environment.ProjectName} {line.Environment.EnvironmentName}")">
+                @if (line.AssigneeName is { } assigned)
+                {
+                    <span class="activity__avatar upd-avatar" aria-hidden="true">@Avatar.Initials(assigned)</span>
+                    <span>@assigned</span>
+                }
+                else
+                {
+                    <Icon Name="plus" Width="13" Height="13" />
+                    <span>Assign</span>
+                }
+            </button>
+            <div class="ra__menu menu" role="menu">
+                @foreach (var person in _people)
+                {
+                    <button type="button" class="menu__item" role="menuitem" @onclick="() => AssignAsync(line, person.UserId)">
+                        @(person.Name.Length > 0 ? person.Name : person.Email)
+                    </button>
+                }
+                @if (line.AssigneeUserId is not null)
+                {
+                    <div class="menu__sep"></div>
+                    <button type="button" class="menu__item" role="menuitem" @onclick="() => AssignAsync(line, null)">Nobody</button>
+                }
+            </div>
+        </span>
+    };
+
+    private RenderFragment CheckedCell(EnvironmentUpgradeLineRow line) => __builder =>
+    {
+        <span class="@(IsDone ? "upd-check upd-check--done" : "upd-check")">
+            @if (IsDone)
+            {
+                <span class="@(line.IsChecked ? "upd-mark upd-ok" : "upd-mark upd-bad")" role="img"
+                      aria-label="@(line.IsChecked ? "Checked" : "Not checked")">
+                    <Icon Name="@(line.IsChecked ? "check" : "x")" Width="15" Height="15" />
+                </span>
+            }
+            else
+            {
+                @* The words sit inside the label, so the tick reads as "Tick when checked"
+                   and never as a second copy of the row's selection box on the left. *@
+                <label class="check upd-check__box" aria-label="@($"Checked {line.Environment.ProjectName} {line.Environment.EnvironmentName}")"
+                       title="@(CanTick(line) ? null : line.Environment.CanAct ? "After the update" : "You can't manage this solution's updates")">
+                    <input type="checkbox" checked="@line.IsChecked" disabled="@(!CanTick(line) || Busy)"
+                           @onchange="e => ToggleCheckAsync(line, e)" />
+                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                    @if (line.IsChecked)
+                    {
+                        <span class="upd-small upd-wrap upd-check__stamp">@(line.CheckedBy is { } by ? UpgradeActionRow.NameOf(by) : "Someone"), <Timestamp Value="@line.CheckedAt" Format="d MMM HH:mm" /></span>
+                    }
+                    else
+                    {
+                        <span class="upd-wrap upd-check__hint">@(CanTick(line) ? "Tick when checked" : "After the update")</span>
+                    }
+                </label>
+            }
+            <span class="cell-stack upd-check__text">
+                @if (IsDone && line.IsChecked)
+                {
+                    <span class="cell-stack__main upd-small upd-wrap">@(line.CheckedBy is { } doneBy ? UpgradeActionRow.NameOf(doneBy) : "Someone"), <Timestamp Value="@line.CheckedAt" Format="d MMM HH:mm" /></span>
+                }
+                else if (IsDone)
+                {
+                    <span class="cell-stack__sub upd-wrap">@NotCheckedText(line)</span>
+                }
+                @if (!IsDone && line.IsChecked && line.Environment.CanAct)
+                {
+                    <button type="button" class="upd-note-button" disabled="@Busy" @onclick="() => EditNoteAsync(line)">
+                        @(line.Note ?? "Add a note")
+                    </button>
+                }
+                else if (line.Note is { } note)
+                {
+                    <span class="cell-stack__sub upd-note-text">@note</span>
+                }
+            </span>
+        </span>
+    };
+
+    private RenderFragment ContactCell(EnvironmentUpgradeLineRow line) => __builder =>
+    {
+        if (ContactFor(line) is { } contact)
+        {
+            <span class="cell-stack">
+                <span class="cell-stack__main upd-small">@contact.Name</span>
+                @if (contact.Phone is { } phone)
+                {
+                    <span class="cell-stack__sub"><a class="u-num" href="@TelHref(phone)">@phone</a></span>
+                }
+                else if (contact.Email is { } email)
+                {
+                    <span class="cell-stack__sub"><a href="@($"mailto:{email}")">@email</a></span>
+                }
+            </span>
+        }
+        else
+        {
+            <span class="cell-stack__sub">None recorded</span>
+        }
+    };
+
+    /// <summary>
+    /// What the last run or the watch has to say about one line: the short ones in the Now
+    /// cell (<paramref name="brief"/>), the ones that need room on a full-width line under
+    /// the row, the way the fleet table does it. Null when there is nothing of that length.
+    /// </summary>
+    private RenderFragment? RowNote(int environmentId, bool brief)
+    {
+        if (_runner?.Results.TryGetValue(environmentId, out var result) == true && result.IsBrief == brief)
+        {
+            return __builder =>
+            {
+                <div class="@UpdNote(result.Tone)">
+                    @if (result.Tone == "busy")
+                    {
+                        <span class="spinner"></span>
+                    }
+                    else if (result.Tone == "ok")
+                    {
+                        <Icon Name="circle-check" Width="12" Height="12" />
+                    }
+                    <span>@result.Text</span>
+                    @if (result.LinkLabel is { } linkLabel)
+                    {
+                        <a class="upd-note__link" href="@($"/solutions/{result.ProjectId}")">@linkLabel</a>
+                    }
+                    @if (result.ActionId is { } bookedId)
+                    {
+                        <button type="button" class="btn btn--sm upd-note__cancel" @onclick="() => CancelBookingAsync(bookedId)">Cancel booking</button>
+                    }
+                </div>
+            };
+        }
+        if (!brief || _watch is null) return null;
+
+        // A watched update's line already reads Running, "Updating to 28.5 since 20:02";
+        // a spinner saying the same again under it would be the one thing said twice.
+        if (_watch.Watching.TryGetValue(environmentId, out var watch)
+            && _detail?.Lines.FirstOrDefault(l => l.Environment.EnvironmentId == environmentId)?.State != UpgradeLineState.Running)
+        {
+            return __builder =>
+            {
+                <div class="upd-note upd-note--busy" role="status">
+                    <span class="spinner"></span>
+                    <span>Updating... started <Timestamp Value="@watch.StartedUtc" Relative="true" /></span>
+                </div>
+            };
+        }
+        if (_watch.Ended.TryGetValue(environmentId, out var ended))
+        {
+            return __builder =>
+            {
+                <div class="@UpdNote(ended.Tone)" role="status">
+                    @if (ended.Tone == "ok")
+                    {
+                        <Icon Name="circle-check" Width="12" Height="12" />
+                    }
+                    else if (ended.Tone == "bad")
+                    {
+                        <Icon Name="circle-alert" Width="12" Height="12" />
+                    }
+                    <span>@ended.Text</span>
+                    @if (ended.ShowOperations)
+                    {
+                        <a class="upd-note__link" href="@($"/environments/{environmentId}/operations")">See what happened →</a>
+                    }
+                </div>
+            };
+        }
+        return null;
+    }
+
+    /// <summary>The note's class, built whole so every class the page renders is one a stylesheet can be checked against.</summary>
+    private static string UpdNote(string tone) => tone switch
+    {
+        "ok" => "upd-note upd-note--ok",
+        "bad" => "upd-note upd-note--bad",
+        "warn" => "upd-note upd-note--warn",
+        "busy" => "upd-note upd-note--busy",
+        _ => "upd-note upd-note--muted",
+    };
+
+    // ── Wording ─────────────────────────────────────────────────────────
+
+    private string ProgressText
+    {
+        get
+        {
+            var lines = _detail!.Lines;
+            var updated = lines.Count(l => l.State is UpgradeLineState.Updated or UpgradeLineState.Checked);
+            var checkedCount = lines.Count(l => l.IsChecked);
+            return $"{updated} of {lines.Count} updated, {checkedCount} checked";
+        }
+    }
+
+    private string PagerText
+    {
+        get
+        {
+            var total = _detail!.Lines.Count;
+            var head = _shown.Count == total ? $"{Count(total)}" : $"Showing {_shown.Count} of {Count(total)}";
+            if (IsDone) return head;
+            var toCheck = _detail.Lines.Count(l => !l.IsChecked);
+            return toCheck == 0 ? $"{head}, all checked" : $"{head}, {toCheck} still to check";
+        }
+    }
+
+    internal static string StatusTone(UpgradeStatus status) => status switch
+    {
+        UpgradeStatus.Planned => "queued",
+        UpgradeStatus.InProgress => "running",
+        UpgradeStatus.Updated => "warn",
+        _ => "succeeded",
+    };
+
+    internal static string StatusWord(UpgradeStatus status) => status switch
+    {
+        UpgradeStatus.Planned => "Planned",
+        UpgradeStatus.InProgress => "In progress",
+        UpgradeStatus.Updated => "Updated",
+        _ => "Done",
+    };
+
+    /// <summary>
+    /// The sheet's tones: Failed and Checked are the only red and green, so they read from
+    /// across the room; Updated is the warning colour because a check is still owed.
+    /// </summary>
+    internal static string StateTone(UpgradeLineState state) => state switch
+    {
+        UpgradeLineState.Planned => "queued",
+        UpgradeLineState.DateMoved => "muted",
+        UpgradeLineState.Booked => "info",
+        UpgradeLineState.Running => "running",
+        UpgradeLineState.Updated => "warn",
+        UpgradeLineState.Failed => "failed",
+        _ => "succeeded",
+    };
+
+    internal static string StateWord(UpgradeLineState state) => state switch
+    {
+        UpgradeLineState.Planned => "Planned",
+        UpgradeLineState.DateMoved => "Date moved",
+        UpgradeLineState.Booked => "Booked",
+        UpgradeLineState.Running => "Running",
+        UpgradeLineState.Updated => "Updated",
+        UpgradeLineState.Failed => "Failed",
+        _ => "Checked",
+    };
+
+    /// <summary>
+    /// The line under the version in Now: where Business Central has the environment, from
+    /// the mirror. Running and Failed say so against the target; a booked start says when
+    /// it fires; otherwise the next update, as the fleet table words it.
+    /// </summary>
+    private RenderFragment NowSub(EnvironmentUpgradeLineRow line) => __builder =>
+    {
+        var env = line.Environment;
+        var target = _detail!.Upgrade.TargetVersion;
+        var last = line.LastAction;
+        switch (line.State)
+        {
+            case UpgradeLineState.Running:
+                var since = _watch?.Watching.TryGetValue(env.EnvironmentId, out var w) == true ? w.StartedUtc
+                    : last is { Kind: UpgradeActionKind.RunNow, SentAt: { } sent } ? sent : (DateTime?)null;
+                <text>Updating to @target</text>
+                if (since is { } s)
+                {
+                    <text> since <Timestamp Value="@s" Format="HH:mm" /></text>
+                }
+                return;
+            case UpgradeLineState.Failed:
+                <text>Update to @target failed</text>
+                if (last is { Status: UpgradeActionStatus.Failed } failed)
+                {
+                    <text> at <Timestamp Value="@(failed.SentAt ?? failed.RequestedAt)" Format="HH:mm" /></text>
+                }
+                return;
+            case UpgradeLineState.Booked when BookingFor(line) is { } booking:
+                <text>@BookedText(env, booking.ExecuteAfter)</text>
+                return;
+        }
+
+        if (!env.HasUpdate)
+        {
+            <text>Nothing waiting</text>
+        }
+        else if (env.NextUpdateDate is { } at)
+        {
+            var onTarget = line.State is UpgradeLineState.Updated or UpgradeLineState.Checked;
+            <text>@(onTarget ? $"Next: {UpgradeActionRunner.ShortVersion(env.NextUpdateVersion)} on " : "Update on ")<Timestamp Value="@at" Format="ddd d MMM" /></text>
+        }
+        else
+        {
+            <text>Update to @UpgradeActionRunner.ShortVersion(env.NextUpdateVersion), no date yet</text>
+        }
+    };
+
+    private static string NowSubClass(EnvironmentUpgradeLineRow line) => line.State switch
+    {
+        UpgradeLineState.Failed => "upd-now--bad",
+        UpgradeLineState.Running => "upd-now--info",
+        _ => "",
+    };
+
+    /// <summary>
+    /// A booked start, said the way it was agreed: the wall clock in the customer's own zone,
+    /// named, as the fleet table's booking marker says it.
+    /// </summary>
+    private static string BookedText(UpgradeFleetRow row, DateTime utc)
+    {
+        var local = UpgradeActionRunner.LocalTime(row, utc);
+        return $"Booked for {local:HH:mm} on {local:d MMM} ({UpgradeActionRunner.ZoneLabel(row.TimeZone)})";
+    }
+
+    private static string LastHeadline(EnvironmentUpgradeLineRow line) =>
+        line.LastAction is { } action ? EnvironmentActivityFeed.Headline(action) : "Nothing yet";
+
+    private RenderFragment LastWho(EnvironmentUpgradeLineRow line) => __builder =>
+    {
+        if (line.LastAction is { } action)
+        {
+            <text>@action.RequestedByName, <Timestamp Value="@action.RequestedAt" Relative="true" /></text>
+        }
+        else
+        {
+            <text>Added <Timestamp Value="@line.AddedAt" Relative="true" /></text>
+        }
+    };
+
+    private string CheckLabel(EnvironmentUpgradeLineRow line) =>
+        line.IsChecked ? $"Checked by {(line.CheckedBy is { } by ? UpgradeActionRow.NameOf(by) : "someone")}"
+        : CanTick(line) ? "Tick when checked"
+        : "Can be ticked after the update";
+
+    private static string NotCheckedText(EnvironmentUpgradeLineRow line) =>
+        line.State == UpgradeLineState.Failed ? "Not checked, update failed" : "Not checked";
+
+    private CustomerContact? ContactFor(EnvironmentUpgradeLineRow line) =>
+        _contacts.GetValueOrDefault(line.Environment.ProjectId);
+
+    /// <summary>
+    /// "Production Production" reads as a stutter, so an environment named for its type
+    /// says it once. The sheet's data writes both; its environments are named that way too.
+    /// </summary>
+    private static bool SameName(UpgradeFleetRow env) =>
+        string.Equals(env.EnvironmentName, env.EnvironmentType, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The environment link, a shade heavier when it is also the only word for a Production environment.</summary>
+    private static string EnvLinkClass(UpgradeFleetRow env) =>
+        SameName(env) && env.IsProduction ? "upd-envlink upd-prod" : "upd-envlink";
+
+    private static string TelHref(string phone) => "tel:" + new string(phone.Where(c => !char.IsWhiteSpace(c)).ToArray());
+
+    private static string FirstName(string name) => name.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? name;
+}

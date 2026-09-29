@@ -32,6 +32,8 @@ public sealed class PageSearchShortcutTests
         {
             [("ALDevToolbox/Components/Pages/ObjectExplorer/OeReleaseDetail.razor", "aria-label=\"Filter by namespace\"")] =
                 "a field inside the Options panel, not the page's search; the page's box is #oe-release-search",
+            [("ALDevToolbox/Components/Pages/Upgrades/UpgradePicker.razor", "aria-label=\"Search the environments to add\"")] =
+                "the search inside the Add environments dialog, not the page's; the upgrade page's own box carries data-page-search",
         };
 
     [Fact]

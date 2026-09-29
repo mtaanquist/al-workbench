@@ -1,0 +1,159 @@
+@inject ALDevToolbox.Services.ObjectExplorer.Bc.EnvironmentUpgradeService Upgrades
+@inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@using ALDevToolbox.Domain.ValueObjects
+
+@*
+    "Edit details" on an upgrade's own page (#984): the name, the release it goes to, the
+    evening the team has in mind, and the note. No sheet draws it; it is the header's four
+    fields in the system's dialog, the way the pipeline editors are.
+
+    The slot is typed as a wall clock in the organisation's display zone - the zone every
+    other time on the page is shown in - and stored in UTC. It is advisory: nothing fires
+    from it. Start update opens on it, and books each customer at that wall clock in their
+    own zone (UpgradeActionRunner).
+
+    The service is the judge (EnvironmentUpgradeService.UpdateDetailsAsync); its refusals
+    come back keyed by field and are shown under the field. The HTML limits mirror its
+    rules so a slip is caught before the round trip.
+*@
+
+@if (_open)
+{
+    <div class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="@_titleId"
+         @onkeydown="OnKeyDown" @onkeydown:stopPropagation tabindex="-1">
+        <div class="modal-backdrop" @onclick="Cancel" aria-hidden="true"></div>
+        <form class="confirm-dialog confirm-dialog--wide" @onclick:stopPropagation @onsubmit="SaveAsync" @onsubmit:preventDefault>
+            <div class="confirm-dialog__head">
+                <span class="confirm-dialog__icon" aria-hidden="true">
+                    <Icon Name="pencil" Width="17" Height="17" />
+                </span>
+                <h2 id="@_titleId" class="confirm-dialog__title">Edit details</h2>
+            </div>
+            <div class="confirm-dialog__body udd-fields">
+                @if (_errors.TryGetValue("Upgrade", out var whole))
+                {
+                    <Alert Tone="AlertTone.Danger">@whole</Alert>
+                }
+                <label class="field">
+                    <span class="field__label">Name <span class="req">*</span></span>
+                    <input class="input" type="text" required maxlength="@EnvironmentUpgradeService.NameMaxLength"
+                           placeholder="e.g. 28.5 in November 2026" @bind="_name" @bind:event="oninput" autofocus />
+                    <FieldError Field="Name" Errors="_errors" />
+                </label>
+                <div class="udd-pair">
+                    <label class="field">
+                        <span class="field__label">Target version <span class="req">*</span></span>
+                        <input class="input" type="text" required inputmode="decimal"
+                               pattern="\d{1,4}\.\d{1,4}" title="Major and minor version, e.g. 28.5"
+                               placeholder="e.g. 28.5" @bind="_target" @bind:event="oninput" />
+                        <FieldError Field="TargetVersion" Errors="_errors" />
+                    </label>
+                    <label class="field">
+                        <span class="field__label">Planned for</span>
+                        <input class="input" type="datetime-local" @bind="_plannedLocal" @bind:event="oninput" />
+                        <span class="field__hint">Your time. Start update opens on it.</span>
+                    </label>
+                </div>
+                <label class="field">
+                    <span class="field__label">Note</span>
+                    <textarea class="textarea" rows="3" maxlength="@EnvironmentUpgradeService.NoteMaxLength"
+                              placeholder="e.g. Agreed with the customers on the October call."
+                              @bind="_note" @bind:event="oninput"></textarea>
+                    <FieldError Field="Note" Errors="_errors" />
+                </label>
+            </div>
+            <div class="confirm-dialog__actions">
+                <button type="button" class="btn" @onclick="Cancel" disabled="@_saving">Cancel</button>
+                <button type="submit" class="btn btn--primary" disabled="@_saving">
+                    @(_saving ? "Saving..." : "Save details")
+                </button>
+            </div>
+        </form>
+    </div>
+}
+
+@code {
+    private readonly string _titleId = $"udd-{Guid.NewGuid():N}";
+    private bool _open;
+    private bool _saving;
+    private int _upgradeId;
+    private string _name = string.Empty;
+    private string _target = string.Empty;
+    private DateTime? _plannedLocal;
+    private string _note = string.Empty;
+    private Dictionary<string, string> _errors = new();
+    private TaskCompletionSource<bool>? _tcs;
+
+    /// <summary>True while the dialog is on screen.</summary>
+    public bool IsOpen => _open;
+
+    /// <summary>
+    /// Opens on the upgrade's current details and waits: true once they were saved, false
+    /// when the person cancelled. The host awaits <c>DisplayTimeZone.EnsureLoadedAsync</c>
+    /// before this, as every page that shows a time does.
+    /// </summary>
+    public Task<bool> OpenAsync(EnvironmentUpgradeSummary upgrade)
+    {
+        _upgradeId = upgrade.Id;
+        _name = upgrade.Name;
+        _target = upgrade.TargetVersion;
+        _plannedLocal = upgrade.PlannedAt is { } at ? Zone.ToDisplay(at) : null;
+        _note = upgrade.Note ?? string.Empty;
+        _errors = new();
+        _saving = false;
+        _open = true;
+        _tcs = new TaskCompletionSource<bool>();
+        StateHasChanged();
+        return _tcs.Task;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_saving) return;
+        _saving = true;
+        _errors = new();
+        try
+        {
+            await Upgrades.UpdateDetailsAsync(_upgradeId, _name, _target, ToUtc(_plannedLocal), _note);
+            _open = false;
+            _tcs?.TrySetResult(true);
+        }
+        catch (PlanValidationException ex)
+        {
+            _errors = new Dictionary<string, string>(ex.Errors);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    /// <summary>
+    /// A wall clock typed in the display zone, as the UTC instant it names. A time the spring
+    /// change skips is read with the zone's standard offset, the way
+    /// <c>DisplayTimeZone.ParseInput</c> reads one.
+    /// </summary>
+    private DateTimeOffset? ToUtc(DateTime? local)
+    {
+        if (local is not { } wall) return null;
+        var zone = Zone.Zone;
+        var unspecified = DateTime.SpecifyKind(wall, DateTimeKind.Unspecified);
+        var utc = zone.IsInvalidTime(unspecified)
+            ? DateTime.SpecifyKind(unspecified - zone.BaseUtcOffset, DateTimeKind.Utc)
+            : TimeZoneInfo.ConvertTimeToUtc(unspecified, zone);
+        return new DateTimeOffset(utc, TimeSpan.Zero);
+    }
+
+    private void Cancel()
+    {
+        if (!_open || _saving) return;
+        _open = false;
+        _tcs?.TrySetResult(false);
+    }
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") Cancel();
+    }
+}
