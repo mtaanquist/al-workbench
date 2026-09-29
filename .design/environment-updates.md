@@ -1,7 +1,9 @@
 # Environment updates — the Upgrades fleet page
 
 > **Status: shipped** ([#657](https://github.com/mtaanquist/ALDevToolbox/issues/657), stages 1–4b).
-> The page is `Components/Pages/Upgrades/UpgradesPage.razor`; the services are
+> The page is `Components/Pages/Upgrades/UpgradesPage.razor`, and the three moves' dialogs
+> and the loop that runs them are `UpgradeActionRunner.razor` beside it, so an upgrade's own
+> page can run them over its lines; the services are
 > `UpgradeFleetService` (read), `UpgradeActionService` (request/cancel/history),
 > `UpgradeActionWorker` (booked slots) and the three write methods on
 > `ProjectConnectionService`, all under `Services/ObjectExplorer/Bc/`. The mirror lives in

@@ -1,0 +1,196 @@
+/* The three moves' confirm dialogs: the preview of what each will do, the choice of
+   when and of which version, and the run reported in the dialog that started it.
+   Moved here with the markup from the Upgrades page's sheet - the dialog bodies are
+   authored in this component, so they carry its scope and not the page's. */
+
+/* A run, reported inside the dialog that started it. */
+.upg-run { display: grid; gap: var(--space-3); }
+
+.upg-run__text { margin: 0; color: var(--ink); }
+
+.upg-run__foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    font-size: var(--text-sm);
+}
+
+/* Production, emphasised but not alarmed - matching the project page's
+   treatment of the same pill. */
+/* ::deep: the pill is rendered by StatusPill, outside this file's scope. */
+::deep .upg-prod {
+    font-weight: 600;
+}
+
+/* The confirm dialogs' preview: one line per environment, and the ones that
+   will be passed over set apart rather than hidden. */
+.upg-preview {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+
+.upg-preview li {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-1) 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.upg-preview li:last-child { border-bottom: none; }
+
+.upg-preview__who { font-weight: 600; }
+.upg-preview__what { color: var(--ink-3); text-align: right; }
+.upg-preview__skip .upg-preview__who,
+.upg-preview__skip .upg-preview__what { color: var(--ink-4); }
+
+/* The skipped group's heading inside a confirm dialog. */
+.upg-preview__head {
+    margin: var(--space-3) 0 var(--space-1);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--ink-3);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+/* How much of the fleet the update-now dialog is about, read just before the
+   confirmation word is typed. */
+.upg-preview__count {
+    margin: var(--space-3) 0 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--ink-2);
+}
+
+/* The Production marker inside a preview row. */
+/* ::deep: the pill is rendered by StatusPill, outside this file's scope. */
+.upg-preview__who ::deep .status-pill {
+    margin-left: var(--space-2);
+}
+
+/* Reads in flow, directly above the confirm. It used to be pinned to the bottom
+   of the scrolling detail block; once that block also carried the when-choice,
+   a pinned line sat on top of the picker's own caption. The lists below scroll
+   on their own instead, which keeps this and the choice both in view without
+   either overlapping the other. */
+.upg-preview__count {
+    padding: var(--space-2) 0 0;
+}
+
+/* Ninety environments still can't push the choice or the buttons off the
+   screen: the list gives way, not the controls. */
+.upg-preview {
+    max-height: 12rem;
+    overflow-y: auto;
+}
+
+/* Booking an update for an agreed slot. */
+
+/* The when-choice inside the update-now confirm. A fieldset because the two
+   radios are one question, and the question has to be readable as one. */
+.upg-when {
+    margin: var(--space-3) 0 0;
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    background: var(--surface-2);
+}
+
+.upg-when__legend {
+    padding: 0 var(--space-1);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--ink-2);
+}
+
+.upg-when__opt {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-right: var(--space-4);
+    font-size: var(--text-sm);
+    color: var(--ink-2);
+}
+
+.upg-when__pick {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-top: var(--space-2);
+}
+
+/* The booking said back in the page's own 24-hour words, under a field the
+   browser draws in its own locale. Emphasised because it, not the field, is
+   what settles what was picked. */
+.upg-when__echo {
+    margin: var(--space-2) 0 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--ink-2);
+}
+
+/* An environment in the preview that already has a booking waiting. Warned, not
+   dimmed: the run will still act on it, which is the thing to notice. */
+.upg-preview__booked {
+    color: var(--warning-text);
+}
+
+/* ── Change the next version (#960) ─────────────────────────────────── */
+
+/* The versions stacked, one per line: each carries a count, and a row of radios
+   with counts beside them reads as one long sentence. */
+.upg-version__opts {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.upg-version__name {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.upg-version__count {
+    color: var(--ink-3);
+    font-size: var(--text-sm);
+}
+
+/* Said once, above the count: the date is Business Central's to pick. */
+.upg-version__date {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin: var(--space-3) 0 0;
+    font-size: var(--text-sm);
+    color: var(--ink-2);
+}
+
+.upg-version__none {
+    margin: 0;
+    color: var(--ink-2);
+}
+
+/* Up to seven groups, so the version preview is one scroller - the dialog's own - not
+   a scroller per group inside it: each list cut at 12rem left the last group's
+   heading at the foot of the dialog with its rows in a second box nobody scrolled.
+   Each heading sticks to the top of its own group while that group scrolls past, so
+   a heading scrolled up never leaves its rows behind. */
+.upg-version__groups .upg-preview {
+    max-height: none;
+    overflow: visible;
+}
+
+.upg-version__group .upg-preview__head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    margin: 0;
+    padding: var(--space-3) 0 var(--space-1);
+    background: var(--surface);
+}
