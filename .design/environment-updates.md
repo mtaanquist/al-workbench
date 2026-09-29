@@ -443,7 +443,15 @@ through `UpgradeActionRunner`, the fleet table's dialogs and run loop, opened on
 target version and planned slot and stamping the upgrade's id on every action. After Start
 update the page watches each started update through to its end with the fleet page's watch
 (`UpdateWatch`), and re-reads the upgrade whenever a watched row changes, so a Running line
-becomes Updated or Failed without a reload.
+becomes Updated or Failed without a reload. A watch that gives up (45 minutes, or Business
+Central not answering) says to reload the page; any re-read after one of the page's own writes
+also lets it join again. The page's writes, its dialogs that read or write (the picker, Edit
+details, the runner's run) and the watch's ticks share one gate on the page's database context:
+a tick skips while a write holds it, and a write waits for a tick in flight, its re-read
+included, and the controls are disabled meanwhile. The line's tick and its note are separate
+writes (`SetCheckedAsync(line, bool)`, `SetLineNoteAsync`), so neither writes back a value the
+page read before somebody else changed it. A done upgrade with no lines says nothing was put on
+it; the Mark done confirm wears the warning glyph only while something is unchecked.
 
 **The lines.** Environment (solution, then environment and type; Production in the heavier
 weight, never red), Now (the mirror's version, and under it the next update, a booked start in

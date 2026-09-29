@@ -86,6 +86,8 @@ public sealed class UpdateWatch : IDisposable
     private readonly Func<int, UpgradeFleetRow?> _find;
     private readonly Action<UpgradeFleetRow> _replace;
     private readonly Func<bool, Task> _afterTick;
+    private readonly string _restartHint;
+    private readonly SemaphoreSlim? _gate;
 
     private readonly Dictionary<int, Watched> _watched = new();
     private readonly Dictionary<int, Ending> _ended = new();
@@ -100,7 +102,18 @@ public sealed class UpdateWatch : IDisposable
     /// <param name="paused">True while the host must not have its rows move: a run in flight, a dialog open, no access.</param>
     /// <param name="find">The host's current row for an environment, or null once it has gone from the page.</param>
     /// <param name="replace">Hands the host a row as the re-read left it.</param>
-    /// <param name="afterTick">Runs once after every tick that read anything, told whether a row or a watch changed; the host redraws there (the "started 6 minutes ago" moves on even when nothing else does).</param>
+    /// <param name="afterTick">Runs once after every tick that read anything, told whether a row changed; the host redraws there (the "started 6 minutes ago" moves on even when nothing else does).</param>
+    /// <param name="restartHint">
+    /// What a watch that gave up tells the person to do to start it again, in the host's own
+    /// words: the fleet page has a Refresh button, an upgrade's page re-reads on every change.
+    /// </param>
+    /// <param name="gate">
+    /// The host's one lock on its scoped <c>DbContext</c>, for a host whose own writes can
+    /// land while a tick is between two awaits (an upgrade's page, #984). A tick takes it
+    /// without waiting and simply skips when a write holds it, and keeps it through
+    /// <paramref name="afterTick"/>, so the host's re-read after a tick cannot meet a write
+    /// either. Null for a host whose ticks and commands never overlap on the context.
+    /// </param>
     public UpdateWatch(
         ProjectConnectionService connection,
         ILogger log,
@@ -108,8 +121,12 @@ public sealed class UpdateWatch : IDisposable
         Func<bool> paused,
         Func<int, UpgradeFleetRow?> find,
         Action<UpgradeFleetRow> replace,
-        Func<bool, Task> afterTick)
+        Func<bool, Task> afterTick,
+        string restartHint = "Refresh to start again.",
+        SemaphoreSlim? gate = null)
     {
+        _restartHint = restartHint;
+        _gate = gate;
         _connection = connection;
         _log = log;
         _invoke = invoke;
@@ -121,6 +138,12 @@ public sealed class UpdateWatch : IDisposable
 
     /// <summary>The updates being watched, by environment id.</summary>
     public IReadOnlyDictionary<int, Watched> Watching => _watched;
+
+    /// <summary>
+    /// True while a tick is reading or its host is re-reading after it: the host's controls
+    /// wait, so a click cannot start a second query on the same context.
+    /// </summary>
+    public bool IsTicking => _busy;
 
     /// <summary>How each finished watch ended, by environment id.</summary>
     public IReadOnlyDictionary<int, Ending> Ended => _ended;
@@ -284,6 +307,8 @@ public sealed class UpdateWatch : IDisposable
         // Never while a run owns the rows, and never under an open dialog: the rows a
         // person is reading there must not move under them.
         if (_busy || _paused() || _disposed || _watched.Count == 0) return;
+        // A write of the host's own holds the gate: skip this tick, the next one comes.
+        if (_gate is not null && !_gate.Wait(0)) return;
         _busy = true;
         var changed = false;
         try
@@ -292,8 +317,7 @@ public sealed class UpdateWatch : IDisposable
             foreach (var id in _watched.Where(w => now > w.Value.UntilUtc).Select(w => w.Key).ToList())
             {
                 End(id, new Ending(
-                    $"Stopped watching after {(int)For.TotalMinutes} minutes. Refresh to start again.", "muted", Stopped: true));
-                changed = true;
+                    $"Stopped watching after {(int)For.TotalMinutes} minutes. {_restartHint}", "muted", Stopped: true));
             }
 
             var due = _watched.OrderBy(w => w.Value.LastReadUtc).Take(PerTick).ToList();
@@ -303,17 +327,21 @@ public sealed class UpdateWatch : IDisposable
                 watch.LastReadUtc = DateTime.UtcNow;
                 changed |= await ReadAsync(environmentId, watch);
             }
+
+            Schedule();
+            if (!_disposed) await _afterTick(changed);
         }
         finally
         {
             _busy = false;
+            _gate?.Release();
         }
-
-        Schedule();
-        if (!_disposed) await _afterTick(changed);
     }
 
-    /// <summary>Reads one watched environment. True when its row, or its watch, changed.</summary>
+    /// <summary>
+    /// Reads one watched environment. True when its row changed; a watch that stops without
+    /// an answer changes no row, so it says false and the host only redraws.
+    /// </summary>
     private async Task<bool> ReadAsync(int environmentId, Watched watch)
     {
         BcEnvironmentReading reading;
@@ -329,13 +357,13 @@ public sealed class UpdateWatch : IDisposable
         {
             // Gone, or the connection needs setting up: asking again will not help.
             End(environmentId, new Ending("Stopped watching - " + UpgradeActionRunner.FirstMessage(ex), "warn", Stopped: true));
-            return true;
+            return false;
         }
         catch (ProjectAccessDeniedException)
         {
             End(environmentId, new Ending(
                 "Stopped watching - you can no longer change this solution's updates.", "muted", Stopped: true));
-            return true;
+            return false;
         }
         catch (Exception ex)
         {
@@ -346,8 +374,8 @@ public sealed class UpdateWatch : IDisposable
             if (++watch.Misses >= MaxMisses)
             {
                 End(environmentId, new Ending(
-                    "Stopped watching - Business Central isn't answering. Refresh to start again.", "warn", Stopped: true));
-                return true;
+                    $"Stopped watching - Business Central isn't answering. {_restartHint}", "warn", Stopped: true));
+                return false;
             }
             return false;
         }

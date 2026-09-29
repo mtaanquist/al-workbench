@@ -345,13 +345,12 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
 
 /* An upgrade's own page (#984) hands DetailPage the page class "upd". Its sheet
    (UpgradeBody.dc.html) lets the head wrap - the name, then the ribbon under it on a
-   narrow window rather than squeezing the name to a word a line - and lets a fact wrap
-   rather than cut "5 of 8 updated, 3 checked" short. DetailPage renders both, so the
+   narrow window rather than squeezing the name to a word a line. The .detail-head, its
+   title block and the .page-head__actions box are DetailPage's own elements, so the
    page's scoped sheet cannot reach them. */
 .page.upd .detail-head { flex-wrap: wrap; gap: var(--space-3); }
 .page.upd .detail-head > div:first-child { flex: 1 1 260px; min-width: 0; }
 .page.upd .detail-head > .page-head__actions { flex-wrap: wrap; min-width: 0; max-width: 100%; }
-.page.upd .meta-item__value { white-space: normal; }
 
 /* The modal scrim in the dark theme. The hand-off's recipe mixes --ink into
    transparent, which dims a light page and does the opposite to a dark one: --ink is

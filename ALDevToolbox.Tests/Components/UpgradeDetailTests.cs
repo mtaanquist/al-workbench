@@ -75,10 +75,16 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
 
         var cut = Render(id);
 
-        // Straight after the first render the page is still reading the upgrade.
-        cut.Markup.Should().Contain("Loading the upgrade and each environment...");
-        cut.Markup.Should().NotContain("from Business Central", "the page reads the mirror, not Business Central");
-        cut.FindAll("h1").Should().BeEmpty();
+        // Straight after the first render the page is still reading the upgrade: the frame's
+        // skeleton head, the page's skeleton rows, no heading yet.
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("Loading the upgrade and each environment...");
+            cut.Markup.Should().NotContain("from Business Central", "the page reads the mirror, not Business Central");
+            cut.FindAll("h1").Should().BeEmpty();
+            cut.FindAll(".detail-head .skeleton").Should().NotBeEmpty();
+            cut.Find(".page-head__crumbs a").GetAttribute("href").Should().Be("/upgrades");
+        });
         cut.WaitForAssertion(() => cut.Find("h1.detail-head__title").TextContent.Should().Be("28.5 in November 2026"));
     }
 
@@ -314,6 +320,10 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
             var named = cut.FindAll(".upd-unchecked__row");
             named.Select(r => r.QuerySelector(".cell-stack__main")!.TextContent).Should().BeEquivalentTo("CRONUS UK", "CRONUS Sverige");
             named.Select(r => r.QuerySelector(".status-pill")!.TextContent.Trim()).Should().BeEquivalentTo("Updated", "Planned");
+            cut.FindAll(".upd-unchecked__head").Select(h => h.TextContent.Trim()).Should()
+                .Equal("Failed or never started (1)", "The rest, not checked yet (1)");
+            cut.Find(".upd-unchecked__head + .upd-unchecked .cell-stack__main").TextContent.Should().Be("CRONUS Sverige",
+                "the leftovers lead, under their own heading");
             cut.Find(".upd-unchecked__after").TextContent.Should().Contain("the one that failed or never started");
         });
 
@@ -390,6 +400,183 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
         });
     }
 
+    [Fact]
+    public async Task A_line_the_person_can_see_but_not_manage_has_a_padlock_and_no_controls()
+    {
+        var (_, mine) = await _f.SeedCustomerAsync("CRONUS Danmark");
+        var id = await UpgradeAsync(mine);
+        var theirs = await SeedUnmanagedAsync("CRONUS Norge");
+        await SetVersionAsync(theirs.EnvironmentId, "28.5.1.0");
+        await PutOnUpgradeAsync(id, theirs);
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() =>
+        {
+            var row = Row(cut, "CRONUS Norge");
+            row.QuerySelector("[role=img][aria-label^='Locked']").Should().NotBeNull();
+            cut.FindAll("label[aria-label='Select CRONUS Norge Production']").Should().BeEmpty();
+            CheckBox(cut, "CRONUS Norge").HasAttribute("disabled").Should().BeTrue(
+                "the line is updated, but ticking it needs the environment-updates grant");
+            row.QuerySelector(".ra").Should().BeNull("no row menu, and no people menu");
+            cut.Find(".upd-legend").TextContent.Should().Contain("padlock");
+            // The line this person manages keeps its controls.
+            cut.FindAll("label[aria-label='Select CRONUS Danmark Production']").Should().ContainSingle();
+        });
+    }
+
+    [Fact]
+    public async Task Delete_waits_until_nothing_has_been_done_from_the_upgrade()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var id = await UpgradeAsync(envId);
+        await ActionFromUpgradeAsync(id, projectId, envId);
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() =>
+        {
+            var delete = OverflowItems(cut).Single(i => i.TextContent.Trim() == "Delete");
+            delete.HasAttribute("disabled").Should().BeTrue();
+            delete.GetAttribute("title").Should().StartWith("Something has already been done from this upgrade");
+        });
+    }
+
+    [Fact]
+    public async Task An_upgrade_nothing_was_done_from_can_be_deleted()
+    {
+        var (_, envId) = await _f.SeedCustomerAsync();
+        var id = await UpgradeAsync(envId);
+
+        var cut = Render(id);
+        cut.WaitForAssertion(() => OverflowItems(cut).Single(i => i.TextContent.Trim() == "Delete").Click());
+        cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions .btn").Last().Click());
+
+        cut.WaitForAssertion(() =>
+            _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>().Uri.Should().EndWith("/upgrades"));
+        await using var read = _f.Db.NewContext();
+        (await read.OeEnvironmentUpgrades.AnyAsync(u => u.Id == id)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Remove_waits_until_nothing_has_been_done_to_that_environment()
+    {
+        var (projectId, acted) = await _f.SeedCustomerAsync("CRONUS Danmark");
+        var (_, untouched) = await _f.SeedCustomerAsync("CRONUS UK");
+        var id = await UpgradeAsync(acted, untouched);
+        await ActionFromUpgradeAsync(id, projectId, acted);
+
+        var cut = Render(id);
+
+        cut.WaitForAssertion(() =>
+        {
+            var remove = RowMenuItem(cut, "CRONUS Danmark", "Remove from upgrade");
+            remove.HasAttribute("disabled").Should().BeTrue();
+            remove.GetAttribute("title").Should().StartWith("Something has already been done to this environment");
+            RowMenuItem(cut, "CRONUS UK", "Remove from upgrade").HasAttribute("disabled").Should().BeFalse();
+        });
+
+        cut.WaitForAssertion(() => RowMenuItem(cut, "CRONUS UK", "Remove from upgrade").Click());
+        cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions .btn").Last().Click());
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".upd-table tbody tr").Should().ContainSingle().Which.TextContent.Should().Contain("CRONUS Danmark");
+            cut.Find(".upd-alerts").TextContent.Should().Contain("Took 1 environment off the upgrade.");
+        });
+        await using var read = _f.Db.NewContext();
+        (await read.OeEnvironmentUpgradeLines.CountAsync(l => l.UpgradeId == id)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_done_upgrade_can_be_reopened()
+    {
+        var (_, envId) = await _f.SeedCustomerAsync();
+        var id = await UpgradeAsync(envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).CloseAsync(id);
+        }
+
+        var cut = Render(id);
+        cut.WaitForAssertion(() => OverflowItems(cut).Single(i => i.TextContent.Trim() == "Reopen").Click());
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".detail-head .status-pill").TextContent.Trim().Should().Be("Planned");
+            cut.Find(".upd-alerts").TextContent.Should().Contain("Reopened.");
+            cut.FindAll(".upd-table input[type=checkbox]").Should().NotBeEmpty("the controls are back");
+        });
+        await using var read = _f.Db.NewContext();
+        (await read.OeEnvironmentUpgrades.SingleAsync(u => u.Id == id)).ClosedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_note_added_on_the_page_keeps_the_stamp_of_whoever_ticked_the_line()
+    {
+        var (_, envId) = await _f.SeedCustomerAsync();
+        await SetVersionAsync(envId, "28.5.1.0");
+        var id = await UpgradeAsync(envId);
+        // A colleague on the update team did the check.
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await ctx.TeamMembers.SingleAsync(m => m.UserId == UpgradeActionTestFixture.PlainTeamUserId)).ManagesUpdates = true;
+            await ctx.SaveChangesAsync();
+        }
+        _f.ActAs(UpgradeActionTestFixture.PlainTeamUserId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var svc = _f.Upgrades(ctx);
+            await svc.SetCheckedAsync((await svc.GetAsync(id))!.Lines.Single().LineId, true);
+        }
+        _f.ActAs(UpgradeActionTestFixture.FlagUserId);
+
+        var cut = Render(id);
+        cut.WaitForAssertion(() => cut.Find(".upd-table .upd-note-button").Click());
+        cut.WaitForAssertion(() => cut.Find(".confirm-dialog textarea").Input("reports OK"));
+        cut.WaitForAssertion(() => cut.Find(".confirm-dialog button[type=submit]").Click());
+
+        cut.WaitForAssertion(() =>
+        {
+            var row = Row(cut, "CRONUS");
+            row.TextContent.Should().Contain("reports OK").And.Contain("colleague@example.com");
+        });
+        await using var read = _f.Db.NewContext();
+        var line = await read.OeEnvironmentUpgradeLines.SingleAsync(l => l.UpgradeId == id);
+        line.Note.Should().Be("reports OK");
+        line.CheckedByUserId.Should().Be(UpgradeActionTestFixture.PlainTeamUserId, "writing a note is not doing the check");
+    }
+
+    // ── The watch and the page's writes ─────────────────────────────────
+
+    [Fact]
+    public async Task A_watch_tick_skips_while_the_page_holds_its_gate_and_reads_once_it_is_free()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var row = new UpgradeFleetRow(projectId, "CRONUS Denmark", "Europe/Copenhagen", envId, "Production", "Production",
+            "Upgrading", "28.4.1.0", "28.5", "GA", "Running", null, null, null, null, CanAct: true);
+        var gate = new SemaphoreSlim(1, 1);
+        var afterTicks = 0;
+        await using var ctx = _f.Db.NewContext();
+        using var watch = new UpdateWatch(_f.Connections(ctx), NullLogger.Instance, f => f(), () => false,
+            _ => row, _ => { }, _ => { afterTicks++; return Task.CompletedTask; }, gate: gate);
+        watch.Begin(row, DateTime.UtcNow, seenBusy: true);
+
+        await gate.WaitAsync();
+        await watch.TickAsync();
+
+        watch.Watching[envId].LastReadUtc.Should().Be(DateTime.MinValue, "a write of the page's own holds the context");
+        afterTicks.Should().Be(0);
+        watch.IsTicking.Should().BeFalse();
+
+        gate.Release();
+        await watch.TickAsync();
+
+        afterTicks.Should().Be(1);
+        gate.CurrentCount.Should().Be(1, "the tick gives the gate back, its re-read included");
+        watch.IsTicking.Should().BeFalse();
+    }
+
     // ── The picker ──────────────────────────────────────────────────────
 
     [Fact]
@@ -452,6 +639,32 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task The_picker_locks_a_solution_the_person_cannot_manage_and_the_fill_skips_it()
+    {
+        var (_, envId) = await _f.SeedCustomerAsync("CRONUS Danmark");
+        await SeedUnmanagedAsync("CRONUS Norge");
+        var id = await UpgradeAsync();
+
+        var cut = Render(id);
+        cut.WaitForAssertion(() => HeadButton(cut, "Add environments...").Click());
+        cut.WaitForAssertion(() =>
+        {
+            PickerBox(cut, "CRONUS Norge").HasAttribute("disabled").Should().BeTrue();
+            PickerRow(cut, "CRONUS Norge").QuerySelector(".upk-why")!.TextContent.Should().Be("You can't manage this solution's updates");
+        });
+
+        cut.WaitForAssertion(() => cut.FindAll(".upk-fill .btn").First(b => b.TextContent.StartsWith("Production")).Click());
+
+        cut.WaitForAssertion(() =>
+        {
+            PickerBox(cut, "CRONUS Danmark").HasAttribute("checked").Should().BeTrue();
+            PickerBox(cut, "CRONUS Norge").HasAttribute("checked").Should().BeFalse();
+            cut.Find(".upk-foot__selected").TextContent.Should().Be("1 selected");
+        });
+        _ = envId;
+    }
+
+    [Fact]
     public async Task The_fill_adds_to_what_was_ticked_by_hand_and_the_search_keeps_it()
     {
         var (_, handPicked) = await _f.SeedCustomerAsync("CRONUS Danmark");
@@ -499,6 +712,59 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
         (await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == environmentId)).Version = version;
         await ctx.SaveChangesAsync();
     }
+
+    /// <summary>A solution with a Production environment and no team: visible to everyone (Public), manageable by nobody here.</summary>
+    private async Task<(int ProjectId, int EnvironmentId)> SeedUnmanagedAsync(string name)
+    {
+        await using var ctx = _f.Db.NewContext();
+        var project = new OeProject
+        {
+            OrganizationId = TestDb.DefaultOrgId, Name = name, CreatedByUserId = UpgradeActionTestFixture.OwnerUserId,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        ctx.OeProjects.Add(project);
+        await ctx.SaveChangesAsync();
+        var env = new OeProjectEnvironment
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = "Production", Type = "Production",
+            ApplicationFamily = "BusinessCentral", Status = "Active", Version = "27.5.12345.0", FetchedAt = DateTime.UtcNow,
+        };
+        ctx.OeProjectEnvironments.Add(env);
+        await ctx.SaveChangesAsync();
+        return (project.Id, env.Id);
+    }
+
+    /// <summary>
+    /// Puts a line on the upgrade directly - the engine would refuse, because this person
+    /// may not manage it, but somebody who may did.
+    /// </summary>
+    private async Task PutOnUpgradeAsync(int upgradeId, (int ProjectId, int EnvironmentId) env)
+    {
+        await using var ctx = _f.Db.NewContext();
+        ctx.OeEnvironmentUpgradeLines.Add(new OeEnvironmentUpgradeLine
+        {
+            OrganizationId = TestDb.DefaultOrgId, UpgradeId = upgradeId, EnvironmentId = env.EnvironmentId,
+            ProjectId = env.ProjectId, IsOpen = true, AddedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>A date move sent from the upgrade: after it, the line and the upgrade are part of the record.</summary>
+    private async Task ActionFromUpgradeAsync(int upgradeId, int projectId, int environmentId)
+    {
+        await using var ctx = _f.Db.NewContext();
+        ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, EnvironmentId = environmentId,
+            Kind = UpgradeActionKind.PushDateToLatest, Status = UpgradeActionStatus.Sent,
+            RequestedBy = "Anna Jensen <upgrade@example.com>", RequestedAt = DateTime.UtcNow.AddHours(-1),
+            ExecuteAfter = DateTime.UtcNow.AddHours(-1), SentAt = DateTime.UtcNow.AddHours(-1), UpgradeId = upgradeId,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    private static AngleSharp.Dom.IElement RowMenuItem(IRenderedComponent<UpgradeDetail> cut, string solution, string label) =>
+        Row(cut, solution).QuerySelectorAll(".ra__menu .menu__item").Single(i => i.TextContent.Trim() == label);
 
     private static AngleSharp.Dom.IElement HeadPrimary(IRenderedComponent<UpgradeDetail> cut) =>
         cut.FindAll(".page-head__actions > .btn--primary").Single();

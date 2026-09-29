@@ -72,10 +72,15 @@ public sealed class DetailPageTests : IDisposable
         var cut = _ctx.Render<DetailPage>(p => p
             .Add(c => c.IsLoading, true)
             .Add(c => c.Title, "28.5 in November 2026")
+            .Add(c => c.LoadingTrail, [new Crumb("Upgrades", "/upgrades")])
+            .Add(c => c.LoadingMeta, 3)
             .Add(c => c.Loading, Html("<div id=\"skeleton\"></div>")));
 
-        cut.Find("div.page").Children.Select(Name).Should().Equal("skeleton");
-        cut.FindAll(".loading-block, h1, .detail-head__title").Should().BeEmpty();
+        // The frame draws the head's skeleton; the page's slot is only the body.
+        cut.Find("div.page").Children.Select(Name).Should().Equal("page-head__crumbs", "detail-head", "meta-row", "skeleton");
+        cut.Find(".page-head__crumbs a").GetAttribute("href").Should().Be("/upgrades");
+        cut.FindAll(".meta-row .meta-item").Should().HaveCount(3);
+        cut.FindAll(".loading-block, h1, .detail-head__title").Should().BeEmpty("there is no name to put in a heading yet");
     }
 
     [Fact]

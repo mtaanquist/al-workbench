@@ -4,17 +4,7 @@
 
 /* ── Loading ─────────────────────────────────────────────────────────── */
 
-.upd-skel-head {
-    display: grid;
-    gap: var(--space-2);
-    flex: 1;
-}
-
 .upd-skel { display: block; }
-.upd-skel--title { width: 280px; max-width: 80%; height: 22px; }
-.upd-skel--sub { width: 180px; height: 10px; }
-.upd-skel--label { width: 50px; height: 9px; }
-.upd-skel--value { margin-top: 6px; }
 .upd-skel--box { width: 16px; height: 16px; flex: none; }
 .upd-skel--short { width: 30%; height: 9px; }
 .upd-skel--pill { width: 64px; height: 18px; }
@@ -109,6 +99,10 @@
 }
 
 .upd-small { font-size: var(--text-sm); }
+
+/* The facts wrap rather than cut "5 of 8 updated, 3 checked" short, as the sheet's do. The
+   meta items are this page's own markup in DetailPage's Meta slot, so the rule is scoped. */
+.meta-item__value { white-space: normal; }
 
 /* The narrow columns wrap rather than cut a sentence off: "Update to 28.5 failed 20:37"
    ending in an ellipsis loses the one word that matters. */

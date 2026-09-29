@@ -44,28 +44,14 @@
 <PageTitle>@(_detail?.Upgrade.Name ?? "Upgrade") · AL Workbench</PageTitle>
 
 <DetailPage IsLoading="_loading"
+            LoadingTrail='@([new("Upgrades", "/upgrades")])'
+            LoadingMeta="5"
             IsNotFound="@(_denied || _detail is null)"
             Title="@_detail?.Upgrade.Name"
             Subtitle="@(_detail?.Upgrade.Note ?? string.Empty)"
             PageClass="upd"
             ShowActions="@(_detail is not null)">
     <Loading>
-        <nav class="page-head__crumbs" aria-label="Breadcrumb"><a href="/upgrades">Upgrades</a></nav>
-        <div class="detail-head" aria-hidden="true">
-            <div class="upd-skel-head">
-                <span class="skeleton upd-skel upd-skel--title"></span>
-                <span class="skeleton upd-skel upd-skel--sub"></span>
-            </div>
-        </div>
-        <div class="meta-row" aria-hidden="true">
-            @foreach (var width in SkeletonWidths)
-            {
-                <span class="meta-item">
-                    <span class="skeleton upd-skel upd-skel--label"></span>
-                    <span class="skeleton upd-skel upd-skel--value" style="width: @width"></span>
-                </span>
-            }
-        </div>
         <div class="card">
             @foreach (var width in SkeletonWidths)
             {
@@ -98,11 +84,7 @@
         }
         else
         {
-            <nav class="page-head__crumbs" aria-label="Breadcrumb">
-                <a href="/upgrades">Upgrades</a>
-                <Icon Name="chevron-right" Width="12" Height="12" />
-                <span>Not found</span>
-            </nav>
+            <CrumbNav Trail='@([new("Upgrades", "/upgrades"), new("Not found")])' />
             <div class="card">
                 <EmptyState Icon="search-x" Title="This upgrade does not exist" Heading="true">
                     <Text>It may have been deleted, or the link is wrong. Upgrades that were marked done are kept in the Archive.</Text>
@@ -155,7 +137,7 @@
                     @foreach (var action in Ribbon().Where(a => !a.IsPrimary))
                     {
                         <button type="button" class="menu__item upd-phone-only" role="menuitem"
-                                disabled="@action.Disabled" title="@action.Title" @onclick="action.Run">@action.Label</button>
+                                disabled="@(action.Disabled || Busy)" title="@action.Title" @onclick="action.Run">@action.Label</button>
                     }
                     <div class="menu__sep upd-phone-only"></div>
                     <button type="button" class="menu__item" role="menuitem" @onclick="EditDetailsAsync">Edit details</button>
@@ -218,7 +200,16 @@
         {
             <div class="card">
                 <EmptyState Icon="list-plus" Title="No environments yet">
-                    <Text>Add the environments you agreed this upgrade with. You can then move their update dates, start their updates and tick them off here, together. Each environment can be on one open upgrade at a time.</Text>
+                    <Text>
+                        @if (IsDone)
+                        {
+                            @:Nothing was put on this upgrade before it was marked done.
+                        }
+                        else
+                        {
+                            @:Add the environments you agreed this upgrade with. You can then move their update dates, start their updates and tick them off here, together. Each environment can be on one open upgrade at a time.
+                        }
+                    </Text>
                     <Action>
                         @if (!IsDone)
                         {
@@ -499,7 +490,7 @@
     <UpgradeTextDialog @ref="_text" />
     <UpgradeAssignDialog @ref="_assign" People="_people" />
 
-    <ConfirmDialog @ref="_markDoneConfirm" Wide="true" HeadIcon="triangle-alert"
+    <ConfirmDialog @ref="_markDoneConfirm" Wide="true" HeadIcon="@(_markDoneUnchecked.Count > 0 ? "triangle-alert" : null)"
                    ConfirmButtonClass="btn--primary" ConfirmLabel="Mark done">
         @if (_markDoneUnchecked.Count > 0)
         {
@@ -606,7 +597,16 @@
     private bool IsDone => _detail?.Upgrade.IsClosed == true;
     private bool HasLines => _detail is { Lines.Count: > 0 };
     private bool Running => _runner?.IsRunning == true;
-    private bool Busy => _working || Running;
+    private bool Busy => _working || Running || _watch?.IsTicking == true;
+
+    /// <summary>
+    /// The page's one lock on its scoped <c>DbContext</c>. Every write of its own - and every
+    /// dialog that reads or writes behind it, the picker and the runner included - holds it
+    /// through its re-read; a watch tick takes it without waiting and skips when it is held
+    /// (<see cref="UpdateWatch"/>). Without it a tick between two awaits and a click on the
+    /// same circuit could start two queries on one context.
+    /// </summary>
+    private readonly SemaphoreSlim _gate = new(1, 1);
 
     private bool DialogOpen =>
         _runner?.IsDialogOpen == true || _picker?.IsOpen == true || _details?.IsOpen == true
@@ -627,13 +627,16 @@
         }
 
         _watch = new UpdateWatch(Connection, Log, InvokeAsync,
-            paused: () => Busy || DialogOpen || _denied,
-            find: FindRow, replace: ReplaceRow, afterTick: AfterWatchTickAsync);
+            paused: () => _working || Running || DialogOpen || _denied,
+            find: FindRow, replace: ReplaceRow, afterTick: AfterWatchTickAsync,
+            restartHint: "Reload the page to start again.", gate: _gate);
         _people = await CustomerInfo.ListAssignableUsersAsync();
         await LoadAsync();
         _loading = false;
     }
 
+    // The gate is not disposed: a SemaphoreSlim that never handed out its wait handle holds
+    // nothing, and a tick or a write finishing after the page went must still release it.
     public void Dispose() => _watch?.Dispose();
 
     /// <summary>
@@ -641,7 +644,12 @@
     /// than patching the rows, because a line's state is derived from the mirror and the
     /// actions together and the page must say what the engine says.
     /// </summary>
-    private async Task LoadAsync()
+    /// <param name="restartStopped">
+    /// Lets a watch that gave up join again if its update is still under way. Every re-read
+    /// does, except the one after a tick: that one would restart, every ten seconds, the
+    /// watch the tick had just stopped for not being answered.
+    /// </param>
+    private async Task LoadAsync(bool restartStopped = true)
     {
         _detail = await Upgrades.GetAsync(Id);
         if (_detail is null)
@@ -657,6 +665,7 @@
 
         _selection.Prune(IsDone ? [] : _detail.Lines.Where(l => l.Environment.CanAct).Select(l => l.Environment.EnvironmentId));
         ApplyFilters();
+        if (restartStopped) _watch?.ForgetStopped();
         if (!IsDone) _watch?.JoinUnderWay(_detail.Lines.Select(l => l.Environment));
     }
 
@@ -794,17 +803,22 @@
 
     // ── The three moves, through the runner ─────────────────────────────
 
+    // The runner's dialog, its run and the re-read after it all hold the gate, so a watch
+    // tick never reads while the run writes.
     private Task MoveAsync(List<UpgradeFleetRow> rows, bool one = false) =>
         _runner is null || rows.Count == 0 ? Task.CompletedTask
-            : _runner.ConfirmPushAsync(one ? UpgradeActionTarget.ForRow(rows[0]) : UpgradeActionTarget.ForSelection(rows));
+            : GatedAsync(() => _runner.ConfirmPushAsync(Target(rows, one)));
 
     private Task StartAsync(List<UpgradeFleetRow> rows, bool one = false) =>
         _runner is null || rows.Count == 0 ? Task.CompletedTask
-            : _runner.ConfirmUpdateNowAsync(one ? UpgradeActionTarget.ForRow(rows[0]) : UpgradeActionTarget.ForSelection(rows));
+            : GatedAsync(() => _runner.ConfirmUpdateNowAsync(Target(rows, one)));
 
     private Task VersionAsync(List<UpgradeFleetRow> rows, bool one = false) =>
         _runner is null || rows.Count == 0 ? Task.CompletedTask
-            : _runner.ConfirmSelectVersionAsync(one ? UpgradeActionTarget.ForRow(rows[0]) : UpgradeActionTarget.ForSelection(rows));
+            : GatedAsync(() => _runner.ConfirmSelectVersionAsync(Target(rows, one)));
+
+    private static UpgradeActionTarget Target(List<UpgradeFleetRow> rows, bool one) =>
+        one ? UpgradeActionTarget.ForRow(rows[0]) : UpgradeActionTarget.ForSelection(rows);
 
     private void OnRunStarted()
     {
@@ -846,21 +860,53 @@
     /// </summary>
     private async Task AfterWatchTickAsync(bool changed)
     {
-        if (changed) await LoadAsync();
+        if (changed) await LoadAsync(restartStopped: false);
         StateHasChanged();
     }
 
     // ── Header moves ────────────────────────────────────────────────────
 
     /// <summary>
-    /// Runs one of the page's own writes: refusals from the service come back as the alert
-    /// at the top of the lines, never as a raw exception.
+    /// Runs <paramref name="body"/> holding the page's gate, with the controls waiting on it.
+    /// Everything the page does with its context outside the first load goes through here.
     /// </summary>
-    private async Task<bool> WriteAsync(Func<Task> write)
+    private async Task GatedAsync(Func<Task> body)
+    {
+        await _gate.WaitAsync();
+        _working = true;
+        try
+        {
+            await body();
+        }
+        finally
+        {
+            _working = false;
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// One of the page's own writes, then the re-read, both under the gate. Refusals from
+    /// the service come back as the alert at the top of the lines, never as a raw
+    /// exception, and the page re-reads either way: a refusal usually means the rows have
+    /// moved on. True when the write went through; <paramref name="reload"/> false for a
+    /// write the page leaves afterwards.
+    /// </summary>
+    private async Task<bool> WriteAsync(Func<Task> write, bool reload = true)
+    {
+        var ok = false;
+        await GatedAsync(async () =>
+        {
+            ok = await TryWriteAsync(write);
+            if (reload) await LoadAsync();
+        });
+        return ok;
+    }
+
+    private async Task<bool> TryWriteAsync(Func<Task> write)
     {
         _refusal = null;
         _notice = null;
-        _working = true;
         try
         {
             await write();
@@ -876,13 +922,10 @@
             _refusal = ex.Message;
             return false;
         }
-        finally
-        {
-            _working = false;
-        }
     }
 
-    private async Task OpenPickerAsync()
+    /// <summary>The picker reads the fleet on the page's context, so it opens under the gate.</summary>
+    private Task OpenPickerAsync() => GatedAsync(async () =>
     {
         if (_picker is null || _detail is null) return;
         var picked = await _picker.OpenAsync(_detail.Upgrade.Id, _detail.Upgrade.Name, _detail.Upgrade.TargetVersion,
@@ -890,12 +933,10 @@
         if (picked is not { Count: > 0 }) return;
 
         AddUpgradeLinesResult? result = null;
-        if (await WriteAsync(async () => result = await Upgrades.AddLinesAsync(Id, picked)))
-        {
-            await LoadAsync();
-            _notice = AddedNotice(result!);
-        }
-    }
+        var ok = await TryWriteAsync(async () => result = await Upgrades.AddLinesAsync(Id, picked));
+        await LoadAsync();
+        if (ok) _notice = AddedNotice(result!);
+    });
 
     /// <summary>What adding did, in one line: how many went on, and each refusal in its own words.</summary>
     internal static UpgradeNotice AddedNotice(AddUpgradeLinesResult result)
@@ -916,7 +957,8 @@
         return new UpgradeNotice(text, result.Refused.Count > 0 ? "warn" : "info", false);
     }
 
-    private async Task EditDetailsAsync()
+    /// <summary>The details dialog saves on the page's context, so it opens under the gate.</summary>
+    private Task EditDetailsAsync() => GatedAsync(async () =>
     {
         if (_details is null || _detail is null) return;
         if (await _details.OpenAsync(_detail.Upgrade))
@@ -924,7 +966,7 @@
             await LoadAsync();
             _notice = new UpgradeNotice("Saved the upgrade's details.", "info", false);
         }
-    }
+    });
 
     private async Task MarkDoneAsync()
     {
@@ -949,7 +991,7 @@
         if (await WriteAsync(async () => left = await Upgrades.CloseAsync(Id)))
         {
             _selection.Clear();
-            await LoadAsync();
+            ApplyFilters();
             _notice = new UpgradeNotice(left == 0
                 ? "Marked done. It is in the Archive now."
                 : $"Marked done with {left} still unchecked. It is in the Archive now.", "info", false);
@@ -960,7 +1002,6 @@
     {
         if (await WriteAsync(() => Upgrades.ReopenAsync(Id)))
         {
-            await LoadAsync();
             _notice = new UpgradeNotice("Reopened. The upgrade is open again.", "info", false);
         }
     }
@@ -1015,7 +1056,7 @@
         if (name is null) return;
 
         var newId = 0;
-        if (await WriteAsync(async () => newId = await Upgrades.CreateFromLeftoversAsync(Id, name)))
+        if (await WriteAsync(async () => newId = await Upgrades.CreateFromLeftoversAsync(Id, name), reload: false))
         {
             Nav.NavigateTo($"/upgrades/{newId}");
         }
@@ -1032,7 +1073,7 @@
             : $"\"{_detail.Upgrade.Name}\" is removed, and its {Count(n)} are free to go on another upgrade. Nothing was done from it, so nothing is lost from the record.";
         if (!await _deleteConfirm.OpenAsync("Delete this upgrade?", message, "Delete upgrade", "btn--danger", "trash-2")) return;
 
-        if (await WriteAsync(() => Upgrades.DeleteAsync(Id)))
+        if (await WriteAsync(() => Upgrades.DeleteAsync(Id), reload: false))
         {
             Nav.NavigateTo("/upgrades");
         }
@@ -1060,22 +1101,13 @@
             }))
         {
             foreach (var line in lines) _selection.Set(line.Environment.EnvironmentId, false);
-            await LoadAsync();
+            ApplyFilters();
             _notice = new UpgradeNotice(one ? "Took 1 environment off the upgrade." : $"Took {lines.Count} environments off the upgrade.", "info", false);
-        }
-        else
-        {
-            await LoadAsync();
         }
     }
 
-    private async Task AssignAsync(EnvironmentUpgradeLineRow line, int? userId)
-    {
-        if (await WriteAsync(() => Upgrades.AssignAsync(line.LineId, userId)))
-        {
-            await LoadAsync();
-        }
-    }
+    private Task AssignAsync(EnvironmentUpgradeLineRow line, int? userId) =>
+        WriteAsync(() => Upgrades.AssignAsync(line.LineId, userId));
 
     private async Task AssignManyAsync(List<EnvironmentUpgradeLineRow> lines)
     {
@@ -1084,20 +1116,15 @@
         var title = lines.Count == 1
             ? $"Who checks {lines[0].Environment.ProjectName} {lines[0].Environment.EnvironmentName}?"
             : $"Who checks these {lines.Count} environments?";
-        var choice = await _assign.OpenAsync(title, current.Count == 1 ? current[0] ?? 0 : null);
+        // Starts on the one person all of them already have; on nothing otherwise, Nobody
+        // included - a list with nobody assigned has nothing chosen yet.
+        var choice = await _assign.OpenAsync(title, current is [{ } only] ? only : null);
         if (choice is null) return;
 
-        if (await WriteAsync(async () =>
-            {
-                foreach (var line in lines) await Upgrades.AssignAsync(line.LineId, choice.UserId);
-            }))
+        await WriteAsync(async () =>
         {
-            await LoadAsync();
-        }
-        else
-        {
-            await LoadAsync();
-        }
+            foreach (var line in lines) await Upgrades.AssignAsync(line.LineId, choice.UserId);
+        });
     }
 
     /// <summary>
@@ -1109,18 +1136,9 @@
         line.Environment.CanAct
         && line.State is UpgradeLineState.Updated or UpgradeLineState.Failed or UpgradeLineState.Checked;
 
-    private async Task ToggleCheckAsync(EnvironmentUpgradeLineRow line, ChangeEventArgs e)
-    {
-        var on = e.Value is true;
-        if (await WriteAsync(() => Upgrades.SetCheckedAsync(line.LineId, on, line.Note)))
-        {
-            await LoadAsync();
-        }
-        else
-        {
-            await LoadAsync();
-        }
-    }
+    /// <summary>The tick alone: the note stays as stored, whatever the page read before.</summary>
+    private Task ToggleCheckAsync(EnvironmentUpgradeLineRow line, ChangeEventArgs e) =>
+        WriteAsync(() => Upgrades.SetCheckedAsync(line.LineId, e.Value is true));
 
     private async Task EditNoteAsync(EnvironmentUpgradeLineRow line)
     {
@@ -1130,10 +1148,8 @@
             "pencil", EnvironmentUpgradeService.LineNoteMaxLength,
             Value: line.Note, Multiline: true, Placeholder: "e.g. Posting OK, reports OK"));
         if (note is null) return;
-        if (await WriteAsync(() => Upgrades.SetCheckedAsync(line.LineId, line.IsChecked, note)))
-        {
-            await LoadAsync();
-        }
+        // The note alone: the tick, and whoever it is stamped with, stay as stored.
+        await WriteAsync(() => Upgrades.SetLineNoteAsync(line.LineId, note));
     }
 
     private UpgradeActionRow? BookingFor(EnvironmentUpgradeLineRow line) =>
@@ -1142,10 +1158,9 @@
 
     private async Task CancelBookingAsync(int actionId)
     {
+        _runner?.ClearResults();
         if (await WriteAsync(() => Actions.CancelUpgradeActionAsync(actionId)))
         {
-            _runner?.ClearResults();
-            await LoadAsync();
             _notice = new UpgradeNotice("The booked update was cancelled.", "info", false);
         }
     }
@@ -1331,7 +1346,7 @@
                     }
                     @if (result.ActionId is { } bookedId)
                     {
-                        <button type="button" class="btn btn--sm upd-note__cancel" @onclick="() => CancelBookingAsync(bookedId)">Cancel booking</button>
+                        <button type="button" class="btn btn--sm upd-note__cancel" disabled="@Busy" @onclick="() => CancelBookingAsync(bookedId)">Cancel booking</button>
                     }
                 </div>
             };
