@@ -64,6 +64,8 @@ public sealed class ReleaseBuildDialogTests : IDisposable
                 NullLogger<ALDevToolbox.Services.GitHub.GitHubConnectionService>.Instance, TimeProvider.System),
             new ProjectAccess(db, org), org,
             new ALDevToolbox.Endpoints.PublicOrigin(null), TimeProvider.System,
+            new ALDevToolbox.Services.Tools.ToolEnablement(TestDb.EverythingEnabled(),
+                new Microsoft.AspNetCore.Http.HttpContextAccessor(), db, org, TimeProvider.System),
             NullLogger<ALDevToolbox.Services.GitHub.GitHubReleaseService>.Instance);
     }
 
@@ -93,6 +95,8 @@ public sealed class ReleaseBuildDialogTests : IDisposable
             new UnusedTokenSource(), new UnusedAppManagementClient(), new UnusedAdminClient(),
             new DeliveryQueue(),
             new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
+            new ALDevToolbox.Services.Tools.ToolEnablement(TestDb.EverythingEnabled(),
+                new Microsoft.AspNetCore.Http.HttpContextAccessor(), db, org, TimeProvider.System),
             NullLogger<DeliveryService>.Instance);
     }
 

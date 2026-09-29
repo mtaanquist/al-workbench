@@ -118,6 +118,18 @@ public static class AuthenticationRegistration
                         {
                             ctx.ProtocolMessage.LoginHint = hint;
                         }
+                        // A step-up must not be satisfied by Microsoft's existing
+                        // session: prompt=login forces a fresh interactive sign-in,
+                        // and with it whatever MFA the tenant's own policy asks for.
+                        // See Endpoints/StepUpEndpoints.cs.
+                        // max_age=0 makes the token carry auth_time, which the
+                        // callback requires; prompt=login is the belt to that
+                        // brace for older tenant behaviour.
+                        if (ctx.Properties.Items.ContainsKey(ALDevToolbox.Endpoints.StepUpEndpoints.EntraStepUpUserIdItem))
+                        {
+                            ctx.ProtocolMessage.Prompt = "login";
+                            ctx.ProtocolMessage.MaxAge = "0";
+                        }
                         return Task.CompletedTask;
                     },
                     OnAuthorizationCodeReceived = async ctx =>

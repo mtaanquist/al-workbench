@@ -1310,6 +1310,7 @@ public sealed class DeliveryServiceTests : IDisposable
         var svc = new DeliveryService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             _tokens, _apps, _admin, _queue,
             new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
+            _db.NewToolEnablement(ctx),
             NullLogger<DeliveryService>.Instance)
         {
             PollDelay = TimeSpan.Zero,

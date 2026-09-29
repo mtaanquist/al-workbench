@@ -1,3 +1,5 @@
+using System.Security.Claims;
+using OpenIddict.Abstractions;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -29,4 +31,25 @@ public sealed class OAuthConsentService
         => _db.OAuthConsents
             .AsNoTracking()
             .AnyAsync(c => c.UserId == userId, ct);
+
+    /// <summary>
+    /// Whether the consent an OAuth access token runs under was approved from
+    /// a session with a recent second factor (<see cref="Domain.Entities.OAuthConsent.StrongAuthAt"/>).
+    /// The MCP call filter asks this before a writing tool the organisation
+    /// marked for step-up runs. The client comes from the token's own claims
+    /// (<c>client_id</c>, or <c>azp</c>, or OpenIddict's presenter); a token
+    /// naming none, or a consent that is revoked or unstamped, answers no,
+    /// which fails closed. Filtered: the token's org is the request's org.
+    /// </summary>
+    public async Task<bool> WasApprovedWithStrongAuthAsync(ClaimsPrincipal principal, CancellationToken ct = default)
+    {
+        if (!int.TryParse(principal.FindFirstValue(HttpOrganizationContext.UserIdClaim), out var userId)) return false;
+        var clientId = principal.FindFirstValue(OpenIddictConstants.Claims.ClientId)
+            ?? principal.FindFirstValue(OpenIddictConstants.Claims.AuthorizedParty)
+            ?? principal.GetPresenters().FirstOrDefault();
+        if (string.IsNullOrEmpty(clientId)) return false;
+        return await _db.OAuthConsents.AsNoTracking()
+            .AnyAsync(c => c.UserId == userId && c.ClientId == clientId
+                && c.RevokedAt == null && c.StrongAuthAt != null, ct);
+    }
 }

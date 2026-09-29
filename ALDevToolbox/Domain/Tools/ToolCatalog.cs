@@ -108,7 +108,13 @@ public static class ToolCatalog
     /// design: an old name left in the DB or on a stale cookie after a tool is
     /// removed must not throw on every request.
     /// </summary>
-    public static HashSet<ToolKey> ParseDisabled(IEnumerable<string>? names)
+    public static HashSet<ToolKey> ParseDisabled(IEnumerable<string>? names) => ParseKeys(names);
+
+    /// <summary>
+    /// Same tolerant parse for any persisted set of tool names — the disabled set
+    /// and the step-up set (<c>organizations.step_up_tools</c>) share the format.
+    /// </summary>
+    public static HashSet<ToolKey> ParseKeys(IEnumerable<string>? names)
     {
         var set = new HashSet<ToolKey>();
         if (names is null) return set;

@@ -10,6 +10,7 @@
 @using ALDevToolbox.Services.Tools
 @using Microsoft.EntityFrameworkCore
 @using ALDevToolbox.Services.Organizations
+@using ALDevToolbox.Services.Account
 
 @*
     Per-organisation tool switches. Only tools the site keeps on are shown — a
@@ -17,6 +18,12 @@
     on here. Turning a tool off hides it for this org's users on their next
     sign-in (or within a few minutes) and 404s its pages. MCP is folded in:
     its checkbox writes the org's MCP opt-out, the rest write the disabled set.
+
+    The second block is the step-up rule: a tool marked there asks members to
+    confirm it is them (a second factor within the last few minutes) before its
+    pages open or its writing MCP tools run. Reads and writes go through
+    OrganizationAdminService; the gate itself is ToolAccessGate, the MCP call
+    filter, and the OAuth consent check. See .design/auth-and-audit.md.
 *@
 
 <PageTitle>Tools · Administration · AL Workbench</PageTitle>
@@ -62,13 +69,62 @@
                 {
                     var key = tool.Key;
                     <SettingRow Name="@tool.Name" Hint="@tool.Blurb">
-                        <Switch Checked="_enabled[key]"
+                        <Switch Name="@($"tool-{key}")"
+                                Checked="_enabled[key]"
                                 CheckedChanged="@(v => _enabled[key] = v)"
                                 Disabled="@_saving"
                                 Label="@(_enabled[key] ? "On" : "Off")" />
                     </SettingRow>
                 }
             </div>
+
+            @* Step-up rules sit under the switches, in the same card, because they are
+               the same decision made twice: first whether a tool is on, then how sure
+               you want to be about who is using it. Only the tools that reach GitHub or
+               a customer's Business Central are offered; the rest have nothing to protect. *@
+            <div class="card__head">
+                <div>
+                    <h2 class="card__title">Confirm identity before use</h2>
+                    <p class="card__sub">
+                        People confirm it's them before these tools open, then aren't asked again for
+                        a while. Anyone without an authenticator app, email codes or a passkey is asked
+                        to add one first.
+                    </p>
+                </div>
+            </div>
+            <div class="setting-list">
+                <SettingRow Name="Ask again after" Hint="How long one confirmation lasts. Shorter means more prompts and less time for an unattended screen to be misused.">
+                    <span class="u-row">
+                        <input class="input input--num" type="number" id="step-up-window"
+                               @bind="_windowMinutes" disabled="@_saving"
+                               min="@StepUpAuth.MinWindowMinutes" max="@StepUpAuth.MaxWindowMinutes" style="width: 92px"
+                               aria-label="Ask again after, in minutes" />
+                        <span class="form-actions__note">minutes</span>
+                    </span>
+                </SettingRow>
+                @foreach (var tool in _visible.Where(t => StepUpOffered.Contains(t.Key)))
+                {
+                    var key = tool.Key;
+                    var toolOn = _enabled[key];
+                    <SettingRow Name="@tool.Name" Hint="@(toolOn ? StepUpHint(key) : "Switch the tool on above to change this.")">
+                        <Switch Name="@($"step-up-{key}")"
+                                Checked="_stepUp[key]"
+                                CheckedChanged="@(v => _stepUp[key] = v)"
+                                Disabled="@(_saving || !toolOn)"
+                                Label="@(_stepUp[key] ? "Required" : "Not required")" />
+                    </SettingRow>
+                }
+            </div>
+            @if (_visible.Any(t => _enabled[t.Key] && _stepUp[t.Key]))
+            {
+                <Alert Tone="AlertTone.Warn">
+                    <span>
+                        AI assistants connected with a personal access token become read-only in these
+                        tools, because a token can't confirm who is using it. Assistants connected through
+                        the permission screen need approving again once, so the person confirms it's them.
+                    </span>
+                </Alert>
+            }
         }
     </Body>
     <Foot>
@@ -90,6 +146,13 @@
                 away next time they sign in.
             </span>
         </Alert>
+        <Alert Tone="AlertTone.Info">
+            <span>
+                Asking people to confirm identity takes effect the next time they open the tool.
+                Someone who confirmed within the "ask again after" time isn't asked again until it
+                runs out.
+            </span>
+        </Alert>
     </Aside>
 </AdministrationHeader>
 
@@ -104,6 +167,12 @@
     // Current org state, keyed by tool: true = on for this org.
     private readonly Dictionary<ToolKey, bool> _enabled = new();
     private Dictionary<ToolKey, bool> _baseline = new();
+    // Step-up per tool: true = confirm it's you before the tool opens.
+    private readonly Dictionary<ToolKey, bool> _stepUp = new();
+    private Dictionary<ToolKey, bool> _stepUpBaseline = new();
+    private HashSet<ToolKey> _storedStepUp = new();
+    private int _windowMinutes = 15;
+    private int _windowBaseline = 15;
     // The org's stored disabled set as loaded — used to preserve entries for
     // tools that are currently hidden site-wide (so a later site re-enable
     // keeps this org's choice) rather than silently dropping them.
@@ -113,18 +182,43 @@
     {
         var org = await OrgAdmin.GetToolsViewAsync();
         _storedDisabled = org.DisabledTools;
+        _storedStepUp = org.StepUpTools;
+        _windowMinutes = _windowBaseline = org.StepUpWindowMinutes;
         _visible = ToolCatalog.All.Where(t => ToolAvailability.IsSiteEnabled(t.Key)).ToList();
         foreach (var tool in _visible)
         {
             _enabled[tool.Key] = tool.Key == ToolKey.Mcp
                 ? org.McpEnabled
                 : !_storedDisabled.Contains(tool.Key);
+            _stepUp[tool.Key] = _storedStepUp.Contains(tool.Key);
         }
         _baseline = new Dictionary<ToolKey, bool>(_enabled);
+        _stepUpBaseline = new Dictionary<ToolKey, bool>(_stepUp);
         _loading = false;
     }
 
-    private bool IsDirty() => _visible.Any(t => _enabled[t.Key] != _baseline[t.Key]);
+    private bool IsDirty() =>
+        _windowMinutes != _windowBaseline
+        || _visible.Any(t => _enabled[t.Key] != _baseline[t.Key] || _stepUp[t.Key] != _stepUpBaseline[t.Key]);
+
+    // The tools with something outside the workbench to protect: a GitHub
+    // repository, a customer's Business Central, or the assistant connection
+    // that reaches both. Piper, Diff and Object Explorer only read what is
+    // already here, so a rule on them would ask for nothing.
+    private static readonly HashSet<ToolKey> StepUpOffered =
+        [ToolKey.Templates, ToolKey.Cookbook, ToolKey.Translator, ToolKey.Projects, ToolKey.Pipelines, ToolKey.Releases, ToolKey.Mcp];
+
+    private static string StepUpHint(ToolKey key) => key switch
+    {
+        ToolKey.Templates => "Generating into GitHub creates repositories and pull requests in your name.",
+        ToolKey.Cookbook => "Applying a recipe opens a pull request in your name.",
+        ToolKey.Translator => "Opening a translation pull request writes to GitHub in your name.",
+        ToolKey.Projects => "Solutions can change a customer's Business Central connection details.",
+        ToolKey.Pipelines => "Build pipelines run against your GitHub repositories and can deploy a build.",
+        ToolKey.Releases => "Deploying installs apps in a customer's Business Central environment.",
+        ToolKey.Mcp => "Asks before someone opens the page where they connect an AI assistant.",
+        _ => "This tool reaches outside the workbench.",
+    };
 
     private async Task SaveAsync()
     {
@@ -149,12 +243,26 @@
                 await OrgAdmin.SetMcpEnabledAsync(_enabled[ToolKey.Mcp]);
             }
 
+            // Same preservation rule for the step-up set: keep entries for tools
+            // hidden site-wide, and keep a rule on a tool that is merely switched
+            // off here so switching it back on restores it.
+            var stepUp = _storedStepUp.Where(k => !visibleKeys.Contains(k))
+                .Concat(_visible.Where(t => _enabled[t.Key] ? _stepUp[t.Key] : _storedStepUp.Contains(t.Key)).Select(t => t.Key))
+                .ToList();
+            await OrgAdmin.SetStepUpToolsAsync(stepUp);
+            await OrgAdmin.SetStepUpWindowAsync(_windowMinutes);
+            _windowBaseline = _windowMinutes;
+
             _storedDisabled = ToolCatalog.ParseDisabled(ToolCatalog.Format(disabled));
+            _storedStepUp = ToolCatalog.ParseKeys(ToolCatalog.Format(stepUp));
             _baseline = new Dictionary<ToolKey, bool>(_enabled);
+            _stepUpBaseline = new Dictionary<ToolKey, bool>(_stepUp);
             _okMessage = "Tools saved.";
         }
         catch (PlanValidationException ex)
         {
+            // Includes "confirm it's you first": changing the step-up rules
+            // needs a fresh session, and the message says where to get one.
             _errMessage = ex.Errors.FirstOrDefault().Value ?? "That did not save. Check the values and try again.";
         }
         catch (Exception ex)

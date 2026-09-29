@@ -31,6 +31,7 @@ public sealed class DeliveryService
     private readonly DeliveryQueue _queue;
     private readonly Bc.BcPanelCache _panelCache;
     private readonly ILogger<DeliveryService> _logger;
+    private readonly ALDevToolbox.Services.Tools.ToolEnablement _tools;
 
     public DeliveryService(
         AppDbContext db,
@@ -41,8 +42,10 @@ public sealed class DeliveryService
         IBcAdminClient admin,
         DeliveryQueue queue,
         Bc.BcPanelCache panelCache,
+        ALDevToolbox.Services.Tools.ToolEnablement tools,
         ILogger<DeliveryService> logger)
     {
+        _tools = tools;
         _db = db;
         _orgContext = orgContext;
         _access = access;
@@ -119,6 +122,11 @@ public sealed class DeliveryService
     private async Task<int> CreateDeliveryAsync(int releasePipelineId, int projectBuildId, DateTime scheduledForUtc, bool forceSyncOnce, CancellationToken ct)
     {
         var orgId = RequireOrganizationId();
+        // Deploying spends the customer's Business Central credential, and it
+        // can be started from the build pipeline's page as well as the
+        // deployment pipeline's, so the step-up rule for Deployment pipelines
+        // is checked here rather than trusted to the route gate.
+        await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
         scheduledForUtc = DateTime.SpecifyKind(scheduledForUtc, DateTimeKind.Utc);
 
         var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct);

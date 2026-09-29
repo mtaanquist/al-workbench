@@ -115,6 +115,55 @@ public sealed class AccountAdministrationTests : IDisposable
     }
 
     [Fact]
+    public async Task Disable_cuts_every_way_back_in()
+    {
+        // Disabling is the "this person has left" action: the cookie must die
+        // on its next revalidation, and their tokens and assistant consents
+        // must not come back to life if the account is re-enabled later. The
+        // revocations are filtered writes, so this runs in the fixture's
+        // ambient org, as the admin endpoint does in production.
+        var orgId = TestDb.DefaultOrgId;
+        await SeedActiveAdminAsync(orgId, "primary-default@example.com");
+        var subjectId = await SeedActiveUserAsync(orgId, "leaver@example.com", UserRole.User);
+        await using (var seed = _db.NewContext())
+        {
+            seed.PersonalAccessTokens.Add(new PersonalAccessToken
+            {
+                UserId = subjectId, OrganizationId = orgId, Name = "laptop",
+                TokenHash = "hash-1", TokenPrefix = "aldt_pat_1", CreatedAt = _clock.GetUtcNow().UtcDateTime,
+            });
+            seed.OAuthConsents.Add(new OAuthConsent
+            {
+                UserId = subjectId, OrganizationId = orgId, ClientId = "claude-desktop",
+                ScopesGranted = "mcp", GrantedAt = _clock.GetUtcNow().UtcDateTime,
+            });
+            await seed.SaveChangesAsync();
+        }
+        var tokens = _db.OpenIddictTokens;
+        var token = await tokens.CreateAsync(new OpenIddict.Abstractions.OpenIddictTokenDescriptor
+        {
+            Subject = subjectId.ToString(),
+            Type = OpenIddict.Abstractions.OpenIddictConstants.TokenTypes.Bearer,
+            Status = OpenIddict.Abstractions.OpenIddictConstants.Statuses.Valid,
+            CreationDate = _clock.GetUtcNow(),
+        });
+
+        await using (var ctx = _db.NewContext()) await NewUserAdmin(ctx).DisableUserAsync(subjectId, orgId);
+
+        (await tokens.GetStatusAsync((await tokens.FindByIdAsync((await tokens.GetIdAsync(token))!))!))
+            .Should().Be(OpenIddict.Abstractions.OpenIddictConstants.Statuses.Revoked);
+
+        await using var read = _db.NewContext();
+        var now = _clock.GetUtcNow().UtcDateTime;
+        (await read.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == subjectId)).CredentialsChangedAt
+            .Should().Be(now, "CookieSessionRevalidation drops sessions that started before this");
+        (await read.PersonalAccessTokens.IgnoreQueryFilters().SingleAsync(p => p.UserId == subjectId)).RevokedAt
+            .Should().Be(now);
+        (await read.OAuthConsents.IgnoreQueryFilters().SingleAsync(c => c.UserId == subjectId)).RevokedAt
+            .Should().Be(now);
+    }
+
+    [Fact]
     public async Task Disable_refuses_to_lock_out_the_last_active_admin()
     {
         var orgId = TestDb.OtherOrgId;
@@ -385,7 +434,7 @@ public sealed class AccountAdministrationTests : IDisposable
     /// ApproveSignup / RejectSignup / Disable / Enable / ChangeRole.
     /// </summary>
     private UserAdministrationService NewUserAdmin(Data.AppDbContext ctx) =>
-        new(ctx, _clock);
+        _db.NewUserAdministrationService(ctx, _clock);
 
     private async Task<int> SeedActiveAdminAsync(int orgId, string email) =>
         await SeedActiveUserAsync(orgId, email, UserRole.Admin);

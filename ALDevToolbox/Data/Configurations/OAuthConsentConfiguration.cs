@@ -17,6 +17,7 @@ internal sealed class OAuthConsentConfiguration : IEntityTypeConfiguration<OAuth
         entity.Property(e => e.ScopesGranted).HasColumnName("scopes_granted").IsRequired();
         entity.Property(e => e.GrantedAt).HasColumnName("granted_at").IsRequired();
         entity.Property(e => e.RevokedAt).HasColumnName("revoked_at");
+        entity.Property(e => e.StrongAuthAt).HasColumnName("strong_auth_at");
 
         // One active consent per (user, client, org). When the user revokes
         // and later re-consents we update RevokedAt back to null on the same
