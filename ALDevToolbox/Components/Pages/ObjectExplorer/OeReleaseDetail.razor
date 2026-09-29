@@ -71,6 +71,10 @@
             <span> · BC @_release!.BcVersion</span>
         }
         <span> · @FormatStatus(_release!.Status)</span>
+        @if (_release!.IsPrerelease)
+        {
+            <StatusPill Tone="warn" Class="status-pill--inline">Preview</StatusPill>
+        }
     </SubtitleContent>
     @* Where the release was built from. A second line under the subtitle until the
        page moved onto the detail frame, which keeps facts in the meta row. *@

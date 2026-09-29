@@ -76,6 +76,8 @@ internal sealed class OrganizationSettingsConfiguration : IEntityTypeConfigurati
         // chars each, so ~33 codes — far beyond any real localisation set).
         entity.Property(e => e.AutoImportCountry).HasColumnName("auto_import_country").HasMaxLength(100);
         entity.Property(e => e.AutoImportLastRunAt).HasColumnName("auto_import_last_run_at");
+        entity.Property(e => e.AutoImportPreviewsEnabled)
+            .HasColumnName("auto_import_previews_enabled").IsRequired().HasDefaultValue(false);
         // text[] like default_supported_countries; empty array default so the
         // NOT NULL column backfills on existing rows (empty = all providers allowed).
         entity.Property(e => e.AllowedRepositoryProviders)

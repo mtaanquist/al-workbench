@@ -116,6 +116,7 @@ public class ReleaseImportService
             Label = metadata.Label.Trim(),
             Kind = metadata.Kind,
             DedupKey = ReleaseSourceScanner.NullIfBlank(metadata.DedupKey),
+            IsPrerelease = metadata.IsPrerelease,
             Publisher = ReleaseSourceScanner.NullIfBlank(metadata.Publisher),
             ProjectName = ReleaseSourceScanner.NullIfBlank(metadata.ProjectName),
             ParentReleaseId = metadata.ParentReleaseId,

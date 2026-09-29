@@ -16,11 +16,26 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// <c>platform.json</c> lists the versions that also have a platform artifact;
 /// an application build is only usable when its version appears there too.
 /// </para>
+///
+/// <para>
+/// Two <em>channels</em> share these helpers. <see cref="BcArtifactChannel.Release"/>
+/// is the public storage's OnPrem type — the builds Microsoft has shipped.
+/// <see cref="BcArtifactChannel.Preview"/> is the insider storage's Sandbox type:
+/// the pre-release builds of upcoming versions BcContainerHelper reaches with
+/// <c>-storageAccount bcinsider</c>. The insider storage serves no OnPrem type
+/// (its OnPrem indexes return 403), and its Sandbox artifacts carry the same
+/// <c>Applications.&lt;country&gt;/</c> + <c>Extensions/</c> layout as the public
+/// OnPrem ones, so one walker covers both. See <c>.design/object-explorer.md</c>,
+/// "Preview builds".
+/// </para>
 /// </summary>
 public static class BcArtifactIndex
 {
-    /// <summary>Only OnPrem artifacts ship loose <c>.app</c> files the Object Explorer can walk (see CLAUDE.md / the plan).</summary>
+    /// <summary>The public storage's artifact type: shipped builds with loose <c>.app</c> files the Object Explorer can walk.</summary>
     public const string OnPremType = "onprem";
+
+    /// <summary>The insider storage's artifact type. Pre-release builds are only published as Sandbox artifacts.</summary>
+    public const string SandboxType = "sandbox";
 
     /// <summary>
     /// Oldest major we offer for import. BC 15 (Oct 2019) is the first release
@@ -42,6 +57,12 @@ public static class BcArtifactIndex
     /// <summary>The Front Door host the index and downloads are actually served from.</summary>
     public const string DefaultCdnHost = "bcartifacts-exdbf9fwegejdqak.b02.azurefd.net";
 
+    /// <summary>Azure blob host behind the insider storage; a rewrite source for <see cref="ToCdnUrl"/> and a trusted host, never fetched directly.</summary>
+    public const string InsiderBlobHost = "bcinsider.blob.core.windows.net";
+
+    /// <summary>The Front Door host the insider (pre-release) indexes and downloads are served from — anonymously, like the public one.</summary>
+    public const string DefaultInsiderCdnHost = "bcinsider-fvh2ekdjecfjd6gk.b02.azurefd.net";
+
     /// <summary>
     /// Front Door CDN host for the index and download URLs. Defaults to
     /// <see cref="DefaultCdnHost"/>; overridable via the <c>BC_ARTIFACT_CDN_HOST</c>
@@ -49,25 +70,39 @@ public static class BcArtifactIndex
     /// config change + restart rather than a rebuild. There is no dynamic
     /// discovery — BcContainerHelper itself hardcodes the same value.
     /// </summary>
-    public static readonly string CdnHost = ResolveCdnHost();
+    public static readonly string CdnHost = ResolveHost("BC_ARTIFACT_CDN_HOST", DefaultCdnHost);
 
-    private static string ResolveCdnHost()
+    /// <summary>
+    /// Front Door host for the insider storage; the pre-release counterpart of
+    /// <see cref="CdnHost"/>, overridable via <c>BC_INSIDER_CDN_HOST</c>.
+    /// </summary>
+    public static readonly string InsiderCdnHost = ResolveHost("BC_INSIDER_CDN_HOST", DefaultInsiderCdnHost);
+
+    private static string ResolveHost(string envVar, string fallback)
     {
-        var fromEnv = Environment.GetEnvironmentVariable("BC_ARTIFACT_CDN_HOST");
-        return string.IsNullOrWhiteSpace(fromEnv) ? DefaultCdnHost : fromEnv.Trim();
+        var fromEnv = Environment.GetEnvironmentVariable(envVar);
+        return string.IsNullOrWhiteSpace(fromEnv) ? fallback : fromEnv.Trim();
     }
 
-    /// <summary>URL of the per-country index for the OnPrem type.</summary>
-    public static string CountryIndexUrl(string country) =>
-        $"https://{CdnHost}/{OnPremType}/indexes/{country.Trim().ToLowerInvariant()}.json";
+    /// <summary>The host a channel's indexes and downloads live on.</summary>
+    public static string HostFor(BcArtifactChannel channel) =>
+        channel == BcArtifactChannel.Preview ? InsiderCdnHost : CdnHost;
 
-    /// <summary>URL of the platform index for the OnPrem type.</summary>
-    public static string PlatformIndexUrl() =>
-        $"https://{CdnHost}/{OnPremType}/indexes/platform.json";
+    /// <summary>The artifact type segment a channel is published under.</summary>
+    public static string TypeFor(BcArtifactChannel channel) =>
+        channel == BcArtifactChannel.Preview ? SandboxType : OnPremType;
 
-    /// <summary>URL of the countries index for the OnPrem type (used to validate a configured country).</summary>
-    public static string CountriesIndexUrl() =>
-        $"https://{CdnHost}/{OnPremType}/indexes/countries.json";
+    /// <summary>URL of the per-country index for a channel.</summary>
+    public static string CountryIndexUrl(string country, BcArtifactChannel channel = BcArtifactChannel.Release) =>
+        $"https://{HostFor(channel)}/{TypeFor(channel)}/indexes/{country.Trim().ToLowerInvariant()}.json";
+
+    /// <summary>URL of the platform index for a channel.</summary>
+    public static string PlatformIndexUrl(BcArtifactChannel channel = BcArtifactChannel.Release) =>
+        $"https://{HostFor(channel)}/{TypeFor(channel)}/indexes/platform.json";
+
+    /// <summary>URL of the countries index for a channel (used to validate a configured country).</summary>
+    public static string CountriesIndexUrl(BcArtifactChannel channel = BcArtifactChannel.Release) =>
+        $"https://{HostFor(channel)}/{TypeFor(channel)}/indexes/countries.json";
 
     /// <summary>
     /// Parses a country index (and optional platform index) into the available
@@ -129,8 +164,11 @@ public static class BcArtifactIndex
     /// e.g. <c>Business Central 28.2 (DK)</c>. The country code is upper-cased.
     /// Display only — dedup keys on <see cref="FormatDedupKey"/>, not this.
     /// </summary>
-    public static string FormatLabel(string version, string country) =>
-        $"Business Central {ToMajorMinor(version)} ({country.Trim().ToUpperInvariant()})";
+    public static string FormatLabel(string version, string country, bool prerelease = false) =>
+        $"Business Central {ToMajorMinor(version)} ({country.Trim().ToUpperInvariant()})" + (prerelease ? PreviewLabelSuffix : "");
+
+    /// <summary>The word a pre-release label ends in, so a preview reads as one wherever the label alone is shown.</summary>
+    public const string PreviewLabelSuffix = " Preview";
 
     /// <summary>
     /// The explicit dedup key for a first-party OnPrem artifact release:
@@ -140,24 +178,80 @@ public static class BcArtifactIndex
     /// display label, freeing the label to be a pure display string. See
     /// <c>.design/roadmap.md</c> ("Harden first-party dedup, then free the label").
     /// </summary>
-    public static string FormatDedupKey(string version, string country) =>
-        $"bc-onprem:{ToMajorMinor(version)}:{country.Trim().ToLowerInvariant()}";
+    public static string FormatDedupKey(string version, string country, bool prerelease = false) =>
+        $"{(prerelease ? PreviewDedupPrefix : ReleaseDedupPrefix)}:{ToMajorMinor(version)}:{country.Trim().ToLowerInvariant()}";
+
+    /// <summary>Dedup-key prefix of a shipped (public OnPrem) release.</summary>
+    public const string ReleaseDedupPrefix = "bc-onprem";
+
+    /// <summary>
+    /// Dedup-key prefix of a pre-release (insider Sandbox) import:
+    /// <c>bc-insider:{Major}.{Minor}:{cc}</c>. Distinct from the shipped key so a
+    /// preview and the release that supersedes it can coexist for the moment the
+    /// sweep swaps them, and so "is 29.0 imported?" never answers yes because of a
+    /// preview.
+    /// </summary>
+    public const string PreviewDedupPrefix = "bc-insider";
+
+    /// <summary>Reads the Major.Minor and country back out of a key <see cref="FormatDedupKey"/> produced, or null for any other key.</summary>
+    public static (string MajorMinor, string Country)? ParseDedupKey(string? dedupKey)
+    {
+        if (string.IsNullOrWhiteSpace(dedupKey)) return null;
+        var parts = dedupKey.Split(':');
+        if (parts.Length != 3 || (parts[0] != ReleaseDedupPrefix && parts[0] != PreviewDedupPrefix)) return null;
+        return (parts[1], parts[2]);
+    }
 
     /// <summary>
     /// Builds the application-artifact download URL on the CDN host, e.g.
     /// <c>https://{cdn}/onprem/28.2.50931.51727/dk</c> — the shape
     /// <c>Get-BCArtifactUrl</c> returns.
     /// </summary>
-    public static string BuildApplicationUrl(string version, string country) =>
-        $"https://{CdnHost}/{OnPremType}/{version}/{country.Trim().ToLowerInvariant()}";
+    public static string BuildApplicationUrl(string version, string country, BcArtifactChannel channel = BcArtifactChannel.Release) =>
+        $"https://{HostFor(channel)}/{TypeFor(channel)}/{version}/{country.Trim().ToLowerInvariant()}";
 
     /// <summary>
-    /// Rewrites a Microsoft artifact URL onto the active <see cref="CdnHost"/>.
-    /// The manifest's <c>platformUrl</c> comes back pointing at the (now 403-ing)
-    /// blob host — or could point at a stale Front Door host — so we normalise it
-    /// onto the host we know serves anonymously before downloading. Mirrors
-    /// BcContainerHelper's <c>ReplaceCDN</c>. URLs on a non-bcartifacts host (or
-    /// already on <see cref="CdnHost"/>) are returned unchanged.
+    /// Picks the pre-release builds worth importing out of an insider index
+    /// (<paramref name="previewVersions"/>, newest first): for every major above
+    /// <paramref name="newestReleasedMajor"/>, the newest build of the lowest
+    /// minor listed — the version that will ship next as that major. Preview
+    /// builds of later minors on the current major (a 28.6 while 28.5 is the
+    /// newest release) are deliberately left out: the request was for upcoming
+    /// majors, and one preview per major keeps the catalogue readable. Returned
+    /// lowest major first so 29.0 is queued before 30.0.
+    /// </summary>
+    public static IReadOnlyList<string> SelectPreviewVersions(IReadOnlyList<string> previewVersions, int newestReleasedMajor)
+    {
+        return previewVersions
+            .Select(v => (Version: v, Parsed: ToComparableVersion(v)))
+            .Where(x => x.Parsed.Major > newestReleasedMajor)
+            .GroupBy(x => x.Parsed.Major)
+            .OrderBy(g => g.Key)
+            .Select(g =>
+            {
+                var lowestMinor = g.Min(x => x.Parsed.Minor);
+                // `previewVersions` is newest-first, so the first hit is the newest build of that minor.
+                return g.First(x => x.Parsed.Minor == lowestMinor).Version;
+            })
+            .ToList();
+    }
+
+    /// <summary>Major of a dotted version, or null when it doesn't start with a number.</summary>
+    public static int? ToMajor(string? version)
+    {
+        var major = version?.Split('.', 2)[0];
+        return int.TryParse(major, out var n) ? n : null;
+    }
+
+    /// <summary>
+    /// Rewrites a Microsoft artifact URL onto the active Front Door host —
+    /// <see cref="CdnHost"/>, or <see cref="InsiderCdnHost"/> when the URL names
+    /// an insider (<c>bcinsider</c>) host. The manifest's <c>platformUrl</c> comes
+    /// back pointing at the (now 403-ing) blob host — or could point at a stale
+    /// Front Door host — so we normalise it onto the host we know serves
+    /// anonymously before downloading. Mirrors BcContainerHelper's
+    /// <c>ReplaceCDN</c>. URLs on a non-Microsoft artifact host (or already on
+    /// the right Front Door host) are returned unchanged.
     /// </summary>
     public static string ToCdnUrl(string url)
     {
@@ -167,7 +261,8 @@ public static class BcArtifactIndex
             return url;
         }
         var host = uri.Host.ToLowerInvariant();
-        if (host == CdnHost.ToLowerInvariant()) return url;
+        var target = host.StartsWith("bcinsider", StringComparison.Ordinal) ? InsiderCdnHost : CdnHost;
+        if (host == target.ToLowerInvariant()) return url;
 
         // Only rewrite recognised Microsoft artifact hosts; anything else is left
         // alone (and would be refused by IsTrustedArtifactHost on download).
@@ -176,7 +271,7 @@ public static class BcArtifactIndex
             || host.EndsWith(".azurefd.net", StringComparison.Ordinal);
         if (!isArtifactHost) return url;
 
-        return $"{uri.Scheme}://{CdnHost}{uri.PathAndQuery}";
+        return $"{uri.Scheme}://{target}{uri.PathAndQuery}";
     }
 
     /// <summary>
@@ -209,7 +304,9 @@ public static class BcArtifactIndex
         if (string.IsNullOrWhiteSpace(host)) return false;
         host = host.Trim().ToLowerInvariant();
         return string.Equals(host, BlobHost, StringComparison.Ordinal)
+            || string.Equals(host, InsiderBlobHost, StringComparison.Ordinal)
             || string.Equals(host, CdnHost, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(host, InsiderCdnHost, StringComparison.OrdinalIgnoreCase)
             || host.EndsWith(".azurefd.net", StringComparison.Ordinal)
             || host.EndsWith(".azureedge.net", StringComparison.Ordinal)
             || host.EndsWith(".blob.core.windows.net", StringComparison.Ordinal);
@@ -323,4 +420,16 @@ public static class BcArtifactIndex
         var major = version?.Split('.', 2)[0];
         return int.TryParse(major, out var n) && n >= MinimumAlMajor;
     }
+}
+
+/// <summary>
+/// Which of Microsoft's two artifact storages a query or download targets. See
+/// <see cref="BcArtifactIndex"/>.
+/// </summary>
+public enum BcArtifactChannel
+{
+    /// <summary>Shipped builds: the public storage's OnPrem type.</summary>
+    Release,
+    /// <summary>Pre-release builds of upcoming versions: the insider storage's Sandbox type.</summary>
+    Preview,
 }

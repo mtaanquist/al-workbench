@@ -127,6 +127,10 @@
                             <a href="@($"/object-explorer/release/{r.Id}")">
                                 <strong>@r.Label</strong>
                             </a>
+                            @if (r.IsPrerelease)
+                            {
+                                <StatusPill Tone="warn" Class="status-pill--inline">Preview</StatusPill>
+                            }
                             @if (r.DeletedAt is not null)
                             {
                                 <span class="u-muted"> · soft-deleted</span>

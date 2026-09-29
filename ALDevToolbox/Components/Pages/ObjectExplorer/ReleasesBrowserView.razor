@@ -145,9 +145,12 @@
             // The featured release is then dropped from the grid: rendering it
             // in both places put the same title, version and file count on
             // screen twice, linking to the same page.
-            var showHero = !searching && _kind == "first_party";
-            var featured = rows[0];
-            var gridRows = showHero ? rows.Skip(1).ToList() : rows;
+            // A preview build never takes the hero: it's the newest version by
+            // number but not the newest release anyone runs. The hero is the
+            // newest shipped release; previews stay in the grid under their major.
+            var showHero = !searching && _kind == "first_party" && rows.Any(r => !r.IsPrerelease);
+            var featured = showHero ? rows.First(r => !r.IsPrerelease) : rows[0];
+            var gridRows = showHero ? rows.Where(r => r.Id != featured.Id).ToList() : rows;
 
             @if (showHero)
             {
@@ -218,6 +221,10 @@
                             <a class="browse-card oe-card" href="@($"/object-explorer/release/{r.Id}")">
                                 <div class="browse-card__top">
                                     <span class="browse-card__title">@r.Label</span>
+                                    @if (r.IsPrerelease)
+                                    {
+                                        <StatusPill Tone="warn" Class="status-pill--inline">Preview</StatusPill>
+                                    }
                                     @if (!string.IsNullOrEmpty(r.BcVersion))
                                     {
                                         <span class="code">@r.BcVersion</span>

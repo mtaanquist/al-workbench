@@ -30,7 +30,8 @@ public sealed record ReleaseImportMetadata(
     int? ApplicationVersionId,
     string? Publisher = null,
     string? ProjectName = null,
-    string? DedupKey = null)
+    string? DedupKey = null,
+    bool IsPrerelease = false)
 {
     public static ReleaseImportMetadata From(ReleaseImportRequest request) => new(
         Label: request.Label,

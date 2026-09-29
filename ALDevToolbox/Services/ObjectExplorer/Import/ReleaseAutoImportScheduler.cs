@@ -18,7 +18,10 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// request — no new <c>IgnoreQueryFilters()</c> inside the per-org work. The
 /// sweep is naturally idempotent: <see cref="ArtifactReleaseImporter"/> skips a
 /// version whose release label already exists, so a re-run (after a restart, or
-/// the same day) downloads nothing new. The run hour is configurable via
+/// the same day) downloads nothing new. Orgs that also opted into preview
+/// builds (<c>AutoImportPreviewsEnabled</c>) get the insider channel's upcoming
+/// majors on the same pass, and each pass retires previews whose version has
+/// since shipped. The run hour is configurable via
 /// <c>RELEASE_AUTO_IMPORT_HOUR_UTC</c>; opt out entirely with
 /// <c>DISABLE_RELEASE_AUTO_IMPORT_SCHEDULER=1</c>.
 /// </para>
@@ -93,7 +96,7 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
     /// otherwise the system org is skipped. Static + DB-only so it's unit-tested
     /// without the importer or the poll loop. See issue #518.
     /// </summary>
-    internal static async Task<List<(int OrganizationId, string Countries, bool IsSystem)>> ResolveTargetsAsync(
+    internal static async Task<List<(int OrganizationId, string Countries, bool IsSystem, bool IncludePreviews)>> ResolveTargetsAsync(
         AppDbContext db, bool includeSystemOrg, CancellationToken ct)
     {
         // Enumerates the orgs to sweep; each org's import then runs pinned inside
@@ -110,11 +113,11 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
         // Fence category 3 (scheduler, no request org): opt-in settings for the same sweep.
         var rows = await db.OrganizationSettings.IgnoreQueryFilters().AsNoTracking()
             .Where(s => s.AutoImportReleasesEnabled && s.AutoImportCountry != null && s.AutoImportCountry != "")
-            .Select(s => new { s.OrganizationId, s.AutoImportCountry })
+            .Select(s => new { s.OrganizationId, s.AutoImportCountry, s.AutoImportPreviewsEnabled })
             .ToListAsync(ct).ConfigureAwait(false);
         return rows
             .Where(r => activeSet.ContainsKey(r.OrganizationId))
-            .Select(r => (r.OrganizationId, r.AutoImportCountry!, activeSet[r.OrganizationId]))
+            .Select(r => (r.OrganizationId, r.AutoImportCountry!, activeSet[r.OrganizationId], r.AutoImportPreviewsEnabled))
             .ToList();
     }
 
@@ -124,7 +127,7 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
     /// </summary>
     internal async Task SweepAsync(CancellationToken ct)
     {
-        List<(int OrganizationId, string Countries, bool IsSystem)> targets;
+        List<(int OrganizationId, string Countries, bool IsSystem, bool IncludePreviews)> targets;
         await using (var scope = _services.CreateAsyncScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -149,8 +152,10 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
         var alreadyImported = 0;
         var notFound = 0;
         var failed = 0;
+        var previewsQueued = 0;
+        var previewsRetired = 0;
 
-        foreach (var (orgId, countries, isSystem) in targets)
+        foreach (var (orgId, countries, isSystem, includePreviews) in targets)
         {
             // The setting may hold a comma-separated list ("w1,dk,nl") — one
             // import per code. Each code fails independently so a bad country
@@ -185,6 +190,25 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
                                 orgId, country);
                             break;
                     }
+
+                    // Retire previews the shipped catalogue has caught up with, for
+                    // every opted-in org — a preview imported while the box was
+                    // ticked should still be replaced after it's unticked.
+                    previewsRetired += await importer.SupersedePreviewsAsync(country, ct).ConfigureAwait(false);
+
+                    if (includePreviews)
+                    {
+                        foreach (var preview in await importer.ImportPreviewsAsync(country, ct).ConfigureAwait(false))
+                        {
+                            if (preview.Status is ArtifactImportStatus.Queued or ArtifactImportStatus.Replaced)
+                            {
+                                previewsQueued++;
+                                _logger.LogInformation(
+                                    "Auto-import queued preview {Label} for org {OrgId} (country {Country}, {Status}).",
+                                    preview.Label, orgId, country, preview.Status);
+                            }
+                        }
+                    }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -201,8 +225,8 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
         }
 
         _logger.LogInformation(
-            "ReleaseAutoImportScheduler sweep complete: {Queued} queued, {Already} already imported, {NotFound} not found, {Failed} failed across {Orgs} org(s).",
-            queued, alreadyImported, notFound, failed, targets.Count);
+            "ReleaseAutoImportScheduler sweep complete: {Queued} queued, {Already} already imported, {NotFound} not found, {Failed} failed, {PreviewsQueued} preview(s) queued, {PreviewsRetired} preview(s) retired across {Orgs} org(s).",
+            queued, alreadyImported, notFound, failed, previewsQueued, previewsRetired, targets.Count);
     }
 
     /// <summary>
