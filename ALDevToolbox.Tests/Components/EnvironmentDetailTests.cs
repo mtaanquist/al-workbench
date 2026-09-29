@@ -565,6 +565,9 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("In the BC update window"));
         cut.Markup.Should().Contain("has no delivery window").And.NotContain("In the delivery window");
+        // Microsoft's window has not been read on the seeded row, so that option cannot be booked yet.
+        cut.Markup.Should().Contain("hasn't been read yet");
+        cut.FindAll(".upload-app__when-opt input[type=radio]")[0].HasAttribute("disabled").Should().BeTrue();
     }
 
     /// <summary>
@@ -599,6 +602,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("Partner_Thing_1.0.0.0.app"));
         cut.Markup.Should().Contain("Uploaded here").And.Contain("Booked for").And.NotContain("Nothing waiting to install");
+        cut.Markup.Should().NotContain(" of 1", "a single upload is not shown as a batch");
         cut.FindAll("button").Should().Contain(b => b.TextContent.Trim() == "Install now")
             .And.Contain(b => b.TextContent.Trim() == "Cancel install");
 

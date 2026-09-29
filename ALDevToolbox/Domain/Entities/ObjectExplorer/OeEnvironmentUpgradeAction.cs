@@ -70,6 +70,18 @@ public class OeEnvironmentUpgradeAction
     /// </summary>
     public byte[]? PackageContent { get; set; }
 
+    /// <summary>
+    /// Groups the rows of one multi-app upload: several apps booked together, one row
+    /// each, sent one after another in <see cref="BatchOrder"/>. The worker waits for
+    /// each install to finish before starting the next, because two installs running at
+    /// once can deadlock on Business Central's own bookkeeping table, and a failed one
+    /// stops the rest of its batch. Null for every other kind and for a single upload.
+    /// </summary>
+    public Guid? BatchId { get; set; }
+
+    /// <summary>This row's place in its batch, from zero, in dependency order. Null with <see cref="BatchId"/>.</summary>
+    public int? BatchOrder { get; set; }
+
     /// <summary>Where the action has got to. See <see cref="UpgradeActionStatus"/>.</summary>
     public UpgradeActionStatus Status { get; set; } = UpgradeActionStatus.Pending;
 
@@ -144,11 +156,11 @@ public enum UpgradeActionKind
     UpdateApp,
 
     /// <summary>
-    /// An extension package somebody was handed was uploaded to the environment. Sent
-    /// right away or in Microsoft's window it is recorded like <see cref="UpdateApp"/>;
-    /// booked for the delivery window or a picked time it is a <c>Pending</c> row carrying
-    /// the package (<see cref="OeEnvironmentUpgradeAction.PackageContent"/>) that the
-    /// worker sends when it comes due.
+    /// An extension package somebody was handed, booked to be installed on the
+    /// environment: always a <c>Pending</c> row carrying the package
+    /// (<see cref="OeEnvironmentUpgradeAction.PackageContent"/>) that the worker sends
+    /// when it comes due - "now" being a slot that has already come - and waits on to
+    /// the end. Several apps booked together share a <see cref="OeEnvironmentUpgradeAction.BatchId"/>.
     /// </summary>
     UploadApp,
 

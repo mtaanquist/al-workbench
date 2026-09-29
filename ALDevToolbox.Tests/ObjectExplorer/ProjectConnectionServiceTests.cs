@@ -279,8 +279,14 @@ public sealed class ProjectConnectionServiceTests : IDisposable
                 string.Empty, "1.0.0.0", deploymentSchedule, string.Empty, string.Empty, string.Empty,
                 false, "app", DateTimeOffset.UtcNow, null, null));
         }
+        /// <summary>What a poll of an install reports; succeeded straight away unless a test says otherwise.</summary>
+        public Func<Guid, BcAppOperation?> OnOperation = id => new BcAppOperation(
+            id, Guid.NewGuid(), "install", BcAppOperationStatus.Succeeded, "succeeded",
+            string.Empty, "1.0.0.0", null, string.Empty, string.Empty, string.Empty,
+            false, "app", DateTimeOffset.UtcNow, null, DateTimeOffset.UtcNow);
+
         public Task<BcAppOperation?> GetAppOperationAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, Guid operationId, CancellationToken ct = default)
-            => throw new NotSupportedException();
+            => Task.FromResult(OnOperation(operationId));
     }
 
     private sealed class StubHandler : HttpMessageHandler
@@ -2279,39 +2285,56 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         apps.Updated.Should().BeNull();
     }
 
-    // ── Uploading an app by hand ──────────────────────────────────────────
+    // ── Uploading apps by hand ────────────────────────────────────────────
+    // Every timing is a booking: nothing reaches Business Central at the form, one
+    // pending row per app carries the package, and the worker sends them in order.
 
-    [Theory]
-    [InlineData(UploadAppTiming.BcUpdateWindow, BcDeploymentSchedule.UpdateWindow)]
-    [InlineData(UploadAppTiming.Now, BcDeploymentSchedule.Immediate)]
-    public async Task An_uploaded_app_goes_to_business_central_as_given_and_clears_the_cached_panel(UploadAppTiming timing, string schedule)
+    private static UploadPackage Pkg(string name, params byte[] bytes) => new(bytes, name);
+
+    [Fact]
+    public async Task An_upload_for_now_is_booked_for_a_slot_that_has_already_come_and_sends_nothing_yet()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
         var apps = new FakeAppManagementClient();
 
         await using var ctx = _db.NewContext();
         var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
-        await svc.GetEnvironmentPanelAsync(projectId, envId);
+        var outcome = await svc.InstallUploadedAppsAsync(projectId, envId,
+            new[] { Pkg(@"C:\Downloads\Partner_Thing_1.0.0.0.app", 1, 2, 3) }, UploadAppTiming.Now);
 
-        var outcome = await svc.InstallUploadedAppAsync(projectId, envId, new byte[] { 1, 2, 3 }, @"C:\Downloads\Partner_Thing_1.0.0.0.app", timing);
+        apps.Installed.Should().BeNull("the worker sends it, so an install that takes minutes never runs inside a page request");
+        outcome.Timing.Should().Be(UploadAppTiming.Now);
+        outcome.Count.Should().Be(1);
+        outcome.RunsAtUtc.Should().BeCloseTo(_clock.GetUtcNow().UtcDateTime, TimeSpan.FromSeconds(1));
 
-        apps.Installed.Should().Be(("Partner_Thing_1.0.0.0.app", 3, schedule, BcSyncMode.Add, false),
-            "the path is dropped, the sync mode is never Force sync, and dependencies are never pulled along");
-        outcome.Timing.Should().Be(timing);
-        outcome.IsBooked.Should().BeFalse();
         await using var read = _db.NewContext();
         var entry = await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.EnvironmentId == envId);
         entry.Kind.Should().Be(UpgradeActionKind.UploadApp);
-        entry.Status.Should().Be(UpgradeActionStatus.Sent);
-        entry.Outcome.Should().Contain("Partner_Thing_1.0.0.0.app");
-        entry.PackageContent.Should().BeNull("a package sent there and then is never stored");
-        _panelCache.Get(projectId, envId).Should().BeNull();
+        entry.Status.Should().Be(UpgradeActionStatus.Pending);
+        entry.PackageFileName.Should().Be("Partner_Thing_1.0.0.0.app", "the path is dropped");
+        entry.PackageContent.Should().Equal(new byte[] { 1, 2, 3 });
+        entry.BatchId.Should().BeNull("a single app is not a batch");
     }
 
-    // Business Central has no "at this time" schedule, so the two timings that are ours
-    // hold the package here and the worker sends it. What is pinned: nothing reaches
-    // Business Central at booking time, the row carries everything the worker needs, and
-    // the slot is the instant the person meant.
+    [Fact]
+    public async Task Several_apps_are_booked_as_one_batch_in_the_order_given()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+
+        await using var ctx = _db.NewContext();
+        var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId,
+                new[] { Pkg("Core.app", 1), Pkg("Connector.app", 2), Pkg("Reports.app", 3) }, UploadAppTiming.Now);
+
+        outcome.Count.Should().Be(3);
+        await using var read = _db.NewContext();
+        var rows = await read.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.EnvironmentId == envId).OrderBy(a => a.BatchOrder).ToListAsync();
+        rows.Select(r => r.PackageFileName).Should().Equal("Core.app", "Connector.app", "Reports.app");
+        rows.Select(r => r.BatchOrder).Should().Equal(0, 1, 2);
+        rows.Select(r => r.BatchId).Distinct().Should().ContainSingle().Which.Should().NotBeNull();
+        rows.Should().OnlyContain(r => r.Status == UpgradeActionStatus.Pending && r.ExecuteAfter == rows[0].ExecuteAfter);
+    }
 
     [Fact]
     public async Task An_upload_booked_for_a_picked_time_is_held_here_with_its_package()
@@ -2322,7 +2345,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using var ctx = _db.NewContext();
         var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .InstallUploadedAppAsync(projectId, envId, new byte[] { 1, 2, 3 }, "Partner.app", UploadAppTiming.AtTime, slot);
+            .InstallUploadedAppsAsync(projectId, envId, new[] { Pkg("Partner.app", 1, 2, 3) }, UploadAppTiming.AtTime, slot);
 
         apps.Installed.Should().BeNull("a booking sends nothing until its slot");
         outcome.Timing.Should().Be(UploadAppTiming.AtTime);
@@ -2330,7 +2353,6 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using var read = _db.NewContext();
         var entry = await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.EnvironmentId == envId);
-        entry.Kind.Should().Be(UpgradeActionKind.UploadApp);
         entry.Status.Should().Be(UpgradeActionStatus.Pending);
         // Postgres keeps microseconds, so the stored slot can be a few ticks off the one asked for.
         entry.ExecuteAfter.Should().BeCloseTo(slot.UtcDateTime, TimeSpan.FromMilliseconds(1));
@@ -2342,14 +2364,12 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     public async Task A_picked_time_that_has_passed_is_refused_and_nothing_is_stored()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
-        var apps = new FakeAppManagementClient();
 
         await using var ctx = _db.NewContext();
-        var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .InstallUploadedAppAsync(projectId, envId, new byte[] { 1 }, "Partner.app", UploadAppTiming.AtTime, _clock.GetUtcNow().AddHours(-1));
+        var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId, new[] { Pkg("Partner.app", 1) }, UploadAppTiming.AtTime, _clock.GetUtcNow().AddHours(-1));
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ExecuteAt"].Should().Contain("hasn't happened yet");
-        apps.Installed.Should().BeNull();
         await using var read = _db.NewContext();
         (await read.OeEnvironmentUpgradeActions.AsNoTracking().AnyAsync(a => a.EnvironmentId == envId)).Should().BeFalse();
     }
@@ -2358,75 +2378,87 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     public async Task An_upload_for_the_delivery_window_waits_for_its_next_opening_in_the_customers_zone()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
-        await SetDeliveryWindowAsync(envId, new TimeOnly(22, 0), new TimeOnly(4, 0));
-        var apps = new FakeAppManagementClient();
-        // Outside the window, so the booking waits for its next 22:00.
-        await using var ctx = _db.NewContext();
+        await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(4, 0));
         var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
+        // Outside the window, so the booking waits for its next 22:00.
         if (UpdateWindow.IsWithin(new TimeOnly(22, 0), new TimeOnly(4, 0), copenhagen, _clock.GetUtcNow().UtcDateTime))
             _clock.Advance(TimeSpan.FromHours(8));
 
-        var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .InstallUploadedAppAsync(projectId, envId, new byte[] { 1 }, "Partner.app", UploadAppTiming.DeliveryWindow);
+        await using var ctx = _db.NewContext();
+        var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId, new[] { Pkg("Partner.app", 1) }, UploadAppTiming.DeliveryWindow);
 
-        apps.Installed.Should().BeNull();
         outcome.Timing.Should().Be(UploadAppTiming.DeliveryWindow);
-        outcome.RunsAtUtc.Should().NotBeNull().And.BeAfter(_clock.GetUtcNow().UtcDateTime);
-        var local = TimeZoneInfo.ConvertTimeFromUtc(outcome.RunsAtUtc!.Value, copenhagen);
+        outcome.RunsAtUtc.Should().BeAfter(_clock.GetUtcNow().UtcDateTime);
+        var local = TimeZoneInfo.ConvertTimeFromUtc(outcome.RunsAtUtc, copenhagen);
         local.TimeOfDay.Should().Be(new TimeSpan(22, 0, 0), "the window is agreed as a wall clock in the customer's zone, not in UTC");
 
         await using var read = _db.NewContext();
         var entry = await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.EnvironmentId == envId);
-        entry.Status.Should().Be(UpgradeActionStatus.Pending);
-        entry.ExecuteAfter.Should().BeCloseTo(outcome.RunsAtUtc.Value, TimeSpan.FromMilliseconds(1));
-        entry.PackageContent.Should().Equal(new byte[] { 1 });
+        entry.ExecuteAfter.Should().BeCloseTo(outcome.RunsAtUtc, TimeSpan.FromMilliseconds(1));
     }
 
     [Fact]
-    public async Task An_upload_while_the_delivery_window_is_open_goes_right_away()
+    public async Task An_upload_while_the_delivery_window_is_open_is_booked_for_now()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
-        // A window that is open now, whatever the clock says: an hour either side.
         var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
         var local = TimeOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(_clock.GetUtcNow().UtcDateTime, copenhagen));
-        await SetDeliveryWindowAsync(envId, local.AddHours(-1), local.AddHours(1));
-        var apps = new FakeAppManagementClient();
+        await SetWindowsAsync(envId, deliveryStart: local.AddHours(-1), deliveryEnd: local.AddHours(1));
 
         await using var ctx = _db.NewContext();
-        var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .InstallUploadedAppAsync(projectId, envId, new byte[] { 1 }, "Partner.app", UploadAppTiming.DeliveryWindow);
+        var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId, new[] { Pkg("Partner.app", 1) }, UploadAppTiming.DeliveryWindow);
 
-        apps.Installed!.Value.Schedule.Should().Be(BcDeploymentSchedule.Immediate, "a booking for 'now' would only add a delay");
         outcome.Timing.Should().Be(UploadAppTiming.DeliveryWindow);
-        outcome.IsBooked.Should().BeFalse();
-        await using var read = _db.NewContext();
-        var entry = await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.EnvironmentId == envId);
-        entry.Status.Should().Be(UpgradeActionStatus.Sent);
-        entry.Outcome.Should().Contain("delivery window was open");
+        outcome.RunsAtUtc.Should().BeCloseTo(_clock.GetUtcNow().UtcDateTime, TimeSpan.FromSeconds(1), "the window is open, so the next sweep sends it");
     }
 
     [Fact]
-    public async Task An_upload_for_the_delivery_window_falls_back_to_microsofts_window_when_there_is_none()
+    public async Task An_upload_for_microsofts_window_is_booked_for_its_next_opening_never_handed_over_deferred()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
+        await SetWindowsAsync(envId, bcStart: new TimeOnly(1, 0), bcEnd: new TimeOnly(5, 0), bcZone: "America/New_York");
+        var newYork = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+        if (UpdateWindow.IsWithin(new TimeOnly(1, 0), new TimeOnly(5, 0), newYork, _clock.GetUtcNow().UtcDateTime))
+            _clock.Advance(TimeSpan.FromHours(6));
         var apps = new FakeAppManagementClient();
 
         await using var ctx = _db.NewContext();
         var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .InstallUploadedAppAsync(projectId, envId, new byte[] { 1 }, "Partner.app", UploadAppTiming.DeliveryWindow);
+            .InstallUploadedAppsAsync(projectId, envId, new[] { Pkg("Partner.app", 1) }, UploadAppTiming.BcUpdateWindow);
 
-        apps.Installed!.Value.Schedule.Should().Be(BcDeploymentSchedule.UpdateWindow);
-        outcome.Timing.Should().Be(UploadAppTiming.BcUpdateWindow, "the page says what actually applied");
-        outcome.IsBooked.Should().BeFalse();
+        apps.Installed.Should().BeNull("Business Central's own queue would pick the order; the workbench books the opening instead");
+        outcome.Timing.Should().Be(UploadAppTiming.BcUpdateWindow);
+        TimeZoneInfo.ConvertTimeFromUtc(outcome.RunsAtUtc, newYork).TimeOfDay.Should().Be(new TimeSpan(1, 0, 0),
+            "Microsoft's window is expressed in the zone the admin centre reports it in");
     }
 
-    private async Task SetDeliveryWindowAsync(int envId, TimeOnly start, TimeOnly end)
+    [Fact]
+    public async Task The_delivery_window_falls_back_to_microsofts_window_when_there_is_none()
     {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        await SetWindowsAsync(envId, bcStart: new TimeOnly(1, 0), bcEnd: new TimeOnly(5, 0), bcZone: "Europe/Copenhagen");
+
         await using var ctx = _db.NewContext();
-        var env = await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == envId);
-        env.UpdateWindowStart = start;
-        env.UpdateWindowEnd = end;
-        await ctx.SaveChangesAsync();
+        var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId, new[] { Pkg("Partner.app", 1) }, UploadAppTiming.DeliveryWindow);
+
+        outcome.Timing.Should().Be(UploadAppTiming.BcUpdateWindow, "the page says what actually applied");
+    }
+
+    [Theory]
+    [InlineData(UploadAppTiming.DeliveryWindow)]
+    [InlineData(UploadAppTiming.BcUpdateWindow)]
+    public async Task A_window_that_has_not_been_read_is_refused_rather_than_guessed(UploadAppTiming timing)
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId, new[] { Pkg("Partner.app", 1) }, timing);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Timing"].Should().Contain("hasn't been read");
     }
 
     [Theory]
@@ -2436,30 +2468,36 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     public async Task An_upload_business_central_would_refuse_never_leaves_the_workbench(string fileName, int size, string says)
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
-        var apps = new FakeAppManagementClient();
 
         await using var ctx = _db.NewContext();
-        var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .InstallUploadedAppAsync(projectId, envId, new byte[size], fileName, UploadAppTiming.Now);
+        var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId, new[] { new UploadPackage(new byte[size], fileName) }, UploadAppTiming.Now);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain(says);
-        apps.Installed.Should().BeNull();
+        await using var read = _db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().AnyAsync(a => a.EnvironmentId == envId)).Should().BeFalse();
     }
 
     [Fact]
-    public async Task What_business_central_says_about_a_refused_upload_reaches_the_person()
+    public async Task Sending_a_booked_upload_waits_for_business_central_to_finish_and_reports_its_refusal()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
         var apps = new FakeAppManagementClient
         {
-            InstallThrows = new BcApiException(null, "It needs Continia Core 28.0.0.0, which isn't installed."),
+            OnOperation = _ => new BcAppOperation(
+                Guid.NewGuid(), Guid.NewGuid(), "install", BcAppOperationStatus.Failed, "failed",
+                string.Empty, "1.0.0.0", null, "It needs Continia Core 28.0.0.0, which isn't installed.", "MissingDependency", string.Empty,
+                false, "app", DateTimeOffset.UtcNow, null, DateTimeOffset.UtcNow),
         };
 
         await using var ctx = _db.NewContext();
-        var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .InstallUploadedAppAsync(projectId, envId, new byte[] { 1 }, "Partner.app", UploadAppTiming.Now);
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+        svc.UploadPollDelay = TimeSpan.Zero;
+        var result = await svc.SendBookedUploadAsync(projectId, envId, new byte[] { 1 }, "Partner.app", CancellationToken.None);
 
-        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("Continia Core");
+        apps.Installed!.Value.Schedule.Should().Be(BcDeploymentSchedule.Immediate);
+        result.Completed.Should().BeFalse();
+        result.Message.Should().Contain("Continia Core");
     }
 
     [Fact]
@@ -2469,14 +2507,27 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await SeedUserAsync(9778, "uploader@example.com", UserRole.User);
         await NarrowAsync(projectId);
         _db.OrgContext.CurrentUserId = 9778;
-        var apps = new FakeAppManagementClient();
 
         await using var ctx = _db.NewContext();
-        var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .InstallUploadedAppAsync(projectId, envId, new byte[] { 1 }, "Partner.app", UploadAppTiming.Now);
+        var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId, new[] { Pkg("Partner.app", 1) }, UploadAppTiming.Now);
 
         await act.Should().ThrowAsync<ProjectAccessDeniedException>();
-        apps.Installed.Should().BeNull();
+    }
+
+    private async Task SetWindowsAsync(int envId,
+        TimeOnly? deliveryStart = null, TimeOnly? deliveryEnd = null,
+        TimeOnly? bcStart = null, TimeOnly? bcEnd = null, string? bcZone = null)
+    {
+        await using var ctx = _db.NewContext();
+        var env = await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == envId);
+        env.UpdateWindowStart = deliveryStart;
+        env.UpdateWindowEnd = deliveryEnd;
+        env.BcUpdateWindowStart = bcStart;
+        env.BcUpdateWindowEnd = bcEnd;
+        env.BcUpdateWindowTimeZoneIana = bcZone;
+        if (bcStart is not null) env.BcUpdateWindowFetchedAt = DateTime.UtcNow;
+        await ctx.SaveChangesAsync();
     }
 
     [Fact]

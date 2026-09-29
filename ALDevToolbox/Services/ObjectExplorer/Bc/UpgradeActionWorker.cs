@@ -49,7 +49,10 @@ public sealed class UpgradeActionWorker : BackgroundService
         // Polls every 30 seconds and is idle most of the time; a sweep that is still
         // running after 15 minutes is wedged on somebody's tenant.
         _heartbeat = heartbeats.Register(nameof(UpgradeActionWorker),
-            maxActiveDuration: TimeSpan.FromMinutes(15),
+            // A sweep that sends a multi-app upload waits for each install to finish -
+            // up to ten minutes apiece - so a batch of a vendor's suite is a long sweep,
+            // not a stalled one.
+            maxActiveDuration: TimeSpan.FromMinutes(90),
             maxIdleSilence: TimeSpan.FromMinutes(5));
     }
 
@@ -149,7 +152,10 @@ public sealed class UpgradeActionWorker : BackgroundService
                             && a.SentAt == null
                             && a.ExecuteAfter <= now)
                 .OrderBy(a => a.ExecuteAfter)
-                .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion, a.PackageFileName))
+                .ThenBy(a => a.BatchOrder)
+                .ThenBy(a => a.Id)
+                .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
+                    a.PackageFileName, a.BatchId, a.BatchOrder))
                 .ToListAsync(ct).ConfigureAwait(false);
         }
 
@@ -181,6 +187,37 @@ public sealed class UpgradeActionWorker : BackgroundService
         using var ambient = AmbientOrganizationScope.Enter(identity);
         await using var scope = _services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        // A row in a multi-app upload waits its turn: the one before it must have
+        // finished installing (the sweep runs them in order, so within one sweep it
+        // has), and if that one failed this one is not tried - its dependency may be the
+        // very thing that did not go in. A cancelled predecessor is the person's choice
+        // and does not stop the rest.
+        if (action.BatchId is { } batch && action.BatchOrder is { } order)
+        {
+            var earlier = await db.OeEnvironmentUpgradeActions.AsNoTracking()
+                .Where(a => a.BatchId == batch && a.BatchOrder < order)
+                .Select(a => new { a.Status, a.PackageFileName })
+                .ToListAsync(ct).ConfigureAwait(false);
+            if (earlier.Any(e => e.Status == UpgradeActionStatus.Pending))
+            {
+                return false;
+            }
+            if (earlier.FirstOrDefault(e => e.Status == UpgradeActionStatus.Failed) is { } blocked)
+            {
+                var skippedAt = _clock.GetUtcNow().UtcDateTime;
+                var skipped = await db.OeEnvironmentUpgradeActions
+                    .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
+                        .SetProperty(a => a.SentAt, skippedAt)
+                        .SetProperty(a => a.PackageContent, (byte[]?)null)
+                        .SetProperty(a => a.Outcome,
+                            $"{action.PackageFileName} wasn't installed, because {blocked.PackageFileName} before it in the same upload didn't install."),
+                        ct).ConfigureAwait(false);
+                return skipped > 0;
+            }
+        }
 
         // Claim first, and this compare-and-set is what beats a racing cancel: stamping
         // sent_at while the row is still pending takes it out of both the due query and
@@ -223,14 +260,28 @@ public sealed class UpgradeActionWorker : BackgroundService
                         ["App"] = "The app file was no longer stored with the booking.",
                     });
                 }
-                await actions.RunUploadAsync(action.ProjectId, action.EnvironmentId, action.PackageFileName, package, ct).ConfigureAwait(false);
+                var result = await actions.RunUploadAsync(action.ProjectId, action.EnvironmentId, action.PackageFileName, package, ct).ConfigureAwait(false);
+                if (result.Completed)
+                {
+                    status = UpgradeActionStatus.Sent;
+                    outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.PackageFileName)
+                        + (result.Message is null ? string.Empty : " " + result.Message);
+                }
+                else
+                {
+                    // Business Central took the file and then reported the install failed,
+                    // in its own words (or ours, for a timeout).
+                    status = UpgradeActionStatus.Failed;
+                    outcome = UpgradeActionService.FailureOutcome(action.Kind,
+                        result.Message ?? "Business Central didn't finish the install.", action.TargetVersion, action.PackageFileName);
+                }
             }
             else
             {
                 await actions.RunAsync(action.ProjectId, action.EnvironmentId, action.Kind, action.TargetVersion, ct).ConfigureAwait(false);
+                status = UpgradeActionStatus.Sent;
+                outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.PackageFileName);
             }
-            status = UpgradeActionStatus.Sent;
-            outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.PackageFileName);
         }
         catch (PlanValidationException ex)
         {
@@ -316,5 +367,5 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// <summary>One due row, read outside the per-action scope so the sweep holds no context open while it works.</summary>
     private sealed record DueAction(
         int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion,
-        string? PackageFileName);
+        string? PackageFileName, Guid? BatchId, int? BatchOrder);
 }

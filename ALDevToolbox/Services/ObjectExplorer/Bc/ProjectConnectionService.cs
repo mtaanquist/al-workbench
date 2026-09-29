@@ -1776,45 +1776,62 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     }
 
     /// <summary>
-    /// Installs an extension package somebody was handed - an app another company
-    /// built, which has no pipeline here to release it from. Manage-gated.
+    /// Books extension packages somebody was handed - apps another company built, which
+    /// have no pipeline here to release them from - to be installed on an environment.
+    /// Manage-gated.
     /// <para>
-    /// Business Central itself takes only two schedules for an app it has not seen before
-    /// (right away, or in Microsoft's update window), and that is what <see cref="UploadAppTiming.Now"/>
-    /// and <see cref="UploadAppTiming.BcUpdateWindow"/> send. The other two timings are
-    /// ours: <see cref="UploadAppTiming.DeliveryWindow"/> and <see cref="UploadAppTiming.AtTime"/>
-    /// write a <c>Pending</c> row carrying the package, and <see cref="UpgradeActionWorker"/>
-    /// sends it as Immediate when the slot arrives. The delivery window falls back to
-    /// Microsoft's window when the environment has none, and sends right away when it is
-    /// open at the moment of asking - a booking for "now" would only add a delay.
+    /// Every timing is a booking: one <c>Pending</c> row per app in
+    /// <c>oe_environment_upgrade_actions</c> carrying the package, which
+    /// <see cref="UpgradeActionWorker"/> sends when the slot arrives - "now" is a slot
+    /// that has already come. Nothing is handed to Business Central with a deferred
+    /// schedule, even for <see cref="UploadAppTiming.BcUpdateWindow"/>: the workbench
+    /// books the next opening of Microsoft's window from the hours mirrored on the
+    /// environment and sends then. That is what lets several apps go in order, each
+    /// waiting for the one before it to finish installing, which the API's own queue
+    /// could not promise (see <c>.design/saas-delivery.md</c>, "Uploading an app").
     /// </para>
     /// <para>
-    /// The sync mode is always Add: Force sync can drop the customer's columns, and that is
-    /// not a choice to make about a package we did not build. Dependencies are not pulled
-    /// along either - a missing one is refused by name, so nothing is installed that nobody
-    /// picked. Like an app update, a send is recorded in the log rather than the audit
-    /// trail, because it touches no row of ours - see <c>.design/saas-delivery.md</c>.
+    /// The delivery window falls back to Microsoft's window when the environment has
+    /// none. Microsoft's window has to have been read from the admin centre; until it
+    /// has, that timing is refused rather than guessed. The sync mode is always Add and
+    /// dependencies are never pulled along: a missing one is refused by name at send
+    /// time, so nothing is installed that nobody picked.
     /// </para>
     /// </summary>
+    /// <param name="packages">The apps, in the order to install them - dependencies first.</param>
     /// <param name="at">The slot for <see cref="UploadAppTiming.AtTime"/>; ignored for the other timings.</param>
-    /// <returns>What was done: the timing that applied, the slot a booking waits for, or the operation Business Central started.</returns>
-    public async Task<UploadAppOutcome> InstallUploadedAppAsync(
-        int projectId, int environmentId, byte[] appBytes, string fileName, UploadAppTiming timing,
+    /// <returns>The timing that applied and the slot the batch waits for.</returns>
+    public async Task<UploadAppOutcome> InstallUploadedAppsAsync(
+        int projectId, int environmentId, IReadOnlyList<UploadPackage> packages, UploadAppTiming timing,
         DateTimeOffset? at = null, CancellationToken ct = default)
     {
-        ArgumentNullException.ThrowIfNull(appBytes);
-        var name = CleanUploadName(fileName);
-        if (!name.EndsWith(".app", StringComparison.OrdinalIgnoreCase))
+        ArgumentNullException.ThrowIfNull(packages);
+        if (packages.Count == 0)
         {
-            throw Validation("App", "Choose an extension package - a file ending in .app.");
+            throw Validation("App", "Choose at least one extension package - a file ending in .app.");
         }
-        if (appBytes.Length == 0)
+        if (packages.Count > MaxUploadBatch)
         {
-            throw Validation("App", $"{name} is empty.");
+            throw Validation("App", $"Choose at most {MaxUploadBatch} apps at a time.");
         }
-        if (appBytes.Length > BcAppManagementClient.MaxAppBytes)
+        var cleaned = new List<(string Name, byte[] Bytes)>(packages.Count);
+        foreach (var package in packages)
         {
-            throw Validation("App", $"{name} is over 50 MB, which is the largest app Business Central accepts.");
+            ArgumentNullException.ThrowIfNull(package.Bytes);
+            var name = CleanUploadName(package.FileName);
+            if (!name.EndsWith(".app", StringComparison.OrdinalIgnoreCase))
+            {
+                throw Validation("App", $"{(name.Length == 0 ? "One of the files" : name)} isn't an extension package - choose files ending in .app.");
+            }
+            if (package.Bytes.Length == 0)
+            {
+                throw Validation("App", $"{name} is empty.");
+            }
+            if (package.Bytes.Length > BcAppManagementClient.MaxAppBytes)
+            {
+                throw Validation("App", $"{name} is over 50 MB, which is the largest app Business Central accepts.");
+            }
+            cleaned.Add((name, package.Bytes));
         }
 
         // Resolved for a booking too: a slot for tonight that cannot get a token should
@@ -1822,26 +1839,19 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
         var now = _clock.GetUtcNow().UtcDateTime;
 
+        var windows = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == environmentId)
+            .Select(e => new
+            {
+                e.UpdateWindowStart, e.UpdateWindowEnd, e.Project!.BcTimeZone,
+                e.BcUpdateWindowStart, e.BcUpdateWindowEnd, e.BcUpdateWindowTimeZoneIana,
+            })
+            .FirstAsync(ct);
+
         var applied = timing;
-        DateTime? runsAt = null;
+        DateTime runsAt;
         switch (timing)
         {
-            case UploadAppTiming.DeliveryWindow:
-            {
-                var window = await _db.OeProjectEnvironments.AsNoTracking()
-                    .Where(e => e.Id == environmentId)
-                    .Select(e => new { e.UpdateWindowStart, e.UpdateWindowEnd, e.Project!.BcTimeZone })
-                    .FirstAsync(ct);
-                if (!UpdateWindow.IsConfigured(window.UpdateWindowStart, window.UpdateWindowEnd))
-                {
-                    applied = UploadAppTiming.BcUpdateWindow;
-                    break;
-                }
-                var opening = UpdateWindow.NextOpeningUtc(
-                    window.UpdateWindowStart, window.UpdateWindowEnd, UpdateWindow.ResolveTimeZone(window.BcTimeZone), now);
-                if (opening > now) runsAt = opening;
-                break;
-            }
             case UploadAppTiming.AtTime:
             {
                 if (at is not { } slot)
@@ -1855,9 +1865,34 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 runsAt = slot.UtcDateTime;
                 break;
             }
+            case UploadAppTiming.DeliveryWindow when UpdateWindow.IsConfigured(windows.UpdateWindowStart, windows.UpdateWindowEnd):
+                runsAt = UpdateWindow.NextOpeningUtc(
+                    windows.UpdateWindowStart, windows.UpdateWindowEnd, UpdateWindow.ResolveTimeZone(windows.BcTimeZone), now);
+                break;
+            case UploadAppTiming.DeliveryWindow:
+            case UploadAppTiming.BcUpdateWindow:
+            {
+                applied = UploadAppTiming.BcUpdateWindow;
+                if (!UpdateWindow.IsConfigured(windows.BcUpdateWindowStart, windows.BcUpdateWindowEnd))
+                {
+                    throw Validation("Timing", timing == UploadAppTiming.DeliveryWindow
+                        ? "This environment has no delivery window, and Business Central's own update window hasn't been read yet. Refresh the environment and try again, or pick a time."
+                        : "Business Central's update window hasn't been read for this environment yet. Refresh the environment and try again, or pick a time.");
+                }
+                // Microsoft's window is expressed in its own zone; the solution's is the
+                // fallback for a Windows zone id that had no IANA mapping.
+                var zone = UpdateWindow.ResolveTimeZone(windows.BcUpdateWindowTimeZoneIana ?? windows.BcTimeZone);
+                runsAt = UpdateWindow.NextOpeningUtc(windows.BcUpdateWindowStart, windows.BcUpdateWindowEnd, zone, now);
+                break;
+            }
+            default:
+                runsAt = now;
+                break;
         }
 
-        if (runsAt is { } due)
+        var requestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
+        var batchId = cleaned.Count > 1 ? Guid.NewGuid() : (Guid?)null;
+        for (var i = 0; i < cleaned.Count; i++)
         {
             _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
             {
@@ -1867,58 +1902,44 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 Kind = UpgradeActionKind.UploadApp,
                 Status = UpgradeActionStatus.Pending,
                 RequestedByUserId = _orgContext.CurrentUserId,
-                RequestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct),
+                RequestedBy = requestedBy,
                 RequestedAt = now,
-                ExecuteAfter = due,
-                PackageFileName = name,
-                PackageContent = appBytes,
+                ExecuteAfter = runsAt,
+                PackageFileName = cleaned[i].Name,
+                PackageContent = cleaned[i].Bytes,
+                BatchId = batchId,
+                BatchOrder = batchId is null ? null : i,
             });
-            await _db.SaveChangesAsync(ct);
-
-            _logger.LogInformation(
-                "User {UserId} booked {FileName} ({Bytes} bytes) for {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}).",
-                _orgContext.CurrentUserId, name, appBytes.Length, env.Name, projectId, due, applied);
-            return new UploadAppOutcome(applied, due, null);
         }
+        await _db.SaveChangesAsync(ct);
 
-        var useUpdateWindow = applied == UploadAppTiming.BcUpdateWindow;
-        var operation = await SendUploadedAppAsync(projectId, env, appBytes, name, useUpdateWindow, ct);
-
-        var when = applied switch
-        {
-            UploadAppTiming.BcUpdateWindow => "in the BC update window",
-            UploadAppTiming.DeliveryWindow => "right away, as the delivery window was open",
-            _ => "right away",
-        };
-        await RecordEnvironmentActionAsync(projectId, env.Id, UpgradeActionKind.UploadApp,
-            $"{name}{(string.IsNullOrWhiteSpace(operation.TargetAppVersion) ? "" : $" (version {operation.TargetAppVersion})")}, {when}.", ct);
-        return new UploadAppOutcome(applied, null, operation);
+        _logger.LogInformation(
+            "User {UserId} booked {Count} app(s) ({Files}) for {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}).",
+            _orgContext.CurrentUserId, cleaned.Count, string.Join(", ", cleaned.Select(c => c.Name)), env.Name, projectId, runsAt, applied);
+        return new UploadAppOutcome(applied, runsAt, cleaned.Count);
     }
 
+    /// <summary>The most apps one upload may book together. A vendor's suite, not a whole environment.</summary>
+    public const int MaxUploadBatch = 10;
+
     /// <summary>
-    /// Sends a booked upload when its slot arrives: the same send as an immediate one,
-    /// re-checking the requester's access and the connection now rather than trusting
-    /// what held at booking time. The caller (<see cref="UpgradeActionService"/>) records
-    /// the outcome on the booking's own row, so nothing is recorded here.
+    /// Sends one booked upload when its slot arrives and waits for Business Central to
+    /// finish installing it, re-checking the requester's access and the connection now
+    /// rather than trusting what held at booking time. The caller
+    /// (<see cref="UpgradeActionWorker"/>) records the outcome on the booking's own row,
+    /// so nothing is recorded here beyond the log line and the panel cache.
     /// </summary>
-    internal async Task<BcAppOperation> SendBookedUploadAsync(
+    internal async Task<BcAppOperationResult> SendBookedUploadAsync(
         int projectId, int environmentId, byte[] appBytes, string fileName, CancellationToken ct)
     {
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
-        return await SendUploadedAppAsync(projectId, env, appBytes, fileName, useUpdateWindow: false, ct);
-    }
 
-    /// <summary>The one call to Business Central behind both upload paths, plus the cache and log it owes.</summary>
-    private async Task<BcAppOperation> SendUploadedAppAsync(
-        int projectId, (string Token, string Family, string Name, int Id) env,
-        byte[] appBytes, string name, bool useUpdateWindow, CancellationToken ct)
-    {
         BcAppOperation operation;
         try
         {
             operation = await _apps.InstallPteAsync(
-                env.Token, env.Family, env.Name, appBytes, name,
-                useUpdateWindow ? BcDeploymentSchedule.UpdateWindow : BcDeploymentSchedule.Immediate,
+                env.Token, env.Family, env.Name, appBytes, fileName,
+                BcDeploymentSchedule.Immediate,
                 BcSyncMode.Add,
                 // No language, for the reason a delivery sends none: see DeliveryService.
                 languageId: string.Empty,
@@ -1930,14 +1951,25 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             throw Validation("App", "Business Central didn't accept the app. " + ex.Message);
         }
 
-        _panelCache.Invalidate(projectId, env.Id);
-
+        _panelCache.Invalidate(projectId, environmentId);
         _logger.LogInformation(
-            "User {UserId} uploaded {FileName} ({Bytes} bytes) to {Environment} (project {ProjectId}, in the update window: {InWindow}); app {AppId} version {Version}, operation {OperationId}.",
-            _orgContext.CurrentUserId, name, appBytes.Length, env.Name, projectId, useUpdateWindow,
+            "User {UserId} uploaded {FileName} ({Bytes} bytes) to {Environment} (project {ProjectId}); app {AppId} version {Version}, operation {OperationId}.",
+            _orgContext.CurrentUserId, fileName, appBytes.Length, env.Name, projectId,
             operation.AppId, operation.TargetAppVersion, operation.Id);
-        return operation;
+
+        var result = await BcAppOperationPoller.PollUntilTerminalAsync(
+            _apps, env.Token, env.Family, env.Name, operation, UploadPollDelay, UploadPollTimeout, ct);
+        _panelCache.Invalidate(projectId, environmentId);
+        if (result.Raw is { } raw)
+        {
+            _logger.LogWarning("Business Central reported the install of {FileName} on {Environment} as failed: {Raw}", fileName, env.Name, raw);
+        }
+        return result;
     }
+
+    /// <summary>How often a booked upload's install is re-read while it runs, and how long one is given. The delivery path's numbers.</summary>
+    internal TimeSpan UploadPollDelay { get; set; } = TimeSpan.FromSeconds(5);
+    internal TimeSpan UploadPollTimeout { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
     /// A minute of slack on a picked slot, because "now" travels between the person's
@@ -2707,18 +2739,17 @@ public sealed record BcConnectionStatus(
     /// <summary>The organisation's client id, when it has a complete registration - what a customer authorises in their admin centre.</summary>
     string? OrganizationClientId = null);
 
+/// <summary>One file handed to <see cref="ProjectConnectionService.InstallUploadedAppsAsync"/>.</summary>
+public sealed record UploadPackage(byte[] Bytes, string FileName);
+
 /// <summary>
-/// What <see cref="ProjectConnectionService.InstallUploadedAppAsync"/> did.
+/// What <see cref="ProjectConnectionService.InstallUploadedAppsAsync"/> booked.
 /// <paramref name="Timing"/> is the timing that <em>applied</em>, which can differ from
 /// the one asked for: the delivery window falls back to Microsoft's window when the
-/// environment has none. <paramref name="RunsAtUtc"/> is set for a booking, which the
-/// worker will send then; <paramref name="Operation"/> for a send that has happened.
+/// environment has none. <paramref name="RunsAtUtc"/> is when the worker will start the
+/// batch - already past for "now".
 /// </summary>
-public sealed record UploadAppOutcome(UploadAppTiming Timing, DateTime? RunsAtUtc, BcAppOperation? Operation)
-{
-    /// <summary>True when the package is waiting on our side for its slot, rather than with Business Central.</summary>
-    public bool IsBooked => RunsAtUtc is not null;
-}
+public sealed record UploadAppOutcome(UploadAppTiming Timing, DateTime RunsAtUtc, int Count);
 
 /// <summary>Where one environment lands in the preview of "set the delivery window" (issue #961).</summary>
 public enum DeliveryWindowChangeGroup

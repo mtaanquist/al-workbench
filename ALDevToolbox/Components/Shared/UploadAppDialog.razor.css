@@ -9,6 +9,22 @@
 
 .upload-app__name { font-family: var(--font-mono); color: var(--ink-2); }
 
+/* The chosen files, numbered: the order they will install in. */
+.upload-app__list {
+    margin: var(--space-2) 0 0;
+    padding-left: var(--space-5);
+    display: grid;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+}
+
+.upload-app__item {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    align-items: baseline;
+}
+
 /* The same "when" block the environment page's app-update dialog draws. */
 .upload-app__when {
     margin: var(--space-3) 0 0;

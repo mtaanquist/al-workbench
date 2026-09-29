@@ -40,6 +40,9 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         // read once by the worker and cleared in the same write that records the outcome.
         entity.Property(e => e.PackageFileName).HasColumnName("package_file_name").HasMaxLength(260);
         entity.Property(e => e.PackageContent).HasColumnName("package_content");
+        // Several apps uploaded together: the worker runs a batch's rows in order.
+        entity.Property(e => e.BatchId).HasColumnName("package_batch_id");
+        entity.Property(e => e.BatchOrder).HasColumnName("package_batch_order");
 
         // No concurrency-token column: see the entity's remarks. The one race on this
         // table — the worker claiming a row while somebody cancels it — is decided by a

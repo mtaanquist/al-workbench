@@ -536,14 +536,21 @@
                                         <td>
                                             @(booked.PackageFileName ?? "An uploaded app")
                                             <span class="tag">Uploaded here</span>
+                                            @if (BatchPlace(booked) is { } place)
+                                            {
+                                                <span class="u-muted">@place</span>
+                                            }
                                         </td>
                                         <td class="u-num env-detail__mono">-</td>
-                                        <td>Booked for @BookedSlotText(booked.ExecuteAfter)</td>
+                                        <td>@BookedWhen(booked)</td>
                                         @if (_canManage)
                                         {
                                             <td class="data-table__actions">
-                                                <button type="button" class="btn btn--sm" disabled="@_settingSaving"
-                                                        @onclick="() => InstallBookedNowAsync(booked)">Install now</button>
+                                                @if (booked.ExecuteAfter > DateTime.UtcNow)
+                                                {
+                                                    <button type="button" class="btn btn--sm" disabled="@_settingSaving"
+                                                            @onclick="() => InstallBookedNowAsync(booked)">Install now</button>
+                                                }
                                                 <button type="button" class="btn btn--sm btn--danger" disabled="@_settingSaving"
                                                         @onclick="() => CancelBookedUploadAsync(booked)">Cancel install</button>
                                             </td>
@@ -1892,14 +1899,16 @@
     private async Task UploadAppAsync()
     {
         if (_uploadDialog is null) return;
-        var upload = await _uploadDialog.OpenAsync(Row.ProjectName, Row.EnvironmentName, Row.IsProduction, BcWindowSuffix(),
-            _env!.DeliveryWindowStart, _env.DeliveryWindowEnd, Row.TimeZone);
+        var upload = await _uploadDialog.OpenAsync(Row.ProjectName, Row.EnvironmentName, Row.IsProduction,
+            _env!.DeliveryWindowStart, _env.DeliveryWindowEnd, Row.TimeZone,
+            _env.BcUpdateWindowStart, _env.BcUpdateWindowEnd, _env.BcUpdateWindowTimeZoneIana);
         if (upload is null) return;
 
         UploadAppOutcome? outcome = null;
+        var packages = upload.Files.Select(f => new UploadPackage(f.Bytes, f.FileName)).ToList();
         await RunSettingWriteAsync("upload",
-            async () => outcome = await Connection.InstallUploadedAppAsync(Row.ProjectId, Id, upload.Bytes, upload.FileName, upload.Timing, upload.At),
-            $"Couldn't upload {upload.FileName}. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.",
+            async () => outcome = await Connection.InstallUploadedAppsAsync(Row.ProjectId, Id, packages, upload.Timing, upload.At),
+            "Couldn't book the upload. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.",
             () => UploadAppDialog.DoneMessage(upload, outcome!, Row.EnvironmentName, Zone));
     }
 
@@ -1910,7 +1919,21 @@
     /// </summary>
     private List<UpgradeActionRow> BookedUploads =>
         _activity?.Where(a => a.Kind == UpgradeActionKind.UploadApp && a.IsPending)
-            .OrderBy(a => a.ExecuteAfter).ToList() ?? new();
+            .OrderBy(a => a.ExecuteAfter).ThenBy(a => a.BatchOrder ?? 0).ThenBy(a => a.Id).ToList() ?? new();
+
+    /// <summary>"2 of 3" for a row of a multi-app upload, so the list shows the order they go in; null for a single one.</summary>
+    private string? BatchPlace(UpgradeActionRow booked)
+    {
+        if (booked.BatchId is not { } batch || booked.BatchOrder is not { } order || _activity is null) return null;
+        var size = _activity.Count(a => a.BatchId == batch);
+        return size > 1 ? $"{order + 1} of {size}" : null;
+    }
+
+    /// <summary>When a booked row goes: its slot, or "starting shortly" once that has come and the worker's next sweep will take it.</summary>
+    private string BookedWhen(UpgradeActionRow booked) =>
+        booked.ExecuteAfter <= DateTime.UtcNow
+            ? "Starting shortly"
+            : $"Booked for {BookedSlotText(booked.ExecuteAfter)}";
 
     /// <summary>A booked slot in the page's own zone - the one it was picked in - so it reads back as picked.</summary>
     private string BookedSlotText(DateTime utc)
@@ -1924,16 +1947,21 @@
     {
         if (_confirm is null) return;
         var name = booked.PackageFileName ?? "the app";
+        var batch = BatchPlace(booked) is not null;
         var confirmed = await _confirm.OpenAsync(
-            $"Install {name} now?",
-            $"It was booked for {BookedSlotText(booked.ExecuteAfter)}. Installing it now may interrupt anyone working in {Row.EnvironmentName}.",
+            batch ? $"Install {name} and the apps booked with it now?" : $"Install {name} now?",
+            (batch
+                ? $"They were booked for {BookedSlotText(booked.ExecuteAfter)} and install one after another. Installing them now may interrupt anyone working in {Row.EnvironmentName}."
+                : $"It was booked for {BookedSlotText(booked.ExecuteAfter)}. Installing it now may interrupt anyone working in {Row.EnvironmentName}."),
             "Install now");
         if (!confirmed) return;
 
         await RunSettingWriteAsync("install-now",
             () => UpgradeActions.RunUploadNowAsync(booked.Id),
-            $"Couldn't install {name}. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.",
-            () => $"Business Central has started installing {name} on {Row.EnvironmentName}. Give it a few minutes, then refresh to see it under Installed apps.");
+            $"Couldn't start the install of {name}.",
+            () => batch
+                ? $"{name} and the apps booked with it will start installing on {Row.EnvironmentName} within a minute."
+                : $"{name} will start installing on {Row.EnvironmentName} within a minute.");
     }
 
     /// <summary>Calls off a booked upload. The file is only ours, so nothing is lost but the booking.</summary>

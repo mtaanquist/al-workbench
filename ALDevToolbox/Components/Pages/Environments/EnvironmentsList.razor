@@ -1050,8 +1050,9 @@
         // The list row carries no windows; the environment's own read does, and the
         // dialog needs the delivery window to offer it.
         var detail = await Fleet.GetEnvironmentAsync(row.EnvironmentId);
-        var upload = await _uploadDialog.OpenAsync(row.ProjectName, row.EnvironmentName, row.IsProduction, null,
-            detail?.DeliveryWindowStart, detail?.DeliveryWindowEnd, row.TimeZone);
+        var upload = await _uploadDialog.OpenAsync(row.ProjectName, row.EnvironmentName, row.IsProduction,
+            detail?.DeliveryWindowStart, detail?.DeliveryWindowEnd, row.TimeZone,
+            detail?.BcUpdateWindowStart, detail?.BcUpdateWindowEnd, detail?.BcUpdateWindowTimeZoneIana);
         if (upload is null) return;
 
         _busy = true;
@@ -1061,12 +1062,13 @@
         StateHasChanged();
         try
         {
-            var outcome = await Connection.InstallUploadedAppAsync(row.ProjectId, row.EnvironmentId, upload.Bytes, upload.FileName, upload.Timing, upload.At);
+            var packages = upload.Files.Select(f => new UploadPackage(f.Bytes, f.FileName)).ToList();
+            var outcome = await Connection.InstallUploadedAppsAsync(row.ProjectId, row.EnvironmentId, packages, upload.Timing, upload.At);
             _done = UploadAppDialog.DoneMessage(upload, outcome, row.EnvironmentName, Zone);
         }
         catch (PlanValidationException ex)
         {
-            _error = ex.Errors.Values.FirstOrDefault() ?? $"Couldn't upload {upload.FileName}.";
+            _error = ex.Errors.Values.FirstOrDefault() ?? "Couldn't book the upload.";
         }
         catch (ProjectAccessDeniedException ex)
         {
@@ -1075,7 +1077,7 @@
         catch (Exception ex)
         {
             Log.LogError(ex, "Uploading an app failed for environment {EnvId}.", row.EnvironmentId);
-            _error = $"Couldn't upload {upload.FileName}. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.";
+            _error = "Couldn't book the upload. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.";
         }
         finally
         {

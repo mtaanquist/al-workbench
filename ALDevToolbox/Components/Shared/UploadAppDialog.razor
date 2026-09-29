@@ -7,43 +7,77 @@
     (ProjectConnectionService.InstallUploadedAppAsync) and reports the outcome where its
     own page reports outcomes. See .design/saas-delivery.md, "Uploading an app".
 
+    Several files may be chosen at once. Each manifest is read on the spot and the apps
+    are put in dependency order, which is the order they will install in, one after
+    another - the worker waits for each install to finish before the next. A package
+    whose manifest cannot be read (an encrypted vendor app) keeps the place it was
+    chosen in, and the list says so.
+
     When: the delivery window agreed with the customer comes first when the environment
     has one, else Microsoft's own update window; then a time the person picks; then now.
-    A picked time is read in the organisation's display zone - the zone every other time
-    on the page is shown in - and echoed back in words, so "12:32" fires at 12:32 on the
-    clock the person is looking at, never at 12:32 UTC. The delivery window is the
-    customer's, in the customer's zone, and is shown as such.
+    Every choice is a booking the workbench sends at the slot, never a schedule handed
+    to Business Central, which is what makes the order a promise. A picked time is read
+    in the organisation's display zone - the zone every other time on the page is shown
+    in - and echoed back in words, so "12:32" fires at 12:32 on the clock the person is
+    looking at, never at 12:32 UTC. The two windows are the customer's, in the
+    customer's zone, and are shown as such.
 *@
 @using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
+@using ALDevToolbox.Services.ObjectExplorer
 @using ALDevToolbox.Services.ObjectExplorer.Bc
+@using ALDevToolbox.Services.ObjectExplorer.Import
 @using ALDevToolbox.Services.Organizations
 @inject DisplayTimeZone DisplayZone
 @inject ILogger<UploadAppDialog> Log
 
-<ConfirmDialog @ref="_confirm" ConfirmDisabled="@(_bytes is null || (_timing == UploadAppTiming.AtTime && SlotProblem() is not null))">
+<ConfirmDialog @ref="_confirm" ConfirmDisabled="@(_files.Count == 0 || (_timing == UploadAppTiming.AtTime && SlotProblem() is not null))">
     <div class="upload-app__file">
         <label class="btn btn--sm btn--file" for="upload-app-file">
             <Icon Name="upload" Width="14" Height="14" />
-            <span>@(_bytes is null ? "Choose the .app file..." : "Choose a different file...")</span>
-            <InputFile id="upload-app-file" OnChange="OnChosenAsync" accept=".app" />
+            <span>@(_files.Count == 0 ? "Choose the .app files..." : "Choose different files...")</span>
+            <InputFile id="upload-app-file" OnChange="OnChosenAsync" accept=".app" multiple />
         </label>
         @if (_reading)
         {
-            <span class="u-muted" role="status">Reading the file...</span>
+            <span class="u-muted" role="status">Reading the files...</span>
         }
         else if (_error is { } error)
         {
             <FieldError Message="@error" />
         }
-        else if (_bytes is not null)
+        else if (_files.Count == 0)
         {
-            <span class="upload-app__name">@_fileName - @FileSize(_bytes.Length)</span>
-        }
-        else
-        {
-            <span class="u-muted">Choose a .app file to continue.</span>
+            <span class="u-muted">Choose one or more .app files to continue.</span>
         }
     </div>
+    @if (_files.Count > 0)
+    {
+        <ol class="upload-app__list">
+            @foreach (var file in _files)
+            {
+                <li class="upload-app__item">
+                    <span class="upload-app__name">@file.FileName</span>
+                    @if (file.Manifest is { } m)
+                    {
+                        <span class="u-muted">@m.Name @m.Version</span>
+                    }
+                    else
+                    {
+                        <span class="u-muted">details not readable</span>
+                    }
+                    <span class="u-muted">@FileSize(file.Bytes.Length)</span>
+                </li>
+            }
+        </ol>
+        @if (_files.Count > 1)
+        {
+            <small class="field__hint">
+                @(_files.Any(f => f.Manifest is null)
+                    ? "They install one after another in this order. Apps whose details couldn't be read keep the order you chose them in, so put the ones others depend on first."
+                    : "They install one after another in this order, dependencies first.")
+            </small>
+        }
+    }
     <fieldset class="upload-app__when">
         <legend class="upload-app__when-legend">When should it install?</legend>
         @if (_deliveryWindowText is { } deliveryWindow)
@@ -58,11 +92,14 @@
         {
             <label class="upload-app__when-opt">
                 <input type="radio" name="upload-app-when" checked="@(_timing == UploadAppTiming.BcUpdateWindow)"
+                       disabled="@(_bcWindowText is null)"
                        @onchange="() => _timing = UploadAppTiming.BcUpdateWindow" />
-                <span>In the BC update window@(_windowSuffix.Length > 0 ? _windowSuffix : ", at a time Business Central picks")</span>
+                <span>In the BC update window@(_bcWindowText is { } bc ? $", {bc}" : "")</span>
             </label>
             <small class="field__hint upload-app__hint">
-                This environment has no delivery window (the install time agreed with the customer), so Business Central's own window stands in for it.
+                @(_bcWindowText is null
+                    ? "This environment has no delivery window, and Business Central's own window hasn't been read yet. Refresh the environment to read it, or pick a time."
+                    : "This environment has no delivery window (the install time agreed with the customer), so Business Central's own window stands in for it.")
             </small>
         }
         <label class="upload-app__when-opt">
@@ -84,7 +121,7 @@
                     <FieldError Message="@problem" />
                 }
                 <small class="field__hint">
-                    Until then you can cancel it, or install it early, under Scheduled installs on the environment's Apps tab.
+                    Until then you can cancel or start it early under Scheduled installs on the environment's Apps tab.
                 </small>
             </div>
         }
@@ -97,12 +134,12 @@
 </ConfirmDialog>
 
 @code {
-    /// <summary>
-    /// What the person chose: the package, its name, when, and - for a picked time - the
-    /// instant it means.
-    /// </summary>
-    /// <param name="CustomerTimeZone">The IANA zone the customer's delivery window is agreed in, for saying a delivery-window slot back in it.</param>
-    public sealed record Upload(byte[] Bytes, string FileName, UploadAppTiming Timing, DateTimeOffset? At = null, string? CustomerTimeZone = null);
+    /// <summary>What the person chose: the packages in install order, when, and - for a picked time - the instant it means.</summary>
+    /// <param name="CustomerTimeZone">The IANA zone the customer's windows are agreed in, for saying a window slot back in it.</param>
+    public sealed record Upload(IReadOnlyList<UploadFile> Files, UploadAppTiming Timing, DateTimeOffset? At = null, string? CustomerTimeZone = null);
+
+    /// <summary>One chosen package, with its manifest when it could be read (an encrypted vendor app hides it).</summary>
+    public sealed record UploadFile(byte[] Bytes, string FileName, AppManifest? Manifest);
 
     /// <summary>
     /// How far in the past a picked slot may land before the dialog refuses it. The same
@@ -111,40 +148,43 @@
     private static readonly TimeSpan PastSlack = TimeSpan.FromMinutes(1);
 
     private ConfirmDialog? _confirm;
-    private byte[]? _bytes;
-    private string _fileName = string.Empty;
+    private List<UploadFile> _files = new();
     private string? _error;
     private bool _reading;
     private UploadAppTiming _timing = UploadAppTiming.BcUpdateWindow;
-    private string _windowSuffix = string.Empty;
+    private string? _bcWindowText;
     private string? _deliveryWindowText;
     private string? _customerTimeZone;
     private DateTime _slotLocal;
 
     /// <summary>
-    /// Asks for the file and the timing. Null when the person backed out. The gentlest
+    /// Asks for the files and the timing. Null when the person backed out. The gentlest
     /// timing is the default each time: the delivery window when the environment has
-    /// one, else Microsoft's window.
+    /// one, else Microsoft's window when its hours are known, else a picked time.
     /// </summary>
-    /// <param name="windowSuffix">", 22:00-04:00 (Copenhagen)" when the caller knows Microsoft's window; empty otherwise.</param>
     /// <param name="deliveryWindowStart">The environment's delivery window, when set. Both bounds or neither.</param>
-    /// <param name="deliveryWindowEnd">See <paramref name="deliveryWindowStart"/>.</param>
+    /// <param name="bcWindowStart">Microsoft's update window as mirrored from the admin centre, when read. Both bounds or neither.</param>
+    /// <param name="bcWindowTimeZone">The IANA zone Microsoft's window is expressed in; the customer's zone when unknown.</param>
     /// <param name="customerTimeZone">The IANA zone the delivery window is agreed in - the solution's.</param>
     public async Task<Upload?> OpenAsync(
-        string projectName, string environmentName, bool isProduction, string? windowSuffix = null,
-        TimeOnly? deliveryWindowStart = null, TimeOnly? deliveryWindowEnd = null, string? customerTimeZone = null)
+        string projectName, string environmentName, bool isProduction,
+        TimeOnly? deliveryWindowStart = null, TimeOnly? deliveryWindowEnd = null, string? customerTimeZone = null,
+        TimeOnly? bcWindowStart = null, TimeOnly? bcWindowEnd = null, string? bcWindowTimeZone = null)
     {
         if (_confirm is null) return null;
         await DisplayZone.EnsureLoadedAsync();
-        _bytes = null;
-        _fileName = string.Empty;
+        _files = new();
         _error = null;
-        _windowSuffix = windowSuffix ?? string.Empty;
         _customerTimeZone = customerTimeZone;
         _deliveryWindowText = UpdateWindow.IsConfigured(deliveryWindowStart, deliveryWindowEnd)
-            ? $"{UpdateWindow.Clock(deliveryWindowStart!.Value)}-{UpdateWindow.Clock(deliveryWindowEnd!.Value)} ({ZoneLabel(customerTimeZone)})"
+            ? WindowText(deliveryWindowStart!.Value, deliveryWindowEnd!.Value, customerTimeZone)
             : null;
-        _timing = _deliveryWindowText is null ? UploadAppTiming.BcUpdateWindow : UploadAppTiming.DeliveryWindow;
+        _bcWindowText = UpdateWindow.IsConfigured(bcWindowStart, bcWindowEnd)
+            ? WindowText(bcWindowStart!.Value, bcWindowEnd!.Value, bcWindowTimeZone ?? customerTimeZone)
+            : null;
+        _timing = _deliveryWindowText is not null ? UploadAppTiming.DeliveryWindow
+            : _bcWindowText is not null ? UploadAppTiming.BcUpdateWindow
+            : UploadAppTiming.AtTime;
         _slotLocal = DefaultSlot();
         StateHasChanged();
 
@@ -152,58 +192,68 @@
             isProduction
                 ? $"Upload an app to {environmentName}, a production environment?"
                 : $"Upload an app to {environmentName}?",
-            $"For an app another company built and sent you as a .app file. It installs into {projectName}'s "
-            + "Business Central as it is; nothing here checks what it does. Apps you build yourself go through Deployments instead.",
+            $"For apps another company built and sent you as .app files. They install into {projectName}'s "
+            + "Business Central as they are; nothing here checks what they do. Apps you build yourself go through Deployments instead.",
             "Upload and install", "btn--danger");
-        var bytes = _bytes;
-        _bytes = null;
-        if (!confirmed || bytes is null) return null;
-        return new Upload(bytes, _fileName, _timing, _timing == UploadAppTiming.AtTime ? SlotInstant() : null, _customerTimeZone);
+        var files = _files;
+        _files = new();
+        if (!confirmed || files.Count == 0) return null;
+        return new Upload(files, _timing, _timing == UploadAppTiming.AtTime ? SlotInstant() : null, _customerTimeZone);
     }
 
     /// <summary>
     /// The sentence for a page's success notice, so both callers say the same thing. It
     /// reports what <em>applied</em>, which the outcome carries: a delivery-window ask on
-    /// an environment without one went to Microsoft's window, and one made while the
-    /// window was open went straight away.
+    /// an environment without one went to Microsoft's window.
     /// </summary>
     /// <param name="zone">The zone the page shows times in, for a booked slot.</param>
     public static string DoneMessage(Upload upload, UploadAppOutcome outcome, string environmentName, DisplayTimeZone zone)
     {
-        if (outcome.RunsAtUtc is { } due)
+        var what = upload.Files.Count == 1 ? upload.Files[0].FileName : $"{upload.Files.Count} apps";
+        var tail = " Until then you can cancel or start it early under Scheduled installs on the environment.";
+        if (outcome.RunsAtUtc <= DateTime.UtcNow)
         {
-            var when = $"{zone.Format(due, SlotFormat)}, {ZoneLabel(zone.Zone.Id)} time";
-            // The delivery window was chosen as the customer's wall clock ("22:00-04:00
-            // (New York)"), so it is said back in that clock first, or the numbers look wrong.
-            var customer = CustomerClock(due, upload.CustomerTimeZone, zone.Zone);
-            var lead = outcome.Timing == UploadAppTiming.DeliveryWindow
-                ? $"{upload.FileName} will be installed on {environmentName} when the delivery window next opens{(customer is null ? "" : $", {customer}")} ({when})."
-                : $"{upload.FileName} will be installed on {environmentName} at {when}{(customer is null ? "" : $" - {customer}")}.";
-            return lead + " Until then it is listed under Scheduled installs on the environment, where you can cancel it or install it now.";
+            return upload.Files.Count == 1
+                ? $"{what} will start installing on {environmentName} within a minute. Follow it under Scheduled installs on the environment."
+                : $"{what} will start installing on {environmentName} within a minute, one after another in the order shown. Follow them under Scheduled installs on the environment.";
         }
-        return outcome.Timing switch
+
+        var when = $"{zone.Format(outcome.RunsAtUtc, SlotFormat)}, {ZoneLabel(zone.Zone.Id)} time";
+        // A window was chosen as the customer's wall clock ("22:00-04:00 (New York)"),
+        // so it is said back in that clock first, or the numbers look wrong.
+        var customer = CustomerClock(outcome.RunsAtUtc, upload.CustomerTimeZone, zone.Zone);
+        var lead = outcome.Timing switch
         {
-            UploadAppTiming.BcUpdateWindow =>
-                $"Business Central will install {upload.FileName} in {environmentName}'s BC update window. It is listed under Scheduled installs on the environment until then.",
             UploadAppTiming.DeliveryWindow =>
-                $"The delivery window is open now, so Business Central has started installing {upload.FileName} on {environmentName}. Give it a few minutes, then refresh to see it under Installed apps.",
-            _ => $"Business Central has started installing {upload.FileName} on {environmentName}. Give it a few minutes, then refresh to see it under Installed apps.",
+                $"{what} will be installed on {environmentName} when the delivery window next opens{(customer is null ? "" : $", {customer}")} ({when}).",
+            UploadAppTiming.BcUpdateWindow =>
+                $"{what} will be installed on {environmentName} when the BC update window next opens{(customer is null ? "" : $", {customer}")} ({when}).",
+            _ => $"{what} will be installed on {environmentName} at {when}{(customer is null ? "" : $" - {customer}")}.",
         };
+        return lead + tail;
     }
+
+    /// <summary>The most files one upload takes - the service's limit, mirrored here so the refusal is instant.</summary>
+    private const int MaxFiles = ProjectConnectionService.MaxUploadBatch;
 
     private async Task OnChosenAsync(InputFileChangeEventArgs e)
     {
-        _bytes = null;
+        _files = new();
         _error = null;
-        var file = e.File;
-        if (!file.Name.EndsWith(".app", StringComparison.OrdinalIgnoreCase))
+        if (e.FileCount > MaxFiles)
         {
-            _error = "Choose an extension package - a file ending in .app.";
+            _error = $"Choose at most {MaxFiles} apps at a time.";
             return;
         }
-        if (file.Size > BcAppManagementClient.MaxAppBytes)
+        var chosen = e.GetMultipleFiles(MaxFiles);
+        if (chosen.FirstOrDefault(f => !f.Name.EndsWith(".app", StringComparison.OrdinalIgnoreCase)) is { } wrong)
         {
-            _error = $"{file.Name} is over 50 MB, which is the largest app Business Central accepts.";
+            _error = $"{wrong.Name} isn't an extension package - choose files ending in .app.";
+            return;
+        }
+        if (chosen.FirstOrDefault(f => f.Size > BcAppManagementClient.MaxAppBytes) is { } tooBig)
+        {
+            _error = $"{tooBig.Name} is over 50 MB, which is the largest app Business Central accepts.";
             return;
         }
 
@@ -211,22 +261,37 @@
         StateHasChanged();
         try
         {
-            await using var stream = file.OpenReadStream(BcAppManagementClient.MaxAppBytes);
-            using var buffer = new MemoryStream();
-            await stream.CopyToAsync(buffer);
-            _bytes = buffer.ToArray();
-            _fileName = file.Name;
+            var read = new List<UploadFile>(chosen.Count);
+            foreach (var file in chosen)
+            {
+                await using var stream = file.OpenReadStream(BcAppManagementClient.MaxAppBytes);
+                using var buffer = new MemoryStream();
+                await stream.CopyToAsync(buffer);
+                var bytes = buffer.ToArray();
+                read.Add(new UploadFile(bytes, file.Name, await AppPackageReader.TryReadManifestAsync(bytes)));
+            }
+            _files = InstallOrder(read);
         }
         catch (IOException ex)
         {
             Log.LogWarning(ex, "Reading an uploaded app failed.");
-            _error = $"Couldn't read {file.Name}. Choose it again.";
+            _error = "Couldn't read one of the files. Choose them again.";
         }
         finally
         {
             _reading = false;
         }
     }
+
+    /// <summary>
+    /// Dependencies first, by the manifests that could be read; a package without one
+    /// only keeps its place. Static so a test can pin the order without a browser.
+    /// </summary>
+    internal static List<UploadFile> InstallOrder(IReadOnlyList<UploadFile> files) =>
+        DependencyOrder.Sort(files,
+            f => f.Manifest?.AppId.ToString(),
+            f => f.Manifest?.Dependencies.Select(d => d.AppId.ToString()) ?? Enumerable.Empty<string>())
+        .ToList();
 
     // -- The picked time ------------------------------------------------------
 
@@ -272,12 +337,16 @@
         var customerZone = UpdateWindow.ResolveTimeZone(customerTimeZone);
         var instant = DateTime.SpecifyKind(utc, DateTimeKind.Utc);
         if (customerZone.GetUtcOffset(instant) == pageZone.GetUtcOffset(instant)) return null;
-        var local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), customerZone);
+        var local = TimeZoneInfo.ConvertTimeFromUtc(instant, customerZone);
         return $"{UpdateWindow.Clock(TimeOnly.FromDateTime(local))} for the customer ({ZoneLabel(customerZone.Id)})";
     }
 
     private string? SlotProblem() =>
         SlotInstant() < DateTimeOffset.UtcNow - PastSlack ? "Pick a time that hasn't happened yet." : null;
+
+    /// <summary>"22:00-04:00 (Copenhagen)": a window as the hours it was agreed in, with whose clock.</summary>
+    private static string WindowText(TimeOnly start, TimeOnly end, string? ianaId) =>
+        $"{UpdateWindow.Clock(start)}-{UpdateWindow.Clock(end)} ({ZoneLabel(ianaId)})";
 
     /// <summary>A zone the way a consultant names it - the city, not the region/city id.</summary>
     private static string ZoneLabel(string? ianaId) =>

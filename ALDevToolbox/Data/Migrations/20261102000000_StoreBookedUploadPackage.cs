@@ -1,4 +1,5 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+﻿using System;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
@@ -10,6 +11,18 @@ namespace ALDevToolbox.Data.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.AddColumn<Guid>(
+                name: "package_batch_id",
+                table: "oe_environment_upgrade_actions",
+                type: "uuid",
+                nullable: true);
+
+            migrationBuilder.AddColumn<int>(
+                name: "package_batch_order",
+                table: "oe_environment_upgrade_actions",
+                type: "integer",
+                nullable: true);
+
             migrationBuilder.AddColumn<byte[]>(
                 name: "package_content",
                 table: "oe_environment_upgrade_actions",
@@ -27,6 +40,14 @@ namespace ALDevToolbox.Data.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.DropColumn(
+                name: "package_batch_id",
+                table: "oe_environment_upgrade_actions");
+
+            migrationBuilder.DropColumn(
+                name: "package_batch_order",
+                table: "oe_environment_upgrade_actions");
+
             migrationBuilder.DropColumn(
                 name: "package_content",
                 table: "oe_environment_upgrade_actions");

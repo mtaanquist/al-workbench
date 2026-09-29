@@ -563,39 +563,51 @@ that names the environment and says what the click does there:
   for those. The service reads the waiting list again first and refuses if Business Central
   now asks for an app that was not on the list the person agreed to. Business Central takes
   each prerequisite to the newest version the environment supports, not the minimum.
-  Both this and an upload leave a line in the environment's update history
-  (`oe_environment_upgrade_actions`, kinds `UpdateApp` and `UploadApp`, written already
-  `Sent` so the worker that fires booked actions never sees them): who asked, when, and
-  what moved alongside. While an update is on its way the row's button is disabled and
+  This leaves a line in the environment's update history
+  (`oe_environment_upgrade_actions`, kind `UpdateApp`, written already `Sent` so the
+  worker that fires booked actions never sees it): who asked, when, and what moved
+  alongside. (An upload is the opposite shape - always a booking the worker sends; see
+  below.) While an update is on its way the row's button is disabled and
   says so - from Business Central's own state on the installed app (`Updating`,
   `UpdatePending`), and, for the minutes before it reports anything, from what the page
   itself just asked for.
-- **Uploading an app** - one `.app` file another company built, for which there is no
-  pipeline here. It goes to `pteInstall` with the sync mode always Add, and dependencies are
-  **not** pulled along: a missing one is refused by name. Apps we build still go through
-  Deployments. Four timings are offered. Two are Business Central's own, the only schedules
-  it allows for an app it has not seen before: "now" (`Immediate`) and "in the BC update
-  window" (`UpdateWindow`); for those the package is passed straight through and never
-  stored. The other two are ours, because Business Central cannot be told "at 20:00 on
-  Thursday": **in the delivery window** (the next opening of the slot agreed with the
-  customer, `UpdateWindowStart/End` in the solution's zone - the same rule a deployment
-  pipeline set to `OurDeliveryWindow` follows) and **at a time I pick**. Those write a
-  `Pending` `UploadApp` row in `oe_environment_upgrade_actions` carrying the file
-  (`package_file_name`, `package_content`), and `UpgradeActionWorker` sends it as
-  `Immediate` when the slot arrives, re-checking the requester's access and the connection
-  then. The delivery window is offered first when the environment has one; without one the
-  dialog says so and offers Microsoft's window instead, and the service makes the same
-  fall-back if asked for a window that isn't there. A delivery-window ask made while the
-  window is open sends right away rather than booking for "now". A picked time is read in
-  the organisation's display zone - the zone every other time on the page is shown in - and
-  echoed back under the field with the zone named, so 12:32 on the person's clock is never
-  12:32 UTC. **The package is held only while the row is pending**: the write that settles
-  the row (sent by the worker, sent now by hand, failed, or cancelled) clears it in the same
-  statement, and the worker's first sweep after a restart drops any package left on a
-  settled row. A booked upload appears in the environment's *Scheduled installs* beside
-  Business Central's own, with "Install now" (`UpgradeActionService.RunUploadNowAsync`,
-  the same claim-then-send the worker does) and "Cancel install"; it is also in the
-  Workbench history, where it can be cancelled like any other booking.
+- **Uploading apps** - `.app` files another company built, for which there is no pipeline
+  here. Several may be chosen at once: each manifest is read on the spot
+  (`AppPackageReader.TryReadManifestAsync`) and the apps are put in dependency order with
+  the same `DependencyOrder` the project build compiles siblings in; an encrypted vendor
+  app hides its manifest and keeps the place it was chosen in, and the dialog says so.
+  The sync mode is always Add and dependencies are **not** pulled along: a missing one is
+  refused by name at send time. Apps we build still go through Deployments.
+
+  **Every timing is a booking, never a schedule handed to Business Central.** Four are
+  offered - the delivery window (first, when the environment has one), the BC update
+  window (booked from the hours mirrored on the environment, and refused until they have
+  been read), a picked time, and now - and all four write one `Pending` `UploadApp` row
+  per app in `oe_environment_upgrade_actions` carrying the file (`package_file_name`,
+  `package_content`) and, for several apps, a batch (`package_batch_id`,
+  `package_batch_order`). `UpgradeActionWorker` sends a batch's rows in order as
+  `Immediate` when the slot arrives, and waits for each install to finish
+  (`BcAppOperationPoller`, the poll a delivery has always done) before sending the next:
+  two installs started back to back can deadlock on Business Central's own bookkeeping
+  table, and the API's `UpdateWindow` queue would pick its own order. A failed app stops
+  the rest of its batch ("not installed, because X before it didn't install"); a
+  cancelled one does not. "Now" is a slot that has already come, so the next sweep
+  (within thirty seconds) takes it - an install that takes minutes never runs inside a
+  page request. The delivery window falls back to Microsoft's window when the
+  environment has none, and a window that is open at the moment of asking books now.
+
+  A picked time is read in the organisation's display zone - the zone every other time
+  on the page is shown in - and echoed back under the field with the zone named, so
+  12:32 on the person's clock is never 12:32 UTC; a window slot is said back in the
+  customer's clock first, because that is the clock it was chosen on. **The package is
+  held only while the row is pending**: the write that settles the row (sent, failed, or
+  cancelled) clears it in the same statement, and the worker's first sweep after a
+  restart drops any package left on a settled row. Booked uploads appear in the
+  environment's *Scheduled installs* beside Business Central's own, with their place in
+  the batch, "Install now" (`UpgradeActionService.RunUploadNowAsync`, which moves the
+  whole batch's slot to now for the next sweep rather than sending from the page) and
+  "Cancel install", gated like the upload itself on managing the solution; they are also
+  in the Workbench history.
 
 Refusals are keyed on Microsoft's error **codes** (`environmentNotFound`,
 `applicationTypeDoesNotExist`, and so on) and rendered as an instruction; the message beside the

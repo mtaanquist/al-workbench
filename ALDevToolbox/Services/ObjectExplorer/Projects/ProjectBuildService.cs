@@ -1638,36 +1638,8 @@ public sealed class ProjectBuildService
     /// it (transitively) depends on, so a sibling is compiled before its dependents.
     /// Cycle-safe (best-effort) and stable in input order.
     /// </summary>
-    internal static IReadOnlyList<DiscoveredApp> TopologicalOrder(IReadOnlyList<DiscoveredApp> apps)
-    {
-        var byId = new Dictionary<string, DiscoveredApp>(StringComparer.OrdinalIgnoreCase);
-        foreach (var a in apps)
-        {
-            if (a.Manifest.Id.Length > 0) byId[a.Manifest.Id] = a;
-        }
-
-        var ordered = new List<DiscoveredApp>();
-        // 0 = unvisited, 1 = on the stack (visiting), 2 = emitted.
-        var state = new Dictionary<DiscoveredApp, int>();
-
-        void Visit(DiscoveredApp app)
-        {
-            if (state.TryGetValue(app, out var s) && s != 0) return; // visiting (cycle) or done
-            state[app] = 1;
-            foreach (var dep in app.Manifest.Dependencies)
-            {
-                if (byId.TryGetValue(dep.Id, out var depApp) && !ReferenceEquals(depApp, app))
-                {
-                    Visit(depApp);
-                }
-            }
-            state[app] = 2;
-            ordered.Add(app);
-        }
-
-        foreach (var a in apps) Visit(a);
-        return ordered;
-    }
+    internal static IReadOnlyList<DiscoveredApp> TopologicalOrder(IReadOnlyList<DiscoveredApp> apps) =>
+        DependencyOrder.Sort(apps, a => a.Manifest.Id, a => a.Manifest.Dependencies.Select(d => d.Id));
 
     /// <summary>The git <c>http.extraHeader</c> value carrying basic auth for the provider's PAT.</summary>
     internal static string BasicAuthHeaderValue(RepositoryProvider provider, string pat)

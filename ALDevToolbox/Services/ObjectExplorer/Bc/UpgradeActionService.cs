@@ -266,12 +266,12 @@ public sealed class UpgradeActionService
     }
 
     /// <summary>
-    /// Sends a booked upload now instead of waiting for its slot: the "Install now" on
-    /// the environment's Scheduled installs list. Claims the row with the same
-    /// compare-and-set the worker uses, so a sweep that picks the row up in the same
-    /// second sends it once, not twice, and a cancel that got there first stands. A
-    /// refusal from Business Central is recorded as a failed row <em>and</em> rethrown,
-    /// as an immediate action's is, so the page shows the reason and the history keeps it.
+    /// Moves a booked upload's slot to now - the "Install now" on the environment's
+    /// Scheduled installs list. The row is not sent from here: the worker sends it on
+    /// its next sweep (within <see cref="UpgradeActionWorker.PollInterval"/>), so an
+    /// install that takes minutes never runs inside a page request, and a batch keeps
+    /// its order. For a row in a batch every row of the batch still waiting moves with
+    /// it: an app cannot jump ahead of the one it was booked to follow.
     /// </summary>
     public async Task RunUploadNowAsync(int actionId, CancellationToken ct = default)
     {
@@ -279,7 +279,7 @@ public sealed class UpgradeActionService
 
         var booking = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.Id == actionId)
-            .Select(a => new { a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status, a.PackageFileName })
+            .Select(a => new { a.Id, a.ProjectId, a.Kind, a.Status, a.PackageFileName, a.BatchId, OwnerId = a.Project!.CreatedByUserId })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {
@@ -301,85 +301,19 @@ public sealed class UpgradeActionService
             });
         }
 
-        // The send below re-checks access through ResolveEnvironmentAsync, but the claim
-        // is a write of its own and must not happen for someone who may not send.
-        var ownerId = await _db.OeProjects.AsNoTracking()
-            .Where(p => p.Id == booking.ProjectId)
-            .Select(p => p.CreatedByUserId)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        await _access.EnsureCanManageAsync(booking.ProjectId, ownerId, ct).ConfigureAwait(false);
+        // The same gate that made the booking: a manager's write.
+        await _access.EnsureCanManageAsync(booking.ProjectId, booking.OwnerId, ct).ConfigureAwait(false);
 
-        var claimedAt = _clock.GetUtcNow().UtcDateTime;
-        var claimed = await _db.OeEnvironmentUpgradeActions
-            .Where(a => a.Id == actionId
-                        && a.Status == UpgradeActionStatus.Pending
-                        && a.SentAt == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.SentAt, claimedAt), ct).ConfigureAwait(false);
-        if (claimed == 0)
-        {
-            throw new PlanValidationException(new Dictionary<string, string>
-            {
-                ["Action"] = "This install has already started or been cancelled, so there is nothing left to do.",
-            });
-        }
-
-        var package = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
-            .Where(a => a.Id == actionId)
-            .Select(a => a.PackageContent)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        var environmentName = await EnvironmentNameAsync(booking.EnvironmentId, ct).ConfigureAwait(false);
-
-        UpgradeActionStatus status;
-        string outcome;
-        PlanValidationException? refusal = null;
-        try
-        {
-            if (package is null || package.Length == 0)
-            {
-                throw new PlanValidationException(new Dictionary<string, string>
-                {
-                    ["App"] = "The app file was no longer stored with the booking.",
-                });
-            }
-            await _connections.SendBookedUploadAsync(
-                booking.ProjectId, booking.EnvironmentId, package, booking.PackageFileName, ct).ConfigureAwait(false);
-            status = UpgradeActionStatus.Sent;
-            outcome = SuccessOutcome(UpgradeActionKind.UploadApp, environmentName: environmentName, fileName: booking.PackageFileName);
-        }
-        catch (PlanValidationException ex)
-        {
-            status = UpgradeActionStatus.Failed;
-            outcome = FailureOutcome(UpgradeActionKind.UploadApp,
-                ex.Errors.Values.FirstOrDefault() ?? "Business Central refused the app.", fileName: booking.PackageFileName);
-            refusal = ex;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // The row is claimed, so it must be settled here or it sits half-sent until the
-            // worker's next restart sweep. The detail goes to the log, not the feed.
-            _logger.LogError(ex, "Sending booked upload {ActionId} now threw.", actionId);
-            await _db.OeEnvironmentUpgradeActions
-                .Where(a => a.Id == actionId)
-                .ExecuteUpdateAsync(s => s
-                    .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
-                    .SetProperty(a => a.Outcome, FailureOutcome(UpgradeActionKind.UploadApp, "Business Central didn't accept the app.", fileName: booking.PackageFileName))
-                    .SetProperty(a => a.PackageContent, (byte[]?)null), ct).ConfigureAwait(false);
-            throw;
-        }
-
-        var finishedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.OeEnvironmentUpgradeActions
-            .Where(a => a.Id == actionId)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(a => a.Status, status)
-                .SetProperty(a => a.Outcome, outcome)
-                .SetProperty(a => a.PackageContent, (byte[]?)null)
-                .SetProperty(a => a.SentAt, finishedAt), ct).ConfigureAwait(false);
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var moved = await _db.OeEnvironmentUpgradeActions
+            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+            .Where(a => booking.BatchId != null ? a.BatchId == booking.BatchId : a.Id == actionId)
+            .Where(a => a.ExecuteAfter > now)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.ExecuteAfter, now), ct).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "User {UserId} sent booked upload {ActionId} ({FileName}) to environment {EnvironmentId} now: {Status}.",
-            _orgContext.CurrentUserId, actionId, booking.PackageFileName, booking.EnvironmentId, status);
-        if (refusal is not null) throw refusal;
+            "User {UserId} moved booked upload {ActionId} ({FileName}) and {Others} other row(s) of its batch to now.",
+            _orgContext.CurrentUserId, actionId, booking.PackageFileName, Math.Max(0, moved - 1));
     }
 
     // ── Reading ─────────────────────────────────────────────────────────
@@ -404,7 +338,7 @@ public sealed class UpgradeActionService
                 a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
                 a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
                 a.CancelledBy, a.CancelledAt, a.TargetVersion,
-                a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName))
+                a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder))
             .ToListAsync(ct).ConfigureAwait(false);
     }
 
@@ -428,7 +362,7 @@ public sealed class UpgradeActionService
                 a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
                 a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
                 a.CancelledBy, a.CancelledAt, a.TargetVersion,
-                a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName))
+                a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder))
             .ToListAsync(ct).ConfigureAwait(false);
     }
 
@@ -462,7 +396,7 @@ public sealed class UpgradeActionService
     /// there and then never becomes a booking, and goes through
     /// <see cref="ProjectConnectionService.InstallUploadedAppAsync"/> whole.
     /// </summary>
-    internal Task<BcAppOperation> RunUploadAsync(
+    internal Task<BcAppOperationResult> RunUploadAsync(
         int projectId, int environmentId, string fileName, byte[] package, CancellationToken ct) =>
         _connections.SendBookedUploadAsync(projectId, environmentId, package, fileName, ct);
 
@@ -518,8 +452,8 @@ public sealed class UpgradeActionService
         {
             UpgradeActionKind.PushDateToLatest => "The update date was moved out to the latest Business Central allows.",
             UpgradeActionKind.UploadApp => environmentName is { Length: > 0 }
-                ? $"{fileName} was sent to {environmentName}, and Business Central started installing it."
-                : $"{fileName} was sent, and Business Central started installing it.",
+                ? $"{fileName} was installed on {environmentName}."
+                : $"{fileName} was installed.",
             UpgradeActionKind.SelectVersion => environmentName is { Length: > 0 }
                 ? $"Set the next version to {targetVersion} on {environmentName}."
                 : $"Set the next version to {targetVersion}.",
@@ -603,7 +537,10 @@ public sealed record UpgradeActionRow(
     int? UpgradeId = null,
     string? UpgradeName = null,
     /// <summary>The file a booked or sent upload carried, so the feed can name it. Null for every other kind.</summary>
-    string? PackageFileName = null)
+    string? PackageFileName = null,
+    /// <summary>The multi-app upload this row belongs to, and its place in it (from zero). Null for a single upload and every other kind.</summary>
+    Guid? BatchId = null,
+    int? BatchOrder = null)
 {
     /// <summary>True while the action is still waiting for its slot — the only state with a Cancel.</summary>
     public bool IsPending => Status == UpgradeActionStatus.Pending;
