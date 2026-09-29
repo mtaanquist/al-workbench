@@ -13,7 +13,7 @@
 @if (Versions.Count > 0)
 {
     <SelectBox>
-        <select id="@Id" class="select" disabled="@Disabled" @onchange="OnPicked">
+        <select id="@Id" class="select" required disabled="@Disabled" @onchange="OnPicked">
             @foreach (var version in Versions)
             {
                 <option value="@version" selected="@(!_other && version == Value)">@version</option>
@@ -24,7 +24,7 @@
 }
 @if (Versions.Count == 0 || _other)
 {
-    <input id="@(Versions.Count == 0 ? Id : Id + "-other")" class="input tvi-other" type="text"
+    <input id="@(Versions.Count == 0 ? Id : Id + "-other")" class="input tvi-other" type="text" required
            inputmode="decimal" pattern="\d{1,4}\.\d{1,4}" maxlength="9"
            placeholder="e.g. 28.5" autocomplete="off" disabled="@Disabled"
            aria-label="@(Versions.Count == 0 ? null : "Version, as major.minor")"

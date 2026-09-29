@@ -806,6 +806,37 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         stored.UpgradeId.Should().Be(id);
     }
 
+    /// <summary>
+    /// The list holds Delete back on the same fact <c>DeleteAsync</c> refuses on: an action
+    /// row carrying the upgrade's id. A line the list cannot show - its environment gone from
+    /// Business Central, so gone from the fleet - still counts, as does a cancelled booking.
+    /// </summary>
+    [Fact]
+    public async Task Anything_started_counts_actions_on_lines_the_list_cannot_show()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var started = await CreateAsync("Started", "28.5");
+        await AddAsync(started, envId);
+        await AddActionAsync(started, projectId, envId, UpgradeActionKind.RunNow, UpgradeActionStatus.Cancelled);
+        var untouched = await CreateAsync("Untouched", "28.5");
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var env = await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == envId);
+            env.MissingSince = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _f.Db.NewContext();
+        var list = await _f.Upgrades(read).ListOpenAsync();
+
+        var s = list.Single(u => u.Id == started);
+        s.LineCount.Should().Be(0, "the environment has left the fleet, so the line is not shown");
+        s.AnythingStarted.Should().BeTrue();
+        list.Single(u => u.Id == untouched).AnythingStarted.Should().BeFalse();
+        (await _f.Upgrades(read).GetAsync(started))!.Upgrade.AnythingStarted.Should().BeTrue();
+        (await _f.Upgrades(read).CountArchivedAsync()).Should().Be(0);
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────
 
     private async Task<int> CreateAsync(string name = "28.5 in November 2026", string version = "28.5", string? note = null)

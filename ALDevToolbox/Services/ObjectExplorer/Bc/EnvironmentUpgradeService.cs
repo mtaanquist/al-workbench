@@ -87,10 +87,15 @@ public sealed class EnvironmentUpgradeService
         return await SummariseAsync(ordered, ct).ConfigureAwait(false);
     }
 
+    /// <summary>How many upgrades are marked done: the Archive's count, without reading their lines.</summary>
+    public Task<int> CountArchivedAsync(CancellationToken ct = default) =>
+        _db.OeEnvironmentUpgrades.AsNoTracking().CountAsync(u => u.ClosedAt != null, ct);
+
     /// <summary>
     /// The upgrades marked done, most recently closed first, optionally narrowed to those
     /// whose name or target release contains <paramref name="search"/> (case-insensitive).
     /// </summary>
+
     public async Task<List<EnvironmentUpgradeSummary>> ListArchivedAsync(string? search = null, CancellationToken ct = default)
     {
         var query = _db.OeEnvironmentUpgrades.AsNoTracking().Where(u => u.ClosedAt != null);
@@ -122,7 +127,8 @@ public sealed class EnvironmentUpgradeService
 
         var lines = await BuildLinesAsync([header], ct).ConfigureAwait(false);
         var mine = lines.GetValueOrDefault(header.Id, []);
-        return new EnvironmentUpgradeDetail(Summarise(header, mine), mine);
+        var acted = await ActedUponAsync([header.Id], ct).ConfigureAwait(false);
+        return new EnvironmentUpgradeDetail(Summarise(header, mine, acted.Contains(header.Id)), mine);
     }
 
     /// <summary>
@@ -160,10 +166,26 @@ public sealed class EnvironmentUpgradeService
     {
         if (headers.Count == 0) return [];
         var lines = await BuildLinesAsync(headers, ct).ConfigureAwait(false);
-        return headers.Select(h => Summarise(h, lines.GetValueOrDefault(h.Id, []))).ToList();
+        var acted = await ActedUponAsync(headers.Select(h => h.Id).ToList(), ct).ConfigureAwait(false);
+        return headers.Select(h => Summarise(h, lines.GetValueOrDefault(h.Id, []), acted.Contains(h.Id))).ToList();
     }
 
-    private static EnvironmentUpgradeSummary Summarise(OeEnvironmentUpgrade h, List<EnvironmentUpgradeLineRow> lines)
+    /// <summary>
+    /// Which of <paramref name="upgradeIds"/> any action row carries - the fact
+    /// <see cref="DeleteAsync"/> refuses on, read the same way: every action, whether or
+    /// not its line is visible to the caller or its environment still in the fleet. Only
+    /// the ids come back; the rows stay behind the organisation filter like any read here.
+    /// </summary>
+    private async Task<HashSet<int>> ActedUponAsync(List<int> upgradeIds, CancellationToken ct) =>
+        (await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.UpgradeId != null && upgradeIds.Contains(a.UpgradeId.Value))
+            .Select(a => a.UpgradeId!.Value)
+            .Distinct()
+            .ToListAsync(ct).ConfigureAwait(false))
+        .ToHashSet();
+
+    private static EnvironmentUpgradeSummary Summarise(
+        OeEnvironmentUpgrade h, List<EnvironmentUpgradeLineRow> lines, bool anythingStarted)
     {
         var counts = lines
             .GroupBy(l => l.State)
@@ -174,10 +196,7 @@ public sealed class EnvironmentUpgradeService
             EnvironmentUpgradeLineState.DeriveStatus(h.ClosedAt is not null, lines.Select(l => l.State)),
             counts, lines.Count)
         {
-            // Every action row from the upgrade leaves its line a LastAction, and a line
-            // with one cannot be taken off, so this reads the same fact DeleteAsync refuses
-            // on - for the lines the caller can see.
-            AnythingSent = lines.Any(l => l.LastAction is not null),
+            AnythingStarted = anythingStarted,
         };
     }
 
@@ -890,12 +909,12 @@ public sealed record EnvironmentUpgradeSummary(
     public int CheckedCount => Count(UpgradeLineState.Checked);
 
     /// <summary>
-    /// True once anything has been done from the upgrade to one of its visible lines - a
-    /// date moved, an update started or booked, even one since cancelled. The list uses
-    /// it to hold Delete back before the click; <see cref="EnvironmentUpgradeService.DeleteAsync"/>
-    /// stays the rule, and also counts the lines the caller cannot see.
+    /// True once anything has been started from the upgrade - a date moved, an update
+    /// started or booked, even a booking cancelled before it was sent - on any of its lines,
+    /// visible to the caller or not. Exactly what <see cref="EnvironmentUpgradeService.DeleteAsync"/>
+    /// refuses on, so the list can hold Delete back before the click.
     /// </summary>
-    public bool AnythingSent { get; init; }
+    public bool AnythingStarted { get; init; }
 }
 
 /// <summary>The open upgrade an environment is on, for the picker's lock.</summary>

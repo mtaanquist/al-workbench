@@ -38,4 +38,25 @@ public sealed class PillTabsTests : IDisposable
         tabs[2].QuerySelector(".pill-tab__count").Should().BeNull();
         tabs[0].GetAttribute("aria-selected").Should().Be("true");
     }
+
+    /// <summary>
+    /// A held tab (the Upgrades page holds its views while a Fleet run works) cannot be
+    /// followed: a link cannot be disabled, so it is a disabled button with the same content.
+    /// </summary>
+    [Fact]
+    public void A_held_tab_is_a_disabled_button_that_goes_nowhere()
+    {
+        var cut = _ctx.Render<PillTabs>(p => p.Add(c => c.Items, new PillTabs.PillTabItem[]
+        {
+            new("Open", "/upgrades", null, false, 4, Disabled: true),
+            new("Fleet", "/upgrades?view=fleet", null, true, 10),
+        }));
+
+        var held = cut.FindAll(".pill-tab")[0];
+        held.TagName.Should().Be("BUTTON");
+        held.HasAttribute("disabled").Should().BeTrue();
+        held.HasAttribute("href").Should().BeFalse();
+        held.QuerySelector(".pill-tab__count")!.TextContent.Should().Be("4");
+        cut.FindAll(".pill-tab")[1].TagName.Should().Be("A");
+    }
 }

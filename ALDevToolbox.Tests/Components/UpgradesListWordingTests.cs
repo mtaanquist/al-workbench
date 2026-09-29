@@ -124,10 +124,10 @@ public sealed class UpgradesListWordingTests
     {
         UpgradesPage.MarkDoneWording("28.5 in November 2026", 3, 8).Should().Be((
             "3 of 8 are not checked yet. Mark done anyway?",
-            "\"28.5 in November 2026\" moves to the Archive and becomes read-only. The unchecked lines stay unchecked in the record."));
+            "\"28.5 in November 2026\" moves to the Archive and becomes read-only. The environments not ticked off stay that way in the record."));
         UpgradesPage.MarkDoneWording("28.5 in November 2026", 0, 8).Should().Be((
             "Mark \"28.5 in November 2026\" done?",
-            "\"28.5 in November 2026\" moves to the Archive and becomes read-only."));
+            "Every environment is checked. \"28.5 in November 2026\" moves to the Archive and becomes read-only."));
     }
 
     [Fact]

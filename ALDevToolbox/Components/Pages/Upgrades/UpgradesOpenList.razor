@@ -117,14 +117,14 @@
         @* Held back rather than refused after the click: once anything has been sent the
            upgrade is part of the record, and the tooltip says what to do instead. *@
         <button type="button" class="menu__item menu__item--danger" role="menuitem"
-                disabled="@(Busy || u.AnythingSent)"
-                title="@(u.AnythingSent ? DeleteRefusedTitle : null)"
+                disabled="@(Busy || u.AnythingStarted)"
+                title="@(u.AnythingStarted ? DeleteRefusedTitle : null)"
                 @onclick="() => OnDelete.InvokeAsync(u)">Delete</button>
     </RowActions>;
 
     /// <summary>Why Delete is greyed out, as the sheet words it.</summary>
     internal const string DeleteRefusedTitle =
-        "Something has been sent to Business Central for this upgrade, so it can only be marked done.";
+        "Something has been started from this upgrade, so it can only be marked done.";
 
     private RenderFragment Checked(EnvironmentUpgradeSummary u, bool compact) => @<text>
         @if (u.LineCount == 0)

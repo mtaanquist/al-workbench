@@ -535,7 +535,11 @@ the next version..." is the first entry of a More menu, the view select narrows 
 Refresh is an icon, so the command row stays one line at 1440px. Its filters stay in the
 address (`q`, `type`, `waiting`, now beside `view=fleet`), and the view remembered for the
 session is restored the first time the Fleet view is shown. Leaving the Fleet view stops its
-refresh poll and its watch; coming back reads the fleet again and keeps the ticks.
+refresh poll and its watch; coming back reads the fleet again and keeps the ticks. While a
+Fleet run is working the tabs and New upgrade are held: the run is using the page's database
+connection, so a switch taken meanwhile (the back button, a typed link) waits for it to end,
+and a run that ends on its way to another view starts no watch. The Archive's list is read
+only while it is shown; elsewhere its tab counts headers.
 
 **Open** lists the open upgrades: the name over "to 28.5 - Tonight, 20:00", a status pill
 (Planned is queued, In progress is running, Updated is warn - checks are still outstanding),
@@ -548,8 +552,9 @@ over how far off it is - and tonight and last night are semibold. **The order is
 first" as the morning after means it**: today's slot, then the ones that have run, most recent
 first (they are the ones being checked), then the ones to come, soonest first, then any with
 no slot. The row menu is Open, Mark done... and Delete; Delete is disabled, with the reason in
-its tooltip, once anything has been done from the upgrade (`EnvironmentUpgradeSummary.AnythingSent`,
-the visible half of the rule `DeleteAsync` holds). **Mark done...** reads the upgrade first and
+its tooltip, once anything has been started from the upgrade (`EnvironmentUpgradeSummary.AnythingStarted`,
+read from the action rows exactly as `DeleteAsync` reads them, including lines the viewer cannot
+see and bookings cancelled before they were sent). **Mark done...** reads the upgrade first and
 asks with the same words as the upgrade's own page: "3 of 8 are not checked yet. Mark done
 anyway?", naming each unchecked environment with its state, and pointing at "New upgrade from
 the leftovers" on the upgrade's page when some of them failed or never started; with every line
@@ -573,10 +578,15 @@ It is advisory: nothing is booked from it. Creating one opens the upgrade's page
 
 **Add to upgrade...** (Fleet view, on a selection; `UpgradePicker.dc.html`, `mode="add"`)
 lists the open upgrades as radios (name, target and slot, size) and then New upgrade, which opens
-a name and a target inline - the slot is left for the upgrade's page. Under it the ticked
-environments, each with a tick, or a warning naming the open upgrade that already holds it
-and "Left out"; the confirm counts only the rest ("Add 6 of 8"). Only those are sent, and the
-service judges each again. The page stays on the Fleet view with a notice saying what went
+a name and a target inline - the slot is left for the upgrade's page. It starts on the upgrade
+whose slot comes next, not the Open view's first row (often last night's wave, still being
+checked); with no slot still to come nothing is picked and the confirm waits for a choice.
+Under it the ticked environments, each with a tick; "Already on this upgrade" for one the
+picked upgrade holds; or a warning naming (and linking) the other open upgrade that holds it,
+and "Left out". The confirm counts only the ones that would go on ("Add 6 of 8"), and when
+none would, a line says why instead of a silently greyed button. The free ones and the ones
+already on it are sent - the service answers the latter "already on it", which the notice
+repeats - and the service judges each again. The page stays on the Fleet view with a notice saying what went
 on and what did not, linking to the upgrade: the team builds the next wave from the same
 table, and the ticks are left as they were, as after a run.
 

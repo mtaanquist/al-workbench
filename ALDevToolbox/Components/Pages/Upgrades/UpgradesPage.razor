@@ -82,7 +82,7 @@
           ShowActions="@ShowNewUpgrade"
           Trail='@([new("Home", "/"), new("Solutions", "/solutions"), new("Upgrades")])'>
     <Actions>
-        <button type="button" class="btn btn--primary" @onclick="OpenNewUpgradeAsync">
+        <button type="button" class="btn btn--primary" disabled="@Running" @onclick="OpenNewUpgradeAsync">
             <Icon Name="plus" Width="15" Height="15" />
             <span>New upgrade</span>
         </button>
@@ -604,7 +604,8 @@
 
 @* Mark done names what is still unchecked before anything moves (PageUpgrade.dc.html,
    the "Mark done" confirm): marking done is never a blind click. *@
-<ConfirmDialog @ref="_doneConfirm" Wide="true" ConfirmButtonClass="btn--primary" ConfirmIcon="circle-check">
+<ConfirmDialog @ref="_doneConfirm" Wide="true" HeadIcon="@(_doneUnchecked.Count > 0 ? "triangle-alert" : null)"
+               ConfirmButtonClass="btn--primary" ConfirmIcon="circle-check">
     @MarkDoneList()
 </ConfirmDialog>
 <ConfirmDialog @ref="_deleteConfirm" />
@@ -700,6 +701,15 @@
         if (_denied || !_initialised) return;
         var was = _view;
         ReadQuery();
+        if (_view != was && Running)
+        {
+            // The tabs are held during a run, but the address can still change (back, a
+            // typed link). The run is using the circuit's database context, so the switch
+            // waits for it to end rather than reading alongside it.
+            _view = was;
+            _viewChangePending = true;
+            return;
+        }
         if (_view != was) await OnViewChangedAsync(was);
         // Only once the fleet is in hand: the first pass runs before it is loaded.
         else if (_view == UpgradesView.Fleet && _rows is not null) ApplyFilters();
@@ -958,10 +968,16 @@
     {
         await LoadAsync();
         _notice = outcome.Notice;
-        foreach (var environmentId in _watch.WatchStarted(outcome.Started))
+        // The watch belongs to the Fleet view: leaving it stops the watch, so a run that
+        // ends with another view on its way must not start one.
+        if (_view == UpgradesView.Fleet && !_viewChangePending)
         {
-            _runner?.ForgetResult(environmentId);
+            foreach (var environmentId in _watch.WatchStarted(outcome.Started))
+            {
+                _runner?.ForgetResult(environmentId);
+            }
         }
+        await ApplyPendingViewAsync();
     }
 
     // ── Refresh ─────────────────────────────────────────────────────────
@@ -1035,7 +1051,7 @@
             await InvokeAsync(async () =>
             {
                 // Never while a batch is mid-flight: that run owns the table.
-                if (Running || _denied) return;
+                if (Running || _denied || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true) return;
                 await ReloadNowAsync();
                 StateHasChanged();
             });
@@ -1066,7 +1082,9 @@
     protected override void OnInitialized()
     {
         _watch = new UpdateWatch(Connection, Log, InvokeAsync,
-            paused: () => Running || _denied || _runner?.IsDialogOpen == true,
+            // Paused off the Fleet view too: its rows are the fleet's, and leaving the view
+            // stops the watch (a tick already on its way must not read under another view).
+            paused: () => Running || _denied || DialogOpen || _view != UpgradesView.Fleet,
             find: id => _all.FirstOrDefault(r => r.EnvironmentId == id),
             replace: row =>
             {
@@ -1087,6 +1105,14 @@
 
     /// <summary>One tick of the watch, for tests that drive it without waiting on the timer.</summary>
     internal Task WatchTickAsync() => _watch.TickAsync();
+
+    /// <summary>
+    /// True while any of the page's dialogs is up: the runner's, and the planned upgrades'
+    /// New and Add, whose saves await the circuit's database context. The watch and the
+    /// refresh poll must not read alongside them.
+    /// </summary>
+    private bool DialogOpen => _runner?.IsDialogOpen == true
+        || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true;
 
     // ── Bookings, the activity feed, and cancelling ─────────────────────
 
@@ -1333,7 +1359,7 @@
             var all = ShownArchiveAll();
             var shown = ShownArchive();
             <div class="pager">
-                <span class="pager__count">Showing @shown.Count of @all.Count done upgrade@(all.Count == 1 ? "" : "s")</span>
+                <span class="pager__count">@ArchivePagerText(_archivePage, shown.Count, all.Count)</span>
                 @if (all.Count > ArchivePageSize)
                 {
                     <span class="pager__buttons">

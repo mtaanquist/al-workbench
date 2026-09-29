@@ -24,8 +24,22 @@ public partial class UpgradesPage
     /// <summary>The open upgrades in the Open view's order; null while loading.</summary>
     private List<EnvironmentUpgradeSummary>? _open;
 
-    /// <summary>The done upgrades, most recently closed first; null while loading.</summary>
+    /// <summary>
+    /// The done upgrades, most recently closed first, with their lines counted. Read only
+    /// while the Archive view is shown - it is the one list that grows for good - and null
+    /// otherwise, and while loading.
+    /// </summary>
     private List<EnvironmentUpgradeSummary>? _archive;
+
+    /// <summary>The Archive tab's count, from a count of headers rather than the list. Null until known.</summary>
+    private int? _archiveCount;
+
+    /// <summary>
+    /// A tab followed while a Fleet run was working. The run owns the circuit's database
+    /// context until it ends, so the switch waits for it; the address already says where
+    /// to go, and <see cref="ApplyPendingViewAsync"/> goes there.
+    /// </summary>
+    private bool _viewChangePending;
 
     /// <summary>The Fleet tab's count: the fleet table's rows. Null until known.</summary>
     private int? _fleetCount;
@@ -94,21 +108,40 @@ public partial class UpgradesPage
 
     private IReadOnlyList<PillTabs.PillTabItem> ViewTabs() =>
     [
-        new("Open", "/upgrades", null, _view == UpgradesView.Open, _open?.Count),
-        new("Archive", "/upgrades?view=archive", null, _view == UpgradesView.Archive, _archive?.Count),
-        new("Fleet", "/upgrades?view=fleet", null, _view == UpgradesView.Fleet, _fleetCount),
+        // Held while a Fleet run works: following a tab then would read the database under it.
+        new("Open", "/upgrades", null, _view == UpgradesView.Open, _open?.Count, Running),
+        new("Archive", "/upgrades?view=archive", null, _view == UpgradesView.Archive, _archiveCount, Running),
+        new("Fleet", "/upgrades?view=fleet", null, _view == UpgradesView.Fleet, _fleetCount, Running),
     ];
 
     // ── Loading ─────────────────────────────────────────────────────────
 
-    /// <summary>Reads the open and the done upgrades: the two views' rows, the tabs' counts and the subtitle.</summary>
+    /// <summary>
+    /// What every view needs on first load: the open upgrades (the Open view's rows, its
+    /// tab's count and the subtitle), and the done ones - listed when the Archive is shown,
+    /// only counted otherwise.
+    /// </summary>
     private async Task LoadPlannedAsync()
+    {
+        await LoadOpenAsync();
+        if (_view == UpgradesView.Archive) await LoadArchiveAsync();
+        else await CountArchiveAsync();
+    }
+
+    private async Task LoadOpenAsync()
     {
         var open = await Upgrades.ListOpenAsync();
         _open = UpgradesListWording.OpenOrder(open, Zone.ToDisplay, Zone.ToDisplay(DateTime.UtcNow));
+    }
+
+    private async Task LoadArchiveAsync()
+    {
         _archive = await Upgrades.ListArchivedAsync();
+        _archiveCount = _archive.Count;
         _archivePage = Math.Min(_archivePage, Math.Max(0, (ShownArchiveAll().Count - 1) / ArchivePageSize));
     }
+
+    private async Task CountArchiveAsync() => _archiveCount = await Upgrades.CountArchivedAsync();
 
     /// <summary>The Fleet tab's count, and the versions a new upgrade can aim at, without drawing the fleet.</summary>
     private async Task CountFleetAsync()
@@ -132,17 +165,31 @@ public partial class UpgradesPage
         if (was == UpgradesView.Fleet)
         {
             StopPolling();
-            StopWatching();
-            _watched.Clear();
+            _watch.Clear();
         }
-        if (_view == UpgradesView.Fleet)
+        if (was == UpgradesView.Archive) _archive = null;
+        switch (_view)
         {
-            await LoadAsync();
+            case UpgradesView.Fleet:
+                await LoadAsync();
+                break;
+            case UpgradesView.Archive:
+                await LoadArchiveAsync();
+                break;
+            default:
+                await LoadOpenAsync();
+                break;
         }
-        else
-        {
-            await LoadPlannedAsync();
-        }
+    }
+
+    /// <summary>Follows a tab that was taken while a run worked, now that the run is over.</summary>
+    private async Task ApplyPendingViewAsync()
+    {
+        if (!_viewChangePending) return;
+        _viewChangePending = false;
+        var was = _view;
+        _view = ParseView(ViewName);
+        if (_view != was) await OnViewChangedAsync(was);
     }
 
     // ── Filtering the two lists ─────────────────────────────────────────
@@ -176,6 +223,18 @@ public partial class UpgradesPage
 
     private void OnArchiveSearch() => _archivePage = 0;
 
+    /// <summary>
+    /// The Archive's count line: "Showing 5 of 5 done upgrades" on one page, and the range
+    /// on screen once there are several ("Showing 21-40 of 45 done upgrades").
+    /// </summary>
+    internal static string ArchivePagerText(int page, int shown, int total)
+    {
+        var noun = total == 1 ? "done upgrade" : "done upgrades";
+        if (total <= ArchivePageSize) return $"Showing {shown} of {total} {noun}";
+        var from = page * ArchivePageSize + 1;
+        return $"Showing {from}-{from + shown - 1} of {total} {noun}";
+    }
+
     private void ClearPlannedFilters()
     {
         _openSearch = string.Empty;
@@ -204,7 +263,7 @@ public partial class UpgradesPage
         _planNotice = null;
         // The open list read now, not when the page opened: a colleague may have made the
         // upgrade these are meant for in the meantime.
-        await LoadPlannedAsync();
+        await LoadOpenAsync();
         await _addToUpgrade.OpenAsync(rows, _open ?? []);
     }
 
@@ -216,7 +275,7 @@ public partial class UpgradesPage
     private async Task OnAddedToUpgradeAsync(AddToUpgradeOutcome outcome)
     {
         _planNotice = AddedNotice(outcome);
-        await LoadPlannedAsync();
+        await LoadOpenAsync();
     }
 
     internal static PlanNotice AddedNotice(AddToUpgradeOutcome outcome)
@@ -263,13 +322,16 @@ public partial class UpgradesPage
         if (detail is null)
         {
             _planNotice = new PlanNotice("That upgrade no longer exists. It may have been deleted.", AlertTone.Warn);
-            await LoadPlannedAsync();
+            await LoadOpenAsync();
             return;
         }
 
         var name = detail.Upgrade.Name;
         _doneUnchecked = detail.Lines.Where(l => !l.IsChecked).ToList();
         var (title, message) = MarkDoneWording(name, _doneUnchecked.Count, detail.Lines.Count);
+        // The dialog's head icon follows _doneUnchecked through its parameters, so the page
+        // redraws before it opens (the upgrade page does the same).
+        StateHasChanged();
         if (!await _doneConfirm.OpenAsync(title, message, "Mark done", "btn--primary", "circle-check")) return;
 
         await RunPlanMoveAsync(async () =>
@@ -277,15 +339,20 @@ public partial class UpgradesPage
             await Upgrades.CloseAsync(upgrade.Id);
             _planNotice = new PlanNotice($"\"{name}\" is marked done and moved to the Archive.", AlertTone.Success,
                 "/upgrades?view=archive", "Go to the Archive");
-        });
+        }, archiveChanged: true);
     }
 
     /// <summary>The Mark done confirm's title and sentence (PageUpgrade.dc.html, the "Mark done" confirm).</summary>
+    /// <remarks>
+    /// The sentences are the upgrade page's own (UpgradeDetail's Mark done), so the two doors
+    /// to the same move say the same thing. Only the all-checked title names the upgrade:
+    /// from a list, "this upgrade" does not say which.
+    /// </remarks>
     internal static (string Title, string Message) MarkDoneWording(string name, int uncheckedCount, int total) =>
         uncheckedCount == 0
-            ? ($"Mark \"{name}\" done?", $"\"{name}\" moves to the Archive and becomes read-only.")
-            : ($"{uncheckedCount} of {total} are not checked yet. Mark done anyway?",
-                $"\"{name}\" moves to the Archive and becomes read-only. The unchecked lines stay unchecked in the record.");
+            ? ($"Mark \"{name}\" done?", $"Every environment is checked. \"{name}\" moves to the Archive and becomes read-only.")
+            : ($"{uncheckedCount} of {total} {(uncheckedCount == 1 ? "is" : "are")} not checked yet. Mark done anyway?",
+                $"\"{name}\" moves to the Archive and becomes read-only. The environments not ticked off stay that way in the record.");
 
     /// <summary>
     /// The line under the unchecked list that points at the second pass, counting only the
@@ -337,7 +404,7 @@ public partial class UpgradesPage
         {
             await Upgrades.DeleteAsync(upgrade.Id);
             _planNotice = new PlanNotice($"\"{upgrade.Name}\" was deleted.", AlertTone.Success);
-        });
+        }, archiveChanged: false);
     }
 
     /// <summary>
@@ -353,14 +420,16 @@ public partial class UpgradesPage
             await Upgrades.ReopenAsync(upgrade.Id);
             _planNotice = new PlanNotice($"\"{upgrade.Name}\" is open again.", AlertTone.Success,
                 $"/upgrades/{upgrade.Id}", "Open it");
-        });
+        }, archiveChanged: true);
     }
 
     /// <summary>
     /// One of the moves above, with its refusal said as a notice rather than thrown at the
-    /// person, and the lists read again afterwards whichever way it went.
+    /// person, and what it can have changed read again afterwards whichever way it went:
+    /// the open list always (it drives the subtitle and a tab), and the archive only when
+    /// the move touches it - listed if it is on screen, counted if not.
     /// </summary>
-    private async Task RunPlanMoveAsync(Func<Task> move)
+    private async Task RunPlanMoveAsync(Func<Task> move, bool archiveChanged)
     {
         _planBusy = true;
         try
@@ -379,6 +448,9 @@ public partial class UpgradesPage
         {
             _planBusy = false;
         }
-        await LoadPlannedAsync();
+        await LoadOpenAsync();
+        if (!archiveChanged) return;
+        if (_view == UpgradesView.Archive) await LoadArchiveAsync();
+        else await CountArchiveAsync();
     }
 }

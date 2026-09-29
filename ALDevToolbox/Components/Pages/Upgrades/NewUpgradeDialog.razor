@@ -121,6 +121,9 @@
 
     private bool Has(string field) => _errors.ContainsKey(field);
 
+    /// <summary>True while the dialog is up; the page holds its timers while it is.</summary>
+    public bool IsOpen => _open;
+
     private string ZoneName => Zone.Zone.Id == TimeZoneInfo.Utc.Id ? "UTC" : Zone.Zone.Id;
 
     /// <summary>Opens the dialog empty, with the newest offered version picked.</summary>

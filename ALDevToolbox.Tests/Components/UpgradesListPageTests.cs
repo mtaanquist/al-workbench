@@ -161,8 +161,10 @@ public sealed class UpgradesListPageTests : IDisposable
     }
 
     /// <summary>An action from the upgrade: what makes it part of the record.</summary>
-    private async Task SeedActionAsync(int upgradeId, int projectId, int environmentId, UpgradeActionStatus status)
+    private async Task SeedActionAsync(
+        int upgradeId, int projectId, int environmentId, UpgradeActionStatus status, DateTime? executeAfter = null)
     {
+        var pending = status == UpgradeActionStatus.Pending;
         await using var ctx = _db.NewContext();
         ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
         {
@@ -175,8 +177,8 @@ public sealed class UpgradesListPageTests : IDisposable
             RequestedByUserId = UserId,
             RequestedBy = Actor,
             RequestedAt = DateTime.UtcNow.AddHours(-2),
-            ExecuteAfter = DateTime.UtcNow.AddHours(-2),
-            SentAt = DateTime.UtcNow.AddHours(-2),
+            ExecuteAfter = executeAfter ?? DateTime.UtcNow.AddHours(-2),
+            SentAt = pending ? null : DateTime.UtcNow.AddHours(-2),
         });
         await ctx.SaveChangesAsync();
     }
@@ -403,7 +405,9 @@ public sealed class UpgradesListPageTests : IDisposable
         cut.WaitForAssertion(() => cut.Find(".confirm-dialog__title").TextContent
             .Should().Be("2 of 3 are not checked yet. Mark done anyway?"));
         cut.Find(".confirm-dialog__body").TextContent.Should().Contain(
-            "\"28.5 in November\" moves to the Archive and becomes read-only. The unchecked lines stay unchecked in the record.");
+            "\"28.5 in November\" moves to the Archive and becomes read-only. The environments not ticked off stay that way in the record.");
+        // The sheet's warning icon, since something is still unchecked (the upgrade page's too).
+        cut.Find(".confirm-dialog__icon svg").GetAttribute("class").Should().Contain("triangle-alert");
         var notChecked = cut.FindAll(".upg-done-list__row");
         notChecked.Select(r => r.QuerySelector(".status-pill")!.TextContent.Trim()).Should().BeEquivalentTo(["Planned", "Updated"]);
         notChecked.Should().AllSatisfy(r => r.TextContent.Should().Contain("Contoso Retail"));
@@ -543,6 +547,10 @@ public sealed class UpgradesListPageTests : IDisposable
         cut.WaitForAssertion(() => cut.Find(".field-error").TextContent.Should().Contain("major.minor"));
     }
 
+    /// <summary>Picks an upgrade's radio in the Add dialog.</summary>
+    private static void PickUpgrade(IRenderedComponent<UpgradesPage> cut, string name) =>
+        cut.FindAll(".atu-choice").Single(c => c.TextContent.Contains(name)).QuerySelector("input")!.Change(true);
+
     private static void ClickCreate(IRenderedComponent<UpgradesPage> cut) =>
         cut.FindAll(".confirm-dialog__actions .btn--primary").Single().Click();
 
@@ -592,17 +600,203 @@ public sealed class UpgradesListPageTests : IDisposable
         await SeedUpgradeAsync("28.5 in November", projectId, []);
 
         var cut = Render("fleet");
-        cut.WaitForAssertion(() => cut.Find("tbody .data-table__col-check input").Change(true));
-        cut.WaitForAssertion(() => cut.FindAll(".cmdbar button").Single(b => b.TextContent.Trim() == "Add to upgrade...").Click());
+        // The Fleet view draws its rows, then reads the planned upgrades for the tabs and
+        // redraws; tick only once all three counts are in, so no handler is retired under us.
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab__count").Should().HaveCount(3));
+        cut.Find("tbody .data-table__col-check input").Change(true);
+        cut.WaitForAssertion(() => cut.Find(".upg-scroll tbody tr").ClassList.Should().Contain("is-selected"));
+        // Once, not inside the wait: a retried click opens the dialog twice, and the second
+        // open can land on a handler the first one's redraw retired.
+        cut.FindAll(".cmdbar button").Single(b => b.TextContent.Trim() == "Add to upgrade...").Click();
+        cut.WaitForAssertion(() => cut.Find("#atu-title").Should().NotBeNull());
 
-        cut.WaitForAssertion(() => cut.Find(".atu-none").TextContent.Should().Contain("Nothing to add"));
+        // Neither upgrade has a slot still to come, so nothing is picked and the confirm waits.
+        cut.WaitForAssertion(() => cut.Find("#atu-title").Should().NotBeNull());
+        cut.FindAll(".atu-choice input:checked").Should().BeEmpty();
         cut.Find(".confirm-dialog__actions .btn--primary").HasAttribute("disabled").Should().BeTrue();
+
+        PickUpgrade(cut, "28.5 in November");
+        cut.WaitForAssertion(() => cut.Find(".atu-none").TextContent.Should().Contain("each of these is on another open upgrade"));
+        cut.Find(".confirm-dialog__actions .btn--primary").HasAttribute("disabled").Should().BeTrue();
+        cut.Find(".atu-env__why a").TextContent.Should().Be("28.5 in October", "the upgrade to take it off is one click away");
+    }
+
+    /// <summary>
+    /// One already on the chosen upgrade is not "left out: on another open upgrade" - it is
+    /// on this one. It is not counted in the confirm, is not greyed as left out, and the
+    /// notice says it was on it already, from the service's own answer.
+    /// </summary>
+    [Fact]
+    public async Task One_already_on_the_chosen_upgrade_is_counted_apart_from_the_left_out()
+    {
+        var (projectId, envs) = await SeedSolutionAsync("CRONUS Denmark", "27.5.1.0", "27.5.1.0");
+        var tonight = await SeedUpgradeAsync("Tonight", projectId, [envs[0]], plannedAt: DateTime.UtcNow.AddHours(3));
+
+        var cut = Render("fleet");
+        cut.WaitForAssertion(() => cut.FindAll(".upg-scroll .data-table tbody tr").Should().HaveCount(2));
+        cut.WaitForAssertion(() => cut.Find("thead .data-table__col-check input").Change(true));
+        // Once, not inside the wait: a retried click opens the dialog twice, and the second
+        // open can land on a handler the first one's redraw retired.
+        cut.FindAll(".cmdbar button").Single(b => b.TextContent.Trim() == "Add to upgrade...").Click();
+        cut.WaitForAssertion(() => cut.Find("#atu-title").Should().NotBeNull());
+
+        cut.WaitForAssertion(() => cut.Find(".confirm-dialog__actions .btn--primary").TextContent.Trim().Should().Be("Add 1 of 2"));
+        cut.FindAll(".atu-env--out").Should().BeEmpty("nothing here is on another upgrade");
+        cut.Find(".atu-envs").TextContent.Should().Contain("Already on this upgrade.");
+        cut.Find(".confirm-dialog__actions .btn--primary").Click();
+
+        cut.WaitForAssertion(() => cut.Find(".alert").TextContent.Should().Contain(
+            "Added 1 environment to \"Tonight\". 1 was on it already."));
+        cut.Find(".alert").TextContent.Should().NotContain("left out");
+        await using var ctx = _db.NewContext();
+        (await ctx.OeEnvironmentUpgradeLines.CountAsync(l => l.UpgradeId == tonight)).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task With_every_ticked_one_on_the_chosen_upgrade_the_dialog_names_it()
+    {
+        var (projectId, envs) = await SeedSolutionAsync("CRONUS Denmark", "27.5.1.0");
+        await SeedUpgradeAsync("Tonight", projectId, envs, plannedAt: DateTime.UtcNow.AddHours(3));
+
+        var cut = Render("fleet");
+        // The Fleet view draws its rows, then reads the planned upgrades for the tabs and
+        // redraws; tick only once all three counts are in, so no handler is retired under us.
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab__count").Should().HaveCount(3));
+        cut.Find("tbody .data-table__col-check input").Change(true);
+        cut.WaitForAssertion(() => cut.Find(".upg-scroll tbody tr").ClassList.Should().Contain("is-selected"));
+        // Once, not inside the wait: a retried click opens the dialog twice, and the second
+        // open can land on a handler the first one's redraw retired.
+        cut.FindAll(".cmdbar button").Single(b => b.TextContent.Trim() == "Add to upgrade...").Click();
+        cut.WaitForAssertion(() => cut.Find("#atu-title").Should().NotBeNull());
+
+        cut.WaitForAssertion(() => cut.Find(".atu-none").TextContent.Should().Be("Nothing to add: it is on \"Tonight\" already."));
+        cut.Find(".confirm-dialog__actions .btn--primary").HasAttribute("disabled").Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The Open view leads with last night's wave, which is still being checked; the dialog
+    /// starts on the slot that comes next instead, since that is where tonight's customers go.
+    /// </summary>
+    [Fact]
+    public async Task Add_to_upgrade_starts_on_the_next_slot_not_last_nights()
+    {
+        var (projectId, _) = await SeedSolutionAsync("CRONUS Denmark", "27.5.1.0");
+        await SeedUpgradeAsync("Last night", projectId, [], plannedAt: DateTime.UtcNow.AddHours(-12));
+        await SeedUpgradeAsync("Next week", projectId, [], plannedAt: DateTime.UtcNow.AddDays(7));
+        await SeedUpgradeAsync("Tomorrow", projectId, [], plannedAt: DateTime.UtcNow.AddDays(1));
+
+        var cut = Render("fleet");
+        // The Fleet view draws its rows, then reads the planned upgrades for the tabs and
+        // redraws; tick only once all three counts are in, so no handler is retired under us.
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab__count").Should().HaveCount(3));
+        cut.Find("tbody .data-table__col-check input").Change(true);
+        cut.WaitForAssertion(() => cut.Find(".upg-scroll tbody tr").ClassList.Should().Contain("is-selected"));
+        // Once, not inside the wait: a retried click opens the dialog twice, and the second
+        // open can land on a handler the first one's redraw retired.
+        cut.FindAll(".cmdbar button").Single(b => b.TextContent.Trim() == "Add to upgrade...").Click();
+        cut.WaitForAssertion(() => cut.Find("#atu-title").Should().NotBeNull());
+
+        cut.WaitForAssertion(() => cut.Find(".atu-choice.is-picked .atu-choice__name").TextContent.Trim().Should().Be("Tomorrow"));
+    }
+
+    // ── The switch on a live page ───────────────────────────────────────
+
+    /// <summary>
+    /// The Fleet view's watch belongs to it: following another tab stops it, and coming back
+    /// reads the fleet again - here, a rename made while away - and joins the watch afresh.
+    /// </summary>
+    [Fact]
+    public async Task Leaving_the_Fleet_view_stops_its_watch_and_coming_back_reads_the_fleet_again()
+    {
+        var (_, envs) = await SeedSolutionAsync("CRONUS Denmark", "27.5.1.0");
+        await using (var ctx = _db.NewContext())
+        {
+            var env = await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == envs[0]);
+            env.Status = "Upgrading";
+            await ctx.SaveChangesAsync();
+        }
+        var nav = _ctx.Services.GetRequiredService<NavigationManager>();
+
+        var cut = Render("fleet");
+        cut.WaitForAssertion(() => cut.Instance.WatchedEnvironmentIds.Should().Equal(envs[0]));
+
+        nav.NavigateTo(nav.GetUriWithQueryParameter("view", "open"));
+        cut.WaitForAssertion(() => cut.Find(".empty-state__title").TextContent.Should().Be("Nothing planned yet"));
+        cut.Instance.WatchedEnvironmentIds.Should().BeEmpty("the watch stops with the view it belongs to");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var env = await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == envs[0]);
+            env.Name = "PROD-DK";
+            await ctx.SaveChangesAsync();
+        }
+        nav.NavigateTo(nav.GetUriWithQueryParameter("view", "fleet"));
+
         cut.WaitForAssertion(() =>
         {
-            cut.FindAll(".atu-choice").Single(c => c.TextContent.Contains("28.5 in November")).QuerySelector("input")!.Change(true);
-            cut.FindAll(".atu-env__why a").Should().ContainSingle();
+            cut.Find(".upg-scroll tbody tr .upg-env a").TextContent.Should().Be("PROD-DK");
+            cut.Instance.WatchedEnvironmentIds.Should().Equal(envs[0]);
         });
-        cut.Find(".atu-env__why a").TextContent.Should().Be("28.5 in October", "the upgrade to take it off is one click away");
+    }
+
+    // ── Open filters, Archive pages, the subtitle ───────────────────────
+
+    [Fact]
+    public async Task The_status_filter_narrows_the_open_list()
+    {
+        var (projectId, envs) = await SeedSolutionAsync("CRONUS Denmark", "28.5.1.0");
+        await SeedUpgradeAsync("Nothing on it", projectId, []);
+        await SeedUpgradeAsync("All updated", projectId, envs);
+
+        var cut = Render();
+        cut.WaitForAssertion(() => cut.FindAll(".upl-table tbody tr").Should().HaveCount(2));
+
+        cut.Find(".filter-bar select").Change("Updated");
+
+        cut.WaitForAssertion(() => cut.FindAll(".upl-table .upl-name").Select(a => a.TextContent.Trim())
+            .Should().Equal("All updated"));
+        cut.Find(".filter-bar select").Change("Planned");
+        cut.WaitForAssertion(() => cut.FindAll(".upl-table .upl-name").Select(a => a.TextContent.Trim())
+            .Should().Equal("Nothing on it"));
+    }
+
+    [Fact]
+    public async Task The_archive_pages_twenty_at_a_time_and_says_which_it_shows()
+    {
+        var (projectId, _) = await SeedSolutionAsync("CRONUS Denmark", "27.5.1.0");
+        for (var i = 1; i <= 22; i++)
+        {
+            await SeedUpgradeAsync($"Wave {i:00}", projectId, [], closed: true);
+        }
+
+        var cut = Render("archive");
+
+        cut.WaitForAssertion(() => cut.FindAll(".upa-table tbody tr").Should().HaveCount(20));
+        cut.Find(".pager__count").TextContent.Trim().Should().Be("Showing 1-20 of 22 done upgrades");
+        Tabs(cut).Should().Contain("Archive22");
+        var buttons = cut.FindAll(".pager__buttons .btn");
+        buttons[0].HasAttribute("disabled").Should().BeTrue("there is nothing before the first page");
+
+        buttons[1].Click();
+
+        cut.WaitForAssertion(() => cut.FindAll(".upa-table tbody tr").Should().HaveCount(2));
+        cut.Find(".pager__count").TextContent.Trim().Should().Be("Showing 21-22 of 22 done upgrades");
+        cut.FindAll(".pager__buttons .btn")[1].HasAttribute("disabled").Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task The_subtitle_counts_what_is_booked_for_a_slot_still_to_come_today()
+    {
+        var (projectId, envs) = await SeedSolutionAsync("CRONUS Denmark", "27.5.1.0", "27.5.1.0");
+        // The last moment of today in the display zone (UTC here), so it is later today
+        // whatever time the test runs.
+        var slot = DateTime.UtcNow.Date.AddDays(1).AddSeconds(-1);
+        var id = await SeedUpgradeAsync("Tonight", projectId, envs, plannedAt: slot);
+        await SeedActionAsync(id, projectId, envs[0], UpgradeActionStatus.Pending, executeAfter: slot);
+
+        var cut = Render();
+
+        cut.WaitForAssertion(() => cut.Find(".page-head__sub").TextContent.Should().Be("1 open, 1 environment booked for tonight."));
     }
 
     [Fact]
@@ -611,8 +805,15 @@ public sealed class UpgradesListPageTests : IDisposable
         await SeedSolutionAsync("CRONUS Denmark", "27.5.1.0");
 
         var cut = Render("fleet");
-        cut.WaitForAssertion(() => cut.Find("tbody .data-table__col-check input").Change(true));
-        cut.WaitForAssertion(() => cut.FindAll(".cmdbar button").Single(b => b.TextContent.Trim() == "Add to upgrade...").Click());
+        // The Fleet view draws its rows, then reads the planned upgrades for the tabs and
+        // redraws; tick only once all three counts are in, so no handler is retired under us.
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab__count").Should().HaveCount(3));
+        cut.Find("tbody .data-table__col-check input").Change(true);
+        cut.WaitForAssertion(() => cut.Find(".upg-scroll tbody tr").ClassList.Should().Contain("is-selected"));
+        // Once, not inside the wait: a retried click opens the dialog twice, and the second
+        // open can land on a handler the first one's redraw retired.
+        cut.FindAll(".cmdbar button").Single(b => b.TextContent.Trim() == "Add to upgrade...").Click();
+        cut.WaitForAssertion(() => cut.Find("#atu-title").Should().NotBeNull());
 
         // With nothing open, a new one is the only choice, and its fields are open.
         cut.WaitForAssertion(() => cut.Find("#atu-name").Should().NotBeNull());

@@ -21,7 +21,7 @@
     <div class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="atu-title"
          tabindex="-1" @onkeydown="OnKeyDown">
         <div class="modal-backdrop" @onclick="Cancel" aria-hidden="true"></div>
-        <div class="confirm-dialog confirm-dialog--wide"@onclick:stopPropagation>
+        <div class="confirm-dialog confirm-dialog--wide" @onclick:stopPropagation>
             <div class="confirm-dialog__head">
                 <span class="confirm-dialog__icon" aria-hidden="true">
                     <Icon Name="list-plus" Width="17" Height="17" />
@@ -81,7 +81,7 @@
                         @foreach (var row in _rows)
                         {
                             var owner = OwnerOf(row);
-                            <li class="@EnvClass(row.EnvironmentId)">
+                            <li class="@EnvClass(row)">
                                 @* Three answers: it goes on (a tick), it is already on the upgrade
                                    picked (nothing to do, so no warning), or another open upgrade
                                    holds it (a warning naming that one, and it is left out). *@
@@ -115,9 +115,9 @@
 
                 @* Rather than a disabled button that says nothing: what the person can do
                    about it is on the upgrade that holds them. *@
-                @if (_rows.Count > 0 && AddableCount == 0)
+                @if (NothingToAddText is { } nothing)
                 {
-                    <p class="atu-none">Nothing to add: each of these is on an open upgrade already. To move one here, take it off the upgrade named beside it first.</p>
+                    <p class="atu-none">@nothing</p>
                 }
 
                 @if (_failure is { } failure)
@@ -165,6 +165,9 @@
     private Dictionary<string, string> _errors = new();
     private string? _failure;
 
+    /// <summary>True while the dialog is up; the page holds its timers while it is.</summary>
+    public bool IsOpen => _open;
+
     /// <summary>The upgrade this dialog made when New upgrade was chosen, once it exists.</summary>
     private int? _createdId;
 
@@ -178,8 +181,7 @@
         _rows = rows.ToList();
         _upgrades = upgrades.ToList();
         _owners = await Upgrades.ListOpenLineOwnersAsync();
-        // The sheet starts on the first upgrade; with none open, a new one is the only choice.
-        _chosen = _upgrades.Count > 0 ? _upgrades[0].Id : NewUpgrade;
+        _chosen = Preselect(_upgrades, DateTime.UtcNow);
         _name = string.Empty;
         _target = Versions.Count > 0 ? Versions[0] : string.Empty;
         _errors = new();
@@ -193,15 +195,61 @@
     /// <summary>The open upgrade holding the environment, or null when it is free.</summary>
     private UpgradeLineOwner? OwnerOf(UpgradeFleetRow row) => _owners.GetValueOrDefault(row.EnvironmentId);
 
-    /// <summary>A left-out environment is greyed, so the ones that will go on read first.</summary>
-    private string EnvClass(int environmentId) =>
-        _owners.ContainsKey(environmentId) ? "atu-env atu-env--out" : "atu-env";
+    /// <summary>
+    /// Which upgrade the dialog starts on: the one whose slot comes next. The Open view's
+    /// first row is often last night's wave, still being checked, which is the wrong place
+    /// for tonight's customers. With none still to come nothing is picked, and the confirm
+    /// waits for a choice; with none open at all, a new one is the only choice.
+    /// </summary>
+    internal static int? Preselect(IReadOnlyList<EnvironmentUpgradeSummary> upgrades, DateTime nowUtc)
+    {
+        if (upgrades.Count == 0) return NewUpgrade;
+        return upgrades
+            .Where(u => u.PlannedAt is { } at && at >= nowUtc)
+            .OrderBy(u => u.PlannedAt)
+            .Select(u => (int?)u.Id)
+            .FirstOrDefault();
+    }
+
+    private bool OnChosen(UpgradeFleetRow row) => OwnerOf(row) is { } owner && owner.UpgradeId == _chosen;
+
+    private bool Elsewhere(UpgradeFleetRow row) => OwnerOf(row) is { } owner && owner.UpgradeId != _chosen;
+
+    /// <summary>One on another open upgrade is greyed, so the ones that will go on read first.</summary>
+    private string EnvClass(UpgradeFleetRow row) => Elsewhere(row) ? "atu-env atu-env--out" : "atu-env";
 
     /// <summary>
-    /// How many of the ticked environments would go on. One on another open upgrade is
-    /// left out; one already on the chosen upgrade has nothing to add.
+    /// How many of the ticked environments would go on. One already on the chosen upgrade
+    /// has nothing to add and one on another open upgrade is left out - two different
+    /// answers, counted apart.
     /// </summary>
     internal int AddableCount => _rows.Count(r => OwnerOf(r) is null);
+
+    private int OnChosenCount => _rows.Count(OnChosen);
+
+    private int ElsewhereCount => _rows.Count(Elsewhere);
+
+    /// <summary>
+    /// Said instead of leaving only a greyed confirm when nothing would go on, naming why:
+    /// all on the chosen upgrade already, all on other ones, or some of each.
+    /// </summary>
+    private string? NothingToAddText
+    {
+        get
+        {
+            if (_rows.Count == 0 || AddableCount > 0 || _chosen is null) return null;
+            var chosenName = _upgrades.FirstOrDefault(u => u.Id == _chosen)?.Name;
+            if (ElsewhereCount == 0)
+            {
+                return $"Nothing to add: {(_rows.Count == 1 ? "it is" : "they are all")} on \"{chosenName}\" already.";
+            }
+            if (OnChosenCount == 0)
+            {
+                return "Nothing to add: each of these is on another open upgrade. To move one here, take it off the upgrade named beside it first.";
+            }
+            return $"Nothing to add: {OnChosenCount} {(OnChosenCount == 1 ? "is" : "are")} on \"{chosenName}\" already, and the rest are on other open upgrades. To move one of those here, take it off the upgrade named beside it first.";
+        }
+    }
 
     private string Title => _rows.Count == 1
         ? "Add 1 environment to an upgrade"
@@ -261,13 +309,15 @@
                 upgradeId = _createdId.Value;
             }
 
-            // Only the free ones: the ones left out were shown as left out, and sending them
-            // would only bring the same refusal back.
-            var ids = _rows.Where(r => OwnerOf(r) is null).Select(r => r.EnvironmentId).ToList();
+            // The free ones, and the ones already on this upgrade - the service answers those
+            // "already on it", which is what the notice should say. Not the ones on another
+            // upgrade: they were shown as left out, and would only be refused.
+            var leftOut = ElsewhereCount;
+            var ids = _rows.Where(r => !Elsewhere(r)).Select(r => r.EnvironmentId).ToList();
             var result = await Upgrades.AddLinesAsync(upgradeId, ids);
             _open = false;
             await OnAdded.InvokeAsync(new AddToUpgradeOutcome(
-                upgradeId, upgradeName, result, _rows.Count - ids.Count, chosen == NewUpgrade));
+                upgradeId, upgradeName, result, leftOut, chosen == NewUpgrade));
         }
         catch (PlanValidationException ex)
         {
