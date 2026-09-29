@@ -14,6 +14,7 @@
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
+@using ALDevToolbox.Domain.Entities.ObjectExplorer
 @using ALDevToolbox.Services
 @using ALDevToolbox.Services.ObjectExplorer
 @using ALDevToolbox.Services.ObjectExplorer.Bc
@@ -488,7 +489,7 @@
                     <div class="card__head">
                         <div>
                             <h2 class="card__title">Scheduled installs</h2>
-                            <p class="card__sub">Installs this workbench has queued against the environment.</p>
+                            <p class="card__sub">Apps waiting to install on this environment, whether booked here or already handed to Business Central.</p>
                         </div>
                         @if (_canManage)
                         {
@@ -498,14 +499,14 @@
                             </button>
                         }
                     </div>
-                    @if (panel.ScheduledInstallsError is { } scheduledErr)
+                    @if (panel.ScheduledInstallsError is { } scheduledErr && BookedUploads.Count == 0)
                     {
                         <div class="card__body"><FieldError Message="@scheduledErr" /></div>
                     }
-                    else if (panel.ScheduledInstalls.Count == 0)
+                    else if (panel.ScheduledInstalls.Count == 0 && BookedUploads.Count == 0)
                     {
                         <EmptyState Icon="calendar" Title="Nothing waiting to install" Quiet="true">
-                            <Text>A deployment you schedule for this environment waits here until Business Central installs it.</Text>
+                            <Text>A deployment you schedule for this environment, or an app another company sent you that you upload for later, waits here until it installs.</Text>
                             <Action>
                                 <a class="btn btn--sm" href="/pipelines/deployments">Open deployment pipelines</a>
                             </Action>
@@ -526,6 +527,29 @@
                                 </tr>
                             </thead>
                             <tbody>
+                                @* Uploads booked here for a delivery window or a picked time: still
+                                   in this workbench, not yet with Business Central, which is why
+                                   they can be cancelled without losing the file or sent now. *@
+                                @foreach (var booked in BookedUploads)
+                                {
+                                    <tr @key="@($"booked-{booked.Id}")">
+                                        <td>
+                                            @(booked.PackageFileName ?? "An uploaded app")
+                                            <span class="tag">Uploaded here</span>
+                                        </td>
+                                        <td class="u-num env-detail__mono">-</td>
+                                        <td>Booked for @BookedSlotText(booked.ExecuteAfter)</td>
+                                        @if (_canManage)
+                                        {
+                                            <td class="data-table__actions">
+                                                <button type="button" class="btn btn--sm" disabled="@_settingSaving"
+                                                        @onclick="() => InstallBookedNowAsync(booked)">Install now</button>
+                                                <button type="button" class="btn btn--sm btn--danger" disabled="@_settingSaving"
+                                                        @onclick="() => CancelBookedUploadAsync(booked)">Cancel install</button>
+                                            </td>
+                                        }
+                                    </tr>
+                                }
                                 @foreach (var op in panel.ScheduledInstalls)
                                 {
                                     <tr>
@@ -557,6 +581,10 @@
                                 Installs started from Business Central's own Extension Management page aren't shown here.@if (_canManage) {<text> Pick one place per customer.</text>}
                             </span>
                         </div>
+                        @if (panel.ScheduledInstallsError is { } bookedOnlyErr)
+                        {
+                            <div class="card__body"><FieldError Message="@bookedOnlyErr" /></div>
+                        }
                     }
                 </div>
 
@@ -1106,7 +1134,13 @@
         if (_tab == Section.Operations) await LoadOperationsAsync();
         else if (_tab == Section.Sessions) await RefreshSessionsAsync();
         else if (_tab == Section.History) _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
-        else await LoadPanelAsync(forceRefresh: true);
+        else
+        {
+            await LoadPanelAsync(forceRefresh: true);
+            // The Apps tab lists the uploads booked here among the scheduled installs, and
+            // one whose slot has passed may have been sent since the page loaded.
+            if (_tab == Section.Apps) _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
+        }
     }
 
     protected override async Task OnParametersSetAsync()
@@ -1858,13 +1892,65 @@
     private async Task UploadAppAsync()
     {
         if (_uploadDialog is null) return;
-        var upload = await _uploadDialog.OpenAsync(Row.ProjectName, Row.EnvironmentName, Row.IsProduction, BcWindowSuffix());
+        var upload = await _uploadDialog.OpenAsync(Row.ProjectName, Row.EnvironmentName, Row.IsProduction, BcWindowSuffix(),
+            _env!.DeliveryWindowStart, _env.DeliveryWindowEnd, Row.TimeZone);
         if (upload is null) return;
 
+        UploadAppOutcome? outcome = null;
         await RunSettingWriteAsync("upload",
-            () => Connection.InstallUploadedAppAsync(Row.ProjectId, Id, upload.Bytes, upload.FileName, upload.InUpdateWindow),
+            async () => outcome = await Connection.InstallUploadedAppAsync(Row.ProjectId, Id, upload.Bytes, upload.FileName, upload.Timing, upload.At),
             $"Couldn't upload {upload.FileName}. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.",
-            () => UploadAppDialog.DoneMessage(upload, Row.EnvironmentName));
+            () => UploadAppDialog.DoneMessage(upload, outcome!, Row.EnvironmentName, Zone));
+    }
+
+    /// <summary>
+    /// Uploads booked here and still waiting for their slot - shown among the scheduled
+    /// installs, because to the person asking "what is going to install here?" they are
+    /// one list, whichever side is holding the file.
+    /// </summary>
+    private List<UpgradeActionRow> BookedUploads =>
+        _activity?.Where(a => a.Kind == UpgradeActionKind.UploadApp && a.IsPending)
+            .OrderBy(a => a.ExecuteAfter).ToList() ?? new();
+
+    /// <summary>A booked slot in the page's own zone - the one it was picked in - so it reads back as picked.</summary>
+    private string BookedSlotText(DateTime utc)
+    {
+        var zone = Zone.Zone.Id == TimeZoneInfo.Utc.Id ? "UTC" : BcUpdateWindow.CityLabel(Zone.Zone.Id);
+        return $"{Zone.Format(utc, "HH:mm 'on' d MMM")}, {zone} time";
+    }
+
+    /// <summary>Sends a booked upload straight away, behind a confirm: from here it interrupts whoever is working.</summary>
+    private async Task InstallBookedNowAsync(UpgradeActionRow booked)
+    {
+        if (_confirm is null) return;
+        var name = booked.PackageFileName ?? "the app";
+        var confirmed = await _confirm.OpenAsync(
+            $"Install {name} now?",
+            $"It was booked for {BookedSlotText(booked.ExecuteAfter)}. Installing it now may interrupt anyone working in {Row.EnvironmentName}.",
+            "Install now");
+        if (!confirmed) return;
+
+        await RunSettingWriteAsync("install-now",
+            () => UpgradeActions.RunUploadNowAsync(booked.Id),
+            $"Couldn't install {name}. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.",
+            () => $"Business Central has started installing {name} on {Row.EnvironmentName}. Give it a few minutes, then refresh to see it under Installed apps.");
+    }
+
+    /// <summary>Calls off a booked upload. The file is only ours, so nothing is lost but the booking.</summary>
+    private async Task CancelBookedUploadAsync(UpgradeActionRow booked)
+    {
+        if (_confirm is null) return;
+        var name = booked.PackageFileName ?? "the app";
+        var confirmed = await _confirm.OpenAsync(
+            "Cancel this booked install?",
+            $"{name} won't be installed on {Row.EnvironmentName}. To install it later, upload it again.",
+            "Cancel the install");
+        if (!confirmed) return;
+
+        await RunSettingWriteAsync("cancel-booked",
+            () => UpgradeActions.CancelUpgradeActionAsync(booked.Id),
+            "Couldn't cancel the booked install.",
+            () => $"The install of {name} was cancelled.");
     }
 
     // ── Copying the environment ─────────────────────────────────────────

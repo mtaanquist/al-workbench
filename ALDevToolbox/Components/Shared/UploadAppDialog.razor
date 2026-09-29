@@ -6,11 +6,21 @@
     The dialog only collects the answer - which file, and when. The caller sends it
     (ProjectConnectionService.InstallUploadedAppAsync) and reports the outcome where its
     own page reports outcomes. See .design/saas-delivery.md, "Uploading an app".
+
+    When: the delivery window agreed with the customer comes first when the environment
+    has one, else Microsoft's own update window; then a time the person picks; then now.
+    A picked time is read in the organisation's display zone - the zone every other time
+    on the page is shown in - and echoed back in words, so "12:32" fires at 12:32 on the
+    clock the person is looking at, never at 12:32 UTC. The delivery window is the
+    customer's, in the customer's zone, and is shown as such.
 *@
+@using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
 @using ALDevToolbox.Services.ObjectExplorer.Bc
+@using ALDevToolbox.Services.Organizations
+@inject DisplayTimeZone DisplayZone
 @inject ILogger<UploadAppDialog> Log
 
-<ConfirmDialog @ref="_confirm" ConfirmDisabled="@(_bytes is null)">
+<ConfirmDialog @ref="_confirm" ConfirmDisabled="@(_bytes is null || (_timing == UploadAppTiming.AtTime && SlotProblem() is not null))">
     <div class="upload-app__file">
         <label class="btn btn--sm btn--file" for="upload-app-file">
             <Icon Name="upload" Width="14" Height="14" />
@@ -36,42 +46,106 @@
     </div>
     <fieldset class="upload-app__when">
         <legend class="upload-app__when-legend">When should it install?</legend>
+        @if (_deliveryWindowText is { } deliveryWindow)
+        {
+            <label class="upload-app__when-opt">
+                <input type="radio" name="upload-app-when" checked="@(_timing == UploadAppTiming.DeliveryWindow)"
+                       @onchange="() => _timing = UploadAppTiming.DeliveryWindow" />
+                <span>In the delivery window, @deliveryWindow</span>
+            </label>
+        }
+        else
+        {
+            <label class="upload-app__when-opt">
+                <input type="radio" name="upload-app-when" checked="@(_timing == UploadAppTiming.BcUpdateWindow)"
+                       @onchange="() => _timing = UploadAppTiming.BcUpdateWindow" />
+                <span>In the BC update window@(_windowSuffix.Length > 0 ? _windowSuffix : ", at a time Business Central picks")</span>
+            </label>
+            <small class="field__hint upload-app__hint">
+                This environment has no delivery window (the install time agreed with the customer), so Business Central's own window stands in for it.
+            </small>
+        }
         <label class="upload-app__when-opt">
-            <input type="radio" name="upload-app-when" checked="@_inWindow" @onchange="() => _inWindow = true" />
-            <span>In the BC update window@(_windowSuffix)</span>
+            <input type="radio" name="upload-app-when" checked="@(_timing == UploadAppTiming.AtTime)"
+                   @onchange="() => _timing = UploadAppTiming.AtTime" />
+            <span>At a time I pick (@ZoneLabel(DisplayZone.Zone.Id) time)</span>
         </label>
+        @if (_timing == UploadAppTiming.AtTime)
+        {
+            <div class="upload-app__pick">
+                <input type="datetime-local" class="input" @bind="_slotLocal" @bind:event="oninput" />
+                @* The browser draws that field in its own locale, which on a machine set
+                   to English (US) is a 12-hour clock. The booking is said back in the
+                   page's own words, always visible, and that sentence is what settles
+                   what was picked - and in which zone. *@
+                <p class="upload-app__echo">@SlotEchoText()</p>
+                @if (SlotProblem() is { } problem)
+                {
+                    <FieldError Message="@problem" />
+                }
+                <small class="field__hint">
+                    Until then you can cancel it, or install it early, under Scheduled installs on the environment's Apps tab.
+                </small>
+            </div>
+        }
         <label class="upload-app__when-opt">
-            <input type="radio" name="upload-app-when" checked="@(!_inWindow)" @onchange="() => _inWindow = false" />
+            <input type="radio" name="upload-app-when" checked="@(_timing == UploadAppTiming.Now)"
+                   @onchange="() => _timing = UploadAppTiming.Now" />
             <span>Now - anyone working in Business Central may be interrupted</span>
         </label>
     </fieldset>
 </ConfirmDialog>
 
 @code {
-    /// <summary>What the person chose: the package, its name, and whether it waits for the update window.</summary>
-    public sealed record Upload(byte[] Bytes, string FileName, bool InUpdateWindow);
+    /// <summary>
+    /// What the person chose: the package, its name, when, and - for a picked time - the
+    /// instant it means.
+    /// </summary>
+    /// <param name="CustomerTimeZone">The IANA zone the customer's delivery window is agreed in, for saying a delivery-window slot back in it.</param>
+    public sealed record Upload(byte[] Bytes, string FileName, UploadAppTiming Timing, DateTimeOffset? At = null, string? CustomerTimeZone = null);
+
+    /// <summary>
+    /// How far in the past a picked slot may land before the dialog refuses it. The same
+    /// minute of slack the service gives, for the same reason: "now" travels.
+    /// </summary>
+    private static readonly TimeSpan PastSlack = TimeSpan.FromMinutes(1);
 
     private ConfirmDialog? _confirm;
     private byte[]? _bytes;
     private string _fileName = string.Empty;
     private string? _error;
     private bool _reading;
-    private bool _inWindow = true;
+    private UploadAppTiming _timing = UploadAppTiming.BcUpdateWindow;
     private string _windowSuffix = string.Empty;
+    private string? _deliveryWindowText;
+    private string? _customerTimeZone;
+    private DateTime _slotLocal;
 
     /// <summary>
-    /// Asks for the file and the timing. Null when the person backed out. The gentle
-    /// timing is the default each time, as on the app-update dialog.
+    /// Asks for the file and the timing. Null when the person backed out. The gentlest
+    /// timing is the default each time: the delivery window when the environment has
+    /// one, else Microsoft's window.
     /// </summary>
-    /// <param name="windowSuffix">", 22:00-04:00 (Copenhagen)" when the caller knows the window's hours; empty otherwise.</param>
-    public async Task<Upload?> OpenAsync(string projectName, string environmentName, bool isProduction, string? windowSuffix = null)
+    /// <param name="windowSuffix">", 22:00-04:00 (Copenhagen)" when the caller knows Microsoft's window; empty otherwise.</param>
+    /// <param name="deliveryWindowStart">The environment's delivery window, when set. Both bounds or neither.</param>
+    /// <param name="deliveryWindowEnd">See <paramref name="deliveryWindowStart"/>.</param>
+    /// <param name="customerTimeZone">The IANA zone the delivery window is agreed in - the solution's.</param>
+    public async Task<Upload?> OpenAsync(
+        string projectName, string environmentName, bool isProduction, string? windowSuffix = null,
+        TimeOnly? deliveryWindowStart = null, TimeOnly? deliveryWindowEnd = null, string? customerTimeZone = null)
     {
         if (_confirm is null) return null;
+        await DisplayZone.EnsureLoadedAsync();
         _bytes = null;
         _fileName = string.Empty;
         _error = null;
-        _inWindow = true;
         _windowSuffix = windowSuffix ?? string.Empty;
+        _customerTimeZone = customerTimeZone;
+        _deliveryWindowText = UpdateWindow.IsConfigured(deliveryWindowStart, deliveryWindowEnd)
+            ? $"{UpdateWindow.Clock(deliveryWindowStart!.Value)}-{UpdateWindow.Clock(deliveryWindowEnd!.Value)} ({ZoneLabel(customerTimeZone)})"
+            : null;
+        _timing = _deliveryWindowText is null ? UploadAppTiming.BcUpdateWindow : UploadAppTiming.DeliveryWindow;
+        _slotLocal = DefaultSlot();
         StateHasChanged();
 
         var confirmed = await _confirm.OpenAsync(
@@ -83,13 +157,39 @@
             "Upload and install", "btn--danger");
         var bytes = _bytes;
         _bytes = null;
-        return confirmed && bytes is not null ? new Upload(bytes, _fileName, _inWindow) : null;
+        if (!confirmed || bytes is null) return null;
+        return new Upload(bytes, _fileName, _timing, _timing == UploadAppTiming.AtTime ? SlotInstant() : null, _customerTimeZone);
     }
 
-    /// <summary>The sentence for a page's success notice, so both callers say the same thing.</summary>
-    public static string DoneMessage(Upload upload, string environmentName) => upload.InUpdateWindow
-        ? $"Business Central will install {upload.FileName} in {environmentName}'s BC update window. It is listed under Scheduled installs on the environment until then."
-        : $"Business Central has started installing {upload.FileName} on {environmentName}. Give it a few minutes, then refresh to see it under Installed apps.";
+    /// <summary>
+    /// The sentence for a page's success notice, so both callers say the same thing. It
+    /// reports what <em>applied</em>, which the outcome carries: a delivery-window ask on
+    /// an environment without one went to Microsoft's window, and one made while the
+    /// window was open went straight away.
+    /// </summary>
+    /// <param name="zone">The zone the page shows times in, for a booked slot.</param>
+    public static string DoneMessage(Upload upload, UploadAppOutcome outcome, string environmentName, DisplayTimeZone zone)
+    {
+        if (outcome.RunsAtUtc is { } due)
+        {
+            var when = $"{zone.Format(due, SlotFormat)}, {ZoneLabel(zone.Zone.Id)} time";
+            // The delivery window was chosen as the customer's wall clock ("22:00-04:00
+            // (New York)"), so it is said back in that clock first, or the numbers look wrong.
+            var customer = CustomerClock(due, upload.CustomerTimeZone, zone.Zone);
+            var lead = outcome.Timing == UploadAppTiming.DeliveryWindow
+                ? $"{upload.FileName} will be installed on {environmentName} when the delivery window next opens{(customer is null ? "" : $", {customer}")} ({when})."
+                : $"{upload.FileName} will be installed on {environmentName} at {when}{(customer is null ? "" : $" - {customer}")}.";
+            return lead + " Until then it is listed under Scheduled installs on the environment, where you can cancel it or install it now.";
+        }
+        return outcome.Timing switch
+        {
+            UploadAppTiming.BcUpdateWindow =>
+                $"Business Central will install {upload.FileName} in {environmentName}'s BC update window. It is listed under Scheduled installs on the environment until then.",
+            UploadAppTiming.DeliveryWindow =>
+                $"The delivery window is open now, so Business Central has started installing {upload.FileName} on {environmentName}. Give it a few minutes, then refresh to see it under Installed apps.",
+            _ => $"Business Central has started installing {upload.FileName} on {environmentName}. Give it a few minutes, then refresh to see it under Installed apps.",
+        };
+    }
 
     private async Task OnChosenAsync(InputFileChangeEventArgs e)
     {
@@ -127,6 +227,61 @@
             _reading = false;
         }
     }
+
+    // -- The picked time ------------------------------------------------------
+
+    /// <summary>The next whole hour on the page's clock, so the field never opens on a time that has gone.</summary>
+    private DateTime DefaultSlot()
+    {
+        var local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, DisplayZone.Zone);
+        return new DateTime(local.Year, local.Month, local.Day, local.Hour, 0, 0).AddHours(1);
+    }
+
+    /// <summary>
+    /// The instant the picked wall clock means, read in the organisation's display zone.
+    /// A time that doesn't exist locally (the spring-forward hour) is nudged forward
+    /// rather than refused - the person meant "that morning", not that instant.
+    /// </summary>
+    private DateTimeOffset SlotInstant()
+    {
+        var zone = DisplayZone.Zone;
+        var wall = DateTime.SpecifyKind(_slotLocal, DateTimeKind.Unspecified);
+        for (var i = 0; i < 4 && zone.IsInvalidTime(wall); i++) wall = wall.AddHours(1);
+        return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(wall, zone), TimeSpan.Zero);
+    }
+
+    /// <summary>"20:00 on 3 Oct": the slot as a wall clock, read back through the display zone like every other time on the page.</summary>
+    private const string SlotFormat = "HH:mm 'on' d MMM";
+
+    private string SlotEchoText()
+    {
+        var instant = SlotInstant().UtcDateTime;
+        var customer = CustomerClock(instant, _customerTimeZone, DisplayZone.Zone);
+        return $"Installs at {DisplayZone.Format(instant, SlotFormat)}, {ZoneLabel(DisplayZone.Zone.Id)} time{(customer is null ? "" : $" - {customer}")}.";
+    }
+
+    /// <summary>
+    /// The same instant on the customer's clock ("08:00 for the customer (New York)"), when
+    /// that clock differs from the page's. Null when the two clocks read the same at that
+    /// instant or no customer zone is known, so a Berlin consultant booking a Copenhagen
+    /// customer is not told the time twice.
+    /// </summary>
+    private static string? CustomerClock(DateTime utc, string? customerTimeZone, TimeZoneInfo pageZone)
+    {
+        if (string.IsNullOrWhiteSpace(customerTimeZone)) return null;
+        var customerZone = UpdateWindow.ResolveTimeZone(customerTimeZone);
+        var instant = DateTime.SpecifyKind(utc, DateTimeKind.Utc);
+        if (customerZone.GetUtcOffset(instant) == pageZone.GetUtcOffset(instant)) return null;
+        var local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), customerZone);
+        return $"{UpdateWindow.Clock(TimeOnly.FromDateTime(local))} for the customer ({ZoneLabel(customerZone.Id)})";
+    }
+
+    private string? SlotProblem() =>
+        SlotInstant() < DateTimeOffset.UtcNow - PastSlack ? "Pick a time that hasn't happened yet." : null;
+
+    /// <summary>A zone the way a consultant names it - the city, not the region/city id.</summary>
+    private static string ZoneLabel(string? ianaId) =>
+        string.IsNullOrWhiteSpace(ianaId) || ianaId == TimeZoneInfo.Utc.Id ? "UTC" : BcUpdateWindow.CityLabel(ianaId);
 
     private static string FileSize(int bytes) => bytes < 1024 * 1024
         ? $"{Math.Max(1, bytes / 1024)} KB"

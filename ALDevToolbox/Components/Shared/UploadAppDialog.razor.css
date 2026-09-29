@@ -34,3 +34,21 @@
     font-size: var(--text-sm);
     color: var(--ink-2);
 }
+
+/* Why the delivery window isn't offered, under the option that stands in for it. */
+.upload-app__hint { margin: calc(-1 * var(--space-1)) 0 0 calc(var(--space-2) + 1em); }
+
+/* The picked time, indented under its option like the Upgrades page's picker. */
+.upload-app__pick {
+    display: grid;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-1) calc(var(--space-2) + 1em);
+}
+
+/* What was picked, said back in the page's own zone: the sentence that settles it. */
+.upload-app__echo {
+    margin: 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--ink-2);
+}

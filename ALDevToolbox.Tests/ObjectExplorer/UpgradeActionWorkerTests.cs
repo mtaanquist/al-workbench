@@ -163,6 +163,146 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Admin.Writes.Should().Be(0, "repeating 'start the update now' on a guess is not a safe default");
     }
 
+    // ── Booked uploads ──────────────────────────────────────────────────
+    // An app somebody was handed, booked for a picked time or the delivery window: the
+    // package waits in the row, and whichever way the row settles - sent by the sweep,
+    // sent now by hand, or cancelled - the package goes with it.
+
+    [Fact]
+    public async Task A_due_upload_is_sent_from_its_stored_package_and_the_package_is_dropped()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookUploadAsync(projectId, envId, hoursAhead: 12);
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        var ran = await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        ran.Should().Be(1);
+        _f.Apps.Installed.Should().NotBeNull();
+        _f.Apps.Installed!.Value.FileName.Should().Be("Partner.app");
+        _f.Apps.Installed.Value.Bytes.Should().Equal(new byte[] { 7, 8, 9 });
+        _f.Apps.Installed.Value.Schedule.Should().Be(ALDevToolbox.Domain.ValueObjects.ObjectExplorer.BcDeploymentSchedule.Immediate,
+            "the slot decided the time, and Business Central installs on arrival");
+
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Sent);
+        stored.Outcome.Should().Contain("Partner.app");
+        stored.PackageFileName.Should().Be("Partner.app", "the history still names the file");
+        stored.PackageContent.Should().BeNull("a sent package has no reason to stay in the database");
+    }
+
+    [Fact]
+    public async Task An_upload_business_central_refuses_at_its_slot_is_a_failed_row_without_its_package()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookUploadAsync(projectId, envId, hoursAhead: 12);
+        _f.Apps.InstallThrows = new BcApiException(null, "It needs Continia Core 28.0.0.0, which isn't installed.");
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("Partner.app wasn't installed").And.Contain("Continia Core");
+        stored.PackageContent.Should().BeNull("a failed booking is not retried, so the package would only sit there");
+    }
+
+    [Fact]
+    public async Task Cancelling_a_booked_upload_drops_its_package_and_the_sweep_leaves_it_alone()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookUploadAsync(projectId, envId, hoursAhead: 12);
+
+        await using (var cancelCtx = _f.Db.NewContext())
+            await _f.Svc(cancelCtx).CancelUpgradeActionAsync(actionId);
+
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Cancelled);
+        stored.PackageContent.Should().BeNull();
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(0);
+        _f.Apps.Installed.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Install_now_sends_a_booked_upload_ahead_of_its_slot_and_settles_the_row()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookUploadAsync(projectId, envId, hoursAhead: 12);
+
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using (var ctx = _f.Db.NewContext())
+            await _f.Svc(ctx).RunUploadNowAsync(actionId);
+
+        _f.Apps.Installed!.Value.FileName.Should().Be("Partner.app");
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Sent);
+        stored.PackageContent.Should().BeNull();
+
+        // The slot arrives later; the row is settled, so the sweep must not send it twice.
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Install_now_refuses_a_booking_that_is_no_longer_waiting()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookUploadAsync(projectId, envId, hoursAhead: 12);
+        await using (var cancelCtx = _f.Db.NewContext())
+            await _f.Svc(cancelCtx).CancelUpgradeActionAsync(actionId);
+
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using var ctx = _f.Db.NewContext();
+        var act = () => _f.Svc(ctx).RunUploadNowAsync(actionId);
+
+        await act.Should().ThrowAsync<ALDevToolbox.Domain.ValueObjects.PlanValidationException>();
+        _f.Apps.Installed.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_first_sweep_after_a_restart_drops_any_package_left_on_a_settled_row()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookUploadAsync(projectId, envId, hoursAhead: 12);
+        // A row settled by a path that forgot the package: not one of ours today, but
+        // the sweep is the guarantee that no such row keeps 50 MB for good.
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeEnvironmentUpgradeActions.Where(a => a.Id == actionId)
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.Status, UpgradeActionStatus.Sent));
+        }
+
+        await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        (await _f.ReadActionAsync(actionId)).PackageContent.Should().BeNull();
+    }
+
+    /// <summary>Books an upload as the solution's owner, who may manage it; the flag holder may not upload.</summary>
+    private async Task<int> BookUploadAsync(int projectId, int environmentId, int hoursAhead)
+    {
+        var acting = _f.Db.OrgContext.CurrentUserId;
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        try
+        {
+            await using var ctx = _f.Db.NewContext();
+            var outcome = await _f.Connections(ctx).InstallUploadedAppAsync(
+                projectId, environmentId, new byte[] { 7, 8, 9 }, "Partner.app",
+                ALDevToolbox.Domain.ValueObjects.ObjectExplorer.UploadAppTiming.AtTime,
+                _f.Clock.GetUtcNow().AddHours(hoursAhead));
+            outcome.IsBooked.Should().BeTrue();
+            await using var read = _f.Db.NewContext();
+            return await read.OeEnvironmentUpgradeActions.AsNoTracking()
+                .Where(a => a.EnvironmentId == environmentId && a.Kind == UpgradeActionKind.UploadApp)
+                .Select(a => a.Id).SingleAsync();
+        }
+        finally
+        {
+            _f.ActAs(acting);
+        }
+    }
+
     private async Task<int> BookAsync(int projectId, int environmentId, int hoursAhead)
     {
         await using var ctx = _f.Db.NewContext();

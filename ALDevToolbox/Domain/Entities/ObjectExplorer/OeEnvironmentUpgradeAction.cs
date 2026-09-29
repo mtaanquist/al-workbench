@@ -53,6 +53,23 @@ public class OeEnvironmentUpgradeAction
     public int? UpgradeId { get; set; }
     public OeEnvironmentUpgrade? Upgrade { get; set; }
 
+    /// <summary>
+    /// The file name of an uploaded app booked for later (<see cref="UpgradeActionKind.UploadApp"/>
+    /// with a future <see cref="ExecuteAfter"/>), as the person chose it. Kept after the
+    /// send so the history can still name the file; null for every other kind.
+    /// </summary>
+    public string? PackageFileName { get; set; }
+
+    /// <summary>
+    /// The <c>.app</c> bytes of an uploaded app booked for later, held only until the
+    /// booking is sent, fails or is cancelled: Business Central has no "at this time"
+    /// schedule, so the workbench keeps the package and the worker sends it when the
+    /// slot arrives. Cleared by whichever write settles the row, and swept by the worker's
+    /// first pass after a restart, so a settled row never carries a package. Null for an
+    /// upload sent there and then and for every other kind.
+    /// </summary>
+    public byte[]? PackageContent { get; set; }
+
     /// <summary>Where the action has got to. See <see cref="UpgradeActionStatus"/>.</summary>
     public UpgradeActionStatus Status { get; set; } = UpgradeActionStatus.Pending;
 
@@ -126,7 +143,13 @@ public enum UpgradeActionKind
     /// </summary>
     UpdateApp,
 
-    /// <summary>An extension package somebody was handed was uploaded to the environment. Recorded like <see cref="UpdateApp"/>.</summary>
+    /// <summary>
+    /// An extension package somebody was handed was uploaded to the environment. Sent
+    /// right away or in Microsoft's window it is recorded like <see cref="UpdateApp"/>;
+    /// booked for the delivery window or a picked time it is a <c>Pending</c> row carrying
+    /// the package (<see cref="OeEnvironmentUpgradeAction.PackageContent"/>) that the
+    /// worker sends when it comes due.
+    /// </summary>
     UploadApp,
 
     /// <summary>

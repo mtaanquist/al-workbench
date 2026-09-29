@@ -571,10 +571,31 @@ that names the environment and says what the click does there:
   `UpdatePending`), and, for the minutes before it reports anything, from what the page
   itself just asked for.
 - **Uploading an app** - one `.app` file another company built, for which there is no
-  pipeline here. It goes straight to `pteInstall` and is never stored. Only "right away" and
-  "in the update window" are offered (the two schedules Business Central allows for an app
-  it has not seen before), the sync mode is always Add, and dependencies are **not** pulled
-  along: a missing one is refused by name. Apps we build still go through Deployments.
+  pipeline here. It goes to `pteInstall` with the sync mode always Add, and dependencies are
+  **not** pulled along: a missing one is refused by name. Apps we build still go through
+  Deployments. Four timings are offered. Two are Business Central's own, the only schedules
+  it allows for an app it has not seen before: "now" (`Immediate`) and "in the BC update
+  window" (`UpdateWindow`); for those the package is passed straight through and never
+  stored. The other two are ours, because Business Central cannot be told "at 20:00 on
+  Thursday": **in the delivery window** (the next opening of the slot agreed with the
+  customer, `UpdateWindowStart/End` in the solution's zone - the same rule a deployment
+  pipeline set to `OurDeliveryWindow` follows) and **at a time I pick**. Those write a
+  `Pending` `UploadApp` row in `oe_environment_upgrade_actions` carrying the file
+  (`package_file_name`, `package_content`), and `UpgradeActionWorker` sends it as
+  `Immediate` when the slot arrives, re-checking the requester's access and the connection
+  then. The delivery window is offered first when the environment has one; without one the
+  dialog says so and offers Microsoft's window instead, and the service makes the same
+  fall-back if asked for a window that isn't there. A delivery-window ask made while the
+  window is open sends right away rather than booking for "now". A picked time is read in
+  the organisation's display zone - the zone every other time on the page is shown in - and
+  echoed back under the field with the zone named, so 12:32 on the person's clock is never
+  12:32 UTC. **The package is held only while the row is pending**: the write that settles
+  the row (sent by the worker, sent now by hand, failed, or cancelled) clears it in the same
+  statement, and the worker's first sweep after a restart drops any package left on a
+  settled row. A booked upload appears in the environment's *Scheduled installs* beside
+  Business Central's own, with "Install now" (`UpgradeActionService.RunUploadNowAsync`,
+  the same claim-then-send the worker does) and "Cancel install"; it is also in the
+  Workbench history, where it can be cancelled like any other booking.
 
 Refusals are keyed on Microsoft's error **codes** (`environmentNotFound`,
 `applicationTypeDoesNotExist`, and so on) and rendered as an instruction; the message beside the

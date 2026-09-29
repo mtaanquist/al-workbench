@@ -121,7 +121,14 @@ else
     private static string Headline(UpgradeActionRow entry)
     {
         if (entry.Kind == UpgradeActionKind.UpdateApp) return "Updated an AppSource app";
-        if (entry.Kind == UpgradeActionKind.UploadApp) return "Uploaded an app";
+        if (entry.Kind == UpgradeActionKind.UploadApp)
+        {
+            // A booked upload names its file: while it waits, the file is the whole of
+            // what somebody deciding whether to cancel it needs to know.
+            var file = entry.PackageFileName ?? "an app";
+            if (entry.IsBooking) return $"Booked the install of {file}";
+            return entry.Status == UpgradeActionStatus.Failed ? $"Tried to install {file}" : "Uploaded an app";
+        }
         if (entry.Kind == UpgradeActionKind.RecoverEnvironment) return "Recovered the environment";
         if (entry.Kind == UpgradeActionKind.CopyEnvironment) return "Copied the environment";
         if (entry.Kind == UpgradeActionKind.CancelSession) return "Ended a signed-in session";

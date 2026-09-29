@@ -36,6 +36,8 @@ internal sealed class UpgradeActionTestFixture : IDisposable
 
     public TestDb Db { get; } = new();
     public FakeUpdatesAdminClient Admin { get; } = new();
+    /// <summary>Stands in for the App Management API: records an install, throws on everything else.</summary>
+    public FakeUploadAppClient Apps { get; } = new();
     public FakeTimeProvider Clock { get; } = new(new DateTimeOffset(2026, 9, 11, 8, 0, 0, TimeSpan.Zero));
 
     private ServiceProvider? _provider;
@@ -95,10 +97,13 @@ internal sealed class UpgradeActionTestFixture : IDisposable
             NullLogger<EnvironmentUpgradeService>.Instance);
     }
 
+    /// <summary>The connection service on its own, for the writes that book an upload.</summary>
+    public ProjectConnectionService Connections(AppDbContext ctx) => Connections(ctx, new ProjectAccess(ctx, Db.OrgContext));
+
     private ProjectConnectionService Connections(AppDbContext ctx, ProjectAccess access) => new(
-        ctx, Db.OrgContext, access, TokenOk(), Admin, new UnusedAppManagementClient(),
+        ctx, Db.OrgContext, access, TokenOk(), Admin, Apps,
         Db.DataProtectionProvider,
-        new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System), TimeProvider.System,
+        new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System), Clock,
         NullLogger<ProjectConnectionService>.Instance);
 
     /// <summary>
@@ -116,7 +121,7 @@ internal sealed class UpgradeActionTestFixture : IDisposable
         services.AddDbContext<AppDbContext>(o => o.UseNpgsql(Db.ConnectionString), ServiceLifetime.Scoped);
         services.AddSingleton(Db.DataProtectionProvider);
         services.AddSingleton<IBcAdminClient>(Admin);
-        services.AddSingleton<IBcAppManagementClient, UnusedAppManagementClient>();
+        services.AddSingleton<IBcAppManagementClient>(Apps);
         services.AddSingleton(TokenOk());
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache>();
         services.AddScoped<ProjectAccess>();
@@ -304,6 +309,36 @@ internal sealed class UpgradeActionTestFixture : IDisposable
         public Task<IReadOnlyList<BcSession>> ListSessionsAsync(string accessToken, string? applicationFamily, string environmentName, CancellationToken ct = default)
             => throw new NotSupportedException();
         public Task CancelSessionAsync(string accessToken, string? applicationFamily, string environmentName, int sessionId, CancellationToken ct = default)
+            => throw new NotSupportedException();
+    }
+
+    public sealed class FakeUploadAppClient : IBcAppManagementClient
+    {
+        /// <summary>What was installed, so a test can pin the file, the bytes and the schedule.</summary>
+        public (string FileName, byte[] Bytes, string Schedule)? Installed;
+        public BcApiException? InstallThrows;
+
+        public Task<BcAppOperation> InstallPteAsync(string accessToken, string applicationFamily, string environmentName, byte[] appBytes, string fileName, string deploymentSchedule, string syncMode, string languageId, bool installOrUpdateNeededDependencies, CancellationToken ct = default)
+        {
+            if (InstallThrows is not null) throw InstallThrows;
+            Installed = (fileName, appBytes, deploymentSchedule);
+            return Task.FromResult(new BcAppOperation(
+                Guid.NewGuid(), Guid.NewGuid(), "install", BcAppOperationStatus.Running, "running",
+                string.Empty, "1.0.0.0", deploymentSchedule, string.Empty, string.Empty, string.Empty,
+                false, "app", DateTimeOffset.UtcNow, null, null));
+        }
+
+        public Task<IReadOnlyList<BcInstalledApp>> ListInstalledAppsAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
+            => throw new NotSupportedException();
+        public Task<IReadOnlyList<BcAvailableAppUpdate>> ListAvailableUpdatesAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
+            => throw new NotSupportedException();
+        public Task<IReadOnlyList<BcScheduledPteOperation>> ListScheduledPteOperationsAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
+            => throw new NotSupportedException();
+        public Task<BcAppOperation> RemoveScheduledPteVersionAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, string targetVersion, string scheduleKind, CancellationToken ct = default)
+            => throw new NotSupportedException();
+        public Task<BcAppOperation?> GetAppOperationAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, Guid operationId, CancellationToken ct = default)
+            => throw new NotSupportedException();
+        public Task<BcAppOperation> UpdateAppAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, string targetVersion, bool useEnvironmentUpdateWindow, bool installOrUpdateNeededDependencies, CancellationToken ct = default)
             => throw new NotSupportedException();
     }
 

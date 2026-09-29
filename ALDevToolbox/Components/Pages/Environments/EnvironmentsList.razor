@@ -5,6 +5,7 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject ILogger<EnvironmentsList> Log
+@inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Services.ObjectExplorer.Bc
@@ -1046,7 +1047,11 @@
     private async Task UploadAppAsync(UpgradeFleetRow row)
     {
         if (_uploadDialog is null) return;
-        var upload = await _uploadDialog.OpenAsync(row.ProjectName, row.EnvironmentName, row.IsProduction);
+        // The list row carries no windows; the environment's own read does, and the
+        // dialog needs the delivery window to offer it.
+        var detail = await Fleet.GetEnvironmentAsync(row.EnvironmentId);
+        var upload = await _uploadDialog.OpenAsync(row.ProjectName, row.EnvironmentName, row.IsProduction, null,
+            detail?.DeliveryWindowStart, detail?.DeliveryWindowEnd, row.TimeZone);
         if (upload is null) return;
 
         _busy = true;
@@ -1056,8 +1061,8 @@
         StateHasChanged();
         try
         {
-            await Connection.InstallUploadedAppAsync(row.ProjectId, row.EnvironmentId, upload.Bytes, upload.FileName, upload.InUpdateWindow);
-            _done = UploadAppDialog.DoneMessage(upload, row.EnvironmentName);
+            var outcome = await Connection.InstallUploadedAppAsync(row.ProjectId, row.EnvironmentId, upload.Bytes, upload.FileName, upload.Timing, upload.At);
+            _done = UploadAppDialog.DoneMessage(upload, outcome, row.EnvironmentName, Zone);
         }
         catch (PlanValidationException ex)
         {

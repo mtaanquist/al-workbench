@@ -149,7 +149,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                             && a.SentAt == null
                             && a.ExecuteAfter <= now)
                 .OrderBy(a => a.ExecuteAfter)
-                .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion))
+                .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion, a.PackageFileName))
                 .ToListAsync(ct).ConfigureAwait(false);
         }
 
@@ -208,9 +208,29 @@ public sealed class UpgradeActionWorker : BackgroundService
         try
         {
             var actions = scope.ServiceProvider.GetRequiredService<UpgradeActionService>();
-            await actions.RunAsync(action.ProjectId, action.EnvironmentId, action.Kind, action.TargetVersion, ct).ConfigureAwait(false);
+            if (action.Kind == UpgradeActionKind.UploadApp)
+            {
+                // The package is read here, not in the sweep: fifty megabytes per booking
+                // has no place in a list of what is due.
+                var package = await db.OeEnvironmentUpgradeActions.AsNoTracking()
+                    .Where(a => a.Id == action.Id)
+                    .Select(a => a.PackageContent)
+                    .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                if (package is null || package.Length == 0 || action.PackageFileName is null)
+                {
+                    throw new PlanValidationException(new Dictionary<string, string>
+                    {
+                        ["App"] = "The app file was no longer stored with the booking.",
+                    });
+                }
+                await actions.RunUploadAsync(action.ProjectId, action.EnvironmentId, action.PackageFileName, package, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await actions.RunAsync(action.ProjectId, action.EnvironmentId, action.Kind, action.TargetVersion, ct).ConfigureAwait(false);
+            }
             status = UpgradeActionStatus.Sent;
-            outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName);
+            outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.PackageFileName);
         }
         catch (PlanValidationException ex)
         {
@@ -219,12 +239,14 @@ public sealed class UpgradeActionWorker : BackgroundService
             // were rotated. All already in plain words.
             status = UpgradeActionStatus.Failed;
             outcome = UpgradeActionService.FailureOutcome(action.Kind,
-                ex.Errors.Values.FirstOrDefault() ?? "Business Central refused the change.", action.TargetVersion);
+                ex.Errors.Values.FirstOrDefault() ?? "Business Central refused the change.", action.TargetVersion, action.PackageFileName);
         }
         catch (ProjectAccessDeniedException)
         {
             status = UpgradeActionStatus.Failed;
-            outcome = "The person who booked this no longer had permission to change this customer's update dates, so it wasn't run.";
+            outcome = action.Kind == UpgradeActionKind.UploadApp
+                ? "The person who booked this no longer had permission to manage this customer, so the app wasn't installed."
+                : "The person who booked this no longer had permission to change this customer's update dates, so it wasn't run.";
         }
         catch (Exception ex)
         {
@@ -233,15 +255,18 @@ public sealed class UpgradeActionWorker : BackgroundService
                 "Upgrade action {ActionId} on environment {EnvironmentId} (project {ProjectId}) threw.",
                 action.Id, action.EnvironmentId, action.ProjectId);
             status = UpgradeActionStatus.Failed;
-            outcome = UpgradeActionService.FailureOutcome(action.Kind, "Business Central didn't accept the change.", action.TargetVersion);
+            outcome = UpgradeActionService.FailureOutcome(action.Kind, "Business Central didn't accept the change.", action.TargetVersion, action.PackageFileName);
         }
 
+        // The package goes with the outcome, whichever way it went: a sent one is with
+        // Business Central now, and a failed one is not retried (see FailInterruptedAsync).
         var finishedAt = _clock.GetUtcNow().UtcDateTime;
         await db.OeEnvironmentUpgradeActions
             .Where(a => a.Id == action.Id)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(a => a.Status, status)
                 .SetProperty(a => a.Outcome, outcome)
+                .SetProperty(a => a.PackageContent, (byte[]?)null)
                 .SetProperty(a => a.SentAt, finishedAt), ct).ConfigureAwait(false);
         return true;
     }
@@ -266,6 +291,7 @@ public sealed class UpgradeActionWorker : BackgroundService
             .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt != null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
+                .SetProperty(a => a.PackageContent, (byte[]?)null)
                 .SetProperty(a => a.Outcome, outcome), ct).ConfigureAwait(false);
 
         if (failed > 0)
@@ -273,9 +299,22 @@ public sealed class UpgradeActionWorker : BackgroundService
             _logger.LogWarning(
                 "Failed {Count} upgrade action(s) in org {OrgId} that a restart interrupted mid-send.", failed, orgId);
         }
+
+        // Belt and braces for the packages: every settled write above clears its own, but
+        // a restart between the send and that write, or a row settled by a path added
+        // later, must not leave a 50 MB file behind for good. Only a pending row may
+        // hold one.
+        var swept = await db.OeEnvironmentUpgradeActions
+            .Where(a => a.Status != UpgradeActionStatus.Pending && a.PackageContent != null)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.PackageContent, (byte[]?)null), ct).ConfigureAwait(false);
+        if (swept > 0)
+        {
+            _logger.LogInformation("Dropped the stored package from {Count} settled upload booking(s) in org {OrgId}.", swept, orgId);
+        }
     }
 
     /// <summary>One due row, read outside the per-action scope so the sweep holds no context open while it works.</summary>
     private sealed record DueAction(
-        int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion);
+        int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion,
+        string? PackageFileName);
 }
