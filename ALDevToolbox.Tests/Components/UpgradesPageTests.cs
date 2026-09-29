@@ -938,7 +938,7 @@ public sealed class UpgradesPageTests : IDisposable
 
         await cut.InvokeAsync(() => cut.Instance.WatchTickAsync());
 
-        admin.Reads.Should().HaveCount(2 * UpgradesPage.WatchPerTick);
+        admin.Reads.Should().HaveCount(2 * UpdateWatch.PerTick);
         admin.Reads.Where(r => r.StartsWith("GetEnvironment:")).Should().OnlyHaveUniqueItems();
         cut.Instance.WatchedEnvironmentIds.Should().HaveCount(12);
     }
@@ -955,8 +955,8 @@ public sealed class UpgradesPageTests : IDisposable
 }
 
 /// <summary>
-/// When a watched update counts as over, and how it went - the rule the Upgrades page's
-/// watch applies to each re-read (#982). Pure, so it runs without a database.
+/// When a watched update counts as over, and how it went - the rule UpdateWatch, the
+/// Upgrades page's and an upgrade's own page's watch, applies to each re-read (#982). Pure.
 /// </summary>
 public sealed class UpgradeWatchVerdictTests
 {
@@ -977,21 +977,21 @@ public sealed class UpgradeWatchVerdictTests
     public void An_update_is_under_way_when_the_state_is_busy_or_the_update_is_running(
         string? status, string? nextStatus, bool expected)
     {
-        UpgradesPage.IsUpdating(Row(status, "27.5.1.0", nextStatus)).Should().Be(expected);
+        UpdateWatch.IsUpdating(Row(status, "27.5.1.0", nextStatus)).Should().Be(expected);
     }
 
     [Fact]
     public void Busy_is_still_updating()
     {
-        UpgradesPage.Judge(Row("Upgrading", "27.5.1.0"), "27.6", seenBusy: true)
-            .Should().Be(UpgradesPage.WatchVerdict.StillUpdating);
+        UpdateWatch.Judge(Row("Upgrading", "27.5.1.0"), "27.6", seenBusy: true)
+            .Should().Be(UpdateWatch.Verdict.StillUpdating);
     }
 
     [Fact]
     public void Running_with_the_update_still_running_is_still_updating()
     {
-        UpgradesPage.Judge(Row("Active", "27.5.1.0", "Running"), "27.6", seenBusy: true)
-            .Should().Be(UpgradesPage.WatchVerdict.StillUpdating);
+        UpdateWatch.Judge(Row("Active", "27.5.1.0", "Running"), "27.6", seenBusy: true)
+            .Should().Be(UpdateWatch.Verdict.StillUpdating);
     }
 
     [Theory]
@@ -999,15 +999,15 @@ public sealed class UpgradeWatchVerdictTests
     [InlineData("28.0.1.0")]
     public void Running_on_the_target_version_or_later_is_updated(string version)
     {
-        UpgradesPage.Judge(Row("Active", version), "27.6", seenBusy: false)
-            .Should().Be(UpgradesPage.WatchVerdict.Updated);
+        UpdateWatch.Judge(Row("Active", version), "27.6", seenBusy: false)
+            .Should().Be(UpdateWatch.Verdict.Updated);
     }
 
     [Fact]
     public void Running_on_the_old_version_after_being_busy_is_failed()
     {
-        UpgradesPage.Judge(Row("Active", "27.5.1.0", "Failed"), "27.6", seenBusy: true)
-            .Should().Be(UpgradesPage.WatchVerdict.Failed);
+        UpdateWatch.Judge(Row("Active", "27.5.1.0", "Failed"), "27.6", seenBusy: true)
+            .Should().Be(UpdateWatch.Verdict.Failed);
     }
 
     /// <summary>
@@ -1017,15 +1017,15 @@ public sealed class UpgradeWatchVerdictTests
     [Fact]
     public void Running_on_the_old_version_before_ever_being_busy_is_not_picked_up_yet()
     {
-        UpgradesPage.Judge(Row("Active", "27.5.1.0", "Scheduled"), "27.6", seenBusy: false)
-            .Should().Be(UpgradesPage.WatchVerdict.StillUpdating);
+        UpdateWatch.Judge(Row("Active", "27.5.1.0", "Scheduled"), "27.6", seenBusy: false)
+            .Should().Be(UpdateWatch.Verdict.StillUpdating);
     }
 
     [Fact]
     public void A_failed_state_is_failed_whatever_else_the_row_says()
     {
-        UpgradesPage.Judge(Row("UpgradingFailed", "27.5.1.0", "Running"), "27.6", seenBusy: false)
-            .Should().Be(UpgradesPage.WatchVerdict.Failed);
+        UpdateWatch.Judge(Row("UpgradingFailed", "27.5.1.0", "Running"), "27.6", seenBusy: false)
+            .Should().Be(UpdateWatch.Verdict.Failed);
     }
 
     [Fact]
