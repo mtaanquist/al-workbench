@@ -71,6 +71,10 @@ public sealed class DeliverToolsTests : IDisposable
                 NullLogger<UpgradeFleetService>.Instance),
             new UpgradeActionService(ctx, _db.OrgContext, access, connections, TimeProvider.System,
                 NullLogger<UpgradeActionService>.Instance),
+            new EnvironmentUpgradeService(ctx, _db.OrgContext, access,
+                new UpgradeFleetService(ctx, _db.OrgContext, access, new EnvironmentRefreshQueue(),
+                    NullLogger<UpgradeFleetService>.Instance),
+                TimeProvider.System, NullLogger<EnvironmentUpgradeService>.Instance),
             new CustomerModuleService(ctx, _db.OrgContext, access, NullLogger<CustomerModuleService>.Instance),
             new DeliveryFeedService(ctx, access),
             access,
@@ -92,7 +96,7 @@ public sealed class DeliverToolsTests : IDisposable
             "every public method on DeliverTools is an MCP tool");
 
         var tools = methods.Select(m => m.GetCustomAttribute<McpServerToolAttribute>()!).ToList();
-        tools.Should().HaveCount(10);
+        tools.Should().HaveCount(12);
         tools.Should().OnlyContain(t => t.ReadOnly,
             "the Deliver tools only read; a write belongs in DeliveryTools behind its own gate");
     }
@@ -247,6 +251,102 @@ public sealed class DeliverToolsTests : IDisposable
         var act = () => NewTools(ctx).ListUpgradesAsync();
 
         (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("environment updates");
+    }
+
+    // ── Planned upgrades ────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Get_upgrade_returns_the_header_and_each_visible_environment_with_its_state()
+    {
+        var id = await SeedUpgradeAsync("26.0 in October 2026", "26.0", closed: false,
+            _seed.DenmarkProduction, _seed.SwedenProduction, _seed.SecretProduction);
+        await using (var ctx = _db.NewContext())
+        {
+            // A start sent to Denmark from the upgrade, and Sweden's check assigned to Anne.
+            var started = NewAction(_seed.Denmark, _seed.DenmarkProduction,
+                UpgradeActionKind.RunNow, UpgradeActionStatus.Sent, DateTime.UtcNow, DateTime.UtcNow);
+            started.UpgradeId = id;
+            ctx.OeEnvironmentUpgradeActions.Add(started);
+            var sweden = ctx.OeEnvironmentUpgradeLines.Single(l => l.UpgradeId == id && l.EnvironmentId == _seed.SwedenProduction);
+            sweden.AssigneeUserId = AnneId;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var upgrade = await NewTools(read).GetUpgradeAsync(id);
+
+        upgrade.Upgrade.Name.Should().Be("26.0 in October 2026");
+        upgrade.Upgrade.TargetVersion.Should().Be("26.0");
+        upgrade.Upgrade.CreatedBy.Should().Be("Viewer", "the email is dropped from the stored actor");
+        upgrade.Upgrade.Status.Should().Be("InProgress");
+        upgrade.Upgrade.EnvironmentCount.Should().Be(2, "the Private solution's environment is left out");
+        upgrade.Upgrade.Counts.Should().Be(new UpgradeStateCounts(0, 0, 1, 1, 0, 0, 0));
+
+        upgrade.Environments.Select(e => e.SolutionName).Should().Equal("CRONUS Denmark", "CRONUS Sweden");
+        var denmark = upgrade.Environments[0];
+        denmark.State.Should().Be("Booked");
+        denmark.LastAction!.Action.Should().Be("RunNow");
+        denmark.NextUpdate!.Version.Should().Be("26.0");
+        denmark.CurrentVersion.Should().Be("25.3.1.0");
+        denmark.Deleted.Should().BeFalse();
+        var swedenLine = upgrade.Environments[1];
+        swedenLine.State.Should().Be("Running", "Business Central reports it upgrading");
+        swedenLine.AssignedTo.Should().Be("Anne Hansen");
+        swedenLine.LastAction.Should().BeNull();
+        upgrade.Environments.Should().NotContain(e => e.SolutionId == _seed.Secret);
+    }
+
+    [Fact]
+    public async Task Get_upgrade_answers_an_unknown_id_as_not_found()
+    {
+        await using var ctx = _db.NewContext();
+        var act = () => NewTools(ctx).GetUpgradeAsync(987_654);
+
+        (await act.Should().ThrowAsync<McpException>()).Which.Message
+            .Should().Contain("does not exist").And.Contain("list_planned_upgrades");
+    }
+
+    [Fact]
+    public async Task List_planned_upgrades_puts_open_first_and_finds_the_archive_by_search()
+    {
+        var open = await SeedUpgradeAsync("26.0 in October 2026", "26.0", closed: false,
+            _seed.DenmarkProduction, _seed.SecretProduction);
+        var done = await SeedUpgradeAsync("25.5 in June 2026", "25.5", closed: true, _seed.DenmarkSandbox);
+
+        await using var ctx = _db.NewContext();
+        var tools = NewTools(ctx);
+
+        (await tools.ListPlannedUpgradesAsync()).Select(u => u.UpgradeId).Should().Equal(open);
+        var all = await tools.ListPlannedUpgradesAsync(includeArchived: true);
+        all.Select(u => u.UpgradeId).Should().Equal(open, done);
+        all[1].Status.Should().Be("Done");
+        all[1].ClosedBy.Should().Be("Viewer");
+        all[0].EnvironmentCount.Should().Be(1, "the Private solution's line is not counted");
+        all[0].Counts.Should().Be(new UpgradeStateCounts(1, 0, 0, 0, 0, 0, 0));
+
+        (await tools.ListPlannedUpgradesAsync(search: "OCTOBER")).Select(u => u.UpgradeId)
+            .Should().Equal([open], "the open list is searched case-insensitively too");
+        (await tools.ListPlannedUpgradesAsync(search: "june")).Should().BeEmpty(
+            "without includeArchived the done upgrade is not offered");
+
+        (await tools.ListPlannedUpgradesAsync(includeArchived: true, search: "june")).Select(u => u.UpgradeId)
+            .Should().Equal(done);
+        (await tools.ListPlannedUpgradesAsync(includeArchived: true, search: "26.0")).Select(u => u.UpgradeId)
+            .Should().Equal(open);
+    }
+
+    [Fact]
+    public async Task Planned_upgrades_need_the_environment_updates_permission()
+    {
+        var id = await SeedUpgradeAsync("26.0 in October 2026", "26.0", closed: false, _seed.DenmarkProduction);
+        ActAs(OutsiderId);
+        await using var ctx = _db.NewContext();
+        var tools = NewTools(ctx);
+
+        (await ((Func<Task>)(() => tools.ListPlannedUpgradesAsync())).Should().ThrowAsync<McpException>())
+            .Which.Message.Should().Contain("environment updates");
+        (await ((Func<Task>)(() => tools.GetUpgradeAsync(id))).Should().ThrowAsync<McpException>())
+            .Which.Message.Should().Contain("environment updates");
     }
 
     // ── list_recent_deliveries ──────────────────────────────────────────
@@ -503,6 +603,30 @@ public sealed class DeliverToolsTests : IDisposable
         await AddDeliveryAsync(ctx, secret.Id, secretProd.Id, ProjectDeliveryStatus.Failed, now.AddHours(-1), "Secret failure.", OurAppId);
 
         return new Seeded(denmark.Id, sweden.Id, secret.Id, dkProd.Id, dkSandbox.Id, seProd.Id, secretProd.Id);
+    }
+
+    /// <summary>A planned upgrade with a line per environment, written straight to the tables as the viewer made it.</summary>
+    private async Task<int> SeedUpgradeAsync(string name, string target, bool closed, params int[] environmentIds)
+    {
+        var now = DateTime.UtcNow;
+        await using var ctx = _db.NewContext();
+        var projects = ctx.OeProjectEnvironments.Where(e => environmentIds.Contains(e.Id))
+            .ToDictionary(e => e.Id, e => e.ProjectId);
+        var upgrade = new OeEnvironmentUpgrade
+        {
+            OrganizationId = TestDb.DefaultOrgId, Name = name, TargetVersion = target,
+            CreatedByUserId = ViewerId, CreatedBy = "Viewer <viewer@example.com>", CreatedAt = now, UpdatedAt = now,
+            ClosedAt = closed ? now : null, ClosedByUserId = closed ? ViewerId : null,
+            ClosedBy = closed ? "Viewer <viewer@example.com>" : null,
+            Lines = environmentIds.Select(e => new OeEnvironmentUpgradeLine
+            {
+                OrganizationId = TestDb.DefaultOrgId, EnvironmentId = e, ProjectId = projects[e],
+                IsOpen = !closed, AddedAt = now,
+            }).ToList(),
+        };
+        ctx.OeEnvironmentUpgrades.Add(upgrade);
+        await ctx.SaveChangesAsync();
+        return upgrade.Id;
     }
 
     private static User NewUser(int id, string email, string name) => new()

@@ -268,7 +268,7 @@ public sealed class CommandPaletteTests : IDisposable
 
         cut.WaitForAssertion(() =>
         {
-            foreach (var kind in new[] { "solution", "environment", "release", "recipe", "person", "doc", "goto", "default" })
+            foreach (var kind in new[] { "solution", "environment", "upgrade", "release", "recipe", "person", "doc", "goto", "default" })
             {
                 cut.FindAll($"template[data-palette-row='{kind}']").Should().ContainSingle(
                     $"the script clones a template per kind and falls back to \"default\"; "

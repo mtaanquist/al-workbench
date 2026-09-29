@@ -125,6 +125,36 @@ public sealed class EnvironmentUpgradeService
         return new EnvironmentUpgradeDetail(Summarise(header, mine), mine);
     }
 
+    /// <summary>
+    /// Which open upgrade holds each environment, keyed by environment id, so the picker can
+    /// show an environment as taken - naming the upgrade - before anyone ticks it, rather than
+    /// learning it from <see cref="AddLinesAsync"/>'s refusal afterwards. Only lines the caller
+    /// can see are read: the same visibility join as every other line read here. An
+    /// environment is on one open upgrade at a time (the filtered unique index), so each key
+    /// has one owner.
+    /// </summary>
+    public async Task<Dictionary<int, UpgradeLineOwner>> ListOpenLineOwnersAsync(CancellationToken ct = default)
+    {
+        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
+
+        var owners = await _db.OeEnvironmentUpgradeLines.AsNoTracking()
+            .Where(l => l.IsOpen)
+            .Where(l => _db.OeProjects.Where(visible)
+                .Any(p => p.Id == l.ProjectId && p.DeletedAt == null))
+            .Select(l => new { l.EnvironmentId, l.UpgradeId, UpgradeName = l.Upgrade!.Name })
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        // ToDictionary would throw on a duplicate; the index rules one out, but a read that
+        // races a reopen is not worth an exception on a page that only draws a lock.
+        var result = new Dictionary<int, UpgradeLineOwner>();
+        foreach (var o in owners)
+        {
+            result.TryAdd(o.EnvironmentId, new UpgradeLineOwner(o.UpgradeId, o.UpgradeName));
+        }
+        return result;
+    }
+
     private async Task<List<EnvironmentUpgradeSummary>> SummariseAsync(
         List<OeEnvironmentUpgrade> headers, CancellationToken ct)
     {
@@ -825,6 +855,9 @@ public sealed record EnvironmentUpgradeSummary(
     /// <summary>How many visible lines have been checked.</summary>
     public int CheckedCount => Count(UpgradeLineState.Checked);
 }
+
+/// <summary>The open upgrade an environment is on, for the picker's lock.</summary>
+public sealed record UpgradeLineOwner(int UpgradeId, string UpgradeName);
 
 /// <summary>One upgrade and its visible lines.</summary>
 public sealed record EnvironmentUpgradeDetail(EnvironmentUpgradeSummary Upgrade, List<EnvironmentUpgradeLineRow> Lines);

@@ -45,6 +45,7 @@ public sealed class DeliverTools
     private readonly ProjectConnectionService _connections;
     private readonly UpgradeFleetService _fleet;
     private readonly UpgradeActionService _upgradeActions;
+    private readonly EnvironmentUpgradeService _plannedUpgrades;
     private readonly CustomerModuleService _modules;
     private readonly DeliveryFeedService _deliveries;
     private readonly ProjectAccess _access;
@@ -60,6 +61,7 @@ public sealed class DeliverTools
         ProjectConnectionService connections,
         UpgradeFleetService fleet,
         UpgradeActionService upgradeActions,
+        EnvironmentUpgradeService plannedUpgrades,
         CustomerModuleService modules,
         DeliveryFeedService deliveries,
         ProjectAccess access,
@@ -71,6 +73,7 @@ public sealed class DeliverTools
         _connections = connections;
         _fleet = fleet;
         _upgradeActions = upgradeActions;
+        _plannedUpgrades = plannedUpgrades;
         _modules = modules;
         _deliveries = deliveries;
         _access = access;
@@ -200,12 +203,9 @@ public sealed class DeliverTools
     [Description("Lists the Upgrades fleet: for every live environment of every solution you can see, the platform update Business Central has waiting - target version, when it is scheduled, the latest date it can be moved to, and its status - grouped by solution with Production first, plus any update move booked from this workbench that has not run yet. canChangeDate says whether you hold the environment-updates permission for that solution. Requires the environment-updates permission on at least one team, as the Upgrades page does. The update facts are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read; each row carries nextUpdateReadAt.")]
     public async Task<IReadOnlyList<UpgradeSolutionGroup>> ListUpgradesAsync(CancellationToken ct = default)
     {
-        var snapshot = await _access.GetSnapshotAsync(ct);
-        if (!snapshot.CanUseEnvironmentOps)
-        {
-            throw new McpException(
-                "You need permission to manage environment updates to see the Upgrades list. An administrator can grant it on one of your teams. list_environments shows the next update of every environment you can see.");
-        }
+        await RequireEnvironmentOpsAsync(
+            "You need permission to manage environment updates to see the Upgrades list. An administrator can grant it on one of your teams. list_environments shows the next update of every environment you can see.",
+            ct);
 
         var rows = await _fleet.ListFleetAsync(includeSoftDeleted: false, ct);
         var pending = (await _upgradeActions.ListPendingAsync(ct)).ToLookup(a => a.EnvironmentId);
@@ -232,6 +232,94 @@ public sealed class DeliverTools
                     r.FetchedAt)).ToList()))
             .ToList();
     }
+
+    // ── Planned upgrades (#984) ─────────────────────────────────────────
+
+    [McpServerTool(Name = "list_planned_upgrades", ReadOnly = true)]
+    [Description("Lists the planned upgrades: named waves of environments the upgrade team moves, starts and checks together (e.g. '28.5 in November 2026'). For each: its id, name, target Business Central version (Major.Minor), the planned slot if one was set, the note, who created it and when, who marked it done and when, its status, and how many of its environments are in each state. Status is 'Planned' (nothing has gone further than a moved date), 'InProgress' (something is booked or running, or the wave is part way through), 'Updated' (every environment has an answer and it waits for someone to mark it done) or 'Done' (marked done, in the archive). Open upgrades come first, soonest planned slot first; with includeArchived the done ones follow, most recently closed first. Only environments of solutions you can see are counted. Requires the environment-updates permission on at least one team, as the Upgrades page does. Use get_upgrade for one upgrade's environments.")]
+    public async Task<IReadOnlyList<PlannedUpgradeSummary>> ListPlannedUpgradesAsync(
+        [Description("Also list the upgrades marked done. Default false: open upgrades only.")] bool includeArchived = false,
+        [Description("Optional text to match, case-insensitively, against the upgrade's name or target version, e.g. 'november' or '28.5'.")] string? search = null,
+        CancellationToken ct = default)
+    {
+        await RequireEnvironmentOpsAsync(
+            "You need permission to manage environment updates to see the planned upgrades. An administrator can grant it on one of your teams.",
+            ct);
+
+        var term = string.IsNullOrWhiteSpace(search) ? null : search.Trim();
+        var open = (await _plannedUpgrades.ListOpenAsync(ct))
+            .Where(u => term is null
+                        || u.Name.Contains(term, StringComparison.OrdinalIgnoreCase)
+                        || u.TargetVersion.Contains(term, StringComparison.OrdinalIgnoreCase));
+        var archived = includeArchived
+            ? await _plannedUpgrades.ListArchivedAsync(term, ct)
+            : [];
+
+        return open.Concat(archived).Select(ToPlannedSummary).ToList();
+    }
+
+    [McpServerTool(Name = "get_upgrade", ReadOnly = true)]
+    [Description("Returns one planned upgrade in full: its name, target version, planned slot, note, who created it and who marked it done, its status and counts (as list_planned_upgrades describes them), and every environment on it. For each environment: the solution, the environment's name and type, whether the customer has deleted it, its current version, the platform update Business Central has waiting (the same fields list_upgrades uses), its state, the last action taken on it from this upgrade, who is assigned to check it, and the after-upgrade check (who ticked it, when, and their note). The state is one word: 'Planned' (on the upgrade and nothing done from it has taken effect yet; a booking that was cancelled lands here too), 'DateMoved' (its update date was moved out to the latest allowed, and that is the last thing done), 'Booked' (a start is booked for a later slot, or Business Central was told to start and has not yet), 'Running' (Business Central is updating it now), 'Updated' (it is on the target version or later), 'Failed' (the last action from this upgrade failed, or Business Central reports the update failed) or 'Checked' (someone did the after-upgrade check and ticked it). Left out: environments of solutions you cannot see, and environments Business Central no longer reports. An environment the customer has deleted but can still restore stays on the upgrade with deleted = true, although list_upgrades leaves those out. Facts about the environment are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read; each carries environmentReadAt and nextUpdateReadAt. Requires the environment-updates permission on at least one team. Read-only: moving, starting and checking are done on the upgrade's page in the web UI.")]
+    public async Task<PlannedUpgradeDetail> GetUpgradeAsync(
+        [Description("The upgrade's numeric id, from list_planned_upgrades.")] int upgradeId,
+        CancellationToken ct = default)
+    {
+        await RequireEnvironmentOpsAsync(
+            "You need permission to manage environment updates to read a planned upgrade. An administrator can grant it on one of your teams.",
+            ct);
+
+        var detail = await _plannedUpgrades.GetAsync(upgradeId, ct)
+            ?? throw new McpException(
+                $"Upgrade {upgradeId} does not exist or is not visible to you. Call list_planned_upgrades to see the upgrades you can read.");
+
+        var lines = detail.Lines.Select(l => new PlannedUpgradeLine(
+                l.Environment.EnvironmentId,
+                l.Environment.ProjectId,
+                l.Environment.ProjectName,
+                l.Environment.EnvironmentName,
+                l.Environment.EnvironmentType,
+                l.Environment.IsSoftDeleted,
+                l.Environment.Version,
+                ToNextUpdate(l.Environment),
+                l.State.ToString(),
+                l.LastAction is null ? null : ToHistory(l.LastAction),
+                l.AssigneeName is { Length: > 0 } assignee ? UpgradeActionRow.NameOf(assignee) : null,
+                l.CheckedAt,
+                l.CheckedBy is { Length: > 0 } who ? UpgradeActionRow.NameOf(who) : null,
+                l.Note,
+                l.Environment.EnvironmentFetchedAt,
+                l.Environment.FetchedAt))
+            .ToList();
+        return new PlannedUpgradeDetail(ToPlannedSummary(detail.Upgrade), lines);
+    }
+
+    /// <summary>The Upgrades page's gate: the environment-updates grant on at least one team.</summary>
+    private async Task RequireEnvironmentOpsAsync(string refusal, CancellationToken ct)
+    {
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        if (!snapshot.CanUseEnvironmentOps) throw new McpException(refusal);
+    }
+
+    private static PlannedUpgradeSummary ToPlannedSummary(EnvironmentUpgradeSummary u) => new(
+        u.Id,
+        u.Name,
+        u.TargetVersion,
+        u.PlannedAt,
+        u.Note,
+        UpgradeActionRow.NameOf(u.CreatedBy),
+        u.CreatedAt,
+        u.ClosedBy is { Length: > 0 } who ? UpgradeActionRow.NameOf(who) : null,
+        u.ClosedAt,
+        u.Status.ToString(),
+        u.LineCount,
+        new UpgradeStateCounts(
+            u.Count(UpgradeLineState.Planned),
+            u.Count(UpgradeLineState.DateMoved),
+            u.Count(UpgradeLineState.Booked),
+            u.Count(UpgradeLineState.Running),
+            u.Count(UpgradeLineState.Updated),
+            u.Count(UpgradeLineState.Failed),
+            u.Count(UpgradeLineState.Checked)));
 
     // ── Deliveries ──────────────────────────────────────────────────────
 
@@ -610,6 +698,58 @@ public sealed record UpgradeEnvironmentRow(
 
 /// <summary>An update move booked from this workbench that has not run yet.</summary>
 public sealed record PendingUpgradeAction(string Action, DateTime RunsAt, string RequestedBy);
+
+/// <summary>A planned upgrade's header, for <c>list_planned_upgrades</c> and <c>get_upgrade</c>.</summary>
+/// <param name="TargetVersion">The Business Central release the wave goes to, as Major.Minor.</param>
+/// <param name="PlannedAt">The slot the team has in mind; advisory, nothing fires from it.</param>
+/// <param name="Status">'Planned', 'InProgress', 'Updated' or 'Done'.</param>
+/// <param name="EnvironmentCount">How many of its environments you can see.</param>
+public sealed record PlannedUpgradeSummary(
+    int UpgradeId,
+    string Name,
+    string TargetVersion,
+    DateTime? PlannedAt,
+    string? Note,
+    string CreatedBy,
+    DateTime CreatedAt,
+    string? ClosedBy,
+    DateTime? ClosedAt,
+    string Status,
+    int EnvironmentCount,
+    UpgradeStateCounts Counts);
+
+/// <summary>How many of an upgrade's visible environments are in each state.</summary>
+public sealed record UpgradeStateCounts(
+    int Planned, int DateMoved, int Booked, int Running, int Updated, int Failed, int Checked);
+
+/// <summary>One planned upgrade with its environments, for <c>get_upgrade</c>.</summary>
+public sealed record PlannedUpgradeDetail(PlannedUpgradeSummary Upgrade, IReadOnlyList<PlannedUpgradeLine> Environments);
+
+/// <summary>One environment on a planned upgrade.</summary>
+/// <param name="Deleted">True when the customer has deleted the environment and it can still be restored.</param>
+/// <param name="State">'Planned', 'DateMoved', 'Booked', 'Running', 'Updated', 'Failed' or 'Checked'.</param>
+/// <param name="LastAction">The last thing done to it from this upgrade; null when nothing has been.</param>
+/// <param name="AssignedTo">Who is to do the after-upgrade check; null when nobody is assigned.</param>
+/// <param name="CheckNote">The note left with the check; kept when the check is unticked.</param>
+/// <param name="EnvironmentReadAt">When the environment's version was last read.</param>
+/// <param name="NextUpdateReadAt">When the next-update facts were last read.</param>
+public sealed record PlannedUpgradeLine(
+    int EnvironmentId,
+    int SolutionId,
+    string SolutionName,
+    string EnvironmentName,
+    string EnvironmentType,
+    bool Deleted,
+    string? CurrentVersion,
+    NextPlatformUpdate? NextUpdate,
+    string State,
+    EnvironmentHistoryEntry? LastAction,
+    string? AssignedTo,
+    DateTime? CheckedAt,
+    string? CheckedBy,
+    string? CheckNote,
+    DateTime? EnvironmentReadAt,
+    DateTime? NextUpdateReadAt);
 
 /// <summary>
 /// One deployment in <c>list_recent_deployments</c>. MCP-only, so its member names are the
