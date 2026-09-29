@@ -42,12 +42,12 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
     private ProjectCustomerInfoService Svc(ALDevToolbox.Data.AppDbContext ctx) =>
         new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ProjectCustomerInfoService>.Instance);
 
-    private async Task<int> SeedAsync(Guid? tenantId = null, bool withEnvironment = false)
+    private async Task<int> SeedAsync(Guid? tenantId = null, bool withEnvironment = false, string name = "CRONUS Denmark")
     {
         await using var ctx = _db.NewContext();
         var project = new OeProject
         {
-            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Denmark", CreatedByUserId = OwnerUserId,
+            OrganizationId = TestDb.DefaultOrgId, Name = name, CreatedByUserId = OwnerUserId,
             BcTenantId = tenantId, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         };
         ctx.OeProjects.Add(project);
@@ -509,6 +509,55 @@ public sealed class ProjectCustomerInfoServiceTests : IDisposable
             ProjectHostingType.MicrosoftCloud, "BC 25.3", "https://bc.cronus.example/BC250", false));
         facts[sandbox].BcVersion.Should().Be("BC 25.3", "a sandbox's version is not the customer's");
         counter.Count.Should().Be(2, "one read for the rows and one for Business Central's facts - no read per row");
+    }
+
+    // ── The one contact per customer, for many solutions at once (#984) ──
+
+    [Fact]
+    public async Task The_contact_to_ring_is_the_customers_own_preferring_one_with_a_phone()
+    {
+        var withPhone = await SeedAsync(name: "CRONUS Denmark");
+        var noPhone = await SeedAsync(name: "CRONUS UK");
+        var nobody = await SeedAsync(name: "CRONUS Sverige");
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = Svc(ctx);
+            // A partner with a phone is not the customer, and a customer without one comes
+            // after a customer with one even when the name sorts first.
+            await svc.SaveContactAsync(withPhone, null, new CustomerContactInput(ProjectContactType.HostingPartner, "Aaron Partner", "CRONUS Hosting", null, "+45 11 11 11 11"));
+            await svc.SaveContactAsync(withPhone, null, new CustomerContactInput(ProjectContactType.Customer, "Anne Holm", null, "anne@cronus.example", null));
+            await svc.SaveContactAsync(withPhone, null, new CustomerContactInput(ProjectContactType.Customer, "Sara Lind", null, null, "+45 42 18 77 03"));
+            await svc.SaveContactAsync(noPhone, null, new CustomerContactInput(ProjectContactType.Customer, "Tom Ellis", null, "tom@cronus.example", null));
+            await svc.SaveContactAsync(nobody, null, new CustomerContactInput(ProjectContactType.MicrosoftPartner, "Eva Berg", null, null, "+46 8 123 456 70"));
+        }
+
+        var counter = new CommandCounter();
+        await using var counted = _db.NewContext(counter);
+        var contacts = await Svc(counted).ListCustomerContactsAsync([withPhone, noPhone, nobody]);
+
+        contacts[withPhone].Name.Should().Be("Sara Lind");
+        contacts[noPhone].Name.Should().Be("Tom Ellis");
+        contacts.Should().NotContainKey(nobody, "a solution with no customer contact has nobody to ring");
+        counter.Count.Should().BeLessThanOrEqualTo(3, "the access snapshot and one read of every contact - never a read per solution");
+    }
+
+    [Fact]
+    public async Task A_solution_the_caller_cannot_see_gives_no_contact()
+    {
+        var hidden = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx).SaveContactAsync(hidden, null, new CustomerContactInput(ProjectContactType.Customer, "Anne Holm", null, null, "+45 31 22 40 18"));
+        }
+        await using (var seed = _db.NewContext())
+        {
+            (await seed.OeProjects.SingleAsync(p => p.Id == hidden)).Visibility = ProjectVisibility.Private;
+            await seed.SaveChangesAsync();
+        }
+
+        _db.OrgContext.CurrentUserId = OtherUserId;
+        await using var read = _db.NewContext();
+        (await Svc(read).ListCustomerContactsAsync([hidden])).Should().BeEmpty();
     }
 
     private sealed class CommandCounter : DbCommandInterceptor

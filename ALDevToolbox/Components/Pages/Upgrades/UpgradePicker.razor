@@ -1,0 +1,361 @@
+@inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
+@inject ALDevToolbox.Services.ObjectExplorer.Bc.EnvironmentUpgradeService Upgrades
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+
+@*
+    "Add environments..." on an upgrade's own page (#984): the fleet, in a large dialog, to
+    tick the customers this wave covers. PageUpgradePicker.dc.html / UpgradePicker.dc.html,
+    mode="picker".
+
+    Named user: the upgrade team member who agreed an evening with eight customers on the
+    phone and now puts those eight on the upgrade. They find each one by short name, or
+    start from "every production not on 28.5 yet" and untick the ones who said no.
+
+    The Fleet table's columns and the Environments list's filters. The selection is held
+    here, as a SelectionSet, so a search, a filter or Show selected only changes what is
+    shown - a customer ticked three searches ago is still ticked (#985). The fill buttons
+    add to the selection and never replace it.
+
+    Locked rows say why, in the row: already on this upgrade (ticked, since it is), on
+    another open upgrade (named, in warning tone - one open upgrade per environment), or a
+    solution whose updates this person may not manage. Deleted environments are not
+    offered at all: Business Central cannot update one.
+
+    Returns the ticked environment ids, or null when cancelled; the page puts them on the
+    upgrade and says how it went.
+*@
+
+@if (_open)
+{
+    <div class="modal-layer upk-layer" role="dialog" aria-modal="true" aria-labelledby="@_titleId"
+         @onkeydown="OnKeyDown" @onkeydown:stopPropagation tabindex="-1">
+        <div class="modal-backdrop" @onclick="Cancel" aria-hidden="true"></div>
+        <div class="confirm-dialog upk-dialog" @onclick:stopPropagation>
+            <div class="confirm-dialog__head upk-head">
+                <div class="upk-head__text">
+                    <h2 id="@_titleId" class="confirm-dialog__title">Add environments</h2>
+                    <span class="upk-head__sub">To "@_upgradeName", target @_target</span>
+                </div>
+                <button type="button" class="btn btn--icon btn--ghost upk-close" aria-label="Close" @onclick="Cancel">
+                    <Icon Name="x" Width="16" Height="16" />
+                </button>
+            </div>
+
+            <div class="confirm-dialog__body upk-body">
+                <div class="upk-fill">
+                    <span class="upk-fill__label">Add to the selection:</span>
+                    <button type="button" class="btn btn--sm" disabled="@(_all is null)" @onclick="() => Fill(production: true)">Production not yet on @_target</button>
+                    <button type="button" class="btn btn--sm" disabled="@(_all is null)" @onclick="() => Fill(production: false)">Sandboxes not yet on @_target</button>
+                </div>
+                <div class="upk-filters">
+                    <span class="search upk-search">
+                        <Icon Name="search" Width="15" Height="15" Css="search__icon" />
+                        <input class="input" type="search" placeholder="Solution, short name or environment..."
+                               aria-label="Search the environments to add"
+                               @bind="_search" @bind:event="oninput" @bind:after="ApplyFilters" />
+                    </span>
+                    <SelectBox Class="upk-select upk-select--solution upk-wide">
+                        <select class="select" aria-label="Solution" @bind="_solution" @bind:after="ApplyFilters">
+                            <option value="">All solutions</option>
+                            @foreach (var name in _solutions)
+                            {
+                                <option value="@name">@name</option>
+                            }
+                        </select>
+                    </SelectBox>
+                    <SelectBox Class="upk-select upk-wide">
+                        <select class="select" aria-label="Type" @bind="_type" @bind:after="ApplyFilters">
+                            <option value="">Every type</option>
+                            @foreach (var type in _types)
+                            {
+                                <option value="@type">@type</option>
+                            }
+                        </select>
+                    </SelectBox>
+                    <SelectBox Class="upk-select upk-wide">
+                        <select class="select" aria-label="View" @bind="_view" @bind:after="ApplyFilters">
+                            <option value="active">All environments</option>
+                            <option value="waiting">With an update waiting</option>
+                        </select>
+                    </SelectBox>
+                </div>
+
+                <div class="upk-scroll">
+                    @if (_all is null)
+                    {
+                        <LoadingBlock Text="Loading environments..." />
+                    }
+                    else if (_rows.Count == 0)
+                    {
+                        <EmptyState Quiet="true" Title="@NoRowsText" />
+                    }
+                    else
+                    {
+                        <table class="data-table upk-table">
+                            <thead>
+                                <tr>
+                                    <th class="upk-col-check"><span class="u-sr">Select</span></th>
+                                    <th class="upk-col-env">Environment</th>
+                                    <th class="upk-col-short">Short name</th>
+                                    <th class="upk-col-ver">Now on</th>
+                                    <th class="upk-col-next">Next update</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var row in _rows)
+                                {
+                                    var lockReason = Lock(row);
+                                    var onThis = _onThis.Contains(row.EnvironmentId);
+                                    var picked = onThis || _selection.Contains(row.EnvironmentId);
+                                    <tr @key="row.EnvironmentId" class="@RowClass(row)">
+                                        <td>
+                                            <label class="check" aria-label="@($"Select {row.ProjectName} {row.EnvironmentName}")">
+                                                <input type="checkbox" checked="@picked" disabled="@(lockReason is not null)"
+                                                       @onchange="e => Toggle(row.EnvironmentId, e)" />
+                                                <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                            </label>
+                                        </td>
+                                        <td>
+                                            <span class="cell-stack">
+                                                <span class="cell-stack__main upk-sol">@row.ProjectName</span>
+                                                <span class="cell-stack__sub">
+                                                    @row.EnvironmentName
+                                                    @if (!string.Equals(row.EnvironmentName, row.EnvironmentType, StringComparison.OrdinalIgnoreCase))
+                                                    {
+                                                        @(" ")<span class="@(row.IsProduction ? "upk-prod" : null)">(@row.EnvironmentType)</span>
+                                                    }
+                                                </span>
+                                                @if (lockReason is { } why)
+                                                {
+                                                    <span class="cell-stack__sub @why.CssClass">@why.Text</span>
+                                                }
+                                            </span>
+                                        </td>
+                                        <td class="upk-col-short">@row.ProjectShortName</td>
+                                        <td class="u-num" title="@row.Version">@UpgradeActionRunner.ShortVersion(row.Version)</td>
+                                        <td class="upk-col-next upk-next">
+                                            @if (!row.HasUpdate)
+                                            {
+                                                <text>Nothing waiting</text>
+                                            }
+                                            else if (row.NextUpdateDate is { } on)
+                                            {
+                                                <text>@UpgradeActionRunner.ShortVersion(row.NextUpdateVersion) on <Timestamp Value="@on" Format="d MMM" /></text>
+                                            }
+                                            else if (row.EffectiveLatestDate is { } by)
+                                            {
+                                                <text>@UpgradeActionRunner.ShortVersion(row.NextUpdateVersion) by <Timestamp Value="@by" Format="d MMM" /></text>
+                                            }
+                                            else
+                                            {
+                                                <text>@UpgradeActionRunner.ShortVersion(row.NextUpdateVersion), no date yet</text>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                </div>
+            </div>
+
+            <div class="confirm-dialog__actions upk-foot">
+                <span class="upk-foot__count">
+                    <span class="upk-foot__selected" aria-live="polite">@SelectedText</span>
+                    <Switch Name="upk-show-selected" Label="Show selected" Checked="@_selection.ShowSelectedOnly"
+                            Disabled="@(_selection.Count == 0)" CheckedChanged="ToggleShowSelected" />
+                </span>
+                <span class="upk-foot__buttons">
+                    <button type="button" class="btn" @onclick="Cancel">Cancel</button>
+                    <button type="button" class="btn btn--primary" disabled="@(_selection.Count == 0)" @onclick="Confirm">@AddLabel</button>
+                </span>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private readonly string _titleId = $"upk-{Guid.NewGuid():N}";
+    private bool _open;
+    private TaskCompletionSource<IReadOnlyList<int>?>? _tcs;
+
+    private int _upgradeId;
+    private string _upgradeName = string.Empty;
+    private string _target = string.Empty;
+
+    /// <summary>The environments already on this upgrade: shown ticked, and locked.</summary>
+    private HashSet<int> _onThis = new();
+
+    /// <summary>Which open upgrade holds each environment, for the lock that names it.</summary>
+    private Dictionary<int, UpgradeLineOwner> _owners = new();
+
+    /// <summary>The live fleet, deleted environments left out. Null while it loads.</summary>
+    private List<UpgradeFleetRow>? _all;
+    private List<UpgradeFleetRow> _rows = new();
+    private List<string> _solutions = new();
+    private List<string> _types = new();
+
+    private string _search = string.Empty;
+    private string _solution = string.Empty;
+    private string _type = string.Empty;
+    private string _view = "active";
+
+    /// <summary>The ticked environments. Never the ones already on this upgrade: those are not the person's to add.</summary>
+    private readonly SelectionSet _selection = new();
+
+    /// <summary>True while the dialog is on screen, for a host that holds off timers meanwhile.</summary>
+    public bool IsOpen => _open;
+
+    /// <summary>
+    /// Opens on an empty selection and waits: the ticked environment ids, or null when
+    /// cancelled.
+    /// </summary>
+    /// <param name="onThisUpgrade">The environments already on the upgrade.</param>
+    public async Task<IReadOnlyList<int>?> OpenAsync(
+        int upgradeId, string upgradeName, string targetVersion, IEnumerable<int> onThisUpgrade)
+    {
+        _upgradeId = upgradeId;
+        _upgradeName = upgradeName;
+        _target = targetVersion;
+        _onThis = onThisUpgrade.ToHashSet();
+        _selection.Clear();
+        _search = _solution = _type = string.Empty;
+        _view = "active";
+        _all = null;
+        _rows = new();
+        _open = true;
+        _tcs = new TaskCompletionSource<IReadOnlyList<int>?>();
+        StateHasChanged();
+
+        // Read after the dialog is up, so the person sees it open at once. The owners come
+        // first: a row must never show as free for a moment and then lock.
+        _owners = await Upgrades.ListOpenLineOwnersAsync();
+        var fleet = await Fleet.ListFleetAsync(includeSoftDeleted: false);
+        _all = fleet.Where(r => !r.IsSoftDeleted).ToList();
+        _solutions = _all.Select(r => r.ProjectName).Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        _types = _all.Select(r => r.EnvironmentType).Where(t => !string.IsNullOrWhiteSpace(t))
+            .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(t => t, StringComparer.OrdinalIgnoreCase).ToList();
+        ApplyFilters();
+        StateHasChanged();
+
+        return await _tcs.Task;
+    }
+
+    /// <summary>Why a row cannot be ticked, in the words the row shows; null when it can.</summary>
+    private sealed record LockReason(string Text, string CssClass);
+
+    private LockReason? Lock(UpgradeFleetRow row)
+    {
+        if (_onThis.Contains(row.EnvironmentId)) return new("Already on this upgrade", "upk-why");
+        if (_owners.TryGetValue(row.EnvironmentId, out var owner) && owner.UpgradeId != _upgradeId)
+        {
+            return new($"On {owner.UpgradeName}", "upk-why upk-why--other");
+        }
+        if (!row.CanAct) return new("You can't manage this solution's updates", "upk-why");
+        return null;
+    }
+
+    /// <summary>A row held elsewhere, or out of reach, reads as unavailable; one already on this upgrade does not.</summary>
+    private string RowClass(UpgradeFleetRow row) =>
+        Lock(row) is not null && !_onThis.Contains(row.EnvironmentId) ? "upk-row--locked" : "";
+
+    private void ApplyFilters()
+    {
+        if (_all is null) return;
+        IEnumerable<UpgradeFleetRow> q = _all;
+        var term = _search.Trim();
+        if (term.Length > 0)
+        {
+            q = q.Where(r =>
+                r.ProjectName.Contains(term, StringComparison.OrdinalIgnoreCase)
+                || (r.ProjectShortName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+                || r.EnvironmentName.Contains(term, StringComparison.OrdinalIgnoreCase));
+        }
+        if (_solution.Length > 0)
+        {
+            q = q.Where(r => string.Equals(r.ProjectName, _solution, StringComparison.OrdinalIgnoreCase));
+        }
+        if (_type.Length > 0)
+        {
+            q = q.Where(r => string.Equals(r.EnvironmentType, _type, StringComparison.OrdinalIgnoreCase));
+        }
+        if (_view == "waiting")
+        {
+            q = q.Where(r => r.HasUpdate);
+        }
+        _rows = _selection.Shown(q, _all, r => r.EnvironmentId, FilterKey()).ToList();
+    }
+
+    private (string, string, string, string) FilterKey() => (_search, _solution, _type, _view);
+
+    private void Toggle(int environmentId, ChangeEventArgs e)
+    {
+        _selection.Set(environmentId, e.Value is true);
+        if (_selection.ShowSelectedOnly || _selection.Count == 0) ApplyFilters();
+    }
+
+    private void ToggleShowSelected(bool on)
+    {
+        _selection.ShowSelected(on, FilterKey());
+        ApplyFilters();
+    }
+
+    /// <summary>
+    /// A fill button: every environment of that type that is free to add and not already
+    /// on the target or a later version, added to what is ticked. Replacing the selection
+    /// would throw away the customers somebody ticked by hand first.
+    /// </summary>
+    private void Fill(bool production)
+    {
+        if (_all is null) return;
+        foreach (var row in _all)
+        {
+            if (row.IsProduction != production) continue;
+            if (Lock(row) is not null) continue;
+            if (EnvironmentUpgradeLineState.IsOnTarget(row.Version, _target)) continue;
+            _selection.Set(row.EnvironmentId, true);
+        }
+        ApplyFilters();
+    }
+
+    private string SelectedText => _selection.Count == 0
+        ? "None selected"
+        : _selection.ShownCount(_rows.Select(r => r.EnvironmentId)) == 0
+            ? $"{_selection.Count} selected, none of them shown"
+            : _selection.Summary(_rows.Select(r => r.EnvironmentId));
+
+    private string AddLabel => _selection.Count switch
+    {
+        0 => "Add environments",
+        1 => "Add 1 environment",
+        var n => $"Add {n} environments",
+    };
+
+    private string NoRowsText => _all is { Count: 0 }
+        ? "No environments yet. Connect a solution to Business Central, and its environments show up here."
+        : _selection.ShowSelectedOnly
+        ? "Nothing selected yet"
+        : _search.Trim().Length > 0
+            ? $"No environment matches \"{_search.Trim()}\""
+            : "No environment matches these filters";
+
+    private void Confirm()
+    {
+        if (_selection.Count == 0) return;
+        _open = false;
+        _tcs?.TrySetResult(_selection.Ids.ToList());
+    }
+
+    private void Cancel()
+    {
+        if (!_open) return;
+        _open = false;
+        _tcs?.TrySetResult(null);
+    }
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") Cancel();
+    }
+}

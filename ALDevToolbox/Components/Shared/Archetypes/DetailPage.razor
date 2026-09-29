@@ -9,7 +9,9 @@
     thing is not there, or it is - and the head only exists in the third, because
     until then there is no name to put in it:
 
-      loading     a LoadingBlock
+      loading     a LoadingBlock; or, when the page passes a Loading body, a
+                  skeleton head drawn here (crumbs from LoadingTrail, title,
+                  LoadingMeta fact bars) over that body - the upgrade page, #984
       not found   NotFound: say what is missing and offer the way back. It holds
                   the page's <h1>, since the head is not rendered.
       found       crumbs, head, meta row, ChildContent
@@ -25,7 +27,36 @@
 <div class="page@(string.IsNullOrEmpty(PageClass) ? "" : " " + PageClass)">
     @if (IsLoading)
     {
-        <LoadingBlock Text="@LoadingText" />
+        @if (Loading is not null)
+        {
+            @* The head the page is about to have, drawn here so a page never writes one:
+               its crumbs as far as they are known, a title and a subtitle bar, and the
+               meta row's facts as bars. The page brings only the body. *@
+            <CrumbNav Trail="LoadingTrail" />
+            <div class="detail-head" aria-hidden="true">
+                <div class="detail-skel__head">
+                    <span class="skeleton detail-skel detail-skel--title"></span>
+                    <span class="skeleton detail-skel detail-skel--sub"></span>
+                </div>
+            </div>
+            @if (LoadingMeta > 0)
+            {
+                <div class="meta-row" aria-hidden="true">
+                    @for (var i = 0; i < LoadingMeta; i++)
+                    {
+                        <span class="meta-item">
+                            <span class="skeleton detail-skel detail-skel--label"></span>
+                            <span class="skeleton detail-skel detail-skel--value"></span>
+                        </span>
+                    }
+                </div>
+            }
+            @Loading
+        }
+        else
+        {
+            <LoadingBlock Text="@LoadingText" />
+        }
     }
     else if (IsNotFound)
     {
@@ -65,6 +96,19 @@
 @code {
     [Parameter] public bool IsLoading { get; set; }
     [Parameter] public string LoadingText { get; set; } = "Loading...";
+
+    /// <summary>
+    /// The body's skeleton, for a sheet that draws skeletons where the head and the rows
+    /// will be. The frame draws the head's skeleton above it; the page brings only the body
+    /// and its own <c>LoadingBlock</c> caption. Unset, loading is the plain block.
+    /// </summary>
+    [Parameter] public RenderFragment? Loading { get; set; }
+
+    /// <summary>The crumbs known before the record is: "Upgrades", say. Only with <see cref="Loading"/>.</summary>
+    [Parameter] public IReadOnlyList<Crumb>? LoadingTrail { get; set; }
+
+    /// <summary>How many fact bars the skeleton's meta row draws; zero draws no meta row. Only with <see cref="Loading"/>.</summary>
+    [Parameter] public int LoadingMeta { get; set; }
 
     [Parameter] public bool IsNotFound { get; set; }
 

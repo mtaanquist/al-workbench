@@ -158,6 +158,7 @@ public sealed class ArchetypeConformanceTests
         ["ALDevToolbox/Components/Pages/Pipelines/PipelineBuilds.razor"] = "names the loaded pipeline and its solution",
         ["ALDevToolbox/Components/Pages/Pipelines/ReleasePipelineDetail.razor"] = "names the loaded release pipeline",
         ["ALDevToolbox/Components/Pages/Projects/ProjectDetail.razor"] = "names the loaded solution",
+        ["ALDevToolbox/Components/Pages/Upgrades/UpgradeDetail.razor"] = "names the loaded upgrade",
     };
 
     [Fact]

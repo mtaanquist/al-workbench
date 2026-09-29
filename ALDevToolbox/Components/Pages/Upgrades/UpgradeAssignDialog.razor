@@ -1,0 +1,105 @@
+@using ALDevToolbox.Services.ObjectExplorer.Projects
+
+@*
+    "Assign to..." on an upgrade's own page (#984): who checks these environments after
+    their update. The Assignee cell has its own people menu for one line; this is the same
+    choice for the ticked lines, or for one line from its row menu, where a menu inside a
+    menu would be one menu too many. A list of the organisation's people with Nobody last,
+    as the cell's menu has it.
+
+    Imperative, like ConfirmDialog: returns the choice, or null when cancelled.
+*@
+
+@if (_open)
+{
+    <div class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="@_titleId"
+         @onkeydown="OnKeyDown" @onkeydown:stopPropagation tabindex="-1">
+        <div class="modal-backdrop" @onclick="Cancel" aria-hidden="true"></div>
+        <div class="confirm-dialog confirm-dialog--wide" @onclick:stopPropagation>
+            <div class="confirm-dialog__head">
+                <span class="confirm-dialog__icon" aria-hidden="true">
+                    <Icon Name="user-check" Width="17" Height="17" />
+                </span>
+                <h2 id="@_titleId" class="confirm-dialog__title">@_title</h2>
+            </div>
+            <div class="confirm-dialog__body">
+                <div class="uad-list" role="radiogroup" aria-labelledby="@_titleId">
+                    @foreach (var person in People)
+                    {
+                        <label class="check uad-row @(_picked == person.UserId ? "is-picked" : "")">
+                            <input type="radio" name="@_titleId" checked="@(_picked == person.UserId)"
+                                   @onchange="() => _picked = person.UserId" />
+                            <span class="check__dot"></span>
+                            <span class="activity__avatar uad-avatar" aria-hidden="true">@Avatar.Initials(person.Name.Length > 0 ? person.Name : person.Email)</span>
+                            <span class="cell-stack uad-who">
+                                <span class="cell-stack__main">@(person.Name.Length > 0 ? person.Name : person.Email)</span>
+                                @if (person.Name.Length > 0)
+                                {
+                                    <span class="cell-stack__sub">@person.Email</span>
+                                }
+                            </span>
+                        </label>
+                    }
+                    <label class="check uad-row @(_picked == 0 ? "is-picked" : "")">
+                        <input type="radio" name="@_titleId" checked="@(_picked == 0)" @onchange="() => _picked = 0" />
+                        <span class="check__dot"></span>
+                        <span class="uad-nobody">Nobody</span>
+                    </label>
+                </div>
+            </div>
+            <div class="confirm-dialog__actions">
+                <button type="button" class="btn" @onclick="Cancel">Cancel</button>
+                <button type="button" class="btn btn--primary" disabled="@(_picked is null)" @onclick="Confirm">Assign</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>The organisation's people who can be picked.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<CustomerPersonOption> People { get; set; } = [];
+
+    /// <summary>What was picked: a person, or nobody (<see cref="UserId"/> null).</summary>
+    public sealed record Choice(int? UserId);
+
+    private readonly string _titleId = $"uad-{Guid.NewGuid():N}";
+    private bool _open;
+    private string _title = string.Empty;
+
+    /// <summary>The picked user id; 0 stands for Nobody, null for nothing picked yet.</summary>
+    private int? _picked;
+    private TaskCompletionSource<Choice?>? _tcs;
+
+    public bool IsOpen => _open;
+
+    /// <param name="title">"Who checks these 3 environments?"</param>
+    /// <param name="current">The one person already assigned to all of them, to start on; null starts on nothing.</param>
+    public Task<Choice?> OpenAsync(string title, int? current)
+    {
+        _title = title;
+        _picked = current;
+        _open = true;
+        _tcs = new TaskCompletionSource<Choice?>();
+        StateHasChanged();
+        return _tcs.Task;
+    }
+
+    private void Confirm()
+    {
+        if (_picked is not { } picked) return;
+        _open = false;
+        _tcs?.TrySetResult(new Choice(picked == 0 ? null : picked));
+    }
+
+    private void Cancel()
+    {
+        if (!_open) return;
+        _open = false;
+        _tcs?.TrySetResult(null);
+    }
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") Cancel();
+    }
+}

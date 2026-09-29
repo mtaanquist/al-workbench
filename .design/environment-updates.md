@@ -328,11 +328,12 @@ yet.
 
 ## Planned upgrades: a header with lines
 
-> **Status: engine only** ([#984](https://github.com/mtaanquist/al-workbench/issues/984), sub-issue B).
+> **Status: engine and the upgrade's own page** ([#984](https://github.com/mtaanquist/al-workbench/issues/984), sub-issues B, D and E).
 > `EnvironmentUpgradeService` and `EnvironmentUpgradeLineState` under
-> `Services/ObjectExplorer/Bc/`; no page yet. The agent surface exists (sub-issue F): the
-> read-only MCP tools `list_planned_upgrades` and `get_upgrade` in `DeliverTools`, and
-> Upgrade as a command-palette result kind (`UpgradePaletteSource`, opening `/upgrades/{id}`).
+> `Services/ObjectExplorer/Bc/`; the page at `/upgrades/{id}` is described under "The upgrade's
+> own page" below. The agent surface exists (sub-issue F): the read-only MCP tools
+> `list_planned_upgrades` and `get_upgrade` in `DeliverTools`, and Upgrade as a
+> command-palette result kind (`UpgradePaletteSource`, opening `/upgrades/{id}`).
 
 The flat table is the right tool for ad hoc work and the wrong one for a wave. The team agrees
 the same evening slot with eight customers, starts them at 20:00, and the next morning wants
@@ -411,6 +412,110 @@ an open upgrade with the same target and note whose lines are the ones that fail
 never started (Failed, Planned, Date moved). It needs the source done first: while the source
 is open it still holds those environments, and taking them off it quietly would rewrite a wave
 somebody is still working.
+
+## The upgrade's own page
+
+`/upgrades/{id}` (`Components/Pages/Upgrades/UpgradeDetail.razor`) is one planned upgrade and its
+lines, from `.design/handoff/PageUpgrade.dc.html` over `UpgradeBody.dc.html`, on the
+entity-detail archetype (`DetailPage`). Its named user is a member of the upgrade team the
+morning after the wave: they go down the lines ticking off each environment they have checked,
+ring the customer whose update failed, and start again the one that did not run.
+
+**The head.** Crumbs "Upgrades > {name}", the name with the upgrade's status pill (Planned
+queued, In progress running, Updated warn, Done succeeded), the note as the subtitle, and the
+facts in the meta row: target, planned slot, environments, progress ("5 of 8 updated, 3
+checked", a checked line counting as updated), created, and closed once done. The ribbon holds
+one primary that follows the wave: **Add environments...** while there are no lines (the primary
+sits in the empty state and the head's copy is outline; the other three disabled, "Add
+environments first"), **Start update...** while it is planned or in
+progress, and **Mark done...** once the status is Updated or every line is checked. The outline
+commands follow it, then the overflow: Edit details, Mark done (unless it is the primary), New
+upgrade from the leftovers, Delete. On a phone only the primary stays in the head and the
+outline commands lead the overflow. A done upgrade has no ribbon; its overflow is Reopen and
+New upgrade from the leftovers.
+
+What each head command runs over, since the ribbon has no selection: **Start update...** the
+lines nothing has been sent for yet (Planned, Date moved); **Move dates...** the lines still
+waiting for their update (Planned, Date moved, Booked); **Change the next version...** every
+line not yet on the target (those three and Failed). Only lines whose solution the person
+manages; a command with nothing to run over is disabled and says why. The three moves go
+through `UpgradeActionRunner`, the fleet table's dialogs and run loop, opened on the upgrade's
+target version and planned slot and stamping the upgrade's id on every action. After Start
+update the page watches each started update through to its end with the fleet page's watch
+(`UpdateWatch`), and re-reads the upgrade whenever a watched row changes, so a Running line
+becomes Updated or Failed without a reload. A watch that gives up (45 minutes, or Business
+Central not answering) says to reload the page; any re-read after one of the page's own writes
+also lets it join again. The page's writes, its dialogs that read or write (the picker, Edit
+details, the runner's run) and the watch's ticks share one gate on the page's database context:
+a tick skips while a write holds it, and a write waits for a tick in flight, its re-read
+included, and the controls are disabled meanwhile. The line's tick and its note are separate
+writes (`SetCheckedAsync(line, bool)`, `SetLineNoteAsync`), so neither writes back a value the
+page read before somebody else changed it. A done upgrade with no lines says nothing was put on
+it; the Mark done confirm wears the warning glyph only while something is unchecked.
+
+**The lines.** Environment (solution, then environment and type; Production in the heavier
+weight, never red), Now (the mirror's version, and under it the next update, a booked start in
+the customer's own time, "Updating to 28.5 since 20:02", or "Update to 28.5 failed at 20:37"),
+State (the derived word, Failed and Checked the only red and green), Last action (the history's
+headline for the latest action from this upgrade, who and when), Assignee (a quiet Assign button
+opening the organisation's people, or the person), Checked, Contact (the customer's own
+contact, preferring one with a phone, as a `tel:` link; read for every solution on the upgrade
+in one query), and the row menu (Move date, Start update, Change the next version, Assign to,
+Cancel booking when one is waiting, Remove from upgrade). The tick can be set once the line is
+Updated or Failed, and taken off once Checked; before that it is disabled and the cell says
+"After the update". Ticking stamps who and when; the note sits under the stamp and opens a small
+dialog to edit. Remove is disabled once anything has been done to that environment from the
+upgrade, as the engine refuses it. The command bar holds the search (solution, short name,
+environment), a Mine switch (lines assigned to me), and a state filter; with a selection it adds
+the count, Move dates, Start update, and More (Change the next version, Assign to, Remove from
+upgrade), and Clear. The selection is a `SelectionSet`: a search or a filter never unticks a line.
+
+A **done** upgrade reads as the record: no checkboxes, no menus, no command bar; a tick or a
+cross stands where the checkbox was, and the note survives. **Mark done...** asks first, naming
+every unchecked line with its state pill ("3 of 8 are not checked yet. Mark done anyway?"), and
+says how many of them the leftovers would carry on with; with every line checked it is one
+sentence. **Edit details** is a dialog over the header's four fields; the planned slot is typed
+in the organisation's display zone and stored in UTC. Refusals from the engine - a reopen that
+would put an environment on two open upgrades, a line somebody else just removed - show as an
+alert above the lines, never as an exception.
+
+**Add environments...** opens the picker (`UpgradePicker.razor`, `UpgradePicker.dc.html`,
+mode="picker"): the live fleet without deleted environments, the Environments list's filters
+(search, solution, type, Active / Update waiting) and the Fleet table's columns, in a dialog of
+fixed height where only the table scrolls, full screen on a phone. Its selection is its own
+`SelectionSet`, so "4 selected, 1 shown" holds across searches, and **Show selected** brings
+every tick back. A line already on this upgrade is ticked and locked; one on another open
+upgrade is locked and names it in the warning tone (`ListOpenLineOwnersAsync`); one whose
+solution the person may not manage is locked and says so. The two fill buttons, **Production
+not yet on 28.5** and **Sandboxes not yet on 28.5**, add to the selection and never replace it,
+skipping locked rows and rows already on the target or later (Major.Minor, compared per
+segment). The page then calls `AddLinesAsync` and says what happened in one line: how many went
+on, how many were on it already, and each refusal in the engine's words.
+
+The environment's own history names the upgrade an action was run from ("from 28.5 in November
+2026", linked to it), so one customer's history leads to the rest of that evening's wave.
+
+Where it departs from its sheets, and why:
+
+| The sheet has | We have | Why |
+| --- | --- | --- |
+| "Add environments..." primary in the head and in the empty state | Primary in the empty state; the head's copy is outline | One primary on the page (CLAUDE.md). The fresh-eyes review caught the two side by side. |
+| "Runs over the lines that have not been sent yet: 1 environment" on Start update | "Starts the update on the environments not started yet: 1 environment" | "Lines" and "sent" are the tool's words; the team says environments and started. |
+| The Checked tick, with "Tick when checked" beside it | The same words inside the tick's label | So the tick reads as its own control and not as a second copy of the row's selection box. |
+| The Mark done confirm as one list of the unchecked lines | The leftovers under "Failed or never started (3)", then "The rest, not checked yet (4)", and a line naming any environment still updating | "The 3 that failed or never started" has to point at three rows the reader can see. |
+| No row menu on a phone card | The row menu beside Call, and the note editor under the tick | Retrying the failed one and noting what was checked are the morning's work, and the phone is where the customer is rung. |
+| "Start with" before the picker's fill buttons; the view select as "Active" / "Update waiting"; "None waiting" | "Add to the selection:"; "All environments" / "With an update waiting" (the fleet page's words); "Nothing waiting" | "Start with" read as "start the update on"; "Active" named nothing; one fact, one wording. |
+| "4 selected, 0 shown" | "4 selected, none of them shown" | A zero read as "nothing on screen" with five rows showing. |
+| An open upgrade's overflow with Reopen, disabled | No Reopen until the upgrade is done | Port note left with the sheet: a command the page can never offer here is hidden, not dimmed. |
+| "New upgrade from the leftovers" enabled on an open upgrade | Disabled, with "Mark this upgrade done first. Its environments stay on it while it is open." | The engine needs the source done first (above): while it is open it still holds those environments. |
+| The Mark done confirm: "a new upgrade with these three" (all unchecked lines) | "... with the N that failed or never started" | Only Failed, Planned and Date moved are leftovers; an Updated line not yet checked is not. |
+| "Loading the upgrade and each environment from Business Central..." | "Loading the upgrade and each environment..." | The page reads the mirror, not Business Central. Port note left with the sheet. |
+| "Production Production" (environment name, then type) | The type only when it differs from the name | A stutter on every Production line. |
+| "Updated 20:31" under the version of an updated line | The next update Business Central has for it, or "Nothing waiting" | The mirror keeps no time the update finished. A data-driven omission; it would need the environment's operations read into the mirror. |
+| A tick enabled on Updated and Failed | The same, and on Checked too | So a tick can be taken off again, which the engine allows. |
+| A 1000px picker dialog | The same, as a rule in the picker's own stylesheet | `components.css` has no dialog that size (420px and 560px). Port note; needs adding upstream. |
+| No row menu entry for a booked start | **Cancel booking** in the row menu while a start is booked, and on a booking's result line | The runner's booking dialog promises a booking can be cancelled from the page it was made on. |
+| A spinner line "Updating..." under a running line | Only the watch's ending ("Updated to 28.5", "Update failed") | The Now cell already says "Updating to 28.5 since 20:02"; the fleet's spinner line would say it twice. |
 
 ## The page
 

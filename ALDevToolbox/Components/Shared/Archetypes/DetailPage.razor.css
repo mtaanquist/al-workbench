@@ -1,0 +1,15 @@
+/* The skeleton head DetailPage draws while a page with a Loading body waits for its
+   record (UpgradeBody.dc.html, kind="loading"): a title and a subtitle bar where the
+   name and the note will be, and label-and-value bars in the meta row. */
+.detail-skel { display: block; }
+
+.detail-skel__head {
+    display: grid;
+    gap: var(--space-2);
+    flex: 1;
+}
+
+.detail-skel--title { width: 280px; max-width: 80%; height: 22px; }
+.detail-skel--sub { width: 180px; height: 10px; }
+.detail-skel--label { width: 50px; height: 9px; }
+.detail-skel--value { width: 60%; margin-top: 6px; }

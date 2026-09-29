@@ -1,0 +1,393 @@
+/* An upgrade's own page (#984): UpgradeBody.dc.html, ported onto our tokens. The frame
+   (crumbs, head, meta row) is DetailPage's; this is the loading skeleton, the command
+   bar, the lines table and its phone cards, and the notes a run leaves on a line. */
+
+/* ── Loading ─────────────────────────────────────────────────────────── */
+
+.upd-skel { display: block; }
+.upd-skel--box { width: 16px; height: 16px; flex: none; }
+.upd-skel--short { width: 30%; height: 9px; }
+.upd-skel--pill { width: 64px; height: 18px; }
+
+.upd-skel-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    min-height: 50px;
+    padding: 0 var(--space-4);
+    border-bottom: 1px solid var(--border);
+}
+
+.upd-skel-row__text {
+    display: grid;
+    gap: 6px;
+    flex: 1;
+}
+
+/* ── Head ────────────────────────────────────────────────────────────── */
+
+.upd-actions-pair {
+    display: flex;
+    gap: var(--space-2);
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+/* The outline commands collapse into the overflow on a phone, and appear there only
+   then. */
+.upd-phone-only { display: none; }
+
+.upd-alerts ::deep .alert { margin: 0 0 var(--space-3); }
+
+/* ── The command bar ─────────────────────────────────────────────────── */
+
+.upd-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    min-height: 48px;
+    margin-bottom: var(--space-2);
+}
+
+.upd-search {
+    flex: 1 1 200px;
+    max-width: 280px;
+}
+
+.upd-bar ::deep .upd-mine { min-height: 44px; }
+.upd-bar ::deep .upd-state { width: 150px; }
+
+.upd-bar__spacer { flex: 1; }
+
+.upd-bar__sel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.upd-bar__count {
+    font-size: var(--text-sm);
+    font-weight: var(--fw-medium);
+    color: var(--ink);
+}
+
+/* ── The lines ───────────────────────────────────────────────────────── */
+
+.upd-table { table-layout: fixed; }
+
+.upd-col-check { width: 40px; }
+.upd-col-env { width: 17%; }
+.upd-col-now { width: 14%; }
+.upd-col-state { width: 10%; }
+.upd-col-last { width: 17%; }
+.upd-col-who { width: 12%; }
+.upd-col-checked { width: 17%; }
+.upd-col-contact { width: 13%; }
+.upd-col-actions { width: 48px; }
+
+.upd-sol { font-weight: var(--fw-medium); }
+
+.upd-envlink { color: inherit; }
+
+/* Production is the one to be careful with, so it reads a shade heavier. Not red: the
+   review settled that red is for a failure. */
+.upd-prod {
+    color: var(--ink);
+    font-weight: var(--fw-semibold);
+}
+
+.upd-small { font-size: var(--text-sm); }
+
+/* The facts wrap rather than cut "5 of 8 updated, 3 checked" short, as the sheet's do. The
+   meta items are this page's own markup in DetailPage's Meta slot, so the rule is scoped. */
+.meta-item__value { white-space: normal; }
+
+/* The narrow columns wrap rather than cut a sentence off: "Update to 28.5 failed 20:37"
+   ending in an ellipsis loses the one word that matters. */
+.upd-wrap {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    text-wrap: pretty;
+}
+
+.upd-now--bad { color: var(--danger-text); }
+.upd-now--info { color: var(--info-text); }
+
+.upd-row--locked td { color: var(--ink-3); }
+
+/* A padlocked line has no checkbox, and the legend under the table says why. */
+.upd-legend {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: var(--space-2) 0 0;
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+}
+
+/* Assignee: a quiet button when nobody is set, the person when somebody is. */
+.upd-assign { color: var(--ink-3); }
+
+.upd-assignee {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 32px;
+    font-size: var(--text-sm);
+    color: var(--ink);
+}
+
+.upd-assignee--button {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: var(--text-sm);
+    cursor: pointer;
+    text-align: left;
+}
+
+.upd-assignee--button:focus-visible {
+    outline: var(--focus-ring);
+    outline-offset: 2px;
+    border-radius: var(--r-control);
+}
+
+.upd-avatar {
+    width: 22px;
+    height: 22px;
+    font-size: 10px;
+    flex: none;
+}
+
+/* Checked: the tick with its words, then the note under them. On a done upgrade a tick
+   or a cross stands where the checkbox was, beside the stamp. */
+.upd-check {
+    display: grid;
+    gap: 2px;
+    align-items: start;
+}
+
+.upd-check--done {
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: var(--space-2);
+}
+
+/* The note lines up under the words, not under the box. */
+.upd-check:not(.upd-check--done) .upd-check__text { padding-left: calc(16px + var(--space-2)); }
+
+.upd-check__box {
+    align-items: flex-start;
+    margin-top: 2px;
+    font-size: var(--text-sm);
+}
+
+.upd-check__box .check__box { flex: none; margin-top: 1px; }
+
+.upd-check__stamp { color: var(--ink); }
+
+.upd-check__hint {
+    font-size: var(--text-xs);
+    color: var(--ink-3);
+}
+
+.upd-check__text {
+    padding: 0;
+    min-width: 0;
+}
+
+.upd-mark { margin-top: 1px; }
+.upd-ok { color: var(--success-text); }
+.upd-bad { color: var(--danger-text); }
+
+.upd-note-text {
+    white-space: normal;
+    text-wrap: pretty;
+}
+
+/* The note is the way to change the note: a link-quiet button, so it reads as the note
+   and not as a control until it is pointed at. */
+.upd-note-button {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: var(--text-xs);
+    color: var(--ink-3);
+    text-align: left;
+    white-space: normal;
+    text-wrap: pretty;
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+}
+
+.upd-note-button:hover { color: var(--primary-ink); }
+
+.upd-note-button:focus-visible {
+    outline: var(--focus-ring);
+    outline-offset: 2px;
+}
+
+/* ── What a run or the watch says about a line ───────────────────────── */
+
+.upd-note {
+    display: flex;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-2);
+    margin-top: var(--space-1);
+    font-size: var(--text-xs);
+}
+
+.upd-note--ok { color: var(--success-text); }
+.upd-note--bad { color: var(--danger-text); }
+.upd-note--warn { color: var(--warning-text); }
+.upd-note--busy { color: var(--ink-3); }
+.upd-note--muted { color: var(--ink-3); }
+
+.upd-note ::deep svg {
+    flex: 0 0 auto;
+    margin-top: 1px;
+}
+
+.upd-note .spinner {
+    width: 12px;
+    height: 12px;
+    flex: 0 0 auto;
+}
+
+.upd-note__link { font-weight: var(--fw-medium); }
+
+.upd-note__cancel { margin-left: var(--space-1); }
+
+.upd-table tr.upd-result-row td {
+    padding-top: 0;
+    border-top: 0;
+}
+
+/* ── Mark done ───────────────────────────────────────────────────────── */
+
+.upd-unchecked__head { margin: var(--space-3) 0 var(--space-2); }
+.upd-unchecked__head:first-child { margin-top: 0; }
+
+.upd-unchecked {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-control);
+}
+
+.upd-unchecked__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+}
+
+.upd-unchecked__row:last-child { border-bottom: 0; }
+
+.upd-unchecked__who { padding: 0; }
+
+.upd-unchecked__who .cell-stack__main {
+    font-size: var(--text-sm);
+    font-weight: var(--fw-medium);
+}
+
+.upd-unchecked__after {
+    margin: var(--space-3) 0 0;
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+    text-wrap: pretty;
+}
+
+/* ── Phone ───────────────────────────────────────────────────────────── */
+
+.upd-compact { display: none; }
+
+.upd-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-1) var(--space-3);
+    padding: var(--space-3);
+    border-bottom: 1px solid var(--border);
+}
+
+.upd-card:last-child { border-bottom: 0; }
+
+.upd-card__who { padding: 0; }
+
+.upd-card__sol { font-weight: var(--fw-semibold); }
+
+.upd-card ::deep .upd-card__pill { align-self: start; }
+
+.upd-card__last {
+    grid-column: 1 / -1;
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+    text-wrap: pretty;
+}
+
+.upd-card__foot {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    min-height: 44px;
+}
+
+.upd-card__check {
+    min-height: 44px;
+    align-items: center;
+}
+
+.upd-card__checktext {
+    display: grid;
+    font-size: var(--text-sm);
+    color: var(--ink);
+}
+
+.upd-card__note {
+    color: var(--ink-3);
+    font-size: var(--text-xs);
+}
+
+.upd-card__acts {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: none;
+}
+
+.upd-card__call {
+    min-height: 44px;
+    flex: none;
+}
+
+.upd-card__notebutton { grid-column: 1 / -1; }
+
+@media (max-width: 700px) {
+    .upd-wide { display: none; }
+
+    .upd-compact {
+        display: block;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--r);
+    }
+
+    .upd-outline { display: none; }
+
+    /* The ribbon wraps under the name here, so the overflow sits at the left of the
+       screen and its menu opens rightwards rather than off the edge. */
+    .upd-more .ra__menu { left: 0; right: auto; }
+    .upd-phone-only { display: flex; }
+    div.upd-phone-only { display: block; }
+
+    .upd-search { max-width: none; }
+}

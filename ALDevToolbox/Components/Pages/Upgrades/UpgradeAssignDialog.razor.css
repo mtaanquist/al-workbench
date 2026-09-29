@@ -1,0 +1,38 @@
+/* The people as a radio list in one bordered box, the way the "Add to upgrade" sheet
+   (UpgradePicker.dc.html, mode="add") lists the open upgrades: one row per choice, the
+   picked row tinted. */
+.uad-list {
+    display: grid;
+    max-height: min(360px, 50vh);
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--r-control);
+}
+
+.uad-row {
+    display: grid;
+    grid-template-columns: 18px 22px minmax(0, 1fr);
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 44px;
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+}
+
+.uad-row:last-child { border-bottom: 0; }
+
+.uad-row.is-picked { background: var(--primary-weak); }
+
+.uad-avatar {
+    width: 22px;
+    height: 22px;
+    font-size: 10px;
+}
+
+.uad-who { padding: 0; }
+
+.uad-nobody {
+    grid-column: 2 / -1;
+    color: var(--ink);
+    font-weight: var(--fw-medium);
+}

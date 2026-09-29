@@ -15,7 +15,8 @@
     in plain words.
 
     Shared by the Upgrades page and the environment panel on a solution's Business
-    Central tab, because the answer must not read differently depending on which
+    Central tab (and an upgrade's own page borrows its headline for the Last action
+    column), because the answer must not read differently depending on which
     page you happened to open. Presentational only: the page loads the entries and
     performs the cancel.
 
@@ -53,6 +54,13 @@ else
                            is a log format, not a sentence. *@
                         <span class="u-muted" title="@entry.RequestedByEmail">@entry.RequestedByName</span>
                         <span class="u-muted"><Timestamp Value="@entry.RequestedAt" Relative="true" /></span>
+                        @* Which wave it belonged to (#984): the upgrade page is where the rest
+                           of that evening's customers are, so the name is the way there. An
+                           ad hoc action carries no upgrade and says nothing. *@
+                        @if (entry.UpgradeId is { } upgradeId && !string.IsNullOrWhiteSpace(entry.UpgradeName))
+                        {
+                            <span class="eaf__from">from <a href="@($"/upgrades/{upgradeId}")">@entry.UpgradeName</a></span>
+                        }
                     </div>
                     <div class="eaf__status">
                         <span>@StatusText(entry)</span>
@@ -135,7 +143,7 @@ else
     /// or was called off, and only an action somebody ran there and then says "Started".
     /// An immediate attempt that was refused never started at all, so it says it tried.
     /// </summary>
-    private static string Headline(UpgradeActionRow entry)
+    internal static string Headline(UpgradeActionRow entry)
     {
         if (entry.Kind == UpgradeActionKind.UpdateApp) return "Updated an AppSource app";
         if (entry.Kind == UpgradeActionKind.UploadApp)

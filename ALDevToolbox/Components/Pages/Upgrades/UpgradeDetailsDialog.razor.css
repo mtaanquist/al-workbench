@@ -1,0 +1,16 @@
+/* The upgrade's four fields, one column; the version and the slot share a row because
+   each is short and they are read together ("28.5 on Thursday at 20:00"). */
+.udd-fields {
+    display: grid;
+    gap: var(--space-3);
+}
+
+.udd-pair {
+    display: grid;
+    grid-template-columns: minmax(0, 140px) minmax(0, 1fr);
+    gap: var(--space-3);
+}
+
+@media (max-width: 560px) {
+    .udd-pair { grid-template-columns: minmax(0, 1fr); }
+}

@@ -25,7 +25,7 @@
         <div class="confirm-dialog @(_danger ? "confirm-dialog--danger" : null) @(Wide ? "confirm-dialog--wide" : null)" @onclick:stopPropagation>
             <div class="confirm-dialog__head">
                 <span class="confirm-dialog__icon" aria-hidden="true">
-                    <Icon Name="@(_danger ? "triangle-alert" : "info")" Width="17" Height="17" />
+                    <Icon Name="@(HeadIcon ?? (_danger ? "triangle-alert" : "info"))" Width="17" Height="17" />
                 </span>
                 <h2 id="@_titleId" class="confirm-dialog__title">@_title</h2>
             </div>
@@ -117,6 +117,14 @@
     [Parameter] public string ConfirmButtonClass { get; set; } = "btn--danger";
     /// <summary>Default confirm icon used when <see cref="OpenAsync"/> is called without an override.</summary>
     [Parameter] public string? ConfirmIcon { get; set; }
+
+    /// <summary>
+    /// The glyph in the head, for a confirm that is a warning without being destructive -
+    /// marking an upgrade done with lines still unchecked is a pause, not a delete, so it
+    /// keeps the neutral tint and takes the warning glyph. Null derives it from the
+    /// confirm button as before.
+    /// </summary>
+    [Parameter] public string? HeadIcon { get; set; }
 
     /// <summary>
     /// Extra body content under the message - for a confirm that has to show the

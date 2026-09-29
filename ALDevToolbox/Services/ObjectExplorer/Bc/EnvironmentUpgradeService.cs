@@ -633,40 +633,68 @@ public sealed class EnvironmentUpgradeService
     }
 
     /// <summary>
-    /// Ticks or unticks a line's after-upgrade check. Ticking stamps the acting person and
-    /// the time; unticking clears both. The note is kept either way, trimmed, at most
-    /// <see cref="LineNoteMaxLength"/> characters.
+    /// Ticks or unticks a line's after-upgrade check and sets its note in one write. Ticking
+    /// stamps the acting person and the time - once: ticking a line that is already ticked
+    /// keeps the stamp of whoever did the check. Unticking clears both. The note replaces
+    /// the stored one, trimmed, at most <see cref="LineNoteMaxLength"/> characters; blank
+    /// clears it. A page that changes only one of the two uses
+    /// <see cref="SetCheckedAsync(int, bool, CancellationToken)"/> or
+    /// <see cref="SetLineNoteAsync"/>, so it never writes back a value it read earlier.
     /// </summary>
-    public async Task SetCheckedAsync(int lineId, bool isChecked, string? note, CancellationToken ct = default)
+    public Task SetCheckedAsync(int lineId, bool isChecked, string? note, CancellationToken ct = default) =>
+        WriteCheckAsync(lineId, isChecked, setNote: true, note, ct);
+
+    /// <summary>
+    /// Ticks or unticks a line's check and leaves its note as stored - the tick in the lines,
+    /// which must not write back a note somebody changed since the page last read it.
+    /// Same stamping rule as <see cref="SetCheckedAsync(int, bool, string?, CancellationToken)"/>.
+    /// </summary>
+    public Task SetCheckedAsync(int lineId, bool isChecked, CancellationToken ct = default) =>
+        WriteCheckAsync(lineId, isChecked, setNote: false, null, ct);
+
+    /// <summary>
+    /// Sets a line's note and leaves the tick, its stamp included, as stored: saving "reports
+    /// OK" never ticks a line somebody unticked meanwhile, nor re-stamps a ticked one with
+    /// the writer. Trimmed, at most <see cref="LineNoteMaxLength"/> characters; blank clears.
+    /// </summary>
+    public Task SetLineNoteAsync(int lineId, string? note, CancellationToken ct = default) =>
+        WriteCheckAsync(lineId, isChecked: null, setNote: true, note, ct);
+
+    /// <param name="isChecked">The tick to set, or null to leave it as stored.</param>
+    /// <param name="setNote">False leaves the stored note alone.</param>
+    private async Task WriteCheckAsync(int lineId, bool? isChecked, bool setNote, string? note, CancellationToken ct)
     {
         RequireOrganizationId();
         var trimmedNote = string.IsNullOrWhiteSpace(note) ? null : note.Trim();
-        if (trimmedNote is { Length: > LineNoteMaxLength })
+        if (setNote && trimmedNote is { Length: > LineNoteMaxLength })
         {
             throw Refusal("Note", $"Keep the note to {LineNoteMaxLength} characters or fewer.");
         }
         var line = await LoadLineForWriteAsync(lineId, ct).ConfigureAwait(false);
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        if (isChecked)
+        // A line already ticked keeps its stamp: ticking it again is not a second check.
+        if (isChecked == true && line.CheckedAt is null)
         {
             line.CheckedAt = now;
             line.CheckedByUserId = _orgContext.CurrentUserId;
             line.CheckedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct).ConfigureAwait(false);
         }
-        else
+        else if (isChecked == false)
         {
             line.CheckedAt = null;
             line.CheckedByUserId = null;
             line.CheckedBy = null;
         }
-        line.Note = trimmedNote;
+        if (setNote) line.Note = trimmedNote;
         line.Upgrade!.UpdatedAt = now;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "User {UserId} marked environment {EnvironmentId} on planned upgrade {UpgradeId} as {CheckState}.",
-            _orgContext.CurrentUserId, line.EnvironmentId, line.UpgradeId, isChecked ? "checked" : "unchecked");
+            "User {UserId} set the check on environment {EnvironmentId} on planned upgrade {UpgradeId} ({CheckState}, note {NoteChange}).",
+            _orgContext.CurrentUserId, line.EnvironmentId, line.UpgradeId,
+            isChecked switch { true => "checked", false => "unchecked", null => "tick unchanged" },
+            setNote ? "set" : "unchanged");
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────

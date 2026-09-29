@@ -156,7 +156,7 @@ public static class EnvironmentUpgradeLineState
 
     /// <summary>
     /// True when Business Central is busy with the environment. The same test as
-    /// <c>UpgradesPage.IsUpdating</c>, the watch after Start update (#982); keep the two
+    /// <c>UpdateWatch.IsUpdating</c>, the watch after Start update (#982); keep the two
     /// in step.
     /// </summary>
     internal static bool IsUpdating(UpgradeFleetRow row) =>

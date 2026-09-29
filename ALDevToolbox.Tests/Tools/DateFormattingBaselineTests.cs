@@ -76,6 +76,8 @@ public sealed class DateFormattingBaselineTests
             "\"(2 days ago)\" sits inside the last-shipped hover title, where relative wording reads the same in every zone and a Timestamp cannot go."),
         ["ALDevToolbox/Components/Pages/Upgrades/UpgradeActionRunner.razor"] = (8,
             "A booked update slot is a wall clock the person types and Business Central runs in each customer's own zone, so it is said back in that zone and labelled with it."),
+        ["ALDevToolbox/Components/Pages/Upgrades/UpgradeDetail.razor"] = (2,
+            "A line's booked update slot is a wall clock in the customer's own zone, said back in that zone and labelled with it, as the fleet table's booking marker says it."),
         ["ALDevToolbox/Components/Pages/Upgrades/UpgradesPage.razor"] = (4,
             "A booked update slot is a wall clock in the customer's own zone, said back on its row in that zone and labelled with it."),
         ["ALDevToolbox/Components/Shared/EnvironmentActivityFeed.razor"] = (2,

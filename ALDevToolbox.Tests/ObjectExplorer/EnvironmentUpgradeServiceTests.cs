@@ -272,6 +272,132 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Changing_the_note_on_a_checked_line_keeps_the_stamp_of_whoever_checked_it()
+    {
+        var (_, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        var lineId = await LineIdAsync(id, envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetCheckedAsync(lineId, true, null);
+        }
+        var checkedAt = _f.Clock.GetUtcNow().UtcDateTime;
+
+        // Later, somebody else on the update team adds what was looked at.
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await ctx.TeamMembers.SingleAsync(m => m.UserId == UpgradeActionTestFixture.PlainTeamUserId)).ManagesUpdates = true;
+            await ctx.SaveChangesAsync();
+        }
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+        _f.ActAs(UpgradeActionTestFixture.PlainTeamUserId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetCheckedAsync(lineId, true, "reports OK");
+        }
+
+        await using var read = _f.Db.NewContext();
+        var line = await read.OeEnvironmentUpgradeLines.AsNoTracking().SingleAsync();
+        line.Note.Should().Be("reports OK");
+        line.CheckedAt.Should().Be(checkedAt);
+        line.CheckedByUserId.Should().Be(UpgradeActionTestFixture.FlagUserId);
+        line.CheckedBy.Should().Contain("Anna Jensen");
+    }
+
+    [Fact]
+    public async Task A_note_on_its_own_leaves_the_tick_as_it_is_stored()
+    {
+        var (_, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        var lineId = await LineIdAsync(id, envId);
+
+        // Nobody has ticked it: a note does not tick it.
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetLineNoteAsync(lineId, "  waiting for the customer  ");
+        }
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var line = await ctx.OeEnvironmentUpgradeLines.AsNoTracking().SingleAsync();
+            line.CheckedAt.Should().BeNull("saving a note must not tick a line");
+            line.Note.Should().Be("waiting for the customer");
+        }
+
+        // Ticked by the flag holder; a colleague's note keeps that stamp.
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetCheckedAsync(lineId, true);
+        }
+        var checkedAt = _f.Clock.GetUtcNow().UtcDateTime;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await ctx.TeamMembers.SingleAsync(m => m.UserId == UpgradeActionTestFixture.PlainTeamUserId)).ManagesUpdates = true;
+            await ctx.SaveChangesAsync();
+        }
+        _f.Clock.Advance(TimeSpan.FromHours(1));
+        _f.ActAs(UpgradeActionTestFixture.PlainTeamUserId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetLineNoteAsync(lineId, "reports OK");
+        }
+
+        await using var read = _f.Db.NewContext();
+        var after = await read.OeEnvironmentUpgradeLines.AsNoTracking().SingleAsync();
+        after.Note.Should().Be("reports OK");
+        after.CheckedAt.Should().Be(checkedAt);
+        after.CheckedByUserId.Should().Be(UpgradeActionTestFixture.FlagUserId);
+    }
+
+    [Fact]
+    public async Task A_tick_on_its_own_keeps_the_stored_note()
+    {
+        var (_, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        var lineId = await LineIdAsync(id, envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetLineNoteAsync(lineId, "posting OK");
+        }
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetCheckedAsync(lineId, true);
+        }
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var line = await ctx.OeEnvironmentUpgradeLines.AsNoTracking().SingleAsync();
+            line.CheckedAt.Should().NotBeNull();
+            line.Note.Should().Be("posting OK");
+        }
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetCheckedAsync(lineId, false);
+        }
+        await using var read = _f.Db.NewContext();
+        var after = await read.OeEnvironmentUpgradeLines.AsNoTracking().SingleAsync();
+        after.CheckedAt.Should().BeNull();
+        after.Note.Should().Be("posting OK");
+    }
+
+    [Fact]
+    public async Task A_note_on_its_own_over_500_characters_is_refused()
+    {
+        var (_, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        var lineId = await LineIdAsync(id, envId);
+        await using var ctx = _f.Db.NewContext();
+
+        var act = () => _f.Upgrades(ctx).SetLineNoteAsync(lineId, new string('x', 501));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Note");
+    }
+
+    [Fact]
     public async Task A_check_note_over_500_characters_is_refused()
     {
         var (_, envId) = await _f.SeedCustomerAsync();
