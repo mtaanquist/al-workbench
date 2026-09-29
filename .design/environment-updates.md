@@ -328,7 +328,9 @@ yet.
 
 > **Status: engine only** ([#984](https://github.com/mtaanquist/al-workbench/issues/984), sub-issue B).
 > `EnvironmentUpgradeService` and `EnvironmentUpgradeLineState` under
-> `Services/ObjectExplorer/Bc/`; no page, palette entry or MCP read yet.
+> `Services/ObjectExplorer/Bc/`; no page yet. The agent surface exists (sub-issue F): the
+> read-only MCP tools `list_planned_upgrades` and `get_upgrade` in `DeliverTools`, and
+> Upgrade as a command-palette result kind (`UpgradePaletteSource`, opening `/upgrades/{id}`).
 
 The flat table is the right tool for ad hoc work and the wrong one for a wave. The team agrees
 the same evening slot with eight customers, starts them at 20:00, and the next morning wants
@@ -920,7 +922,9 @@ Where it differs from the sheet, and why:
   behind a typed confirmation; that is not a surface to hand an agent. The environment
   *reads* of the mirror are the exception, since #912: `list_environments`,
   `get_environment`, `list_environment_history` and `list_upgrades` read what the sweep
-  and Refresh stored, each fact with the time it was read. Sessions and Business
+  and Refresh stored, each fact with the time it was read; `list_planned_upgrades` and
+  `get_upgrade` (#984) read the planned upgrades the same way, and nothing on the agent
+  surface creates, fills, starts or checks one. Sessions and Business
   Central's own operations log stay web-only - they are live reads made with the
   customer's credentials. See `.design/saas-delivery.md`, "MCP parity".
 - **A per-batch table after all, for a different reason (#984).** This bullet used to say there

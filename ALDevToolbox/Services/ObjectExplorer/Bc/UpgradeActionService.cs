@@ -597,7 +597,8 @@ public sealed record UpgradeActionRow(
     /// <summary>The canceller's email, or null.</summary>
     public string? CancelledByEmail => CancelledBy is { Length: > 0 } who ? EmailOf(who) : null;
 
-    private static string NameOf(string actor)
+    /// <summary>The name part of a stored <c>"name &lt;email&gt;"</c> actor string; the whole string when it carries no email.</summary>
+    internal static string NameOf(string actor)
     {
         var bracket = actor.IndexOf(" <", StringComparison.Ordinal);
         return bracket > 0 ? actor[..bracket] : actor;

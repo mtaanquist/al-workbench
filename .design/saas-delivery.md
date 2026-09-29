@@ -1014,6 +1014,16 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   is not on is absent, not locked. `list_upgrades` refuses a caller without the
   environment-updates grant anywhere, as the Upgrades page does, and marks per solution
   whether they may move the date (`UpdateOpsProjectPredicate`).
+- **Planned upgrades are read, never driven (#984).** `list_planned_upgrades` lists the
+  upgrade headers with their derived status and a count per line state (open first; the
+  archive with `includeArchived`, searchable by name and target version), and `get_upgrade`
+  returns one header with every visible line: the environment, its current version and next
+  update as `list_upgrades` shows them, the derived state word, the last action taken from
+  the upgrade, the assignee and the check. Both sit on `EnvironmentUpgradeService`'s own
+  reads, so a line from a solution the caller cannot see is left out of the lines and the
+  counts, and both ask for the environment-updates grant as `list_upgrades` does. Creating an
+  upgrade, adding lines, and every move, start and check stay on the page: the fleet-writes
+  rule in `environment-updates.md` holds for waves as for single rows.
 - **Query additions, not page edits.** Four reads had no page method an agent could use:
   `UpgradeFleetService.ListFleetDetailsAsync` (the fleet with each row's windows, one query
   rather than one per row) and `ListInstalledAppsAsync` (the installed-apps mirror, through
