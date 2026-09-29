@@ -4,6 +4,7 @@
 @implements IDisposable
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService Actions
+@inject ALDevToolbox.Services.ObjectExplorer.Bc.EnvironmentUpgradeService Upgrades
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject ALDevToolbox.Services.ObjectExplorer.ProjectAccess Access
 @inject NavigationManager Nav
@@ -18,9 +19,23 @@
 @using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
 
 @*
-    Upgrades: every customer environment in one table, with the date Business
-    Central will next update it, and the three moves the upgrade team makes in
-    bulk: push the dates out, start the update, and change the version it goes to.
+    Upgrades: the home of planned upgrades (issue #984) - named waves with a target
+    version, a slot and the environments agreed for it - in three views under one
+    head, picked by the address (?view=open|archive|fleet, Open by default):
+
+      Open     the waves being worked, with how far each has got (UpgradesOpenList)
+      Archive  the ones marked done, read-only but for Reopen (UpgradesArchiveList)
+      Fleet    every customer environment in one table, with the date Business
+               Central will next update it, and the moves the upgrade team makes
+               in bulk: push the dates out, start the update, change the version it
+               goes to, and put a selection on an upgrade.
+
+    PageUpgradesList.dc.html is the sheet for the whole page; the Fleet view is
+    PageUpgrades.dc.html drawn embedded. The view switch is ListPage's Views row, so
+    it never moves when the command row under it changes with the view; each view
+    decides the frame's four states for itself. "New upgrade" is the page's one
+    primary, in the head - or, on an Open view with nothing planned, in the empty
+    state instead.
 
     Named user: a member of the BC upgrade team who schedules platform updates
     for around a hundred customers. Twice a quarter they push every customer's
@@ -41,9 +56,11 @@
     bar counts the selection once there is one, says how much of it is off screen,
     and offers Show selected and Clear selection beside the count.
 
-    "Move dates" is this page's one primary: it is what the team comes here to do,
-    a hundred at a time. "Start update..." is irreversible, and its dialog is where that
-    is said - a typed word and a danger button - rather than in the bar.
+    In the Fleet view "Move dates..." is an outline button like the rest, so "New
+    upgrade" stays the page's only primary. "Start update..." is irreversible, and its
+    dialog is where that is said - a typed word and a danger button - rather than in the
+    bar. "Change the next version..." is the first entry of the bar's More menu, so the
+    command row stays one line at 1440px.
 
     Where this page departs from the sheet, and why, is in
     .design/environment-updates.md. See also .design/saas-delivery.md and #657.
@@ -51,18 +68,53 @@
 
 <PageTitle>Upgrades · AL Workbench</PageTitle>
 
-@* The subtitle describes what you do here; someone who can't do it is told
-   that instead, by the card below.
+@* The subtitle says where the waves stand, whichever view is open; someone who
+   can't use the page is told that instead, by the card below.
 
-   Archetype 15 has a sticky .cmdbar where a list has its filter row, so the bar
-   goes in ListPage's Toolbar slot rather than being forced into FilterBar. *@
+   Archetype 15 has a sticky .cmdbar where a list has its filter row, so the Fleet
+   view's bar goes in ListPage's Toolbar slot rather than being forced into
+   FilterBar. The Open and Archive views put a plain FilterBar in the same slot. *@
 <ListPage Title="Upgrades"
-          Subtitle="@(_denied ? string.Empty : "When each solution's environment moves to its next Business Central version, and how much longer you can put that off. Times you book land in the customer's local time.")"
-          IsLoading="@(!_denied && _rows is null)"
-          IsEmpty="@(_denied || (_rows is not null && _totalCount == 0))"
-          HasNoMatches="@(_rows is { Count: 0 })"
+          Subtitle="@HeadSubtitle"
+          IsLoading="@(!_denied && ViewIsLoading)"
+          IsEmpty="@(_denied || ViewIsEmpty)"
+          HasNoMatches="@ViewHasNoMatches"
+          ShowActions="@ShowNewUpgrade"
           Trail='@([new("Home", "/"), new("Solutions", "/solutions"), new("Upgrades")])'>
+    <Actions>
+        <button type="button" class="btn btn--primary" disabled="@Running" @onclick="OpenNewUpgradeAsync">
+            <Icon Name="plus" Width="15" Height="15" />
+            <span>New upgrade</span>
+        </button>
+    </Actions>
+    <Views>
+        @if (!_denied)
+        {
+            @* Scrolls sideways on a phone rather than wrapping under itself. *@
+            <div class="upg-views">
+                <PillTabs AriaLabel="View" Items="ViewTabs()" />
+            </div>
+        }
+    </Views>
+    <Notices>
+        @if (_planNotice is { } planNotice)
+        {
+            <Alert Tone="planNotice.Tone">
+                <span>@planNotice.Text</span>
+                @if (planNotice.LinkHref is { } linkHref)
+                {
+                    <a href="@linkHref">@planNotice.LinkLabel</a>
+                }
+            </Alert>
+        }
+    </Notices>
     <Loading>
+        @if (_view != UpgradesView.Fleet)
+        {
+            @PlannedLoading()
+        }
+        else
+        {
         <div class="upg-scroll">
         <table class="data-table data-table--edge">
             <thead>@TableHead(selectable: false)</thead>
@@ -84,6 +136,7 @@
         </table>
         </div>
         <LoadingBlock Text="Loading environments..." UnderTable="true" />
+        }
     </Loading>
     <Empty>
         @if (_denied)
@@ -97,6 +150,30 @@
                             <span>Go to Home</span>
                         </a>
                     </Action>
+                </EmptyState>
+            </div>
+        }
+        else if (_view == UpgradesView.Open)
+        {
+            <div class="card">
+                <EmptyState Icon="calendar-plus" Title="Nothing planned yet">
+                    <Text>An upgrade is a named wave: a target version, a slot, and the environments you agreed it with. Create one, add the environments, then start them together and tick each one off the morning after.</Text>
+                    <Action>
+                        <button type="button" class="btn btn--primary" @onclick="OpenNewUpgradeAsync">
+                            <Icon Name="plus" Width="15" Height="15" />
+                            <span>New upgrade</span>
+                        </button>
+                    </Action>
+                </EmptyState>
+            </div>
+        }
+        else if (_view == UpgradesView.Archive)
+        {
+            @* No action: an upgrade is marked done from its own page, or from the
+               Open view's row menu, not from here. *@
+            <div class="card">
+                <EmptyState Icon="archive" Title="No upgrade has been marked done yet">
+                    <Text>When an upgrade's environments are updated and checked, mark it done from its page. It moves here, read-only, as the record of what the wave ran over.</Text>
                 </EmptyState>
             </div>
         }
@@ -116,6 +193,12 @@
         }
     </Empty>
     <Toolbar>
+        @if (_view != UpgradesView.Fleet)
+        {
+            @PlannedFilters()
+        }
+        else
+        {
         <div class="cmdbar">
             <div class="cmdbar__row">
                 @* Filters as you type - the fleet is already in hand - and puts the
@@ -171,12 +254,16 @@
                         </button>
                     </div>
                 }
+                @* The sheet's embedded bar (PageUpgrades.dc.html, embedded): every command
+                   outline, because "New upgrade" in the head is the page's one primary;
+                   Refresh as an icon and the version change in More, so the row stays
+                   one line at 1440px. *@
                 <div class="cmdbar__group">
-                    <button type="button" class="btn btn--primary" disabled="@ActionsDisabled"
+                    <button type="button" class="btn" disabled="@ActionsDisabled"
                             title="Move the selected environments to their latest possible update date"
                             @onclick="() => ConfirmPushAsync()">
                         <Icon Name="calendar" Width="15" Height="15" />
-                        <span>Move dates</span>
+                        <span>Move dates...</span>
                     </button>
                     <button type="button" class="btn" disabled="@ActionsDisabled"
                             title="Start the Business Central update on the selected environments, now or at a time you book"
@@ -185,17 +272,25 @@
                         <span>Start update...</span>
                     </button>
                     <button type="button" class="btn" disabled="@ActionsDisabled"
-                            title="Choose which Business Central version the selected environments update to next"
-                            @onclick="() => ConfirmSelectVersionAsync()">
-                        <Icon Name="tag" Width="15" Height="15" />
-                        <span>Change the next version...</span>
+                            title="Put the selected environments on a planned upgrade"
+                            @onclick="OpenAddToUpgradeAsync">
+                        <Icon Name="list-plus" Width="15" Height="15" />
+                        <span>Add to upgrade...</span>
                     </button>
-                    <button type="button" class="btn" disabled="@Running"
+                    <button type="button" class="btn btn--icon" disabled="@Running"
                             title="Read the environments again from Business Central"
                             @onclick="RefreshDataAsync">
                         <Icon Name="refresh-cw" Width="15" Height="15" />
-                        <span class="btn__label">Refresh</span>
+                        <span class="u-sr">Refresh</span>
                     </button>
+                    <RowActions Label="More options" Icon="ellipsis" Small="false">
+                        <button type="button" class="menu__item" role="menuitem" disabled="@ActionsDisabled"
+                                title="Choose which Business Central version the selected environments update to next"
+                                @onclick="() => ConfirmSelectVersionAsync()">
+                            <Icon Name="tag" Width="15" Height="15" Css="menu__icon" />
+                            <span>Change the next version...</span>
+                        </button>
+                    </RowActions>
                 </div>
             </div>
         </div>
@@ -214,19 +309,33 @@
                 }
             </div>
         }
+        }
 
     </Toolbar>
     <NoMatches>
+        @if (_view != UpgradesView.Fleet)
+        {
+            @PlannedNoMatches()
+        }
+        else
+        {
         <div class="card">
             <EmptyState Icon="funnel-x" Title="No environments match these filters">
                 <Text>Try a shorter search, or clear the filters to see all @_totalCount.</Text>
                 <Action>
-                    <a class="btn" href="/upgrades">Clear filters</a>
+                    <a class="btn" href="/upgrades?view=fleet">Clear filters</a>
                 </Action>
             </EmptyState>
         </div>
+        }
     </NoMatches>
     <ChildContent>
+        @if (_view != UpgradesView.Fleet)
+        {
+            @PlannedRows()
+        }
+        else
+        {
         @* A narrow window cannot hold nine columns, and the page's own container
            clips rather than scrolls (#574), so the table gets a box of its own
            to scroll in. *@
@@ -461,8 +570,15 @@
             </tbody>
         </table>
         </div>
+        }
     </ChildContent>
     <Footer>
+        @if (_view != UpgradesView.Fleet)
+        {
+            @PlannedFooter()
+        }
+        else
+        {
         <div class="pager">
             <span class="pager__count">Showing @_rows!.Count of @_totalCount environment@(_totalCount == 1 ? "" : "s")</span>
         </div>
@@ -477,8 +593,22 @@
                 <span>Rows with a padlock belong to a team you're not on, so you can't change their dates.</span>
             </p>
         }
+        }
     </Footer>
 </ListPage>
+
+@* The planned upgrades' own dialogs: making one, putting the ticked environments on
+   one, and the two row-menu confirms. *@
+<NewUpgradeDialog @ref="_newUpgrade" Versions="_offeredVersions" OnCreated="OnUpgradeCreated" />
+<AddToUpgradeDialog @ref="_addToUpgrade" Versions="_offeredVersions" OnAdded="OnAddedToUpgradeAsync" />
+
+@* Mark done names what is still unchecked before anything moves (PageUpgrade.dc.html,
+   the "Mark done" confirm): marking done is never a blind click. *@
+<ConfirmDialog @ref="_doneConfirm" Wide="true" HeadIcon="@(_doneUnchecked.Count > 0 ? "triangle-alert" : null)"
+               ConfirmButtonClass="btn--primary" ConfirmIcon="circle-check">
+    @MarkDoneList()
+</ConfirmDialog>
+<ConfirmDialog @ref="_deleteConfirm" />
 
 @* The three commands' dialogs, and the loop that runs them one environment at a
    time. Shared with an upgrade's own page; this page hands it the rows. *@
@@ -489,6 +619,8 @@
                      OnRunFinished="OnRunFinishedAsync" />
 
 @code {
+    /// <summary>Which view: <c>open</c> (the default), <c>archive</c> or <c>fleet</c>.</summary>
+    [Parameter, SupplyParameterFromQuery(Name = "view")] public string? ViewName { get; set; }
     [Parameter, SupplyParameterFromQuery(Name = "q")] public string? Query { get; set; }
     [Parameter, SupplyParameterFromQuery(Name = "type")] public string? TypeFilter { get; set; }
     [Parameter, SupplyParameterFromQuery(Name = "waiting")] public string? WaitingFilter { get; set; }
@@ -554,15 +686,33 @@
         }
 
         ReadQuery();
-        await LoadAsync();
+        // The view on screen first; the other two only need their counts for the tabs.
+        if (_view == UpgradesView.Fleet) await LoadAsync();
+        await LoadPlannedAsync();
+        if (_view != UpgradesView.Fleet) await CountFleetAsync();
+        _initialised = true;
     }
 
-    protected override void OnParametersSet()
+    /// <summary>True once the first load is done; a view change before then is the first load's to make.</summary>
+    private bool _initialised;
+
+    protected override async Task OnParametersSetAsync()
     {
-        if (_denied) return;
+        if (_denied || !_initialised) return;
+        var was = _view;
         ReadQuery();
+        if (_view != was && Running)
+        {
+            // The tabs are held during a run, but the address can still change (back, a
+            // typed link). The run is using the circuit's database context, so the switch
+            // waits for it to end rather than reading alongside it.
+            _view = was;
+            _viewChangePending = true;
+            return;
+        }
+        if (_view != was) await OnViewChangedAsync(was);
         // Only once the fleet is in hand: the first pass runs before it is loaded.
-        if (_rows is not null) ApplyFilters();
+        else if (_view == UpgradesView.Fleet && _rows is not null) ApplyFilters();
     }
 
     public void Dispose()
@@ -574,6 +724,7 @@
 
     private void ReadQuery()
     {
+        _view = ParseView(ViewName);
         _search = (Query ?? string.Empty).Trim();
         _type = (TypeFilter ?? string.Empty).Trim();
         _onlyWaiting = WaitingFilter == "1";
@@ -612,7 +763,8 @@
     /// </summary>
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (_viewRestored || _denied) return;
+        // Only the Fleet view has a remembered slice; the first time it is shown counts.
+        if (_viewRestored || _denied || _view != UpgradesView.Fleet || _rows is null) return;
         _viewRestored = true;
         if (Query is not null || TypeFilter is not null || WaitingFilter is not null) return;
 
@@ -669,17 +821,20 @@
     /// </summary>
     private void GoToFilters(string type, bool waiting)
     {
-        var parts = new List<string>();
+        // The Fleet view by name: a bare /upgrades is the Open view.
+        var parts = new List<string> { "view=fleet" };
         var search = _search.Trim();
         if (search.Length > 0) parts.Add("q=" + Uri.EscapeDataString(search));
         if (type.Length > 0) parts.Add("type=" + Uri.EscapeDataString(type));
         if (waiting) parts.Add("waiting=1");
-        Nav.NavigateTo(parts.Count == 0 ? "/upgrades" : "/upgrades?" + string.Join("&", parts));
+        Nav.NavigateTo("/upgrades?" + string.Join("&", parts));
     }
 
     private async Task LoadAsync()
     {
         _all = await Fleet.ListFleetAsync();
+        _fleetCount = _all.Count;
+        _offeredVersions = OfferedVersionNames(_all);
         _pending = await Actions.ListPendingAsync();
         // Against the whole fleet, not the rows on screen: a tick the search has
         // hidden is still wanted. A row that has gone, or that is no longer this
@@ -813,10 +968,16 @@
     {
         await LoadAsync();
         _notice = outcome.Notice;
-        foreach (var environmentId in _watch.WatchStarted(outcome.Started))
+        // The watch belongs to the Fleet view: leaving it stops the watch, so a run that
+        // ends with another view on its way must not start one.
+        if (_view == UpgradesView.Fleet && !_viewChangePending)
         {
-            _runner?.ForgetResult(environmentId);
+            foreach (var environmentId in _watch.WatchStarted(outcome.Started))
+            {
+                _runner?.ForgetResult(environmentId);
+            }
         }
+        await ApplyPendingViewAsync();
     }
 
     // ── Refresh ─────────────────────────────────────────────────────────
@@ -890,7 +1051,7 @@
             await InvokeAsync(async () =>
             {
                 // Never while a batch is mid-flight: that run owns the table.
-                if (Running || _denied) return;
+                if (Running || _denied || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true) return;
                 await ReloadNowAsync();
                 StateHasChanged();
             });
@@ -921,7 +1082,9 @@
     protected override void OnInitialized()
     {
         _watch = new UpdateWatch(Connection, Log, InvokeAsync,
-            paused: () => Running || _denied || _runner?.IsDialogOpen == true,
+            // Paused off the Fleet view too: its rows are the fleet's, and leaving the view
+            // stops the watch (a tick already on its way must not read under another view).
+            paused: () => Running || _denied || DialogOpen || _view != UpgradesView.Fleet,
             find: id => _all.FirstOrDefault(r => r.EnvironmentId == id),
             replace: row =>
             {
@@ -942,6 +1105,14 @@
 
     /// <summary>One tick of the watch, for tests that drive it without waiting on the timer.</summary>
     internal Task WatchTickAsync() => _watch.TickAsync();
+
+    /// <summary>
+    /// True while any of the page's dialogs is up: the runner's, and the planned upgrades'
+    /// New and Add, whose saves await the circuit's database context. The watch and the
+    /// refresh poll must not read alongside them.
+    /// </summary>
+    private bool DialogOpen => _runner?.IsDialogOpen == true
+        || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true;
 
     // ── Bookings, the activity feed, and cancelling ─────────────────────
 
@@ -1086,4 +1257,150 @@
         row.FetchedAt is null || DateTime.UtcNow - row.FetchedAt.Value > TimeSpan.FromHours(36);
 
     private static string FirstMessage(PlanValidationException ex) => UpgradeActionRunner.FirstMessage(ex);
+}
+
+@code {
+    // ── The Open and Archive views' markup ──────────────────────────────
+    //
+    // The rows are UpgradesOpenList and UpgradesArchiveList; these are the pieces the
+    // frame asks for around them. The logic is in UpgradesPage.Planned.cs.
+
+    /// <summary>The Open and Archive views before their rows arrive: the columns where they will be, and a line saying so.</summary>
+    private RenderFragment PlannedLoading() => @<text>
+        <table class="data-table upg-plan-skeleton">
+            <thead>
+                <tr>
+                    <th scope="col">Upgrade</th>
+                    <th scope="col">@(_view == UpgradesView.Archive ? "Target" : "Status")</th>
+                    <th scope="col">Environments</th>
+                    <th scope="col">@(_view == UpgradesView.Archive ? "Closed" : "Checked")</th>
+                    <th scope="col">@(_view == UpgradesView.Archive ? "Created by" : "Planned")</th>
+                    <th scope="col" class="data-table__actions"><span class="u-sr">Actions</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                @for (var i = 0; i < 4; i++)
+                {
+                    <tr aria-hidden="true">
+                        <td><span class="skeleton upg-skel upg-skel--wide"></span></td>
+                        <td><span class="skeleton upg-skel upg-skel--pill"></span></td>
+                        <td><span class="skeleton upg-skel"></span></td>
+                        <td><span class="skeleton upg-skel"></span></td>
+                        <td><span class="skeleton upg-skel"></span></td>
+                        <td></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        @* The page reads its own record of the upgrades, not Business Central, so the
+           line says nothing about Business Central (port note on the sheet). *@
+        <LoadingBlock Text="Loading upgrades..." UnderTable="true" />
+    </text>;
+
+    /// <summary>The Open view's search and status filter, or the Archive's search.</summary>
+    private RenderFragment PlannedFilters() => @<div class="upg-plan-filters">
+        @if (_view == UpgradesView.Archive)
+        {
+            <FilterBar>
+                <Search>
+                    <input class="input" type="search" placeholder="Search by name or target version..."
+                           aria-label="Search done upgrades by name or target version"
+                           data-page-search aria-keyshortcuts="F3" title="Search done upgrades (F3)"
+                           @bind="_archiveSearch" @bind:event="oninput" @bind:after="OnArchiveSearch" />
+                </Search>
+            </FilterBar>
+        }
+        else
+        {
+            <FilterBar>
+                <Search>
+                    <input class="input" type="search" placeholder="Search upgrades..."
+                           aria-label="Search open upgrades by name or target version"
+                           data-page-search aria-keyshortcuts="F3" title="Search open upgrades (F3)"
+                           @bind="_openSearch" @bind:event="oninput" />
+                </Search>
+                <ChildContent>
+                    <SelectBox Class="upg-status">
+                        <select class="select" aria-label="Status" @bind="_openStatus">
+                            <option value="">Every status</option>
+                            <option value="@UpgradeStatus.Planned">Planned</option>
+                            <option value="@UpgradeStatus.InProgress">In progress</option>
+                            <option value="@UpgradeStatus.Updated">Updated</option>
+                        </select>
+                    </SelectBox>
+                </ChildContent>
+            </FilterBar>
+        }
+    </div>;
+
+    private RenderFragment PlannedNoMatches() => @<div class="card">
+        <EmptyState Icon="funnel-x" Title="@(_view == UpgradesView.Archive ? "No done upgrades match this search" : "No open upgrades match these filters")">
+            <Text>Try a shorter search, or clear the filters to see all @(_view == UpgradesView.Archive ? _archive?.Count : _open?.Count).</Text>
+            <Action>
+                <button type="button" class="btn" @onclick="ClearPlannedFilters">Clear filters</button>
+            </Action>
+        </EmptyState>
+    </div>;
+
+    private RenderFragment PlannedRows() => @<text>
+        @if (_view == UpgradesView.Archive)
+        {
+            <UpgradesArchiveList Rows="ShownArchive()" OnReopen="ReopenAsync" Busy="_planBusy" />
+        }
+        else
+        {
+            <UpgradesOpenList Rows="ShownOpen()" OnMarkDone="MarkDoneAsync" OnDelete="DeleteUpgradeAsync" Busy="_planBusy" />
+        }
+    </text>;
+
+    private RenderFragment PlannedFooter() => @<text>
+        @if (_view == UpgradesView.Archive)
+        {
+            var all = ShownArchiveAll();
+            var shown = ShownArchive();
+            <div class="pager">
+                <span class="pager__count">@ArchivePagerText(_archivePage, shown.Count, all.Count)</span>
+                @if (all.Count > ArchivePageSize)
+                {
+                    <span class="pager__buttons">
+                        <button type="button" class="btn btn--sm" disabled="@(_archivePage == 0)"
+                                @onclick="() => _archivePage--">Previous</button>
+                        <button type="button" class="btn btn--sm" disabled="@((_archivePage + 1) * ArchivePageSize >= all.Count)"
+                                @onclick="() => _archivePage++">Next</button>
+                    </span>
+                }
+            </div>
+        }
+        else
+        {
+            var shown = ShownOpen().Count;
+            var total = _open?.Count ?? 0;
+            <div class="pager">
+                <span class="pager__count">@(shown == total ? $"{total} open upgrade{(total == 1 ? "" : "s")}" : $"Showing {shown} of {total} open upgrades")</span>
+            </div>
+        }
+    </text>;
+
+    /// <summary>The Mark done confirm's list of what is still unchecked, and where the leftovers go next.</summary>
+    private RenderFragment MarkDoneList() => @<text>
+        @if (_doneUnchecked.Count > 0)
+        {
+            <ul class="upg-done-list">
+                @foreach (var line in _doneUnchecked)
+                {
+                    <li class="upg-done-list__row">
+                        <span class="cell-stack">
+                            <span class="cell-stack__main upg-done-list__name">@line.Environment.ProjectName</span>
+                            <span class="cell-stack__sub">@EnvironmentLabel(line.Environment)</span>
+                        </span>
+                        <StatusPill Tone="@UpgradesListWording.LineStateTone(line.State)">@UpgradesListWording.LineStateWord(line.State)</StatusPill>
+                    </li>
+                }
+            </ul>
+            @if (LeftoversHint(_doneUnchecked) is { } hint)
+            {
+                <p class="upg-done-hint">@hint</p>
+            }
+        }
+    </text>;
 }

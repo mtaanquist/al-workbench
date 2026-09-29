@@ -1,0 +1,71 @@
+/* The Archive view's rows (UpgradesListBody.dc.html, view="archive"), the sheet's
+   widths on a fixed-layout table. */
+
+.upa-table {
+    table-layout: fixed;
+}
+
+.upa-col-name { width: 28%; }
+.upa-col-target { width: 10%; }
+.upa-col-envs { width: 18%; }
+.upa-col-closed { width: 22%; }
+.upa-col-by { width: 16%; }
+.upa-col-menu { width: 52px; }
+
+.upa-name {
+    font-weight: var(--fw-medium);
+}
+
+/* A wave that left environments behind says so in the danger tone. */
+.upa-failed {
+    color: var(--danger-text);
+    font-weight: var(--fw-medium);
+}
+
+/* ── Phone: stacked items instead of the table ───────────────────────── */
+
+.upa-cards {
+    display: none;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+}
+
+.upa-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px var(--space-3);
+    padding: var(--space-3);
+    border-bottom: 1px solid var(--border);
+}
+
+.upa-card:last-child {
+    border-bottom: 0;
+}
+
+.upa-card__head {
+    padding: 0;
+}
+
+.upa-card__name {
+    font-weight: var(--fw-semibold);
+}
+
+.upa-card__menu ::deep .btn {
+    width: 44px;
+    height: 44px;
+    margin: -10px -10px 0 0;
+}
+
+@media (max-width: 700px) {
+    .upa-table {
+        display: none;
+    }
+
+    .upa-cards {
+        display: block;
+    }
+}

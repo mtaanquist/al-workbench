@@ -1,0 +1,95 @@
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+
+@*
+    The Upgrades page's Archive view, populated (UpgradesListBody.dc.html,
+    view="archive"): the upgrades marked done, most recently closed first, read-only.
+    The row menu opens one or takes it back out of the archive; there is no selection
+    and no primary, because nothing here is worked on.
+
+    The table from 700px up, stacked items under it, as the Open view does.
+*@
+
+<table class="data-table upa-table">
+    <thead>
+        <tr>
+            <th scope="col" class="upa-col-name">Upgrade</th>
+            <th scope="col" class="upa-col-target">Target</th>
+            <th scope="col" class="upa-col-envs">Environments</th>
+            <th scope="col" class="upa-col-closed">Closed</th>
+            <th scope="col" class="upa-col-by">Created by</th>
+            <th scope="col" class="data-table__actions upa-col-menu"><span class="u-sr">Actions</span></th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var a in Rows)
+        {
+            <tr @key="a.Id">
+                <td><a class="upa-name" href="@Href(a)">@a.Name</a></td>
+                <td class="u-num">@a.TargetVersion</td>
+                <td>
+                    <span class="cell-stack">
+                        <span class="cell-stack__main">@EnvironmentCount(a)</span>
+                        @if (Failed(a) > 0)
+                        {
+                            <span class="cell-stack__sub upa-failed">@Failed(a) failed</span>
+                        }
+                    </span>
+                </td>
+                <td>
+                    <span class="cell-stack">
+                        <span class="cell-stack__main"><Timestamp Value="@a.ClosedAt" Format="ddd d MMM" /></span>
+                        <span class="cell-stack__sub">by @PersonName(a.ClosedBy)</span>
+                    </span>
+                </td>
+                <td>
+                    <span class="cell-stack">
+                        <span class="cell-stack__main">@PersonName(a.CreatedBy)</span>
+                        <span class="cell-stack__sub"><Timestamp Value="@a.CreatedAt" Format="d MMM" /></span>
+                    </span>
+                </td>
+                <td class="data-table__actions">@Menu(a)</td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+<ul class="upa-cards" aria-label="Done upgrades">
+    @foreach (var a in Rows)
+    {
+        <li class="upa-card" @key="a.Id">
+            <span class="cell-stack upa-card__head">
+                <a class="cell-stack__main upa-card__name" href="@Href(a)">@a.Name</a>
+                <span class="cell-stack__sub">to @a.TargetVersion - @EnvironmentCount(a)@if (Failed(a) > 0) { <text>, </text><span class="upa-failed">@Failed(a) failed</span> }</span>
+                <span class="cell-stack__sub">Closed <Timestamp Value="@a.ClosedAt" Format="ddd d MMM" /> by @PersonName(a.ClosedBy)</span>
+            </span>
+            <span class="upa-card__menu">@Menu(a)</span>
+        </li>
+    }
+</ul>
+
+@code {
+    /// <summary>The page of done upgrades to show.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<EnvironmentUpgradeSummary> Rows { get; set; } = [];
+
+    /// <summary>Row menu: Reopen. The page reports a refusal as a notice.</summary>
+    [Parameter] public EventCallback<EnvironmentUpgradeSummary> OnReopen { get; set; }
+
+    [Parameter] public bool Busy { get; set; }
+
+    private static string Href(EnvironmentUpgradeSummary a) => $"/upgrades/{a.Id}";
+
+    private RenderFragment Menu(EnvironmentUpgradeSummary a) => @<RowActions Label="@($"Actions for {a.Name}")">
+        <a class="menu__item" role="menuitem" href="@Href(a)">Open</a>
+        <button type="button" class="menu__item" role="menuitem" disabled="@Busy"
+                @onclick="() => OnReopen.InvokeAsync(a)">Reopen</button>
+    </RowActions>;
+
+    private static int Failed(EnvironmentUpgradeSummary a) => a.Count(UpgradeLineState.Failed);
+
+    private static string EnvironmentCount(EnvironmentUpgradeSummary a) =>
+        a.LineCount == 1 ? "1 environment" : $"{a.LineCount} environments";
+
+    private static string PersonName(string? actor) =>
+        string.IsNullOrEmpty(actor) ? "someone" : UpgradeActionRow.NameOf(actor);
+}

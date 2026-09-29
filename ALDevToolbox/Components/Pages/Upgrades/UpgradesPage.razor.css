@@ -99,10 +99,11 @@
     min-width: 13rem;
 }
 
-/* The view select's width, from the sheet. */
+/* The view select's width, from the sheet's embedded bar: narrower than the
+   standalone page's 230px, so the command row stays one line at 1440px. */
 /* ::deep: the wrapper is rendered by SelectBox, outside this file's scope. */
 ::deep .upg-view {
-    width: 230px;
+    width: 190px;
 }
 
 /* The link drops onto its own line rather than stealing width from the sentence
@@ -384,4 +385,100 @@ a.cell-stack__main {
     font-weight: var(--fw-medium);
     color: var(--ink-2);
     white-space: nowrap;
+}
+
+/* ── The Open and Archive views, and the page-wide parts ─────────────────── */
+
+/* The view switch on its own row under the head. On a phone it scrolls sideways
+   rather than wrapping under itself (UpgradesListBody.dc.html). */
+.upg-views {
+    overflow-x: auto;
+}
+
+.upg-views ::deep .pill-tabs {
+    width: max-content;
+}
+
+/* A plain grid item, so the filter bar inside keeps its place in the page's rhythm. */
+.upg-plan-filters {
+    display: grid;
+}
+
+/* The Open view's status filter, the sheet's width. */
+.upg-plan-filters ::deep .upg-status {
+    width: 170px;
+}
+
+/* On a phone the Open view's filter is the search alone, as the sheet draws it. */
+@media (max-width: 700px) {
+    .upg-plan-filters ::deep .upg-status {
+        display: none;
+    }
+}
+
+/* The loading skeleton's columns, the Open table's widths. */
+.upg-plan-skeleton {
+    table-layout: fixed;
+}
+
+.upg-skel {
+    display: block;
+    width: 60%;
+}
+
+.upg-skel--wide {
+    width: 75%;
+}
+
+.upg-skel--pill {
+    width: 70px;
+    height: 18px;
+}
+
+/* Mark done: the unchecked lines, in a sunken box under the sentence. */
+.upg-done-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-control);
+}
+
+.upg-done-list__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+}
+
+.upg-done-list__row:last-child {
+    border-bottom: 0;
+}
+
+.upg-done-list__name {
+    font-size: var(--text-sm);
+    font-weight: var(--fw-medium);
+}
+
+.upg-done-hint {
+    margin: var(--space-3) 0 0;
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+}
+
+/* On a phone the command group wraps inside itself. Kept on one line it was wider
+   than the screen, and since the page clips rather than scrolls sideways (#574) the
+   commands at its end - and the head's New upgrade, pushed out with them - were cut
+   off. */
+@media (max-width: 700px) {
+    .cmdbar__group {
+        flex-wrap: wrap;
+    }
+
+    .upg-search {
+        max-width: none;
+    }
 }

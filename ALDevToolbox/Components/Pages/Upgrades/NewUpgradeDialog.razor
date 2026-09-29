@@ -1,0 +1,223 @@
+@using System.Globalization
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@inject EnvironmentUpgradeService Upgrades
+@inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+
+@*
+    "New upgrade" (PageUpgradesList.dc.html, the dialog section): a name, the version
+    the wave goes to, the slot the team has in mind and a note. Only the name and the
+    version are required; environments are added from the upgrade's own page or from
+    the Fleet view, so the dialog stays four fields.
+
+    The version list is what Business Central offers the fleet right now, newest first,
+    so the usual choice is one click; "Another version..." takes a typed one for a wave
+    planned before Microsoft has offered it. The slot is read in the organisation's
+    display zone - the zone every other time on the page is in - and stored UTC.
+
+    The service is the rule (EnvironmentUpgradeService.CreateAsync); the attributes
+    here mirror it so most mistakes are caught before the click, and whatever it still
+    refuses comes back beside the field it is about.
+*@
+
+@if (_open)
+{
+    <div class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="nu-title"
+         tabindex="-1" @onkeydown="OnKeyDown">
+        <div class="modal-backdrop" @onclick="Cancel" aria-hidden="true"></div>
+        <div class="confirm-dialog confirm-dialog--wide" @onclick:stopPropagation>
+            <div class="confirm-dialog__head">
+                <span class="confirm-dialog__icon" aria-hidden="true">
+                    <Icon Name="calendar" Width="17" Height="17" />
+                </span>
+                <h2 id="nu-title" class="confirm-dialog__title">New upgrade</h2>
+            </div>
+            <form class="confirm-dialog__body nu-body" @onsubmit="CreateAsync" @onsubmit:preventDefault novalidate>
+                <div class="field @(Has("Name") ? "field--invalid" : "")">
+                    <label class="field__label" for="nu-name">Name <span class="req">*</span></label>
+                    <input id="nu-name" class="input" type="text" required
+                           maxlength="@EnvironmentUpgradeService.NameMaxLength"
+                           placeholder="e.g. 28.5 in November 2026" autocomplete="off"
+                           @bind="_name" @bind:event="oninput" disabled="@_saving" @ref="_nameInput" />
+                    <FieldError Field="Name" Errors="_errors" />
+                </div>
+
+                <div class="field @(Has("TargetVersion") ? "field--invalid" : "")">
+                    <label class="field__label" for="nu-target">Target version <span class="req">*</span></label>
+                    <TargetVersionInput Id="nu-target" Versions="Versions" @bind-Value="_target" Disabled="_saving" />
+                    <FieldError Field="TargetVersion" Errors="_errors" />
+                </div>
+
+                <div class="field @(Has("Slot") ? "field--invalid" : "")">
+                    <span class="field__label" id="nu-slot-label">Planned slot</span>
+                    <span class="nu-slot" role="group" aria-labelledby="nu-slot-label">
+                        <input class="input" type="date" aria-label="Planned date"
+                               value="@_date" @oninput="e => _date = e.Value?.ToString() ?? string.Empty" disabled="@_saving" />
+                        <input class="input" type="time" aria-label="Planned time"
+                               value="@_time" @oninput="e => _time = e.Value?.ToString() ?? string.Empty" disabled="@_saving" />
+                    </span>
+                    <small class="field__hint">Optional. The time is in @ZoneName. Nothing is booked until you start the update.</small>
+                    <FieldError Field="Slot" Errors="_errors" />
+                </div>
+
+                <div class="field @(Has("Note") ? "field--invalid" : "")">
+                    <label class="field__label" for="nu-note">Note</label>
+                    <textarea id="nu-note" class="textarea" maxlength="@EnvironmentUpgradeService.NoteMaxLength"
+                              placeholder="e.g. Agreed with the customers on the September call."
+                              @bind="_note" disabled="@_saving"></textarea>
+                    <FieldError Field="Note" Errors="_errors" />
+                </div>
+
+                @if (_failure is { } failure)
+                {
+                    <FieldError Message="@failure" />
+                }
+
+                @* A submit button inside the form, hidden, so Enter in the name creates;
+                   the visible one sits in the actions row where every dialog keeps it. *@
+                <button type="submit" class="u-sr" tabindex="-1" aria-hidden="true">Create upgrade</button>
+            </form>
+            <div class="confirm-dialog__actions">
+                <button type="button" class="btn" @onclick="Cancel" disabled="@_saving">Cancel</button>
+                <button type="button" class="btn btn--primary" @onclick="CreateAsync" disabled="@_saving">
+                    @if (_saving)
+                    {
+                        <span class="spinner"></span>
+                        <span>Creating...</span>
+                    }
+                    else
+                    {
+                        <Icon Name="plus" Width="14" Height="14" />
+                        <span>Create upgrade</span>
+                    }
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>The versions Business Central offers the fleet, as major.minor, newest first.</summary>
+    [Parameter] public IReadOnlyList<string> Versions { get; set; } = [];
+
+    /// <summary>Raised with the new upgrade's id once it exists.</summary>
+    [Parameter] public EventCallback<int> OnCreated { get; set; }
+
+    private bool _open;
+    private bool _saving;
+    private bool _needsFocus;
+    private string _name = string.Empty;
+    private string _target = string.Empty;
+    // Kept as the text the browser sends ("2026-11-12", "20:00" or "20:00:00"): a time
+    // field sends seconds only when it shows them, and a typed binding that expects
+    // them drops the value without a word.
+    private string _date = string.Empty;
+    private string _time = string.Empty;
+    private string _note = string.Empty;
+    private Dictionary<string, string> _errors = new();
+    private string? _failure;
+    private ElementReference _nameInput;
+
+    private bool Has(string field) => _errors.ContainsKey(field);
+
+    /// <summary>True while the dialog is up; the page holds its timers while it is.</summary>
+    public bool IsOpen => _open;
+
+    private string ZoneName => Zone.Zone.Id == TimeZoneInfo.Utc.Id ? "UTC" : Zone.Zone.Id;
+
+    /// <summary>Opens the dialog empty, with the newest offered version picked.</summary>
+    public async Task OpenAsync()
+    {
+        await Zone.EnsureLoadedAsync();
+        _name = string.Empty;
+        _target = Versions.Count > 0 ? Versions[0] : string.Empty;
+        _date = string.Empty;
+        _time = string.Empty;
+        _note = string.Empty;
+        _errors = new();
+        _failure = null;
+        _saving = false;
+        _open = true;
+        _needsFocus = true;
+        StateHasChanged();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_needsFocus || !_open) return;
+        _needsFocus = false;
+        try { await _nameInput.FocusAsync(); }
+        catch { /* closed before the render landed, or no browser (tests) */ }
+    }
+
+    private void Cancel()
+    {
+        if (_saving) return;
+        _open = false;
+    }
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") Cancel();
+    }
+
+    /// <summary>
+    /// The slot as a UTC instant, or null when none was given. A date without a time (or
+    /// the other way round) is not a slot, so it is said back rather than guessed at.
+    /// </summary>
+    private DateTimeOffset? Slot(Dictionary<string, string> errors)
+    {
+        var hasDate = !string.IsNullOrWhiteSpace(_date);
+        var hasTime = !string.IsNullOrWhiteSpace(_time);
+        if (!hasDate && !hasTime) return null;
+        if (!hasDate || !hasTime
+            || !DateOnly.TryParse(_date, CultureInfo.InvariantCulture, out _)
+            || !TimeOnly.TryParse(_time, CultureInfo.InvariantCulture, out _))
+        {
+            errors["Slot"] = "Pick both a date and a time, or clear both.";
+            return null;
+        }
+        // Read as a wall clock in the display zone, the same way every time typed into
+        // this app is (DisplayTimeZone.ParseInput), including the spring-forward gap.
+        var utc = Zone.ParseInput($"{_date.Trim()}T{_time.Trim()}");
+        return utc is null ? null : new DateTimeOffset(DateTime.SpecifyKind(utc.Value, DateTimeKind.Utc));
+    }
+
+    private async Task CreateAsync()
+    {
+        if (_saving) return;
+        _failure = null;
+        var errors = new Dictionary<string, string>();
+        var slot = Slot(errors);
+        // The service's own rules are checked there too; asking first means one round
+        // trip reports the slot and the rest together.
+        if (string.IsNullOrWhiteSpace(_name)) errors["Name"] = "Give the upgrade a name, e.g. 28.5 in November 2026.";
+        if (string.IsNullOrWhiteSpace(_target)) errors["TargetVersion"] = "Choose the Business Central version the upgrade goes to, e.g. 28.5.";
+        if (errors.Count > 0)
+        {
+            _errors = errors;
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var id = await Upgrades.CreateAsync(_name, _target, slot, _note);
+            _open = false;
+            await OnCreated.InvokeAsync(id);
+        }
+        catch (PlanValidationException ex)
+        {
+            _errors = new Dictionary<string, string>(ex.Errors);
+            if (!ex.Errors.Keys.Any(k => k is "Name" or "TargetVersion" or "Note"))
+            {
+                _failure = ex.Errors.Values.FirstOrDefault();
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+}

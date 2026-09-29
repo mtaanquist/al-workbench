@@ -1,0 +1,59 @@
+@using ALDevToolbox.Components.Shared
+
+@*
+    The target version of a planned upgrade, for the two dialogs that make one (New
+    upgrade, and New upgrade inside "Add to upgrade..."). The versions Business Central
+    offers the fleet come first, newest first, so the usual answer is one pick; "Another
+    version..." opens a box for one it has not offered yet - a wave is often planned
+    before Microsoft offers the release. With nothing offered at all it is just the box.
+
+    The box's pattern mirrors the service's rule (major.minor, e.g. 28.5).
+*@
+
+@if (Versions.Count > 0)
+{
+    <SelectBox>
+        <select id="@Id" class="select" required disabled="@Disabled" @onchange="OnPicked">
+            @foreach (var version in Versions)
+            {
+                <option value="@version" selected="@(!_other && version == Value)">@version</option>
+            }
+            <option value="@OtherValue" selected="@_other">Another version...</option>
+        </select>
+    </SelectBox>
+}
+@if (Versions.Count == 0 || _other)
+{
+    <input id="@(Versions.Count == 0 ? Id : Id + "-other")" class="input tvi-other" type="text" required
+           inputmode="decimal" pattern="\d{1,4}\.\d{1,4}" maxlength="9"
+           placeholder="e.g. 28.5" autocomplete="off" disabled="@Disabled"
+           aria-label="@(Versions.Count == 0 ? null : "Version, as major.minor")"
+           value="@Value" @oninput="OnTyped" />
+}
+
+@code {
+    private const string OtherValue = "__other";
+
+    [Parameter] public string? Id { get; set; }
+    [Parameter] public IReadOnlyList<string> Versions { get; set; } = [];
+    [Parameter] public string Value { get; set; } = string.Empty;
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+
+    private bool _other;
+
+    protected override void OnParametersSet()
+    {
+        // A value that is not one of the offered versions can only have been typed.
+        if (Versions.Count > 0 && Value.Length > 0 && !Versions.Contains(Value)) _other = true;
+    }
+
+    private async Task OnPicked(ChangeEventArgs e)
+    {
+        var picked = e.Value?.ToString() ?? string.Empty;
+        _other = picked == OtherValue;
+        await ValueChanged.InvokeAsync(_other ? string.Empty : picked);
+    }
+
+    private Task OnTyped(ChangeEventArgs e) => ValueChanged.InvokeAsync(e.Value?.ToString()?.Trim() ?? string.Empty);
+}

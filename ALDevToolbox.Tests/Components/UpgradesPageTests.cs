@@ -51,6 +51,7 @@ public sealed class UpgradesPageTests : IDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<UpgradeFleetService>();
         _ctx.Services.AddScoped<UpgradeActionService>();
+        _ctx.Services.AddScoped<EnvironmentUpgradeService>();
         _ctx.Services.AddScoped<ProjectConnectionService>();
         _ctx.Services.AddSingleton<IBcAdminClient>(new UnreachableAdminClient());
         _ctx.Services.AddSingleton<IBcAppManagementClient>(new UnreachableAppManagementClient());
@@ -121,9 +122,21 @@ public sealed class UpgradesPageTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
+    /// <summary>
+    /// The page on its Fleet view. A bare /upgrades opens on the planned upgrades now
+    /// (#984), and this class is about the fleet table, so every render names the view -
+    /// on top of whatever address the test has already set.
+    /// </summary>
+    private IRenderedComponent<UpgradesPage> RenderFleet()
+    {
+        var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        nav.NavigateTo(nav.GetUriWithQueryParameter("view", "fleet"));
+        return _ctx.Render<UpgradesPage>();
+    }
+
     private IRenderedComponent<UpgradesPage> RenderWithOneRow()
     {
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(1));
         return cut;
     }
@@ -147,7 +160,7 @@ public sealed class UpgradesPageTests : IDisposable
             await ctx.SaveChangesAsync();
         }
 
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
 
         cut.WaitForAssertion(() => cut.FindAll(".empty-state").Should().NotBeEmpty());
         cut.FindAll(".data-table tbody tr").Should().BeEmpty();
@@ -188,9 +201,9 @@ public sealed class UpgradesPageTests : IDisposable
         _ctx.JSInterop.Setup<string?>("sessionStorage.getItem", "aldt-upgrades-view").SetResult("0Production");
         var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
 
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
 
-        cut.WaitForAssertion(() => nav.Uri.Should().EndWith("/upgrades?type=Production"));
+        cut.WaitForAssertion(() => nav.Uri.Should().EndWith("/upgrades?view=fleet&type=Production"));
     }
 
     [Fact]
@@ -199,10 +212,11 @@ public sealed class UpgradesPageTests : IDisposable
         await SeedOneEnvironmentAsync();
         _ctx.JSInterop.Setup<string?>("sessionStorage.getItem", "aldt-upgrades-view").SetResult("0Production");
         var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        nav.NavigateTo(nav.GetUriWithQueryParameter("view", "fleet"));
         nav.NavigateTo(nav.GetUriWithQueryParameter("waiting", "1"));
         var before = nav.Uri;
 
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table").Should().NotBeEmpty());
 
         nav.Uri.Should().Be(before, "a link somebody sent shows what they meant it to show");
@@ -250,15 +264,20 @@ public sealed class UpgradesPageTests : IDisposable
         cut.Find(".cmdbar .cmdbar__row > .search + .cmdbar__group select").Should().NotBeNull();
         cut.FindAll(".filter-bar").Should().BeEmpty();
 
-        var commands = cut.FindAll(".cmdbar .cmdbar__group:last-child button");
+        // The embedded bar (PageUpgrades.dc.html, embedded): the version change is the
+        // first entry of More, so the row stays one line; Refresh is an icon.
+        var commands = cut.FindAll(".cmdbar .cmdbar__group:last-child > button");
         commands.Select(c => c.TextContent.Trim()).Should().Equal(
-            "Move dates", "Start update...", "Change the next version...", "Refresh");
+            "Move dates...", "Start update...", "Add to upgrade...", "Refresh");
         commands[0].HasAttribute("disabled").Should().BeTrue();
         commands[1].HasAttribute("disabled").Should().BeTrue();
         commands[2].HasAttribute("disabled").Should().BeTrue();
         commands[3].HasAttribute("disabled").Should().BeFalse();
-        // The page's one primary.
-        cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Trim().Should().Be("Move dates");
+        var more = cut.FindAll(".cmdbar .ra__menu .menu__item");
+        more.Select(i => i.TextContent.Trim()).First().Should().Be("Change the next version...");
+        more[0].HasAttribute("disabled").Should().BeTrue();
+        // The page's one primary is New upgrade, in the head, on every view.
+        cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Trim().Should().Be("New upgrade");
 
         cut.Find("tbody .data-table__col-check input").Change(true);
 
@@ -337,7 +356,7 @@ public sealed class UpgradesPageTests : IDisposable
         await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
         await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
 
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
 
         cut.Find(".cmdbar__search input").Input("CRONUS ");
@@ -362,7 +381,7 @@ public sealed class UpgradesPageTests : IDisposable
         await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
         UpgradesPage.SearchDebounce = TimeSpan.FromMilliseconds(300);
 
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
 
         cut.Find(".cmdbar__search input").Input("f");
@@ -389,7 +408,7 @@ public sealed class UpgradesPageTests : IDisposable
         await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production", shortName: "CRD");
         await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
 
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
 
         var shortName = cut.Find("td.upg-customer .sol-list__short");
@@ -426,7 +445,7 @@ public sealed class UpgradesPageTests : IDisposable
         await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production", shortName: "CRD");
         await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production", shortName: "FAB");
 
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
         cut.FindAll(".upg-picked__count").Should().BeEmpty("nothing is ticked yet");
 
@@ -440,7 +459,7 @@ public sealed class UpgradesPageTests : IDisposable
             cut.FindAll(".data-table tbody tr").Should().ContainSingle()
                 .Which.TextContent.Should().Contain("Fabrikam Norway");
             PickedCount(cut).Should().Be("1 selected, 0 shown");
-            BarButton(cut, "Move dates").HasAttribute("disabled").Should().BeFalse(
+            BarButton(cut, "Move dates...").HasAttribute("disabled").Should().BeFalse(
                 "the tick the search hid is still a selection to act on");
         });
 
@@ -451,7 +470,7 @@ public sealed class UpgradesPageTests : IDisposable
         cut.WaitForAssertion(() => PickedCount(cut).Should().Be("1 selected, 0 shown"));
 
         // The command names the hidden customer before it sends anything.
-        BarButton(cut, "Move dates").Click();
+        BarButton(cut, "Move dates...").Click();
         cut.WaitForAssertion(() =>
             cut.FindAll(".confirm-dialog .upg-preview__who").Select(w => w.TextContent.Trim())
                 .Should().ContainSingle().Which.Should().StartWith("CRONUS Denmark - Production"));
@@ -473,7 +492,7 @@ public sealed class UpgradesPageTests : IDisposable
             cut.FindAll(".upg-picked__count").Should().BeEmpty();
             cut.FindAll(".data-table tbody tr").Should().ContainSingle()
                 .Which.TextContent.Should().Contain("Fabrikam Norway", "the search is still in the box");
-            BarButton(cut, "Move dates").HasAttribute("disabled").Should().BeTrue();
+            BarButton(cut, "Move dates...").HasAttribute("disabled").Should().BeTrue();
         });
     }
 
@@ -486,7 +505,7 @@ public sealed class UpgradesPageTests : IDisposable
         await SeedFleetEnvironmentAsync("CRONUS Denmark", "Production");
         await SeedFleetEnvironmentAsync("Fabrikam Norway", "Production");
 
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
         cut.Find("thead .data-table__col-check input").Change(true);
         cut.WaitForAssertion(() => PickedCount(cut).Should().Be("2 selected"));
@@ -533,19 +552,23 @@ public sealed class UpgradesPageTests : IDisposable
             nextVersion: "29.2", offered: ["29.2"], nextStatus: "Running");
     }
 
+    /// <summary>"Change the next version..." - the first entry of the bar's More menu.</summary>
+    private static AngleSharp.Dom.IElement ChangeVersionCommand(IRenderedComponent<UpgradesPage> cut) =>
+        cut.FindAll(".cmdbar .ra__menu .menu__item").First(i => i.TextContent.Trim() == "Change the next version...");
+
     private IRenderedComponent<UpgradesPage> OpenVersionDialog(int rows)
     {
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(rows));
 
         cut.WaitForAssertion(() =>
         {
             cut.Find("thead .data-table__col-check input").Change(true);
-            cut.FindAll(".cmdbar .cmdbar__group:last-child button")[2].HasAttribute("disabled").Should().BeFalse();
+            ChangeVersionCommand(cut).HasAttribute("disabled").Should().BeFalse();
         });
         cut.WaitForAssertion(() =>
         {
-            cut.FindAll(".cmdbar .cmdbar__group:last-child button")[2].Click();
+            ChangeVersionCommand(cut).Click();
             cut.Find(".confirm-dialog__title").TextContent.Should().Be("Change the next version?");
         });
         return cut;
@@ -933,7 +956,7 @@ public sealed class UpgradesPageTests : IDisposable
         await SeedConnectedAsync("Upgrading", count: 12);
         var admin = new WatchAdminClient { Status = "Upgrading", Updates = [NextUpdate("Running")] };
         UseBusinessCentral(admin);
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.Instance.WatchedEnvironmentIds.Should().HaveCount(12));
 
         await cut.InvokeAsync(() => cut.Instance.WatchTickAsync());

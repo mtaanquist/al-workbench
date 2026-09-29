@@ -1,0 +1,150 @@
+/* "Add to upgrade..." (UpgradePicker.dc.html, mode="add"). */
+
+.atu-title {
+    display: grid;
+    gap: 2px;
+}
+
+.atu-title__sub {
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+}
+
+.atu-body {
+    display: grid;
+    gap: var(--space-4);
+    overflow: auto;
+}
+
+.atu-group {
+    display: grid;
+    gap: var(--space-2);
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+/* The design system's .section-label, without its margin, as the sheet has it -
+   as a legend and as a plain label alike. */
+.atu-label {
+    margin: 0;
+    padding: 0;
+}
+
+.atu-choices,
+.atu-envs {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: 1px solid var(--border);
+    border-radius: var(--r-control);
+}
+
+/* One radio row: the dot, the upgrade over its target and slot, its size. */
+.atu-choice {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+    align-items: start;
+    gap: var(--space-3);
+    min-height: 44px;
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+}
+
+.atu-choice--new {
+    grid-template-columns: 18px minmax(0, 1fr);
+    border-bottom: 0;
+}
+
+.atu-choice.is-picked {
+    background: var(--primary-weak);
+}
+
+.atu-choice .check__dot {
+    margin-top: 2px;
+}
+
+.atu-choice__text {
+    padding: 0;
+}
+
+.atu-choice__name {
+    color: var(--ink);
+    font-weight: var(--fw-medium);
+}
+
+.atu-choice__count {
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+    white-space: nowrap;
+}
+
+/* The new upgrade's name and target, inline under its radio, indented to its text. */
+.atu-new {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 140px;
+    gap: var(--space-2);
+    padding: 0 var(--space-3) var(--space-3) calc(var(--space-3) * 2 + 18px);
+    background: var(--primary-weak);
+}
+
+@media (max-width: 700px) {
+    .atu-new {
+        grid-template-columns: minmax(0, 1fr);
+        padding-left: var(--space-3);
+    }
+}
+
+.atu-env {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+}
+
+.atu-env:last-child {
+    border-bottom: 0;
+}
+
+.atu-env__icon {
+    margin-top: 2px;
+}
+
+.atu-env__icon--ok {
+    color: var(--success-text);
+}
+
+.atu-env__icon--muted {
+    color: var(--ink-4);
+}
+
+.atu-env__icon--warn {
+    color: var(--warning-text);
+}
+
+.atu-env__text {
+    padding: 0;
+}
+
+.atu-env__name {
+    font-size: var(--text-sm);
+    color: var(--ink);
+}
+
+.atu-env--out .atu-env__name {
+    color: var(--ink-3);
+}
+
+.atu-env__why {
+    color: var(--warning-text);
+    font-weight: var(--fw-medium);
+}
+
+.atu-none {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--ink-2);
+}

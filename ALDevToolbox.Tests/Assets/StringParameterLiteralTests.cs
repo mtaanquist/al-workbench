@@ -60,7 +60,9 @@ public sealed class StringParameterLiteralTests
             foreach (Match tag in Regex.Matches(text, @"<(?<c>[A-Z]\w+)\b(?<a>(?:[^>""]|""[^""]*"")*?)/?>", RegexOptions.Singleline))
             {
                 if (!stringParams.TryGetValue(tag.Groups["c"].Value, out var declared)) continue;
-                foreach (Match attr in Regex.Matches(tag.Groups["a"].Value, @"(?<n>\w+)\s*=\s*""(?<v>[^""]*)"""))
+                // Not the tail of a directive attribute: in @bind-Value="_field" the bare
+                // field is exactly right - @bind- takes an expression, not a string.
+                foreach (Match attr in Regex.Matches(tag.Groups["a"].Value, @"(?<![\w@:-])(?<n>\w+)\s*=\s*""(?<v>[^""]*)"""))
                 {
                     var value = attr.Groups["v"].Value.Trim();
                     if (!declared.Contains(attr.Groups["n"].Value)) continue;

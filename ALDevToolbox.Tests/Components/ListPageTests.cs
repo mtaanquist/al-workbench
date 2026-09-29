@@ -158,6 +158,32 @@ public sealed class ListPageTests : IDisposable
             because: "a page with a bar of its own and no filters must not get an empty filter row too");
     }
 
+    /// <summary>
+    /// A list with views (Upgrades: Open, Archive, Fleet) has its switch on a row of its
+    /// own straight under the head - before the notices and the filter row - and in every
+    /// state, because the view that is loading or empty is the one somebody may want to
+    /// switch away from.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void The_view_switch_sits_under_the_head_in_every_state(bool loading, bool empty)
+    {
+        var cut = _ctx.Render<ListPage>(p => p
+            .Add(c => c.Title, "Upgrades")
+            .Add(c => c.IsLoading, loading)
+            .Add(c => c.IsEmpty, empty)
+            .Add(c => c.Views, Html("<nav id=\"views\" class=\"pill-tabs\"></nav>"))
+            .Add(c => c.Notices, Html("<p id=\"notice\"></p>"))
+            .Add(c => c.Search, Html("<input class=\"input\" type=\"search\" />"))
+            .Add(c => c.Empty, Html("<div id=\"empty\"></div>"))
+            .Add(c => c.ChildContent, Html("<table id=\"rows\"></table>")));
+
+        var order = cut.Find("div.page").Children.Select(Name).ToList();
+        order.Take(3).Should().Equal("page-head", "views", "notice");
+    }
+
     [Fact]
     public void Sticky_is_passed_to_the_head()
     {

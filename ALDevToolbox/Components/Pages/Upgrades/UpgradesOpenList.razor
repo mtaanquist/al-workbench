@@ -1,0 +1,202 @@
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+
+@*
+    The Upgrades page's Open view, populated (UpgradesListBody.dc.html, view="open"):
+    one row per open upgrade with its status, how far each of its environments has got,
+    how many have been checked, when it is planned and who made it. The page owns the
+    frame, the states and the dialogs; this draws the rows and hands the row menu's two
+    moves back to it.
+
+    Two layouts from one list: the table from 700px up, and under that the sheet's
+    stacked items - status and the breakdown on one line, Checked keeping its bar -
+    because six columns do not survive a phone.
+*@
+
+<table class="data-table upl-table">
+    <thead>
+        <tr>
+            <th scope="col" class="upl-col-name">Upgrade</th>
+            <th scope="col" class="upl-col-status">Status</th>
+            <th scope="col" class="upl-col-envs">Environments</th>
+            <th scope="col" class="upl-col-checked">Checked</th>
+            <th scope="col" class="upl-col-slot">Planned</th>
+            <th scope="col" class="upl-col-by">Created by</th>
+            <th scope="col" class="data-table__actions upl-col-menu"><span class="u-sr">Actions</span></th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var u in Rows)
+        {
+            <tr @key="u.Id">
+                <td>
+                    <span class="cell-stack">
+                        <a class="cell-stack__main upl-name" href="@Href(u)">@u.Name</a>
+                        <span class="cell-stack__sub">to @u.TargetVersion@if (u.PlannedAt is { } at) { <text> - </text>@SlotMain(at) }</span>
+                    </span>
+                </td>
+                <td><StatusPill Tone="@StatusTone(u.Status)">@StatusWord(u.Status)</StatusPill></td>
+                <td>
+                    <span class="cell-stack">
+                        <span class="cell-stack__main">@EnvironmentCount(u)</span>
+                        @if (u.LineCount > 0)
+                        {
+                            <span class="cell-stack__sub upl-parts">@Breakdown(u)</span>
+                        }
+                    </span>
+                </td>
+                <td>@Checked(u, compact: false)</td>
+                <td>
+                    @if (u.PlannedAt is { } slot)
+                    {
+                        <span class="cell-stack">
+                            <span class="@SlotClass(u.PlannedAt)">@SlotMain(slot)</span>
+                            <span class="cell-stack__sub">@SlotSub(slot)</span>
+                        </span>
+                    }
+                    else
+                    {
+                        <span class="u-muted">No slot yet</span>
+                    }
+                </td>
+                <td>
+                    <span class="cell-stack">
+                        <span class="cell-stack__main">@PersonName(u.CreatedBy)</span>
+                        <span class="cell-stack__sub"><Timestamp Value="@u.CreatedAt" Format="d MMM" /></span>
+                    </span>
+                </td>
+                <td class="data-table__actions">@Menu(u)</td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+<ul class="upl-cards" aria-label="Open upgrades">
+    @foreach (var u in Rows)
+    {
+        <li class="upl-card" @key="u.Id">
+            <span class="cell-stack upl-card__head">
+                <a class="cell-stack__main upl-card__name" href="@Href(u)">@u.Name</a>
+                <span class="cell-stack__sub">to @u.TargetVersion - @if (u.PlannedAt is { } at) { @SlotMain(at) } else { <text>no slot yet</text> }</span>
+            </span>
+            <span class="upl-card__menu">@Menu(u)</span>
+            <span class="upl-card__line">
+                <StatusPill Tone="@StatusTone(u.Status)">@StatusWord(u.Status)</StatusPill>
+                <span class="upl-card__count">@EnvironmentCount(u)</span>
+                @Breakdown(u)
+            </span>
+            @if (u.LineCount > 0)
+            {
+                <span class="upl-card__line upl-card__checked">@Checked(u, compact: true)</span>
+            }
+        </li>
+    }
+</ul>
+
+@code {
+    /// <summary>The open upgrades, already in the order the page wants them.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<EnvironmentUpgradeSummary> Rows { get; set; } = [];
+
+    /// <summary>Row menu: Mark done... The page asks first, naming what is unchecked.</summary>
+    [Parameter] public EventCallback<EnvironmentUpgradeSummary> OnMarkDone { get; set; }
+
+    /// <summary>Row menu: Delete. Offered only while nothing has been done from the upgrade.</summary>
+    [Parameter] public EventCallback<EnvironmentUpgradeSummary> OnDelete { get; set; }
+
+    /// <summary>While a move is under way the menus wait for it.</summary>
+    [Parameter] public bool Busy { get; set; }
+
+    private static string Href(EnvironmentUpgradeSummary u) => $"/upgrades/{u.Id}";
+
+    private RenderFragment Menu(EnvironmentUpgradeSummary u) => @<RowActions Label="@($"Actions for {u.Name}")">
+        <a class="menu__item" role="menuitem" href="@Href(u)">Open</a>
+        <button type="button" class="menu__item" role="menuitem" disabled="@Busy"
+                @onclick="() => OnMarkDone.InvokeAsync(u)">Mark done...</button>
+        <div class="menu__sep"></div>
+        @* Held back rather than refused after the click: once anything has been sent the
+           upgrade is part of the record, and the tooltip says what to do instead. *@
+        <button type="button" class="menu__item menu__item--danger" role="menuitem"
+                disabled="@(Busy || u.AnythingStarted)"
+                title="@(u.AnythingStarted ? DeleteRefusedTitle : null)"
+                @onclick="() => OnDelete.InvokeAsync(u)">Delete</button>
+    </RowActions>;
+
+    /// <summary>Why Delete is greyed out, as the sheet words it.</summary>
+    internal const string DeleteRefusedTitle =
+        "Something has been started from this upgrade, so it can only be marked done.";
+
+    private RenderFragment Checked(EnvironmentUpgradeSummary u, bool compact) => @<text>
+        @if (u.LineCount == 0)
+        {
+            <span class="u-muted">-</span>
+        }
+        else
+        {
+            var text = $"{u.CheckedCount} of {u.LineCount}";
+            <span class="upl-check">
+                <span class="u-num upl-check__text">@(compact ? text + " checked" : text)</span>
+                <progress class="progress upl-check__bar" value="@Percent(u)" max="100" aria-label="@($"{text} checked")"></progress>
+            </span>
+        }
+    </text>;
+
+    private RenderFragment Breakdown(EnvironmentUpgradeSummary u) => @<text>
+        @foreach (var part in UpgradesListWording.Breakdown(u))
+        {
+            <span class="@PartClass(part.Tone)">@part.Text</span>
+        }
+    </text>;
+
+    /// <summary>The breakdown's word, toned when it needs somebody: <c>upl-part--running</c>, <c>upl-part--failed</c>.</summary>
+    private static string PartClass(string? tone) => tone switch
+    {
+        "running" => "upl-part upl-part--running",
+        "failed" => "upl-part upl-part--failed",
+        _ => "upl-part",
+    };
+
+    private static int Percent(EnvironmentUpgradeSummary u) =>
+        u.LineCount == 0 ? 0 : (int)Math.Round(u.CheckedCount * 100.0 / u.LineCount);
+
+    private static string EnvironmentCount(EnvironmentUpgradeSummary u) => u.LineCount switch
+    {
+        0 => "No environments yet",
+        1 => "1 environment",
+        var n => $"{n} environments",
+    };
+
+    internal static string StatusWord(UpgradeStatus status) => UpgradesListWording.StatusWord(status);
+
+    internal static string StatusTone(UpgradeStatus status) => UpgradesListWording.StatusTone(status);
+
+    private static string PersonName(string actor) => UpgradeActionRow.NameOf(actor);
+
+    // ── The planned slot, in words ──────────────────────────────────────
+
+    private UpgradesListWording.SlotDay Day(DateTime slot) =>
+        UpgradesListWording.DayOf(Zone.ToDisplay(slot), Zone.ToDisplay(DateTime.UtcNow));
+
+    /// <summary>
+    /// Tonight and last night are the two a morning-after reader is looking for, so they are
+    /// the semibold ones.
+    /// </summary>
+    private string SlotClass(DateTime? slot) =>
+        slot is { } at && Day(at) is UpgradesListWording.SlotDay.Today or UpgradesListWording.SlotDay.Yesterday
+            ? "cell-stack__main upl-slot--near"
+            : "cell-stack__main";
+
+    /// <summary>"Tonight, 20:00", "Last night, 20:00", "Tomorrow, 20:00" or "Tue 29 Sep, 21:00".</summary>
+    private RenderFragment SlotMain(DateTime slot)
+    {
+        var word = UpgradesListWording.DayWord(Day(slot), Zone.ToDisplay(slot));
+        return word is null
+            ? @<Timestamp Value="@slot" Format="ddd d MMM, HH:mm" />
+            : @<text>@word, <Timestamp Value="@slot" Format="HH:mm" /></text>;
+    }
+
+    /// <summary>Under a named day, the date; under a date, how far away it is.</summary>
+    private RenderFragment SlotSub(DateTime slot) => Day(slot) == UpgradesListWording.SlotDay.Other
+        ? @<text>@UpgradesListWording.Distance(Zone.ToDisplay(slot), Zone.ToDisplay(DateTime.UtcNow))</text>
+        : @<Timestamp Value="@slot" Format="ddd d MMM" />;
+}

@@ -240,6 +240,18 @@ public sealed class UpdateWatch : IDisposable
         }
     }
 
+    /// <summary>
+    /// Stops watching everything, and forgets how earlier watches ended, without ending
+    /// the watch for good: for a host whose rows go off screen (the Upgrades page leaving
+    /// its Fleet view) and come back later to join afresh from a re-read.
+    /// </summary>
+    public void Clear()
+    {
+        _watched.Clear();
+        _ended.Clear();
+        Stop();
+    }
+
     public void Dispose()
     {
         _disposed = true;

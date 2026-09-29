@@ -22,6 +22,10 @@
     It owns the frame, not the table. What goes in ChildContent is the page's own -
     a data-table, a card-grid, two sections of either.
 
+    A list with several views (Upgrades: Open, Archive, Fleet) passes the switch in
+    Views, which sits on its own row under the head in every state; each view then
+    decides the four states for itself.
+
     Composition only: the head and the filter row are PageHead and FilterBar, with
     their parameters passed straight through. See PROJECT.md, "Page archetypes".
 *@
@@ -30,6 +34,8 @@
     <PageHead Title="@Title" Subtitle="@Subtitle" SubtitleContent="SubtitleContent"
               Trail="Trail" Crumbs="Crumbs" Actions="Actions"
               ShowActions="@(ShowActions ?? (!IsLoading && !IsEmpty))" Sticky="Sticky" />
+
+    @Views
 
     @Notices
 
@@ -112,6 +118,15 @@
 
     /// <summary>Extra class on the <c>.page</c> wrapper, for a page-scoped stylesheet to hang on.</summary>
     [Parameter] public string? PageClass { get; set; }
+
+    /// <summary>
+    /// A row of its own directly under the head, in every state: the switch between a
+    /// list's views (a <c>PillTabs</c> row, as Upgrades has Open, Archive and Fleet). Its
+    /// own row so the switch never moves when the filter or command row under it changes
+    /// with the view, and in every state because the view that is loading or empty is
+    /// exactly the one somebody may want to switch away from.
+    /// </summary>
+    [Parameter] public RenderFragment? Views { get; set; }
 
     /// <summary>Alerts and notices that belong between the head and the list, in every state.</summary>
     [Parameter] public RenderFragment? Notices { get; set; }
