@@ -346,4 +346,26 @@ public sealed class UpgradeActionServiceTests : IDisposable
             _f.Clock.GetUtcNow().AddHours(12));
         return row.Id;
     }
+
+    [Fact]
+    public async Task A_booked_upload_is_not_a_pending_platform_update()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Connections(ctx).InstallUploadedAppsAsync(projectId, envId,
+                new[] { new UploadPackage(new byte[] { 1 }, "Partner.app") },
+                ALDevToolbox.Domain.ValueObjects.ObjectExplorer.UploadAppTiming.AtTime,
+                _f.Clock.GetUtcNow().AddHours(12));
+        }
+        _f.ActAs(UpgradeActionTestFixture.FlagUserId);
+
+        await using var read = _f.Db.NewContext();
+        var pending = await _f.Svc(read).ListPendingAsync();
+        var uploads = await _f.Svc(read).ListPendingUploadsAsync(projectId, envId);
+
+        pending.Should().BeEmpty("the Upgrades page must not report a vendor app waiting for tonight as a booked update");
+        uploads.Should().ContainSingle().Which.PackageFileName.Should().Be("Partner.app");
+    }
 }

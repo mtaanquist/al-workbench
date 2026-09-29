@@ -30,7 +30,7 @@ public sealed class AccountSecurityFlowTests : IDisposable
             new ALDevToolbox.Services.SingleTenant.SingleTenantModeState(false),
             NullLogger<AccountService>.Instance, _clock);
     private UserAdministrationService NewUserAdmin(Data.AppDbContext ctx) =>
-        new(ctx, _clock);
+        _db.NewUserAdministrationService(ctx, _clock);
 
     [Fact]
     public async Task TryLogin_returns_MfaRequired_when_totp_enabled()

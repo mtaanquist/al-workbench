@@ -36,7 +36,7 @@ public sealed class AccountServiceTests : IDisposable
             NullLogger<AccountService>.Instance, _clock);
 
     private UserAdministrationService NewUserAdmin(Data.AppDbContext ctx) =>
-        new(ctx, _clock);
+        _db.NewUserAdministrationService(ctx, _clock);
 
     private PasswordResetService NewPasswordReset(Data.AppDbContext ctx) =>
         new(ctx, NewAuth(ctx), _clock);

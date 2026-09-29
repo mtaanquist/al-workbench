@@ -6,8 +6,10 @@
 @inject IHttpContextAccessor Http
 @inject IDataProtectionProvider Protection
 @inject TimeProvider Clock
+@inject ALDevToolbox.Services.Account.WebAuthnConfig WebAuthn
+@inject ALDevToolbox.Services.Tools.ToolEnablement Tools
 
-<PageTitle>Verify it's you · AL Workbench</PageTitle>
+<PageTitle>@(_state?.StepUp == true ? "Confirm it's you" : "Verify it's you") · AL Workbench</PageTitle>
 
 @*
     The second factor, on the auth-card archetype.
@@ -23,7 +25,22 @@
     here needs a rule the design layer does not already have.
 *@
 
-@if (_state is null)
+@if (_state is null && _signedIn)
+{
+    @* A signed-in person whose step-up state lapsed, or who came back to
+       this address later. They never signed out, so don't tell them to sign
+       in again: opening the tool starts a fresh confirmation. *@
+    <AuthCard Title="That took too long">
+        <Sub>Open the tool again and you'll be asked to confirm.</Sub>
+        <ChildContent>
+            <a class="btn btn--primary" href="/" style="height: var(--control-h-lg)">
+                <Icon Name="arrow-left" Width="16" Height="16" />
+                <span>Back to the workbench</span>
+            </a>
+        </ChildContent>
+    </AuthCard>
+}
+else if (_state is null)
 {
     @* Its own card: the old one kept the title "Verify it's you" over a
        message saying you no longer can, said the same thing twice, and left
@@ -39,10 +56,40 @@
         </ChildContent>
     </AuthCard>
 }
+else if (_state.StepUp && _methods.Count == 0 && !_state.PasskeyAvailable && !_state.EntraAvailable)
+{
+    @* A signed-in person with nothing to confirm with. The tool stays closed
+       until they set something up; say so, and take them there. *@
+    <AuthCard Title="Set up two-factor sign-in first">
+        <Sub>
+            Your organisation asks people to confirm it's them before using this tool, and
+            your account has no way to do that yet. Add an authenticator app@(string.IsNullOrEmpty(WebAuthn.RpId) ? " or email codes" : ", email codes or a passkey")
+            under Sign-in &amp; security on your account, then open the tool again.
+        </Sub>
+        <ChildContent>
+            <a class="btn btn--primary" href="/account?section=security" style="height: var(--control-h-lg)">
+                <Icon Name="shield" Width="16" Height="16" />
+                <span>Go to Sign-in &amp; security</span>
+            </a>
+        </ChildContent>
+        <Foot>
+            <a class="auth__link" href="/">Back to the workbench</a>
+        </Foot>
+    </AuthCard>
+}
 else
 {
-<AuthCard Title="Verify it's you">
-    <Sub>One more step: enter a code to finish signing in.</Sub>
+<AuthCard Title="@(_state.StepUp ? "Confirm it's you" : "Verify it's you")">
+    <Sub>
+        @if (_state.StepUp)
+        {
+            <text>The tool you opened asks you to confirm it's you first. We'll take you straight back, and you won't be asked again for the next @_windowMinutes minutes.</text>
+        }
+        else
+        {
+            <text>One more step: enter a code to finish signing in.</text>
+        }
+    </Sub>
     <Alerts>
         @{
             @if (!string.IsNullOrEmpty(Error))
@@ -61,6 +108,30 @@ else
     </Alerts>
     <ChildContent>
         @{
+            @* Step-up only: the two ceremonies that are not a typed code, above
+               the code tabs. A passkey with user verification, or a fresh
+               Microsoft sign-in. *@
+            @* One primary per card: the passkey when there is one, else
+               Microsoft, else the code form's own button. *@
+            @if (_state.StepUp && _state.PasskeyAvailable)
+            {
+                <StepUpPasskeyButton Primary="true" HasOtherWays="@(_methods.Count > 0 || _state.EntraAvailable)" />
+            }
+            @if (_state.StepUp && _state.EntraAvailable)
+            {
+                <form method="post" action="/auth/step-up/entra">
+                    <AntiforgeryToken />
+                    <button type="submit" class="btn @(_state.PasskeyAvailable ? "" : "btn--primary")" style="height: var(--control-h-lg); width: 100%">
+                        <Icon Name="log-in" Width="16" Height="16" />
+                        <span>Confirm with Microsoft</span>
+                    </button>
+                </form>
+            }
+            @if (_state.StepUp && _methods.Count > 0 && (_state.PasskeyAvailable || _state.EntraAvailable))
+            {
+                <span class="auth__or">or enter a code</span>
+            }
+
             @if (_methods.Count > 1)
             {
                 <span class="pill-tabs" role="tablist" aria-label="Verification method">
@@ -97,8 +168,8 @@ else
                                pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code"
                                placeholder="123456" autofocus="@(Ok == "sent")" />
                     </div>
-                    <button type="submit" class="btn @(Ok == "sent" ? "btn--primary" : "")"
-                            style="@(Ok == "sent" ? "height: var(--control-h-lg)" : "")">Verify</button>
+                    <button type="submit" class="btn @(Ok == "sent" && !_ceremonyIsPrimary ? "btn--primary" : "")"
+                            style="@(Ok == "sent" ? "height: var(--control-h-lg)" : "")">@VerifyLabel</button>
                 </form>
                 @if (Ok == "sent")
                 {
@@ -118,10 +189,10 @@ else
                                autocomplete="off" placeholder="XXXXX-XXXXX" autofocus />
                         <span class="field__hint">One of the codes you saved when you turned on two-factor sign-in. Each works once.</span>
                     </div>
-                    <button type="submit" class="btn btn--primary" style="height: var(--control-h-lg)">Verify</button>
+                    <button type="submit" class="btn @(_ceremonyIsPrimary ? "" : "btn--primary")" style="height: var(--control-h-lg)">@VerifyLabel</button>
                 </form>
             }
-            else
+            else if (_methods.Count > 0)
             {
                 <form method="post" action="/auth/login/challenge/totp" class="auth__fields">
                     <AntiforgeryToken />
@@ -131,13 +202,20 @@ else
                                pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code"
                                placeholder="123456" autofocus />
                     </div>
-                    <button type="submit" class="btn btn--primary" style="height: var(--control-h-lg)">Verify</button>
+                    <button type="submit" class="btn @(_ceremonyIsPrimary ? "" : "btn--primary")" style="height: var(--control-h-lg)">@VerifyLabel</button>
                 </form>
             }
         }
     </ChildContent>
     <Foot>
-        <a class="auth__link" href="/login">Cancel and sign in again</a>
+        @if (_state.StepUp)
+        {
+            <a class="auth__link" href="/">Not now, back to the workbench</a>
+        }
+        else
+        {
+            <a class="auth__link" href="/login">Cancel and sign in again</a>
+        }
     </Foot>
 </AuthCard>
 }
@@ -150,13 +228,23 @@ else
     private EndpointHelpers.MfaPending? _state;
     private List<(string Key, string Label)> _methods = new();
     private string _method = "totp";
+    private bool _signedIn;
+    // Step-up with a passkey or Microsoft on offer: that button is the
+    // primary, and the code forms' buttons step down to outline.
+    private bool _ceremonyIsPrimary;
 
-    protected override void OnInitialized()
+    private int _windowMinutes = (int)ALDevToolbox.Services.Account.StepUpAuth.DefaultWindow.TotalMinutes;
+    private string VerifyLabel => _state?.StepUp == true ? "Confirm" : "Verify";
+
+    protected override async Task OnInitializedAsync()
     {
         var ctx = Http.HttpContext;
         if (ctx is null) return;
+        _signedIn = ctx.User?.Identity?.IsAuthenticated == true;
         _state = EndpointHelpers.ReadMfaPendingCookie(ctx, Protection, Clock);
         if (_state is null) return;
+        if (_state.StepUp) _windowMinutes = (int)(await Tools.StepUpWindowAsync()).TotalMinutes;
+        _ceremonyIsPrimary = _state.StepUp && (_state.PasskeyAvailable || _state.EntraAvailable);
 
         // Recovery codes are issued with TOTP, so they ride on the same flag.
         if (_state.TotpEnabled) _methods.Add(("totp", "Authenticator app"));
@@ -183,10 +271,15 @@ else
         // email has no authenticator app and no recovery codes, so telling it
         // to use them is a locked door with a sign pointing at another locked
         // door. The only real move is a person with admin rights.
+        "not-configured" when !HasAnotherWayIn && _state?.StepUp == true =>
+            "We can't send email codes right now, and email is the only way this account can confirm. "
+            + "Ask your administrator to fix email sending, or add an authenticator app under Sign-in & security on your account.",
         "not-configured" when !HasAnotherWayIn =>
             "We can't send email codes right now, and email is the only second factor on this account. "
             + "Ask your administrator to set up email, or to switch off two-factor sign-in for you.",
         "not-configured" => "We can't send email codes right now. Use your authenticator app or a recovery code instead.",
+        "entra-mismatch" => "That Microsoft sign-in didn't match your account. Sign in with the Microsoft account connected to it.",
+        "entra-unavailable" => "Microsoft sign-in isn't available right now. Use another way to confirm.",
         _ => "Something went wrong. Try again.",
     };
 }

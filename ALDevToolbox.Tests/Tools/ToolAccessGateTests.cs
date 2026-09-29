@@ -35,6 +35,59 @@ public sealed class ToolAccessGateTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
+    private static readonly DateTime Now = new(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
+
+    private static System.Security.Claims.ClaimsPrincipal CookieUser(string stepUpTools, DateTime? strongAt, bool pat = false)
+    {
+        var claims = new List<System.Security.Claims.Claim>
+        {
+            new(ALDevToolbox.Services.HttpOrganizationContext.UserIdClaim, "7"),
+            new(ALDevToolbox.Endpoints.EndpointHelpers.StepUpToolsClaim, stepUpTools),
+        };
+        if (strongAt is { } at)
+        {
+            claims.Add(new(ALDevToolbox.Services.Account.StepUpAuth.StrongAuthAtClaim,
+                at.ToString("o", System.Globalization.CultureInfo.InvariantCulture)));
+        }
+        if (pat) claims.Add(new("pat_id", "1"));
+        return new(new System.Security.Claims.ClaimsIdentity(claims, "test"));
+    }
+
+    [Fact]
+    public void Step_up_is_needed_for_a_marked_tool_when_the_session_is_not_fresh()
+    {
+        var tools = new[] { ToolKey.Releases };
+
+        ALDevToolbox.Endpoints.ToolAccessGate.NeedsStepUp(tools, CookieUser("Releases", strongAt: null), Now)
+            .Should().BeTrue("no second factor ever happened on this session");
+        ALDevToolbox.Endpoints.ToolAccessGate.NeedsStepUp(tools, CookieUser("Releases", Now.AddMinutes(-30)), Now)
+            .Should().BeTrue("the last one is outside the window");
+        ALDevToolbox.Endpoints.ToolAccessGate.NeedsStepUp(tools, CookieUser("Releases", Now.AddMinutes(-2)), Now)
+            .Should().BeFalse("it was just done");
+    }
+
+    [Fact]
+    public void Step_up_is_not_needed_for_unmarked_tools_anonymous_visitors_or_tokens()
+    {
+        var tools = new[] { ToolKey.Releases };
+
+        ALDevToolbox.Endpoints.ToolAccessGate.NeedsStepUp(tools, CookieUser("Templates", strongAt: null), Now)
+            .Should().BeFalse("only the marked tools are gated");
+        ALDevToolbox.Endpoints.ToolAccessGate.NeedsStepUp(tools, new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity()), Now)
+            .Should().BeFalse("authorization's own login redirect handles anonymous requests");
+        ALDevToolbox.Endpoints.ToolAccessGate.NeedsStepUp(tools, CookieUser("Releases", strongAt: null, pat: true), Now)
+            .Should().BeFalse("a token session cannot step up and never reaches page routes anyway");
+    }
+
+    [Fact]
+    public void The_shared_pipelines_dashboard_is_gated_when_either_of_its_tools_is()
+    {
+        var tools = ALDevToolbox.Endpoints.ToolAccessGate.MatchTools("/pipelines");
+
+        ALDevToolbox.Endpoints.ToolAccessGate.NeedsStepUp(tools, CookieUser("Releases", strongAt: null), Now)
+            .Should().BeTrue();
+    }
+
     [Fact]
     public async Task Disabled_tool_routes_404_for_anonymous_request()
     {

@@ -497,6 +497,26 @@ public sealed class EntraSignInService
             .ToListAsync(ct);
 
     /// <summary>
+    /// Whether <paramref name="token"/> is the Microsoft identity already
+    /// linked to <paramref name="userId"/>, from a tenant the user's
+    /// organisation still allows. The step-up callback uses it to make sure a
+    /// forced re-sign-in came back as the same person, not as any account
+    /// the tenant would accept, and that the tenant allow-list (the actual
+    /// security boundary for Microsoft sign-in) applies to step-up as it does
+    /// to sign-in. Filtered: the caller is signed in.
+    /// </summary>
+    public async Task<bool> IsLinkedAsync(int userId, EntraTokenIdentity token, CancellationToken ct = default)
+    {
+        var tid = token.TenantId.Trim().ToLowerInvariant();
+        var linked = await _db.UserExternalLogins.AsNoTracking().AnyAsync(
+            l => l.Provider == ProviderName && l.Issuer == tid
+                && l.Subject == token.ObjectId && l.UserId == userId, ct);
+        if (!linked) return false;
+        return await _db.OrganizationSettings.AsNoTracking()
+            .AnyAsync(s => s.EntraEnabled && s.EntraAllowedTenantIds.Contains(tid), ct);
+    }
+
+    /// <summary>
     /// Links a Microsoft identity to an already-signed-in user (the
     /// "Connect Microsoft account" flow). The token's tenant must be on the
     /// user's org allow-list — same boundary as sign-in — and the identity

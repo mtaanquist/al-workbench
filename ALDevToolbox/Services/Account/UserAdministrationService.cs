@@ -3,6 +3,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using Microsoft.EntityFrameworkCore;
+using OpenIddict.Abstractions;
 
 namespace ALDevToolbox.Services.Account;
 
@@ -25,11 +26,13 @@ public sealed class UserAdministrationService
 
     private readonly AppDbContext _db;
     private readonly TimeProvider _clock;
+    private readonly IOpenIddictTokenManager _oauthTokens;
 
-    public UserAdministrationService(AppDbContext db, TimeProvider clock)
+    public UserAdministrationService(AppDbContext db, TimeProvider clock, IOpenIddictTokenManager oauthTokens)
     {
         _db = db;
         _clock = clock;
+        _oauthTokens = oauthTokens;
     }
 
     /// <summary>
@@ -86,7 +89,17 @@ public sealed class UserAdministrationService
         await _db.SaveChangesAsync(ct);
     }
 
-    /// <summary>Disables an active user (or pending one). Last admin protection enforced.</summary>
+    /// <summary>
+    /// Disables an active user (or pending one). Last admin protection enforced.
+    /// Disabling is the "this person has left" action, so it also cuts every
+    /// way back in: the cookie (via <see cref="User.CredentialsChangedAt"/>,
+    /// which <c>CookieSessionRevalidation</c> compares against the session's
+    /// start), the user's personal access tokens, their OAuth consents and the
+    /// access and refresh tokens issued under them. The PAT and OAuth request
+    /// paths already refuse a non-active user on every call, so this is belt
+    /// and braces there; it also means re-enabling the account later does not
+    /// quietly bring old tokens back to life.
+    /// </summary>
     public async Task DisableUserAsync(int userId, int actingOrgId, CancellationToken ct = default)
     {
         var user = await LoadUserAsync(userId, actingOrgId, ct);
@@ -95,8 +108,31 @@ public sealed class UserAdministrationService
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["LastAdmin"] = "You can't disable the last active admin in this organisation." });
         }
+        var now = _clock.GetUtcNow().UtcDateTime;
         user.Status = UserStatus.Disabled;
+        user.CredentialsChangedAt = now;
+        // One transaction: the bulk revocations commit on their own otherwise,
+        // and a failed save would leave tokens revoked on an account still
+        // active. Both filtered writes: LoadUserAsync pinned the user to the
+        // acting org, and the admin endpoint passes the request's own org as
+        // actingOrgId, so the query filter and the pin agree. Not crossing the
+        // fence here is deliberate (CLAUDE.md); a caller acting for another org
+        // would find these no-op, which the filter would then be right about.
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        await _db.PersonalAccessTokens
+            .Where(p => p.UserId == userId && p.RevokedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.RevokedAt, now), ct);
+        await _db.OAuthConsents
+            .Where(c => c.UserId == userId && c.RevokedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.RevokedAt, now), ct);
         await _db.SaveChangesAsync(ct);
+        // OpenIddict stores Subject = the user id (OAuthEndpoints.MapAuthorizeComplete).
+        // Its manager shares this scoped context, so the revocations join the transaction.
+        await foreach (var token in _oauthTokens.FindBySubjectAsync(userId.ToString(), ct))
+        {
+            await _oauthTokens.TryRevokeAsync(token, ct);
+        }
+        await tx.CommitAsync(ct);
     }
 
     /// <summary>Re-enables a disabled user without further admin approval.</summary>

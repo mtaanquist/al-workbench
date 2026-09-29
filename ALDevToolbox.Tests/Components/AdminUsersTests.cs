@@ -37,6 +37,7 @@ public sealed class AdminUsersTests : IDisposable
             opts.UseNpgsql(_db.ConnectionString)
                 .AddInterceptors(_db.CommandTracker));
         _ctx.Services.AddSingleton(TimeProvider.System);
+        _ctx.Services.AddSingleton(_db.OpenIddictTokens);
         _ctx.Services.AddScoped<UserAdministrationService>();
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);

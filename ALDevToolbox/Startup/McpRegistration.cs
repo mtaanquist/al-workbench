@@ -52,7 +52,47 @@ public static class McpRegistration
             // stopped buying it well before the 2.x upgrade. That case is handled by
             // Endpoints/McpAcceptCompatibility.cs instead.
             .WithHttpTransport()
-            .WithToolsFromAssembly();
+            .WithToolsFromAssembly()
+            // Step-up for writing tools (Administration → Tools; see
+            // ".design/auth-and-audit.md"). A PAT can never confirm who is
+            // using it, so it is refused. An OAuth session is allowed only when
+            // the consent it runs under was approved from a session with a
+            // recent second factor (OAuthEndpoints.MapAuthorizeComplete stamps
+            // that), which is what makes an assistant approved before the org
+            // marked the tool approve again. Read-only tools are never gated.
+            .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (request, ct) =>
+            {
+                var name = request.Params?.Name ?? string.Empty;
+                if (ALDevToolbox.Domain.Tools.McpToolCatalog.ToolFor(name) is not { } key)
+                {
+                    return await next(request, ct);
+                }
+                var services = request.Services ?? throw new InvalidOperationException("MCP call without request services.");
+                var tools = services.GetRequiredService<ALDevToolbox.Services.Tools.ToolEnablement>();
+                if (!await tools.RequiresStepUpAsync(key, ct))
+                {
+                    return await next(request, ct);
+                }
+                // The transport sets request.User from the HTTP principal; the
+                // accessor is the fallback so a future SDK change cannot turn
+                // this check into a silent allow.
+                var user = request.User
+                    ?? services.GetRequiredService<IHttpContextAccessor>().HttpContext?.User;
+                if (user?.HasClaim(c => c.Type == "pat_id") != false)
+                {
+                    throw new ModelContextProtocol.McpException(
+                        $"{name} needs the person to confirm it's them first, which a personal access token cannot do. "
+                        + "Connect this assistant through the permission screen on the MCP page instead of a token, then try again.");
+                }
+                var consents = services.GetRequiredService<ALDevToolbox.Services.OAuth.OAuthConsentService>();
+                if (!await consents.WasApprovedWithStrongAuthAsync(user, ct))
+                {
+                    throw new ModelContextProtocol.McpException(
+                        $"{name} needs the person to confirm it's them first. "
+                        + "Approve this assistant again from the MCP page's permission screen, then try again.");
+                }
+                return await next(request, ct);
+            }));
         return services;
     }
 }

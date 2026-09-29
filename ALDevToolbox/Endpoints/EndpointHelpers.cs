@@ -3,6 +3,7 @@ using System.Text.Json;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services;
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 
@@ -37,6 +38,12 @@ internal static class EndpointHelpers
             // CookieSessionRevalidation, which rebuilds the principal from the
             // current row. Like org_mcp_enabled, this is a visibility hint only.
             new("org_disabled_tools", BuildDisabledToolsClaim(user.Organization)),
+            // Comma-joined ToolKey names this org wants a recent second factor
+            // for. Read by ToolAccessGate on page routes; the MCP call filter and
+            // the OAuth consent check read the live row instead, so this too is
+            // a hint that refreshes with the cookie.
+            new(StepUpToolsClaim, string.Join(',', user.Organization?.StepUpTools ?? new List<string>())),
+            new(StepUpWindowClaim, (user.Organization?.StepUpWindowMinutes ?? 15).ToString(System.Globalization.CultureInfo.InvariantCulture)),
         };
         if (user.IsSiteAdmin)
         {
@@ -88,6 +95,75 @@ internal static class EndpointHelpers
             raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
     }
 
+    /// <summary>Claim type carrying the org's step-up tools as a comma-joined list of <see cref="Domain.Tools.ToolKey"/> names.</summary>
+    public const string StepUpToolsClaim = "org_step_up_tools";
+
+    /// <summary>Claim type carrying the org's step-up window in minutes, beside <see cref="StepUpToolsClaim"/>.</summary>
+    public const string StepUpWindowClaim = "org_step_up_window";
+
+    /// <summary>The org's step-up window off a principal; the default when the claim is absent or out of range.</summary>
+    public static TimeSpan ReadStepUpWindow(ClaimsPrincipal? user) =>
+        Services.Account.StepUpAuth.WindowOf(
+            int.TryParse(user?.FindFirst(StepUpWindowClaim)?.Value, out var minutes) ? minutes : null);
+
+    /// <summary>
+    /// Reads the <see cref="StepUpToolsClaim"/> off a principal. Empty when the
+    /// claim is absent (PAT / OAuth principals), which is why those surfaces
+    /// consult <see cref="Services.Tools.ToolEnablement"/> against the row.
+    /// </summary>
+    public static HashSet<Domain.Tools.ToolKey> ReadStepUpTools(ClaimsPrincipal? user)
+    {
+        var raw = user?.FindFirst(StepUpToolsClaim)?.Value;
+        if (string.IsNullOrEmpty(raw)) return new HashSet<Domain.Tools.ToolKey>();
+        return Domain.Tools.ToolCatalog.ParseKeys(
+            raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    }
+
+    /// <summary>
+    /// Issues the auth cookie for a fresh sign-in, stamping how the session
+    /// was established (<see cref="Services.Account.StepUpAuth"/>). Every
+    /// sign-in path goes through here so the method is never left unstamped.
+    /// A strong method earns "now" as its strong moment; an Entra sign-in
+    /// passes the token's <c>auth_time</c> as <paramref name="strongAuthAt"/>
+    /// instead, because that is when Microsoft says the person was there.
+    /// </summary>
+    public static Task SignInUserAsync(HttpContext ctx, User user, Services.Account.SignInMethod method, DateTime? strongAuthAt = null)
+    {
+        var clock = ctx.RequestServices.GetRequiredService<TimeProvider>();
+        var now = clock.GetUtcNow().UtcDateTime;
+        var properties = PersistentSignIn(ctx, method,
+            strongAuthAt ?? Services.Account.StepUpAuth.StrongMomentFor(method, now), signedInAt: now);
+        return IssueAsync(ctx, user, properties);
+    }
+
+    /// <summary>
+    /// Re-issues the cookie for a session that already exists, keeping
+    /// <c>signed_in_at</c> so a session a password reset should have ended
+    /// cannot be rescued by re-issuing it (a step-up in the five-minute
+    /// revalidation gap, for instance), and taking the method and strong
+    /// moment the caller decides: a step-up passes the factor that just
+    /// succeeded and "now"; a password change passes the session's own
+    /// stamps unchanged, because typing the current password proves nothing
+    /// new.
+    /// </summary>
+    public static async Task ReissueUserAsync(HttpContext ctx, User user, Services.Account.SignInMethod method, DateTime? strongAuthAt)
+    {
+        var clock = ctx.RequestServices.GetRequiredService<TimeProvider>();
+        var current = await ctx.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        var signedInAt = current.Properties?.Items.TryGetValue(SignedInAtKey, out var raw) == true
+            && DateTime.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
+            ? parsed
+            : clock.GetUtcNow().UtcDateTime;
+        await IssueAsync(ctx, user, PersistentSignIn(ctx, method, strongAuthAt, signedInAt));
+    }
+
+    private static Task IssueAsync(HttpContext ctx, User user, Microsoft.AspNetCore.Authentication.AuthenticationProperties properties)
+    {
+        var identity = BuildIdentity(user);
+        Services.Account.StepUpAuth.ApplyClaims(identity, properties);
+        return ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity), properties);
+    }
+
     /// <summary>
     /// Auth-properties key carrying the moment this cookie was issued, as a
     /// round-trippable UTC string. The cookie handler's own <c>IssuedUtc</c>
@@ -106,12 +182,12 @@ internal static class EndpointHelpers
     /// fresh instance per call — the auth stack mutates the properties bag
     /// during sign-in.
     /// </summary>
-    public static Microsoft.AspNetCore.Authentication.AuthenticationProperties PersistentSignIn(HttpContext ctx)
+    public static Microsoft.AspNetCore.Authentication.AuthenticationProperties PersistentSignIn(
+        HttpContext ctx, Services.Account.SignInMethod method, DateTime? strongAuthAt, DateTime signedInAt)
     {
-        var clock = ctx.RequestServices.GetRequiredService<TimeProvider>();
         var props = new Microsoft.AspNetCore.Authentication.AuthenticationProperties { IsPersistent = true };
-        props.Items[SignedInAtKey] =
-            clock.GetUtcNow().UtcDateTime.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        props.Items[SignedInAtKey] = signedInAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        Services.Account.StepUpAuth.Stamp(props, method, strongAuthAt);
         return props;
     }
 
@@ -332,7 +408,17 @@ internal static class EndpointHelpers
     public static readonly TimeSpan MfaCookieLifetime = TimeSpan.FromMinutes(10);
     public static readonly TimeSpan OneShotCookieLifetime = TimeSpan.FromSeconds(60);
 
-    public sealed record MfaPending(int UserId, bool TotpEnabled, bool EmailMfaEnabled, DateTime IssuedAt, string ReturnUrl);
+    /// <summary>
+    /// The "password OK, second factor pending" state, and since step-up
+    /// (<see cref="Services.Account.StepUpAuth"/>) also the "signed in, confirm
+    /// it's you" state: <paramref name="StepUp"/> marks the latter, and the
+    /// two availability flags tell the challenge page whether to offer a
+    /// passkey or a Microsoft re-sign-in beside the code methods. The trailing
+    /// parameters default so a cookie issued before they existed still reads.
+    /// </summary>
+    public sealed record MfaPending(
+        int UserId, bool TotpEnabled, bool EmailMfaEnabled, DateTime IssuedAt, string ReturnUrl,
+        bool StepUp = false, bool PasskeyAvailable = false, bool EntraAvailable = false);
 
     public static void SetMfaPendingCookie(HttpContext ctx, IDataProtectionProvider protection, MfaPending state)
     {

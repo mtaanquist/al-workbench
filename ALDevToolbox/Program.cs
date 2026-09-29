@@ -137,6 +137,7 @@ app.MapTranslatorEndpoints();
 app.MapAdminEndpoints();
 app.MapAccountEndpoints();
 app.MapEntraAuthEndpoints();
+app.MapStepUpEndpoints();
 app.MapGitHubAppEndpoints();
 app.MapGitHubWebhookEndpoints();
 app.MapAdminUserEndpoints();

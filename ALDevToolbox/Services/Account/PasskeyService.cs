@@ -179,12 +179,40 @@ public sealed class PasskeyService
     /// is supplied, narrows the allow-list to that user's credentials;
     /// otherwise issues a discoverable-credential challenge.
     /// </summary>
-    public async Task<(AssertionOptions Options, string ProtectedChallenge)> BeginLoginAsync(string? emailHint, CancellationToken ct = default)
+    public async Task<(AssertionOptions Options, string ProtectedChallenge)> BeginLoginAsync(string? emailHint, CancellationToken ct = default) =>
+        await BeginLoginCoreAsync(emailHint, forUserId: null, requireUserVerification: false, ct);
+
+    /// <summary>
+    /// The step-up variant: the allow-list is pinned to the signed-in user's
+    /// own passkeys and user verification (PIN or biometric) is required, so
+    /// a touch alone cannot confirm it is them. The requirement rides in the
+    /// protected envelope so <see cref="CompleteLoginAsync"/> enforces it on
+    /// the way back rather than trusting the browser.
+    /// </summary>
+    public async Task<(AssertionOptions Options, string ProtectedChallenge)> BeginStepUpAsync(int userId, CancellationToken ct = default) =>
+        await BeginLoginCoreAsync(emailHint: null, forUserId: userId, requireUserVerification: true, ct);
+
+    private async Task<(AssertionOptions Options, string ProtectedChallenge)> BeginLoginCoreAsync(
+        string? emailHint, int? forUserId, bool requireUserVerification, CancellationToken ct)
     {
         AssertConfigured();
         var allowCredentials = new List<PublicKeyCredentialDescriptor>();
         int? userId = null;
-        if (!string.IsNullOrWhiteSpace(emailHint))
+        if (forUserId is { } pinnedUserId)
+        {
+            userId = pinnedUserId;
+            // Filtered: the caller is signed in, so the query stays inside their org.
+            var creds = await _db.UserPasskeys
+                .Where(p => p.UserId == pinnedUserId)
+                .Select(p => p.CredentialId)
+                .ToListAsync(ct);
+            allowCredentials = creds.Select(id => new PublicKeyCredentialDescriptor(id)).ToList();
+            if (allowCredentials.Count == 0)
+            {
+                throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "You don't have a passkey on this account." });
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(emailHint))
         {
             var normalised = emailHint.Trim().ToLowerInvariant();
             // Fence category 1 (pre-auth routing): passkey sign-in, before any cookie exists;
@@ -222,9 +250,11 @@ public sealed class PasskeyService
         var options = _fido2.GetAssertionOptions(new GetAssertionOptionsParams
         {
             AllowedCredentials = allowCredentials,
-            UserVerification = UserVerificationRequirement.Preferred,
+            UserVerification = requireUserVerification
+                ? UserVerificationRequirement.Required
+                : UserVerificationRequirement.Preferred,
         });
-        var envelope = JsonSerializer.Serialize(new ChallengeEnvelope(userId, options.Challenge, _clock.GetUtcNow().UtcDateTime));
+        var envelope = JsonSerializer.Serialize(new ChallengeEnvelope(userId, options.Challenge, _clock.GetUtcNow().UtcDateTime, requireUserVerification));
         return (options, _protector.Protect(envelope));
     }
 
@@ -245,10 +275,13 @@ public sealed class PasskeyService
 
     /// <summary>
     /// Validates the assertion response, bumps the credential's counter, and
-    /// returns the authenticated user. A non-monotonic counter (signal of a
+    /// returns the authenticated user together with whether the authenticator
+    /// reported user verification. A non-monotonic counter (signal of a
     /// cloned authenticator) raises <see cref="PlanValidationException"/>.
+    /// A step-up envelope (<see cref="BeginStepUpAsync"/>) is refused here;
+    /// <see cref="CompleteStepUpAsync"/> finishes those.
     /// </summary>
-    public async Task<User> CompleteLoginAsync(
+    public async Task<(User User, bool UserVerified)> CompleteLoginAsync(
         AuthenticatorAssertionRawResponse rawResponse,
         string protectedChallenge,
         CancellationToken ct = default)
@@ -271,6 +304,12 @@ public sealed class PasskeyService
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "This account isn't active." });
         }
+        if (envelope.RequireUserVerification)
+        {
+            // A step-up envelope is finished by CompleteStepUpAsync, which
+            // stays inside the tenant fence; it must not double as a sign-in.
+            throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey check wasn't started as a sign-in." });
+        }
 
         IsUserHandleOwnerOfCredentialIdAsync isOwner = (args, _) =>
             Task.FromResult(BitConverter.ToInt32(args.UserHandle) == passkey.UserId);
@@ -278,7 +317,7 @@ public sealed class PasskeyService
         var result = await _fido2.MakeAssertionAsync(new MakeAssertionParams
         {
             AssertionResponse = rawResponse,
-            OriginalOptions = ReconstructAssertionOptions(envelope.Challenge),
+            OriginalOptions = ReconstructAssertionOptions(envelope.Challenge, envelope.RequireUserVerification),
             StoredPublicKey = passkey.PublicKey,
             StoredSignatureCounter = (uint)passkey.SignCounter,
             IsUserHandleOwnerOfCredentialIdCallback = isOwner,
@@ -293,7 +332,67 @@ public sealed class PasskeyService
         passkey.LastUsedAt = _clock.GetUtcNow().UtcDateTime;
         user.LastLoginAt = passkey.LastUsedAt;
         await _db.SaveChangesAsync(ct);
-        return user;
+        return (user, UserVerifiedFlag(rawResponse));
+    }
+
+    /// <summary>
+    /// The step-up counterpart of <see cref="CompleteLoginAsync"/>: the
+    /// credential must belong to <paramref name="userId"/>, the envelope must
+    /// be one <see cref="BeginStepUpAsync"/> issued, and the authenticator
+    /// must report user verification. Filtered throughout, because the caller
+    /// is signed in and the passkey has to be theirs: no tenant crossing, and
+    /// no <c>LastLoginAt</c> stamp, since this is not a sign-in.
+    /// </summary>
+    public async Task CompleteStepUpAsync(
+        int userId,
+        AuthenticatorAssertionRawResponse rawResponse,
+        string protectedChallenge,
+        CancellationToken ct = default)
+    {
+        AssertConfigured();
+        var envelope = UnprotectEnvelope(protectedChallenge);
+        if (!envelope.RequireUserVerification || envelope.UserId != userId)
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey check wasn't started for this account." });
+        }
+        var credentialId = rawResponse.RawId;
+        var passkey = await _db.UserPasskeys
+            .FirstOrDefaultAsync(p => p.CredentialId == credentialId && p.UserId == userId, ct)
+            ?? throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey belongs to a different account." });
+
+        IsUserHandleOwnerOfCredentialIdAsync isOwner = (args, _) =>
+            Task.FromResult(BitConverter.ToInt32(args.UserHandle) == userId);
+        var result = await _fido2.MakeAssertionAsync(new MakeAssertionParams
+        {
+            AssertionResponse = rawResponse,
+            OriginalOptions = ReconstructAssertionOptions(envelope.Challenge, requireUserVerification: true),
+            StoredPublicKey = passkey.PublicKey,
+            StoredSignatureCounter = (uint)passkey.SignCounter,
+            IsUserHandleOwnerOfCredentialIdCallback = isOwner,
+        }, ct);
+        if (result.SignCount <= passkey.SignCounter && result.SignCount != 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "Passkey counter mismatch — refusing sign-in." });
+        }
+        if (!UserVerifiedFlag(rawResponse))
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey didn't confirm it's you." });
+        }
+        passkey.SignCounter = result.SignCount;
+        passkey.LastUsedAt = _clock.GetUtcNow().UtcDateTime;
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// The UV bit of the authenticator data's flags byte (WebAuthn 6.1: the
+    /// flags follow the 32-byte RP ID hash; bit 2 is user verified). Read
+    /// straight off the response the library just validated, so it is the
+    /// same bytes the signature covers.
+    /// </summary>
+    internal static bool UserVerifiedFlag(AuthenticatorAssertionRawResponse rawResponse)
+    {
+        var authData = rawResponse.Response?.AuthenticatorData;
+        return authData is { Length: > 32 } && (authData[32] & 0x04) != 0;
     }
 
     public async Task DeleteAsync(int userId, int passkeyId, CancellationToken ct = default)
@@ -375,16 +474,23 @@ public sealed class PasskeyService
         return options;
     }
 
-    private AssertionOptions ReconstructAssertionOptions(byte[] challenge)
+    private AssertionOptions ReconstructAssertionOptions(byte[] challenge, bool requireUserVerification)
     {
+        // The library refuses an assertion without the UV flag when the
+        // original options required it, which is what makes a step-up
+        // passkey stronger than a sign-in one.
         var options = _fido2.GetAssertionOptions(new GetAssertionOptionsParams
         {
             AllowedCredentials = new List<PublicKeyCredentialDescriptor>(),
-            UserVerification = UserVerificationRequirement.Preferred,
+            UserVerification = requireUserVerification
+                ? UserVerificationRequirement.Required
+                : UserVerificationRequirement.Preferred,
         });
         options.Challenge = challenge;
         return options;
     }
 
-    private sealed record ChallengeEnvelope(int? UserId, byte[] Challenge, DateTime IssuedAt);
+    // RequireUserVerification defaults to false so an envelope issued before
+    // this field existed still deserialises as an ordinary sign-in.
+    private sealed record ChallengeEnvelope(int? UserId, byte[] Challenge, DateTime IssuedAt, bool RequireUserVerification = false);
 }

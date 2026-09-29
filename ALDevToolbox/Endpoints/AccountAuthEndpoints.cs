@@ -76,10 +76,7 @@ internal static class AccountAuthEndpoints
                 return;
             }
 
-            var identity = BuildIdentity(user);
-            await ctx.SignInAsync(
-                CookieAuthenticationDefaults.AuthenticationScheme,
-                new ClaimsPrincipal(identity), PersistentSignIn(ctx));
+            await SignInUserAsync(ctx, user, SignInMethod.Password);
             logger.LogInformation("Signed in {Email} (org {OrgId}, role {Role}).", user.Email, user.OrganizationId, user.Role);
             ctx.Response.Redirect(safeReturn);
         });
@@ -143,9 +140,7 @@ internal static class AccountAuthEndpoints
                 if (outcome == SignupOutcome.OrganizationProvisioned && user is not null && org is not null)
                 {
                     user.Organization = org;
-                    await ctx.SignInAsync(
-                        CookieAuthenticationDefaults.AuthenticationScheme,
-                        new ClaimsPrincipal(BuildIdentity(user)), PersistentSignIn(ctx));
+                    await SignInUserAsync(ctx, user, SignInMethod.Password);
                     logger.LogInformation("Auto-approved new-org signup {Email} as admin of {OrgSlug}.", user.Email, org.Slug);
                     ctx.Response.Redirect("/");
                     return;
@@ -309,9 +304,7 @@ internal static class AccountAuthEndpoints
                     && user is not null && org is not null)
                 {
                     user.Organization = org;
-                    await ctx.SignInAsync(
-                        CookieAuthenticationDefaults.AuthenticationScheme,
-                        new ClaimsPrincipal(BuildIdentity(user)), PersistentSignIn(ctx));
+                    await SignInUserAsync(ctx, user, SignInMethod.Password);
                     logger.LogInformation("Verified signup signed in {Email} (org {OrgSlug}, newOrg={New}).",
                         user.Email, org.Slug, outcome == SignupOutcome.OrganizationProvisioned);
                     ctx.Response.Redirect("/");
@@ -433,9 +426,7 @@ internal static class AccountAuthEndpoints
             try
             {
                 var user = await passwordReset.ConsumeMagicLoginTokenAsync(token, ct);
-                await ctx.SignInAsync(
-                    CookieAuthenticationDefaults.AuthenticationScheme,
-                    new ClaimsPrincipal(BuildIdentity(user)), PersistentSignIn(ctx));
+                await SignInUserAsync(ctx, user, SignInMethod.MagicLink);
                 logger.LogInformation("Magic-link sign-in for {Email} (org {OrgId}).", user.Email, user.OrganizationId);
                 ctx.Response.Redirect("/");
             }
@@ -467,9 +458,7 @@ internal static class AccountAuthEndpoints
                     form["Password"].ToString(),
                     ct);
 
-                await ctx.SignInAsync(
-                    CookieAuthenticationDefaults.AuthenticationScheme,
-                    new ClaimsPrincipal(BuildIdentity(user)), PersistentSignIn(ctx));
+                await SignInUserAsync(ctx, user, SignInMethod.Password);
                 logger.LogInformation("Invite accepted; {Email} signed in to org {OrgId}.",
                     user.Email, user.OrganizationId);
                 ctx.Response.Redirect("/");
@@ -508,7 +497,7 @@ internal static class AccountAuthEndpoints
 
         // /auth/account/* — self-service. All require [Authorize].
         app.MapPost("/auth/account/password", async (
-            HttpContext ctx, AccountService accounts, IOrganizationContext org, IAntiforgery antiforgery, CancellationToken ct) =>
+            HttpContext ctx, AccountService accounts, IOrganizationContext org, IAntiforgery antiforgery, TimeProvider clock, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
@@ -519,8 +508,15 @@ internal static class AccountAuthEndpoints
                 // The change invalidates every cookie issued before it (#675),
                 // including this one — re-issue it so the user who just changed
                 // their own password isn't signed out along with everyone else.
-                await ctx.SignInAsync(
-                    CookieAuthenticationDefaults.AuthenticationScheme, ctx.User, PersistentSignIn(ctx));
+                // Same session: keep its method and strong moment exactly as
+                // they were (typing the current password proves nothing new),
+                // but a fresh signed_in_at so this cookie survives the cut the
+                // change just made. The stamps are mirrored on ctx.User as claims.
+                var props = PersistentSignIn(ctx,
+                    StepUpAuth.Method(ctx.User) ?? SignInMethod.Password,
+                    StepUpAuth.StrongAuthAt(ctx.User),
+                    signedInAt: clock.GetUtcNow().UtcDateTime);
+                await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, ctx.User, props);
                 ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=password");
             }
             catch (PlanValidationException ex)

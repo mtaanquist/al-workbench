@@ -142,10 +142,8 @@ internal static class AccountPasskeyEndpoints
             ctx.Response.Cookies.Delete(PasskeyService.LoginCookieName);
             try
             {
-                var user = await passkeys.CompleteLoginAsync(rawResponse, envelope, ct);
-                await ctx.SignInAsync(
-                    CookieAuthenticationDefaults.AuthenticationScheme,
-                    new ClaimsPrincipal(BuildIdentity(user)), PersistentSignIn(ctx));
+                var (user, userVerified) = await passkeys.CompleteLoginAsync(rawResponse, envelope, ct);
+                await SignInUserAsync(ctx, user, userVerified ? SignInMethod.PasskeyVerified : SignInMethod.Passkey);
                 logger.LogInformation("Passkey sign-in for {Email}.", user.Email);
                 ctx.Response.ContentType = "application/json";
                 await ctx.Response.WriteAsync("{\"ok\":true}");

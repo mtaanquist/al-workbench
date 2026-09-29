@@ -36,7 +36,12 @@ internal sealed class UpgradeActionTestFixture : IDisposable
 
     public TestDb Db { get; } = new();
     public FakeUpdatesAdminClient Admin { get; } = new();
+    /// <summary>Stands in for the App Management API: records an install, throws on everything else.</summary>
+    public FakeUploadAppClient Apps { get; } = new();
     public FakeTimeProvider Clock { get; } = new(new DateTimeOffset(2026, 9, 11, 8, 0, 0, TimeSpan.Zero));
+
+    /// <summary>How long the worker's sends wait for an install; a test sets it to zero to run the wait out.</summary>
+    public TimeSpan UploadPollTimeout { get; set; } = ProjectConnectionService.DefaultUploadPollTimeout;
 
     private ServiceProvider? _provider;
 
@@ -95,11 +100,18 @@ internal sealed class UpgradeActionTestFixture : IDisposable
             NullLogger<EnvironmentUpgradeService>.Instance);
     }
 
+    /// <summary>The connection service on its own, for the writes that book an upload.</summary>
+    public ProjectConnectionService Connections(AppDbContext ctx) => Connections(ctx, new ProjectAccess(ctx, Db.OrgContext));
+
     private ProjectConnectionService Connections(AppDbContext ctx, ProjectAccess access) => new(
-        ctx, Db.OrgContext, access, TokenOk(), Admin, new UnusedAppManagementClient(),
+        ctx, Db.OrgContext, access, TokenOk(), Admin, Apps,
         Db.DataProtectionProvider,
-        new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System), TimeProvider.System,
-        NullLogger<ProjectConnectionService>.Instance);
+        new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System), Clock,
+        NullLogger<ProjectConnectionService>.Instance)
+    {
+        // A poll every five seconds is right for Business Central and wrong for a test.
+        UploadPollDelay = TimeSpan.Zero,
+    };
 
     /// <summary>
     /// A service provider shaped like the app's, for the worker: scoped context reading
@@ -116,17 +128,27 @@ internal sealed class UpgradeActionTestFixture : IDisposable
         services.AddDbContext<AppDbContext>(o => o.UseNpgsql(Db.ConnectionString), ServiceLifetime.Scoped);
         services.AddSingleton(Db.DataProtectionProvider);
         services.AddSingleton<IBcAdminClient>(Admin);
-        services.AddSingleton<IBcAppManagementClient, UnusedAppManagementClient>();
+        services.AddSingleton<IBcAppManagementClient>(Apps);
         services.AddSingleton(TokenOk());
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache>();
         services.AddScoped<ProjectAccess>();
-        services.AddScoped<ProjectConnectionService>();
+        services.AddScoped(sp => new ProjectConnectionService(
+            sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>(),
+            sp.GetRequiredService<ProjectAccess>(), sp.GetRequiredService<BcTokenService>(),
+            sp.GetRequiredService<IBcAdminClient>(), sp.GetRequiredService<IBcAppManagementClient>(),
+            sp.GetRequiredService<Microsoft.AspNetCore.DataProtection.IDataProtectionProvider>(),
+            sp.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache>(), sp.GetRequiredService<TimeProvider>(),
+            NullLogger<ProjectConnectionService>.Instance)
+        {
+            UploadPollDelay = TimeSpan.Zero,
+            UploadPollTimeout = UploadPollTimeout,
+        });
         services.AddScoped<UpgradeActionService>();
         return _provider = services.BuildServiceProvider();
     }
 
-    public UpgradeActionWorker Worker() => new(
-        Provider(), Clock, NullLogger<UpgradeActionWorker>.Instance, new WorkerHeartbeatRegistry());
+    public UpgradeActionWorker Worker(WorkerHeartbeatRegistry? heartbeats = null) => new(
+        Provider(), Clock, NullLogger<UpgradeActionWorker>.Instance, heartbeats ?? new WorkerHeartbeatRegistry());
 
     /// <summary>A token service whose every request succeeds, for a page test that drives the real services.</summary>
     public BcTokenService TokenService() => TokenOk();
@@ -304,6 +326,62 @@ internal sealed class UpgradeActionTestFixture : IDisposable
         public Task<IReadOnlyList<BcSession>> ListSessionsAsync(string accessToken, string? applicationFamily, string environmentName, CancellationToken ct = default)
             => throw new NotSupportedException();
         public Task CancelSessionAsync(string accessToken, string? applicationFamily, string environmentName, int sessionId, CancellationToken ct = default)
+            => throw new NotSupportedException();
+    }
+
+    public sealed class FakeUploadAppClient : IBcAppManagementClient
+    {
+        /// <summary>The last install, so a test can pin the file, the bytes and the schedule.</summary>
+        public (string FileName, byte[] Bytes, string Schedule)? Installed;
+        /// <summary>Every install in the order it was sent.</summary>
+        public List<string> InstalledFiles { get; } = new();
+        public BcApiException? InstallThrows;
+        /// <summary>What a poll of an install reports, by file name; succeeded straight away unless a test says otherwise.</summary>
+        public Func<string, BcAppOperationStatus> OnOperationStatus = _ => BcAppOperationStatus.Succeeded;
+        /// <summary>How many polls in a row answer with an API error before the status above is returned.</summary>
+        public int PollErrorsBeforeAnswer;
+        public int Polls;
+        private readonly Dictionary<Guid, string> _operations = new();
+
+        public Task<BcAppOperation> InstallPteAsync(string accessToken, string applicationFamily, string environmentName, byte[] appBytes, string fileName, string deploymentSchedule, string syncMode, string languageId, bool installOrUpdateNeededDependencies, CancellationToken ct = default)
+        {
+            if (InstallThrows is not null) throw InstallThrows;
+            Installed = (fileName, appBytes, deploymentSchedule);
+            InstalledFiles.Add(fileName);
+            var operationId = Guid.NewGuid();
+            _operations[operationId] = fileName;
+            return Task.FromResult(new BcAppOperation(
+                operationId, Guid.NewGuid(), "install", BcAppOperationStatus.Running, "running",
+                string.Empty, "1.0.0.0", deploymentSchedule, string.Empty, string.Empty, string.Empty,
+                false, "app", DateTimeOffset.UtcNow, null, null));
+        }
+
+        public Task<BcAppOperation?> GetAppOperationAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, Guid operationId, CancellationToken ct = default)
+        {
+            Polls++;
+            if (PollErrorsBeforeAnswer > 0)
+            {
+                PollErrorsBeforeAnswer--;
+                throw new BcApiException(System.Net.HttpStatusCode.TooManyRequests, "Too many requests.");
+            }
+            var status = OnOperationStatus(_operations[operationId]);
+            return Task.FromResult<BcAppOperation?>(new BcAppOperation(
+                operationId, appId, "install", status, status.ToString().ToLowerInvariant(),
+                string.Empty, "1.0.0.0", null,
+                status == BcAppOperationStatus.Failed ? "The app needs Continia Core 28.0.0.0, which isn't installed." : string.Empty,
+                status == BcAppOperationStatus.Failed ? "MissingDependency" : string.Empty, string.Empty,
+                false, "app", DateTimeOffset.UtcNow, null, DateTimeOffset.UtcNow));
+        }
+
+        public Task<IReadOnlyList<BcInstalledApp>> ListInstalledAppsAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
+            => throw new NotSupportedException();
+        public Task<IReadOnlyList<BcAvailableAppUpdate>> ListAvailableUpdatesAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
+            => throw new NotSupportedException();
+        public Task<IReadOnlyList<BcScheduledPteOperation>> ListScheduledPteOperationsAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
+            => throw new NotSupportedException();
+        public Task<BcAppOperation> RemoveScheduledPteVersionAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, string targetVersion, string scheduleKind, CancellationToken ct = default)
+            => throw new NotSupportedException();
+        public Task<BcAppOperation> UpdateAppAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, string targetVersion, bool useEnvironmentUpdateWindow, bool installOrUpdateNeededDependencies, CancellationToken ct = default)
             => throw new NotSupportedException();
     }
 

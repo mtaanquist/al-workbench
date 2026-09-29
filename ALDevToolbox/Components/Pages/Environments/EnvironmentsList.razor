@@ -5,6 +5,7 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject ILogger<EnvironmentsList> Log
+@inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Services.ObjectExplorer.Bc
@@ -458,7 +459,7 @@
                                 @if (!row.IsSoftDeleted)
                                 {
                                     <button type="button" class="menu__item" role="menuitem"
-                                            disabled="@_busy" @onclick="() => UploadAppAsync(row)">Upload an app...</button>
+                                            disabled="@_busy" @onclick="() => UploadAppAsync(row)">Upload apps...</button>
                                 }
                                 @* Copy is the one entry offered only to people who manage the
                                    solution. The others are one click and a refusal; this one
@@ -1046,7 +1047,12 @@
     private async Task UploadAppAsync(UpgradeFleetRow row)
     {
         if (_uploadDialog is null) return;
-        var upload = await _uploadDialog.OpenAsync(row.ProjectName, row.EnvironmentName, row.IsProduction);
+        // The list row carries no windows; the environment's own read does, and the
+        // dialog needs the delivery window to offer it.
+        var detail = await Fleet.GetEnvironmentAsync(row.EnvironmentId);
+        var upload = await _uploadDialog.OpenAsync(row.ProjectName, row.EnvironmentName, row.IsProduction,
+            detail?.DeliveryWindowStart, detail?.DeliveryWindowEnd, row.TimeZone,
+            detail?.BcUpdateWindowStart, detail?.BcUpdateWindowEnd, detail?.BcUpdateWindowTimeZoneIana);
         if (upload is null) return;
 
         _busy = true;
@@ -1056,12 +1062,13 @@
         StateHasChanged();
         try
         {
-            await Connection.InstallUploadedAppAsync(row.ProjectId, row.EnvironmentId, upload.Bytes, upload.FileName, upload.InUpdateWindow);
-            _done = UploadAppDialog.DoneMessage(upload, row.EnvironmentName);
+            var packages = upload.Files.Select(f => new UploadPackage(f.Bytes, f.FileName)).ToList();
+            var outcome = await Connection.InstallUploadedAppsAsync(row.ProjectId, row.EnvironmentId, packages, upload.Timing, upload.At);
+            _done = UploadAppDialog.DoneMessage(upload, outcome, row.EnvironmentName, Zone);
         }
         catch (PlanValidationException ex)
         {
-            _error = ex.Errors.Values.FirstOrDefault() ?? $"Couldn't upload {upload.FileName}.";
+            _error = ex.Errors.Values.FirstOrDefault() ?? "Couldn't book the upload.";
         }
         catch (ProjectAccessDeniedException ex)
         {
@@ -1070,7 +1077,7 @@
         catch (Exception ex)
         {
             Log.LogError(ex, "Uploading an app failed for environment {EnvId}.", row.EnvironmentId);
-            _error = $"Couldn't upload {upload.FileName}. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.";
+            _error = "Couldn't book the upload. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.";
         }
         finally
         {

@@ -116,6 +116,11 @@ internal static class EntraAuthEndpoints
         return app;
     }
 
+    /// <summary>The token's <c>auth_time</c> (seconds since the epoch) as UTC, or null when Microsoft did not include it.</summary>
+    private static DateTime? AuthTimeOf(ClaimsPrincipal principal) =>
+        long.TryParse(principal.FindFirst("auth_time")?.Value, out var unix)
+            ? DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime : null;
+
     private static int? CurrentUserId(HttpContext ctx) =>
         int.TryParse(ctx.User.FindFirst(ALDevToolbox.Services.HttpOrganizationContext.UserIdClaim)?.Value, out var id)
             ? id : null;
@@ -152,6 +157,44 @@ internal static class EntraAuthEndpoints
         }
 
         var entra = ctx.HttpContext.RequestServices.GetRequiredService<EntraSignInService>();
+
+        // Step-up mode: a signed-in user confirming it is them for a sensitive
+        // tool (StepUpEndpoints). Never a sign-in: the identity that came back
+        // must already be linked to the user on this request's cookie, and the
+        // sign-in must be newer than the step-up started when Microsoft says
+        // when it happened (auth_time is optional in Entra ID tokens).
+        var authTime = AuthTimeOf(principal);
+        if (ctx.Properties?.Items.TryGetValue(StepUpEndpoints.EntraStepUpUserIdItem, out var stepUpUserRaw) == true
+            && int.TryParse(stepUpUserRaw, out var stepUpUserId))
+        {
+            var cookie = await ctx.HttpContext.AuthenticateAsync(
+                CookieAuthenticationDefaults.AuthenticationScheme);
+            if (cookie.Principal is not null) ctx.HttpContext.User = cookie.Principal;
+            // The handshake asked with max_age=0, so a conforming token carries
+            // auth_time; one without it, or one older than the step-up started
+            // (a minute of clock skew allowed), means Microsoft did not
+            // re-authenticate the person, whatever the browser sent.
+            var issuedAt = ctx.Properties.Items.TryGetValue(StepUpEndpoints.EntraStepUpIssuedAtItem, out var issuedRaw)
+                && DateTime.TryParse(issuedRaw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedIssuedAt)
+                ? parsedIssuedAt : DateTime.MaxValue;
+            var reauthenticated = authTime is { } at && at >= issuedAt.AddMinutes(-1);
+            if (CurrentUserId(ctx.HttpContext) != stepUpUserId
+                || !reauthenticated
+                || !await entra.IsLinkedAsync(stepUpUserId, token, ct))
+            {
+                ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=entra-mismatch");
+                return;
+            }
+            var protection = ctx.HttpContext.RequestServices.GetRequiredService<Microsoft.AspNetCore.DataProtection.IDataProtectionProvider>();
+            var clock = ctx.HttpContext.RequestServices.GetRequiredService<TimeProvider>();
+            var pending = ReadMfaPendingCookie(ctx.HttpContext, protection, clock)
+                ?? new MfaPending(stepUpUserId, false, false, clock.GetUtcNow().UtcDateTime, safeReturn, StepUp: true);
+            var logger = ctx.HttpContext.RequestServices
+                .GetRequiredService<ILoggerFactory>().CreateLogger("StepUp");
+            var auth = ctx.HttpContext.RequestServices.GetRequiredService<AuthService>();
+            await StepUpEndpoints.CompleteStepUpAsync(ctx.HttpContext, auth, pending with { ReturnUrl = safeReturn }, SignInMethod.Entra, ct, logger);
+            return;
+        }
 
         // Link mode: a signed-in user connecting a Microsoft account from
         // /account. The link target rides in the protected properties, and
@@ -193,10 +236,17 @@ internal static class EntraAuthEndpoints
         {
             // Reload with the Organization nav so BuildIdentity can stamp
             // the org-name / MCP / tool claims, mirroring TryLoginAsync.
-            var identity = BuildIdentity(result.User);
-            await ctx.HttpContext.SignInAsync(
-                CookieAuthenticationDefaults.AuthenticationScheme,
-                new ClaimsPrincipal(identity), PersistentSignIn(ctx.HttpContext));
+            // Strong only when Microsoft says when the person authenticated:
+            // without auth_time this may be a silently reused Microsoft
+            // session, which proves nothing about who is at the keyboard.
+            if (authTime is { } strongAt)
+            {
+                await SignInUserAsync(ctx.HttpContext, result.User, SignInMethod.Entra, strongAt);
+            }
+            else
+            {
+                await SignInUserAsync(ctx.HttpContext, result.User, SignInMethod.EntraSso);
+            }
             ctx.Response.Redirect(safeReturn);
             return;
         }

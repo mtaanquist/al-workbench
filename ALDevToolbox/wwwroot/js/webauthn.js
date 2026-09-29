@@ -104,6 +104,42 @@ window.aldtPasskey = {
         }
         window.location.href = '/';
     },
+
+    // Step-up: same ceremony as login, against the endpoints that pin the
+    // allow-list to the signed-in user and require user verification. The
+    // server answers with where to go next.
+    async stepUp() {
+        const optionsRes = await fetch('/auth/step-up/passkey/options', { method: 'POST' });
+        if (!optionsRes.ok) throw new Error('Failed to start passkey check.');
+        const opts = decodeAssertOptions(await optionsRes.json());
+
+        const assertion = await navigator.credentials.get({ publicKey: opts });
+        if (!assertion) throw new Error('Passkey check cancelled.');
+
+        const response = {
+            id: assertion.id,
+            rawId: bufToB64u(assertion.rawId),
+            type: assertion.type,
+            response: {
+                authenticatorData: bufToB64u(assertion.response.authenticatorData),
+                clientDataJSON: bufToB64u(assertion.response.clientDataJSON),
+                signature: bufToB64u(assertion.response.signature),
+                userHandle: assertion.response.userHandle ? bufToB64u(assertion.response.userHandle) : null,
+            },
+            extensions: assertion.getClientExtensionResults ? assertion.getClientExtensionResults() : {},
+        };
+        const completeRes = await fetch('/auth/step-up/passkey', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(response),
+        });
+        if (!completeRes.ok) {
+            const txt = await completeRes.text();
+            throw new Error(txt || 'Passkey check failed.');
+        }
+        const result = await completeRes.json();
+        window.location.href = result.redirect || '/';
+    },
 };
 
 window.aldtDownload = {
