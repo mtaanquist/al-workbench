@@ -61,7 +61,19 @@ public sealed class ReleaseAutoImportSchedulerTests : IDisposable
         }
     }
 
-    private async Task EnableAutoImportAsync(int organizationId, string country)
+    [Fact]
+    public async Task Preview_opt_in_travels_with_the_target()
+    {
+        await EnableAutoImportAsync(TestDb.OtherOrgId, "dk", includePreviews: true);
+
+        await using var ctx = _db.NewContext();
+        var targets = await ReleaseAutoImportScheduler.ResolveTargetsAsync(ctx, includeSystemOrg: false, default);
+
+        targets.Should().ContainSingle(t => t.OrganizationId == TestDb.OtherOrgId)
+            .Which.IncludePreviews.Should().BeTrue("the sweep decides per org whether to hit the insider channel");
+    }
+
+    private async Task EnableAutoImportAsync(int organizationId, string country, bool includePreviews = false)
     {
         await using var ctx = _db.NewContext();
         ctx.OrganizationSettings.Add(new OrganizationSettings
@@ -69,6 +81,7 @@ public sealed class ReleaseAutoImportSchedulerTests : IDisposable
             OrganizationId = organizationId,
             AutoImportReleasesEnabled = true,
             AutoImportCountry = country,
+            AutoImportPreviewsEnabled = includePreviews,
             UpdatedAt = DateTime.UtcNow,
         });
         await ctx.SaveChangesAsync();

@@ -206,7 +206,29 @@ public static class FolderZipWalker
     /// <see cref="PairingCandidates"/>.
     /// </summary>
     public static IReadOnlyList<FolderZipEntry> WalkBcArtifactApplication(ZipArchive archive) =>
-        Walk(archive, IsWantedArtifactApp);
+        PreferCountryFolderCopy(Walk(archive, IsWantedArtifactApp));
+
+    /// <summary>
+    /// The insider (preview) Sandbox artifact ships the core apps twice under the
+    /// same filename: once in <c>Applications.&lt;country&gt;/</c> beside their
+    /// <c>.Source.zip</c>, and once in <c>Extensions/</c> as different bytes (the
+    /// install copy). Same <c>(AppId, Version)</c>, different hash - exactly what
+    /// the importer's collision guard refuses - so when a leaf name appears in
+    /// both places only the country-folder copy is kept. An app that appears
+    /// once, in either folder, is untouched.
+    /// </summary>
+    private static IReadOnlyList<FolderZipEntry> PreferCountryFolderCopy(IReadOnlyList<FolderZipEntry> entries) =>
+        entries
+            .GroupBy(e => e.FileName, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.Count() == 1
+                ? g.First()
+                : g.OrderBy(e => IsUnderApplicationsFolder(Normalize(e.AppEntry.FullName)) ? 0 : 1).First())
+            .ToList();
+
+    private static bool IsUnderApplicationsFolder(string normalizedFullName) =>
+        normalizedFullName.Split('/', StringSplitOptions.RemoveEmptyEntries).Any(segment =>
+            string.Equals(segment, "Applications", StringComparison.OrdinalIgnoreCase)
+            || segment.StartsWith("Applications.", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Walks the <em>platform</em> artifact for the single thing the application

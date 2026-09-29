@@ -116,6 +116,7 @@ public class ReleaseImportService
             Label = metadata.Label.Trim(),
             Kind = metadata.Kind,
             DedupKey = ReleaseSourceScanner.NullIfBlank(metadata.DedupKey),
+            IsPrerelease = metadata.IsPrerelease,
             Publisher = ReleaseSourceScanner.NullIfBlank(metadata.Publisher),
             ProjectName = ReleaseSourceScanner.NullIfBlank(metadata.ProjectName),
             ParentReleaseId = metadata.ParentReleaseId,
@@ -736,7 +737,9 @@ public class ReleaseImportService
         // releases: those are the DVDs whose language packs seed the org-wide
         // translation memory. Partner/project imports skip the extra work — an
         // admin can still upload their XLIFFs on demand. See .design/translator/.
-        var captureTranslations = string.Equals(release.Kind, "first_party", StringComparison.Ordinal);
+        // A preview build is skipped too: its captions are still changing and
+        // would seed the memory with strings the shipped release may not carry.
+        var captureTranslations = string.Equals(release.Kind, "first_party", StringComparison.Ordinal) && !release.IsPrerelease;
 
         AppPackage pkg;
         try
@@ -1585,7 +1588,10 @@ public class ReleaseImportService
     /// </summary>
     private async Task ScanForDependencyDriftAsync(OeRelease release, CancellationToken ct)
     {
-        if (_drift is null || release.Kind != "first_party") return;
+        // A preview never drives the scan: it would tell every solution it is
+        // behind a version customers can't run yet (DependencyDriftService
+        // ignores previews when picking the newest release for the same reason).
+        if (_drift is null || release.Kind != "first_party" || release.IsPrerelease) return;
 
         try
         {

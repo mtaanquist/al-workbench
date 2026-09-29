@@ -412,6 +412,37 @@ public sealed class FolderZipWalkerTests
     }
 
     [Fact]
+    public void Artifact_application_walk_keeps_the_country_folder_copy_when_extensions_repeats_an_app()
+    {
+        // The insider Sandbox artifact (30.0.55227.0 dk, read live) carries Base
+        // Application, System Application, Application, Business Foundation and
+        // PEPPOL in BOTH Applications.DK/ and Extensions/ under the same filename
+        // with different bytes. Importing both would trip the (AppId, Version)
+        // collision guard and fail the release; the copy beside its .Source.zip
+        // is the one we want. Apps that appear once in Extensions/ still come
+        // through.
+        using var archive = BuildArchive(
+            "Applications.DK/Microsoft_Base Application_30.0.55227.0.app",
+            "Applications.DK/Base Application.Source.zip",
+            "Applications.DK/Microsoft_PEPPOL_30.0.55227.0.app",
+            "Extensions/Microsoft_Base Application_30.0.55227.0.app",
+            "Extensions/Microsoft_PEPPOL_30.0.55227.0.app",
+            "Extensions/Microsoft_Sustainability_30.0.55227.0.app",
+            "manifest.json");
+
+        var entries = FolderZipWalker.WalkBcArtifactApplication(archive);
+
+        entries.Select(e => e.FileName).Should().BeEquivalentTo(
+            "Microsoft_Base Application_30.0.55227.0.app",
+            "Microsoft_PEPPOL_30.0.55227.0.app",
+            "Microsoft_Sustainability_30.0.55227.0.app");
+        var baseApp = entries.Single(e => e.FileName.StartsWith("Microsoft_Base Application"));
+        baseApp.AppEntry.FullName.Should().StartWith("Applications.DK/");
+        baseApp.SourceZipEntry.Should().NotBeNull("the country-folder copy is the one paired with its source");
+        entries.Single(e => e.FileName.StartsWith("Microsoft_PEPPOL")).AppEntry.FullName.Should().StartWith("Applications.DK/");
+    }
+
+    [Fact]
     public void Artifact_application_walk_pairs_versioned_app_with_unversioned_source_zip()
     {
         using var archive = BuildArchive(

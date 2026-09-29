@@ -126,7 +126,9 @@ public class ObjectExplorerService
                 SourceFileCount: r.SourceFileCount,
                 SourceContentLength: r.SourceContentLength,
                 DeletedAt: r.DeletedAt,
-                StatusMessage: r.StatusMessage))
+                StatusMessage: r.StatusMessage,
+                PipelineName: null,
+                IsPrerelease: r.IsPrerelease))
             .ToListAsync(ct);
 
         // Sort in memory: active rows first, then by BC version descending
@@ -212,7 +214,7 @@ public class ObjectExplorerService
             .Select(r => new
             {
                 r.Id, r.Label, r.Kind, r.Status, r.StatusMessage, r.BcVersion, r.ParentReleaseId, r.ImportedAt,
-                r.Publisher, r.ProjectName, r.DeletedAt,
+                r.Publisher, r.ProjectName, r.DeletedAt, r.IsPrerelease,
                 ParentLabel = r.ParentRelease != null ? r.ParentRelease.Label : null,
             })
             .SingleOrDefaultAsync(ct);
@@ -234,7 +236,8 @@ public class ObjectExplorerService
             ProjectName: row.ProjectName,
             ImportedAt: row.ImportedAt,
             DeletedAt: row.DeletedAt,
-            ModuleCount: moduleCount);
+            ModuleCount: moduleCount,
+            IsPrerelease: row.IsPrerelease);
     }
 
     /// <summary>

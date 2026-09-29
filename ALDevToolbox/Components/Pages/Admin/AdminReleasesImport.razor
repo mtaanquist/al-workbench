@@ -108,7 +108,9 @@
         // ingesting ones would resolve references to nothing.
         var all = await ObjectExplorer.ListReleasesAsync();
         _parentCandidates = all
-            .Where(r => r.Status == "ready" && r.Kind == "first_party")
+            // Previews are left out: a third-party release parented on one would
+            // lose its parent when the preview is retired.
+            .Where(r => r.Status == "ready" && r.Kind == "first_party" && !r.IsPrerelease)
             .OrderBy(r => r.Label)
             .ToList();
     }
