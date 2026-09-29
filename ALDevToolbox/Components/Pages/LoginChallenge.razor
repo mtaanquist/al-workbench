@@ -7,6 +7,7 @@
 @inject IDataProtectionProvider Protection
 @inject TimeProvider Clock
 @inject ALDevToolbox.Services.Account.WebAuthnConfig WebAuthn
+@inject ALDevToolbox.Services.Tools.ToolEnablement Tools
 
 <PageTitle>@(_state?.StepUp == true ? "Confirm it's you" : "Verify it's you") · AL Workbench</PageTitle>
 
@@ -82,7 +83,7 @@ else
     <Sub>
         @if (_state.StepUp)
         {
-            <text>The tool you opened asks you to confirm it's you first. We'll take you straight back, and you won't be asked again for the next @WindowMinutes minutes.</text>
+            <text>The tool you opened asks you to confirm it's you first. We'll take you straight back, and you won't be asked again for the next @_windowMinutes minutes.</text>
         }
         else
         {
@@ -232,16 +233,17 @@ else
     // primary, and the code forms' buttons step down to outline.
     private bool _ceremonyIsPrimary;
 
-    private static int WindowMinutes => (int)ALDevToolbox.Services.Account.StepUpAuth.Window.TotalMinutes;
+    private int _windowMinutes = (int)ALDevToolbox.Services.Account.StepUpAuth.DefaultWindow.TotalMinutes;
     private string VerifyLabel => _state?.StepUp == true ? "Confirm" : "Verify";
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
         var ctx = Http.HttpContext;
         if (ctx is null) return;
         _signedIn = ctx.User?.Identity?.IsAuthenticated == true;
         _state = EndpointHelpers.ReadMfaPendingCookie(ctx, Protection, Clock);
         if (_state is null) return;
+        if (_state.StepUp) _windowMinutes = (int)(await Tools.StepUpWindowAsync()).TotalMinutes;
         _ceremonyIsPrimary = _state.StepUp && (_state.PasskeyAvailable || _state.EntraAvailable);
 
         // Recovery codes are issued with TOTP, so they ride on the same flag.

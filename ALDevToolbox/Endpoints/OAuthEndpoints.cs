@@ -189,7 +189,7 @@ internal static class OAuthEndpoints
             var tools = ctx.RequestServices.GetRequiredService<ToolEnablement>();
             if (decision == "allow"
                 && await tools.AnyStepUpAsync(cancellationToken)
-                && !tools.IsFresh(cookieResult.Principal))
+                && !await tools.IsFreshAsync(cookieResult.Principal, cancellationToken))
             {
                 var consentQuery = QueryString.Create(form
                     .Where(f => f.Key != "decision" && !f.Key.StartsWith("__", StringComparison.Ordinal))
@@ -231,7 +231,7 @@ internal static class OAuthEndpoints
             // The consent remembers whether the person confirming it had a
             // recent second factor; the MCP filter requires that before a
             // writing tool the org marked for step-up runs under this consent.
-            var strongAuthAt = StepUpAuth.IsFresh(cookieResult.Principal, now)
+            var strongAuthAt = await tools.IsFreshAsync(cookieResult.Principal, cancellationToken)
                 ? StepUpAuth.StrongAuthAt(cookieResult.Principal) : null;
             await UpsertConsentAsync(db, userId, orgId, clientId, canonicalScopes, now, strongAuthAt, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);

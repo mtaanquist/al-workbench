@@ -82,8 +82,8 @@ internal static class ToolAccessGate
     /// <summary>
     /// True when the signed-in cookie user's organisation wants a second factor
     /// for any of <paramref name="tools"/> and the session's last one is older
-    /// than <see cref="Services.Account.StepUpAuth.Window"/>. The shared
-    /// Pipelines dashboard is gated when either of its tools is.
+    /// than the organisation's window (both ride the cookie as claims). The
+    /// shared Pipelines dashboard is gated when either of its tools is.
     /// </summary>
     internal static bool NeedsStepUp(IReadOnlyList<ToolKey> tools, System.Security.Claims.ClaimsPrincipal? user, DateTime now)
     {
@@ -91,7 +91,7 @@ internal static class ToolAccessGate
         if (user.HasClaim(c => c.Type == "pat_id")) return false;
         var stepUp = EndpointHelpers.ReadStepUpTools(user);
         if (stepUp.Count == 0 || !tools.Any(stepUp.Contains)) return false;
-        return !Services.Account.StepUpAuth.IsFresh(user, now);
+        return !Services.Account.StepUpAuth.IsFresh(user, now, EndpointHelpers.ReadStepUpWindow(user));
     }
 
     /// <summary>

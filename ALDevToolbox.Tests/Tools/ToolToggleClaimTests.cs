@@ -71,6 +71,16 @@ public sealed class ToolToggleClaimTests
     }
 
     [Fact]
+    public void The_step_up_window_rides_the_cookie_beside_the_tools()
+    {
+        var org = new Organization { Id = 1, Name = "CRONUS", McpEnabled = true, StepUpWindowMinutes = 45 };
+
+        EndpointHelpers.ReadStepUpWindow(PrincipalFor(org)).Should().Be(TimeSpan.FromMinutes(45));
+        EndpointHelpers.ReadStepUpWindow(new ClaimsPrincipal(new ClaimsIdentity()))
+            .Should().Be(ALDevToolbox.Services.Account.StepUpAuth.DefaultWindow, "no claim means the default");
+    }
+
+    [Fact]
     public void Mcp_off_folds_into_the_disabled_set()
     {
         var org = new Organization { Id = 1, Name = "CRONUS", McpEnabled = false };

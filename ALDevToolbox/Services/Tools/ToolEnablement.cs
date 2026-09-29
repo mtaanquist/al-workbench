@@ -38,6 +38,7 @@ public sealed class ToolEnablement
     // should not read the organisation row twice.
     private HashSet<ToolKey>? _orgDisabled;
     private HashSet<ToolKey>? _orgStepUp;
+    private TimeSpan? _orgStepUpWindow;
 
     public ToolEnablement(
         IToolAvailability availability,
@@ -60,15 +61,34 @@ public sealed class ToolEnablement
     /// <summary>The tools the acting organisation has marked for step-up, read once per scope.</summary>
     public async Task<HashSet<ToolKey>> StepUpToolsAsync(CancellationToken ct = default)
     {
-        if (_orgStepUp is not null) return _orgStepUp;
-        if (_orgContext.CurrentOrganizationId is not { } orgId) return _orgStepUp = new HashSet<ToolKey>();
+        await LoadStepUpAsync(ct);
+        return _orgStepUp!;
+    }
+
+    /// <summary>How long a confirmation keeps a session fresh in the acting organisation.</summary>
+    public async Task<TimeSpan> StepUpWindowAsync(CancellationToken ct = default)
+    {
+        await LoadStepUpAsync(ct);
+        return _orgStepUpWindow!.Value;
+    }
+
+    private async Task LoadStepUpAsync(CancellationToken ct)
+    {
+        if (_orgStepUp is not null) return;
+        if (_orgContext.CurrentOrganizationId is not { } orgId)
+        {
+            _orgStepUp = new HashSet<ToolKey>();
+            _orgStepUpWindow = Services.Account.StepUpAuth.DefaultWindow;
+            return;
+        }
         // Always the row, never the claim: the claim refreshes with the cookie
         // and this answer decides whether a credential gets spent.
-        var names = await _db.Organizations.AsNoTracking()
+        var row = await _db.Organizations.AsNoTracking()
             .Where(o => o.Id == orgId)
-            .Select(o => o.StepUpTools)
+            .Select(o => new { o.StepUpTools, o.StepUpWindowMinutes })
             .FirstOrDefaultAsync(ct);
-        return _orgStepUp = ToolCatalog.ParseKeys(names);
+        _orgStepUp = ToolCatalog.ParseKeys(row?.StepUpTools);
+        _orgStepUpWindow = Services.Account.StepUpAuth.WindowOf(row?.StepUpWindowMinutes);
     }
 
     /// <summary>True when the acting organisation wants a recent second factor before <paramref name="key"/> is used.</summary>
@@ -79,9 +99,9 @@ public sealed class ToolEnablement
     public async Task<bool> AnyStepUpAsync(CancellationToken ct = default) =>
         (await StepUpToolsAsync(ct)).Count > 0;
 
-    /// <summary>Whether the principal's last second factor is within <see cref="Services.Account.StepUpAuth.Window"/>.</summary>
-    public bool IsFresh(ClaimsPrincipal? user) =>
-        Services.Account.StepUpAuth.IsFresh(user, _clock.GetUtcNow().UtcDateTime);
+    /// <summary>Whether the principal's last second factor is within the acting organisation's window.</summary>
+    public async Task<bool> IsFreshAsync(ClaimsPrincipal? user, CancellationToken ct = default) =>
+        Services.Account.StepUpAuth.IsFresh(user, _clock.GetUtcNow().UtcDateTime, await StepUpWindowAsync(ct));
 
     /// <summary>
     /// The action-level check for the code paths that spend a stored
@@ -99,7 +119,7 @@ public sealed class ToolEnablement
         if (user?.Identity?.IsAuthenticated != true) return;
         if (user.HasClaim(c => c.Type == "pat_id") || user.FindFirst(EndpointHelpers.DisabledToolsClaim) is null) return;
         if (!await RequiresStepUpAsync(key, ct)) return;
-        if (IsFresh(user)) return;
+        if (await IsFreshAsync(user, ct)) return;
         throw new StepUpRequiredException(key);
     }
 

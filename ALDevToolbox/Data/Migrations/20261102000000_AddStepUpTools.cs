@@ -19,6 +19,13 @@ namespace ALDevToolbox.Data.Migrations
                 nullable: false,
                 defaultValueSql: "'{}'::text[]");
 
+            migrationBuilder.AddColumn<int>(
+                name: "step_up_window_minutes",
+                table: "organizations",
+                type: "integer",
+                nullable: false,
+                defaultValue: 15);
+
             migrationBuilder.AddColumn<DateTime>(
                 name: "strong_auth_at",
                 table: "oauth_consents",
@@ -31,6 +38,10 @@ namespace ALDevToolbox.Data.Migrations
         {
             migrationBuilder.DropColumn(
                 name: "step_up_tools",
+                table: "organizations");
+
+            migrationBuilder.DropColumn(
+                name: "step_up_window_minutes",
                 table: "organizations");
 
             migrationBuilder.DropColumn(

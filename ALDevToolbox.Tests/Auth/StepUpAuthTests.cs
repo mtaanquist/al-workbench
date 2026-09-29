@@ -77,13 +77,25 @@ public sealed class StepUpAuthTests
         StepUpAuth.StrongAuthAt(new ClaimsPrincipal(identity)).Should().Be(Now);
     }
 
+    private static readonly TimeSpan Window = StepUpAuth.DefaultWindow;
+
     [Fact]
     public void Fresh_inside_the_window_and_stale_after_it()
     {
-        StepUpAuth.IsFresh(Now.AddMinutes(-14), Now).Should().BeTrue();
-        StepUpAuth.IsFresh(Now - StepUpAuth.Window, Now).Should().BeTrue("the window is inclusive");
-        StepUpAuth.IsFresh(Now - StepUpAuth.Window - TimeSpan.FromSeconds(1), Now).Should().BeFalse();
-        StepUpAuth.IsFresh((DateTime?)null, Now).Should().BeFalse("a session that never had a second factor is never fresh");
+        StepUpAuth.IsFresh(Now.AddMinutes(-14), Now, Window).Should().BeTrue();
+        StepUpAuth.IsFresh(Now - Window, Now, Window).Should().BeTrue("the window is inclusive");
+        StepUpAuth.IsFresh(Now - Window - TimeSpan.FromSeconds(1), Now, Window).Should().BeFalse();
+        StepUpAuth.IsFresh((DateTime?)null, Now, Window).Should().BeFalse("a session that never had a second factor is never fresh");
+        StepUpAuth.IsFresh(Now.AddMinutes(-14), Now, TimeSpan.FromMinutes(5)).Should().BeFalse("the organisation's own window decides");
+    }
+
+    [Fact]
+    public void A_stored_window_outside_the_allowed_range_falls_back_to_the_default()
+    {
+        StepUpAuth.WindowOf(30).Should().Be(TimeSpan.FromMinutes(30));
+        StepUpAuth.WindowOf(null).Should().Be(StepUpAuth.DefaultWindow);
+        StepUpAuth.WindowOf(0).Should().Be(StepUpAuth.DefaultWindow, "zero would mean never fresh");
+        StepUpAuth.WindowOf(100_000).Should().Be(StepUpAuth.DefaultWindow, "a huge value would mean always fresh");
     }
 
     [Fact]
@@ -91,8 +103,8 @@ public sealed class StepUpAuthTests
     {
         // A forged or mis-clocked stamp far ahead of now must not buy an
         // arbitrarily long window; a few minutes of skew is tolerated.
-        StepUpAuth.IsFresh(Now.AddMinutes(2), Now).Should().BeTrue();
-        StepUpAuth.IsFresh(Now.AddHours(1), Now).Should().BeFalse();
+        StepUpAuth.IsFresh(Now.AddMinutes(2), Now, Window).Should().BeTrue();
+        StepUpAuth.IsFresh(Now.AddHours(1), Now, Window).Should().BeFalse();
     }
 
     [Fact]
@@ -101,6 +113,6 @@ public sealed class StepUpAuthTests
         var principal = new ClaimsPrincipal(new ClaimsIdentity(
             new[] { new Claim(StepUpAuth.StrongAuthAtClaim, "not a date") }, "test"));
 
-        StepUpAuth.IsFresh(principal, Now).Should().BeFalse();
+        StepUpAuth.IsFresh(principal, Now, Window).Should().BeFalse();
     }
 }

@@ -32,6 +32,10 @@ internal sealed class OrganizationConfiguration : IEntityTypeConfiguration<Organ
             .HasColumnType("text[]")
             .HasDefaultValueSql("'{}'::text[]")
             .IsRequired();
+        entity.Property(e => e.StepUpWindowMinutes)
+            .HasColumnName("step_up_window_minutes")
+            .HasDefaultValue(15)
+            .IsRequired();
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         // Partial unique index on is_system=true: at most one system org per
         // deployment. Regular orgs aren't subject to the constraint because

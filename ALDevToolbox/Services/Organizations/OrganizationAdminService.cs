@@ -73,7 +73,7 @@ public sealed record DefaultDeliveryWindows(
 }
 
 /// <summary>The current org's tool switches, for Administration → Tools.</summary>
-public sealed record OrgToolsView(bool McpEnabled, HashSet<ToolKey> DisabledTools, HashSet<ToolKey> StepUpTools);
+public sealed record OrgToolsView(bool McpEnabled, HashSet<ToolKey> DisabledTools, HashSet<ToolKey> StepUpTools, int StepUpWindowMinutes);
 
 public sealed class OrganizationAdminService
 {
@@ -247,17 +247,44 @@ public sealed class OrganizationAdminService
         var org = await _db.Organizations.FirstAsync(o => o.Id == orgId, ct);
         var normalised = ToolCatalog.Format(stepUp.Distinct());
         if (org.StepUpTools.ToHashSet().SetEquals(normalised)) return;
-        if ((org.StepUpTools.Count > 0 || normalised.Count > 0) && !_tools.IsFresh(_http.HttpContext?.User))
-        {
-            throw new PlanValidationException(new Dictionary<string, string>
-            {
-                ["StepUp"] = $"Confirm it's you before changing this: open {Endpoints.StepUpEndpoints.Path} in a new tab, confirm, then reload and save again.",
-            });
-        }
+        if (org.StepUpTools.Count > 0 || normalised.Count > 0) await RequireFreshSessionAsync(ct);
         org.StepUpTools = normalised;
         await _db.SaveChangesAsync(ct);
         _logger.LogInformation(
             "Org {OrgId} set step-up tools = [{Tools}].", orgId, string.Join(',', normalised));
+    }
+
+    /// <summary>
+    /// Sets how many minutes a confirmation keeps a member's session fresh
+    /// (<see cref="Organization.StepUpWindowMinutes"/>), one minute to a day.
+    /// Same freshness rule as the marked set while any tool is marked: a
+    /// stale admin session must not be able to stretch the window instead.
+    /// </summary>
+    public async Task SetStepUpWindowAsync(int minutes, CancellationToken ct = default)
+    {
+        if (minutes < StepUpAuth.MinWindowMinutes || minutes > StepUpAuth.MaxWindowMinutes)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["StepUpWindow"] = $"Ask again after must be between {StepUpAuth.MinWindowMinutes} and {StepUpAuth.MaxWindowMinutes} minutes.",
+            });
+        }
+        var orgId = RequireOrganizationId();
+        var org = await _db.Organizations.FirstAsync(o => o.Id == orgId, ct);
+        if (org.StepUpWindowMinutes == minutes) return;
+        if (org.StepUpTools.Count > 0) await RequireFreshSessionAsync(ct);
+        org.StepUpWindowMinutes = minutes;
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Org {OrgId} set step-up window = {Minutes} minutes.", orgId, minutes);
+    }
+
+    private async Task RequireFreshSessionAsync(CancellationToken ct)
+    {
+        if (await _tools.IsFreshAsync(_http.HttpContext?.User, ct)) return;
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["StepUp"] = $"Confirm it's you before changing this: open {Endpoints.StepUpEndpoints.Path} in a new tab, confirm, then reload and save again.",
+        });
     }
 
     /// <summary>
@@ -416,9 +443,9 @@ public sealed class OrganizationAdminService
         var orgId = RequireOrganizationId();
         var org = await _db.Organizations.AsNoTracking()
             .Where(o => o.Id == orgId)
-            .Select(o => new { o.McpEnabled, o.DisabledTools, o.StepUpTools })
+            .Select(o => new { o.McpEnabled, o.DisabledTools, o.StepUpTools, o.StepUpWindowMinutes })
             .FirstAsync(ct);
-        return new OrgToolsView(org.McpEnabled, ToolCatalog.ParseDisabled(org.DisabledTools), ToolCatalog.ParseKeys(org.StepUpTools));
+        return new OrgToolsView(org.McpEnabled, ToolCatalog.ParseDisabled(org.DisabledTools), ToolCatalog.ParseKeys(org.StepUpTools), org.StepUpWindowMinutes);
     }
 
     /// <summary>

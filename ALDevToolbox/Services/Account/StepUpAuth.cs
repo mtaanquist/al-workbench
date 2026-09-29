@@ -53,8 +53,21 @@ public enum SignInMethod
 /// </summary>
 public static class StepUpAuth
 {
-    /// <summary>How long a strong sign-in or step-up keeps a session fresh for gated tools.</summary>
-    public static readonly TimeSpan Window = TimeSpan.FromMinutes(15);
+    /// <summary>
+    /// How long a strong sign-in or step-up keeps a session fresh for gated
+    /// tools, unless the organisation sets its own on Administration → Tools
+    /// (<c>organizations.step_up_window_minutes</c>). Also the value a claim
+    /// or row that is missing falls back to.
+    /// </summary>
+    public static readonly TimeSpan DefaultWindow = TimeSpan.FromMinutes(15);
+
+    /// <summary>The shortest and longest window an organisation may choose: one minute to a day.</summary>
+    public const int MinWindowMinutes = 1;
+    public const int MaxWindowMinutes = 24 * 60;
+
+    /// <summary>A stored window, clamped to the allowed range so a bad row cannot open a session forever.</summary>
+    public static TimeSpan WindowOf(int? minutes) =>
+        minutes is { } m && m >= MinWindowMinutes && m <= MaxWindowMinutes ? TimeSpan.FromMinutes(m) : DefaultWindow;
 
     /// <summary>Auth-properties key: the <see cref="SignInMethod"/> name.</summary>
     public const string MethodKey = "auth_method";
@@ -137,11 +150,11 @@ public static class StepUpAuth
     public static DateTime? StrongAuthAt(ClaimsPrincipal? principal) =>
         ParseStamp(principal?.FindFirst(StrongAuthAtClaim)?.Value);
 
-    /// <summary>True while the strong moment is within <see cref="Window"/> of <paramref name="now"/>.</summary>
-    public static bool IsFresh(DateTime? strongAuthAt, DateTime now) =>
-        strongAuthAt is { } at && now - at <= Window && at <= now.Add(TimeSpan.FromMinutes(5));
+    /// <summary>True while the strong moment is within <paramref name="window"/> of <paramref name="now"/>.</summary>
+    public static bool IsFresh(DateTime? strongAuthAt, DateTime now, TimeSpan window) =>
+        strongAuthAt is { } at && now - at <= window && at <= now.Add(TimeSpan.FromMinutes(5));
 
-    public static bool IsFresh(ClaimsPrincipal? principal, DateTime now) => IsFresh(StrongAuthAt(principal), now);
+    public static bool IsFresh(ClaimsPrincipal? principal, DateTime now, TimeSpan window) => IsFresh(StrongAuthAt(principal), now, window);
 
     private static DateTime? ParseStamp(string? raw) =>
         !string.IsNullOrEmpty(raw)

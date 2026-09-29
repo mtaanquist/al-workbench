@@ -39,12 +39,12 @@ internal static class StepUpEndpoints
         // pending state, and show the challenge page in its step-up dress.
         app.MapGet(Path, async (
             HttpContext ctx, AppDbContext db, IOrganizationContext org, PasskeyService passkeys,
-            EntraSignInService entra, IDataProtectionProvider protection, TimeProvider clock,
-            CancellationToken ct) =>
+            EntraSignInService entra, ALDevToolbox.Services.Tools.ToolEnablement tools,
+            IDataProtectionProvider protection, TimeProvider clock, CancellationToken ct) =>
         {
             var safeReturn = ResolveSafeReturn(ctx.Request.Query["return"].ToString());
             var now = clock.GetUtcNow().UtcDateTime;
-            if (StepUpAuth.IsFresh(ctx.User, now))
+            if (await tools.IsFreshAsync(ctx.User, ct))
             {
                 ctx.Response.Redirect(safeReturn);
                 return;

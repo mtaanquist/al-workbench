@@ -35,7 +35,7 @@ public sealed class StepUpEnforcementTests : IDisposable
     private readonly FakeTimeProvider _clock = new(new DateTimeOffset(Now));
     public void Dispose() => _db.Dispose();
 
-    private static ClaimsPrincipal CookieUser(int userId, int orgId, string stepUpTools = "", DateTime? strongAt = null, bool pat = false)
+    private static ClaimsPrincipal CookieUser(int userId, int orgId, string stepUpTools = "", DateTime? strongAt = null, bool pat = false, int? windowMinutes = null)
     {
         var claims = new List<Claim>
         {
@@ -44,6 +44,7 @@ public sealed class StepUpEnforcementTests : IDisposable
             new(EndpointHelpers.DisabledToolsClaim, string.Empty),
             new(EndpointHelpers.StepUpToolsClaim, stepUpTools),
         };
+        if (windowMinutes is { } w) claims.Add(new(EndpointHelpers.StepUpWindowClaim, w.ToString(CultureInfo.InvariantCulture)));
         if (strongAt is { } at) claims.Add(new(StepUpAuth.StrongAuthAtClaim, at.ToString("o", CultureInfo.InvariantCulture)));
         if (pat) claims.Add(new("pat_id", "1"));
         return new(new ClaimsIdentity(claims, "test"));
@@ -113,6 +114,16 @@ public sealed class StepUpEnforcementTests : IDisposable
             .Response.StatusCode.Should().Be(299);
         (await RunGateAsync(null, "/pipelines/deployments/7"))
             .Response.StatusCode.Should().Be(299, "an anonymous request is authorization's to redirect");
+    }
+
+    [Fact]
+    public async Task Gate_uses_the_organisations_own_window()
+    {
+        var tenMinutesAgo = Now.AddMinutes(-10);
+        (await RunGateAsync(CookieUser(1, 1, "Releases", strongAt: tenMinutesAgo, windowMinutes: 5), "/pipelines/deployments/7"))
+            .Response.StatusCode.Should().Be(StatusCodes.Status302Found, "a five-minute window has run out");
+        (await RunGateAsync(CookieUser(1, 1, "Releases", strongAt: tenMinutesAgo, windowMinutes: 60), "/pipelines/deployments/7"))
+            .Response.StatusCode.Should().Be(299, "an hour has not");
     }
 
     // ---- CookieSessionRevalidation keeps the stamps ---------------------------
@@ -294,6 +305,27 @@ public sealed class StepUpEnforcementTests : IDisposable
 
         var unmark = () => NewOrgAdmin(ctx, tools, stale).SetStepUpToolsAsync([]);
         await unmark.Should().ThrowAsync<Domain.ValueObjects.PlanValidationException>("switching the rule off is the change a stolen session would make");
+
+        var stretch = () => NewOrgAdmin(ctx, tools, stale).SetStepUpWindowAsync(600);
+        await stretch.Should().ThrowAsync<Domain.ValueObjects.PlanValidationException>("stretching the window is the other change a stolen session would make");
+        await NewOrgAdmin(ctx, tools, fresh).SetStepUpWindowAsync(30);
+        (await NewOrgAdmin(ctx, tools, fresh).GetToolsViewAsync()).StepUpWindowMinutes.Should().Be(30);
+    }
+
+    [Fact]
+    public async Task The_window_must_be_between_a_minute_and_a_day()
+    {
+        await using var ctx = _db.NewContext();
+        var fresh = new TestDb.FixedHttpContextAccessor(new DefaultHttpContext { User = CookieUser(1, 1, strongAt: Now) });
+        var tools = new ToolEnablement(TestDb.EverythingEnabled(), fresh, ctx, _db.OrgContext, _clock);
+
+        foreach (var bad in new[] { 0, -5, 24 * 60 + 1 })
+        {
+            var act = () => NewOrgAdmin(ctx, tools, fresh).SetStepUpWindowAsync(bad);
+            (await act.Should().ThrowAsync<Domain.ValueObjects.PlanValidationException>()).Which.Errors.Keys.Should().Contain("StepUpWindow");
+        }
+        await NewOrgAdmin(ctx, tools, fresh).SetStepUpWindowAsync(24 * 60);
+        (await tools.StepUpWindowAsync()).Should().Be(TimeSpan.FromHours(24));
     }
 
     private ALDevToolbox.Services.Organizations.OrganizationAdminService NewOrgAdmin(AppDbContext ctx, ToolEnablement tools, IHttpContextAccessor http) =>

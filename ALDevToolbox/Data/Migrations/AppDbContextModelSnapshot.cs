@@ -4083,6 +4083,12 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnName("step_up_tools")
                         .HasDefaultValueSql("'{}'::text[]");
 
+                    b.Property<int>("StepUpWindowMinutes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(15)
+                        .HasColumnName("step_up_window_minutes");
+
                     b.Property<int?>("StorageQuotaMb")
                         .HasColumnType("integer")
                         .HasColumnName("storage_quota_mb");

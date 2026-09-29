@@ -43,6 +43,7 @@ internal static class EndpointHelpers
             // the OAuth consent check read the live row instead, so this too is
             // a hint that refreshes with the cookie.
             new(StepUpToolsClaim, string.Join(',', user.Organization?.StepUpTools ?? new List<string>())),
+            new(StepUpWindowClaim, (user.Organization?.StepUpWindowMinutes ?? 15).ToString(System.Globalization.CultureInfo.InvariantCulture)),
         };
         if (user.IsSiteAdmin)
         {
@@ -96,6 +97,14 @@ internal static class EndpointHelpers
 
     /// <summary>Claim type carrying the org's step-up tools as a comma-joined list of <see cref="Domain.Tools.ToolKey"/> names.</summary>
     public const string StepUpToolsClaim = "org_step_up_tools";
+
+    /// <summary>Claim type carrying the org's step-up window in minutes, beside <see cref="StepUpToolsClaim"/>.</summary>
+    public const string StepUpWindowClaim = "org_step_up_window";
+
+    /// <summary>The org's step-up window off a principal; the default when the claim is absent or out of range.</summary>
+    public static TimeSpan ReadStepUpWindow(ClaimsPrincipal? user) =>
+        Services.Account.StepUpAuth.WindowOf(
+            int.TryParse(user?.FindFirst(StepUpWindowClaim)?.Value, out var minutes) ? minutes : null);
 
     /// <summary>
     /// Reads the <see cref="StepUpToolsClaim"/> off a principal. Empty when the

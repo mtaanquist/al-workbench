@@ -68,11 +68,19 @@ public class Organization
     /// opening one of these tools' pages, or calling one of its writing MCP
     /// tools, must have completed a second factor (authenticator app, email
     /// code, recovery code, passkey with user verification, or a fresh Microsoft
-    /// sign-in) within <c>StepUpAuth.Window</c>; otherwise they are sent to
-    /// confirm it is them first. See ".design/auth-and-audit.md", "Step-up for
-    /// sensitive tools".
+    /// sign-in) within <see cref="StepUpWindowMinutes"/>; otherwise they are
+    /// sent to confirm it is them first. See ".design/auth-and-audit.md",
+    /// "Step-up for sensitive tools".
     /// </summary>
     public List<string> StepUpTools { get; set; } = new();
+
+    /// <summary>
+    /// How many minutes a confirmation keeps a member's session fresh for the
+    /// tools in <see cref="StepUpTools"/>. Defaults to fifteen; an admin sets
+    /// it on Administration → Tools within
+    /// <c>StepUpAuth.MinWindowMinutes</c>..<c>MaxWindowMinutes</c>.
+    /// </summary>
+    public int StepUpWindowMinutes { get; set; } = 15;
 
     public DateTime CreatedAt { get; set; }
 }

@@ -87,12 +87,21 @@
                     <h2 class="card__title">Confirm identity before use</h2>
                     <p class="card__sub">
                         People confirm it's them before these tools open, then aren't asked again for
-                        @WindowMinutes minutes. Anyone without an authenticator app, email codes or a
-                        passkey is asked to add one first.
+                        a while. Anyone without an authenticator app, email codes or a passkey is asked
+                        to add one first.
                     </p>
                 </div>
             </div>
             <div class="setting-list">
+                <SettingRow Name="Ask again after" Hint="How long one confirmation lasts. Shorter means more prompts and less time for an unattended screen to be misused.">
+                    <span class="u-row">
+                        <input class="input input--num" type="number" id="step-up-window"
+                               @bind="_windowMinutes" disabled="@_saving"
+                               min="@StepUpAuth.MinWindowMinutes" max="@StepUpAuth.MaxWindowMinutes" style="width: 92px"
+                               aria-label="Ask again after, in minutes" />
+                        <span class="form-actions__note">minutes</span>
+                    </span>
+                </SettingRow>
                 @foreach (var tool in _visible.Where(t => StepUpOffered.Contains(t.Key)))
                 {
                     var key = tool.Key;
@@ -140,7 +149,7 @@
         <Alert Tone="AlertTone.Info">
             <span>
                 Asking people to confirm identity takes effect the next time they open the tool.
-                Someone who confirmed in the last @WindowMinutes minutes isn't asked again until that
+                Someone who confirmed within the "ask again after" time isn't asked again until it
                 runs out.
             </span>
         </Alert>
@@ -162,6 +171,8 @@
     private readonly Dictionary<ToolKey, bool> _stepUp = new();
     private Dictionary<ToolKey, bool> _stepUpBaseline = new();
     private HashSet<ToolKey> _storedStepUp = new();
+    private int _windowMinutes = 15;
+    private int _windowBaseline = 15;
     // The org's stored disabled set as loaded — used to preserve entries for
     // tools that are currently hidden site-wide (so a later site re-enable
     // keeps this org's choice) rather than silently dropping them.
@@ -172,6 +183,7 @@
         var org = await OrgAdmin.GetToolsViewAsync();
         _storedDisabled = org.DisabledTools;
         _storedStepUp = org.StepUpTools;
+        _windowMinutes = _windowBaseline = org.StepUpWindowMinutes;
         _visible = ToolCatalog.All.Where(t => ToolAvailability.IsSiteEnabled(t.Key)).ToList();
         foreach (var tool in _visible)
         {
@@ -186,9 +198,8 @@
     }
 
     private bool IsDirty() =>
-        _visible.Any(t => _enabled[t.Key] != _baseline[t.Key] || _stepUp[t.Key] != _stepUpBaseline[t.Key]);
-
-    private static int WindowMinutes => (int)StepUpAuth.Window.TotalMinutes;
+        _windowMinutes != _windowBaseline
+        || _visible.Any(t => _enabled[t.Key] != _baseline[t.Key] || _stepUp[t.Key] != _stepUpBaseline[t.Key]);
 
     // The tools with something outside the workbench to protect: a GitHub
     // repository, a customer's Business Central, or the assistant connection
@@ -239,6 +250,8 @@
                 .Concat(_visible.Where(t => _enabled[t.Key] ? _stepUp[t.Key] : _storedStepUp.Contains(t.Key)).Select(t => t.Key))
                 .ToList();
             await OrgAdmin.SetStepUpToolsAsync(stepUp);
+            await OrgAdmin.SetStepUpWindowAsync(_windowMinutes);
+            _windowBaseline = _windowMinutes;
 
             _storedDisabled = ToolCatalog.ParseDisabled(ToolCatalog.Format(disabled));
             _storedStepUp = ToolCatalog.ParseKeys(ToolCatalog.Format(stepUp));
