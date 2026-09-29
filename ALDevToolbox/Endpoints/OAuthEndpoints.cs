@@ -4,6 +4,7 @@ using System.Text.Json;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.OAuth;
 using Microsoft.AspNetCore;
 using Microsoft.AspNetCore.Antiforgery;
@@ -170,6 +171,19 @@ internal static class OAuthEndpoints
             if (!cookieResult.Succeeded || cookieResult.Principal?.Identity?.IsAuthenticated != true)
             {
                 await ctx.ChallengeAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                return;
+            }
+
+            // Step-up: authorising an assistant hands it this user's writing
+            // tools for as long as its refresh token lives, so when the org
+            // asks for a second factor on any tool, the consent itself needs a
+            // recent one. The consent page checks the same thing before
+            // rendering; this is the backstop for a stale or replayed form.
+            var stepUp = ctx.RequestServices.GetRequiredService<StepUpPolicy>();
+            if (await stepUp.AnyStepUpToolAsync(cancellationToken) && !stepUp.IsFresh(cookieResult.Principal))
+            {
+                var consentUrl = "/oauth/consent" + ctx.Request.QueryString;
+                ctx.Response.Redirect(StepUpEndpoints.Url(consentUrl));
                 return;
             }
 

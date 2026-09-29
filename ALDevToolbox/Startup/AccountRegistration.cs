@@ -21,6 +21,7 @@ public static class AccountRegistration
         services.AddScoped<ALDevToolbox.Services.Account.EmailMfaService>();
         services.AddScoped<ALDevToolbox.Services.Account.PendingSignupService>();
         services.AddScoped<ALDevToolbox.Services.Account.PasskeyService>();
+        services.AddScoped<ALDevToolbox.Services.Account.StepUpPolicy>();
         services.AddScoped<ALDevToolbox.Services.Account.PersonalAccessTokenService>();
         services.AddScoped<ALDevToolbox.Services.Account.UserRepositoryTokenService>();
         // WebAuthn (passkeys). RP id / origins live in configuration; if RpId isn't

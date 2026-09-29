@@ -118,6 +118,14 @@ public static class AuthenticationRegistration
                         {
                             ctx.ProtocolMessage.LoginHint = hint;
                         }
+                        // A step-up must not be satisfied by Microsoft's existing
+                        // session: prompt=login forces a fresh interactive sign-in,
+                        // and with it whatever MFA the tenant's own policy asks for.
+                        // See Endpoints/StepUpEndpoints.cs.
+                        if (ctx.Properties.Items.ContainsKey(ALDevToolbox.Endpoints.StepUpEndpoints.EntraStepUpUserIdItem))
+                        {
+                            ctx.ProtocolMessage.Prompt = "login";
+                        }
                         return Task.CompletedTask;
                     },
                     OnAuthorizationCodeReceived = async ctx =>

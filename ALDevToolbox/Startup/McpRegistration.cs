@@ -52,7 +52,34 @@ public static class McpRegistration
             // stopped buying it well before the 2.x upgrade. That case is handled by
             // Endpoints/McpAcceptCompatibility.cs instead.
             .WithHttpTransport()
-            .WithToolsFromAssembly();
+            .WithToolsFromAssembly()
+            // Step-up for writing tools: an org can ask for a recent second
+            // factor before a tool's writing MCP calls run (Administration →
+            // Tools). A PAT can never satisfy that, and an OAuth session proved
+            // it at consent (OAuthEndpoints.MapAuthorizeComplete), so the filter
+            // only has to refuse PATs. Read-only tools are never gated; see
+            // Domain/Tools/McpToolAccess.cs.
+            .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (request, ct) =>
+            {
+                var tool = ALDevToolbox.Domain.Tools.McpToolAccess.ToolFor(request.Params?.Name ?? string.Empty);
+                var services = request.Services ?? throw new InvalidOperationException("MCP call without request services.");
+                // The transport sets request.User from the HTTP principal; the
+                // accessor is the fallback so a future SDK change cannot turn
+                // this check into a silent allow.
+                var user = request.User
+                    ?? services.GetRequiredService<IHttpContextAccessor>().HttpContext?.User;
+                if (tool is { } key && user?.HasClaim(c => c.Type == "pat_id") == true)
+                {
+                    var policy = services.GetRequiredService<ALDevToolbox.Services.Account.StepUpPolicy>();
+                    if (await policy.RequiresStepUpAsync(key, ct))
+                    {
+                        throw new ModelContextProtocol.McpException(
+                            $"{request.Params!.Name} needs a recent multi-factor sign-in, which a personal access token cannot provide. "
+                            + "Connect this assistant through the permission screen on the MCP page instead of a token, then try again.");
+                    }
+                }
+                return await next(request, ct);
+            }));
         return services;
     }
 }

@@ -51,9 +51,47 @@ internal static class ToolAccessGate
                 return;
             }
 
+            // Step-up: a tool the org marked on Administration → Tools opens
+            // only for a session whose last second factor is recent. The set
+            // rides the cookie like the disabled set; the freshness stamp is a
+            // claim mirrored from the cookie's properties (StepUpAuth). Anonymous
+            // requests fall through to authorization's own login redirect, and
+            // PATs never reach page routes. GETs go to the step-up page and
+            // come back; anything else gets a 403.
+            var clock = ctx.RequestServices.GetRequiredService<TimeProvider>();
+            if (NeedsStepUp(tools, ctx.User, clock.GetUtcNow().UtcDateTime))
+            {
+                if (HttpMethods.IsGet(ctx.Request.Method))
+                {
+                    ctx.Response.Redirect(StepUpEndpoints.Url(ctx.Request.Path + ctx.Request.QueryString));
+                    return;
+                }
+                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                ctx.Response.ContentType = "text/plain; charset=utf-8";
+                await ctx.Response.WriteAsync(
+                    "Confirm it's you before using this tool: open it again in the browser.",
+                    ctx.RequestAborted);
+                return;
+            }
+
             await next();
         });
         return app;
+    }
+
+    /// <summary>
+    /// True when the signed-in cookie user's organisation wants a second factor
+    /// for any of <paramref name="tools"/> and the session's last one is older
+    /// than <see cref="Services.Account.StepUpAuth.Window"/>. The shared
+    /// Pipelines dashboard is gated when either of its tools is.
+    /// </summary>
+    internal static bool NeedsStepUp(IReadOnlyList<ToolKey> tools, System.Security.Claims.ClaimsPrincipal? user, DateTime now)
+    {
+        if (user?.Identity?.IsAuthenticated != true) return false;
+        if (user.HasClaim(c => c.Type == "pat_id")) return false;
+        var stepUp = EndpointHelpers.ReadStepUpTools(user);
+        if (stepUp.Count == 0 || !tools.Any(stepUp.Contains)) return false;
+        return !Services.Account.StepUpAuth.IsFresh(user, now);
     }
 
     /// <summary>

@@ -126,4 +126,20 @@ public sealed class ToolToggleServiceTests : IDisposable
         stored.Should().NotContain(nameof(ToolKey.Mcp), "MCP is toggled through SetMcpEnabledAsync");
         stored.Should().Contain(nameof(ToolKey.Piper));
     }
+
+    [Fact]
+    public async Task Org_step_up_tools_round_trip_and_keep_mcp()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = _db.NewOrganizationAdminService(ctx);
+
+        (await svc.GetToolsViewAsync()).StepUpTools.Should().BeEmpty();
+
+        await svc.SetStepUpToolsAsync(new[] { ToolKey.Releases, ToolKey.Mcp, ToolKey.Releases });
+
+        var view = await svc.GetToolsViewAsync();
+        view.StepUpTools.Should().BeEquivalentTo(new[] { ToolKey.Releases, ToolKey.Mcp },
+            "duplicates collapse and MCP is allowed in this set, unlike the disabled one");
+        view.DisabledTools.Should().BeEmpty("the two sets are independent");
+    }
 }

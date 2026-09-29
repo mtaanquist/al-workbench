@@ -73,7 +73,7 @@ public sealed record DefaultDeliveryWindows(
 }
 
 /// <summary>The current org's tool switches, for Administration → Tools.</summary>
-public sealed record OrgToolsView(bool McpEnabled, HashSet<ToolKey> DisabledTools);
+public sealed record OrgToolsView(bool McpEnabled, HashSet<ToolKey> DisabledTools, HashSet<ToolKey> StepUpTools);
 
 public sealed class OrganizationAdminService
 {
@@ -222,6 +222,26 @@ public sealed class OrganizationAdminService
         await _db.SaveChangesAsync(ct);
         _logger.LogInformation(
             "Org {OrgId} set disabled tools = [{Tools}].", orgId, string.Join(',', normalised));
+    }
+
+    /// <summary>
+    /// Replaces the set of tools this organisation wants a recent second factor
+    /// for (<see cref="Organization.StepUpTools"/>). Any tool may be listed,
+    /// MCP included, though MCP itself has no page to gate; the writing MCP
+    /// tools follow the tool they belong to (<see cref="McpToolAccess"/>).
+    /// Takes effect for signed-in members on their next cookie refresh; MCP and
+    /// OAuth consent read the row directly.
+    /// </summary>
+    public async Task SetStepUpToolsAsync(IEnumerable<ToolKey> stepUp, CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        var org = await _db.Organizations.FirstAsync(o => o.Id == orgId, ct);
+        var normalised = ToolCatalog.Format(stepUp.Distinct());
+        if (org.StepUpTools.ToHashSet().SetEquals(normalised)) return;
+        org.StepUpTools = normalised;
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation(
+            "Org {OrgId} set step-up tools = [{Tools}].", orgId, string.Join(',', normalised));
     }
 
     /// <summary>
@@ -380,9 +400,9 @@ public sealed class OrganizationAdminService
         var orgId = RequireOrganizationId();
         var org = await _db.Organizations.AsNoTracking()
             .Where(o => o.Id == orgId)
-            .Select(o => new { o.McpEnabled, o.DisabledTools })
+            .Select(o => new { o.McpEnabled, o.DisabledTools, o.StepUpTools })
             .FirstAsync(ct);
-        return new OrgToolsView(org.McpEnabled, ToolCatalog.ParseDisabled(org.DisabledTools));
+        return new OrgToolsView(org.McpEnabled, ToolCatalog.ParseDisabled(org.DisabledTools), ToolCatalog.ParseKeys(org.StepUpTools));
     }
 
     /// <summary>

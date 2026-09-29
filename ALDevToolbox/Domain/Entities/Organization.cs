@@ -62,5 +62,17 @@ public class Organization
     /// </summary>
     public List<string> DisabledTools { get; set; } = new();
 
+    /// <summary>
+    /// Tools this organisation wants a recent multi-factor sign-in for, stored
+    /// as <see cref="Domain.Tools.ToolKey"/> names. Empty by default. A member
+    /// opening one of these tools' pages, or calling one of its writing MCP
+    /// tools, must have completed a second factor (authenticator app, email
+    /// code, recovery code, passkey with user verification, or a fresh Microsoft
+    /// sign-in) within <c>StepUpAuth.Window</c>; otherwise they are sent to
+    /// confirm it is them first. See ".design/auth-and-audit.md", "Step-up for
+    /// sensitive tools".
+    /// </summary>
+    public List<string> StepUpTools { get; set; } = new();
+
     public DateTime CreatedAt { get; set; }
 }

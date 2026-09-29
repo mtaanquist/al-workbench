@@ -102,7 +102,27 @@ public sealed class TestDb : IDisposable
         _scopeProvider = new Lazy<ServiceProvider>(() => new ServiceCollection()
             .AddScoped(_ => new AppDbContext(options, orgContext))
             .BuildServiceProvider());
+        _openIddict = new Lazy<ServiceProvider>(() => new ServiceCollection()
+            .AddLogging()
+            .AddScoped(_ => new AppDbContext(options, orgContext))
+            .AddOpenIddict()
+            .AddCore(o => o.UseEntityFrameworkCore().UseDbContext<AppDbContext>())
+            .Services
+            .BuildServiceProvider());
     }
+
+    private readonly Lazy<ServiceProvider> _openIddict;
+
+    /// <summary>
+    /// An OpenIddict token manager over this fixture's database, for services
+    /// that revoke a user's OAuth tokens (<see cref="ALDevToolbox.Services.Account.UserAdministrationService"/>).
+    /// </summary>
+    public OpenIddict.Abstractions.IOpenIddictTokenManager OpenIddictTokens =>
+        _openIddict.Value.GetRequiredService<OpenIddict.Abstractions.IOpenIddictTokenManager>();
+
+    /// <summary>Org-admin actions on user accounts, wired to this fixture's clock and token manager.</summary>
+    public ALDevToolbox.Services.Account.UserAdministrationService NewUserAdministrationService(AppDbContext ctx, TimeProvider clock) =>
+        new(ctx, clock, OpenIddictTokens);
 
     /// <summary>
     /// Builds the process-wide template database: migrate once, seed once. Every
@@ -218,6 +238,7 @@ public sealed class TestDb : IDisposable
         // live one would hand a connection straight back to the pool after the
         // clear and block the drop.
         if (_scopeProvider.IsValueCreated) _scopeProvider.Value.Dispose();
+        if (_openIddict.IsValueCreated) _openIddict.Value.Dispose();
         // Idle pool connections hold open the per-fixture database and would
         // block DROP DATABASE; clear them before issuing the drop.
         NpgsqlConnection.ClearAllPools();

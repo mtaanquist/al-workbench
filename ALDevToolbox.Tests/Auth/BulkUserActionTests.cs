@@ -28,7 +28,7 @@ public sealed class BulkUserActionTests : IDisposable
         var (adminId, aliceId, bobId) = await SeedTwoUsersWithAdminAsync(orgId);
 
         await using var ctx = _db.NewContext();
-        var svc = new ALDevToolbox.Services.Account.UserAdministrationService(ctx, _clock);
+        var svc = _db.NewUserAdministrationService(ctx, _clock);
         var result = await svc.BulkDisableUsersAsync(new[] { aliceId, bobId }, orgId);
 
         result.AllSucceeded.Should().BeTrue();
@@ -60,7 +60,7 @@ public sealed class BulkUserActionTests : IDisposable
         }
 
         await using var ctx = _db.NewContext();
-        var svc = new ALDevToolbox.Services.Account.UserAdministrationService(ctx, _clock);
+        var svc = _db.NewUserAdministrationService(ctx, _clock);
         var result = await svc.BulkChangeRoleAsync(new[] { 100, 101 }, UserRole.User, orgId);
 
         result.SucceededCount.Should().Be(1);
@@ -99,7 +99,7 @@ public sealed class BulkUserActionTests : IDisposable
 
         _db.OrgContext.CurrentOrganizationId = orgA;
         await using var ctx = _db.NewContext();
-        var svc = new ALDevToolbox.Services.Account.UserAdministrationService(ctx, _clock);
+        var svc = _db.NewUserAdministrationService(ctx, _clock);
         var result = await svc.BulkDisableUsersAsync(new[] { idA, idB }, orgA);
 
         result.SucceededIds.Should().BeEquivalentTo(new[] { idA });
@@ -125,7 +125,7 @@ public sealed class BulkUserActionTests : IDisposable
         }
 
         await using var ctx = _db.NewContext();
-        var svc = new ALDevToolbox.Services.Account.UserAdministrationService(ctx, _clock);
+        var svc = _db.NewUserAdministrationService(ctx, _clock);
         var result = await svc.BulkDisableUsersAsync(new[] { 301 }, orgA);
 
         // The row fails (cross-org id not found in orgA) and the failure's display

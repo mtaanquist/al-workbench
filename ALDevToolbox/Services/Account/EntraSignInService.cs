@@ -503,6 +503,20 @@ public sealed class EntraSignInService
     /// must not already belong to someone else. Field-keyed errors surface
     /// on /account.
     /// </summary>
+    /// <summary>
+    /// Whether <paramref name="token"/> is the Microsoft identity already
+    /// linked to <paramref name="userId"/>. The step-up callback uses it to
+    /// make sure a forced re-sign-in came back as the same person, not as any
+    /// account the tenant would accept. Filtered: the caller is signed in.
+    /// </summary>
+    public async Task<bool> IsLinkedAsync(int userId, EntraTokenIdentity token, CancellationToken ct = default)
+    {
+        var tid = token.TenantId.Trim().ToLowerInvariant();
+        return await _db.UserExternalLogins.AsNoTracking().AnyAsync(
+            l => l.Provider == ProviderName && l.Issuer == tid
+                && l.Subject == token.ObjectId && l.UserId == userId, ct);
+    }
+
     public async Task LinkAsync(int userId, EntraTokenIdentity token, CancellationToken ct = default)
     {
         var now = _clock.GetUtcNow().UtcDateTime;

@@ -153,6 +153,38 @@ internal static class EntraAuthEndpoints
 
         var entra = ctx.HttpContext.RequestServices.GetRequiredService<EntraSignInService>();
 
+        // Step-up mode: a signed-in user confirming it is them for a sensitive
+        // tool (StepUpEndpoints). Never a sign-in: the identity that came back
+        // must already be linked to the user on this request's cookie, and the
+        // sign-in must be newer than the step-up started when Microsoft says
+        // when it happened (auth_time is optional in Entra ID tokens).
+        if (ctx.Properties?.Items.TryGetValue(StepUpEndpoints.EntraStepUpUserIdItem, out var stepUpUserRaw) == true
+            && int.TryParse(stepUpUserRaw, out var stepUpUserId))
+        {
+            var cookie = await ctx.HttpContext.AuthenticateAsync(
+                CookieAuthenticationDefaults.AuthenticationScheme);
+            if (cookie.Principal is not null) ctx.HttpContext.User = cookie.Principal;
+            var stale = ctx.Properties.Items.TryGetValue(StepUpEndpoints.EntraStepUpIssuedAtItem, out var issuedRaw)
+                && DateTime.TryParse(issuedRaw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var issuedAt)
+                && long.TryParse(principal.FindFirst("auth_time")?.Value, out var authTimeUnix)
+                && DateTimeOffset.FromUnixTimeSeconds(authTimeUnix).UtcDateTime < issuedAt.AddMinutes(-5);
+            if (CurrentUserId(ctx.HttpContext) != stepUpUserId
+                || stale
+                || !await entra.IsLinkedAsync(stepUpUserId, token, ct))
+            {
+                ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=entra-mismatch");
+                return;
+            }
+            var protection = ctx.HttpContext.RequestServices.GetRequiredService<Microsoft.AspNetCore.DataProtection.IDataProtectionProvider>();
+            var clock = ctx.HttpContext.RequestServices.GetRequiredService<TimeProvider>();
+            var pending = ReadMfaPendingCookie(ctx.HttpContext, protection, clock)
+                ?? new MfaPending(stepUpUserId, false, false, clock.GetUtcNow().UtcDateTime, safeReturn, StepUp: true);
+            var logger = ctx.HttpContext.RequestServices
+                .GetRequiredService<ILoggerFactory>().CreateLogger("StepUp");
+            await StepUpEndpoints.CompleteStepUpAsync(ctx.HttpContext, pending with { ReturnUrl = safeReturn }, SignInMethod.Entra, ct, logger);
+            return;
+        }
+
         // Link mode: a signed-in user connecting a Microsoft account from
         // /account. The link target rides in the protected properties, and
         // the auth cookie on this request must belong to the same user — a
@@ -193,10 +225,7 @@ internal static class EntraAuthEndpoints
         {
             // Reload with the Organization nav so BuildIdentity can stamp
             // the org-name / MCP / tool claims, mirroring TryLoginAsync.
-            var identity = BuildIdentity(result.User);
-            await ctx.HttpContext.SignInAsync(
-                CookieAuthenticationDefaults.AuthenticationScheme,
-                new ClaimsPrincipal(identity), PersistentSignIn(ctx.HttpContext));
+            await SignInUserAsync(ctx.HttpContext, result.User, SignInMethod.Entra);
             ctx.Response.Redirect(safeReturn);
             return;
         }

@@ -76,10 +76,7 @@ internal static class AccountAuthEndpoints
                 return;
             }
 
-            var identity = BuildIdentity(user);
-            await ctx.SignInAsync(
-                CookieAuthenticationDefaults.AuthenticationScheme,
-                new ClaimsPrincipal(identity), PersistentSignIn(ctx));
+            await SignInUserAsync(ctx, user, SignInMethod.Password);
             logger.LogInformation("Signed in {Email} (org {OrgId}, role {Role}).", user.Email, user.OrganizationId, user.Role);
             ctx.Response.Redirect(safeReturn);
         });
@@ -143,9 +140,7 @@ internal static class AccountAuthEndpoints
                 if (outcome == SignupOutcome.OrganizationProvisioned && user is not null && org is not null)
                 {
                     user.Organization = org;
-                    await ctx.SignInAsync(
-                        CookieAuthenticationDefaults.AuthenticationScheme,
-                        new ClaimsPrincipal(BuildIdentity(user)), PersistentSignIn(ctx));
+                    await SignInUserAsync(ctx, user, SignInMethod.Password);
                     logger.LogInformation("Auto-approved new-org signup {Email} as admin of {OrgSlug}.", user.Email, org.Slug);
                     ctx.Response.Redirect("/");
                     return;
@@ -309,9 +304,7 @@ internal static class AccountAuthEndpoints
                     && user is not null && org is not null)
                 {
                     user.Organization = org;
-                    await ctx.SignInAsync(
-                        CookieAuthenticationDefaults.AuthenticationScheme,
-                        new ClaimsPrincipal(BuildIdentity(user)), PersistentSignIn(ctx));
+                    await SignInUserAsync(ctx, user, SignInMethod.Password);
                     logger.LogInformation("Verified signup signed in {Email} (org {OrgSlug}, newOrg={New}).",
                         user.Email, org.Slug, outcome == SignupOutcome.OrganizationProvisioned);
                     ctx.Response.Redirect("/");
@@ -433,9 +426,7 @@ internal static class AccountAuthEndpoints
             try
             {
                 var user = await passwordReset.ConsumeMagicLoginTokenAsync(token, ct);
-                await ctx.SignInAsync(
-                    CookieAuthenticationDefaults.AuthenticationScheme,
-                    new ClaimsPrincipal(BuildIdentity(user)), PersistentSignIn(ctx));
+                await SignInUserAsync(ctx, user, SignInMethod.MagicLink);
                 logger.LogInformation("Magic-link sign-in for {Email} (org {OrgId}).", user.Email, user.OrganizationId);
                 ctx.Response.Redirect("/");
             }
@@ -467,9 +458,7 @@ internal static class AccountAuthEndpoints
                     form["Password"].ToString(),
                     ct);
 
-                await ctx.SignInAsync(
-                    CookieAuthenticationDefaults.AuthenticationScheme,
-                    new ClaimsPrincipal(BuildIdentity(user)), PersistentSignIn(ctx));
+                await SignInUserAsync(ctx, user, SignInMethod.Password);
                 logger.LogInformation("Invite accepted; {Email} signed in to org {OrgId}.",
                     user.Email, user.OrganizationId);
                 ctx.Response.Redirect("/");
@@ -519,8 +508,12 @@ internal static class AccountAuthEndpoints
                 // The change invalidates every cookie issued before it (#675),
                 // including this one — re-issue it so the user who just changed
                 // their own password isn't signed out along with everyone else.
+                // Same session, so keep its sign-in method and any step-up it
+                // already did: the stamps are mirrored on ctx.User as claims.
+                var method = Enum.TryParse<SignInMethod>(ctx.User.FindFirst(StepUpAuth.MethodClaim)?.Value, out var m) ? m : SignInMethod.Password;
                 await ctx.SignInAsync(
-                    CookieAuthenticationDefaults.AuthenticationScheme, ctx.User, PersistentSignIn(ctx));
+                    CookieAuthenticationDefaults.AuthenticationScheme, ctx.User,
+                    PersistentSignIn(ctx, method, carryOverStrongAt: StepUpAuth.StrongAuthAt(ctx.User)));
                 ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=password");
             }
             catch (PlanValidationException ex)

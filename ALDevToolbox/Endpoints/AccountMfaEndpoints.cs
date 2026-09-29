@@ -51,7 +51,7 @@ internal static class AccountMfaEndpoints
                 ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=invalid");
                 return;
             }
-            await CompleteMfaSignIn(ctx, auth, state, ct, logger);
+            await CompleteMfaSignIn(ctx, auth, state, SignInMethod.Totp, ct, logger);
         });
 
         app.MapPost("/auth/login/challenge/email/issue", async (
@@ -110,7 +110,7 @@ internal static class AccountMfaEndpoints
                 ctx.Response.Redirect($"/login/challenge?method=email&{RouteConstants.ErrQuery}=invalid");
                 return;
             }
-            await CompleteMfaSignIn(ctx, auth, state, ct, logger);
+            await CompleteMfaSignIn(ctx, auth, state, SignInMethod.EmailCode, ct, logger);
         });
 
         app.MapPost("/auth/login/challenge/recovery", async (
@@ -138,7 +138,7 @@ internal static class AccountMfaEndpoints
                 ctx.Response.Redirect($"/login/challenge?method=recovery&{RouteConstants.ErrQuery}=invalid");
                 return;
             }
-            await CompleteMfaSignIn(ctx, auth, state, ct, logger);
+            await CompleteMfaSignIn(ctx, auth, state, SignInMethod.RecoveryCode, ct, logger);
         });
 
         // --- TOTP self-service ----------------------------------------------
@@ -271,12 +271,15 @@ internal static class AccountMfaEndpoints
     /// return URL. Shared by the TOTP / email-code / recovery-code challenge
     /// handlers (was a local function inside the original registration method).
     /// </summary>
-    private static async Task CompleteMfaSignIn(HttpContext ctx, AuthService auth, MfaPending state, CancellationToken ct, ILogger logger)
+    private static async Task CompleteMfaSignIn(HttpContext ctx, AuthService auth, MfaPending state, SignInMethod method, CancellationToken ct, ILogger logger)
     {
+        if (state.StepUp)
+        {
+            await StepUpEndpoints.CompleteStepUpAsync(ctx, state, method, ct, logger);
+            return;
+        }
         var user = await auth.CompleteMfaAsync(state.UserId, ResolveIp(ctx), ct);
-        await ctx.SignInAsync(
-            CookieAuthenticationDefaults.AuthenticationScheme,
-            new ClaimsPrincipal(BuildIdentity(user)), PersistentSignIn(ctx));
+        await SignInUserAsync(ctx, user, method);
         ClearMfaPendingCookie(ctx);
         logger.LogInformation("MFA-gated sign-in completed for {Email} (org {OrgId}).", user.Email, user.OrganizationId);
         ctx.Response.Redirect(string.IsNullOrEmpty(state.ReturnUrl) ? "/" : state.ReturnUrl);

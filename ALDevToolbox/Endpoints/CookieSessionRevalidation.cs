@@ -82,7 +82,11 @@ internal static class CookieSessionRevalidation
         // Rebuild the claims from the current row so a role / SiteAdmin / org
         // change applies on this request, then renew the cookie with a fresh
         // re-validation stamp.
-        context.ReplacePrincipal(new ClaimsPrincipal(EndpointHelpers.BuildIdentity(user)));
+        var rebuilt = EndpointHelpers.BuildIdentity(user);
+        // The sign-in method and step-up moment live in the properties, which
+        // survive this rebuild; mirror them back onto the fresh claims.
+        ALDevToolbox.Services.Account.StepUpAuth.ApplyClaims(rebuilt, context.Properties);
+        context.ReplacePrincipal(new ClaimsPrincipal(rebuilt));
         context.Properties.Items[LastValidatedKey] = now.ToString("o", CultureInfo.InvariantCulture);
         context.ShouldRenew = true;
     }

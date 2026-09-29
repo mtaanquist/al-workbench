@@ -1,0 +1,52 @@
+@rendermode InteractiveServer
+@inject IJSRuntime JS
+@inject ILogger<StepUpPasskeyButton> Logger
+
+@*
+    The one interactive piece of the step-up challenge: a passkey ceremony
+    needs script, and the challenge page around it is static. Calls
+    aldtPasskey.stepUp (wwwroot/js/webauthn.js), which runs the assertion
+    against the step-up endpoints and navigates on success.
+*@
+
+<button type="button" class="btn @(Primary ? "btn--primary" : "")" style="height: var(--control-h-lg); width: 100%"
+        @onclick="ConfirmAsync" disabled="@_busy">
+    <Icon Name="key-round" Width="16" Height="16" />
+    <span>@(_busy ? "Waiting for your passkey..." : "Confirm with a passkey")</span>
+</button>
+@if (!string.IsNullOrEmpty(_error))
+{
+    <FieldError Message="@_error" />
+}
+
+@code {
+    /// <summary>Render as the card's one primary button.</summary>
+    [Parameter] public bool Primary { get; set; }
+
+    /// <summary>Whether the card offers another way to confirm, so the error can point at it.</summary>
+    [Parameter] public bool HasOtherWays { get; set; }
+
+    private bool _busy;
+    private string? _error;
+
+    private async Task ConfirmAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            await JS.InvokeVoidAsync("aldtPasskey.stepUp");
+        }
+        catch (Exception ex)
+        {
+            // The JS exception wraps a WebAuthn constant, and a cancelled prompt
+            // lands here too, so don't call the passkey broken. The cause goes
+            // to the log; the person gets a sentence they can act on.
+            Logger.LogInformation(ex, "Passkey step-up did not complete.");
+            _error = HasOtherWays
+                ? "The passkey check didn't finish. Try again, or confirm another way below."
+                : "The passkey check didn't finish. Try again.";
+            _busy = false;
+        }
+    }
+}
