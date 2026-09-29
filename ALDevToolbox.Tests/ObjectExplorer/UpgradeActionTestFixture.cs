@@ -334,6 +334,9 @@ internal sealed class UpgradeActionTestFixture : IDisposable
         public BcApiException? InstallThrows;
         /// <summary>What a poll of an install reports, by file name; succeeded straight away unless a test says otherwise.</summary>
         public Func<string, BcAppOperationStatus> OnOperationStatus = _ => BcAppOperationStatus.Succeeded;
+        /// <summary>How many polls in a row answer with an API error before the status above is returned.</summary>
+        public int PollErrorsBeforeAnswer;
+        public int Polls;
         private readonly Dictionary<Guid, string> _operations = new();
 
         public Task<BcAppOperation> InstallPteAsync(string accessToken, string applicationFamily, string environmentName, byte[] appBytes, string fileName, string deploymentSchedule, string syncMode, string languageId, bool installOrUpdateNeededDependencies, CancellationToken ct = default)
@@ -351,6 +354,12 @@ internal sealed class UpgradeActionTestFixture : IDisposable
 
         public Task<BcAppOperation?> GetAppOperationAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, Guid operationId, CancellationToken ct = default)
         {
+            Polls++;
+            if (PollErrorsBeforeAnswer > 0)
+            {
+                PollErrorsBeforeAnswer--;
+                throw new BcApiException(System.Net.HttpStatusCode.TooManyRequests, "Too many requests.");
+            }
             var status = OnOperationStatus(_operations[operationId]);
             return Task.FromResult<BcAppOperation?>(new BcAppOperation(
                 operationId, appId, "install", status, status.ToString().ToLowerInvariant(),

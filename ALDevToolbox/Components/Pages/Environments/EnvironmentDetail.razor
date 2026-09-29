@@ -483,7 +483,11 @@
         }
         else if (_tab == Section.Apps)
         {
-            @if (LivePanel is { } panel)
+            @* Drawn whether or not Business Central answered: the uploads booked here are
+               ours to show and cancel, and a tenant that will not answer today is exactly
+               when somebody wants to call one off. *@
+            var panel = LivePanel;
+            if (panel is not null || BookedUploads.Count > 0)
             {
                 <div class="card">
                     <div class="card__head">
@@ -499,11 +503,11 @@
                             </button>
                         }
                     </div>
-                    @if (panel.ScheduledInstallsError is { } scheduledErr && BookedUploads.Count == 0)
+                    @if (panel?.ScheduledInstallsError is { } scheduledErr && BookedUploads.Count == 0)
                     {
                         <div class="card__body"><FieldError Message="@scheduledErr" /></div>
                     }
-                    else if (panel.ScheduledInstalls.Count == 0 && BookedUploads.Count == 0)
+                    else if ((panel?.ScheduledInstalls.Count ?? 0) == 0 && BookedUploads.Count == 0)
                     {
                         <EmptyState Icon="calendar" Title="Nothing waiting to install" Quiet="true">
                             <Text>A deployment you schedule for this environment, or an app another company sent you that you upload for later, waits here until it installs.</Text>
@@ -546,23 +550,28 @@
                                         @if (_canManage)
                                         {
                                             <td class="data-table__actions">
-                                                @if (booked.ExecuteAfter > DateTime.UtcNow)
+                                                @* Nothing to do to one mid-install: the worker has claimed it, and a
+                                                   cancel would only be refused. *@
+                                                @if (booked.SentAt is null)
                                                 {
-                                                    <button type="button" class="btn btn--sm" disabled="@_settingSaving"
-                                                            @onclick="() => InstallBookedNowAsync(booked)">Install now</button>
+                                                    @if (booked.ExecuteAfter > DateTime.UtcNow)
+                                                    {
+                                                        <button type="button" class="btn btn--sm" disabled="@_settingSaving"
+                                                                @onclick="() => InstallBookedNowAsync(booked)">Install now</button>
+                                                    }
+                                                    <button type="button" class="btn btn--sm btn--danger" disabled="@_settingSaving"
+                                                            @onclick="() => CancelBookedUploadAsync(booked)">Cancel install</button>
                                                 }
-                                                <button type="button" class="btn btn--sm btn--danger" disabled="@_settingSaving"
-                                                        @onclick="() => CancelBookedUploadAsync(booked)">Cancel install</button>
                                             </td>
                                         }
                                     </tr>
                                 }
-                                @foreach (var op in panel.ScheduledInstalls)
+                                @foreach (var op in panel?.ScheduledInstalls ?? Array.Empty<BcScheduledPteOperation>())
                                 {
                                     <tr>
                                         <td>
                                             @(string.IsNullOrWhiteSpace(op.Name) ? "An extension" : op.Name)
-                                            @if (op.AppId is { } ourApp && panel.ReleasedAppIds.Contains(ourApp))
+                                            @if (op.AppId is { } ourApp && panel!.ReleasedAppIds.Contains(ourApp))
                                             {
                                                 <span class="tag">Deployed from this workbench</span>
                                             }
@@ -588,13 +597,15 @@
                                 Installs started from Business Central's own Extension Management page aren't shown here.@if (_canManage) {<text> Pick one place per customer.</text>}
                             </span>
                         </div>
-                        @if (panel.ScheduledInstallsError is { } bookedOnlyErr)
+                        @if (panel?.ScheduledInstallsError is { } bookedOnlyErr)
                         {
                             <div class="card__body"><FieldError Message="@bookedOnlyErr" /></div>
                         }
                     }
                 </div>
-
+            }
+            if (panel is not null)
+            {
                 <div class="card">
                     <div class="card__head">
                         <div>
@@ -929,6 +940,7 @@
                 <div class="card__body">
                     <EnvironmentActivityFeed Entries="_activity"
                                              CanAct="Row.CanAct"
+                                             CanActOnUploads="_canManage"
                                              TimeZone="UpdateWindow.ResolveTimeZone(Row.TimeZone)"
                                              TimeZoneLabel="@(string.IsNullOrWhiteSpace(Row.TimeZone) ? "UTC" : Row.TimeZone!)"
                                              OnCancel="CancelUpgradeActionAsync" />
@@ -1146,7 +1158,7 @@
             await LoadPanelAsync(forceRefresh: true);
             // The Apps tab lists the uploads booked here among the scheduled installs, and
             // one whose slot has passed may have been sent since the page loaded.
-            if (_tab == Section.Apps) _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
+            if (_tab == Section.Apps) await LoadBookedUploadsAsync();
         }
     }
 
@@ -1181,6 +1193,7 @@
 
             _canManage = await Read(ct => Access.CanManageAsync(Row.ProjectId, _env.CreatedByUserId, ct));
             _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
+            await LoadBookedUploadsAsync();
         }
         if (_env is null) return;
 
@@ -1482,6 +1495,7 @@
             await Write(() => Connection.CancelEnvironmentSessionAsync(Row.ProjectId, Id, session.SessionId));
             _settingDone = $"{who}'s session on {Row.EnvironmentName} was ended.";
             _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
+            await LoadBookedUploadsAsync();
         }
         catch (PlanValidationException ex)
         {
@@ -1917,30 +1931,37 @@
     /// installs, because to the person asking "what is going to install here?" they are
     /// one list, whichever side is holding the file.
     /// </summary>
-    private List<UpgradeActionRow> BookedUploads =>
-        _activity?.Where(a => a.Kind == UpgradeActionKind.UploadApp && a.IsPending)
-            .OrderBy(a => a.ExecuteAfter).ThenBy(a => a.BatchOrder ?? 0).ThenBy(a => a.Id).ToList() ?? new();
+    private List<UpgradeActionRow> BookedUploads => _bookedUploads ?? new();
+
+    /// <summary>
+    /// The uploads still booked here, read on their own rather than out of the history:
+    /// the history is capped, and a booking must not drop off the Scheduled installs
+    /// because the environment has been busy.
+    /// </summary>
+    private List<UpgradeActionRow>? _bookedUploads;
+
+    private async Task LoadBookedUploadsAsync() =>
+        _bookedUploads = await Read(ct => UpgradeActions.ListPendingUploadsAsync(Row.ProjectId, Id, ct));
 
     /// <summary>"2 of 3" for a row of a multi-app upload, so the list shows the order they go in; null for a single one.</summary>
     private string? BatchPlace(UpgradeActionRow booked)
     {
-        if (booked.BatchId is not { } batch || booked.BatchOrder is not { } order || _activity is null) return null;
-        var size = _activity.Count(a => a.BatchId == batch);
+        if (booked.BatchId is not { } batch || booked.BatchOrder is not { } order) return null;
+        // The batch may have settled rows already, which the pending list no longer
+        // holds; the history has them for as long as it reaches.
+        var size = Math.Max(BookedUploads.Count(a => a.BatchId == batch), _activity?.Count(a => a.BatchId == batch) ?? 0);
         return size > 1 ? $"{order + 1} of {size}" : null;
     }
 
-    /// <summary>When a booked row goes: its slot, or "starting shortly" once that has come and the worker's next sweep will take it.</summary>
+    /// <summary>When a booked row goes: its slot, "starting shortly" once that has come, or "installing now" while the worker has it.</summary>
     private string BookedWhen(UpgradeActionRow booked) =>
-        booked.ExecuteAfter <= DateTime.UtcNow
-            ? "Starting shortly"
-            : $"Booked for {BookedSlotText(booked.ExecuteAfter)}";
+        booked.SentAt is not null ? "Installing now"
+        : booked.ExecuteAfter <= DateTime.UtcNow ? "Starting shortly"
+        : $"Booked for {BookedSlotText(booked.ExecuteAfter)}";
 
     /// <summary>A booked slot in the page's own zone - the one it was picked in - so it reads back as picked.</summary>
-    private string BookedSlotText(DateTime utc)
-    {
-        var zone = Zone.Zone.Id == TimeZoneInfo.Utc.Id ? "UTC" : BcUpdateWindow.CityLabel(Zone.Zone.Id);
-        return $"{Zone.Format(utc, "HH:mm 'on' d MMM")}, {zone} time";
-    }
+    private string BookedSlotText(DateTime utc) =>
+        $"{Zone.Format(utc, UploadAppDialog.SlotFormat)}, {UploadAppDialog.ZoneLabel(Zone.Zone.Id)} time";
 
     /// <summary>Sends a booked upload straight away, behind a confirm: from here it interrupts whoever is working.</summary>
     private async Task InstallBookedNowAsync(UpgradeActionRow booked)
@@ -1969,10 +1990,11 @@
     {
         if (_confirm is null) return;
         var name = booked.PackageFileName ?? "the app";
+        var others = BatchPlace(booked) is null ? "" : " The other apps booked with it still install; any that needs it will be refused by Business Central.";
         var confirmed = await _confirm.OpenAsync(
-            "Cancel this booked install?",
-            $"{name} won't be installed on {Row.EnvironmentName}. To install it later, upload it again.",
-            "Cancel the install");
+            "Call off this install?",
+            $"{name} won't be installed on {Row.EnvironmentName}. To install it later, upload it again.{others}",
+            "Call off the install");
         if (!confirmed) return;
 
         await RunSettingWriteAsync("cancel-booked",
@@ -2226,6 +2248,7 @@
             await LoadEnvironmentAsync();
             await LoadPanelAsync();
             _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
+            await LoadBookedUploadsAsync();
             _settingDone = successMessage();
             return true;
         }
@@ -2266,7 +2289,10 @@
         {
             await Write(() => UpgradeActions.CancelUpgradeActionAsync(actionId));
             _settingError = null;
-            _settingDone = "The booked update was cancelled.";
+            var entry = _activity?.FirstOrDefault(a => a.Id == actionId);
+            _settingDone = entry?.Kind == UpgradeActionKind.UploadApp
+                ? $"The install of {entry.PackageFileName ?? "the app"} was cancelled."
+                : "The booked update was cancelled.";
         }
         catch (PlanValidationException ex)
         {
@@ -2278,5 +2304,6 @@
         }
 
         _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
+        await LoadBookedUploadsAsync();
     }
 }

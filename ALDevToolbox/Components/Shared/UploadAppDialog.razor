@@ -3,9 +3,9 @@
     company built and sent over, which no pipeline here can deploy. Shared by the
     environment page and the Environments list's row menu.
 
-    The dialog only collects the answer - which file, and when. The caller sends it
-    (ProjectConnectionService.InstallUploadedAppAsync) and reports the outcome where its
-    own page reports outcomes. See .design/saas-delivery.md, "Uploading an app".
+    The dialog only collects the answer - which files, and when. The caller books them
+    (ProjectConnectionService.InstallUploadedAppsAsync) and reports the outcome where its
+    own page reports outcomes. See .design/saas-delivery.md, "Uploading apps".
 
     Several files may be chosen at once. Each manifest is read on the spot and the apps
     are put in dependency order, which is the order they will install in, one after
@@ -63,7 +63,7 @@
                     }
                     else
                     {
-                        <span class="u-muted">details not readable</span>
+                        <span class="u-muted">protected app - name and version hidden</span>
                     }
                     <span class="u-muted">@FileSize(file.Bytes.Length)</span>
                 </li>
@@ -73,7 +73,7 @@
         {
             <small class="field__hint">
                 @(_files.Any(f => f.Manifest is null)
-                    ? "They install one after another in this order. Apps whose details couldn't be read keep the order you chose them in, so put the ones others depend on first."
+                    ? "They install one after another in this order, dependencies first where they could be read. A protected app's dependencies can't be read: if one depends on another app here, upload them separately, dependencies first."
                     : "They install one after another in this order, dependencies first.")
             </small>
         }
@@ -98,7 +98,7 @@
             </label>
             <small class="field__hint upload-app__hint">
                 @(_bcWindowText is null
-                    ? "This environment has no delivery window, and Business Central's own window hasn't been read yet. Refresh the environment to read it, or pick a time."
+                    ? "This environment has no delivery window, and Business Central's own window hasn't been read yet. Open the environment and choose Refresh to read it, or pick a time."
                     : "This environment has no delivery window (the install time agreed with the customer), so Business Central's own window stands in for it.")
             </small>
         }
@@ -140,12 +140,6 @@
 
     /// <summary>One chosen package, with its manifest when it could be read (an encrypted vendor app hides it).</summary>
     public sealed record UploadFile(byte[] Bytes, string FileName, AppManifest? Manifest);
-
-    /// <summary>
-    /// How far in the past a picked slot may land before the dialog refuses it. The same
-    /// minute of slack the service gives, for the same reason: "now" travels.
-    /// </summary>
-    private static readonly TimeSpan PastSlack = TimeSpan.FromMinutes(1);
 
     private ConfirmDialog? _confirm;
     private List<UploadFile> _files = new();
@@ -190,8 +184,8 @@
 
         var confirmed = await _confirm.OpenAsync(
             isProduction
-                ? $"Upload an app to {environmentName}, a production environment?"
-                : $"Upload an app to {environmentName}?",
+                ? $"Upload apps to {environmentName}, a production environment?"
+                : $"Upload apps to {environmentName}?",
             $"For apps another company built and sent you as .app files. They install into {projectName}'s "
             + "Business Central as they are; nothing here checks what they do. Apps you build yourself go through Deployments instead.",
             "Upload and install", "btn--danger");
@@ -210,7 +204,9 @@
     public static string DoneMessage(Upload upload, UploadAppOutcome outcome, string environmentName, DisplayTimeZone zone)
     {
         var what = upload.Files.Count == 1 ? upload.Files[0].FileName : $"{upload.Files.Count} apps";
-        var tail = " Until then you can cancel or start it early under Scheduled installs on the environment.";
+        var tail = upload.Files.Count == 1
+            ? " Until then you can cancel or start it early under Scheduled installs on the environment."
+            : " Until then you can cancel or start them early under Scheduled installs on the environment.";
         if (outcome.RunsAtUtc <= DateTime.UtcNow)
         {
             return upload.Files.Count == 1
@@ -315,8 +311,8 @@
         return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(wall, zone), TimeSpan.Zero);
     }
 
-    /// <summary>"20:00 on 3 Oct": the slot as a wall clock, read back through the display zone like every other time on the page.</summary>
-    private const string SlotFormat = "HH:mm 'on' d MMM";
+    /// <summary>"20:00 on 3 Oct": the slot as a wall clock, read back through the display zone like every other time on the page. Shared with the pages that say a booking back.</summary>
+    internal const string SlotFormat = "HH:mm 'on' d MMM";
 
     private string SlotEchoText()
     {
@@ -342,14 +338,14 @@
     }
 
     private string? SlotProblem() =>
-        SlotInstant() < DateTimeOffset.UtcNow - PastSlack ? "Pick a time that hasn't happened yet." : null;
+        SlotInstant() < DateTimeOffset.UtcNow - ProjectConnectionService.BookingPastSlack ? "Pick a time that hasn't happened yet." : null;
 
     /// <summary>"22:00-04:00 (Copenhagen)": a window as the hours it was agreed in, with whose clock.</summary>
     private static string WindowText(TimeOnly start, TimeOnly end, string? ianaId) =>
         $"{UpdateWindow.Clock(start)}-{UpdateWindow.Clock(end)} ({ZoneLabel(ianaId)})";
 
-    /// <summary>A zone the way a consultant names it - the city, not the region/city id.</summary>
-    private static string ZoneLabel(string? ianaId) =>
+    /// <summary>A zone the way a consultant names it - the city, not the region/city id. Shared with the pages that say a booking back.</summary>
+    internal static string ZoneLabel(string? ianaId) =>
         string.IsNullOrWhiteSpace(ianaId) || ianaId == TimeZoneInfo.Utc.Id ? "UTC" : BcUpdateWindow.CityLabel(ianaId);
 
     private static string FileSize(int bytes) => bytes < 1024 * 1024

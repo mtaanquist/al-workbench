@@ -14,6 +14,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Bc;
 /// </summary>
 public static class BcAppOperationPoller
 {
+    /// <summary>How many polls in a row may fail before the install is given up as unconfirmed.</summary>
+    internal const int MaxConsecutivePollErrors = 4;
+
     public static async Task<BcAppOperationResult> PollUntilTerminalAsync(
         IBcAppManagementClient apps, string accessToken, string applicationFamily, string environmentName,
         BcAppOperation started, TimeSpan pollDelay, TimeSpan timeout, CancellationToken ct)
@@ -27,12 +30,31 @@ public static class BcAppOperationPoller
         }
 
         var deadline = DateTime.UtcNow + timeout;
+        var consecutiveErrors = 0;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
 
-            var operation = await apps.GetAppOperationAsync(
-                accessToken, applicationFamily, environmentName, appId, started.Id, ct).ConfigureAwait(false);
+            BcAppOperation? operation;
+            try
+            {
+                operation = await apps.GetAppOperationAsync(
+                    accessToken, applicationFamily, environmentName, appId, started.Id, ct).ConfigureAwait(false);
+                consecutiveErrors = 0;
+            }
+            catch (BcApiException) when (++consecutiveErrors < MaxConsecutivePollErrors)
+            {
+                // A throttled or briefly unavailable read says nothing about the install,
+                // which Business Central is running regardless. One blip must not turn an
+                // accepted install into a failure - and, for a batch, stop the apps after it.
+                operation = null;
+            }
+            catch (BcApiException ex)
+            {
+                return new BcAppOperationResult(false,
+                    "Business Central accepted the app, but kept answering with an error when asked whether the install had finished, so it wasn't confirmed here. "
+                    + ex.Message);
+            }
 
             switch (operation?.Status)
             {

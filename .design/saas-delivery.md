@@ -579,10 +579,11 @@ that names the environment and says what the click does there:
   The sync mode is always Add and dependencies are **not** pulled along: a missing one is
   refused by name at send time. Apps we build still go through Deployments.
 
-  **Every timing is a booking, never a schedule handed to Business Central.** Four are
-  offered - the delivery window (first, when the environment has one), the BC update
-  window (booked from the hours mirrored on the environment, and refused until they have
-  been read), a picked time, and now - and all four write one `Pending` `UploadApp` row
+  **Every timing is a booking, never a schedule handed to Business Central.** The dialog
+  offers three: the delivery window (or, when the environment has none, the BC update
+  window, booked from the hours mirrored on the environment and refused until they have
+  been read), a picked time, and now. The service takes all four `UploadAppTiming`
+  values, and all four write one `Pending` `UploadApp` row
   per app in `oe_environment_upgrade_actions` carrying the file (`package_file_name`,
   `package_content`) and, for several apps, a batch (`package_batch_id`,
   `package_batch_order`). `UpgradeActionWorker` sends a batch's rows in order as
@@ -594,7 +595,16 @@ that names the environment and says what the click does there:
   cancelled one does not. "Now" is a slot that has already come, so the next sweep
   (within thirty seconds) takes it - an install that takes minutes never runs inside a
   page request. The delivery window falls back to Microsoft's window when the
-  environment has none, and a window that is open at the moment of asking books now.
+  environment has none, and a window that is open at the moment of asking books now. The
+  sweep sends at most one upload per organisation and puts platform-update moves first,
+  so a batch spreads over as many sweeps as it has apps and never holds up a customer's
+  agreed update slot. A poll that errors a few times in a row is treated as "still
+  running"; only a run of errors gives the install up as unconfirmed. A restart while an
+  app is installing records it as sent, unconfirmed (the operation ids Business Central
+  answered with are on the row, `package_bc_app_id` / `package_bc_operation_id`), and the
+  rest of its batch still goes: a dependent that needed it is refused by Business Central
+  if it did not land. A pending upload is **not** a platform-update booking: the Upgrades
+  page's "already booked" marker and the bulk version change ignore it.
 
   A picked time is read in the organisation's display zone - the zone every other time
   on the page is shown in - and echoed back under the field with the zone named, so
@@ -602,7 +612,10 @@ that names the environment and says what the click does there:
   customer's clock first, because that is the clock it was chosen on. **The package is
   held only while the row is pending**: the write that settles the row (sent, failed, or
   cancelled) clears it in the same statement, and the worker's first sweep after a
-  restart drops any package left on a settled row. Booked uploads appear in the
+  restart drops any package left on a settled row. This is a change of scope from the
+  first version, which never stored the file: while a booking waits, up to ten packages
+  of up to 50 MB each sit in the database and in any `pg_dump` taken meanwhile. Booked
+  uploads appear in the
   environment's *Scheduled installs* beside Business Central's own, with their place in
   the batch, "Install now" (`UpgradeActionService.RunUploadNowAsync`, which moves the
   whole batch's slot to now for the next sweep rather than sending from the page) and

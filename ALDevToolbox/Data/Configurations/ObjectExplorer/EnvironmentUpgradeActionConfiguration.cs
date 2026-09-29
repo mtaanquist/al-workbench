@@ -43,6 +43,10 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         // Several apps uploaded together: the worker runs a batch's rows in order.
         entity.Property(e => e.BatchId).HasColumnName("package_batch_id");
         entity.Property(e => e.BatchOrder).HasColumnName("package_batch_order");
+        // What Business Central answered the upload with, so a restart mid-install knows
+        // the app is already with it.
+        entity.Property(e => e.BcAppId).HasColumnName("package_bc_app_id");
+        entity.Property(e => e.BcOperationId).HasColumnName("package_bc_operation_id");
 
         // No concurrency-token column: see the entity's remarks. The one race on this
         // table — the worker claiming a row while somebody cancels it — is decided by a

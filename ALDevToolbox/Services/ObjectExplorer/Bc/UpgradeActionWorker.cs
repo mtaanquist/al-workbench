@@ -49,10 +49,10 @@ public sealed class UpgradeActionWorker : BackgroundService
         // Polls every 30 seconds and is idle most of the time; a sweep that is still
         // running after 15 minutes is wedged on somebody's tenant.
         _heartbeat = heartbeats.Register(nameof(UpgradeActionWorker),
-            // A sweep that sends a multi-app upload waits for each install to finish -
-            // up to ten minutes apiece - so a batch of a vendor's suite is a long sweep,
-            // not a stalled one.
-            maxActiveDuration: TimeSpan.FromMinutes(90),
+            // A sweep sends at most one booked upload per organisation and waits for
+            // its install to finish, so the budget is one install plus the rest of the
+            // sweep - not a whole batch, which spreads over as many sweeps as it has apps.
+            maxActiveDuration: ProjectConnectionService.DefaultUploadPollTimeout + TimeSpan.FromMinutes(15),
             maxIdleSilence: TimeSpan.FromMinutes(5));
     }
 
@@ -151,7 +151,10 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .Where(a => a.Status == UpgradeActionStatus.Pending
                             && a.SentAt == null
                             && a.ExecuteAfter <= now)
-                .OrderBy(a => a.ExecuteAfter)
+                // Platform-update moves first: they are a date the customer agreed and
+                // take seconds, and must not queue behind an app install that takes minutes.
+                .OrderBy(a => a.Kind == UpgradeActionKind.UploadApp)
+                .ThenBy(a => a.ExecuteAfter)
                 .ThenBy(a => a.BatchOrder)
                 .ThenBy(a => a.Id)
                 .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
@@ -163,7 +166,14 @@ public sealed class UpgradeActionWorker : BackgroundService
         foreach (var action in due)
         {
             if (ct.IsCancellationRequested) break;
-            if (await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false)) ran++;
+            if (!await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false)) continue;
+            ran++;
+            // One upload per organisation per sweep: each waits for its install to
+            // finish, up to ten minutes, and the sweep is serial across every
+            // organisation. A batch resumes on the next sweep, where the gate below finds
+            // its predecessor settled; another organisation's due rows get their turn
+            // in between.
+            if (action.Kind == UpgradeActionKind.UploadApp) break;
         }
 
         if (ran > 0)
@@ -197,14 +207,23 @@ public sealed class UpgradeActionWorker : BackgroundService
         {
             var earlier = await db.OeEnvironmentUpgradeActions.AsNoTracking()
                 .Where(a => a.BatchId == batch && a.BatchOrder < order)
-                .Select(a => new { a.Status, a.PackageFileName })
+                .OrderBy(a => a.BatchOrder)
+                .Select(a => new { a.Status, a.SentAt, a.PackageFileName })
                 .ToListAsync(ct).ConfigureAwait(false);
-            if (earlier.Any(e => e.Status == UpgradeActionStatus.Pending))
+            // A predecessor still pending is either waiting its turn or mid-install. One
+            // claimed longer ago than an install can take is a row whose settling write
+            // was lost; it is not waited on for ever - its dependents go, and Business
+            // Central refuses them by name if the app it needed is not there.
+            var staleBefore = _clock.GetUtcNow().UtcDateTime - (ProjectConnectionService.DefaultUploadPollTimeout + TimeSpan.FromMinutes(5));
+            if (earlier.Any(e => e.Status == UpgradeActionStatus.Pending && (e.SentAt == null || e.SentAt > staleBefore)))
             {
                 return false;
             }
             if (earlier.FirstOrDefault(e => e.Status == UpgradeActionStatus.Failed) is { } blocked)
             {
+                _logger.LogInformation(
+                    "Upload booking {ActionId} ({FileName}) is not tried: {Blocked} before it in the same batch failed.",
+                    action.Id, action.PackageFileName, blocked.PackageFileName);
                 var skippedAt = _clock.GetUtcNow().UtcDateTime;
                 var skipped = await db.OeEnvironmentUpgradeActions
                     .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
@@ -260,7 +279,16 @@ public sealed class UpgradeActionWorker : BackgroundService
                         ["App"] = "The app file was no longer stored with the booking.",
                     });
                 }
-                var result = await actions.RunUploadAsync(action.ProjectId, action.EnvironmentId, action.PackageFileName, package, ct).ConfigureAwait(false);
+                // The operation is stamped on the row as soon as Business Central accepts
+                // the package, so a restart during the poll can tell "installing without
+                // us" from "never sent" - see FailInterruptedAsync.
+                var result = await actions.RunUploadAsync(action.ProjectId, action.EnvironmentId, action.PackageFileName, package,
+                    (operation, token) => db.OeEnvironmentUpgradeActions
+                        .Where(a => a.Id == action.Id)
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(a => a.BcAppId, operation.AppId)
+                            .SetProperty(a => a.BcOperationId, operation.Id), token),
+                    ct).ConfigureAwait(false);
                 if (result.Completed)
                 {
                     status = UpgradeActionStatus.Sent;
@@ -335,6 +363,20 @@ public sealed class UpgradeActionWorker : BackgroundService
         await using var scope = _services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
+        // An upload Business Central had already accepted went on installing without
+        // us: it is recorded as sent, unconfirmed, and the rest of its batch still goes -
+        // a dependent that needed it is refused by Business Central if it did not land.
+        // (The operation ids are on the row; re-polling them after a restart is the
+        // obvious next step, not taken yet.)
+        var unconfirmed = await db.OeEnvironmentUpgradeActions
+            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt != null && a.BcOperationId != null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.Status, UpgradeActionStatus.Sent)
+                .SetProperty(a => a.PackageContent, (byte[]?)null)
+                .SetProperty(a => a.Outcome, a => a.PackageFileName
+                    + " was uploaded, but the workbench restarted before it could confirm the install finished. Check the environment's installed apps."),
+                ct).ConfigureAwait(false);
+
         const string outcome =
             "The workbench restarted while this was being sent, so we can't say whether it reached Business Central. "
             + "Check the environment, then schedule it again if you need to.";
@@ -345,10 +387,11 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .SetProperty(a => a.PackageContent, (byte[]?)null)
                 .SetProperty(a => a.Outcome, outcome), ct).ConfigureAwait(false);
 
-        if (failed > 0)
+        if (unconfirmed > 0 || failed > 0)
         {
             _logger.LogWarning(
-                "Failed {Count} upgrade action(s) in org {OrgId} that a restart interrupted mid-send.", failed, orgId);
+                "A restart interrupted {Unconfirmed} upload(s) mid-install (recorded as sent, unconfirmed) and {Failed} action(s) mid-send (failed) in org {OrgId}.",
+                unconfirmed, failed, orgId);
         }
 
         // Belt and braces for the packages: every settled write above clears its own, but

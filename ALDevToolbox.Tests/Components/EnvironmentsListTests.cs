@@ -178,7 +178,7 @@ public sealed class EnvironmentsListTests : IDisposable
         cut.WaitForAssertion(() =>
             cut.FindAll("button.menu__item").Single(b => b.TextContent.Trim() == "Upload an app...").Click());
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Upload an app to Production, a production environment?"));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Upload apps to Production, a production environment?"));
         cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload and install")
             .HasAttribute("disabled").Should().BeTrue("nothing has been chosen yet");
     }

@@ -607,8 +607,8 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
             .And.Contain(b => b.TextContent.Trim() == "Cancel install");
 
         cut.FindAll("button").Single(b => b.TextContent.Trim() == "Cancel install").Click();
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Cancel this booked install?"));
-        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Cancel the install").Click();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Call off this install?"));
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Call off the install").Click();
 
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("The install of Partner_Thing_1.0.0.0.app was cancelled."));
         await using var verify = _db.NewContext();

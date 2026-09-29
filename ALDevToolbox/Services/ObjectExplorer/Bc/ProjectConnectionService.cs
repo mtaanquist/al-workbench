@@ -1929,8 +1929,14 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// (<see cref="UpgradeActionWorker"/>) records the outcome on the booking's own row,
     /// so nothing is recorded here beyond the log line and the panel cache.
     /// </summary>
+    /// <param name="accepted">
+    /// Called with the operation the moment Business Central accepts the package, before
+    /// the install is polled: the caller stamps it on the row, so a restart during the
+    /// poll knows the app is with Business Central rather than never sent.
+    /// </param>
     internal async Task<BcAppOperationResult> SendBookedUploadAsync(
-        int projectId, int environmentId, byte[] appBytes, string fileName, CancellationToken ct)
+        int projectId, int environmentId, byte[] appBytes, string fileName,
+        Func<BcAppOperation, CancellationToken, Task>? accepted, CancellationToken ct)
     {
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
 
@@ -1956,6 +1962,10 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             "User {UserId} uploaded {FileName} ({Bytes} bytes) to {Environment} (project {ProjectId}); app {AppId} version {Version}, operation {OperationId}.",
             _orgContext.CurrentUserId, fileName, appBytes.Length, env.Name, projectId,
             operation.AppId, operation.TargetAppVersion, operation.Id);
+        if (accepted is not null)
+        {
+            await accepted(operation, ct);
+        }
 
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
             _apps, env.Token, env.Family, env.Name, operation, UploadPollDelay, UploadPollTimeout, ct);
@@ -1967,15 +1977,22 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         return result;
     }
 
-    /// <summary>How often a booked upload's install is re-read while it runs, and how long one is given. The delivery path's numbers.</summary>
+    /// <summary>
+    /// How long one booked upload's install is given before it is reported as timed out,
+    /// and how often it is re-read meanwhile - the delivery path's numbers. Settable so a
+    /// test need not wait five seconds a poll; the defaults are what the worker's
+    /// heartbeat budget is worked out from.
+    /// </summary>
+    public static readonly TimeSpan DefaultUploadPollTimeout = TimeSpan.FromMinutes(10);
     internal TimeSpan UploadPollDelay { get; set; } = TimeSpan.FromSeconds(5);
-    internal TimeSpan UploadPollTimeout { get; set; } = TimeSpan.FromMinutes(10);
+    internal TimeSpan UploadPollTimeout { get; set; } = DefaultUploadPollTimeout;
 
     /// <summary>
     /// A minute of slack on a picked slot, because "now" travels between the person's
-    /// clock, the page and this method. The same allowance <see cref="UpgradeActionService"/> gives.
+    /// clock, the page and this method. The dialog refuses with the same allowance, so a
+    /// slot the form accepts is one the service accepts.
     /// </summary>
-    private static readonly TimeSpan BookingPastSlack = TimeSpan.FromMinutes(1);
+    internal static readonly TimeSpan BookingPastSlack = TimeSpan.FromMinutes(1);
 
     /// <summary>The file's own name, whichever separator the person's machine used: a Windows path is not one to Linux.</summary>
     private static string CleanUploadName(string? fileName)
@@ -2322,10 +2339,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             .ToListAsync(ct);
         foreach (var pipeline in pipelines) pipeline.ProjectEnvironmentId = survivor.Id;
 
-        var actions = await _db.OeEnvironmentUpgradeActions
+        // A set-based update: a pending upload booking carries its package, and there is
+        // no reason to pull fifty megabytes into memory to change one foreign key.
+        await _db.OeEnvironmentUpgradeActions
             .Where(a => a.EnvironmentId == stale.Id)
-            .ToListAsync(ct);
-        foreach (var action in actions) action.EnvironmentId = survivor.Id;
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.EnvironmentId, survivor.Id), ct);
 
         // Its places on planned upgrades (#984) come across too, or the delete below would
         // cascade them away. A place the survivor already holds - on the same upgrade, or

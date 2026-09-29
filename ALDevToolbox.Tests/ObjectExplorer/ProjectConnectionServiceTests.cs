@@ -2493,7 +2493,11 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
         svc.UploadPollDelay = TimeSpan.Zero;
-        var result = await svc.SendBookedUploadAsync(projectId, envId, new byte[] { 1 }, "Partner.app", CancellationToken.None);
+        BcAppOperation? accepted = null;
+        var result = await svc.SendBookedUploadAsync(projectId, envId, new byte[] { 1 }, "Partner.app",
+            (op, _) => { accepted = op; return Task.CompletedTask; }, CancellationToken.None);
+
+        accepted.Should().NotBeNull("the caller is told what Business Central accepted before the install is polled");
 
         apps.Installed!.Value.Schedule.Should().Be(BcDeploymentSchedule.Immediate);
         result.Completed.Should().BeFalse();
@@ -2513,6 +2517,21 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             .InstallUploadedAppsAsync(projectId, envId, new[] { Pkg("Partner.app", 1) }, UploadAppTiming.Now);
 
         await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+    }
+
+    [Fact]
+    public async Task More_apps_than_one_upload_takes_are_refused_before_anything_is_stored()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var packages = Enumerable.Range(1, ProjectConnectionService.MaxUploadBatch + 1).Select(i => Pkg($"App{i}.app", 1)).ToList();
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId, packages, UploadAppTiming.Now);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("at most");
+        await using var read = _db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().AnyAsync(a => a.EnvironmentId == envId)).Should().BeFalse();
     }
 
     private async Task SetWindowsAsync(int envId,

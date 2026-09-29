@@ -1251,6 +1251,14 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("package_batch_order");
 
+                    b.Property<Guid?>("BcAppId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("package_bc_app_id");
+
+                    b.Property<Guid?>("BcOperationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("package_bc_operation_id");
+
                     b.Property<DateTime?>("CancelledAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("cancelled_at");

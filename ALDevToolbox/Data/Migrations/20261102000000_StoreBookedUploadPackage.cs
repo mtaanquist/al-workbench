@@ -23,6 +23,18 @@ namespace ALDevToolbox.Data.Migrations
                 type: "integer",
                 nullable: true);
 
+            migrationBuilder.AddColumn<Guid>(
+                name: "package_bc_app_id",
+                table: "oe_environment_upgrade_actions",
+                type: "uuid",
+                nullable: true);
+
+            migrationBuilder.AddColumn<Guid>(
+                name: "package_bc_operation_id",
+                table: "oe_environment_upgrade_actions",
+                type: "uuid",
+                nullable: true);
+
             migrationBuilder.AddColumn<byte[]>(
                 name: "package_content",
                 table: "oe_environment_upgrade_actions",
@@ -46,6 +58,14 @@ namespace ALDevToolbox.Data.Migrations
 
             migrationBuilder.DropColumn(
                 name: "package_batch_order",
+                table: "oe_environment_upgrade_actions");
+
+            migrationBuilder.DropColumn(
+                name: "package_bc_app_id",
+                table: "oe_environment_upgrade_actions");
+
+            migrationBuilder.DropColumn(
+                name: "package_bc_operation_id",
                 table: "oe_environment_upgrade_actions");
 
             migrationBuilder.DropColumn(

@@ -54,21 +54,30 @@ public class OeEnvironmentUpgradeAction
     public OeEnvironmentUpgrade? Upgrade { get; set; }
 
     /// <summary>
-    /// The file name of an uploaded app booked for later (<see cref="UpgradeActionKind.UploadApp"/>
-    /// with a future <see cref="ExecuteAfter"/>), as the person chose it. Kept after the
-    /// send so the history can still name the file; null for every other kind.
+    /// The file name of a booked upload (<see cref="UpgradeActionKind.UploadApp"/>), as the
+    /// person chose it. Kept after the send so the history can still name the file; null
+    /// for every other kind.
     /// </summary>
     public string? PackageFileName { get; set; }
 
     /// <summary>
-    /// The <c>.app</c> bytes of an uploaded app booked for later, held only until the
-    /// booking is sent, fails or is cancelled: Business Central has no "at this time"
-    /// schedule, so the workbench keeps the package and the worker sends it when the
-    /// slot arrives. Cleared by whichever write settles the row, and swept by the worker's
-    /// first pass after a restart, so a settled row never carries a package. Null for an
-    /// upload sent there and then and for every other kind.
+    /// The <c>.app</c> bytes of a booked upload, held only until the row settles: Business
+    /// Central has no "at this time" schedule, so the workbench keeps the package and the
+    /// worker sends it when the slot arrives. Cleared by whichever write settles the row
+    /// (sent, failed, skipped or cancelled), and swept by the worker's first pass after a
+    /// restart, so a settled row never carries a package. Null for every other kind.
     /// </summary>
     public byte[]? PackageContent { get; set; }
+
+    /// <summary>
+    /// The app and operation ids Business Central returned when it accepted the package,
+    /// stamped the moment the upload call returns and before the install is polled. They
+    /// are what tells a restart that the app is with Business Central (the install went
+    /// on without us, unconfirmed) from a row the restart caught before anything was
+    /// sent. Null until the upload is accepted and for every other kind.
+    /// </summary>
+    public Guid? BcAppId { get; set; }
+    public Guid? BcOperationId { get; set; }
 
     /// <summary>
     /// Groups the rows of one multi-app upload: several apps booked together, one row

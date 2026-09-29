@@ -312,8 +312,8 @@ public sealed class UpgradeActionService
             .ExecuteUpdateAsync(s => s.SetProperty(a => a.ExecuteAfter, now), ct).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "User {UserId} moved booked upload {ActionId} ({FileName}) and {Others} other row(s) of its batch to now.",
-            _orgContext.CurrentUserId, actionId, booking.PackageFileName, Math.Max(0, moved - 1));
+            "User {UserId} asked for booked upload {ActionId} ({FileName}) now; {Moved} row(s) of its batch moved to the next sweep.",
+            _orgContext.CurrentUserId, actionId, booking.PackageFileName, moved);
     }
 
     // ── Reading ─────────────────────────────────────────────────────────
@@ -353,11 +353,37 @@ public sealed class UpgradeActionService
         var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
 
+        // Booked uploads are pending rows too, but they are not platform-update moves:
+        // the Upgrades page must not report "something is already booked" for a vendor
+        // app waiting for tonight, nor skip that environment in a bulk version change.
         return await _db.OeEnvironmentUpgradeActions.AsNoTracking()
-            .Where(a => a.Status == UpgradeActionStatus.Pending)
+            .Where(a => a.Status == UpgradeActionStatus.Pending && a.Kind != UpgradeActionKind.UploadApp)
             .Where(a => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == a.ProjectId && p.DeletedAt == null))
             .OrderBy(a => a.ExecuteAfter)
+            .Select(a => new UpgradeActionRow(
+                a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
+                a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
+                a.CancelledBy, a.CancelledAt, a.TargetVersion,
+                a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder))
+            .ToListAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Every upload still booked on one environment, in the order it will go, for the
+    /// environment's Scheduled installs. Not capped like the history: a booking must not
+    /// drop off the list because the environment has been busy. Reading needs only
+    /// visibility, as the history does.
+    /// </summary>
+    public async Task<List<UpgradeActionRow>> ListPendingUploadsAsync(
+        int projectId, int environmentId, CancellationToken ct = default)
+    {
+        await _access.EnsureCanViewAsync(projectId, ct).ConfigureAwait(false);
+
+        return await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
+                        && a.Kind == UpgradeActionKind.UploadApp && a.Status == UpgradeActionStatus.Pending)
+            .OrderBy(a => a.ExecuteAfter).ThenBy(a => a.BatchOrder).ThenBy(a => a.Id)
             .Select(a => new UpgradeActionRow(
                 a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
                 a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
@@ -392,13 +418,15 @@ public sealed class UpgradeActionService
 
     /// <summary>
     /// Sends a booked upload (<see cref="UpgradeActionKind.UploadApp"/> with a package on
-    /// the row) when its slot arrives. Only the worker calls this: an upload asked for
-    /// there and then never becomes a booking, and goes through
-    /// <see cref="ProjectConnectionService.InstallUploadedAppAsync"/> whole.
+    /// the row) when its slot arrives and waits for the install to finish. Only the
+    /// worker calls this: every upload is booked through
+    /// <see cref="ProjectConnectionService.InstallUploadedAppsAsync"/>, and none is sent
+    /// from a page request.
     /// </summary>
     internal Task<BcAppOperationResult> RunUploadAsync(
-        int projectId, int environmentId, string fileName, byte[] package, CancellationToken ct) =>
-        _connections.SendBookedUploadAsync(projectId, environmentId, package, fileName, ct);
+        int projectId, int environmentId, string fileName, byte[] package,
+        Func<BcAppOperation, CancellationToken, Task> accepted, CancellationToken ct) =>
+        _connections.SendBookedUploadAsync(projectId, environmentId, package, fileName, accepted, ct);
 
     /// <summary>
     /// The kinds this service runs, and the version rule between them: a version change
