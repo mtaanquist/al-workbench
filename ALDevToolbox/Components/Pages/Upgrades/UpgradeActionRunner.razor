@@ -1,0 +1,985 @@
+@inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService Actions
+@inject ILogger<UpgradeActionRunner> Log
+@inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@using ALDevToolbox.Domain.Entities.ObjectExplorer
+@using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
+
+@*
+    The three moves the upgrade team makes on environments - push the dates out, start
+    the update (now or at a booked slot), change the version it goes to - with their
+    confirm dialogs and the loop that runs them one environment at a time.
+
+    Taken out of the Upgrades page so an upgrade's own page (#984) runs the same three
+    moves over its lines through the same loop rather than a copy of it. The host keeps
+    the table, the selection, the notice and the re-read; this owns what happens between
+    a command being pressed and the run being over, and the per-row results the host
+    draws on its rows while and after it runs.
+
+    The host hands over the rows at the moment it opens a dialog (UpgradeActionTarget),
+    so its own selection is never touched from here. See .design/environment-updates.md.
+*@
+
+@* Both confirms preview exactly what the run will do, row by row, including the
+   rows it will pass over - the alternative is a person pressing a button on
+   ninety customers and finding out afterwards. The ones that will be passed over
+   are grouped at the bottom so the top of the list is only what will happen. *@
+<ConfirmDialog @ref="_pushConfirm" Wide="true"
+               Title="@(IsOneRow ? "Move this update date?" : "Move these update dates?")"
+               Message="The version each environment updates to doesn't change - only the date it runs. Each date moves to the latest Business Central still allows."
+               ConfirmLabel="Move the dates" ConfirmButtonClass="btn" ConfirmIcon="calendar"
+               WorkingContent="@RunProgress()">
+    @PreviewList()
+</ConfirmDialog>
+
+@* One dialog, two voices. Starting an update now is irreversible and wears the
+   danger button and the typed word; booking one for later can be called off from
+   the Upgrades page until it runs, and saying "you cannot stop it" over a thing with a
+   Cancel button would be a straight contradiction. So the title, the sentence, the
+   button label and its colour all follow the choice. *@
+<ConfirmDialog @ref="_nowConfirm" Wide="true"
+               Title="@NowDialogTitle"
+               Message="@NowDialogMessage"
+               ConfirmLabel="@NowConfirmLabel"
+               ConfirmButtonClass="@(_scheduleLater ? "btn" : "btn--danger")"
+               ConfirmIcon="@(_scheduleLater ? "clock" : "zap")"
+               ConfirmDisabled="@(_scheduleLater && SlotProblem() is not null)"
+               RequireWord="@(_scheduleLater ? null : "update")"
+               GraceSeconds="@(_scheduleLater ? 0 : StartGraceSeconds)"
+               GraceContent="@PreviewList()"
+               WorkingContent="@RunProgress()">
+    @PreviewList()
+
+    @* The whole reason a slot exists: the team agrees "tonight at 20:00" with a
+       customer in the morning and books it, rather than sitting on the page all
+       evening. Immediately stays the default, because most of the time that is
+       what a customer on the phone is asking for. *@
+    <fieldset class="upg-when">
+        <legend class="upg-when__legend">When should this run?</legend>
+        <label class="upg-when__opt">
+            <input type="radio" name="upg-when" checked="@(!_scheduleLater)"
+                   @onchange="() => SetScheduleLater(false)" />
+            <span>Immediately</span>
+        </label>
+        <label class="upg-when__opt">
+            <input type="radio" name="upg-when" checked="@_scheduleLater"
+                   @onchange="() => SetScheduleLater(true)" />
+            <span>Later, at a time I pick</span>
+        </label>
+        @if (_scheduleLater)
+        {
+            <div class="upg-when__pick">
+                <input type="datetime-local" class="input" @bind="_slotLocal" @bind:event="oninput" />
+            </div>
+            @* The browser draws that field in its own locale, which on a machine set
+               to English (US) is a 12-hour clock while every other time on this page
+               is 24-hour. So the booking is said back in the page's own words, always
+               visible, and that sentence is what settles what was picked. *@
+            <p class="upg-when__echo">@SlotEchoText()</p>
+            @if (SlotProblem() is { } problem)
+            {
+                <FieldError Message="@problem" />
+            }
+            <small class="field__hint">
+                You can cancel a booked update from this page right up until it runs.
+            </small>
+        }
+    </fieldset>
+
+    @* Directly above the confirm: the last thing read before the click should be
+       how much of the fleet this is, and how much of it is production. *@
+    <p class="upg-preview__count">@PreviewCountLine()</p>
+</ConfirmDialog>
+
+@* The third move (#960): "everyone goes to 29.2". The versions come from what Business
+   Central last offered the selected rows, so the list can only hold something at least
+   one of them can take, and each says how many. Picking one sorts every selected row into
+   the group it lands in, from the same mirror - the run re-reads each environment before
+   it writes, so a stale mirror can make this preview hopeful but never the write wrong.
+   The typed word is the one the page already asks for before touching a customer's
+   production update. *@
+<ConfirmDialog @ref="_versionConfirm" Wide="true"
+               Title="@(IsOneRow ? "Change this environment's next version?" : "Change the next version?")"
+               Message="Pick the Business Central version to update to next. Environments set to a later version move back to it."
+               ConfirmLabel="@VersionConfirmLabel" ConfirmButtonClass="btn" ConfirmIcon="tag"
+               ConfirmDisabled="@(_targetVersion is null || !_versionPreview.Any(p => p.WillChange))"
+               RequireWord="update"
+               WorkingContent="@RunProgress()">
+    @if (_versionOptions.Count == 0)
+    {
+        <p class="upg-version__none">
+            Business Central hasn't offered these environments a version to change to. Refresh them, then try again.
+        </p>
+    }
+    else
+    {
+        <fieldset class="upg-when">
+            <legend class="upg-when__legend">Version</legend>
+            <div class="upg-version__opts">
+                @foreach (var option in _versionOptions)
+                {
+                    <label class="upg-when__opt">
+                        <input type="radio" name="upg-version" value="@option.Version"
+                               checked="@(option.Version == _targetVersion)"
+                               @onchange="() => PickVersion(option.Version)" />
+                        <span class="upg-version__name">@option.Version</span>
+                        <span class="upg-version__count">for @option.RowCount of the selected</span>
+                    </label>
+                }
+            </div>
+        </fieldset>
+
+        @* The sum and the date note lead, under the picker: the groups below can run
+           long enough to scroll, and the line that says how much of the fleet this
+           touches must not be the part scrolled out of view. *@
+        @if (_targetVersion is not null)
+        {
+            <p class="upg-preview__count">@VersionCountLine()</p>
+            <p class="upg-version__date">
+                <Icon Name="calendar" Width="13" Height="13" />
+                <span>Business Central sets the date; use Move dates afterwards to push it out.</span>
+            </p>
+            @VersionPreviewList()
+        }
+    }
+</ConfirmDialog>
+
+@code {
+    /// <summary>
+    /// The bookings still waiting to fire across what the host shows. The Start update
+    /// preview warns about a second booking from it, and the version change leaves a row
+    /// with a booking alone.
+    /// </summary>
+    [Parameter, EditorRequired] public IReadOnlyList<UpgradeActionRow> Pending { get; set; } = [];
+
+    /// <summary>
+    /// The upgrade the run belongs to, stamped on every action it sends so the upgrade's
+    /// lines can tell what was done from it. Null for the fleet table's ad hoc runs.
+    /// </summary>
+    [Parameter] public int? UpgradeId { get; set; }
+
+    /// <summary>
+    /// A version to have picked when the version dialog opens - an upgrade's target
+    /// release. Ignored when none of the rows is offered it; the person still confirms.
+    /// </summary>
+    [Parameter] public string? PrefillVersion { get; set; }
+
+    /// <summary>
+    /// A slot (UTC) the Start update dialog opens on, with "Later" chosen - an upgrade's
+    /// planned slot. Ignored once it has passed, so the dialog then opens as it always
+    /// does, on "Immediately".
+    /// </summary>
+    [Parameter] public DateTime? PrefillSlotUtc { get; set; }
+
+    /// <summary>Raised when a run begins, after the rows are marked Waiting.</summary>
+    [Parameter] public EventCallback OnRunStarted { get; set; }
+
+    /// <summary>
+    /// Raised after each row's result changes during a run, so the host redraws its rows:
+    /// the results live here, but the host is what draws them.
+    /// </summary>
+    [Parameter] public EventCallback OnProgress { get; set; }
+
+    /// <summary>Raised once a run is over and its dialog closed, with what the host needs next.</summary>
+    [Parameter] public EventCallback<UpgradeRunOutcome> OnRunFinished { get; set; }
+
+    /// <summary>
+    /// True from the first row of a run until the host has handled <see cref="OnRunFinished"/>.
+    /// The host's event handler that opened the dialog redraws once it returns, which is
+    /// when its controls come back.
+    /// </summary>
+    public bool IsRunning => _running;
+
+    /// <summary>
+    /// True while any of the three dialogs is on screen. A host that re-reads its rows on
+    /// a timer holds off meanwhile: the rows a person is reading in the dialog must not
+    /// move under them.
+    /// </summary>
+    public bool IsDialogOpen =>
+        _pushConfirm?.IsOpen == true || _nowConfirm?.IsOpen == true || _versionConfirm?.IsOpen == true;
+
+    /// <summary>What the last run did to each row, by environment id. Cleared when the next run starts.</summary>
+    public IReadOnlyDictionary<int, UpgradeRowResult> Results => _results;
+
+    /// <summary>Drops one row's result - for a host that has something newer to say there.</summary>
+    public void ForgetResult(int environmentId) => _results.Remove(environmentId);
+
+    /// <summary>Drops every row's result - for a host whose rows have just changed under them.</summary>
+    public void ClearResults() => _results.Clear();
+
+    private readonly Dictionary<int, UpgradeRowResult> _results = new();
+    private List<PreviewItem> _preview = new();
+
+    /// <summary>What the open dialog, or the run it started, acts on. Null between dialogs.</summary>
+    private UpgradeActionTarget? _target;
+
+    private IReadOnlyList<UpgradeFleetRow> TargetRows => _target?.Rows ?? [];
+
+    private bool IsOneRow => _target?.IsOneRow == true;
+
+    private bool _running;
+    private bool _stopRequested;
+    private string _progressText = string.Empty;
+    private int _progressDone;
+    private int _progressTotal;
+
+    /// <summary>
+    /// How long an immediate update waits after the confirm before anything is sent.
+    /// Starting one cannot be taken back, so the dialog gives the person this long to
+    /// notice the wrong customer. A booking has no wait: it can be cancelled for hours.
+    /// </summary>
+    private const int StartGraceSeconds = 10;
+
+    /// <summary>
+    /// The run, reported in the dialog that started it rather than in a strip above a
+    /// table the scrim has just uncovered. Stop only appears when there is a next one
+    /// to stop before.
+    /// </summary>
+    private RenderFragment RunProgress() => @<div class="upg-run" role="status">
+        <p class="upg-run__text">@_progressText</p>
+        <progress class="progress" value="@_progressDone" max="@Math.Max(1, _progressTotal)"></progress>
+        @if (_progressTotal > 1)
+        {
+            <div class="upg-run__foot">
+                <span class="u-muted">@_progressDone of @_progressTotal done. Each result appears on its row.</span>
+                <button type="button" class="btn btn--sm" @onclick="() => _stopRequested = true" disabled="@_stopRequested">
+                    <span>@(_stopRequested ? "Stopping after this one" : "Stop after this one")</span>
+                </button>
+            </div>
+        }
+    </div>;
+
+    private ConfirmDialog? _pushConfirm;
+    private ConfirmDialog? _nowConfirm;
+    private ConfirmDialog? _versionConfirm;
+
+    // ── Changing the next version (#960) ────────────────────────────────
+
+    /// <summary>What the picker offers for the rows the dialog was opened on, newest first.</summary>
+    private List<OfferedVersionOption> _versionOptions = new();
+
+    /// <summary>The version picked, or null until one is; the preview waits for it.</summary>
+    private string? _targetVersion;
+
+    /// <summary>Every selected row sorted into its group for <see cref="_targetVersion"/>.</summary>
+    private List<SelectVersionPreviewRow> _versionPreview = new();
+
+    // ── Booking an update for a slot instead of running it now ──────────
+    //
+    // The wall clock the person picks is read in each customer's own time zone, so
+    // "20:00" across a selection means 20:00 for each of them - which is what the team
+    // means when they say "tonight at eight". The instant that produces is what gets
+    // stored.
+
+    private bool _scheduleLater;
+    private DateTime _slotLocal = DateTime.UtcNow;
+
+    // ── The three moves ─────────────────────────────────────────────────
+
+    /// <summary>Asks to move each target row's update date to the latest allowed, then runs it.</summary>
+    public async Task ConfirmPushAsync(UpgradeActionTarget target)
+    {
+        _target = target;
+        try
+        {
+            await ConfirmPushCoreAsync();
+        }
+        finally
+        {
+            _target = null;
+        }
+    }
+
+    /// <summary>Asks to start each target row's update, now or at a booked slot, then runs it.</summary>
+    public async Task ConfirmUpdateNowAsync(UpgradeActionTarget target)
+    {
+        _target = target;
+        try
+        {
+            await ConfirmUpdateNowCoreAsync();
+        }
+        finally
+        {
+            _target = null;
+        }
+    }
+
+    /// <summary>Asks which version the target rows update to next, then runs the change.</summary>
+    public async Task ConfirmSelectVersionAsync(UpgradeActionTarget target)
+    {
+        _target = target;
+        try
+        {
+            await ConfirmSelectVersionCoreAsync();
+        }
+        finally
+        {
+            _target = null;
+        }
+    }
+
+    private async Task ConfirmPushCoreAsync()
+    {
+        var rows = TargetRows;
+        if (rows.Count == 0 || _pushConfirm is null) return;
+
+        _preview = rows.Select(r => r.CanPushDate
+            ? new PreviewItem(r.ProjectName, r.EnvironmentName, r.IsProduction,
+                $"{WhenText(r.NextUpdateDate)} → {DateText(r.EffectiveLatestDate)}", PreviewGroup.Acting)
+            : new PreviewItem(r.ProjectName, r.EnvironmentName, r.IsProduction,
+                WhyNoPush(r), PreviewGroup.Skipped)).ToList();
+
+        if (await _pushConfirm.OpenAsync())
+        {
+            await RunBatchAsync(UpgradeActionKind.PushDateToLatest);
+        }
+    }
+
+    private async Task ConfirmUpdateNowCoreAsync()
+    {
+        var rows = TargetRows;
+        if (rows.Count == 0 || _nowConfirm is null) return;
+
+        // Every open of the dialog starts at "immediately": a slot is a deliberate
+        // choice, never something left over from the last batch. The one exception is
+        // a slot the host already agreed (an upgrade's planned slot), which is exactly
+        // that deliberate choice, made earlier.
+        if (PrefillSlotUtc is { } planned && planned > DateTime.UtcNow)
+        {
+            _scheduleLater = true;
+            _slotLocal = LocalTime(rows[0], planned);
+        }
+        else
+        {
+            _scheduleLater = false;
+            _slotLocal = DefaultSlot(rows);
+        }
+
+        // A row that already has a booking waiting is not refused - somebody may well
+        // want a second one - but pressing the button without being told is how a
+        // customer ends up updated twice.
+        _preview = rows.Select(r =>
+        {
+            if (!r.HasUpdate)
+            {
+                return new PreviewItem(r.ProjectName, r.EnvironmentName, r.IsProduction,
+                    "no update is waiting", PreviewGroup.Skipped);
+            }
+            if (PendingFor(r.EnvironmentId) is { Count: > 0 } booked)
+            {
+                return new PreviewItem(r.ProjectName, r.EnvironmentName, r.IsProduction,
+                    $"already booked for {SlotText(r, booked[0].ExecuteAfter)} - this adds another",
+                    PreviewGroup.AlreadyBooked);
+            }
+            return new PreviewItem(r.ProjectName, r.EnvironmentName, r.IsProduction,
+                $"starts updating to {ShortVersion(r.NextUpdateVersion)}", PreviewGroup.Acting);
+        }).ToList();
+
+        if (await _nowConfirm.OpenAsync())
+        {
+            await RunBatchAsync(UpgradeActionKind.RunNow);
+        }
+    }
+
+    private async Task ConfirmSelectVersionCoreAsync()
+    {
+        var rows = TargetRows;
+        if (rows.Count == 0 || _versionConfirm is null) return;
+
+        // Every open starts with nothing picked: a version is a deliberate choice, and
+        // the one picked last week is exactly the wrong thing to have ready this week.
+        // A selection offered only one version has nothing to choose between, and a
+        // host with a version already agreed (an upgrade's target) has chosen.
+        _versionOptions = UpgradeFleetService.OfferedVersions(rows);
+        _targetVersion = null;
+        _versionPreview = new();
+        var prefill = PrefillVersion is { } wanted
+            ? _versionOptions.FirstOrDefault(o => string.Equals(o.Version, wanted, StringComparison.OrdinalIgnoreCase))
+            : null;
+        if (prefill is not null) PickVersion(prefill.Version);
+        else if (_versionOptions.Count == 1) PickVersion(_versionOptions[0].Version);
+
+        if (await _versionConfirm.OpenAsync())
+        {
+            await RunBatchAsync(UpgradeActionKind.SelectVersion);
+        }
+    }
+
+    private void PickVersion(string version)
+    {
+        _targetVersion = version;
+        _versionPreview = UpgradeFleetService.PreviewSelectVersion(TargetRows, version, Pending);
+    }
+
+    private string VersionConfirmLabel => _targetVersion is { } version
+        ? $"Change to {version}"
+        : "Change the version";
+
+    /// <summary>
+    /// Runs the target rows one environment at a time, in the host page's own circuit.
+    /// Each row reports for itself and a refusal never costs the rest of the batch -
+    /// the whole point of the sweep is that ninety-nine customers still get done when
+    /// one of them has nothing to move. Stop applies before the next environment;
+    /// nothing is ever abandoned half-written on a customer's tenant.
+    ///
+    /// <para>Booking for a slot goes through the same loop, and is fast (nothing leaves
+    /// the building), but it is the same shape so one selection of ninety customers
+    /// reports the same way whichever the person chose. Each row's slot is worked out
+    /// from that customer's own time zone.</para>
+    /// </summary>
+    private async Task RunBatchAsync(UpgradeActionKind kind)
+    {
+        var rows = TargetRows;
+        if (rows.Count == 0) return;
+
+        var push = kind == UpgradeActionKind.PushDateToLatest;
+        var version = kind == UpgradeActionKind.SelectVersion ? _targetVersion : null;
+        if (kind == UpgradeActionKind.SelectVersion && version is null) return;
+
+        _running = true;
+        _stopRequested = false;
+        _results.Clear();
+        foreach (var row in rows) _results[row.EnvironmentId] = new UpgradeRowResult("Waiting", "muted");
+        _progressDone = 0;
+        _progressTotal = rows.Count;
+        await OnRunStarted.InvokeAsync();
+
+        var done = 0;
+        var skipped = 0;
+        var failed = 0;
+        var needSetup = 0;
+        // Updates this run started, and when, to watch through to the end once it is over.
+        var started = new Dictionary<int, DateTime>();
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            if (_stopRequested)
+            {
+                _results[row.EnvironmentId] = new UpgradeRowResult("Stopped before this one", "muted");
+                continue;
+            }
+
+            // A version change leaves alone what its preview said it would: a row already
+            // on the version, one not offered it, one with something booked. Asking
+            // Business Central would at best do nothing, and a row with a booked update
+            // would have the version changed under the booking.
+            if (version is not null
+                && _versionPreview.FirstOrDefault(p => p.Row.EnvironmentId == row.EnvironmentId) is { WillChange: false } passed)
+            {
+                _results[row.EnvironmentId] = new UpgradeRowResult("Skipped — " + passed.Detail, "muted");
+                skipped++;
+                _progressDone = i + 1;
+                continue;
+            }
+
+            var booking = kind == UpgradeActionKind.RunNow && _scheduleLater;
+            _progressDone = i;
+            _progressText = (push ? "Moving the date on " : version is not null ? "Changing the version on "
+                    : booking ? "Booking " : "Starting the update on ")
+                + $"{row.ProjectName} {row.EnvironmentName}...";
+            _results[row.EnvironmentId] = new UpgradeRowResult(
+                push ? "Moving the date..." : version is not null ? "Changing the version..."
+                    : booking ? "Booking..." : "Starting the update...", "busy");
+            await RenderProgressAsync();
+
+            try
+            {
+                // Push-to-latest and the version change are always immediate: the first
+                // is housekeeping ahead of a release, and the second leaves the date to
+                // Business Central. Only starting an update is agreed for a time.
+                var slot = booking ? SlotFor(row) : (DateTimeOffset?)null;
+                var action = await Actions.ScheduleUpgradeActionAsync(
+                    row.ProjectId, row.EnvironmentId, kind, slot, targetVersion: version, upgradeId: UpgradeId);
+                _results[row.EnvironmentId] = action.IsPending
+                    ? new UpgradeRowResult($"Booked for {SlotText(row, action.ExecuteAfter)}", "ok", ActionId: action.Id)
+                    : new UpgradeRowResult(push ? "Date moved" : version is not null ? $"Now set to {version}" : "Update started", "ok");
+                if (kind == UpgradeActionKind.RunNow && action.Status == UpgradeActionStatus.Sent)
+                {
+                    started[row.EnvironmentId] = action.SentAt ?? DateTime.UtcNow;
+                }
+                done++;
+            }
+            catch (PlanValidationException ex)
+            {
+                // Our own plain-words refusals, shown as they are. The field key tells
+                // the two kinds apart without reading the sentence: "Environment" means
+                // the customer's connection needs setting up somewhere else, so the row
+                // says where; "Update" means this update simply can't move, which the
+                // message already explains in full.
+                var isSetup = ex.Errors.ContainsKey("Environment");
+                if (isSetup) needSetup++;
+                _results[row.EnvironmentId] = new UpgradeRowResult(
+                    "Skipped — " + FirstMessage(ex),
+                    isSetup ? "warn" : "muted",
+                    isSetup ? row.ProjectId : null,
+                    isSetup ? $"Set it up on {row.ProjectName} →" : null);
+                skipped++;
+            }
+            catch (ProjectAccessDeniedException ex)
+            {
+                _results[row.EnvironmentId] = new UpgradeRowResult("Skipped — " + ex.Message, "muted");
+                skipped++;
+            }
+            catch (Exception ex)
+            {
+                // Never the raw exception text: a 401 body or a null-reference message
+                // is not something to hand a consultant. The detail goes to the log,
+                // and the row points at the solution, where the connection lives.
+                Log.LogError(ex,
+                    "The upgrades page failed on environment {EnvironmentId} of solution {ProjectId}.",
+                    row.EnvironmentId, row.ProjectId);
+                _results[row.EnvironmentId] = new UpgradeRowResult(
+                    "Didn't work — Business Central didn't accept the change. Try again, or check the connection.",
+                    "bad", row.ProjectId, $"Open {row.ProjectName} →");
+                failed++;
+            }
+
+            _progressDone = i + 1;
+            await RenderProgressAsync();
+        }
+
+        _progressText = string.Empty;
+        // The dialog stayed open to show the run; the rows and the summary take over.
+        _nowConfirm?.Close();
+        _pushConfirm?.Close();
+        _versionConfirm?.Close();
+        var notice = Summary(done, skipped, failed, needSetup, kind, version,
+            kind == UpgradeActionKind.RunNow && _scheduleLater ? BookedForText() : null);
+
+        // The host re-reads its rows so the table shows what Business Central now says
+        // rather than what we asked it for, then watches what was started. Still running
+        // until it has: the host redraws while its re-read is in flight, and its controls
+        // - and its own timers - must not start a second query on the same context then.
+        try
+        {
+            await OnRunFinished.InvokeAsync(new UpgradeRunOutcome(notice, started));
+        }
+        finally
+        {
+            _running = false;
+        }
+    }
+
+    /// <summary>
+    /// Redraws the dialog's progress here and the row results the host draws. The two
+    /// live in different components, so each needs its own nudge.
+    /// </summary>
+    private async Task RenderProgressAsync()
+    {
+        StateHasChanged();
+        await OnProgress.InvokeAsync();
+    }
+
+    /// <summary>
+    /// The one line above the table after a run. "Moved the date on 0 environments"
+    /// is a sentence nobody wants to read, so a run that changed nothing leads with
+    /// that instead of with a zero. A run with anything skipped or failed is not a
+    /// neutral outcome, so it does not get the neutral tone - and when the reason was
+    /// a missing connection, the line says what to do next.
+    /// </summary>
+    /// <param name="bookedFor">
+    /// When the run booked things for, already worded ("for 20:00 on 30 Aug, each in their
+    /// own time"), or null when it acted immediately. A summary that says only how many
+    /// were booked leaves the one fact somebody would double-check off the screen.
+    /// </param>
+    /// <param name="version">The version a version change set; null for the other two moves.</param>
+    private static UpgradeNotice Summary(
+        int done, int skipped, int failed, int needSetup, UpgradeActionKind kind, string? version, string? bookedFor)
+    {
+        var push = kind == UpgradeActionKind.PushDateToLatest;
+        var booking = bookedFor is not null;
+        var parts = new List<string>();
+        if (done == 0)
+        {
+            parts.Add(push ? "No dates were moved" : version is not null ? "No versions were changed"
+                : booking ? "Nothing was booked" : "No updates were started");
+        }
+        else
+        {
+            var verb = push ? "Moved the date on" : version is not null ? $"Set the next version to {version} on"
+                : booking ? "Booked the update on" : "Started the update on";
+            var where = $"{done} environment{(done == 1 ? "" : "s")}";
+            parts.Add(booking ? $"{verb} {where} {bookedFor}" : $"{verb} {where}");
+        }
+        if (skipped > 0) parts.Add($"{skipped} skipped");
+        if (failed > 0) parts.Add($"{failed} didn't work");
+
+        var text = string.Join(", ", parts) + ".";
+        if (needSetup > 0)
+        {
+            // Deliberately wider than "has no connection": the same refusal covers a
+            // customer nobody has set up yet and one whose credentials were rejected,
+            // and the summary must not claim which. The row says which; this says where
+            // to go.
+            text += $" {needSetup} of them need{(needSetup == 1 ? "s" : "")} the solution's "
+                + "Business Central connection checked - open the solution, then try again.";
+        }
+
+        return new UpgradeNotice(text, skipped > 0 || failed > 0 ? "warn" : "info", false);
+    }
+
+    // ── Slots ───────────────────────────────────────────────────────────
+
+    private void SetScheduleLater(bool later) => _scheduleLater = later;
+
+    /// <summary>
+    /// Where the slot picker starts: this evening at 20:00 in the customer's own time,
+    /// which is the slot the upgrade team agrees more often than any other. Tomorrow
+    /// evening once today's has gone.
+    /// </summary>
+    private static DateTime DefaultSlot(IReadOnlyList<UpgradeFleetRow> rows)
+    {
+        var tz = UpdateWindow.ResolveTimeZone(rows.Count > 0 ? rows[0].TimeZone : null);
+        var localNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, tz);
+        var evening = localNow.Date.AddHours(20);
+        if (evening <= localNow) evening = evening.AddDays(1);
+        return evening;
+    }
+
+    /// <summary>
+    /// The instant one customer's booking fires: the wall clock the person typed, read
+    /// in <em>that customer's</em> zone. A selection spanning Copenhagen and Auckland
+    /// books each of them for their own 20:00, which is what "tonight at eight" means to
+    /// the person agreeing it with the customer.
+    /// </summary>
+    private DateTimeOffset SlotFor(UpgradeFleetRow row)
+    {
+        var tz = UpdateWindow.ResolveTimeZone(row.TimeZone);
+        var wall = DateTime.SpecifyKind(_slotLocal, DateTimeKind.Unspecified);
+        // A time that doesn't exist locally (the spring-forward hour) is nudged forward
+        // rather than refused - the person meant "that evening", not that instant.
+        for (var i = 0; i < 4 && tz.IsInvalidTime(wall); i++) wall = wall.AddHours(1);
+        return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(wall, tz), TimeSpan.Zero);
+    }
+
+    /// <summary>
+    /// A customer's time zone the way a consultant names it - the city, not the raw
+    /// region/city id. Matches how the project page says the same thing.
+    /// </summary>
+    internal static string ZoneLabel(string? ianaId) =>
+        string.IsNullOrWhiteSpace(ianaId) ? "UTC" : BcUpdateWindow.CityLabel(ianaId);
+
+    // -- What the dialog says, which depends on the choice in it ---------
+
+    /// <summary>
+    /// Singular when the dialog came from one row's menu: rows ticked for something else
+    /// are still tinted behind it, and the title is what says they are not part of this.
+    /// </summary>
+    private string NowDialogTitle => (_scheduleLater, !IsOneRow) switch
+    {
+        (true, true) => "Book these updates?",
+        (true, false) => "Book this update?",
+        (false, true) => "Start these updates?",
+        (false, false) => "Start this update?",
+    };
+
+    /// <summary>
+    /// The sentence under the title. Starting now is irreversible and says so; a booking
+    /// leads with the guarantee that makes it safe, and only then with what happens once
+    /// it does run.
+    /// </summary>
+    private string NowDialogMessage => _scheduleLater
+        ? "Business Central will start these updates at the time you pick. You can cancel from the Upgrades page any time before it runs; once it starts it can't be stopped."
+        : "Business Central will start updating these environments as soon as it picks them up, whatever time of day their update window says. Once it starts you cannot stop it.";
+
+    /// <summary>
+    /// The confirm button. A booking's label carries the time, so the last thing read
+    /// before the click is the commitment being made.
+    /// </summary>
+    private string NowConfirmLabel => _scheduleLater
+        ? $"Book for {_slotLocal:HH:mm} on {_slotLocal:d MMM}"
+        : "Start the updates";
+
+    /// <summary>
+    /// The booking said back in this page's own words, under the picker. The browser draws
+    /// a datetime field in its own locale - a 12-hour clock on a US-English machine, while
+    /// every other time here is 24-hour - so this line, not the field, is what settles what
+    /// was picked.
+    /// </summary>
+    private string SlotEchoText()
+    {
+        var when = $"Runs at {_slotLocal:HH:mm} on {_slotLocal:d MMM}";
+        var zones = SelectedZones();
+        return zones.Count <= 1
+            ? $"{when}, {(zones.FirstOrDefault() ?? "UTC")} time."
+            : $"{when}, in each customer's own time - {ZoneList(zones)} here.";
+    }
+
+    /// <summary>
+    /// The "for 20:00 on 30 Aug..." tail the run's summary carries. Same clock and same
+    /// zone rule as the picker's echo, so the sentence before the click and the one after
+    /// it cannot disagree.
+    /// </summary>
+    private string BookedForText()
+    {
+        var when = $"for {_slotLocal:HH:mm} on {_slotLocal:d MMM}";
+        var zones = SelectedZones();
+        return zones.Count <= 1
+            ? $"{when}, {(zones.FirstOrDefault() ?? "UTC")} time"
+            : $"{when}, each in their own time";
+    }
+
+    private List<string> SelectedZones() => TargetRows
+        .Select(r => ZoneLabel(r.TimeZone))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(z => z, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    /// <summary>
+    /// The zones in a selection, named. Somebody checking whether "20:00" means what they
+    /// agreed needs to see which countries are in the batch, not just how many; past three
+    /// the list stops being readable, so the rest are counted.
+    /// </summary>
+    private static string ZoneList(List<string> zones)
+    {
+        if (zones.Count <= 3)
+        {
+            return zones.Count == 2
+                ? $"{zones[0]} and {zones[1]}"
+                : string.Join(", ", zones[..^1]) + " and " + zones[^1];
+        }
+        return string.Join(", ", zones[..3]) + $" and {zones.Count - 3} more";
+    }
+
+    /// <summary>One booked slot, said back in the customer's own words: "20:00 on 11 Sep, Europe/Copenhagen time".</summary>
+    private static string SlotText(UpgradeFleetRow row, DateTime utc)
+    {
+        var local = LocalTime(row, utc);
+        return $"{local:HH:mm} on {local:d MMM}, {ZoneLabel(row.TimeZone)} time";
+    }
+
+    /// <summary>
+    /// Warns before the run when the picked time has already gone for at least one of
+    /// the customers - a slot in the past is refused per row, and finding that out row by
+    /// row after pressing the button is no way to learn it.
+    /// </summary>
+    private string? SlotProblem()
+    {
+        var rows = TargetRows;
+        if (rows.Count == 0) return null;
+        var past = rows.Where(r => SlotFor(r) <= DateTimeOffset.UtcNow).ToList();
+        if (past.Count == 0) return null;
+        if (past.Count == rows.Count) return "That time has already passed. Pick a time later than now.";
+
+        // Named, not counted: "3 of these customers" leaves the person to work out which,
+        // and the whole reason only some of them are past is that they are in another
+        // country - which is exactly the thing to show.
+        var first = $"{past[0].ProjectName} - {past[0].EnvironmentName}";
+        var rest = past.Count == 2
+            ? $" and {past[1].ProjectName} - {past[1].EnvironmentName}"
+            : past.Count > 2 ? $" and {past.Count - 1} others" : string.Empty;
+        return $"Already past for {first}{rest}. Pick a later time.";
+    }
+
+    private List<UpgradeActionRow> PendingFor(int environmentId) =>
+        Pending.Where(a => a.EnvironmentId == environmentId).OrderBy(a => a.ExecuteAfter).ToList();
+
+    /// <summary>One instant in one customer's own time.</summary>
+    internal static DateTime LocalTime(UpgradeFleetRow row, DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(
+            DateTime.SpecifyKind(utc, DateTimeKind.Utc), UpdateWindow.ResolveTimeZone(row.TimeZone));
+
+    // ── Confirm-dialog previews ─────────────────────────────────────────
+
+    /// <summary>
+    /// The preview both dialogs show: what will happen, then - under its own heading -
+    /// what will be passed over. Shared so the two dialogs cannot drift apart.
+    /// </summary>
+    private RenderFragment PreviewList() => @<div>
+        <ul class="upg-preview">
+            @foreach (var item in _preview.Where(p => p.Group == PreviewGroup.Acting))
+            {
+                <li>
+                    <span class="upg-preview__who">
+                        @item.ProjectName - @item.EnvironmentName
+                        @if (item.IsProduction)
+                        {
+                            <StatusPill Tone="muted" Class="upg-prod"><span>Production</span>
+                            </StatusPill>
+                        }
+                    </span>
+                    <span class="upg-preview__what">@item.What</span>
+                </li>
+            }
+        </ul>
+        @if (_preview.Any(p => p.Group == PreviewGroup.AlreadyBooked))
+        {
+            <p class="upg-preview__head">Already booked (@_preview.Count(p => p.Group == PreviewGroup.AlreadyBooked))</p>
+            <ul class="upg-preview">
+                @foreach (var item in _preview.Where(p => p.Group == PreviewGroup.AlreadyBooked))
+                {
+                    <li>
+                        <span class="upg-preview__who">
+                            @item.ProjectName - @item.EnvironmentName
+                            @if (item.IsProduction)
+                            {
+                                <StatusPill Tone="muted" Class="upg-prod"><span>Production</span>
+                                </StatusPill>
+                            }
+                        </span>
+                        <span class="upg-preview__what upg-preview__booked">@item.What</span>
+                    </li>
+                }
+            </ul>
+        }
+        @if (_preview.Any(p => p.Skipped))
+        {
+            <p class="upg-preview__head">Will be skipped (@_preview.Count(p => p.Skipped))</p>
+            <ul class="upg-preview">
+                @foreach (var item in _preview.Where(p => p.Skipped))
+                {
+                    <li class="upg-preview__skip">
+                        <span class="upg-preview__who">@item.ProjectName - @item.EnvironmentName</span>
+                        <span class="upg-preview__what">@item.What</span>
+                    </li>
+                }
+            </ul>
+        }
+    </div>;
+
+    /// <summary>
+    /// The version change's preview: the rows that will change, then each group that
+    /// will be passed over under its own heading, in the order a person asks "why not
+    /// this one?" - already done, not possible, busy, not theirs, gone. Same markup as
+    /// the other two dialogs, so the three read as one page.
+    /// </summary>
+    private RenderFragment VersionPreviewList() => @<div class="upg-version__groups">
+        @if (_versionPreview.Any(p => p.WillChange))
+        {
+            <section class="upg-version__group">
+            <p class="upg-preview__head">Will change (@_versionPreview.Count(p => p.WillChange))</p>
+            <ul class="upg-preview">
+                @foreach (var item in _versionPreview.Where(p => p.WillChange))
+                {
+                    <li>
+                        <span class="upg-preview__who">
+                            @item.Row.ProjectName - @item.Row.EnvironmentName
+                            @if (item.Row.IsProduction)
+                            {
+                                <StatusPill Tone="muted" Class="upg-prod"><span>Production</span>
+                                </StatusPill>
+                            }
+                        </span>
+                        <span class="upg-preview__what">@ChangeText(item)</span>
+                    </li>
+                }
+            </ul>
+            </section>
+        }
+        @foreach (var (group, heading) in SkippedGroups)
+        {
+            var items = _versionPreview.Where(p => p.Group == group).ToList();
+            if (items.Count == 0) continue;
+            <section class="upg-version__group">
+            <p class="upg-preview__head">@heading (@items.Count)</p>
+            <ul class="upg-preview">
+                @foreach (var item in items)
+                {
+                    <li class="upg-preview__skip">
+                        <span class="upg-preview__who">@item.Row.ProjectName - @item.Row.EnvironmentName</span>
+                        <span class="upg-preview__what">@item.Detail</span>
+                    </li>
+                }
+            </ul>
+            </section>
+        }
+    </div>;
+
+    /// <summary>The groups a version change passes over, in the order the preview lists them.</summary>
+    private static readonly (SelectVersionGroup Group, string Heading)[] SkippedGroups =
+    [
+        (SelectVersionGroup.AlreadyOnIt, "Already on it"),
+        (SelectVersionGroup.AlreadyChosen, "Already chosen"),
+        (SelectVersionGroup.NotOffered, "Not offered"),
+        (SelectVersionGroup.UpdateUnderWay, "Update under way"),
+        (SelectVersionGroup.NoAccess, "No access"),
+        (SelectVersionGroup.Missing, "Missing or being deleted"),
+    ];
+
+    /// <summary>
+    /// "28.5 to 29.2", or with a proviso when the environment's offer list has never been
+    /// read: the row is counted as a change, and the read before the write decides.
+    /// </summary>
+    private static string ChangeText(SelectVersionPreviewRow item) => item.OfferUnknown
+        ? $"{item.Detail}, if Business Central offers it"
+        : item.Detail;
+
+    private string VersionCountLine()
+    {
+        var acting = _versionPreview.Where(p => p.WillChange).ToList();
+        if (acting.Count == 0) return "Nothing to change for this version.";
+        var production = acting.Count(p => p.Row.IsProduction);
+        var envs = $"{acting.Count} environment{(acting.Count == 1 ? "" : "s")}";
+        return production == 0
+            ? $"{envs}, none of them production."
+            : $"{envs}, including {production} production.";
+    }
+
+    /// <summary>How much of the fleet this is, and how much of it is production.</summary>
+    private string PreviewCountLine()
+    {
+        var acting = _preview.Where(p => !p.Skipped).ToList();  // acting + already-booked
+        var production = acting.Count(p => p.IsProduction);
+        var envs = $"{acting.Count} environment{(acting.Count == 1 ? "" : "s")}";
+        return production == 0
+            ? $"{envs}, none of them production."
+            : $"{envs}, including {production} production.";
+    }
+
+    // ── Wording ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The major.minor a person actually compares. Business Central reports a four-part
+    /// build ("27.5.34567.0"), and reading that next to "27.6" is arithmetic; the full
+    /// string stays on the cell's title for anyone who needs it.
+    /// </summary>
+    internal static string ShortVersion(string? version)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return "—";
+        var parts = version.Split('.');
+        return parts.Length >= 2 ? $"{parts[0]}.{parts[1]}" : version;
+    }
+
+    // The confirm dialog's preview lines are plain text, so these go through the display
+    // zone directly rather than through a Timestamp.
+    private string DateText(DateTime? at) =>
+        at is { } value ? Zone.Format(value, "dd MMM yyyy") : "no date";
+
+    private string WhenText(DateTime? at) =>
+        at is { } value ? Zone.Format(value, "dd MMM yyyy") : "No date set";
+
+    /// <summary>
+    /// Why a selected row won't move, in the same words the service refuses with, so
+    /// the preview and the run never disagree.
+    /// </summary>
+    private static string WhyNoPush(UpgradeFleetRow row)
+    {
+        if (!row.HasUpdate) return "no update is waiting";
+        if (row.EffectiveLatestDate is null) return "Business Central hasn't given it a last possible date";
+        return "its date is already the latest allowed";
+    }
+
+    internal static string FirstMessage(PlanValidationException ex) =>
+        ex.Errors.Values.FirstOrDefault() ?? "Business Central refused the change.";
+
+    /// <summary>
+    /// One line in a confirm dialog's preview: who it is about, and what will happen to
+    /// them. <paramref name="Group"/> decides which of the three lists it lands in - what
+    /// will happen, what already has a booking waiting, and what will be passed over.
+    /// </summary>
+    private sealed record PreviewItem(
+        string ProjectName, string EnvironmentName, bool IsProduction, string What, PreviewGroup Group)
+    {
+        public bool Skipped => Group == PreviewGroup.Skipped;
+    }
+
+    /// <summary>
+    /// Which part of the preview a row belongs in. "Already booked" is deliberately its
+    /// own group rather than a skip: the run <em>will</em> act on it, it just adds a
+    /// second booking to an environment that already has one, and that is a thing to
+    /// notice before pressing the button rather than after.
+    /// </summary>
+    private enum PreviewGroup { Acting, AlreadyBooked, Skipped }
+}
