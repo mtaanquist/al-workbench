@@ -141,12 +141,12 @@ keystroke opens the palette - one decision, not two that could disagree.
 Each source of results is one class implementing one contract, registered in DI. The
 palette knows none of them by name; adding a source is one class and one registration.
 This clears the "no interface until the second implementation" bar on day one - the
-first version shipped five, and #885 added four more.
+first version shipped five, #885 added four more, and #984 added Upgrades.
 
 A source provides:
 
 - **An id and a label.** The label is its group heading: Solutions, Environments,
-  Pipelines, Release pipelines, Releases, Recipes, Templates, Teams, Go to.
+  Upgrades, Pipelines, Release pipelines, Releases, Recipes, Templates, Teams, Go to.
 - **A gate.** The role check and feature gate its matching page already has. A caller who
   fails it never has that source asked.
 - **A search.** Query terms and a limit in; candidate rows out - kind, title, subtitle,
@@ -168,6 +168,7 @@ ranking cannot drift from source to source.
 | --- | --- | --- |
 | Solutions | name, short name; and the customer fields support types mid-call - a contact's name or company, the Voice account number, the tenant id | the Solution (its default tab, Customer) |
 | Environments | environment name; the Solution's name as subtitle and its short name as searched-only text | the environment page |
+| Upgrades | a planned upgrade's name, and its target release as subtitle ("to 28.5") followed by its status in the Upgrades page's words (Planned, In progress, Updated, Done); open ones and the archive, open first. Gated like the sidebar's Upgrades entry, on the environment-updates grant | the upgrade's page, `/upgrades/{id}` |
 | Pipelines | pipeline name; the Solution's name and the latest build ("Built 2 days ago", "No builds yet") as subtitle, its short name as searched-only text | the pipeline's builds |
 | Release pipelines | release pipeline name; the Solution's name and the target environment's as subtitle - with the environment's trouble when it is gone or failed, in the Releases page's words - and the Solution's short name as searched-only text | the release pipeline |
 | Releases | release label, BC version, country, and the name of the Solution whose build produced it | the release in Object Explorer |
@@ -199,6 +200,15 @@ Four decisions in the #885 rows are worth their reasons:
 All four are small tables - a few rows per Solution, or per organisation - so each
 projects the rows the caller may see and lets the ranking decide, as Solutions and
 Environments do. None pre-filters with `ILIKE`.
+
+**An Upgrade's status is words, not a pill (#984).** The planned-upgrades picker sheet
+lists Upgrade as a result kind "with name, target and state pill". A palette row has a
+title, a second line and its kind's icon, and nothing else rides the wire, so the status
+is the last words of the second line ("to 28.5 - In progress"). A pill would be a new
+field on the result contract and new drawing in the script for one source; not worth it
+until a second kind wants one. The header belongs to the organisation, so the fence here
+is on the status: it is derived only from the lines the caller can see, and no line's
+solution is ever named in the row.
 
 **Go to is the one that is not a DI source.** It has no database behind it and its
 whole content is decided by the caller's roles and tool toggles, so Razor renders it
@@ -363,7 +373,7 @@ term first, and that pre-filter is accent-sensitive: `møller` finds a release n
 Møller, `moller` does not. Accepted, and recorded here so the next person does not read
 it as a bug.
 
-Results are **grouped by source in a fixed order** - Solutions, Environments, Pipelines,
+Results are **grouped by source in a fixed order** - Solutions, Environments, Upgrades, Pipelines,
 Release pipelines, Releases, Recipes, Templates, Teams, Go to - so a Solution and its environments do not shuffle against each other as
 the user types. Within a group, best tier first, ties broken by name:
 
@@ -474,7 +484,11 @@ Go to still works. If storage is unavailable there are simply no recents.
 - **Server:** results in under 100 ms for an organisation with a few hundred Solutions.
   Sources run one after another, not in parallel - they share the request's `DbContext`,
   which allows one operation at a time. Each source is one `AsNoTracking()` query with a
-  limit, projecting only the fields a row needs.
+  limit, projecting only the fields a row needs. Upgrades is the one exception, and only
+  sometimes: an open upgrade's status is derived from its lines and the fleet, so when an
+  open upgrade is among the rows it returns it reads the open list a second time for the
+  status (`UpgradePaletteSource`). A done upgrade's status is fixed, so a search that
+  lands only on the archive, or on nothing, stays at one query.
 - **Browser:** 120 ms debounce after the last keystroke; the in-flight request is
   aborted when a new one starts; a late response for an old query is dropped. A
   one-character query is not sent - Go to filters locally.
