@@ -1,0 +1,146 @@
+/* The Open view's rows (UpgradesListBody.dc.html, view="open"). Widths are the
+   sheet's; the table is fixed-layout so a long name ellipsises rather than pushing
+   the Planned column off the page. */
+
+.upl-table {
+    table-layout: fixed;
+}
+
+.upl-col-name { width: 24%; }
+.upl-col-status { width: 11%; }
+.upl-col-envs { width: 24%; }
+.upl-col-checked { width: 13%; }
+.upl-col-slot { width: 13%; }
+.upl-col-by { width: 11%; }
+.upl-col-menu { width: 52px; }
+
+/* The name is the link to the upgrade: link-coloured, not the stack's plain ink. */
+.upl-name,
+.upl-card__name {
+    color: var(--primary-ink);
+    font-weight: var(--fw-medium);
+}
+
+/* The breakdown wraps rather than ellipsising: "6 updated 1 running 1 failed" is
+   the part the morning-after reader came for. */
+.upl-parts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--space-2);
+    white-space: normal;
+}
+
+.upl-part {
+    color: var(--ink-2);
+    white-space: nowrap;
+}
+
+/* Tone only on the two counts that need somebody. */
+.upl-part--running {
+    color: var(--info-text);
+    font-weight: var(--fw-semibold);
+}
+
+.upl-part--failed {
+    color: var(--danger-text);
+    font-weight: var(--fw-semibold);
+}
+
+.upl-check {
+    display: grid;
+    gap: 4px;
+}
+
+.upl-check__text {
+    font-size: var(--text-sm);
+    color: var(--ink);
+}
+
+.upl-check__bar {
+    width: 88px;
+    height: 5px;
+}
+
+/* Tonight and last night: the slots the page is opened for. */
+.upl-slot--near {
+    font-weight: var(--fw-semibold);
+}
+
+/* ── Phone: stacked items instead of the table ───────────────────────── */
+
+.upl-cards {
+    display: none;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+}
+
+.upl-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-1) var(--space-3);
+    padding: var(--space-3);
+    border-bottom: 1px solid var(--border);
+}
+
+.upl-card:last-child {
+    border-bottom: 0;
+}
+
+.upl-card__head {
+    padding: 0;
+}
+
+.upl-card__name {
+    font-weight: var(--fw-semibold);
+}
+
+
+/* A 44px target on a touch screen, pulled into the card's corner. */
+.upl-card__menu ::deep .btn {
+    width: 44px;
+    height: 44px;
+    margin: -10px -10px 0 0;
+}
+
+.upl-card__line {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    font-size: var(--text-sm);
+}
+
+.upl-card__count {
+    color: var(--ink-2);
+}
+
+.upl-card__checked {
+    color: var(--ink-2);
+}
+
+.upl-card__checked .upl-check {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1;
+}
+
+.upl-card__checked .upl-check__bar {
+    flex: 1;
+    max-width: 160px;
+}
+
+@media (max-width: 700px) {
+    .upl-table {
+        display: none;
+    }
+
+    .upl-cards {
+        display: block;
+    }
+}

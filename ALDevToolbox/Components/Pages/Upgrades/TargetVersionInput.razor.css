@@ -1,0 +1,9 @@
+/* The typed version, under the list it was picked from with "Another version...". */
+.tvi-other {
+    margin-top: var(--space-2);
+}
+
+/* With nothing offered it is the only control, so no gap above it. */
+.tvi-other:first-child {
+    margin-top: 0;
+}

@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Components;
 using ALDevToolbox.Components.Pages.Upgrades;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services;
@@ -39,6 +40,7 @@ public sealed class UpgradesPageSelectVersionRunTests : IDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<UpgradeFleetService>();
         _ctx.Services.AddScoped<UpgradeActionService>();
+        _ctx.Services.AddScoped<EnvironmentUpgradeService>();
         _ctx.Services.AddScoped<ProjectConnectionService>();
         _ctx.Services.AddSingleton<IBcAdminClient>(_f.Admin);
         _ctx.Services.AddSingleton<IBcAppManagementClient>(new UnreachableAppManagementClient());
@@ -61,6 +63,22 @@ public sealed class UpgradesPageSelectVersionRunTests : IDisposable
         };
     }
 
+    /// <summary>
+    /// The page on its Fleet view. A bare /upgrades opens on the planned upgrades now
+    /// (#984), and this class is about the fleet table, so every render names the view -
+    /// on top of whatever address the test has already set.
+    /// </summary>
+    private IRenderedComponent<UpgradesPage> RenderFleet()
+    {
+        var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        nav.NavigateTo(nav.GetUriWithQueryParameter("view", "fleet"));
+        return _ctx.Render<UpgradesPage>();
+    }
+
+    /// <summary>"Change the next version..." - the first entry of the bar's More menu.</summary>
+    private static AngleSharp.Dom.IElement ChangeVersionCommand(IRenderedComponent<UpgradesPage> cut) =>
+        cut.FindAll(".cmdbar .ra__menu .menu__item").First(i => i.TextContent.Trim() == "Change the next version...");
+
     public void Dispose()
     {
         _f.Db.WaitForQueriesToSettle();
@@ -80,17 +98,17 @@ public sealed class UpgradesPageSelectVersionRunTests : IDisposable
         await MirrorAsync(changeId, next: "27.6", offered: ["29.2", "27.6"]);
         await MirrorAsync(chosenId, next: "29.2", offered: ["29.2"]);
 
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
 
         cut.WaitForAssertion(() =>
         {
             cut.Find("thead .data-table__col-check input").Change(true);
-            cut.FindAll(".cmdbar .cmdbar__group:last-child button")[2].HasAttribute("disabled").Should().BeFalse();
+            ChangeVersionCommand(cut).HasAttribute("disabled").Should().BeFalse();
         });
         cut.WaitForAssertion(() =>
         {
-            cut.FindAll(".cmdbar .cmdbar__group:last-child button")[2].Click();
+            ChangeVersionCommand(cut).Click();
             cut.FindAll(".upg-version__opts input[type=radio]").Select(r => r.GetAttribute("value"))
                 .Should().Equal("29.2", "27.6");
         });
@@ -132,13 +150,13 @@ public sealed class UpgradesPageSelectVersionRunTests : IDisposable
         var (_, envId) = await _f.SeedCustomerAsync("CRONUS Denmark");
         await MirrorAsync(envId, next: "27.6", offered: ["29.2", "27.6"]);
 
-        var cut = _ctx.Render<UpgradesPage>();
+        var cut = RenderFleet();
         cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(1));
 
         // From the row's own menu this time: the one environment, same dialog.
         cut.WaitForAssertion(() =>
         {
-            cut.FindAll(".ra__menu .menu__item").First(i => i.TextContent.Trim() == "Change the next version...").Click();
+            cut.FindAll("tbody .ra__menu .menu__item").First(i => i.TextContent.Trim() == "Change the next version...").Click();
             cut.Find(".confirm-dialog__title").TextContent.Should().Be("Change this environment's next version?");
         });
         cut.WaitForAssertion(() =>

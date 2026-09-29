@@ -1,0 +1,289 @@
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Services.ObjectExplorer
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@inject EnvironmentUpgradeService Upgrades
+
+@*
+    "Add to upgrade..." from the Fleet view (UpgradePicker.dc.html, mode="add"): the
+    reverse of the upgrade page's picker. The environments are already ticked; this asks
+    which open upgrade they go on - or a new one, named here with its target, its slot
+    left for the upgrade's page.
+
+    An environment is on one open upgrade at a time, so the ticked list below says, before
+    the click, which ones are already on another and will be left out, naming that
+    upgrade; the confirm counts only the rest ("Add 6 of 8"). The service judges each
+    environment again when it adds them, and what it says is what the page reports.
+*@
+
+@if (_open)
+{
+    <div class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="atu-title"
+         tabindex="-1" @onkeydown="OnKeyDown">
+        <div class="modal-backdrop" @onclick="Cancel" aria-hidden="true"></div>
+        <div class="confirm-dialog confirm-dialog--wide"@onclick:stopPropagation>
+            <div class="confirm-dialog__head">
+                <span class="confirm-dialog__icon" aria-hidden="true">
+                    <Icon Name="list-plus" Width="17" Height="17" />
+                </span>
+                <div class="atu-title">
+                    <h2 id="atu-title" class="confirm-dialog__title">@Title</h2>
+                    <span class="atu-title__sub">An environment can be on one open upgrade at a time.</span>
+                </div>
+            </div>
+            <div class="confirm-dialog__body atu-body">
+                <fieldset class="atu-group">
+                    <legend class="section-label atu-label">Upgrade</legend>
+                    <div class="atu-choices" role="radiogroup">
+                        @foreach (var u in _upgrades)
+                        {
+                            <label class="check atu-choice @(_chosen == u.Id ? "is-picked" : "")">
+                                <input type="radio" name="atu-upgrade" checked="@(_chosen == u.Id)"
+                                       disabled="@_saving" @onchange="() => Choose(u.Id)" />
+                                <span class="check__dot"></span>
+                                <span class="cell-stack atu-choice__text">
+                                    <span class="cell-stack__main atu-choice__name">@u.Name</span>
+                                    <span class="cell-stack__sub">Target @u.TargetVersion@if (u.PlannedAt is { } at) { <text> - </text><Timestamp Value="@at" Format="ddd d MMM, HH:mm" /> }</span>
+                                </span>
+                                <span class="atu-choice__count">@Environments(u.LineCount)</span>
+                            </label>
+                        }
+                        <label class="check atu-choice atu-choice--new @(_chosen == NewUpgrade ? "is-picked" : "")">
+                            <input type="radio" name="atu-upgrade" checked="@(_chosen == NewUpgrade)"
+                                   disabled="@_saving" @onchange="() => Choose(NewUpgrade)" />
+                            <span class="check__dot"></span>
+                            <span class="atu-choice__name">New upgrade</span>
+                        </label>
+                        @if (_chosen == NewUpgrade)
+                        {
+                            <div class="atu-new">
+                                <div class="field @(_errors.ContainsKey("Name") ? "field--invalid" : "")">
+                                    <label class="field__label" for="atu-name">Name <span class="req">*</span></label>
+                                    <input id="atu-name" class="input" type="text" required
+                                           maxlength="@EnvironmentUpgradeService.NameMaxLength"
+                                           placeholder="e.g. 28.5 for CRONUS in December" autocomplete="off"
+                                           @bind="_name" @bind:event="oninput" disabled="@_saving" />
+                                    <FieldError Field="Name" Errors="_errors" />
+                                </div>
+                                <div class="field @(_errors.ContainsKey("TargetVersion") ? "field--invalid" : "")">
+                                    <label class="field__label" for="atu-target">Target <span class="req">*</span></label>
+                                    <TargetVersionInput Id="atu-target" Versions="Versions" @bind-Value="_target" Disabled="_saving" />
+                                    <FieldError Field="TargetVersion" Errors="_errors" />
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </fieldset>
+
+                <div class="atu-group">
+                    <span class="section-label atu-label" id="atu-envs">Environments</span>
+                    <ul class="atu-envs" aria-labelledby="atu-envs">
+                        @foreach (var row in _rows)
+                        {
+                            var owner = OwnerOf(row);
+                            <li class="@EnvClass(row.EnvironmentId)">
+                                @* Three answers: it goes on (a tick), it is already on the upgrade
+                                   picked (nothing to do, so no warning), or another open upgrade
+                                   holds it (a warning naming that one, and it is left out). *@
+                                @if (owner is null)
+                                {
+                                    <span class="atu-env__icon atu-env__icon--ok" role="img" aria-label="Will be added"><Icon Name="check" Width="15" Height="15" /></span>
+                                }
+                                else if (owner.UpgradeId == _chosen)
+                                {
+                                    <span class="atu-env__icon atu-env__icon--muted" role="img" aria-label="Already on it"><Icon Name="check" Width="15" Height="15" /></span>
+                                }
+                                else
+                                {
+                                    <span class="atu-env__icon atu-env__icon--warn" role="img" aria-label="Left out"><Icon Name="triangle-alert" Width="15" Height="15" /></span>
+                                }
+                                <span class="cell-stack atu-env__text">
+                                    <span class="cell-stack__main atu-env__name">@row.ProjectName - @EnvironmentLabel(row)</span>
+                                    @if (owner is { } other && other.UpgradeId == _chosen)
+                                    {
+                                        <span class="cell-stack__sub">Already on this upgrade.</span>
+                                    }
+                                    else if (owner is { } elsewhere)
+                                    {
+                                        <span class="cell-stack__sub atu-env__why">On <a href="@($"/upgrades/{elsewhere.UpgradeId}")" target="_blank" rel="noopener">@elsewhere.UpgradeName</a>. Left out.</span>
+                                    }
+                                </span>
+                            </li>
+                        }
+                    </ul>
+                </div>
+
+                @* Rather than a disabled button that says nothing: what the person can do
+                   about it is on the upgrade that holds them. *@
+                @if (_rows.Count > 0 && AddableCount == 0)
+                {
+                    <p class="atu-none">Nothing to add: each of these is on an open upgrade already. To move one here, take it off the upgrade named beside it first.</p>
+                }
+
+                @if (_failure is { } failure)
+                {
+                    <FieldError Message="@failure" />
+                }
+            </div>
+            <div class="confirm-dialog__actions">
+                <button type="button" class="btn" @onclick="Cancel" disabled="@_saving">Cancel</button>
+                <button type="button" class="btn btn--primary" @onclick="AddAsync"
+                        disabled="@(_saving || AddableCount == 0 || _chosen is null)">
+                    @if (_saving)
+                    {
+                        <span class="spinner"></span>
+                        <span>Adding...</span>
+                    }
+                    else
+                    {
+                        <span>@ConfirmLabel</span>
+                    }
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>The versions Business Central offers the fleet, for a new upgrade's target.</summary>
+    [Parameter] public IReadOnlyList<string> Versions { get; set; } = [];
+
+    /// <summary>Raised once environments went on an upgrade (or it refused all of them), with what happened.</summary>
+    [Parameter] public EventCallback<AddToUpgradeOutcome> OnAdded { get; set; }
+
+    /// <summary>The radio value that means "a new upgrade", which no real id can be.</summary>
+    private const int NewUpgrade = 0;
+
+    private bool _open;
+    private bool _saving;
+    private List<UpgradeFleetRow> _rows = [];
+    private List<EnvironmentUpgradeSummary> _upgrades = [];
+    private Dictionary<int, UpgradeLineOwner> _owners = new();
+    private int? _chosen;
+    private string _name = string.Empty;
+    private string _target = string.Empty;
+    private Dictionary<string, string> _errors = new();
+    private string? _failure;
+
+    /// <summary>The upgrade this dialog made when New upgrade was chosen, once it exists.</summary>
+    private int? _createdId;
+
+    /// <summary>
+    /// Opens the dialog over the ticked environments. Reads the open upgrades and which of
+    /// them holds each environment now, so the list is right at the moment it is shown.
+    /// </summary>
+    /// <param name="upgrades">The open upgrades, in the order the Open view lists them.</param>
+    public async Task OpenAsync(IReadOnlyList<UpgradeFleetRow> rows, IReadOnlyList<EnvironmentUpgradeSummary> upgrades)
+    {
+        _rows = rows.ToList();
+        _upgrades = upgrades.ToList();
+        _owners = await Upgrades.ListOpenLineOwnersAsync();
+        // The sheet starts on the first upgrade; with none open, a new one is the only choice.
+        _chosen = _upgrades.Count > 0 ? _upgrades[0].Id : NewUpgrade;
+        _name = string.Empty;
+        _target = Versions.Count > 0 ? Versions[0] : string.Empty;
+        _errors = new();
+        _failure = null;
+        _createdId = null;
+        _saving = false;
+        _open = true;
+        StateHasChanged();
+    }
+
+    /// <summary>The open upgrade holding the environment, or null when it is free.</summary>
+    private UpgradeLineOwner? OwnerOf(UpgradeFleetRow row) => _owners.GetValueOrDefault(row.EnvironmentId);
+
+    /// <summary>A left-out environment is greyed, so the ones that will go on read first.</summary>
+    private string EnvClass(int environmentId) =>
+        _owners.ContainsKey(environmentId) ? "atu-env atu-env--out" : "atu-env";
+
+    /// <summary>
+    /// How many of the ticked environments would go on. One on another open upgrade is
+    /// left out; one already on the chosen upgrade has nothing to add.
+    /// </summary>
+    internal int AddableCount => _rows.Count(r => OwnerOf(r) is null);
+
+    private string Title => _rows.Count == 1
+        ? "Add 1 environment to an upgrade"
+        : $"Add {_rows.Count} environments to an upgrade";
+
+    private string ConfirmLabel
+    {
+        get
+        {
+            var n = AddableCount;
+            if (n == _rows.Count) return n == 1 ? "Add 1 environment" : $"Add {n} environments";
+            return $"Add {n} of {_rows.Count}";
+        }
+    }
+
+    private static string Environments(int n) => n switch
+    {
+        0 => "No environments yet",
+        1 => "1 environment",
+        _ => $"{n} environments",
+    };
+
+    private static string EnvironmentLabel(UpgradeFleetRow row) => UpgradesPage.EnvironmentLabel(row);
+
+    private void Choose(int id)
+    {
+        _chosen = id;
+        _errors = new();
+        _failure = null;
+    }
+
+    private void Cancel()
+    {
+        if (_saving) return;
+        _open = false;
+    }
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") Cancel();
+    }
+
+    private async Task AddAsync()
+    {
+        if (_saving || _chosen is not { } chosen || AddableCount == 0) return;
+        _failure = null;
+        _saving = true;
+        try
+        {
+            var upgradeId = chosen;
+            var upgradeName = _upgrades.FirstOrDefault(u => u.Id == chosen)?.Name ?? _name.Trim();
+            if (chosen == NewUpgrade)
+            {
+                // A new wave's name and target only; its slot and note are set on its page.
+                // Made once: a retry after the add was refused must not make a second one.
+                _createdId ??= await Upgrades.CreateAsync(_name, _target, plannedAt: null, note: null);
+                upgradeId = _createdId.Value;
+            }
+
+            // Only the free ones: the ones left out were shown as left out, and sending them
+            // would only bring the same refusal back.
+            var ids = _rows.Where(r => OwnerOf(r) is null).Select(r => r.EnvironmentId).ToList();
+            var result = await Upgrades.AddLinesAsync(upgradeId, ids);
+            _open = false;
+            await OnAdded.InvokeAsync(new AddToUpgradeOutcome(
+                upgradeId, upgradeName, result, _rows.Count - ids.Count, chosen == NewUpgrade));
+        }
+        catch (PlanValidationException ex)
+        {
+            _errors = new Dictionary<string, string>(ex.Errors);
+            if (!ex.Errors.Keys.Any(k => k is "Name" or "TargetVersion"))
+            {
+                _failure = ex.Errors.Values.FirstOrDefault();
+            }
+        }
+        catch (ProjectAccessDeniedException ex)
+        {
+            _failure = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+}

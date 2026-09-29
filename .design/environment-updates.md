@@ -517,6 +517,78 @@ Where it departs from its sheets, and why:
 | No row menu entry for a booked start | **Cancel booking** in the row menu while a start is booked, and on a booking's result line | The runner's booking dialog promises a booking can be cancelled from the page it was made on. |
 | A spinner line "Updating..." under a running line | Only the watch's ending ("Updated to 28.5", "Update failed") | The Now cell already says "Updating to 28.5 since 20:02"; the fleet's spinner line would say it twice. |
 
+## The Upgrades page: Open, Archive and Fleet
+
+`/upgrades` is the home of planned upgrades ([#984](https://github.com/mtaanquist/al-workbench/issues/984),
+sub-issue D; `.design/handoff/PageUpgradesList.dc.html`). One head - "Upgrades", a subtitle
+that says where the waves stand ("5 open, 11 environments booked for tonight." or "Nothing
+planned."), and **New upgrade** as the page's one primary - over three views picked by the
+address: `?view=open` (the default, so a bare `/upgrades` opens on it), `?view=archive` and
+`?view=fleet`. The switch is a `.pill-tabs` row of its own under the head, each tab with its
+count (Archive even at 0, Fleet counting the fleet table's rows), and it sits in `ListPage`'s
+**Views** slot - a row the frame draws in every state, so the switch neither moves when the
+filter row under it changes with the view nor disappears while a view loads or is empty. Each
+view then decides the frame's four states for itself. The Fleet view is the table described
+under "The page" below, drawn embedded (`PageUpgrades.dc.html`, `embedded`): its own head is
+gone, "Move dates..." is outline, **Add to upgrade...** joins the selection commands, "Change
+the next version..." is the first entry of a More menu, the view select narrows to 190px and
+Refresh is an icon, so the command row stays one line at 1440px. Its filters stay in the
+address (`q`, `type`, `waiting`, now beside `view=fleet`), and the view remembered for the
+session is restored the first time the Fleet view is shown. Leaving the Fleet view stops its
+refresh poll and its watch; coming back reads the fleet again and keeps the ticks.
+
+**Open** lists the open upgrades: the name over "to 28.5 - Tonight, 20:00", a status pill
+(Planned is queued, In progress is running, Updated is warn - checks are still outstanding),
+the environments with a breakdown by line state in words (running in the info tone and failed
+in danger, because those two need somebody; a checked line counts as updated here and shows in
+Checked, so nothing is counted twice), Checked as "3 of 8" over a small bar ("-" with no
+environments), the planned slot and who made it. A slot is said the way the team says it -
+Tonight / Last night / Today / Yesterday / Tomorrow and the time, otherwise the date and time
+over how far off it is - and tonight and last night are semibold. **The order is "nearest
+first" as the morning after means it**: today's slot, then the ones that have run, most recent
+first (they are the ones being checked), then the ones to come, soonest first, then any with
+no slot. The row menu is Open, Mark done... and Delete; Delete is disabled, with the reason in
+its tooltip, once anything has been done from the upgrade (`EnvironmentUpgradeSummary.AnythingSent`,
+the visible half of the rule `DeleteAsync` holds). **Mark done...** reads the upgrade first and
+asks with the same words as the upgrade's own page: "3 of 8 are not checked yet. Mark done
+anyway?", naming each unchecked environment with its state, and pointing at "New upgrade from
+the leftovers" on the upgrade's page when some of them failed or never started; with every line
+checked it is one sentence. A search (name or target) and a status filter narrow the list; on a
+phone the rows become stacked items and the status filter goes. With nothing open, the empty
+state carries New upgrade itself and the head drops it.
+
+**Archive** lists the done upgrades, most recently closed first, read-only: name, target,
+environments (with any failed count in danger), when it was closed and by whom, who made it.
+The row menu is Open and Reopen; there is no selection and no primary of its own. A search
+matches the name or the target version, twenty to a page. The empty state has no button - an
+upgrade is marked done from its own page or from the Open view. A refused Reopen (one of its
+environments is now on another open upgrade) is a warning notice naming them, never a raw
+exception, and so is every other refusal from the list.
+
+**New upgrade** asks for a name and a target version (required), a planned slot and a note.
+The versions offered are the ones Business Central offers the fleet now, newest first, with
+"Another version..." for a release not offered yet; the slot is a date and a time read in the
+organisation's display zone, the zone every other time on the page is shown in, and stored UTC.
+It is advisory: nothing is booked from it. Creating one opens the upgrade's page.
+
+**Add to upgrade...** (Fleet view, on a selection; `UpgradePicker.dc.html`, `mode="add"`)
+lists the open upgrades as radios (name, target and slot, size) and then New upgrade, which opens
+a name and a target inline - the slot is left for the upgrade's page. Under it the ticked
+environments, each with a tick, or a warning naming the open upgrade that already holds it
+and "Left out"; the confirm counts only the rest ("Add 6 of 8"). Only those are sent, and the
+service judges each again. The page stays on the Fleet view with a notice saying what went
+on and what did not, linking to the upgrade: the team builds the next wave from the same
+table, and the ticks are left as they were, as after a run.
+
+Where it differs from the sheet: the Open view's head keeps New upgrade hidden while its list
+is still loading, where the sheet draws it (until the read returns the page cannot tell whether
+the next step is the head's button or the empty state's, which is `ListPage`'s rule); the
+Planned header is not a sort button, because the order is fixed; the Archive's pager is twenty
+to a page; "New upgrade from the leftovers" is pointed to "from the upgrade's page" rather than
+"from the overflow menu", because this list's menu has no such entry. **The tab counts, the
+Open view's phone layout and the "Add to upgrade" notice have no sheet of their own beyond
+what is described here.**
+
 ## The page
 
 One table, one row per non-missing environment of every project the viewer can see: the
@@ -559,8 +631,10 @@ menu, over that one row, leaving the ticked rows as they were - behind a confirm
 lists every selected environment with what will happen to it and — grouped at the bottom
 under its own heading — the ones that will be passed over and why.
 
-- **Move dates** previews each date and the date it moves to. It is the page's one primary
-  button: it is what the team comes here to do, a hundred at a time.
+- **Move dates...** previews each date and the date it moves to. It was the page's one
+  primary button while the fleet was the whole page; since the fleet became the Fleet view
+  of `/upgrades` (below) it is outline like the other commands, because "New upgrade" in the
+  shared head is the page's primary.
 - **Start update...** is the sterner one, and its dialog is where that is said; in the bar it
   is a plain button, as the sheet has it. The sheet calls it "Update now", but the dialog also
   books an update for a later slot, and nobody wanting tonight at 20:00 presses a button called

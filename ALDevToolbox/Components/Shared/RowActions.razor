@@ -22,10 +22,10 @@
 *@
 
 <span class="ra">
-    <button type="button" class="btn btn--icon btn--sm" data-ra-toggle
+    <button type="button" class="btn btn--icon@(Small ? " btn--sm" : "")" data-ra-toggle
             title="@Label" aria-label="@Label"
             aria-haspopup="menu" aria-expanded="false">
-        <Icon Name="ellipsis-vertical" Width="15" Height="15" />
+        <Icon Name="@Icon" Width="15" Height="15" />
     </button>
 
     <div class="ra__menu menu" role="menu">@ChildContent</div>
@@ -41,4 +41,13 @@
     /// user would otherwise meet a column of identical buttons.
     /// </summary>
     [Parameter] public string Label { get; set; } = "More actions";
+
+    /// <summary>
+    /// The trigger's glyph. A row's menu is the vertical kebab; a command bar's overflow
+    /// ("More options" in PageUpgrades.dc.html) is the horizontal one.
+    /// </summary>
+    [Parameter] public string Icon { get; set; } = "ellipsis-vertical";
+
+    /// <summary>The row-sized trigger. Off for a command bar, whose buttons are full height.</summary>
+    [Parameter] public bool Small { get; set; } = true;
 }

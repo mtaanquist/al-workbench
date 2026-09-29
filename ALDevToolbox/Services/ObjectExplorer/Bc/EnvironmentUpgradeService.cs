@@ -172,7 +172,13 @@ public sealed class EnvironmentUpgradeService
             h.Id, h.Name, h.TargetVersion, h.PlannedAt, h.Note,
             h.CreatedBy, h.CreatedAt, h.ClosedAt, h.ClosedBy, h.UpdatedAt,
             EnvironmentUpgradeLineState.DeriveStatus(h.ClosedAt is not null, lines.Select(l => l.State)),
-            counts, lines.Count);
+            counts, lines.Count)
+        {
+            // Every action row from the upgrade leaves its line a LastAction, and a line
+            // with one cannot be taken off, so this reads the same fact DeleteAsync refuses
+            // on - for the lines the caller can see.
+            AnythingSent = lines.Any(l => l.LastAction is not null),
+        };
     }
 
     /// <summary>
@@ -882,6 +888,14 @@ public sealed record EnvironmentUpgradeSummary(
 
     /// <summary>How many visible lines have been checked.</summary>
     public int CheckedCount => Count(UpgradeLineState.Checked);
+
+    /// <summary>
+    /// True once anything has been done from the upgrade to one of its visible lines - a
+    /// date moved, an update started or booked, even one since cancelled. The list uses
+    /// it to hold Delete back before the click; <see cref="EnvironmentUpgradeService.DeleteAsync"/>
+    /// stays the rule, and also counts the lines the caller cannot see.
+    /// </summary>
+    public bool AnythingSent { get; init; }
 }
 
 /// <summary>The open upgrade an environment is on, for the picker's lock.</summary>

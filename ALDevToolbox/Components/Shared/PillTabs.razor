@@ -21,6 +21,10 @@
                 <Icon Name="@item.IconName" Width="14" Height="14" />
             }
             <span>@item.Label</span>
+            @if (item.Count is { } count)
+            {
+                <span class="pill-tab__count">@count</span>
+            }
         </a>
     }
 </nav>
@@ -32,5 +36,10 @@
     /// <summary>When true the tabs stretch to equal width (a full-width row) instead of sizing to their labels.</summary>
     [Parameter] public bool Equal { get; set; }
 
-    public record PillTabItem(string Label, string Href, string? IconName, bool IsActive);
+    /// <param name="Count">
+    /// How many things the tab holds, shown after the label in the sheet's quieter
+    /// <c>.pill-tab__count</c>. Null draws none - a count still loading is left out
+    /// rather than shown as a zero that is not true yet.
+    /// </param>
+    public record PillTabItem(string Label, string Href, string? IconName, bool IsActive, int? Count = null);
 }
