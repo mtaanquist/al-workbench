@@ -91,15 +91,20 @@ public sealed class UpgradePaletteSourceTests : PaletteSourceVisibilityTestBase
     }
 
     [Fact]
-    public async Task The_target_release_finds_open_and_done_upgrades_open_first()
+    public async Task The_target_release_finds_open_and_done_upgrades_ranked_together()
     {
         await SeedWorldAsync();
         var done = await AddUpgradeAsync("28.4 in October 2026", "28.4", closed: true);
         var alsoDone = await AddUpgradeAsync("28.5 stragglers", "28.5", closed: true);
 
         var byTarget = await SearchAsync("28.5");
-        byTarget.Select(r => r.Title).Should().Contain([VisibleName, PrivateName, "28.5 stragglers"]);
-        byTarget.Single(r => r.Href == $"/upgrades/{alsoDone}").Subtitle.Should().Be("to 28.5 - Done");
+        byTarget.Select(r => r.Title).Should().BeEquivalentTo([VisibleName, PrivateName, "28.5 stragglers"],
+            "open and done upgrades are both offered");
+        byTarget[0].Href.Should().Be($"/upgrades/{alsoDone}",
+            "the palette ranks the archive with the open ones: a name starting with the query "
+            + "beats a match in the subtitle, done or not");
+        byTarget[0].Subtitle.Should().Be("to 28.5 - Done");
+        byTarget.Skip(1).Should().OnlyContain(r => r.Subtitle == "to 28.5 - Planned");
 
         var byName = await SearchAsync("october");
         byName.Should().ContainSingle().Which.Href.Should().Be($"/upgrades/{done}");

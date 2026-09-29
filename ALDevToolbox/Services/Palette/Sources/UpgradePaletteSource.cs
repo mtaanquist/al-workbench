@@ -10,7 +10,11 @@ namespace ALDevToolbox.Services.Palette.Sources;
 /// Planned upgrades (#984), found by their name and their target release: <c>november</c>
 /// or <c>28.5</c> finds "28.5 in November 2026". The subtitle is the target and the
 /// upgrade's status in the page's words ("to 28.5 - In progress"). Enter opens
-/// <c>/upgrades/{id}</c>. Open upgrades and the archive are both offered, open first. See
+/// <c>/upgrades/{id}</c>. Open upgrades and the archive are both offered and ranked
+/// together by the palette's usual rule, so a done upgrade whose name starts with what was
+/// typed sits above an open one that only contains it; the subtitle's status tells them
+/// apart. The header query's open-first order only decides which rows survive
+/// <see cref="MaxUpgradesScanned"/>. See
 /// <c>.design/command-palette.md</c>, "Sources", and
 /// <c>.design/environment-updates.md</c>, "Planned upgrades: a header with lines".
 ///
@@ -24,7 +28,9 @@ namespace ALDevToolbox.Services.Palette.Sources;
 ///
 /// <para><b>One query, and a second only when it pays.</b> The status of an open upgrade
 /// is derived from its lines and the fleet, which is more than a palette keystroke should
-/// read for rows nobody asked about. So the headers are projected and ranked on their name
+/// read for rows nobody asked about: <see cref="EnvironmentUpgradeService.ListOpenAsync"/>
+/// summarises every open upgrade, reading the headers, their lines, their action rows and
+/// the whole visible fleet. So the headers are projected and ranked on their name
 /// and target first; only when an open upgrade survives into the rows returned is the
 /// open list read for its status. A done upgrade is "Done" whatever its lines say, so
 /// the archive never costs the second read. The consequence: "done" is searchable, the

@@ -288,6 +288,7 @@ public sealed class DeliverToolsTests : IDisposable
         denmark.LastAction!.Action.Should().Be("RunNow");
         denmark.NextUpdate!.Version.Should().Be("26.0");
         denmark.CurrentVersion.Should().Be("25.3.1.0");
+        denmark.Deleted.Should().BeFalse();
         var swedenLine = upgrade.Environments[1];
         swedenLine.State.Should().Be("Running", "Business Central reports it upgrading");
         swedenLine.AssignedTo.Should().Be("Anne Hansen");
@@ -308,7 +309,8 @@ public sealed class DeliverToolsTests : IDisposable
     [Fact]
     public async Task List_planned_upgrades_puts_open_first_and_finds_the_archive_by_search()
     {
-        var open = await SeedUpgradeAsync("26.0 in October 2026", "26.0", closed: false, _seed.DenmarkProduction);
+        var open = await SeedUpgradeAsync("26.0 in October 2026", "26.0", closed: false,
+            _seed.DenmarkProduction, _seed.SecretProduction);
         var done = await SeedUpgradeAsync("25.5 in June 2026", "25.5", closed: true, _seed.DenmarkSandbox);
 
         await using var ctx = _db.NewContext();
@@ -319,7 +321,13 @@ public sealed class DeliverToolsTests : IDisposable
         all.Select(u => u.UpgradeId).Should().Equal(open, done);
         all[1].Status.Should().Be("Done");
         all[1].ClosedBy.Should().Be("Viewer");
-        all[0].Counts.Planned.Should().Be(1);
+        all[0].EnvironmentCount.Should().Be(1, "the Private solution's line is not counted");
+        all[0].Counts.Should().Be(new UpgradeStateCounts(1, 0, 0, 0, 0, 0, 0));
+
+        (await tools.ListPlannedUpgradesAsync(search: "OCTOBER")).Select(u => u.UpgradeId)
+            .Should().Equal([open], "the open list is searched case-insensitively too");
+        (await tools.ListPlannedUpgradesAsync(search: "june")).Should().BeEmpty(
+            "without includeArchived the done upgrade is not offered");
 
         (await tools.ListPlannedUpgradesAsync(includeArchived: true, search: "june")).Select(u => u.UpgradeId)
             .Should().Equal(done);

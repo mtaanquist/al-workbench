@@ -168,7 +168,7 @@ ranking cannot drift from source to source.
 | --- | --- | --- |
 | Solutions | name, short name; and the customer fields support types mid-call - a contact's name or company, the Voice account number, the tenant id | the Solution (its default tab, Customer) |
 | Environments | environment name; the Solution's name as subtitle and its short name as searched-only text | the environment page |
-| Upgrades | a planned upgrade's name, and its target release as subtitle ("to 28.5") followed by its status in the Upgrades page's words (Planned, In progress, Updated, Done); open ones and the archive, open first. Gated like the sidebar's Upgrades entry, on the environment-updates grant | the upgrade's page, `/upgrades/{id}` |
+| Upgrades | a planned upgrade's name, and its target release as subtitle ("to 28.5") followed by its status in the Upgrades page's words (Planned, In progress, Updated, Done); open ones and the archive, ranked together by the usual rule (so a done upgrade whose name starts with the query can sit above an open one; the status in the subtitle tells them apart). Gated like the sidebar's Upgrades entry, on the environment-updates grant | the upgrade's page, `/upgrades/{id}` |
 | Pipelines | pipeline name; the Solution's name and the latest build ("Built 2 days ago", "No builds yet") as subtitle, its short name as searched-only text | the pipeline's builds |
 | Release pipelines | release pipeline name; the Solution's name and the target environment's as subtitle - with the environment's trouble when it is gone or failed, in the Releases page's words - and the Solution's short name as searched-only text | the release pipeline |
 | Releases | release label, BC version, country, and the name of the Solution whose build produced it | the release in Object Explorer |
@@ -484,11 +484,16 @@ Go to still works. If storage is unavailable there are simply no recents.
 - **Server:** results in under 100 ms for an organisation with a few hundred Solutions.
   Sources run one after another, not in parallel - they share the request's `DbContext`,
   which allows one operation at a time. Each source is one `AsNoTracking()` query with a
-  limit, projecting only the fields a row needs. Upgrades is the one exception, and only
-  sometimes: an open upgrade's status is derived from its lines and the fleet, so when an
-  open upgrade is among the rows it returns it reads the open list a second time for the
-  status (`UpgradePaletteSource`). A done upgrade's status is fixed, so a search that
-  lands only on the archive, or on nothing, stays at one query.
+  limit, projecting only the fields a row needs. Upgrades is the one exception, and not a
+  small one: an open upgrade's status is derived from its lines and the fleet, so whenever
+  an open upgrade is among the rows it returns, it calls
+  `EnvironmentUpgradeService.ListOpenAsync`, which summarises *every* open upgrade - the
+  headers, their lines through the visibility join, their action rows, and the whole
+  visible fleet - on that debounced keystroke (`UpgradePaletteSource`). That is acceptable
+  at today's sizes (a handful of open upgrades, a fleet of a few hundred environments) and
+  is the first thing to look at if the palette ever shows up in traces. A done upgrade's
+  status is fixed, so a search that lands only on the archive, or on nothing, stays at one
+  query.
 - **Browser:** 120 ms debounce after the last keystroke; the in-flight request is
   aborted when a new one starts; a late response for an old query is dropped. A
   one-character query is not sent - Go to filters locally.

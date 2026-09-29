@@ -259,7 +259,7 @@ public sealed class DeliverTools
     }
 
     [McpServerTool(Name = "get_upgrade", ReadOnly = true)]
-    [Description("Returns one planned upgrade in full: its name, target version, planned slot, note, who created it and who marked it done, its status and counts (as list_planned_upgrades describes them), and every environment on it. For each environment: the solution, the environment's name and type, its current version, the platform update Business Central has waiting (as list_upgrades shows it), its state, the last action taken on it from this upgrade, who is assigned to check it, and the after-upgrade check (who ticked it, when, and their note). The state is one word: 'Planned' (on the upgrade, nothing done from it yet), 'DateMoved' (its update date was moved out to the latest allowed, and that is the last thing done), 'Booked' (a start is booked for a later slot, or Business Central was told to start and has not yet), 'Running' (Business Central is updating it now), 'Updated' (it is on the target version or later), 'Failed' (the last action from this upgrade failed, or Business Central reports the update failed) or 'Checked' (someone did the after-upgrade check and ticked it). Environments of solutions you cannot see are left out. Facts about the environment are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read; each carries environmentReadAt and nextUpdateReadAt. Requires the environment-updates permission on at least one team. Read-only: moving, starting and checking are done on the upgrade's page in the web UI.")]
+    [Description("Returns one planned upgrade in full: its name, target version, planned slot, note, who created it and who marked it done, its status and counts (as list_planned_upgrades describes them), and every environment on it. For each environment: the solution, the environment's name and type, whether the customer has deleted it, its current version, the platform update Business Central has waiting (the same fields list_upgrades uses), its state, the last action taken on it from this upgrade, who is assigned to check it, and the after-upgrade check (who ticked it, when, and their note). The state is one word: 'Planned' (on the upgrade and nothing done from it has taken effect yet; a booking that was cancelled lands here too), 'DateMoved' (its update date was moved out to the latest allowed, and that is the last thing done), 'Booked' (a start is booked for a later slot, or Business Central was told to start and has not yet), 'Running' (Business Central is updating it now), 'Updated' (it is on the target version or later), 'Failed' (the last action from this upgrade failed, or Business Central reports the update failed) or 'Checked' (someone did the after-upgrade check and ticked it). Left out: environments of solutions you cannot see, and environments Business Central no longer reports. An environment the customer has deleted but can still restore stays on the upgrade with deleted = true, although list_upgrades leaves those out. Facts about the environment are the workbench's mirror as of the nightly sweep or the last Refresh, not a live read; each carries environmentReadAt and nextUpdateReadAt. Requires the environment-updates permission on at least one team. Read-only: moving, starting and checking are done on the upgrade's page in the web UI.")]
     public async Task<PlannedUpgradeDetail> GetUpgradeAsync(
         [Description("The upgrade's numeric id, from list_planned_upgrades.")] int upgradeId,
         CancellationToken ct = default)
@@ -278,11 +278,12 @@ public sealed class DeliverTools
                 l.Environment.ProjectName,
                 l.Environment.EnvironmentName,
                 l.Environment.EnvironmentType,
+                l.Environment.IsSoftDeleted,
                 l.Environment.Version,
                 ToNextUpdate(l.Environment),
                 l.State.ToString(),
                 l.LastAction is null ? null : ToHistory(l.LastAction),
-                l.AssigneeName,
+                l.AssigneeName is { Length: > 0 } assignee ? UpgradeActionRow.NameOf(assignee) : null,
                 l.CheckedAt,
                 l.CheckedBy is { Length: > 0 } who ? UpgradeActionRow.NameOf(who) : null,
                 l.Note,
@@ -725,6 +726,7 @@ public sealed record UpgradeStateCounts(
 public sealed record PlannedUpgradeDetail(PlannedUpgradeSummary Upgrade, IReadOnlyList<PlannedUpgradeLine> Environments);
 
 /// <summary>One environment on a planned upgrade.</summary>
+/// <param name="Deleted">True when the customer has deleted the environment and it can still be restored.</param>
 /// <param name="State">'Planned', 'DateMoved', 'Booked', 'Running', 'Updated', 'Failed' or 'Checked'.</param>
 /// <param name="LastAction">The last thing done to it from this upgrade; null when nothing has been.</param>
 /// <param name="AssignedTo">Who is to do the after-upgrade check; null when nobody is assigned.</param>
@@ -737,6 +739,7 @@ public sealed record PlannedUpgradeLine(
     string SolutionName,
     string EnvironmentName,
     string EnvironmentType,
+    bool Deleted,
     string? CurrentVersion,
     NextPlatformUpdate? NextUpdate,
     string State,
