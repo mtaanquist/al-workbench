@@ -499,7 +499,7 @@
                         {
                             <button type="button" class="btn btn--sm" disabled="@_settingSaving" @onclick="UploadAppAsync">
                                 <Icon Name="upload" Width="14" Height="14" />
-                                <span>Upload an app</span>
+                                <span>Upload apps</span>
                             </button>
                         }
                     </div>
@@ -531,9 +531,8 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                @* Uploads booked here for a delivery window or a picked time: still
-                                   in this workbench, not yet with Business Central, which is why
-                                   they can be cancelled without losing the file or sent now. *@
+                                @* Uploads booked here: still in this workbench, not yet with Business
+                                   Central, which is why they can be called off or started early. *@
                                 @foreach (var booked in BookedUploads)
                                 {
                                     <tr @key="@($"booked-{booked.Id}")">
@@ -1960,8 +1959,7 @@
         : $"Booked for {BookedSlotText(booked.ExecuteAfter)}";
 
     /// <summary>A booked slot in the page's own zone - the one it was picked in - so it reads back as picked.</summary>
-    private string BookedSlotText(DateTime utc) =>
-        $"{Zone.Format(utc, UploadAppDialog.SlotFormat)}, {UploadAppDialog.ZoneLabel(Zone.Zone.Id)} time";
+    private string BookedSlotText(DateTime utc) => UploadAppDialog.SlotText(Zone, utc);
 
     /// <summary>Sends a booked upload straight away, behind a confirm: from here it interrupts whoever is working.</summary>
     private async Task InstallBookedNowAsync(UpgradeActionRow booked)
@@ -1985,7 +1983,7 @@
                 : $"{name} will start installing on {Row.EnvironmentName} within a minute.");
     }
 
-    /// <summary>Calls off a booked upload. The file is only ours, so nothing is lost but the booking.</summary>
+    /// <summary>Calls off a booked upload. The stored file goes with the booking, so the confirm says to upload it again.</summary>
     private async Task CancelBookedUploadAsync(UpgradeActionRow booked)
     {
         if (_confirm is null) return;
@@ -2285,14 +2283,19 @@
     /// </summary>
     private async Task CancelUpgradeActionAsync(int actionId)
     {
+        var entry = _activity?.FirstOrDefault(a => a.Id == actionId);
+        if (entry?.Kind == UpgradeActionKind.UploadApp)
+        {
+            // The same confirm the Scheduled installs card gives: the stored file goes
+            // with the booking.
+            await CancelBookedUploadAsync(entry);
+            return;
+        }
         try
         {
             await Write(() => UpgradeActions.CancelUpgradeActionAsync(actionId));
             _settingError = null;
-            var entry = _activity?.FirstOrDefault(a => a.Id == actionId);
-            _settingDone = entry?.Kind == UpgradeActionKind.UploadApp
-                ? $"The install of {entry.PackageFileName ?? "the app"} was cancelled."
-                : "The booked update was cancelled.";
+            _settingDone = "The booked update was cancelled.";
         }
         catch (PlanValidationException ex)
         {

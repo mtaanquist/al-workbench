@@ -574,8 +574,9 @@ that names the environment and says what the click does there:
 - **Uploading apps** - `.app` files another company built, for which there is no pipeline
   here. Several may be chosen at once: each manifest is read on the spot
   (`AppPackageReader.TryReadManifestAsync`) and the apps are put in dependency order with
-  the same `DependencyOrder` the project build compiles siblings in; an encrypted vendor
-  app hides its manifest and keeps the place it was chosen in, and the dialog says so.
+  the same `DependencyOrder` the project build compiles siblings in; a protected vendor
+  app hides its manifest and cannot be placed, and the dialog says to upload such apps
+  separately, dependencies first.
   The sync mode is always Add and dependencies are **not** pulled along: a missing one is
   refused by name at send time. Apps we build still go through Deployments.
 
@@ -595,16 +596,20 @@ that names the environment and says what the click does there:
   cancelled one does not. "Now" is a slot that has already come, so the next sweep
   (within thirty seconds) takes it - an install that takes minutes never runs inside a
   page request. The delivery window falls back to Microsoft's window when the
-  environment has none, and a window that is open at the moment of asking books now. The
-  sweep sends at most one upload per organisation and puts platform-update moves first,
-  so a batch spreads over as many sweeps as it has apps and never holds up a customer's
-  agreed update slot. A poll that errors a few times in a row is treated as "still
-  running"; only a run of errors gives the install up as unconfirmed. A restart while an
-  app is installing records it as sent, unconfirmed (the operation ids Business Central
-  answered with are on the row, `package_bc_app_id` / `package_bc_operation_id`), and the
-  rest of its batch still goes: a dependent that needed it is refused by Business Central
-  if it did not land. A pending upload is **not** a platform-update booking: the Upgrades
-  page's "already booked" marker and the bulk version change ignore it.
+  environment has none, and a window that is open at the moment of asking books now. A
+  sweep makes two passes: every organisation's platform-update moves first, then at most
+  **one** upload across all organisations, so a batch spreads over as many sweeps as it
+  has apps, no customer's agreed update slot waits behind another's install, and a sweep
+  costs at most one install (the worker's heartbeat is ticked on every poll of it). "Now"
+  therefore means "shortly", not "within a minute", when another install is running. An
+  install the workbench could not see finish - a run of failed polls, or the wait ran
+  out - is recorded as **sent, unconfirmed**, as a restart while an app is installing
+  records it (the operation ids Business Central answered with are on the row,
+  `package_bc_app_id` / `package_bc_operation_id`); in both cases the rest of the batch
+  still goes, and a dependent that needed the app is refused by Business Central if it
+  did not land. Only Business Central's own refusal is a failure that stops a batch. A
+  pending upload is **not** a platform-update booking: the Upgrades page's "already
+  booked" marker and the bulk version change ignore it.
 
   A picked time is read in the organisation's display zone - the zone every other time
   on the page is shown in - and echoed back under the field with the zone named, so
@@ -613,8 +618,9 @@ that names the environment and says what the click does there:
   held only while the row is pending**: the write that settles the row (sent, failed, or
   cancelled) clears it in the same statement, and the worker's first sweep after a
   restart drops any package left on a settled row. This is a change of scope from the
-  first version, which never stored the file: while a booking waits, up to ten packages
-  of up to 50 MB each sit in the database and in any `pg_dump` taken meanwhile. Booked
+  first version, which never stored the file: while a booking waits, its packages (up to
+  ten per upload, up to 50 MB each, with no cap across bookings) sit in the database and
+  in any `pg_dump` taken meanwhile. Booked
   uploads appear in the
   environment's *Scheduled installs* beside Business Central's own, with their place in
   the batch, "Install now" (`UpgradeActionService.RunUploadNowAsync`, which moves the

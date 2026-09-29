@@ -1,6 +1,7 @@
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
+using ALDevToolbox.Services.Workers;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -189,6 +190,8 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         stored.Outcome.Should().Contain("Partner.app was installed");
         stored.PackageFileName.Should().Be("Partner.app", "the history still names the file");
         stored.PackageContent.Should().BeNull("a sent package has no reason to stay in the database");
+        stored.BcOperationId.Should().NotBeNull("the operation is stamped as soon as Business Central accepts the package, for a restart to find");
+        stored.BcAppId.Should().NotBeNull();
     }
 
     [Fact]
@@ -244,9 +247,9 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Apps.OnOperationStatus = file => file == "Core.app" ? BcAppOperationStatus.Failed : BcAppOperationStatus.Succeeded;
 
         _f.Clock.Advance(TimeSpan.FromHours(13));
-        var ran = await SweepUntilQuietAsync();
+        var sent = await SweepUntilQuietAsync();
 
-        ran.Should().Be(3, "every row is settled, even the ones not sent");
+        sent.Should().Be(1, "only the first app was sent; the rest were settled on the way, in the same sweep");
         _f.Apps.InstalledFiles.Should().Equal(new[] { "Core.app" }, "the apps after the failed one never reach Business Central");
         (await _f.ReadActionAsync(ids[0])).Status.Should().Be(UpgradeActionStatus.Failed);
         var second = await _f.ReadActionAsync(ids[1]);
@@ -356,18 +359,84 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task A_run_of_failed_polls_gives_the_install_up_as_unconfirmed_not_as_never_sent()
+    public async Task A_run_of_failed_polls_records_the_install_as_sent_unconfirmed_and_the_batch_goes_on()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app", "Reports.app");
+        _f.Apps.PollErrorsBeforeAnswer = BcAppOperationPoller.MaxConsecutivePollErrors;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await SweepUntilQuietAsync();
+
+        var core = await _f.ReadActionAsync(ids[0]);
+        core.Status.Should().Be(UpgradeActionStatus.Sent, "Business Central has the app; only the answer is missing, as after a restart");
+        core.Outcome.Should().Contain("Core.app was uploaded").And.Contain("wasn't confirmed here").And.NotContain("wasn't installed");
+        core.PackageContent.Should().BeNull();
+        _f.Apps.InstalledFiles.Should().Equal("Core.app", "Reports.app");
+    }
+
+    [Fact]
+    public async Task A_wait_that_runs_out_is_unconfirmed_too_not_a_failure()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
         var actionId = (await BookUploadAsync(projectId, envId, hoursAhead: 12, "Partner.app"))[0];
-        _f.Apps.PollErrorsBeforeAnswer = BcAppOperationPoller.MaxConsecutivePollErrors;
+        _f.Apps.OnOperationStatus = _ => BcAppOperationStatus.Running;
+        _f.UploadPollTimeout = TimeSpan.Zero;
 
         _f.Clock.Advance(TimeSpan.FromHours(13));
         await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
 
         var stored = await _f.ReadActionAsync(actionId);
-        stored.Status.Should().Be(UpgradeActionStatus.Failed);
-        stored.Outcome.Should().Contain("wasn't confirmed here").And.NotContain("didn't accept");
+        stored.Status.Should().Be(UpgradeActionStatus.Sent);
+        stored.Outcome.Should().Contain("still installing").And.Contain("wasn't confirmed here");
+    }
+
+    [Fact]
+    public async Task The_error_count_starts_over_after_a_poll_that_answers()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = (await BookUploadAsync(projectId, envId, hoursAhead: 12, "Partner.app"))[0];
+        // Three errors, an answer of "running", three more errors, then done: never four in a row.
+        var limit = BcAppOperationPoller.MaxConsecutivePollErrors - 1;
+        var answered = 0;
+        _f.Apps.PollErrorsBeforeAnswer = limit;
+        _f.Apps.OnOperationStatus = _ =>
+        {
+            answered++;
+            if (answered == 1) _f.Apps.PollErrorsBeforeAnswer = limit;
+            return answered == 1 ? BcAppOperationStatus.Running : BcAppOperationStatus.Succeeded;
+        };
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Sent);
+        stored.Outcome.Should().Contain("was installed");
+        _f.Apps.Polls.Should().Be(2 * limit + 2);
+    }
+
+    [Fact]
+    public async Task A_long_install_keeps_the_workers_heartbeat_alive()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookUploadAsync(projectId, envId, hoursAhead: 12, "Partner.app");
+        // Every poll of the install is a tick, so a ten-minute install never reads as a
+        // loop that has stopped.
+        var polls = 0;
+        _f.Apps.OnOperationStatus = _ =>
+        {
+            _f.Clock.Advance(TimeSpan.FromMinutes(2));
+            return ++polls < 4 ? BcAppOperationStatus.Running : BcAppOperationStatus.Succeeded;
+        };
+        var heartbeats = new WorkerHeartbeatRegistry(_f.Clock);
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker(heartbeats).RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var heartbeat = heartbeats.All().Single();
+        heartbeat.LastTickUtc.Should().BeCloseTo(_f.Clock.GetUtcNow().UtcDateTime, TimeSpan.FromMinutes(2),
+            "the last poll ticked it, minutes after the sweep began");
     }
 
     [Fact]

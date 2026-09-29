@@ -59,7 +59,7 @@ else
                         @* Beside the sentence it acts on, not pinned to the right: this
                            feed is embedded in a panel narrower than the page, and a
                            right-aligned button there ends up somewhere nobody looks. *@
-                        @if (entry.IsPending && CanCancel(entry))
+                        @if (entry.IsPending && CanCancel(entry) && !IsMidInstall(entry))
                         {
                             <button type="button" class="btn btn--sm eaf__cancel"
                                     disabled="@(_cancelling == entry.Id)"
@@ -98,6 +98,10 @@ else
 
     private bool CanCancel(UpgradeActionRow entry) =>
         entry.Kind == UpgradeActionKind.UploadApp ? CanActOnUploads : CanAct;
+
+    /// <summary>An upload the worker has claimed: nothing left to cancel, and a cancel would only be refused.</summary>
+    private static bool IsMidInstall(UpgradeActionRow entry) =>
+        entry.Kind == UpgradeActionKind.UploadApp && entry.SentAt is not null;
 
     /// <summary>The customer's own time zone, which booked slots are shown in.</summary>
     [Parameter] public TimeZoneInfo TimeZone { get; set; } = TimeZoneInfo.Utc;
@@ -141,9 +145,11 @@ else
             // "now" is still sent by the worker, so it has a waiting state of its own.
             var file = entry.PackageFileName ?? "an app";
             if (entry.IsBooking) return $"Booked the install of {file}";
+            // "Uploaded", not "installed": a sent row may be one the workbench could not
+            // see through to the end, and the status line carries that caveat.
             return entry.Status switch
             {
-                UpgradeActionStatus.Sent => $"Installed {file}",
+                UpgradeActionStatus.Sent => $"Uploaded {file}",
                 UpgradeActionStatus.Failed => $"Tried to install {file}",
                 _ => $"Asked to install {file} now",
             };
@@ -213,7 +219,7 @@ else
     {
         if (entry.Kind == UpgradeActionKind.UploadApp)
         {
-            return $"{DisplayZone.Format(utc, UploadAppDialog.SlotFormat)}, {UploadAppDialog.ZoneLabel(DisplayZone.Zone.Id)} time";
+            return UploadAppDialog.SlotText(DisplayZone, utc);
         }
         var local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZone);
         return $"{local:HH:mm} on {local:d MMM}, {TimeZoneLabel} time";

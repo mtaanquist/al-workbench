@@ -334,11 +334,7 @@ public sealed class UpgradeActionService
             .OrderByDescending(a => a.RequestedAt)
             .ThenByDescending(a => a.Id)
             .Take(FeedLimit)
-            .Select(a => new UpgradeActionRow(
-                a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
-                a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
-                a.CancelledBy, a.CancelledAt, a.TargetVersion,
-                a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder))
+            .Select(ToRow)
             .ToListAsync(ct).ConfigureAwait(false);
     }
 
@@ -361,11 +357,7 @@ public sealed class UpgradeActionService
             .Where(a => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == a.ProjectId && p.DeletedAt == null))
             .OrderBy(a => a.ExecuteAfter)
-            .Select(a => new UpgradeActionRow(
-                a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
-                a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
-                a.CancelledBy, a.CancelledAt, a.TargetVersion,
-                a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder))
+            .Select(ToRow)
             .ToListAsync(ct).ConfigureAwait(false);
     }
 
@@ -384,13 +376,17 @@ public sealed class UpgradeActionService
             .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
                         && a.Kind == UpgradeActionKind.UploadApp && a.Status == UpgradeActionStatus.Pending)
             .OrderBy(a => a.ExecuteAfter).ThenBy(a => a.BatchOrder).ThenBy(a => a.Id)
-            .Select(a => new UpgradeActionRow(
-                a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
-                a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
-                a.CancelledBy, a.CancelledAt, a.TargetVersion,
-                a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder))
+            .Select(ToRow)
             .ToListAsync(ct).ConfigureAwait(false);
     }
+
+    /// <summary>The one projection every read of the table shares, so a new column reaches every list at once.</summary>
+    private static readonly System.Linq.Expressions.Expression<Func<OeEnvironmentUpgradeAction, UpgradeActionRow>> ToRow =
+        a => new UpgradeActionRow(
+            a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
+            a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
+            a.CancelledBy, a.CancelledAt, a.TargetVersion,
+            a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder);
 
     // ── Shared with the worker ──────────────────────────────────────────
 
@@ -425,8 +421,8 @@ public sealed class UpgradeActionService
     /// </summary>
     internal Task<BcAppOperationResult> RunUploadAsync(
         int projectId, int environmentId, string fileName, byte[] package,
-        Func<BcAppOperation, CancellationToken, Task> accepted, CancellationToken ct) =>
-        _connections.SendBookedUploadAsync(projectId, environmentId, package, fileName, accepted, ct);
+        Func<BcAppOperation, CancellationToken, Task> accepted, CancellationToken ct, Action? progress = null) =>
+        _connections.SendBookedUploadAsync(projectId, environmentId, package, fileName, accepted, ct, progress);
 
     /// <summary>
     /// The kinds this service runs, and the version rule between them: a version change

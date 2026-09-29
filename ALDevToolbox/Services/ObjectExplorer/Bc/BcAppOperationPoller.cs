@@ -17,15 +17,16 @@ public static class BcAppOperationPoller
     /// <summary>How many polls in a row may fail before the install is given up as unconfirmed.</summary>
     internal const int MaxConsecutivePollErrors = 4;
 
+    /// <param name="onPoll">Called before each read, so a long install can keep a worker's heartbeat alive.</param>
     public static async Task<BcAppOperationResult> PollUntilTerminalAsync(
         IBcAppManagementClient apps, string accessToken, string applicationFamily, string environmentName,
-        BcAppOperation started, TimeSpan pollDelay, TimeSpan timeout, CancellationToken ct)
+        BcAppOperation started, TimeSpan pollDelay, TimeSpan timeout, CancellationToken ct, Action? onPoll = null)
     {
         if (started.AppId is not { } appId)
         {
             // Without an app id there's nothing to poll. The upload was accepted, so
             // don't call it a failure — say what's unverified and let the consultant look.
-            return new BcAppOperationResult(true,
+            return BcAppOperationResult.Unconfirmed(
                 "Business Central accepted the upload but didn't say which app it was, so the install wasn't confirmed here.");
         }
 
@@ -34,6 +35,7 @@ public static class BcAppOperationPoller
         while (true)
         {
             ct.ThrowIfCancellationRequested();
+            onPoll?.Invoke();
 
             BcAppOperation? operation;
             try
@@ -49,11 +51,11 @@ public static class BcAppOperationPoller
                 // accepted install into a failure - and, for a batch, stop the apps after it.
                 operation = null;
             }
-            catch (BcApiException ex)
+            catch (BcApiException)
             {
-                return new BcAppOperationResult(false,
-                    "Business Central accepted the app, but kept answering with an error when asked whether the install had finished, so it wasn't confirmed here. "
-                    + ex.Message);
+                // The install is Business Central's now; only the answer is missing.
+                return BcAppOperationResult.Unconfirmed(
+                    "Business Central accepted the app, but kept answering with an error when asked whether the install had finished, so it wasn't confirmed here.");
             }
 
             switch (operation?.Status)
@@ -71,7 +73,7 @@ public static class BcAppOperationPoller
 
             if (DateTime.UtcNow > deadline)
             {
-                return new BcAppOperationResult(false, "Timed out waiting for the install to finish.");
+                return BcAppOperationResult.Unconfirmed("Business Central was still installing the app when the workbench stopped waiting, so the install wasn't confirmed here.");
             }
             await Task.Delay(pollDelay, ct).ConfigureAwait(false);
         }
@@ -97,9 +99,20 @@ public static class BcAppOperationPoller
     }
 }
 
-/// <summary>How one install operation ended.</summary>
-/// <param name="Completed">True when Business Central reported the install done (or accepted it without an id to confirm by).</param>
+/// <summary>
+/// How one install operation ended. Three shapes: done (<see cref="Completed"/>), refused
+/// by Business Central (not completed, with its reason), and <see cref="Unconfirmed"/> -
+/// Business Central has the app and was installing it, but the workbench could not see
+/// it through to the end (no id to poll, a run of failed polls, or the wait ran out).
+/// A caller that must not claim what it did not see treats the third as "sent, not
+/// confirmed"; a caller that needs a clean yes treats it as not completed.
+/// </summary>
+/// <param name="Completed">True when Business Central reported the install done.</param>
 /// <param name="Message">The sentence a history shows: null for a plain success, otherwise the reason or the caveat.</param>
 /// <param name="Failure">Set when Business Central reported the install as failed, so a line can be built from its code.</param>
 /// <param name="Raw">Business Central's text as it came, for the log.</param>
-public sealed record BcAppOperationResult(bool Completed, string? Message, BcFailureDetail? Failure = null, string? Raw = null);
+/// <param name="IsUnconfirmed">True when the app is with Business Central but the install was not seen to finish.</param>
+public sealed record BcAppOperationResult(bool Completed, string? Message, BcFailureDetail? Failure = null, string? Raw = null, bool IsUnconfirmed = false)
+{
+    public static BcAppOperationResult Unconfirmed(string message) => new(false, message, IsUnconfirmed: true);
+}

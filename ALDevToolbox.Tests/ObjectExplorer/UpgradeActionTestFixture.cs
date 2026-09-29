@@ -40,6 +40,9 @@ internal sealed class UpgradeActionTestFixture : IDisposable
     public FakeUploadAppClient Apps { get; } = new();
     public FakeTimeProvider Clock { get; } = new(new DateTimeOffset(2026, 9, 11, 8, 0, 0, TimeSpan.Zero));
 
+    /// <summary>How long the worker's sends wait for an install; a test sets it to zero to run the wait out.</summary>
+    public TimeSpan UploadPollTimeout { get; set; } = ProjectConnectionService.DefaultUploadPollTimeout;
+
     private ServiceProvider? _provider;
 
     public UpgradeActionTestFixture()
@@ -138,13 +141,14 @@ internal sealed class UpgradeActionTestFixture : IDisposable
             NullLogger<ProjectConnectionService>.Instance)
         {
             UploadPollDelay = TimeSpan.Zero,
+            UploadPollTimeout = UploadPollTimeout,
         });
         services.AddScoped<UpgradeActionService>();
         return _provider = services.BuildServiceProvider();
     }
 
-    public UpgradeActionWorker Worker() => new(
-        Provider(), Clock, NullLogger<UpgradeActionWorker>.Instance, new WorkerHeartbeatRegistry());
+    public UpgradeActionWorker Worker(WorkerHeartbeatRegistry? heartbeats = null) => new(
+        Provider(), Clock, NullLogger<UpgradeActionWorker>.Instance, heartbeats ?? new WorkerHeartbeatRegistry());
 
     /// <summary>A token service whose every request succeeds, for a page test that drives the real services.</summary>
     public BcTokenService TokenService() => TokenOk();

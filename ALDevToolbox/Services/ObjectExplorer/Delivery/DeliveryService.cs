@@ -1187,7 +1187,11 @@ public sealed class DeliveryService
     {
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
             _apps, bc.AccessToken, family, delivery.EnvironmentName, started, PollDelay, PollTimeoutPerApp, ct);
-        return new DeploymentOutcome(result.Completed, result.Message, result.Failure, result.Raw);
+        // A delivery needs a clean yes: an install it could not see finish (no id, a run
+        // of failed polls, the wait ran out) is not one it reports as done. A missing app
+        // id is the one caveat it has always carried as a success.
+        var completed = result.Completed || (result.IsUnconfirmed && started.AppId is null);
+        return new DeploymentOutcome(completed, result.Message, result.Failure, result.Raw);
     }
 
     /// <param name="Failure">Set when Business Central reported the install as failed, so the delivery's line is built from its code.</param>

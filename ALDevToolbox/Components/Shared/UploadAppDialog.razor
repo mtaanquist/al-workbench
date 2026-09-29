@@ -1,7 +1,7 @@
 @*
-    Upload one extension package to a Business Central environment: an app another
-    company built and sent over, which no pipeline here can deploy. Shared by the
-    environment page and the Environments list's row menu.
+    Upload extension packages to a Business Central environment: apps another company
+    built and sent over, which no pipeline here can deploy. Shared by the environment
+    page and the Environments list's row menu.
 
     The dialog only collects the answer - which files, and when. The caller books them
     (ProjectConnectionService.InstallUploadedAppsAsync) and reports the outcome where its
@@ -10,8 +10,8 @@
     Several files may be chosen at once. Each manifest is read on the spot and the apps
     are put in dependency order, which is the order they will install in, one after
     another - the worker waits for each install to finish before the next. A package
-    whose manifest cannot be read (an encrypted vendor app) keeps the place it was
-    chosen in, and the list says so.
+    whose manifest cannot be read (a protected vendor app) cannot be placed by its
+    dependencies, and the hint says to upload such apps separately, dependencies first.
 
     When: the delivery window agreed with the customer comes first when the environment
     has one, else Microsoft's own update window; then a time the person picks; then now.
@@ -98,7 +98,7 @@
             </label>
             <small class="field__hint upload-app__hint">
                 @(_bcWindowText is null
-                    ? "This environment has no delivery window, and Business Central's own window hasn't been read yet. Open the environment and choose Refresh to read it, or pick a time."
+                    ? "This environment has no delivery window, and Business Central's own window hasn't been read yet. It is read when the solution's Business Central connection is tested, and overnight. Pick a time instead."
                     : "This environment has no delivery window (the install time agreed with the customer), so Business Central's own window stands in for it.")
             </small>
         }
@@ -121,7 +121,7 @@
                     <FieldError Message="@problem" />
                 }
                 <small class="field__hint">
-                    Until then you can cancel or start it early under Scheduled installs on the environment's Apps tab.
+                    Until then you can cancel or start early under Scheduled installs on the environment.
                 </small>
             </div>
         }
@@ -207,14 +207,16 @@
         var tail = upload.Files.Count == 1
             ? " Until then you can cancel or start it early under Scheduled installs on the environment."
             : " Until then you can cancel or start them early under Scheduled installs on the environment.";
-        if (outcome.RunsAtUtc <= DateTime.UtcNow)
+        if (outcome.Timing == UploadAppTiming.Now || outcome.RunsAtUtc <= DateTime.UtcNow)
         {
+            // "Shortly", not a promise of a minute: the worker sends one upload at a time
+            // across every customer, and one may be mid-install.
             return upload.Files.Count == 1
-                ? $"{what} will start installing on {environmentName} within a minute. Follow it under Scheduled installs on the environment."
-                : $"{what} will start installing on {environmentName} within a minute, one after another in the order shown. Follow them under Scheduled installs on the environment.";
+                ? $"{what} will start installing on {environmentName} shortly. Follow it under Scheduled installs on the environment."
+                : $"{what} will start installing on {environmentName} shortly, one after another in the order shown. Follow them under Scheduled installs on the environment.";
         }
 
-        var when = $"{zone.Format(outcome.RunsAtUtc, SlotFormat)}, {ZoneLabel(zone.Zone.Id)} time";
+        var when = SlotText(zone, outcome.RunsAtUtc);
         // A window was chosen as the customer's wall clock ("22:00-04:00 (New York)"),
         // so it is said back in that clock first, or the numbers look wrong.
         var customer = CustomerClock(outcome.RunsAtUtc, upload.CustomerTimeZone, zone.Zone);
@@ -311,14 +313,22 @@
         return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(wall, zone), TimeSpan.Zero);
     }
 
-    /// <summary>"20:00 on 3 Oct": the slot as a wall clock, read back through the display zone like every other time on the page. Shared with the pages that say a booking back.</summary>
-    internal const string SlotFormat = "HH:mm 'on' d MMM";
+    /// <summary>"20:00 on 3 Oct": the slot as a wall clock, read back through the display zone like every other time on the page.</summary>
+    private const string SlotFormat = "HH:mm 'on' d MMM";
+
+    /// <summary>
+    /// "20:00 on 3 Oct, Berlin time": an upload's slot said back in the page's own zone,
+    /// named. The one wording for the dialog, the Scheduled installs list and the history,
+    /// so a booking reads the same everywhere it is shown.
+    /// </summary>
+    internal static string SlotText(DisplayTimeZone zone, DateTime utc) =>
+        $"{zone.Format(utc, SlotFormat)}, {ZoneLabel(zone.Zone.Id)} time";
 
     private string SlotEchoText()
     {
         var instant = SlotInstant().UtcDateTime;
         var customer = CustomerClock(instant, _customerTimeZone, DisplayZone.Zone);
-        return $"Installs at {DisplayZone.Format(instant, SlotFormat)}, {ZoneLabel(DisplayZone.Zone.Id)} time{(customer is null ? "" : $" - {customer}")}.";
+        return $"Installs at {SlotText(DisplayZone, instant)}{(customer is null ? "" : $" - {customer}")}.";
     }
 
     /// <summary>
@@ -344,8 +354,8 @@
     private static string WindowText(TimeOnly start, TimeOnly end, string? ianaId) =>
         $"{UpdateWindow.Clock(start)}-{UpdateWindow.Clock(end)} ({ZoneLabel(ianaId)})";
 
-    /// <summary>A zone the way a consultant names it - the city, not the region/city id. Shared with the pages that say a booking back.</summary>
-    internal static string ZoneLabel(string? ianaId) =>
+    /// <summary>A zone the way a consultant names it - the city, not the region/city id.</summary>
+    private static string ZoneLabel(string? ianaId) =>
         string.IsNullOrWhiteSpace(ianaId) || ianaId == TimeZoneInfo.Utc.Id ? "UTC" : BcUpdateWindow.CityLabel(ianaId);
 
     private static string FileSize(int bytes) => bytes < 1024 * 1024

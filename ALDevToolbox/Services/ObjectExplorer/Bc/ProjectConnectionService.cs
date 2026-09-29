@@ -1934,9 +1934,10 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// the install is polled: the caller stamps it on the row, so a restart during the
     /// poll knows the app is with Business Central rather than never sent.
     /// </param>
+    /// <param name="progress">Called on each poll of the install, so a worker can keep its heartbeat alive through a long one.</param>
     internal async Task<BcAppOperationResult> SendBookedUploadAsync(
         int projectId, int environmentId, byte[] appBytes, string fileName,
-        Func<BcAppOperation, CancellationToken, Task>? accepted, CancellationToken ct)
+        Func<BcAppOperation, CancellationToken, Task>? accepted, CancellationToken ct, Action? progress = null)
     {
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
 
@@ -1968,7 +1969,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
 
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
-            _apps, env.Token, env.Family, env.Name, operation, UploadPollDelay, UploadPollTimeout, ct);
+            _apps, env.Token, env.Family, env.Name, operation, UploadPollDelay, UploadPollTimeout, ct, progress);
         _panelCache.Invalidate(projectId, environmentId);
         if (result.Raw is { } raw)
         {
@@ -1977,13 +1978,13 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         return result;
     }
 
+    /// <summary>How long one booked upload's install is waited for before it is given up as unconfirmed. The worker's budget is worked out from it.</summary>
+    internal static readonly TimeSpan DefaultUploadPollTimeout = TimeSpan.FromMinutes(10);
+
     /// <summary>
-    /// How long one booked upload's install is given before it is reported as timed out,
-    /// and how often it is re-read meanwhile - the delivery path's numbers. Settable so a
-    /// test need not wait five seconds a poll; the defaults are what the worker's
-    /// heartbeat budget is worked out from.
+    /// How often a booked upload's install is re-read, and how long it is waited for -
+    /// the delivery path's numbers. Settable so a test need not wait five seconds a poll.
     /// </summary>
-    public static readonly TimeSpan DefaultUploadPollTimeout = TimeSpan.FromMinutes(10);
     internal TimeSpan UploadPollDelay { get; set; } = TimeSpan.FromSeconds(5);
     internal TimeSpan UploadPollTimeout { get; set; } = DefaultUploadPollTimeout;
 

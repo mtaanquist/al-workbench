@@ -510,7 +510,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         var cut = Render(envId, "apps");
 
         cut.WaitForAssertion(() =>
-            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload an app").Click());
+            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload apps").Click());
 
         cut.WaitForAssertion(() => cut.Find("#upload-app-file").GetAttribute("accept").Should().Be(".app"));
         cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload and install")
@@ -531,7 +531,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         var cut = Render(envId, "apps");
 
         cut.WaitForAssertion(() =>
-            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload an app").Click());
+            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload apps").Click());
 
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("In the delivery window, 22:00-04:00 (Copenhagen)"));
         cut.Markup.Should().NotContain("In the BC update window", "the customer's own window stands in for Microsoft's");
@@ -561,7 +561,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         var cut = Render(envId, "apps");
 
         cut.WaitForAssertion(() =>
-            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload an app").Click());
+            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload apps").Click());
 
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("In the BC update window"));
         cut.Markup.Should().Contain("has no delivery window").And.NotContain("In the delivery window");
@@ -1232,7 +1232,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.Markup.Should().Contain("CRONUS Sales Extension");
         cut.Markup.Should().Contain("Continia Core");
         cut.FindAll(".data-table__actions").Should().BeEmpty("every action on an app writes to the customer's tenant");
-        cut.Markup.Should().NotContain("Upload an app");
+        cut.Markup.Should().NotContain("Upload apps");
     }
 
     [Fact]
