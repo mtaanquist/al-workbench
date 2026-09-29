@@ -209,14 +209,24 @@ public sealed class UpgradeActionService
 
         var action = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.Id == actionId)
-            .Select(a => new { a.Id, a.ProjectId, a.Status })
+            .Select(a => new { a.Id, a.ProjectId, a.Status, a.Kind, OwnerId = a.Project!.CreatedByUserId })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Action"] = "That scheduled action no longer exists.",
             });
 
-        await _access.EnsureCanManageEnvironmentUpdatesAsync(action.ProjectId, ct).ConfigureAwait(false);
+        // The gate matches the one that made the booking: an upload is a manager's write
+        // (the same check as installing it), the platform-update moves are the update
+        // team's. Whoever may book it may call it off.
+        if (action.Kind == UpgradeActionKind.UploadApp)
+        {
+            await _access.EnsureCanManageAsync(action.ProjectId, action.OwnerId, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            await _access.EnsureCanManageEnvironmentUpdatesAsync(action.ProjectId, ct).ConfigureAwait(false);
+        }
 
         if (action.Status != UpgradeActionStatus.Pending)
         {
@@ -236,6 +246,8 @@ public sealed class UpgradeActionService
                         && a.SentAt == null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(a => a.Status, UpgradeActionStatus.Cancelled)
+                // A cancelled upload has nothing left to send, so its package goes now.
+                .SetProperty(a => a.PackageContent, (byte[]?)null)
                 .SetProperty(a => a.CancelledAt, now)
                 .SetProperty(a => a.CancelledBy, cancelledBy)
                 .SetProperty(a => a.CancelledByUserId, cancelledByUserId), ct).ConfigureAwait(false);
@@ -251,6 +263,57 @@ public sealed class UpgradeActionService
         _logger.LogInformation(
             "User {UserId} cancelled upgrade action {ActionId} on project {ProjectId}.",
             _orgContext.CurrentUserId, actionId, action.ProjectId);
+    }
+
+    /// <summary>
+    /// Moves a booked upload's slot to now - the "Install now" on the environment's
+    /// Scheduled installs list. The row is not sent from here: the worker sends it on
+    /// its next sweep (within <see cref="UpgradeActionWorker.PollInterval"/>), so an
+    /// install that takes minutes never runs inside a page request, and a batch keeps
+    /// its order. For a row in a batch every row of the batch still waiting moves with
+    /// it: an app cannot jump ahead of the one it was booked to follow.
+    /// </summary>
+    public async Task RunUploadNowAsync(int actionId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+
+        var booking = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.Id == actionId)
+            .Select(a => new { a.Id, a.ProjectId, a.Kind, a.Status, a.PackageFileName, a.BatchId, OwnerId = a.Project!.CreatedByUserId })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false)
+            ?? throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Action"] = "That booked install no longer exists.",
+            });
+
+        if (booking.Kind != UpgradeActionKind.UploadApp || booking.PackageFileName is null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Action"] = "Only an app booked for a later install can be installed now.",
+            });
+        }
+        if (booking.Status != UpgradeActionStatus.Pending)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Action"] = AlreadyOverMessage(booking.Status),
+            });
+        }
+
+        // The same gate that made the booking: a manager's write.
+        await _access.EnsureCanManageAsync(booking.ProjectId, booking.OwnerId, ct).ConfigureAwait(false);
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var moved = await _db.OeEnvironmentUpgradeActions
+            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
+            .Where(a => booking.BatchId != null ? a.BatchId == booking.BatchId : a.Id == actionId)
+            .Where(a => a.ExecuteAfter > now)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.ExecuteAfter, now), ct).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "User {UserId} asked for booked upload {ActionId} ({FileName}) now; {Moved} row(s) of its batch moved to the next sweep.",
+            _orgContext.CurrentUserId, actionId, booking.PackageFileName, moved);
     }
 
     // ── Reading ─────────────────────────────────────────────────────────
@@ -271,11 +334,7 @@ public sealed class UpgradeActionService
             .OrderByDescending(a => a.RequestedAt)
             .ThenByDescending(a => a.Id)
             .Take(FeedLimit)
-            .Select(a => new UpgradeActionRow(
-                a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
-                a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
-                a.CancelledBy, a.CancelledAt, a.TargetVersion,
-                a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null))
+            .Select(ToRow)
             .ToListAsync(ct).ConfigureAwait(false);
     }
 
@@ -290,18 +349,44 @@ public sealed class UpgradeActionService
         var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
 
+        // Booked uploads are pending rows too, but they are not platform-update moves:
+        // the Upgrades page must not report "something is already booked" for a vendor
+        // app waiting for tonight, nor skip that environment in a bulk version change.
         return await _db.OeEnvironmentUpgradeActions.AsNoTracking()
-            .Where(a => a.Status == UpgradeActionStatus.Pending)
+            .Where(a => a.Status == UpgradeActionStatus.Pending && a.Kind != UpgradeActionKind.UploadApp)
             .Where(a => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == a.ProjectId && p.DeletedAt == null))
             .OrderBy(a => a.ExecuteAfter)
-            .Select(a => new UpgradeActionRow(
-                a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
-                a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
-                a.CancelledBy, a.CancelledAt, a.TargetVersion,
-                a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null))
+            .Select(ToRow)
             .ToListAsync(ct).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Every upload still booked on one environment, in the order it will go, for the
+    /// environment's Scheduled installs. Not capped like the history: a booking must not
+    /// drop off the list because the environment has been busy. Reading needs only
+    /// visibility, as the history does.
+    /// </summary>
+    public async Task<List<UpgradeActionRow>> ListPendingUploadsAsync(
+        int projectId, int environmentId, CancellationToken ct = default)
+    {
+        await _access.EnsureCanViewAsync(projectId, ct).ConfigureAwait(false);
+
+        return await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.ProjectId == projectId && a.EnvironmentId == environmentId
+                        && a.Kind == UpgradeActionKind.UploadApp && a.Status == UpgradeActionStatus.Pending)
+            .OrderBy(a => a.ExecuteAfter).ThenBy(a => a.BatchOrder).ThenBy(a => a.Id)
+            .Select(ToRow)
+            .ToListAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>The one projection every read of the table shares, so a new column reaches every list at once.</summary>
+    private static readonly System.Linq.Expressions.Expression<Func<OeEnvironmentUpgradeAction, UpgradeActionRow>> ToRow =
+        a => new UpgradeActionRow(
+            a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.Status,
+            a.RequestedBy, a.RequestedAt, a.ExecuteAfter, a.SentAt, a.Outcome,
+            a.CancelledBy, a.CancelledAt, a.TargetVersion,
+            a.UpgradeId, a.Upgrade != null ? a.Upgrade.Name : null, a.PackageFileName, a.BatchId, a.BatchOrder);
 
     // ── Shared with the worker ──────────────────────────────────────────
 
@@ -326,6 +411,18 @@ public sealed class UpgradeActionService
                 ct),
             _ => throw new InvalidOperationException($"{kind} is recorded, never run."),
         };
+
+    /// <summary>
+    /// Sends a booked upload (<see cref="UpgradeActionKind.UploadApp"/> with a package on
+    /// the row) when its slot arrives and waits for the install to finish. Only the
+    /// worker calls this: every upload is booked through
+    /// <see cref="ProjectConnectionService.InstallUploadedAppsAsync"/>, and none is sent
+    /// from a page request.
+    /// </summary>
+    internal Task<BcAppOperationResult> RunUploadAsync(
+        int projectId, int environmentId, string fileName, byte[] package,
+        Func<BcAppOperation, CancellationToken, Task> accepted, CancellationToken ct, Action? progress = null) =>
+        _connections.SendBookedUploadAsync(projectId, environmentId, package, fileName, accepted, ct, progress);
 
     /// <summary>
     /// The kinds this service runs, and the version rule between them: a version change
@@ -374,10 +471,13 @@ public sealed class UpgradeActionService
     /// version because they act on whichever is chosen, while a version change says which
     /// version it set, since that is the whole of what it did.
     /// </summary>
-    internal static string SuccessOutcome(UpgradeActionKind kind, string? targetVersion = null, string? environmentName = null) =>
+    internal static string SuccessOutcome(UpgradeActionKind kind, string? targetVersion = null, string? environmentName = null, string? fileName = null) =>
         kind switch
         {
             UpgradeActionKind.PushDateToLatest => "The update date was moved out to the latest Business Central allows.",
+            UpgradeActionKind.UploadApp => environmentName is { Length: > 0 }
+                ? $"{fileName} was installed on {environmentName}."
+                : $"{fileName} was installed.",
             UpgradeActionKind.SelectVersion => environmentName is { Length: > 0 }
                 ? $"Set the next version to {targetVersion} on {environmentName}."
                 : $"Set the next version to {targetVersion}.",
@@ -396,11 +496,12 @@ public sealed class UpgradeActionService
     /// "try again once it finishes" is an instruction, and a history entry is not the
     /// place to be given one.</para>
     /// </summary>
-    internal static string FailureOutcome(UpgradeActionKind kind, string reason, string? targetVersion = null)
+    internal static string FailureOutcome(UpgradeActionKind kind, string reason, string? targetVersion = null, string? fileName = null)
     {
         var lead = kind switch
         {
             UpgradeActionKind.PushDateToLatest => "The update date wasn't moved.",
+            UpgradeActionKind.UploadApp => $"{fileName} wasn't installed.",
             UpgradeActionKind.SelectVersion => $"The next version wasn't changed to {targetVersion}.",
             _ => "The update didn't start.",
         };
@@ -458,7 +559,12 @@ public sealed record UpgradeActionRow(
     DateTime? CancelledAt,
     string? TargetVersion = null,
     int? UpgradeId = null,
-    string? UpgradeName = null)
+    string? UpgradeName = null,
+    /// <summary>The file a booked or sent upload carried, so the feed can name it. Null for every other kind.</summary>
+    string? PackageFileName = null,
+    /// <summary>The multi-app upload this row belongs to, and its place in it (from zero). Null for a single upload and every other kind.</summary>
+    Guid? BatchId = null,
+    int? BatchOrder = null)
 {
     /// <summary>True while the action is still waiting for its slot — the only state with a Cancel.</summary>
     public bool IsPending => Status == UpgradeActionStatus.Pending;

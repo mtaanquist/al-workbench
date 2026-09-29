@@ -1178,67 +1178,20 @@ public sealed class DeliveryService
     }
 
     /// <summary>
-    /// Polls one install operation by id until it reports a terminal state or the per-app
-    /// timeout elapses. Keyed on the operation and app ids Business Central returned from
-    /// the upload, so two extensions that happen to share a display name can't be mistaken
-    /// for each other.
+    /// Polls one install operation until it reports a terminal state or the per-app
+    /// timeout elapses - the shared <see cref="BcAppOperationPoller"/>, which booked
+    /// uploads use too, mapped onto this delivery's outcome shape.
     /// </summary>
     private async Task<DeploymentOutcome> PollUntilTerminalAsync(
         BcDeliveryContext bc, string family, OeProjectDelivery delivery, BcAppOperation started, CancellationToken ct)
     {
-        if (started.AppId is not { } appId)
-        {
-            // Without an app id there's nothing to poll. The upload was accepted, so
-            // don't call it a failure — say what's unverified and let the consultant look.
-            return new DeploymentOutcome(true, "Business Central accepted the upload but didn't say which app it was, so the install wasn't confirmed here.");
-        }
-
-        var deadline = DateTime.UtcNow + PollTimeoutPerApp;
-        while (true)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            var operation = await _apps.GetAppOperationAsync(
-                bc.AccessToken, family, delivery.EnvironmentName, appId, started.Id, ct);
-
-            switch (operation?.Status)
-            {
-                case BcAppOperationStatus.Succeeded:
-                    return new DeploymentOutcome(true, null);
-                case BcAppOperationStatus.Failed:
-                    return DescribeFailure(operation);
-                case BcAppOperationStatus.Canceled:
-                    return new DeploymentOutcome(false, "The install was cancelled in Business Central.");
-                case BcAppOperationStatus.Skipped:
-                    return new DeploymentOutcome(false, "Business Central skipped the install.");
-                // Scheduled / Running / Unknown, and a not-yet-visible operation → keep polling.
-            }
-
-            if (DateTime.UtcNow > deadline)
-            {
-                return new DeploymentOutcome(false, "Timed out waiting for the install to finish.");
-            }
-            await Task.Delay(PollDelay, ct);
-        }
-    }
-
-    /// <summary>
-    /// Turns a failed operation into what the history stores (#930): the app's message is
-    /// the code's sentence followed by Business Central's own message, verbatim, and the raw
-    /// text goes to the log. The codes lead because <see cref="BcAppOperation.ErrorMessage"/>
-    /// comes back in the <em>environment's</em> language - shown, never branched on. The
-    /// codes the client already read win over the ones parsed from the text.
-    /// </summary>
-    private static DeploymentOutcome DescribeFailure(BcAppOperation operation)
-    {
-        var parsed = BcFailureText.Parse(operation.ErrorMessage);
-        var detail = parsed with
-        {
-            Code = string.IsNullOrEmpty(operation.ErrorCode) ? parsed.Code : operation.ErrorCode,
-            InnerCode = string.IsNullOrEmpty(operation.InnerErrorCode) ? parsed.InnerCode : operation.InnerErrorCode,
-        };
-        var raw = string.IsNullOrWhiteSpace(operation.ErrorMessage) ? null : operation.ErrorMessage;
-        return new DeploymentOutcome(false, BcFailureText.AppMessage(detail), detail, raw);
+        var result = await BcAppOperationPoller.PollUntilTerminalAsync(
+            _apps, bc.AccessToken, family, delivery.EnvironmentName, started, PollDelay, PollTimeoutPerApp, ct);
+        // A delivery needs a clean yes: an install it could not see finish (no id, a run
+        // of failed polls, the wait ran out) is not one it reports as done. A missing app
+        // id is the one caveat it has always carried as a success.
+        var completed = result.Completed || (result.IsUnconfirmed && started.AppId is null);
+        return new DeploymentOutcome(completed, result.Message, result.Failure, result.Raw);
     }
 
     /// <param name="Failure">Set when Business Central reported the install as failed, so the delivery's line is built from its code.</param>
