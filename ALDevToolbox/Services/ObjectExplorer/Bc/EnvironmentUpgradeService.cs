@@ -634,8 +634,9 @@ public sealed class EnvironmentUpgradeService
 
     /// <summary>
     /// Ticks or unticks a line's after-upgrade check. Ticking stamps the acting person and
-    /// the time; unticking clears both. The note is kept either way, trimmed, at most
-    /// <see cref="LineNoteMaxLength"/> characters.
+    /// the time - once: ticking a line that is already ticked, to change its note, keeps
+    /// the stamp of whoever did the check. Unticking clears both. The note is kept either
+    /// way, trimmed, at most <see cref="LineNoteMaxLength"/> characters.
     /// </summary>
     public async Task SetCheckedAsync(int lineId, bool isChecked, string? note, CancellationToken ct = default)
     {
@@ -648,13 +649,16 @@ public sealed class EnvironmentUpgradeService
         var line = await LoadLineForWriteAsync(lineId, ct).ConfigureAwait(false);
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        if (isChecked)
+        // A line already ticked keeps its stamp: saving a note on it is not a second check,
+        // and the page's note editor goes through here with the tick left on. Otherwise
+        // whoever added "reports OK" afterwards would replace the person who did the check.
+        if (isChecked && line.CheckedAt is null)
         {
             line.CheckedAt = now;
             line.CheckedByUserId = _orgContext.CurrentUserId;
             line.CheckedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct).ConfigureAwait(false);
         }
-        else
+        else if (!isChecked)
         {
             line.CheckedAt = null;
             line.CheckedByUserId = null;

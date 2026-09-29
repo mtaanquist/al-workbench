@@ -272,6 +272,40 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Changing_the_note_on_a_checked_line_keeps_the_stamp_of_whoever_checked_it()
+    {
+        var (_, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        var lineId = await LineIdAsync(id, envId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetCheckedAsync(lineId, true, null);
+        }
+        var checkedAt = _f.Clock.GetUtcNow().UtcDateTime;
+
+        // Later, somebody else on the update team adds what was looked at.
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await ctx.TeamMembers.SingleAsync(m => m.UserId == UpgradeActionTestFixture.PlainTeamUserId)).ManagesUpdates = true;
+            await ctx.SaveChangesAsync();
+        }
+        _f.Clock.Advance(TimeSpan.FromHours(2));
+        _f.ActAs(UpgradeActionTestFixture.PlainTeamUserId);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetCheckedAsync(lineId, true, "reports OK");
+        }
+
+        await using var read = _f.Db.NewContext();
+        var line = await read.OeEnvironmentUpgradeLines.AsNoTracking().SingleAsync();
+        line.Note.Should().Be("reports OK");
+        line.CheckedAt.Should().Be(checkedAt);
+        line.CheckedByUserId.Should().Be(UpgradeActionTestFixture.FlagUserId);
+        line.CheckedBy.Should().Contain("Anna Jensen");
+    }
+
+    [Fact]
     public async Task A_check_note_over_500_characters_is_refused()
     {
         var (_, envId) = await _f.SeedCustomerAsync();
