@@ -35,12 +35,42 @@
             </Alert>
         }
     </Notices>
+    @* In the sticky head so the decision stays in view however long the
+       suggestion runs, instead of at the foot of the page. *@
+    <Actions>
+        @if (_suggestion is not null)
+        {
+            if (_rejecting)
+            {
+                <input class="input suggestion-reject-note" type="text" aria-label="Reason for rejecting"
+                       placeholder="Reason (optional)"
+                       @bind="_rejectNote" @bind:event="oninput"
+                       maxlength="500" />
+                <button type="button" class="btn" @onclick="() => _rejecting = false" disabled="@_busy">Cancel</button>
+                <button type="button" class="btn btn--danger" @onclick="RejectAsync" disabled="@_busy">
+                    <Icon Name="x" Width="14" Height="14" />
+                    <span>Confirm reject</span>
+                </button>
+            }
+            else
+            {
+                <button type="button" class="btn" @onclick="StartReject" disabled="@_busy">
+                    <Icon Name="x" Width="14" Height="14" />
+                    <span>Reject</span>
+                </button>
+            }
+            <button type="button" class="btn btn--primary" @onclick="ApproveAsync" disabled="@_busy">
+                <Icon Name="check" Width="14" Height="14" />
+                <span>Approve and publish</span>
+            </button>
+        }
+    </Actions>
     @* Not found has no body of its own: the head already says it, and offers the way back. *@
     <ChildContent>
     <section class="card">
         <div class="card__head">
             <h2 class="card__title">What was suggested</h2>
-            <span class="u-row">
+            <span class="u-row suggestion-tags">
                 @* A .tag, not a .status-pill, for the same reason
                    AdminTemplateList gives its "Default" marker one: a
                    recipe type is an attribute of the suggestion, not its
@@ -62,7 +92,7 @@
             <p class="form-sec__cap">@_suggestion!.Description</p>
             @if (!string.IsNullOrWhiteSpace(_suggestion!.Keywords))
             {
-                <div class="u-row">
+                <div class="u-row suggestion-tags">
                     @foreach (var kw in _suggestion!.Keywords.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                     {
                         <span class="tag">@kw</span>
@@ -100,32 +130,6 @@
         </div>
     </section>
 
-    <div class="form-actions">
-        @if (_rejecting)
-        {
-            <input class="input" type="text" aria-label="Reason for rejecting"
-                   placeholder="Reason (optional)"
-                   @bind="_rejectNote" @bind:event="oninput"
-                   maxlength="500" />
-            <button type="button" class="btn" @onclick="() => _rejecting = false" disabled="@_busy">Cancel</button>
-            <button type="button" class="btn btn--danger" @onclick="RejectAsync" disabled="@_busy">
-                <Icon Name="x" Width="14" Height="14" />
-                <span>Confirm reject</span>
-            </button>
-        }
-        else
-        {
-            <button type="button" class="btn" @onclick="StartReject" disabled="@_busy">
-                <Icon Name="x" Width="14" Height="14" />
-                <span>Reject</span>
-            </button>
-        }
-        <span class="form-actions__spacer"></span>
-        <button type="button" class="btn btn--primary" @onclick="ApproveAsync" disabled="@_busy">
-            <Icon Name="check" Width="14" Height="14" />
-            <span>Approve and publish</span>
-        </button>
-    </div>
     </ChildContent>
 </EditPage>
 
