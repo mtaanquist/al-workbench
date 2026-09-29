@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -13,9 +14,11 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261102000000_StoreBookedUploadPackage")]
+    partial class StoreBookedUploadPackage
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -996,10 +999,6 @@ namespace ALDevToolbox.Data.Migrations
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("scopes_granted");
-
-                    b.Property<DateTime?>("StrongAuthAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("strong_auth_at");
 
                     b.Property<int>("UserId")
                         .HasColumnType("integer")
@@ -3722,12 +3721,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("imported_at");
 
-                    b.Property<bool>("IsPrerelease")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false)
-                        .HasColumnName("is_prerelease");
-
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasColumnType("text")
@@ -4107,19 +4100,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("slug");
 
-                    b.PrimitiveCollection<List<string>>("StepUpTools")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("text[]")
-                        .HasColumnName("step_up_tools")
-                        .HasDefaultValueSql("'{}'::text[]");
-
-                    b.Property<int>("StepUpWindowMinutes")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(15)
-                        .HasColumnName("step_up_window_minutes");
-
                     b.Property<int?>("StorageQuotaMb")
                         .HasColumnType("integer")
                         .HasColumnName("storage_quota_mb");
@@ -4288,12 +4268,6 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<DateTime?>("AutoImportLastRunAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("auto_import_last_run_at");
-
-                    b.Property<bool>("AutoImportPreviewsEnabled")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false)
-                        .HasColumnName("auto_import_previews_enabled");
 
                     b.Property<bool>("AutoImportReleasesEnabled")
                         .ValueGeneratedOnAdd()

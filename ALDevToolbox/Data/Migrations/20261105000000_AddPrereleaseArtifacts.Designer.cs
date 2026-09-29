@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -13,9 +14,11 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261105000000_AddPrereleaseArtifacts")]
+    partial class AddPrereleaseArtifacts
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -997,10 +1000,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("scopes_granted");
 
-                    b.Property<DateTime?>("StrongAuthAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("strong_auth_at");
-
                     b.Property<int>("UserId")
                         .HasColumnType("integer")
                         .HasColumnName("user_id");
@@ -1247,22 +1246,6 @@ namespace ALDevToolbox.Data.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
-                    b.Property<Guid?>("BatchId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("package_batch_id");
-
-                    b.Property<int?>("BatchOrder")
-                        .HasColumnType("integer")
-                        .HasColumnName("package_batch_order");
-
-                    b.Property<Guid?>("BcAppId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("package_bc_app_id");
-
-                    b.Property<Guid?>("BcOperationId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("package_bc_operation_id");
-
                     b.Property<DateTime?>("CancelledAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("cancelled_at");
@@ -1297,15 +1280,6 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<string>("Outcome")
                         .HasColumnType("text")
                         .HasColumnName("outcome");
-
-                    b.Property<byte[]>("PackageContent")
-                        .HasColumnType("bytea")
-                        .HasColumnName("package_content");
-
-                    b.Property<string>("PackageFileName")
-                        .HasMaxLength(260)
-                        .HasColumnType("character varying(260)")
-                        .HasColumnName("package_file_name");
 
                     b.Property<int>("ProjectId")
                         .HasColumnType("integer")
@@ -4106,19 +4080,6 @@ namespace ALDevToolbox.Data.Migrations
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("slug");
-
-                    b.PrimitiveCollection<List<string>>("StepUpTools")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("text[]")
-                        .HasColumnName("step_up_tools")
-                        .HasDefaultValueSql("'{}'::text[]");
-
-                    b.Property<int>("StepUpWindowMinutes")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(15)
-                        .HasColumnName("step_up_window_minutes");
 
                     b.Property<int?>("StorageQuotaMb")
                         .HasColumnType("integer")

@@ -1,4 +1,5 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerService ObjectExplorer
+@using ALDevToolbox.Services.ObjectExplorer.Import
 @using ALDevToolbox.Services.ObjectExplorer
 @using System.Text.RegularExpressions
 
@@ -145,9 +146,12 @@
             // The featured release is then dropped from the grid: rendering it
             // in both places put the same title, version and file count on
             // screen twice, linking to the same page.
-            var showHero = !searching && _kind == "first_party";
-            var featured = rows[0];
-            var gridRows = showHero ? rows.Skip(1).ToList() : rows;
+            // A preview build never takes the hero, and the hero never points at
+            // one: featured there it would read as GA. The hero is the newest
+            // shipped release; previews stay in the grid under their major, pilled.
+            var showHero = !searching && _kind == "first_party" && rows.Any(r => !r.IsPrerelease);
+            var featured = showHero ? rows.First(r => !r.IsPrerelease) : rows[0];
+            var gridRows = showHero ? rows.Where(r => r.Id != featured.Id).ToList() : rows;
 
             @if (showHero)
             {
@@ -217,7 +221,11 @@
                         {
                             <a class="browse-card oe-card" href="@($"/object-explorer/release/{r.Id}")">
                                 <div class="browse-card__top">
-                                    <span class="browse-card__title">@r.Label</span>
+                                    <span class="browse-card__title">@(r.IsPrerelease ? BcArtifactIndex.StripPreviewSuffix(r.Label) : r.Label)</span>
+                                    @if (r.IsPrerelease)
+                                    {
+                                        <StatusPill Tone="warn" Class="status-pill--inline" title="Pre-release build of an upcoming version. Objects may still change before it ships.">Preview</StatusPill>
+                                    }
                                     @if (!string.IsNullOrEmpty(r.BcVersion))
                                     {
                                         <span class="code">@r.BcVersion</span>

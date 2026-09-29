@@ -163,6 +163,17 @@ public class OrganizationSettings
     public string? AutoImportCountry { get; set; }
 
     /// <summary>
+    /// When <see langword="true"/> (and <see cref="AutoImportReleasesEnabled"/>),
+    /// the daily sweep also imports Microsoft's pre-release builds of upcoming
+    /// majors off the insider channel for the same countries, marks them as
+    /// previews, refreshes them every fortnight, and retires each once the
+    /// version ships. Off by default: previews are large downloads of builds
+    /// Microsoft publishes under its insider terms. See
+    /// <c>.design/object-explorer.md</c>, "Preview builds".
+    /// </summary>
+    public bool AutoImportPreviewsEnabled { get; set; }
+
+    /// <summary>
     /// When the daily auto-import sweep last ran for this org (UTC), stamped by
     /// <c>ReleaseAutoImportScheduler</c> after each per-org pass — including
     /// passes that found nothing new. Null until the first sweep; shown on the

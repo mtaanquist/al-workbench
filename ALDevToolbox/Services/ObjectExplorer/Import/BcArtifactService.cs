@@ -63,15 +63,26 @@ public sealed class BcArtifactService
             throw Invalid("Country", "Enter a BC country code, e.g. 'dk' or 'w1'.");
         }
 
-        var countryJson = await GetIndexAsync(BcArtifactIndex.CountryIndexUrl(country), ct).ConfigureAwait(false);
-        if (countryJson is null)
+        var versions = await TryListVersionsAsync(country, BcArtifactChannel.Release, ct).ConfigureAwait(false);
+        if (versions is null)
         {
             throw Invalid("Country",
                 $"No artifact index for country '{country.Trim().ToLowerInvariant()}'. Check the code (e.g. 'dk', 'w1').");
         }
-        // Platform index is best-effort: if it's unavailable we don't drop
-        // application versions for lack of a cross-check.
-        var platformJson = await GetIndexAsync(BcArtifactIndex.PlatformIndexUrl(), ct).ConfigureAwait(false);
+        return versions;
+    }
+
+    /// <summary>
+    /// Fetches a channel's available versions for <paramref name="country"/>,
+    /// newest first, or <see langword="null"/> when that channel publishes no
+    /// index for the country (404/403). The platform index is best-effort: when
+    /// it's unavailable we don't drop application versions for lack of a cross-check.
+    /// </summary>
+    private async Task<IReadOnlyList<string>?> TryListVersionsAsync(string country, BcArtifactChannel channel, CancellationToken ct)
+    {
+        var countryJson = await GetIndexAsync(BcArtifactIndex.CountryIndexUrl(country, channel), ct).ConfigureAwait(false);
+        if (countryJson is null) return null;
+        var platformJson = await GetIndexAsync(BcArtifactIndex.PlatformIndexUrl(channel), ct).ConfigureAwait(false);
         return BcArtifactIndex.ParseVersions(countryJson, platformJson);
     }
 
@@ -85,12 +96,45 @@ public sealed class BcArtifactService
         var available = await ListAvailableVersionsAsync(country, ct).ConfigureAwait(false);
         var selected = BcArtifactIndex.SelectVersion(available, version);
         if (selected is null) return null;
+        return Resolve(selected, country, BcArtifactChannel.Release);
+    }
+
+    /// <summary>
+    /// Resolves the pre-release builds worth importing for <paramref name="country"/>:
+    /// the newest insider build of each upcoming major (see
+    /// <see cref="BcArtifactIndex.SelectPreviewVersions"/>), judged against the
+    /// newest major the public OnPrem index has shipped. Empty when the country
+    /// has no shipped release to judge against, when the insider storage
+    /// publishes no index for it, or when nothing newer is in preview.
+    /// </summary>
+    public async Task<IReadOnlyList<ResolvedArtifact>> ResolvePreviewsAsync(string country, CancellationToken ct = default)
+    {
+        var released = await ListAvailableVersionsAsync(country, ct).ConfigureAwait(false);
+        var newestReleasedMajor = BcArtifactIndex.ToMajor(released.FirstOrDefault());
+        if (newestReleasedMajor is null) return Array.Empty<ResolvedArtifact>();
+
+        var previews = await TryListVersionsAsync(country, BcArtifactChannel.Preview, ct).ConfigureAwait(false);
+        if (previews is null)
+        {
+            _logger.LogInformation("No insider artifact index for country {Country}; no preview builds to resolve.", country);
+            return Array.Empty<ResolvedArtifact>();
+        }
+
+        return BcArtifactIndex.SelectPreviewVersions(previews, newestReleasedMajor.Value)
+            .Select(v => Resolve(v, country, BcArtifactChannel.Preview))
+            .ToList();
+    }
+
+    private static ResolvedArtifact Resolve(string version, string country, BcArtifactChannel channel)
+    {
+        var prerelease = channel == BcArtifactChannel.Preview;
         return new ResolvedArtifact(
-            Version: selected,
-            ApplicationUrl: BcArtifactIndex.BuildApplicationUrl(selected, country),
-            Label: BcArtifactIndex.FormatLabel(selected, country),
-            MajorMinor: BcArtifactIndex.ToMajorMinor(selected),
-            DedupKey: BcArtifactIndex.FormatDedupKey(selected, country));
+            Version: version,
+            ApplicationUrl: BcArtifactIndex.BuildApplicationUrl(version, country, channel),
+            Label: BcArtifactIndex.FormatLabel(version, country, prerelease),
+            MajorMinor: BcArtifactIndex.ToMajorMinor(version),
+            DedupKey: BcArtifactIndex.FormatDedupKey(version, country, prerelease),
+            IsPrerelease: prerelease);
     }
 
     // ── Persisted cache (Artifacts tab) ────────────────────────────────
@@ -189,7 +233,8 @@ public sealed class BcArtifactService
             if (platformUrl is not null)
             {
                 // The manifest may hand back a blob-host URL (which now 403s);
-                // rewrite it onto the Front Door host that serves anonymously.
+                // rewrite it onto the Front Door host that serves anonymously
+                // (the insider one for a preview build).
                 platformUrl = BcArtifactIndex.ToCdnUrl(platformUrl);
                 if (!Uri.TryCreate(platformUrl, UriKind.Absolute, out var platformUri)
                     || !BcArtifactIndex.IsTrustedArtifactHost(platformUri.Host))
@@ -288,8 +333,13 @@ public sealed class BcArtifactService
     }
 }
 
-/// <summary>A resolved OnPrem artifact: the selected version, its download URL, the derived (display) release label, the Major.Minor, and the explicit dedup key.</summary>
-public sealed record ResolvedArtifact(string Version, string ApplicationUrl, string Label, string MajorMinor, string DedupKey);
+/// <summary>
+/// A resolved Microsoft artifact: the selected version, its download URL, the
+/// derived (display) release label, the Major.Minor, the explicit dedup key, and
+/// whether it came off the insider (pre-release) channel.
+/// </summary>
+public sealed record ResolvedArtifact(
+    string Version, string ApplicationUrl, string Label, string MajorMinor, string DedupKey, bool IsPrerelease = false);
 
 /// <summary>The staged temp-zip paths for a downloaded artifact set; <see cref="PlatformZipPath"/> is null when the artifact had no platform pairing.</summary>
 public sealed record BcArtifactDownload(string ApplicationZipPath, string? PlatformZipPath);

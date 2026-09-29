@@ -35,6 +35,19 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         entity.Property(e => e.CancelledBy).HasColumnName("cancelled_by").HasMaxLength(320);
         entity.Property(e => e.CancelledAt).HasColumnName("cancelled_at");
 
+        // A booked upload's package, held until the row settles (see the entity's
+        // remarks). bytea rather than a side table: at most one 50 MB file per booking,
+        // read once by the worker and cleared in the same write that records the outcome.
+        entity.Property(e => e.PackageFileName).HasColumnName("package_file_name").HasMaxLength(260);
+        entity.Property(e => e.PackageContent).HasColumnName("package_content");
+        // Several apps uploaded together: the worker runs a batch's rows in order.
+        entity.Property(e => e.BatchId).HasColumnName("package_batch_id");
+        entity.Property(e => e.BatchOrder).HasColumnName("package_batch_order");
+        // What Business Central answered the upload with, so a restart mid-install knows
+        // the app is already with it.
+        entity.Property(e => e.BcAppId).HasColumnName("package_bc_app_id");
+        entity.Property(e => e.BcOperationId).HasColumnName("package_bc_operation_id");
+
         // No concurrency-token column: see the entity's remarks. The one race on this
         // table — the worker claiming a row while somebody cancels it — is decided by a
         // conditional ExecuteUpdate, the pattern the rest of the codebase already uses.

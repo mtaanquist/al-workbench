@@ -451,6 +451,24 @@ public sealed class DependencyDriftServiceTests : IDisposable
         result.Refusal.Should().Contain("Connect your own GitHub account first");
     }
 
+    [Fact]
+    public async Task A_preview_release_is_never_a_drift_target()
+    {
+        // A preview going ready must not wipe the findings and tell every solution
+        // it is behind a version customers can't run; nor may "Check again" pick it
+        // as the newest first-party release just because its number is highest.
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var shipped = await SeedReleaseAsync();
+        var preview = await SeedReleaseAsync(prerelease: true, bcVersion: "29.0.55190.0");
+        var (service, ctx) = NewService(BaseApi());
+        await using var _ = ctx;
+
+        (await service.ScanForReleaseAsync(preview)).Should().Be(0);
+        (await service.NewestFirstPartyReleaseIdAsync()).Should().Be(shipped);
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────
 
     private (DependencyDriftService Service, AppDbContext Context) NewService(FakeGitHubApi api)
@@ -539,17 +557,19 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     /// <summary>A first-party release with the Base Application and System modules a scan reads.</summary>
-    private async Task<int> SeedReleaseAsync(string kind = "first_party")
+    private async Task<int> SeedReleaseAsync(string kind = "first_party", bool prerelease = false, string bcVersion = "28.2.50931.51727")
     {
         await using var ctx = _db.NewContext();
         var release = new OeRelease
         {
             OrganizationId = TestDb.DefaultOrgId,
-            Label = "Business Central 28.2 (DK)",
+            Label = prerelease ? $"Business Central {bcVersion[..4]} (DK) Preview" : "Business Central 28.2 (DK)",
             Kind = kind,
             Status = "ready",
-            BcVersion = "28.2.50931.51727",
-            DedupKey = kind == "first_party" ? "bc-onprem:28.2:dk" : null,
+            BcVersion = bcVersion,
+            IsPrerelease = prerelease,
+            DedupKey = kind != "first_party" ? null
+                : prerelease ? $"bc-insider:{bcVersion[..4]}:dk" : "bc-onprem:28.2:dk",
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         };

@@ -38,9 +38,9 @@
 <DetailPage IsLoading="@(_release is null && !_loaded)"
             LoadingText="Loading release..."
             IsNotFound="@(_release is null && _loaded)"
-            Title="@(_release?.Label)"
+            Title="@(_release is { IsPrerelease: true } ? ALDevToolbox.Services.ObjectExplorer.Import.BcArtifactIndex.StripPreviewSuffix(_release.Label) : _release?.Label)"
             PageClass="oe-release"
-            ShowMeta="@(_repoUrls.Count > 0)">
+            ShowMeta="@(_repoUrls.Count > 0 || _release?.IsPrerelease == true)">
     <NotFound>
         @* An id that resolves to nothing - a removed release, or one that
            belongs to a solution the viewer can't see - used to leave the page on
@@ -71,10 +71,27 @@
             <span> · BC @_release!.BcVersion</span>
         }
         <span> · @FormatStatus(_release!.Status)</span>
+        @if (_release!.IsPrerelease)
+        {
+            <StatusPill Tone="warn" Class="status-pill--inline" title="Pre-release build of an upcoming version. Objects may still change before it ships.">Preview</StatusPill>
+        }
     </SubtitleContent>
     @* Where the release was built from. A second line under the subtitle until the
        page moved onto the detail frame, which keeps facts in the meta row. *@
     <Meta>
+        @if (_release!.IsPrerelease)
+        {
+            <span class="meta-item">
+                <span class="meta-item__label">Preview</span>
+                <span class="meta-item__value">
+                    Pre-release build of an upcoming version, imported
+                    <Timestamp Value="@_release!.ImportedAt" Format="yyyy-MM-dd" />.
+                    Objects may still change before it ships.
+                </span>
+            </span>
+        }
+        @if (_repoUrls.Count > 0)
+        {
         <span class="meta-item">
             <span class="meta-item__label">@(_repoUrls.Count == 1 ? "Repository" : "Repositories")</span>
             <span class="meta-item__value oe-release__repos">
@@ -84,6 +101,7 @@
                 }
             </span>
         </span>
+        }
     </Meta>
     <Actions>
         @if (_artifactProjectId is { } pid)

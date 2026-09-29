@@ -125,8 +125,12 @@
                     <tr>
                         <td>
                             <a href="@($"/object-explorer/release/{r.Id}")">
-                                <strong>@r.Label</strong>
+                                <strong>@(r.IsPrerelease ? ALDevToolbox.Services.ObjectExplorer.Import.BcArtifactIndex.StripPreviewSuffix(r.Label) : r.Label)</strong>
                             </a>
+                            @if (r.IsPrerelease)
+                            {
+                                <StatusPill Tone="warn" Class="status-pill--inline" title="Pre-release build of an upcoming version. Objects may still change before it ships.">Preview</StatusPill>
+                            }
                             @if (r.DeletedAt is not null)
                             {
                                 <span class="u-muted"> · soft-deleted</span>

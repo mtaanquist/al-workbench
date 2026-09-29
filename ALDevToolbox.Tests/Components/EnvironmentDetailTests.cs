@@ -510,11 +510,111 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         var cut = Render(envId, "apps");
 
         cut.WaitForAssertion(() =>
-            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload an app").Click());
+            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload apps").Click());
 
         cut.WaitForAssertion(() => cut.Find("#upload-app-file").GetAttribute("accept").Should().Be(".app"));
         cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload and install")
             .HasAttribute("disabled").Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The seeded environment has a delivery window, so that is the first choice and
+    /// Microsoft's window is not offered beside it; picking a time reveals the field and
+    /// says the slot back with the zone named, which is the sentence that keeps 12:32 on
+    /// the person's clock from becoming 12:32 UTC.
+    /// </summary>
+    [Fact]
+    public async Task The_upload_dialog_offers_the_delivery_window_first_and_says_a_picked_time_back_with_its_zone()
+    {
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        var cut = Render(envId, "apps");
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload apps").Click());
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("In the delivery window, 22:00-04:00 (Copenhagen)"));
+        cut.Markup.Should().NotContain("In the BC update window", "the customer's own window stands in for Microsoft's");
+        cut.Markup.Should().Contain("At a time I pick (UTC time)", "the option names the zone it is read in - the test organisation shows times in UTC").And.Contain("anyone working in Business Central may be interrupted");
+        cut.FindAll("input[type=datetime-local]").Should().BeEmpty("the field only appears once that option is chosen");
+
+        cut.FindAll(".upload-app__when-opt input[type=radio]")[1].Change(true);
+
+        cut.WaitForAssertion(() => cut.FindAll("input[type=datetime-local]").Should().HaveCount(1));
+        cut.Find(".upload-app__echo").TextContent.Should().MatchRegex(
+            @"^Installs at \d\d:\d\d on \d+ \w+, UTC time - \d\d:\d\d for the customer \(Copenhagen\)\.$",
+            "the customer's clock differs from the page's, so both are said");
+    }
+
+    [Fact]
+    public async Task Without_a_delivery_window_the_upload_dialog_falls_back_to_microsofts_window_and_says_so()
+    {
+        var (projectId, envId) = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var env = await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == envId);
+            env.UpdateWindowStart = null;
+            env.UpdateWindowEnd = null;
+            await ctx.SaveChangesAsync();
+        }
+        _panels.Set(projectId, envId, Panel());
+        var cut = Render(envId, "apps");
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll("button").Single(b => b.TextContent.Trim() == "Upload apps").Click());
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("In the BC update window"));
+        cut.Markup.Should().Contain("has no delivery window").And.NotContain("In the delivery window");
+        // Microsoft's window has not been read on the seeded row, so that option cannot be booked yet.
+        cut.Markup.Should().Contain("hasn't been read yet");
+        cut.FindAll(".upload-app__when-opt input[type=radio]")[0].HasAttribute("disabled").Should().BeTrue();
+    }
+
+    /// <summary>
+    /// An upload booked here is one of the environment's scheduled installs to the person
+    /// asking what is going to install, so it sits in that list beside Business Central's
+    /// own, named, timed, and with the two things that can be done to it.
+    /// </summary>
+    [Fact]
+    public async Task A_booked_upload_is_listed_among_the_scheduled_installs_with_install_now_and_cancel()
+    {
+        var (projectId, envId) = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = projectId,
+                EnvironmentId = envId,
+                Kind = UpgradeActionKind.UploadApp,
+                Status = UpgradeActionStatus.Pending,
+                RequestedByUserId = OwnerUserId,
+                RequestedBy = "owner@example.com",
+                RequestedAt = DateTime.UtcNow,
+                ExecuteAfter = DateTime.UtcNow.AddHours(6),
+                PackageFileName = "Partner_Thing_1.0.0.0.app",
+                PackageContent = new byte[] { 1, 2, 3 },
+            });
+            await ctx.SaveChangesAsync();
+        }
+        _panels.Set(projectId, envId, Panel());
+        var cut = Render(envId, "apps");
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Partner_Thing_1.0.0.0.app"));
+        cut.Markup.Should().Contain("Uploaded here").And.Contain("Booked for").And.NotContain("Nothing waiting to install");
+        cut.Markup.Should().NotContain(" of 1", "a single upload is not shown as a batch");
+        cut.FindAll("button").Should().Contain(b => b.TextContent.Trim() == "Install now")
+            .And.Contain(b => b.TextContent.Trim() == "Cancel install");
+
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Cancel install").Click();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Call off this install?"));
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Call off the install").Click();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("The install of Partner_Thing_1.0.0.0.app was cancelled."));
+        await using var verify = _db.NewContext();
+        var row = await verify.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.EnvironmentId == envId);
+        row.Status.Should().Be(UpgradeActionStatus.Cancelled);
+        row.PackageContent.Should().BeNull("a cancelled booking keeps nothing but the record");
     }
 
     [Fact]
@@ -1132,7 +1232,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.Markup.Should().Contain("CRONUS Sales Extension");
         cut.Markup.Should().Contain("Continia Core");
         cut.FindAll(".data-table__actions").Should().BeEmpty("every action on an app writes to the customer's tenant");
-        cut.Markup.Should().NotContain("Upload an app");
+        cut.Markup.Should().NotContain("Upload apps");
     }
 
     [Fact]

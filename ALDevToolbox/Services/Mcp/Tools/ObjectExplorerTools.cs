@@ -43,7 +43,7 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "list_releases", ReadOnly = true)]
-    [Description("Lists every BC release (the version snapshots from which Object Explorer was populated), including Microsoft (kind 'first_party'), third-party ('third_party'), and legacy C/AL TXT imports ('cal'). Returns each release's id, Label (e.g. 'BC 28.1'), kind, BC version, and status.")]
+    [Description("Lists every BC release (the version snapshots from which Object Explorer was populated), including Microsoft (kind 'first_party'), third-party ('third_party'), and legacy C/AL TXT imports ('cal'). Returns each release's id, Label (e.g. 'BC 28.1'), kind, BC version, status, and IsPrerelease — true for a Microsoft preview build of an upcoming version imported from the insider channel, which is replaced once that version ships; prefer a non-preview release for anything that has to match what customers run.")]
     public async Task<IReadOnlyList<ReleaseListItem>> ListReleasesAsync(CancellationToken ct = default) =>
         // Project builds are excluded — they're served through the Artifacts surface
         // (list_pipelines / list_pipeline_builds / get_solution_build), not the general

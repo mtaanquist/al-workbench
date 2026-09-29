@@ -446,6 +446,8 @@
                                        called Production, so the environment alone does
                                        not say whose history this is. *@
                                     <h2 class="upg-feed__title">Update history - @row.ProjectName, @row.EnvironmentName</h2>
+                                    @* No CanActOnUploads: this page is the update team's, and a booked
+                                       upload is called off from the environment's own page. *@
                                     <EnvironmentActivityFeed Entries="_feed"
                                                              CanAct="row.CanAct"
                                                              TimeZone="UpdateWindow.ResolveTimeZone(row.TimeZone)"
