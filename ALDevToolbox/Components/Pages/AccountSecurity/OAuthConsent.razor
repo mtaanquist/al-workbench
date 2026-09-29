@@ -8,7 +8,7 @@
 @inject IHttpContextAccessor Http
 @inject AppDbContext Db
 @inject IOrganizationContext Org
-@inject ALDevToolbox.Services.Account.StepUpPolicy StepUp
+@inject ALDevToolbox.Services.Tools.ToolEnablement Tools
 @inject NavigationManager Nav
 
 <PageTitle>Authorise · AL Workbench</PageTitle>
@@ -118,7 +118,7 @@ else
         // Step-up before the form, not after: when the org asks for a second
         // factor on any tool, approving an assistant needs a recent one. The
         // POST handler checks again. Static render, so NavigateTo is a 302.
-        if (await StepUp.AnyStepUpToolAsync() && !StepUp.IsFresh(http.User))
+        if (await Tools.AnyStepUpAsync() && !Tools.IsFresh(http.User))
         {
             Nav.NavigateTo(StepUpEndpoints.Url(http.Request.Path + http.Request.QueryString));
             return;

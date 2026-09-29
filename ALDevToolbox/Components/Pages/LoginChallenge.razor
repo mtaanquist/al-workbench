@@ -6,6 +6,7 @@
 @inject IHttpContextAccessor Http
 @inject IDataProtectionProvider Protection
 @inject TimeProvider Clock
+@inject ALDevToolbox.Services.Account.WebAuthnConfig WebAuthn
 
 <PageTitle>@(_state?.StepUp == true ? "Confirm it's you" : "Verify it's you") · AL Workbench</PageTitle>
 
@@ -61,13 +62,13 @@ else if (_state.StepUp && _methods.Count == 0 && !_state.PasskeyAvailable && !_s
     <AuthCard Title="Set up two-factor sign-in first">
         <Sub>
             Your organisation asks people to confirm it's them before using this tool, and
-            your account has no way to do that yet. Add an authenticator app, email codes or a
-            passkey on your account's Security page, then open the tool again.
+            your account has no way to do that yet. Add an authenticator app@(string.IsNullOrEmpty(WebAuthn.RpId) ? " or email codes" : ", email codes or a passkey")
+            under Sign-in &amp; security on your account, then open the tool again.
         </Sub>
         <ChildContent>
             <a class="btn btn--primary" href="/account?section=security" style="height: var(--control-h-lg)">
                 <Icon Name="shield" Width="16" Height="16" />
-                <span>Go to account security</span>
+                <span>Go to Sign-in &amp; security</span>
             </a>
         </ChildContent>
         <Foot>
@@ -270,7 +271,7 @@ else
         // door. The only real move is a person with admin rights.
         "not-configured" when !HasAnotherWayIn && _state?.StepUp == true =>
             "We can't send email codes right now, and email is the only way this account can confirm. "
-            + "Ask your administrator to fix email sending, or add an authenticator app or passkey on your account's Security page.",
+            + "Ask your administrator to fix email sending, or add an authenticator app under Sign-in & security on your account.",
         "not-configured" when !HasAnotherWayIn =>
             "We can't send email codes right now, and email is the only second factor on this account. "
             + "Ask your administrator to set up email, or to switch off two-factor sign-in for you.",

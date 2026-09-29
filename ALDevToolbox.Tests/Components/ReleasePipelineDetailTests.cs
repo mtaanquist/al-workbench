@@ -52,6 +52,7 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         _ctx.Services.AddScoped<ProjectConnectionService>();
         _ctx.Services.AddScoped<IDeliveryTokenSource>(sp => sp.GetRequiredService<ProjectConnectionService>());
         _ctx.Services.AddScoped<DeliveryService>();
+        TestDb.AddToolServices(_ctx.Services);
         _ctx.Services.AddSingleton(new DeliveryQueue());
         _ctx.Services.AddSingleton<IBcAdminClient>(new UnreachableAdminClient());
         _ctx.Services.AddSingleton<IBcAppManagementClient>(new UnreachableAppManagementClient());
@@ -773,6 +774,8 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
                 NullLogger<ALDevToolbox.Services.GitHub.GitHubConnectionService>.Instance, TimeProvider.System),
             new ProjectAccess(db, org), org,
             new ALDevToolbox.Endpoints.PublicOrigin(null), TimeProvider.System,
+            new ALDevToolbox.Services.Tools.ToolEnablement(TestDb.EverythingEnabled(),
+                new Microsoft.AspNetCore.Http.HttpContextAccessor(), db, org, TimeProvider.System),
             NullLogger<ALDevToolbox.Services.GitHub.GitHubReleaseService>.Instance);
     }
 

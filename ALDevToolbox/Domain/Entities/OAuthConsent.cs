@@ -40,4 +40,15 @@ public class OAuthConsent
 
     /// <summary>Stamped when the user (or an admin) revokes the consent. Non-null rows are ignored.</summary>
     public DateTime? RevokedAt { get; set; }
+
+    /// <summary>
+    /// When the person approving this consent had a recent second factor,
+    /// stamped at consent time from the session's strong moment. Null for a
+    /// consent granted from a session without one, including every consent
+    /// granted before step-up existed. The MCP call filter requires it before
+    /// an assistant may use a writing tool the organisation marked for
+    /// step-up: approving the assistant again is how it gets one. See
+    /// ".design/auth-and-audit.md", "Step-up for sensitive tools".
+    /// </summary>
+    public DateTime? StrongAuthAt { get; set; }
 }

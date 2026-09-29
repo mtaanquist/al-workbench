@@ -497,7 +497,7 @@ internal static class AccountAuthEndpoints
 
         // /auth/account/* — self-service. All require [Authorize].
         app.MapPost("/auth/account/password", async (
-            HttpContext ctx, AccountService accounts, IOrganizationContext org, IAntiforgery antiforgery, CancellationToken ct) =>
+            HttpContext ctx, AccountService accounts, IOrganizationContext org, IAntiforgery antiforgery, TimeProvider clock, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
@@ -508,12 +508,15 @@ internal static class AccountAuthEndpoints
                 // The change invalidates every cookie issued before it (#675),
                 // including this one — re-issue it so the user who just changed
                 // their own password isn't signed out along with everyone else.
-                // Same session, so keep its sign-in method and any step-up it
-                // already did: the stamps are mirrored on ctx.User as claims.
-                var method = Enum.TryParse<SignInMethod>(ctx.User.FindFirst(StepUpAuth.MethodClaim)?.Value, out var m) ? m : SignInMethod.Password;
-                await ctx.SignInAsync(
-                    CookieAuthenticationDefaults.AuthenticationScheme, ctx.User,
-                    PersistentSignIn(ctx, method, carryOverStrongAt: StepUpAuth.StrongAuthAt(ctx.User)));
+                // Same session: keep its method and strong moment exactly as
+                // they were (typing the current password proves nothing new),
+                // but a fresh signed_in_at so this cookie survives the cut the
+                // change just made. The stamps are mirrored on ctx.User as claims.
+                var props = PersistentSignIn(ctx,
+                    StepUpAuth.Method(ctx.User) ?? SignInMethod.Password,
+                    StepUpAuth.StrongAuthAt(ctx.User),
+                    signedInAt: clock.GetUtcNow().UtcDateTime);
+                await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, ctx.User, props);
                 ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=password");
             }
             catch (PlanValidationException ex)

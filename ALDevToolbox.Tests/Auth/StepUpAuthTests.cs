@@ -23,34 +23,40 @@ public sealed class StepUpAuthTests
     [InlineData(SignInMethod.Password, false)]
     [InlineData(SignInMethod.Passkey, false)]
     [InlineData(SignInMethod.MagicLink, false)]
+    [InlineData(SignInMethod.EntraSso, false)]
     public void Only_second_factor_methods_are_strong(SignInMethod method, bool strong)
     {
         StepUpAuth.IsStrong(method).Should().Be(strong);
     }
 
     [Fact]
-    public void A_strong_method_stamps_the_moment_and_a_weak_one_leaves_none()
+    public void A_fresh_sign_in_earns_the_moment_only_for_a_strong_method()
+    {
+        StepUpAuth.StrongMomentFor(SignInMethod.Totp, Now).Should().Be(Now);
+        StepUpAuth.StrongMomentFor(SignInMethod.Password, Now).Should().BeNull();
+        StepUpAuth.StrongMomentFor(SignInMethod.EntraSso, Now).Should().BeNull(
+            "Microsoft without auth_time may have reused its own session");
+    }
+
+    [Fact]
+    public void Stamp_writes_exactly_what_it_is_given()
     {
         var strong = new AuthenticationProperties();
         StepUpAuth.Stamp(strong, SignInMethod.Totp, Now);
         strong.Items[StepUpAuth.MethodKey].Should().Be("Totp");
         StepUpAuth.StrongAuthAt(strong).Should().Be(Now);
 
-        var weak = new AuthenticationProperties();
-        StepUpAuth.Stamp(weak, SignInMethod.Password, Now);
-        weak.Items[StepUpAuth.MethodKey].Should().Be("Password");
-        StepUpAuth.StrongAuthAt(weak).Should().BeNull();
-    }
+        // A re-issue of the same session passes the moment it already had,
+        // whatever the method: a password change must neither refresh nor
+        // lose an earlier step-up.
+        var reissued = new AuthenticationProperties();
+        StepUpAuth.Stamp(reissued, SignInMethod.Totp, Now.AddHours(-8));
+        StepUpAuth.StrongAuthAt(reissued).Should().Be(Now.AddHours(-8));
 
-    [Fact]
-    public void A_weak_reissue_keeps_the_earlier_strong_moment_when_asked_to()
-    {
-        // The password-change endpoint re-issues the same session's cookie;
-        // that must not throw away a step-up the person just did.
-        var props = new AuthenticationProperties();
-        StepUpAuth.Stamp(props, SignInMethod.Password, Now, carryOverStrongAt: Now.AddMinutes(-3));
-
-        StepUpAuth.StrongAuthAt(props).Should().Be(Now.AddMinutes(-3));
+        var none = new AuthenticationProperties();
+        none.Items[StepUpAuth.StrongAuthAtKey] = "stale";
+        StepUpAuth.Stamp(none, SignInMethod.Password, null);
+        StepUpAuth.StrongAuthAt(none).Should().BeNull("a null moment removes an earlier stamp");
     }
 
     [Fact]
@@ -67,6 +73,7 @@ public sealed class StepUpAuthTests
         StepUpAuth.ApplyClaims(identity, props);
 
         identity.FindAll(StepUpAuth.MethodClaim).Should().ContainSingle().Which.Value.Should().Be("Entra");
+        StepUpAuth.Method(new ClaimsPrincipal(identity)).Should().Be(SignInMethod.Entra);
         StepUpAuth.StrongAuthAt(new ClaimsPrincipal(identity)).Should().Be(Now);
     }
 

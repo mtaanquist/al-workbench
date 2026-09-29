@@ -63,6 +63,27 @@ public sealed class McpToolCatalogTests
     }
 
     [Fact]
+    public void Every_writing_tool_names_the_tool_whose_step_up_rule_covers_it()
+    {
+        // The step-up rule an admin sets per tool reaches the MCP surface
+        // through this field; a writing tool without one would be ungated.
+        foreach (var tool in McpToolCatalog.All)
+        {
+            if (tool.Writes)
+            {
+                tool.Tool.Should().NotBeNull("{0} changes something, so it needs a tool to follow", tool.Name);
+            }
+            else
+            {
+                tool.Tool.Should().BeNull("{0} is read-only and is never gated by step-up", tool.Name);
+            }
+        }
+        McpToolCatalog.ToolFor("deploy_build").Should().Be(ToolKey.Releases);
+        McpToolCatalog.ToolFor("list_environments").Should().BeNull();
+        McpToolCatalog.ToolFor("no_such_tool").Should().BeNull();
+    }
+
+    [Fact]
     public void Every_tool_lands_in_a_group_the_table_actually_renders()
     {
         McpToolCatalog.All.Select(t => t.Group).Distinct()

@@ -70,7 +70,7 @@ public sealed class ToolEnablementTests : IDisposable
                 User = PrincipalWithDisabled(ToolKey.Projects),
             },
         };
-        var tools = new ToolEnablement(TestDb.EverythingEnabled(), accessor, ctx, _db.OrgContext);
+        var tools = new ToolEnablement(TestDb.EverythingEnabled(), accessor, ctx, _db.OrgContext, TimeProvider.System);
 
         (await tools.IsEnabledAsync(ToolKey.Projects)).Should().BeFalse();
         (await tools.IsEnabledAsync(ToolKey.Cookbook)).Should().BeTrue();
@@ -81,7 +81,7 @@ public sealed class ToolEnablementTests : IDisposable
     {
         using var ctx = _db.NewContext();
         var site = TestDb.EverythingEnabled();
-        var tools = new ToolEnablement(site, new HttpContextAccessor(), ctx, _db.OrgContext);
+        var tools = new ToolEnablement(site, new HttpContextAccessor(), ctx, _db.OrgContext, TimeProvider.System);
 
         tools.IsEnabled(ToolKey.Projects, PrincipalWithDisabled(ToolKey.Projects)).Should().BeFalse();
         tools.IsEnabled(ToolKey.Projects, PrincipalWithDisabled(ToolKey.Piper)).Should().BeTrue();

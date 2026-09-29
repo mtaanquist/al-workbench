@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Tools;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Endpoints;
 using Microsoft.EntityFrameworkCore;
 
@@ -31,20 +32,75 @@ public sealed class ToolEnablement
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
 
+    private readonly TimeProvider _clock;
+
     // Resolved at most once per scope: a request that asks about two tools
     // should not read the organisation row twice.
     private HashSet<ToolKey>? _orgDisabled;
+    private HashSet<ToolKey>? _orgStepUp;
 
     public ToolEnablement(
         IToolAvailability availability,
         IHttpContextAccessor http,
         AppDbContext db,
-        IOrganizationContext orgContext)
+        IOrganizationContext orgContext,
+        TimeProvider clock)
     {
         _availability = availability;
         _http = http;
         _db = db;
         _orgContext = orgContext;
+        _clock = clock;
+    }
+
+    // ---- Step-up: "does this tool want a recent second factor?" -------------
+    // The second per-org question about a tool, answered from the same row.
+    // See ".design/auth-and-audit.md", "Step-up for sensitive tools".
+
+    /// <summary>The tools the acting organisation has marked for step-up, read once per scope.</summary>
+    public async Task<HashSet<ToolKey>> StepUpToolsAsync(CancellationToken ct = default)
+    {
+        if (_orgStepUp is not null) return _orgStepUp;
+        if (_orgContext.CurrentOrganizationId is not { } orgId) return _orgStepUp = new HashSet<ToolKey>();
+        // Always the row, never the claim: the claim refreshes with the cookie
+        // and this answer decides whether a credential gets spent.
+        var names = await _db.Organizations.AsNoTracking()
+            .Where(o => o.Id == orgId)
+            .Select(o => o.StepUpTools)
+            .FirstOrDefaultAsync(ct);
+        return _orgStepUp = ToolCatalog.ParseKeys(names);
+    }
+
+    /// <summary>True when the acting organisation wants a recent second factor before <paramref name="key"/> is used.</summary>
+    public async Task<bool> RequiresStepUpAsync(ToolKey key, CancellationToken ct = default) =>
+        (await StepUpToolsAsync(ct)).Contains(key);
+
+    /// <summary>True when the acting organisation has marked any tool at all.</summary>
+    public async Task<bool> AnyStepUpAsync(CancellationToken ct = default) =>
+        (await StepUpToolsAsync(ct)).Count > 0;
+
+    /// <summary>Whether the principal's last second factor is within <see cref="Services.Account.StepUpAuth.Window"/>.</summary>
+    public bool IsFresh(ClaimsPrincipal? user) =>
+        Services.Account.StepUpAuth.IsFresh(user, _clock.GetUtcNow().UtcDateTime);
+
+    /// <summary>
+    /// The action-level check for the code paths that spend a stored
+    /// credential from inside a page a route gate cannot see (a dialog on a
+    /// different tool's page, an admin page): refuses with
+    /// <see cref="StepUpRequiredException"/> when the acting organisation
+    /// marked <paramref name="key"/> and the request's cookie session is not
+    /// fresh. Bearer sessions are the MCP filter's business (a PAT is refused
+    /// there, an OAuth session was checked at consent), and a call with no
+    /// HTTP request at all (a worker) passes: there is nobody to ask.
+    /// </summary>
+    public async Task EnsureStepUpAsync(ToolKey key, CancellationToken ct = default)
+    {
+        var user = _http.HttpContext?.User;
+        if (user?.Identity?.IsAuthenticated != true) return;
+        if (user.HasClaim(c => c.Type == "pat_id") || user.FindFirst(EndpointHelpers.DisabledToolsClaim) is null) return;
+        if (!await RequiresStepUpAsync(key, ct)) return;
+        if (IsFresh(user)) return;
+        throw new StepUpRequiredException(key);
     }
 
     /// <summary>
@@ -100,5 +156,25 @@ public sealed class ToolEnablement
         // callers ask one question for every tool, as the claim lets them.
         if (!row.McpEnabled) disabled.Add(ToolKey.Mcp);
         return _orgDisabled = disabled;
+    }
+}
+
+/// <summary>
+/// Raised by <see cref="ToolEnablement.EnsureStepUpAsync"/>. A
+/// <see cref="PlanValidationException"/> so the dialogs and pages that
+/// already render field-keyed errors show it inline, with a message that
+/// says what to do: confirm on the step-up page and come back.
+/// </summary>
+public sealed class StepUpRequiredException : PlanValidationException
+{
+    public ToolKey Tool { get; }
+
+    public StepUpRequiredException(ToolKey tool)
+        : base(new Dictionary<string, string>
+        {
+            ["StepUp"] = $"Confirm it's you before using {ToolCatalog.Describe(tool).Name}: open {Endpoints.StepUpEndpoints.Path} in a new tab, confirm, then reload this page and try again.",
+        })
+    {
+        Tool = tool;
     }
 }

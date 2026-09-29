@@ -139,8 +139,19 @@ public sealed class AccountAdministrationTests : IDisposable
             });
             await seed.SaveChangesAsync();
         }
+        var tokens = _db.OpenIddictTokens;
+        var token = await tokens.CreateAsync(new OpenIddict.Abstractions.OpenIddictTokenDescriptor
+        {
+            Subject = subjectId.ToString(),
+            Type = OpenIddict.Abstractions.OpenIddictConstants.TokenTypes.Bearer,
+            Status = OpenIddict.Abstractions.OpenIddictConstants.Statuses.Valid,
+            CreationDate = _clock.GetUtcNow(),
+        });
 
         await using (var ctx = _db.NewContext()) await NewUserAdmin(ctx).DisableUserAsync(subjectId, orgId);
+
+        (await tokens.GetStatusAsync((await tokens.FindByIdAsync((await tokens.GetIdAsync(token))!))!))
+            .Should().Be(OpenIddict.Abstractions.OpenIddictConstants.Statuses.Revoked);
 
         await using var read = _db.NewContext();
         var now = _clock.GetUtcNow().UtcDateTime;

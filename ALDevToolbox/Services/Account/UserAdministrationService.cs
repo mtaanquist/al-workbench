@@ -111,11 +111,14 @@ public sealed class UserAdministrationService
         var now = _clock.GetUtcNow().UtcDateTime;
         user.Status = UserStatus.Disabled;
         user.CredentialsChangedAt = now;
-        // Both filtered writes: LoadUserAsync pinned the user to the acting org,
-        // and the admin endpoint passes the request's own org as actingOrgId, so
-        // the query filter and the pin agree. Not crossing the fence here is
-        // deliberate (CLAUDE.md); a caller acting for another org would find
-        // these no-op, which the filter would then be right about.
+        // One transaction: the bulk revocations commit on their own otherwise,
+        // and a failed save would leave tokens revoked on an account still
+        // active. Both filtered writes: LoadUserAsync pinned the user to the
+        // acting org, and the admin endpoint passes the request's own org as
+        // actingOrgId, so the query filter and the pin agree. Not crossing the
+        // fence here is deliberate (CLAUDE.md); a caller acting for another org
+        // would find these no-op, which the filter would then be right about.
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
         await _db.PersonalAccessTokens
             .Where(p => p.UserId == userId && p.RevokedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(p => p.RevokedAt, now), ct);
@@ -124,10 +127,12 @@ public sealed class UserAdministrationService
             .ExecuteUpdateAsync(s => s.SetProperty(c => c.RevokedAt, now), ct);
         await _db.SaveChangesAsync(ct);
         // OpenIddict stores Subject = the user id (OAuthEndpoints.MapAuthorizeComplete).
+        // Its manager shares this scoped context, so the revocations join the transaction.
         await foreach (var token in _oauthTokens.FindBySubjectAsync(userId.ToString(), ct))
         {
             await _oauthTokens.TryRevokeAsync(token, ct);
         }
+        await tx.CommitAsync(ct);
     }
 
     /// <summary>Re-enables a disabled user without further admin approval.</summary>

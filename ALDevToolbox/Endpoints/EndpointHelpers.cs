@@ -100,7 +100,7 @@ internal static class EndpointHelpers
     /// <summary>
     /// Reads the <see cref="StepUpToolsClaim"/> off a principal. Empty when the
     /// claim is absent (PAT / OAuth principals), which is why those surfaces
-    /// consult <see cref="Services.Account.StepUpPolicy"/> against the row.
+    /// consult <see cref="Services.Tools.ToolEnablement"/> against the row.
     /// </summary>
     public static HashSet<Domain.Tools.ToolKey> ReadStepUpTools(ClaimsPrincipal? user)
     {
@@ -111,16 +111,45 @@ internal static class EndpointHelpers
     }
 
     /// <summary>
-    /// Issues the auth cookie for <paramref name="user"/>, stamping how the
-    /// session was established (<see cref="Services.Account.StepUpAuth"/>).
-    /// Every sign-in path goes through here so the method is never left
-    /// unstamped. A re-issue for the same session (password change, step-up)
-    /// passes <paramref name="carryOverStrongAt"/> so a weak re-issue keeps the
-    /// earlier strong moment.
+    /// Issues the auth cookie for a fresh sign-in, stamping how the session
+    /// was established (<see cref="Services.Account.StepUpAuth"/>). Every
+    /// sign-in path goes through here so the method is never left unstamped.
+    /// A strong method earns "now" as its strong moment; an Entra sign-in
+    /// passes the token's <c>auth_time</c> as <paramref name="strongAuthAt"/>
+    /// instead, because that is when Microsoft says the person was there.
     /// </summary>
-    public static Task SignInUserAsync(HttpContext ctx, User user, Services.Account.SignInMethod method, DateTime? carryOverStrongAt = null)
+    public static Task SignInUserAsync(HttpContext ctx, User user, Services.Account.SignInMethod method, DateTime? strongAuthAt = null)
     {
-        var properties = PersistentSignIn(ctx, method, carryOverStrongAt);
+        var clock = ctx.RequestServices.GetRequiredService<TimeProvider>();
+        var now = clock.GetUtcNow().UtcDateTime;
+        var properties = PersistentSignIn(ctx, method,
+            strongAuthAt ?? Services.Account.StepUpAuth.StrongMomentFor(method, now), signedInAt: now);
+        return IssueAsync(ctx, user, properties);
+    }
+
+    /// <summary>
+    /// Re-issues the cookie for a session that already exists, keeping
+    /// <c>signed_in_at</c> so a session a password reset should have ended
+    /// cannot be rescued by re-issuing it (a step-up in the five-minute
+    /// revalidation gap, for instance), and taking the method and strong
+    /// moment the caller decides: a step-up passes the factor that just
+    /// succeeded and "now"; a password change passes the session's own
+    /// stamps unchanged, because typing the current password proves nothing
+    /// new.
+    /// </summary>
+    public static async Task ReissueUserAsync(HttpContext ctx, User user, Services.Account.SignInMethod method, DateTime? strongAuthAt)
+    {
+        var clock = ctx.RequestServices.GetRequiredService<TimeProvider>();
+        var current = await ctx.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        var signedInAt = current.Properties?.Items.TryGetValue(SignedInAtKey, out var raw) == true
+            && DateTime.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
+            ? parsed
+            : clock.GetUtcNow().UtcDateTime;
+        await IssueAsync(ctx, user, PersistentSignIn(ctx, method, strongAuthAt, signedInAt));
+    }
+
+    private static Task IssueAsync(HttpContext ctx, User user, Microsoft.AspNetCore.Authentication.AuthenticationProperties properties)
+    {
         var identity = BuildIdentity(user);
         Services.Account.StepUpAuth.ApplyClaims(identity, properties);
         return ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity), properties);
@@ -145,13 +174,11 @@ internal static class EndpointHelpers
     /// during sign-in.
     /// </summary>
     public static Microsoft.AspNetCore.Authentication.AuthenticationProperties PersistentSignIn(
-        HttpContext ctx, Services.Account.SignInMethod method, DateTime? carryOverStrongAt = null)
+        HttpContext ctx, Services.Account.SignInMethod method, DateTime? strongAuthAt, DateTime signedInAt)
     {
-        var clock = ctx.RequestServices.GetRequiredService<TimeProvider>();
-        var now = clock.GetUtcNow().UtcDateTime;
         var props = new Microsoft.AspNetCore.Authentication.AuthenticationProperties { IsPersistent = true };
-        props.Items[SignedInAtKey] = now.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
-        Services.Account.StepUpAuth.Stamp(props, method, now, carryOverStrongAt);
+        props.Items[SignedInAtKey] = signedInAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        Services.Account.StepUpAuth.Stamp(props, method, strongAuthAt);
         return props;
     }
 

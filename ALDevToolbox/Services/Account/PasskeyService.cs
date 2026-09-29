@@ -278,8 +278,8 @@ public sealed class PasskeyService
     /// returns the authenticated user together with whether the authenticator
     /// reported user verification. A non-monotonic counter (signal of a
     /// cloned authenticator) raises <see cref="PlanValidationException"/>.
-    /// When the envelope came from <see cref="BeginStepUpAsync"/>, the
-    /// assertion must be for that user and must carry user verification.
+    /// A step-up envelope (<see cref="BeginStepUpAsync"/>) is refused here;
+    /// <see cref="CompleteStepUpAsync"/> finishes those.
     /// </summary>
     public async Task<(User User, bool UserVerified)> CompleteLoginAsync(
         AuthenticatorAssertionRawResponse rawResponse,
@@ -304,9 +304,11 @@ public sealed class PasskeyService
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "This account isn't active." });
         }
-        if (envelope.UserId is { } expectedUserId && envelope.RequireUserVerification && expectedUserId != user.Id)
+        if (envelope.RequireUserVerification)
         {
-            throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey belongs to a different account." });
+            // A step-up envelope is finished by CompleteStepUpAsync, which
+            // stays inside the tenant fence; it must not double as a sign-in.
+            throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey check wasn't started as a sign-in." });
         }
 
         IsUserHandleOwnerOfCredentialIdAsync isOwner = (args, _) =>
@@ -334,12 +336,60 @@ public sealed class PasskeyService
     }
 
     /// <summary>
+    /// The step-up counterpart of <see cref="CompleteLoginAsync"/>: the
+    /// credential must belong to <paramref name="userId"/>, the envelope must
+    /// be one <see cref="BeginStepUpAsync"/> issued, and the authenticator
+    /// must report user verification. Filtered throughout, because the caller
+    /// is signed in and the passkey has to be theirs: no tenant crossing, and
+    /// no <c>LastLoginAt</c> stamp, since this is not a sign-in.
+    /// </summary>
+    public async Task CompleteStepUpAsync(
+        int userId,
+        AuthenticatorAssertionRawResponse rawResponse,
+        string protectedChallenge,
+        CancellationToken ct = default)
+    {
+        AssertConfigured();
+        var envelope = UnprotectEnvelope(protectedChallenge);
+        if (!envelope.RequireUserVerification || envelope.UserId != userId)
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey check wasn't started for this account." });
+        }
+        var credentialId = rawResponse.RawId;
+        var passkey = await _db.UserPasskeys
+            .FirstOrDefaultAsync(p => p.CredentialId == credentialId && p.UserId == userId, ct)
+            ?? throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey belongs to a different account." });
+
+        IsUserHandleOwnerOfCredentialIdAsync isOwner = (args, _) =>
+            Task.FromResult(BitConverter.ToInt32(args.UserHandle) == userId);
+        var result = await _fido2.MakeAssertionAsync(new MakeAssertionParams
+        {
+            AssertionResponse = rawResponse,
+            OriginalOptions = ReconstructAssertionOptions(envelope.Challenge, requireUserVerification: true),
+            StoredPublicKey = passkey.PublicKey,
+            StoredSignatureCounter = (uint)passkey.SignCounter,
+            IsUserHandleOwnerOfCredentialIdCallback = isOwner,
+        }, ct);
+        if (result.SignCount <= passkey.SignCounter && result.SignCount != 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "Passkey counter mismatch — refusing sign-in." });
+        }
+        if (!UserVerifiedFlag(rawResponse))
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey didn't confirm it's you." });
+        }
+        passkey.SignCounter = result.SignCount;
+        passkey.LastUsedAt = _clock.GetUtcNow().UtcDateTime;
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
     /// The UV bit of the authenticator data's flags byte (WebAuthn 6.1: the
     /// flags follow the 32-byte RP ID hash; bit 2 is user verified). Read
     /// straight off the response the library just validated, so it is the
     /// same bytes the signature covers.
     /// </summary>
-    private static bool UserVerifiedFlag(AuthenticatorAssertionRawResponse rawResponse)
+    internal static bool UserVerifiedFlag(AuthenticatorAssertionRawResponse rawResponse)
     {
         var authData = rawResponse.Response?.AuthenticatorData;
         return authData is { Length: > 32 } && (authData[32] & 0x04) != 0;

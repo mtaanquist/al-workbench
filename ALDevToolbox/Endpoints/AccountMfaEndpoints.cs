@@ -33,7 +33,7 @@ internal static class AccountMfaEndpoints
         {
             var logger = loggerFactory.CreateLogger("MfaChallenge");
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            var state = ReadMfaPendingCookie(ctx, protection, clock);
+            var state = ReadChallengeState(ctx, protection, clock, requiresTotp: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
             // Brute-force guard: the attacker already has the password (that's
             // how they reached the challenge), so cap wrong second-factor
@@ -61,7 +61,7 @@ internal static class AccountMfaEndpoints
         {
             var logger = loggerFactory.CreateLogger("MfaChallenge");
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            var state = ReadMfaPendingCookie(ctx, protection, clock);
+            var state = ReadChallengeState(ctx, protection, clock, requiresEmail: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
 
             try
@@ -101,7 +101,7 @@ internal static class AccountMfaEndpoints
         {
             var logger = loggerFactory.CreateLogger("MfaChallenge");
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            var state = ReadMfaPendingCookie(ctx, protection, clock);
+            var state = ReadChallengeState(ctx, protection, clock, requiresEmail: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
             var form = await ctx.Request.ReadFormAsync(ct);
             var code = form["Code"].ToString();
@@ -120,7 +120,7 @@ internal static class AccountMfaEndpoints
         {
             var logger = loggerFactory.CreateLogger("MfaChallenge");
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            var state = ReadMfaPendingCookie(ctx, protection, clock);
+            var state = ReadChallengeState(ctx, protection, clock, requiresTotp: true);
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
             // Same brute-force guard as the TOTP path — recovery codes are a
             // longer but still finite space, and the counter is shared so an
@@ -266,6 +266,31 @@ internal static class AccountMfaEndpoints
     }
 
     /// <summary>
+    /// The pending state a challenge endpoint may act on. The state's
+    /// enrolment flags were read from the user row when it was issued, so a
+    /// method the account never turned on is refused here rather than left to
+    /// the page to hide: the email-code path in particular verifies against
+    /// nothing but the mailbox. For a step-up, the cookie on this request must
+    /// also belong to the user the state names, before any code is sent or
+    /// checked (the pre-auth login leg has no cookie to compare).
+    /// </summary>
+    internal static MfaPending? ReadChallengeState(
+        HttpContext ctx, IDataProtectionProvider protection, TimeProvider clock,
+        bool requiresTotp = false, bool requiresEmail = false)
+    {
+        var state = ReadMfaPendingCookie(ctx, protection, clock);
+        if (state is null) return null;
+        if (requiresTotp && !state.TotpEnabled) return null;
+        if (requiresEmail && !state.EmailMfaEnabled) return null;
+        if (state.StepUp)
+        {
+            var current = ctx.RequestServices.GetRequiredService<IOrganizationContext>().CurrentUserId;
+            if (current != state.UserId) return null;
+        }
+        return state;
+    }
+
+    /// <summary>
     /// Finalises an MFA-gated login: completes the second factor, issues the
     /// auth cookie, clears the pending-MFA cookie and redirects to the stashed
     /// return URL. Shared by the TOTP / email-code / recovery-code challenge
@@ -275,7 +300,7 @@ internal static class AccountMfaEndpoints
     {
         if (state.StepUp)
         {
-            await StepUpEndpoints.CompleteStepUpAsync(ctx, state, method, ct, logger);
+            await StepUpEndpoints.CompleteStepUpAsync(ctx, auth, state, method, ct, logger);
             return;
         }
         var user = await auth.CompleteMfaAsync(state.UserId, ResolveIp(ctx), ct);

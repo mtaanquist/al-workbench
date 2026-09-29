@@ -13,24 +13,12 @@ using static ALDevToolbox.Endpoints.EndpointHelpers;
 namespace ALDevToolbox.Endpoints;
 
 /// <summary>
-/// Step-up authentication: a signed-in member confirms it is them, with a
-/// second factor they already have, before a tool the organisation marked
-/// as sensitive opens (<see cref="ToolAccessGate"/>), before an AI assistant
-/// is authorised (<c>OAuthEndpoints.MapAuthorizeComplete</c>), and in the
-/// future wherever else a recent strong sign-in is worth asking for.
-///
-/// <para>
-/// The flow reuses the login challenge: <c>GET /auth/step-up</c> stashes an
-/// <see cref="MfaPending"/> with <c>StepUp = true</c> in the same signed
-/// cookie the password login uses and sends the user to
-/// <c>/login/challenge</c>, whose code forms post to the ordinary challenge
-/// endpoints. Those finish through <see cref="CompleteStepUpAsync"/> instead
-/// of a fresh sign-in. Passkeys and Microsoft get their own endpoints here
-/// because their ceremonies differ from a typed code: the passkey one
-/// requires user verification, and the Microsoft one forces a fresh
-/// interactive sign-in with <c>prompt=login</c>.
-/// </para>
-/// <para>See ".design/auth-and-audit.md", "Step-up for sensitive tools".</para>
+/// Step-up authentication: a signed-in member confirms it is them with a
+/// second factor they already have. The flow reuses the login challenge
+/// (the same pending cookie, page and code endpoints) because the
+/// verification and its throttle are the same; passkeys and Microsoft get
+/// their own endpoints here because their ceremonies differ from a typed
+/// code. See ".design/auth-and-audit.md", "Step-up for sensitive tools".
 /// </summary>
 internal static class StepUpEndpoints
 {
@@ -74,6 +62,9 @@ internal static class StepUpEndpoints
                 .FirstOrDefaultAsync(ct);
             if (user is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
 
+            // A session that began with a magic link already rests on the
+            // mailbox, so an emailed code would be the same factor twice.
+            var emailUsable = user.EmailMfaEnabled && StepUpAuth.Method(ctx.User) != SignInMethod.MagicLink;
             var passkeyAvailable = passkeys.IsConfigured
                 && await db.UserPasskeys.AnyAsync(p => p.UserId == userId.Value, ct);
             var entraAvailable = await db.UserExternalLogins.AnyAsync(
@@ -81,7 +72,7 @@ internal static class StepUpEndpoints
                 && await entra.ResolveChallengeForCurrentOrgAsync(ct) is not null;
 
             SetMfaPendingCookie(ctx, protection, new MfaPending(
-                userId.Value, user.TotpEnabled, user.EmailMfaEnabled, now, safeReturn,
+                userId.Value, user.TotpEnabled, emailUsable, now, safeReturn,
                 StepUp: true, PasskeyAvailable: passkeyAvailable, EntraAvailable: entraAvailable));
             ctx.Response.Redirect("/login/challenge");
         }).RequireAuthorization();
@@ -116,7 +107,7 @@ internal static class StepUpEndpoints
         // Passkey, second leg: verify, then re-stamp the session. Answers JSON
         // with where to go next, because the caller is a fetch, not a form.
         app.MapPost($"{Path}/passkey", async (
-            HttpContext ctx, PasskeyService passkeys, IOrganizationContext org,
+            HttpContext ctx, PasskeyService passkeys, AuthService auth, IOrganizationContext org,
             IDataProtectionProvider protection, TimeProvider clock, ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
@@ -137,16 +128,10 @@ internal static class StepUpEndpoints
             ctx.Response.Cookies.Delete(PasskeyService.LoginCookieName);
             try
             {
-                var (user, userVerified) = await passkeys.CompleteLoginAsync(rawResponse, envelope, ct);
-                if (user.Id != state.UserId || !userVerified)
-                {
-                    // BeginStepUpAsync pinned the allow-list and required UV, so
-                    // reaching here means a tampered response. Refuse.
-                    ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                    await ctx.Response.WriteAsync("{\"error\":\"That passkey didn't confirm it's you.\"}", ct);
-                    return;
-                }
-                await CompleteStepUpAsync(ctx, state, SignInMethod.PasskeyVerified, ct, logger, redirect: false);
+                // Filtered and pinned to the signed-in user; refuses without
+                // user verification. Nothing here crosses the tenant fence.
+                await passkeys.CompleteStepUpAsync(state.UserId, rawResponse, envelope, ct);
+                await CompleteStepUpAsync(ctx, auth, state, SignInMethod.PasskeyVerified, ct, logger, redirect: false);
                 ctx.Response.ContentType = "application/json";
                 await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, redirect = ReturnUrlOf(state) }), ct);
             }
@@ -198,12 +183,14 @@ internal static class StepUpEndpoints
 
     /// <summary>
     /// Re-issues the session cookie for the signed-in user with the method
-    /// that just succeeded, which stamps a fresh strong-auth moment, and clears
-    /// the pending state. Refuses unless the cookie on this request belongs to
-    /// the user the step-up was started for: a pending-state cookie replayed
-    /// from another session must not upgrade it.
+    /// that just succeeded, which stamps a fresh strong moment, keeps the
+    /// session's original start so a reset that should end it still does,
+    /// records the success so the MFA throttle's run of failures is broken,
+    /// and clears the pending state. Refuses unless the cookie on this
+    /// request belongs to the user the step-up was started for: a pending
+    /// state replayed from another session must not upgrade it.
     /// </summary>
-    public static async Task CompleteStepUpAsync(HttpContext ctx, MfaPending state, SignInMethod method, CancellationToken ct, ILogger logger, bool redirect = true)
+    public static async Task CompleteStepUpAsync(HttpContext ctx, AuthService auth, MfaPending state, SignInMethod method, CancellationToken ct, ILogger logger, bool redirect = true)
     {
         var org = ctx.RequestServices.GetRequiredService<IOrganizationContext>();
         if (org.CurrentUserId != state.UserId)
@@ -213,11 +200,14 @@ internal static class StepUpEndpoints
             return;
         }
         var db = ctx.RequestServices.GetRequiredService<AppDbContext>();
+        var clock = ctx.RequestServices.GetRequiredService<TimeProvider>();
+        var now = clock.GetUtcNow().UtcDateTime;
         // Filtered: the user's own row; the Organization nav feeds the claims.
         var user = await db.Users.AsNoTracking()
             .Include(u => u.Organization)
             .FirstAsync(u => u.Id == state.UserId, ct);
-        await SignInUserAsync(ctx, user, method);
+        await ReissueUserAsync(ctx, user, method, strongAuthAt: now);
+        await auth.RecordAttemptAsync(user.Email, ResolveIp(ctx), succeeded: true, now, ct);
         ClearMfaPendingCookie(ctx);
         logger.LogInformation("Step-up completed with {Method} for {Email} (org {OrgId}).", method, user.Email, user.OrganizationId);
         if (redirect) ctx.Response.Redirect(ReturnUrlOf(state));

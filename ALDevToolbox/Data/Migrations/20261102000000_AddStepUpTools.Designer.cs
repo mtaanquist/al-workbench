@@ -1000,6 +1000,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("scopes_granted");
 
+                    b.Property<DateTime?>("StrongAuthAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("strong_auth_at");
+
                     b.Property<int>("UserId")
                         .HasColumnType("integer")
                         .HasColumnName("user_id");

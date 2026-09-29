@@ -131,7 +131,8 @@ public sealed class ToolToggleServiceTests : IDisposable
     public async Task Org_step_up_tools_round_trip_and_keep_mcp()
     {
         await using var ctx = _db.NewContext();
-        var svc = _db.NewOrganizationAdminService(ctx);
+        // Changing the rule needs a fresh session (StepUpEnforcementTests has the refusal).
+        var svc = _db.NewOrganizationAdminService(ctx, TestDb.RequestWithStrongAuth(DateTime.UtcNow));
 
         (await svc.GetToolsViewAsync()).StepUpTools.Should().BeEmpty();
 

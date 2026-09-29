@@ -48,6 +48,7 @@ public sealed class AuthCardTests : IDisposable
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>));
         _ctx.Services.AddSingleton<IHttpContextAccessor>(_http);
+        _ctx.Services.AddSingleton(new ALDevToolbox.Services.Account.WebAuthnConfig(string.Empty, [], "AL Workbench"));
     }
 
     private readonly HttpContextAccessor _http = new() { HttpContext = new DefaultHttpContext() };

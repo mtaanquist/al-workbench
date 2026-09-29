@@ -5,6 +5,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.Tools;
 using ALDevToolbox.Services.OAuth;
 using Microsoft.AspNetCore;
 using Microsoft.AspNetCore.Antiforgery;
@@ -174,21 +175,29 @@ internal static class OAuthEndpoints
                 return;
             }
 
+            var form = await ctx.Request.ReadFormAsync(cancellationToken);
+            var decision = form["decision"].ToString();
+
             // Step-up: authorising an assistant hands it this user's writing
             // tools for as long as its refresh token lives, so when the org
             // asks for a second factor on any tool, the consent itself needs a
             // recent one. The consent page checks the same thing before
-            // rendering; this is the backstop for a stale or replayed form.
-            var stepUp = ctx.RequestServices.GetRequiredService<StepUpPolicy>();
-            if (await stepUp.AnyStepUpToolAsync(cancellationToken) && !stepUp.IsFresh(cookieResult.Principal))
+            // rendering; this is the backstop for a form that sat open past
+            // the window. Denying needs no confirmation. The form carries the
+            // OAuth request as hidden fields, so the page URL to come back to
+            // is rebuilt from those, not from this POST's (empty) query.
+            var tools = ctx.RequestServices.GetRequiredService<ToolEnablement>();
+            if (decision == "allow"
+                && await tools.AnyStepUpAsync(cancellationToken)
+                && !tools.IsFresh(cookieResult.Principal))
             {
-                var consentUrl = "/oauth/consent" + ctx.Request.QueryString;
-                ctx.Response.Redirect(StepUpEndpoints.Url(consentUrl));
+                var consentQuery = QueryString.Create(form
+                    .Where(f => f.Key != "decision" && !f.Key.StartsWith("__", StringComparison.Ordinal))
+                    .Select(f => new KeyValuePair<string, string?>(f.Key, f.Value.ToString())));
+                ctx.Response.Redirect(StepUpEndpoints.Url("/oauth/consent" + consentQuery));
                 return;
             }
 
-            var form = await ctx.Request.ReadFormAsync(cancellationToken);
-            var decision = form["decision"].ToString();
             if (decision != "allow")
             {
                 // Deny — round-trip an OAuth error back to Claude per RFC 6749.
@@ -219,7 +228,12 @@ internal static class OAuthEndpoints
             var canonicalScopes = string.Join(' ', requestedScopes);
 
             var now = clock.GetUtcNow().UtcDateTime;
-            await UpsertConsentAsync(db, userId, orgId, clientId, canonicalScopes, now, cancellationToken);
+            // The consent remembers whether the person confirming it had a
+            // recent second factor; the MCP filter requires that before a
+            // writing tool the org marked for step-up runs under this consent.
+            var strongAuthAt = StepUpAuth.IsFresh(cookieResult.Principal, now)
+                ? StepUpAuth.StrongAuthAt(cookieResult.Principal) : null;
+            await UpsertConsentAsync(db, userId, orgId, clientId, canonicalScopes, now, strongAuthAt, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
 
             // Stamp the org id and granted scopes onto the principal. The
@@ -262,6 +276,7 @@ internal static class OAuthEndpoints
         string clientId,
         string canonicalScopes,
         DateTime now,
+        DateTime? strongAuthAt,
         CancellationToken cancellationToken)
     {
         // Use IgnoreQueryFilters so the lookup hits the unique index across
@@ -283,6 +298,7 @@ internal static class OAuthEndpoints
                 ClientId = clientId,
                 ScopesGranted = canonicalScopes,
                 GrantedAt = now,
+                StrongAuthAt = strongAuthAt,
             });
         }
         else
@@ -290,6 +306,7 @@ internal static class OAuthEndpoints
             existing.ScopesGranted = canonicalScopes;
             existing.GrantedAt = now;
             existing.RevokedAt = null;
+            existing.StrongAuthAt = strongAuthAt;
         }
     }
 

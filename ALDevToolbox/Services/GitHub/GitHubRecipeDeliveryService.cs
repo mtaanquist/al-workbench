@@ -67,6 +67,7 @@ public sealed class GitHubRecipeDeliveryService
     private readonly GitHubAppClient _github;
     private readonly IOrganizationContext _orgContext;
     private readonly ILogger<GitHubRecipeDeliveryService> _logger;
+    private readonly ALDevToolbox.Services.Tools.ToolEnablement _tools;
 
     public GitHubRecipeDeliveryService(
         RecipeService recipes,
@@ -74,8 +75,10 @@ public sealed class GitHubRecipeDeliveryService
         GitHubAccessService access,
         GitHubAppClient github,
         IOrganizationContext orgContext,
+        ALDevToolbox.Services.Tools.ToolEnablement tools,
         ILogger<GitHubRecipeDeliveryService> logger)
     {
+        _tools = tools;
         _recipes = recipes;
         _repositories = repositories;
         _access = access;
@@ -113,6 +116,10 @@ public sealed class GitHubRecipeDeliveryService
         CancellationToken ct = default)
     {
         var userId = RequireUserId();
+        // Applying opens a pull request in the person's name, from the recipe
+        // page and from its admin page alike; the admin page is not under the
+        // Cookbook route gate, so the rule is checked here.
+        await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Cookbook, ct);
 
         // The recipe first: one that does not exist, or that carries no files,
         // is not worth a round trip to GitHub, and neither refusal is about the

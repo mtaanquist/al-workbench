@@ -89,6 +89,8 @@ public sealed class OrganizationAdminService
     private readonly OrganizationConfigService _config;
     private readonly IDataProtector _entraSecretProtector;
     private readonly ILogger<OrganizationAdminService> _logger;
+    private readonly ALDevToolbox.Services.Tools.ToolEnablement _tools;
+    private readonly IHttpContextAccessor _http;
 
     public OrganizationAdminService(
         AppDbContext db,
@@ -97,8 +99,12 @@ public sealed class OrganizationAdminService
         AuthService auth,
         OrganizationConfigService config,
         IDataProtectionProvider protectionProvider,
+        ALDevToolbox.Services.Tools.ToolEnablement tools,
+        IHttpContextAccessor http,
         ILogger<OrganizationAdminService> logger)
     {
+        _tools = tools;
+        _http = http;
         _db = db;
         _orgContext = orgContext;
         _mcpAvailability = mcpAvailability;
@@ -226,11 +232,14 @@ public sealed class OrganizationAdminService
 
     /// <summary>
     /// Replaces the set of tools this organisation wants a recent second factor
-    /// for (<see cref="Organization.StepUpTools"/>). Any tool may be listed,
-    /// MCP included, though MCP itself has no page to gate; the writing MCP
-    /// tools follow the tool they belong to (<see cref="McpToolAccess"/>).
-    /// Takes effect for signed-in members on their next cookie refresh; MCP and
-    /// OAuth consent read the row directly.
+    /// for (<see cref="Organization.StepUpTools"/>). Any tool may be listed:
+    /// its pages go behind the route gate (MCP's own page included), and its
+    /// writing MCP tools follow it through <see cref="McpToolDescriptor.Tool"/>.
+    /// Takes effect for signed-in members on their next cookie refresh; MCP,
+    /// OAuth consent and the action-level checks read the row directly.
+    /// Changing the set while any tool is marked, before or after, needs a
+    /// fresh session itself: otherwise a stale admin session could simply
+    /// switch the rule off.
     /// </summary>
     public async Task SetStepUpToolsAsync(IEnumerable<ToolKey> stepUp, CancellationToken ct = default)
     {
@@ -238,6 +247,13 @@ public sealed class OrganizationAdminService
         var org = await _db.Organizations.FirstAsync(o => o.Id == orgId, ct);
         var normalised = ToolCatalog.Format(stepUp.Distinct());
         if (org.StepUpTools.ToHashSet().SetEquals(normalised)) return;
+        if ((org.StepUpTools.Count > 0 || normalised.Count > 0) && !_tools.IsFresh(_http.HttpContext?.User))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["StepUp"] = $"Confirm it's you before changing this: open {Endpoints.StepUpEndpoints.Path} in a new tab, confirm, then reload and save again.",
+            });
+        }
         org.StepUpTools = normalised;
         await _db.SaveChangesAsync(ct);
         _logger.LogInformation(

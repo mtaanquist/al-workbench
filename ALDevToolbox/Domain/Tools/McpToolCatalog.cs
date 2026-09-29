@@ -10,7 +10,11 @@ namespace ALDevToolbox.Domain.Tools;
 /// consultant looking up what their assistant can do.</param>
 /// <param name="Writes">True when the tool changes something. Mirrors
 /// <c>McpServerToolAttribute.ReadOnly == false</c>; the catalogue test pins the two together.</param>
-public sealed record McpToolDescriptor(string Name, string Group, string Blurb, bool Writes);
+/// <param name="Tool">For a writing tool, the toggleable tool whose step-up rule
+/// (Administration → Tools) governs it. Read-only tools carry none: a recent second factor
+/// guards the actions that spend a stored credential, not the lookups around them.
+/// <c>McpToolCatalogTests</c> requires every writing tool to name one.</param>
+public sealed record McpToolDescriptor(string Name, string Group, string Blurb, bool Writes, ToolKey? Tool = null);
 
 /// <summary>
 /// The user-facing description of every tool an AI assistant can call, for
@@ -30,6 +34,10 @@ public sealed record McpToolDescriptor(string Name, string Group, string Blurb, 
 /// </summary>
 public static class McpToolCatalog
 {
+    /// <summary>The toggleable tool a writing MCP tool belongs to, or null for a read-only or unknown one.</summary>
+    public static ToolKey? ToolFor(string mcpToolName) =>
+        All.FirstOrDefault(t => t.Name == mcpToolName)?.Tool;
+
     public const string Generation = "Templates and generation";
     public const string ObjectExplorer = "Object Explorer";
     public const string Cookbook = "Cookbook";
@@ -56,10 +64,10 @@ public static class McpToolCatalog
             "Lists the dependencies your organisation has on file, so the assistant names them correctly.", false),
         new McpToolDescriptor("generate_workspace", Generation,
             "Builds a new workspace and hands back the ZIP, or creates a repository for it in "
-            + "your GitHub organisation.", true),
+            + "your GitHub organisation.", true, ToolKey.Templates),
         new McpToolDescriptor("generate_extension", Generation,
             "Builds a new standalone extension and hands back the ZIP, or adds it to one of "
-            + "your GitHub repositories as a pull request.", true),
+            + "your GitHub repositories as a pull request.", true, ToolKey.Templates),
 
         // ---- Object Explorer ----
         new McpToolDescriptor("list_releases", ObjectExplorer,
@@ -99,13 +107,13 @@ public static class McpToolCatalog
             "Reads your organisation's house rules for writing a recipe, so its suggestions "
             + "follow your house style.", false),
         new McpToolDescriptor("suggest_recipe", Cookbook,
-            "Submits a new recipe for an editor to review. Nothing is published without a person.", true),
+            "Submits a new recipe for an editor to review. Nothing is published without a person.", true, ToolKey.Cookbook),
         new McpToolDescriptor("update_recipe_suggestion", Cookbook,
-            "Revises a suggestion the assistant already submitted.", true),
+            "Revises a suggestion the assistant already submitted.", true, ToolKey.Cookbook),
         new McpToolDescriptor("update_recipe", Cookbook,
-            "Edits a published recipe. Needs the Editor role.", true),
+            "Edits a published recipe. Needs the Editor role.", true, ToolKey.Cookbook),
         new McpToolDescriptor("apply_recipe", Cookbook,
-            "Puts a recipe into one of your GitHub repositories as a pull request, in your name.", true),
+            "Puts a recipe into one of your GitHub repositories as a pull request, in your name.", true, ToolKey.Cookbook),
 
         // ---- Translator ----
         new McpToolDescriptor("list_translation_languages", Translator,
@@ -117,9 +125,9 @@ public static class McpToolCatalog
         new McpToolDescriptor("machine_translate", Translator,
             "Proposes a translation. It is a suggestion until someone accepts it.", false),
         new McpToolDescriptor("vote_translation", Translator,
-            "Votes a suggested translation up or down.", true),
+            "Votes a suggested translation up or down.", true, ToolKey.Translator),
         new McpToolDescriptor("remove_translation", Translator,
-            "Withdraws a translation the assistant suggested.", true),
+            "Withdraws a translation the assistant suggested.", true, ToolKey.Translator),
 
         // ---- Solutions and pipelines ----
         new McpToolDescriptor("list_solutions", Projects,
@@ -139,11 +147,11 @@ public static class McpToolCatalog
         new McpToolDescriptor("list_deployments", Projects,
             "Lists what one deployment pipeline has installed, when, and whether it landed.", false),
         new McpToolDescriptor("deploy_build", Projects,
-            "Deploys a build to a Business Central environment.", true),
+            "Deploys a build to a Business Central environment.", true, ToolKey.Releases),
         new McpToolDescriptor("list_github_releases", Projects,
             "Lists the GitHub releases a deployment pipeline can install.", false),
         new McpToolDescriptor("stage_github_release", Projects,
-            "Fetches the app files from a GitHub release so they can be deployed.", true),
+            "Fetches the app files from a GitHub release so they can be deployed.", true, ToolKey.Releases),
 
         // ---- Environments and customers (read-only; see DeliverTools) ----
         new McpToolDescriptor("get_solution", Operations,
@@ -174,14 +182,14 @@ public static class McpToolCatalog
             "Lists the GitHub repositories you can work on, and says what to connect when there "
             + "are none yet.", false),
         new McpToolDescriptor("create_repository", Repositories,
-            "Creates a repository in your GitHub organisation with a new workspace in it.", true),
+            "Creates a repository in your GitHub organisation with a new workspace in it.", true, ToolKey.Templates),
         new McpToolDescriptor("add_extension_to_repository", Repositories,
-            "Adds a new extension to one of your repositories as a pull request, in your name.", true),
+            "Adds a new extension to one of your repositories as a pull request, in your name.", true, ToolKey.Templates),
         new McpToolDescriptor("list_translation_files", Repositories,
             "Lists the translation files in one of your repositories.", false),
         new McpToolDescriptor("open_translation_pr", Repositories,
             "Writes translations into a file in one of your repositories and opens a pull request "
-            + "for them.", true),
+            + "for them.", true, ToolKey.Translator),
 
         // ---- Quality guidance ----
         new McpToolDescriptor("search_bcquality", BcQuality,

@@ -84,6 +84,7 @@ public sealed class GitHubReleaseService
     private readonly PublicOrigin _publicOrigin;
     private readonly TimeProvider _clock;
     private readonly ILogger<GitHubReleaseService> _logger;
+    private readonly ALDevToolbox.Services.Tools.ToolEnablement _tools;
 
     public GitHubReleaseService(
         AppDbContext db,
@@ -93,8 +94,10 @@ public sealed class GitHubReleaseService
         IOrganizationContext orgContext,
         PublicOrigin publicOrigin,
         TimeProvider clock,
+        ALDevToolbox.Services.Tools.ToolEnablement tools,
         ILogger<GitHubReleaseService> logger)
     {
+        _tools = tools;
         _db = db;
         _github = github;
         _connection = connection;
@@ -392,6 +395,8 @@ public sealed class GitHubReleaseService
     {
         var orgId = _orgContext.CurrentOrganizationId
             ?? throw new InvalidOperationException("No organization in scope; staging a GitHub release called outside an authenticated request.");
+        // Fetches the files that will be deployed; same rule as deploying.
+        await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
         var source = await ResolveSourceAsync(releasePipelineId, ct);
         tag = (tag ?? string.Empty).Trim();
         if (tag.Length == 0) throw Validation("Tag", "Choose a release to deploy.");

@@ -28,30 +28,28 @@ public enum SignInMethod
     PasskeyVerified,
     /// <summary>A magic link consumed from the mailbox.</summary>
     MagicLink,
-    /// <summary>Microsoft Entra ID, either the initial sign-in or a forced re-authentication.</summary>
+    /// <summary>
+    /// Microsoft Entra ID with an <c>auth_time</c> in the token: Microsoft
+    /// says when the person last authenticated interactively, and that moment
+    /// is the strong one. Entra only supplies the claim when asked with
+    /// <c>max_age</c>, which the step-up handshake does.
+    /// </summary>
     Entra,
+    /// <summary>
+    /// Microsoft Entra ID without <c>auth_time</c>: Microsoft may have reused
+    /// its existing browser session, so nothing proves the person was there.
+    /// Weak, like a password.
+    /// </summary>
+    EntraSso,
 }
 
 /// <summary>
-/// Step-up authentication for the tools an organisation marks as sensitive
-/// (<c>organizations.step_up_tools</c>). The cookie carries two stamps in its
-/// auth properties: the <see cref="SignInMethod"/> that established the
-/// session and, when that method counts as strong, the moment it happened.
-/// A session is <em>fresh</em> while that moment is within
-/// <see cref="Window"/>; after that the user is asked to confirm it is them
-/// again, through whichever factor they already have, before a gated tool
-/// opens or a gated MCP tool writes.
-///
-/// <para>
-/// The stamps live in <see cref="AuthenticationProperties.Items"/>, next to
-/// <c>signed_in_at</c>, because <c>CookieSessionRevalidation</c> rebuilds the
-/// principal's claims from the user row every few minutes and would drop a
-/// claim written only at sign-in. They are mirrored onto the principal as
-/// claims by <see cref="ApplyClaims"/> so Blazor pages and the MCP filter,
-/// which only see the principal, can read them too. The properties are the
-/// source of truth; the claims are a copy.
-/// </para>
-/// <para>See ".design/auth-and-audit.md", "Step-up for sensitive tools".</para>
+/// The two cookie stamps behind step-up: how the session was established and
+/// when the person last proved it with a second factor. They live in the auth
+/// properties, because <c>CookieSessionRevalidation</c> rebuilds the claims
+/// from the user row and would drop a claim written only at sign-in, and are
+/// mirrored onto the principal for the code that only sees claims. See
+/// ".design/auth-and-audit.md", "Step-up for sensitive tools".
 /// </summary>
 public static class StepUpAuth
 {
@@ -74,24 +72,25 @@ public static class StepUpAuth
     /// The methods that count as proving presence with more than a password.
     /// Passkey without reported user verification does not, because the
     /// authenticator may have accepted a touch alone; magic link does not,
-    /// because the mailbox is the only factor. Entra does: the tenant's own
-    /// sign-in policy applies, and a step-up re-runs it with <c>prompt=login</c>.
+    /// because the mailbox is the only factor; Microsoft without
+    /// <c>auth_time</c> does not, because Microsoft may have reused its own
+    /// session without the person doing anything.
     /// </summary>
     public static bool IsStrong(SignInMethod method) => method is
         SignInMethod.Totp or SignInMethod.EmailCode or SignInMethod.RecoveryCode
         or SignInMethod.PasskeyVerified or SignInMethod.Entra;
 
     /// <summary>
-    /// Records the method on a fresh set of auth properties. Strong methods
-    /// also stamp <see cref="StrongAuthAtKey"/> with <paramref name="now"/>;
-    /// weak ones leave whatever <paramref name="carryOverStrongAt"/> holds,
-    /// so a password-change re-issue of the cookie keeps an earlier step-up.
+    /// Writes the two stamps exactly as given. <paramref name="strongAuthAt"/>
+    /// is the caller's decision: a fresh sign-in passes "now" for a strong
+    /// method and null otherwise (<see cref="StrongMomentFor"/>), a re-issue
+    /// of the same session passes the moment it already had, and an Entra
+    /// sign-in passes the token's <c>auth_time</c>.
     /// </summary>
-    public static void Stamp(AuthenticationProperties properties, SignInMethod method, DateTime now, DateTime? carryOverStrongAt = null)
+    public static void Stamp(AuthenticationProperties properties, SignInMethod method, DateTime? strongAuthAt)
     {
         properties.Items[MethodKey] = method.ToString();
-        var strongAt = IsStrong(method) ? now : carryOverStrongAt;
-        if (strongAt is { } at)
+        if (strongAuthAt is { } at)
         {
             properties.Items[StrongAuthAtKey] = at.ToString("o", CultureInfo.InvariantCulture);
         }
@@ -100,6 +99,13 @@ public static class StepUpAuth
             properties.Items.Remove(StrongAuthAtKey);
         }
     }
+
+    /// <summary>The strong moment a fresh sign-in earns: now for a strong method, nothing otherwise.</summary>
+    public static DateTime? StrongMomentFor(SignInMethod method, DateTime now) => IsStrong(method) ? now : null;
+
+    /// <summary>The method mirrored on the principal, or null when the session predates the stamps.</summary>
+    public static SignInMethod? Method(ClaimsPrincipal? principal) =>
+        Enum.TryParse<SignInMethod>(principal?.FindFirst(MethodClaim)?.Value, out var method) ? method : null;
 
     /// <summary>
     /// Copies the two stamps from the properties onto the identity as claims,
@@ -134,8 +140,6 @@ public static class StepUpAuth
     /// <summary>True while the strong moment is within <see cref="Window"/> of <paramref name="now"/>.</summary>
     public static bool IsFresh(DateTime? strongAuthAt, DateTime now) =>
         strongAuthAt is { } at && now - at <= Window && at <= now.Add(TimeSpan.FromMinutes(5));
-
-    public static bool IsFresh(AuthenticationProperties? properties, DateTime now) => IsFresh(StrongAuthAt(properties), now);
 
     public static bool IsFresh(ClaimsPrincipal? principal, DateTime now) => IsFresh(StrongAuthAt(principal), now);
 
