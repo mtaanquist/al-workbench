@@ -17,8 +17,9 @@
     daily auto-import. Microsoft releases are always first-party with the label
     "Business Central {Major}.{Minor} ({CC})"; a version already in the catalogue
     shows "Imported" instead of an Import button so we never re-download it.
-    Only OnPrem is offered - Sandbox artifacts hide their apps inside a database
-    backup and aren't walkable. See .design/object-explorer.md.
+    The browse table lists shipped (OnPrem) builds only; preview builds of
+    upcoming versions are an opt-in on the automatic-import card and never
+    imported by hand from here. See .design/object-explorer.md, "Preview builds".
 *@
 
 <PageTitle>Import Release · Artifacts · Admin · AL Workbench</PageTitle>
@@ -33,6 +34,8 @@
         <p class="form-sec__cap">
             Pick a country and refresh to list the available OnPrem builds, then
             import the newest - or an older one to backfill a specific release.
+            Previews of the next major version aren't listed here: to get them,
+            turn on automatic import and tick "Also import previews" on the right.
         </p>
 
         @if (_message is not null)
@@ -83,7 +86,9 @@
                 <span class="empty-state__title">No OnPrem builds for "@_loadedCountry"</span>
                 <span class="empty-state__text">
                     Double-check the country code - <code>dk</code> and <code>w1</code>
-                    are the usual ones - and refresh again.
+                    are the usual ones - and refresh again. Previews of the next major
+                    version are never listed here; the automatic-import card on the
+                    right is where they are turned on.
                 </span>
             </div>
         }
@@ -182,6 +187,32 @@
                         <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
                         <span>Import new releases automatically</span>
                     </label>
+                    <div class="auto-previews">
+                        <label class="check">
+                            <input type="checkbox" @bind="_autoPreviews" disabled="@(!_autoEnabled)" />
+                            <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                            <span>Also import previews of the next major version</span>
+                        </label>
+                        <small class="field__hint">
+                            @if (!_autoEnabled)
+                            {
+                                <span>Turn on "Import new releases automatically" first.</span>
+                            }
+                            else
+                            {
+                                <span>
+                                    Imports Microsoft's preview of the next major version (for
+                                    example 29.0 while 28.x is current) for the same countries.
+                                    It appears in Object Explorer with a Preview label and is
+                                    about as large as a normal release. A newer preview replaces
+                                    it every two weeks, and when the version ships the preview is
+                                    removed and the shipped release imported instead. Microsoft
+                                    publishes previews under its insider programme terms, which
+                                    you accept by turning this on.
+                                </span>
+                            }
+                        </small>
+                    </div>
                     <div class="field">
                         <label class="field__label" for="auto-country">Country codes</label>
                         <input id="auto-country" type="text" class="input" maxlength="100"
@@ -199,6 +230,10 @@
                         @if (_autoLastRunAt is DateTime last)
                         {
                             <span>Last checked <Timestamp Value="@last" />.</span>
+                            @if (_autoPreviews)
+                            {
+                                <span> Previews are picked up at the next daily check.</span>
+                            }
                         }
                         else if (_autoEnabled)
                         {
@@ -215,6 +250,7 @@
 @code {
     // Auto-import settings (persisted to OrganizationSettings).
     private bool _autoEnabled;
+    private bool _autoPreviews;
     private string _autoCountry = string.Empty;
     private bool _savingAuto;
     private DateTime? _autoLastRunAt;
@@ -240,6 +276,7 @@
         var config = await Config.GetCurrentAsync();
         _autoEnabled = config.Settings.AutoImportReleasesEnabled;
         _autoCountry = config.Settings.AutoImportCountry ?? string.Empty;
+        _autoPreviews = config.Settings.AutoImportPreviewsEnabled;
         _autoLastRunAt = config.Settings.AutoImportLastRunAt;
         // Pre-fill the browse country from the auto-import list (its first code)
         // so the common case is one click to refresh.
@@ -363,11 +400,12 @@
         _autoError = null;
         try
         {
-            await Config.SaveAutoImportAsync(_autoEnabled, _autoCountry);
+            await Config.SaveAutoImportAsync(_autoEnabled, _autoCountry, _autoPreviews);
             _autoCountry = string.Join(",",
                 ALDevToolbox.Services.Organizations.OrganizationConfigService.ParseAutoImportCountries(_autoCountry));
+            _autoPreviews = _autoEnabled && _autoPreviews;
             _autoMessage = _autoEnabled
-                ? $"Automatic import enabled for '{_autoCountry}'."
+                ? $"Automatic import enabled for '{_autoCountry}'{(_autoPreviews ? ", including previews of the next major version" : "")}."
                 : "Automatic import disabled.";
         }
         catch (PlanValidationException ex)

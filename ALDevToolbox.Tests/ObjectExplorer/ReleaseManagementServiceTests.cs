@@ -1,4 +1,6 @@
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Services;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.ObjectExplorer;
@@ -104,6 +106,41 @@ public sealed class ReleaseManagementServiceTests : IDisposable
         await using var read = _db.NewContext();
         var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == id);
         release.DeletedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task RestoreAsync_refuses_when_a_successor_holds_the_dedup_key()
+    {
+        // A replaced preview is the everyday case: the old row is soft-deleted and a
+        // new one carries the same key. Restoring the old one must be a field error,
+        // not a unique-index violation from the database.
+        int oldId, newId;
+        await using (var ctx = _db.NewContext())
+        {
+            var old = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId, Label = "Business Central 29.0 (DK) Preview",
+                DedupKey = "bc-insider:29.0:dk", Kind = "first_party", Status = "ready", IsPrerelease = true,
+                DeletedAt = DateTime.UtcNow, ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            var successor = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId, Label = "Business Central 29.0 (DK) Preview",
+                DedupKey = "bc-insider:29.0:dk", Kind = "first_party", Status = "ingesting", IsPrerelease = true,
+                ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            ctx.OeReleases.AddRange(old, successor);
+            await ctx.SaveChangesAsync();
+            (oldId, newId) = (old.Id, successor.Id);
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var act = () => NewManagement(ctx2).RestoreAsync(oldId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Release");
+        await using var read = _db.NewContext();
+        (await read.OeReleases.SingleAsync(r => r.Id == oldId)).DeletedAt.Should().NotBeNull();
+        (await read.OeReleases.SingleAsync(r => r.Id == newId)).DeletedAt.Should().BeNull();
     }
 
     // ── Metadata edit ───────────────────────────────────────────────────

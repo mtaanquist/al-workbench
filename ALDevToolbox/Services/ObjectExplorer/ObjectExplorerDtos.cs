@@ -27,7 +27,8 @@ public sealed record ReleaseListItem(
     long SourceContentLength,
     DateTime? DeletedAt,
     string? StatusMessage = null,
-    string? PipelineName = null);
+    string? PipelineName = null,
+    bool IsPrerelease = false);
 
 /// <summary>
 /// Release detail surface for the header bar — adds module count and the
@@ -46,7 +47,8 @@ public sealed record ReleaseDetail(
     string? ProjectName,
     DateTime ImportedAt,
     DateTime? DeletedAt,
-    int ModuleCount);
+    int ModuleCount,
+    bool IsPrerelease = false);
 
 /// <summary>One per-app row of a project build's report — drives the manage page's build panel and seeds the future Artifacts surface. Carries the source provenance (repo + commit) when known.</summary>
 public sealed record ProjectBuildResultRow(

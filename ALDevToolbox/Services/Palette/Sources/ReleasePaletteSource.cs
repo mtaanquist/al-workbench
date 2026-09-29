@@ -46,12 +46,17 @@ public sealed class ReleasePaletteSource : IPaletteSource
     private const string ProjectKind = "project";
 
     /// <summary>
-    /// The prefix on the dedup key of a Microsoft OnPrem artifact import,
-    /// <c>bc-onprem:{Major}.{Minor}:{cc}</c> - the only place a release's country
-    /// is recorded as data rather than as part of its label. See
-    /// <c>BcArtifactIndex.FormatDedupKey</c>.
+    /// The prefixes on the dedup key of a Microsoft artifact import -
+    /// <c>bc-onprem:{Major}.{Minor}:{cc}</c> for a shipped release,
+    /// <c>bc-insider:{Major}.{Minor}:{cc}</c> for a preview - the only place a
+    /// release's country is recorded as data rather than as part of its label.
+    /// See <c>BcArtifactIndex.FormatDedupKey</c>.
     /// </summary>
-    private const string OnPremDedupPrefix = "bc-onprem:";
+    private static readonly string[] ArtifactDedupPrefixes =
+    {
+        ALDevToolbox.Services.ObjectExplorer.Import.BcArtifactIndex.ReleaseDedupPrefix + ":",
+        ALDevToolbox.Services.ObjectExplorer.Import.BcArtifactIndex.PreviewDedupPrefix + ":",
+    };
 
     /// <summary>
     /// How many rows to read per row the palette will show. Ranking drops every
@@ -178,15 +183,15 @@ public sealed class ReleasePaletteSource : IPaletteSource
     }
 
     /// <summary>
-    /// The country code out of a Microsoft OnPrem import's dedup key
-    /// (<c>bc-onprem:28.2:dk</c> -> <c>DK</c>), or null for every other release -
+    /// The country code out of a Microsoft artifact import's dedup key
+    /// (<c>bc-onprem:28.2:dk</c> or <c>bc-insider:29.0:dk</c> -> <c>DK</c>), or null for every other release -
     /// manual uploads, third-party bundles and Solution builds record no country
     /// at all. Upper-cased to match the label the importer writes,
     /// "Business Central 28.2 (DK)".
     /// </summary>
     private static string? Country(string? dedupKey)
     {
-        if (dedupKey is null || !dedupKey.StartsWith(OnPremDedupPrefix, StringComparison.Ordinal)) return null;
+        if (dedupKey is null || !ArtifactDedupPrefixes.Any(p => dedupKey.StartsWith(p, StringComparison.Ordinal))) return null;
 
         var lastSeparator = dedupKey.LastIndexOf(':');
         if (lastSeparator < 0 || lastSeparator == dedupKey.Length - 1) return null;

@@ -387,7 +387,7 @@ public class OrganizationConfigService
     /// Throws <see cref="PlanValidationException"/> (field key
     /// <c>AutoImportCountry</c>) so the form renders the error inline.
     /// </summary>
-    public async Task SaveAutoImportAsync(bool enabled, string? country, CancellationToken ct = default)
+    public async Task SaveAutoImportAsync(bool enabled, string? country, bool includePreviews = false, CancellationToken ct = default)
     {
         var codes = ParseAutoImportCountries(country);
         if (enabled && codes.Count == 0)
@@ -410,13 +410,16 @@ public class OrganizationConfigService
         var row = await GetOrCreateSettingsAsync(orgId, ct);
         row.AutoImportReleasesEnabled = enabled;
         row.AutoImportCountry = normalized;
+        // Previews ride on the daily sweep, so they can't be on while it's off —
+        // the form disables the box in that state and we mirror it here.
+        row.AutoImportPreviewsEnabled = enabled && includePreviews;
         row.UpdatedAt = DateTime.UtcNow;
 
         await _db.SaveChangesAsync(ct);
         InvalidateCache(orgId);
         _logger.LogInformation(
-            "Updated release auto-import settings for org {OrgId} (enabled={Enabled}, countries={Countries}).",
-            orgId, enabled, normalized ?? "(none)");
+            "Updated release auto-import settings for org {OrgId} (enabled={Enabled}, countries={Countries}, previews={Previews}).",
+            orgId, enabled, normalized ?? "(none)", row.AutoImportPreviewsEnabled);
     }
 
     /// <summary>

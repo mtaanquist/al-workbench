@@ -17,6 +17,7 @@ internal sealed class ReleaseConfiguration : IEntityTypeConfiguration<OeRelease>
         entity.Property(e => e.BcVersion).HasColumnName("bc_version");
         entity.Property(e => e.Kind).HasColumnName("kind").IsRequired();
         entity.Property(e => e.DedupKey).HasColumnName("dedup_key").HasMaxLength(200);
+        entity.Property(e => e.IsPrerelease).HasColumnName("is_prerelease").IsRequired().HasDefaultValue(false);
         entity.Property(e => e.Publisher).HasColumnName("publisher").HasMaxLength(200);
         entity.Property(e => e.ProjectName).HasColumnName("project_name").HasMaxLength(200);
         entity.Property(e => e.ParentReleaseId).HasColumnName("parent_release_id");

@@ -94,6 +94,27 @@ public sealed class OrganizationConfigAutoImportTests : IDisposable
         row.AutoImportCountry.Should().Be("w1,dk");
     }
 
+    [Fact]
+    public async Task Previews_are_stored_only_while_the_sweep_itself_is_enabled()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = _db.NewOrganizationConfigService(ctx);
+
+        await svc.SaveAutoImportAsync(enabled: true, country: "dk", includePreviews: true);
+        await using (var read = _db.NewContext())
+        {
+            (await read.OrganizationSettings.AsNoTracking().SingleAsync()).AutoImportPreviewsEnabled.Should().BeTrue();
+        }
+
+        // Turning the sweep off takes previews with it: they ride on the daily
+        // pass, so a stored "true" would mean nothing and mislead the form.
+        await svc.SaveAutoImportAsync(enabled: false, country: "dk", includePreviews: true);
+        await using (var read = _db.NewContext())
+        {
+            (await read.OrganizationSettings.AsNoTracking().SingleAsync()).AutoImportPreviewsEnabled.Should().BeFalse();
+        }
+    }
+
     [Theory]
     [InlineData(null, new string[0])]
     [InlineData("dk", new[] { "dk" })]

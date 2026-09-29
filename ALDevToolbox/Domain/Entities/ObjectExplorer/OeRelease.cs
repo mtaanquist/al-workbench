@@ -58,6 +58,15 @@ public class OeRelease
     public string? DedupKey { get; set; }
 
     /// <summary>
+    /// True for a Microsoft pre-release build imported off the insider channel
+    /// (dedup key <c>bc-insider:...</c>), so every list and the MCP surface can
+    /// mark it "Preview" and the Releases hero never features one over the newest
+    /// shipped release. The auto-import sweep retires such a row once the same
+    /// Major.Minor ships. Always false for manual uploads and third-party imports.
+    /// </summary>
+    public bool IsPrerelease { get; set; }
+
+    /// <summary>
     /// Free-text publisher name for third-party / project Releases. Stored on the
     /// Release rather than derived from module manifests because we sometimes take
     /// over an extension someone else built — the manifest publisher no longer

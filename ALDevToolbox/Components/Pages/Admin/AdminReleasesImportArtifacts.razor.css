@@ -1,0 +1,8 @@
+/* The preview option belongs to "Import new releases automatically": indented
+   under it so the dependency is visible, with its hint carrying the reason
+   while the parent is off. */
+.auto-previews {
+    display: grid;
+    gap: var(--space-1);
+    margin-left: var(--space-6);
+}
