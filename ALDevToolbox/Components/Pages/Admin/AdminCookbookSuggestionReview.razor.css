@@ -1,0 +1,5 @@
+/* A suggestion can carry any number of keywords; a row that never wraps
+   widens the page and pushes the head's actions off screen. */
+.suggestion-tags { flex-wrap: wrap; min-width: 0; }
+
+.suggestion-reject-note { width: 16rem; }
