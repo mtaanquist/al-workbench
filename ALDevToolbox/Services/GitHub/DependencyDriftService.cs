@@ -168,10 +168,12 @@ public sealed class DependencyDriftService
     {
         var orgId = RequireOrganizationId();
         var release = await _db.OeReleases.AsNoTracking().FirstOrDefaultAsync(r => r.Id == releaseId, ct);
-        if (release is null || release.Kind != "first_party")
+        if (release is null || release.Kind != "first_party" || release.IsPrerelease)
         {
+            // A preview build is not a target either: nobody's app.json should be
+            // moved to a version customers can't run yet.
             _logger.LogInformation(
-                "Release {ReleaseId} is not a first-party Business Central release, so nothing is compared against it.",
+                "Release {ReleaseId} is not a shipped first-party Business Central release, so nothing is compared against it.",
                 releaseId);
             return 0;
         }
@@ -264,7 +266,7 @@ public sealed class DependencyDriftService
     {
         RequireOrganizationId();
         var releases = await _db.OeReleases.AsNoTracking()
-            .Where(r => r.Kind == "first_party" && r.Status == "ready" && r.BcVersion != null)
+            .Where(r => r.Kind == "first_party" && !r.IsPrerelease && r.Status == "ready" && r.BcVersion != null)
             .Select(r => new { r.Id, r.BcVersion })
             .ToListAsync(ct);
         return releases
@@ -996,7 +998,7 @@ public sealed class DependencyDriftService
     {
         var family = DedupFamily(release.DedupKey);
         var candidates = await _db.OeReleases.AsNoTracking()
-            .Where(r => r.Kind == "first_party" && r.Id != release.Id && r.BcVersion != null)
+            .Where(r => r.Kind == "first_party" && !r.IsPrerelease && r.Id != release.Id && r.BcVersion != null)
             .Select(r => new { r.Id, r.BcVersion, r.DedupKey })
             .ToListAsync(ct);
 

@@ -191,6 +191,27 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
                             break;
                     }
 
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    failed++;
+                    _logger.LogError(ex, "Auto-import failed for org {OrgId} (country {Country}).", orgId, country);
+                }
+
+                // The preview steps get their own try each: a shipped import that
+                // failed on a transient error must not cost the country its
+                // preview housekeeping for the day, and vice versa.
+                try
+                {
+                    using var ambient = AmbientOrganizationScope.Enter(
+                        AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem));
+                    await using var scope = _services.CreateAsyncScope();
+                    var importer = scope.ServiceProvider.GetRequiredService<ArtifactReleaseImporter>();
+
                     // Retire previews the shipped catalogue has caught up with, for
                     // every opted-in org — a preview imported while the box was
                     // ticked should still be replaced after it's unticked.
@@ -217,7 +238,7 @@ public sealed class ReleaseAutoImportScheduler : PolledScheduler
                 catch (Exception ex)
                 {
                     failed++;
-                    _logger.LogError(ex, "Auto-import failed for org {OrgId} (country {Country}).", orgId, country);
+                    _logger.LogError(ex, "Preview housekeeping failed for org {OrgId} (country {Country}).", orgId, country);
                 }
             }
 

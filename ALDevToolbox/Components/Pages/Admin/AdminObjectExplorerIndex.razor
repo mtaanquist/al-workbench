@@ -129,7 +129,7 @@
                             </a>
                             @if (r.IsPrerelease)
                             {
-                                <StatusPill Tone="warn" Class="status-pill--inline">Preview</StatusPill>
+                                <StatusPill Tone="warn" Class="status-pill--inline" title="Pre-release build of an upcoming version. Objects may still change before it ships.">Preview</StatusPill>
                             }
                             @if (r.DeletedAt is not null)
                             {

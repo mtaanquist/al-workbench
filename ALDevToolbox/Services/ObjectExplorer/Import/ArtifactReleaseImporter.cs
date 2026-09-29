@@ -107,16 +107,22 @@ public sealed class ArtifactReleaseImporter
     /// preview is older than <see cref="PreviewRefreshAge"/> and the insider
     /// channel now offers a different build — then the old row is soft-deleted
     /// and the new build queued (<see cref="ArtifactImportStatus.Replaced"/>).
-    /// A preview still ingesting is never replaced.
+    /// A preview still ingesting is never replaced. One preview per major is the
+    /// contract, so when the insider channel moves a major on to its next minor
+    /// (29.0 dropped, 29.1 listed) the preview of the earlier minor is retired
+    /// as well, before the new one is queued.
     /// </summary>
     public async Task<IReadOnlyList<ArtifactImportOutcome>> ImportPreviewsAsync(string country, CancellationToken ct = default)
     {
         var resolved = await _artifacts.ResolvePreviewsAsync(country, ct).ConfigureAwait(false);
         var outcomes = new List<ArtifactImportOutcome>(resolved.Count);
         var now = _clock.GetUtcNow().UtcDateTime;
+        var cc = country.Trim().ToLowerInvariant();
 
         foreach (var preview in resolved)
         {
+            await RetireOtherMinorsAsync(preview, cc, ct).ConfigureAwait(false);
+
             var existing = await _db.OeReleases.AsNoTracking()
                 .Where(r => r.DedupKey == preview.DedupKey && r.DeletedAt == null)
                 .Select(r => new { r.Id, r.Status, r.ImportedAt, r.BcVersion })
@@ -136,8 +142,18 @@ public sealed class ArtifactReleaseImporter
                     continue;
                 }
 
-                await _management.SoftDeleteAsync(existing.Id, ct).ConfigureAwait(false);
-                var replacementId = await QueueAsync(preview, ct).ConfigureAwait(false);
+                // One transaction for the soft-delete and the new rows: if the
+                // quota guard (or anything else) refuses the replacement, the org
+                // keeps the preview it had instead of ending up with none.
+                (int replacementId, long jobRowId) begun;
+                await using (var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false))
+                {
+                    await _management.SoftDeleteAsync(existing.Id, ct).ConfigureAwait(false);
+                    begun = await BeginAsync(preview, ct).ConfigureAwait(false);
+                    await tx.CommitAsync(ct).ConfigureAwait(false);
+                }
+                var replacementId = begun.replacementId;
+                await EnqueueAsync(replacementId, begun.jobRowId, preview, ct).ConfigureAwait(false);
                 _logger.LogInformation(
                     "Replaced preview release {OldReleaseId} ({OldVersion}) with build {Version} as release {ReleaseId}.",
                     existing.Id, existing.BcVersion, preview.Version, replacementId);
@@ -154,11 +170,14 @@ public sealed class ArtifactReleaseImporter
 
     /// <summary>
     /// Soft-deletes every preview release for <paramref name="country"/> whose
-    /// Major.Minor is now in the catalogue as a <c>ready</c>, non-deleted shipped
-    /// release — the "replace them once they get published for real" half of the
-    /// preview flow. Keyed on the dedup keys, so a renamed label changes
-    /// nothing. Returns the number of previews retired. Soft, not hard: the
-    /// admin release list can still restore or purge them.
+    /// major has shipped: a <c>ready</c>, non-deleted <c>bc-onprem:</c> release
+    /// of the same or a higher major exists for the country. That is the
+    /// "replace them once they get published for real" half of the preview flow,
+    /// and comparing majors rather than exact Major.Minor keys means a 29.0
+    /// preview is still retired when the org's first shipped 29 is 29.1 (the sweep
+    /// was off for a while, or the org joined late). Keyed on the dedup keys, so a
+    /// renamed label changes nothing. Returns the number of previews retired.
+    /// Soft, not hard: the admin release list can still restore or purge them.
     /// </summary>
     public async Task<int> SupersedePreviewsAsync(string country, CancellationToken ct = default)
     {
@@ -171,28 +190,74 @@ public sealed class ArtifactReleaseImporter
             .ToListAsync(ct).ConfigureAwait(false);
         if (previews.Count == 0) return 0;
 
+        var shippedKeys = await _db.OeReleases.AsNoTracking()
+            .Where(r => r.DeletedAt == null && r.Status == "ready" && r.DedupKey != null
+                        && r.DedupKey.StartsWith(BcArtifactIndex.ReleaseDedupPrefix + ":")
+                        && r.DedupKey.EndsWith(":" + cc))
+            .Select(r => r.DedupKey!)
+            .ToListAsync(ct).ConfigureAwait(false);
+        var newestShippedMajor = shippedKeys
+            .Select(k => BcArtifactIndex.ParseDedupKey(k))
+            .Where(p => p is not null)
+            .Select(p => BcArtifactIndex.ToMajor(p!.Value.MajorMinor))
+            .Where(m => m is not null)
+            .Select(m => m!.Value)
+            .DefaultIfEmpty(-1)
+            .Max();
+        if (newestShippedMajor < 0) return 0;
+
         var retired = 0;
         foreach (var preview in previews)
         {
             var parsed = BcArtifactIndex.ParseDedupKey(preview.DedupKey);
-            if (parsed is null) continue;
-            var releasedKey = $"{BcArtifactIndex.ReleaseDedupPrefix}:{parsed.Value.MajorMinor}:{parsed.Value.Country}";
-            var shipped = await _db.OeReleases.AsNoTracking()
-                .AnyAsync(r => r.DedupKey == releasedKey && r.DeletedAt == null && r.Status == "ready", ct)
-                .ConfigureAwait(false);
-            if (!shipped) continue;
+            var previewMajor = parsed is null ? null : BcArtifactIndex.ToMajor(parsed.Value.MajorMinor);
+            if (previewMajor is null || previewMajor.Value > newestShippedMajor) continue;
 
             await _management.SoftDeleteAsync(preview.Id, ct).ConfigureAwait(false);
             retired++;
             _logger.LogInformation(
-                "Retired preview release {ReleaseId} ({Label}): {ReleasedKey} is now in the catalogue.",
-                preview.Id, preview.Label, releasedKey);
+                "Retired preview release {ReleaseId} ({Label}): version {Major} has shipped for {Country}.",
+                preview.Id, preview.Label, previewMajor.Value, cc);
         }
         return retired;
     }
 
+    /// <summary>
+    /// Soft-deletes any active preview of <paramref name="preview"/>'s major for
+    /// <paramref name="cc"/> under a different minor, so a major never carries two
+    /// previews once the channel moves on to its next minor.
+    /// </summary>
+    private async Task RetireOtherMinorsAsync(ResolvedArtifact preview, string cc, CancellationToken ct)
+    {
+        var major = BcArtifactIndex.ToMajor(preview.Version);
+        if (major is null) return;
+        var sameMajorPrefix = $"{BcArtifactIndex.PreviewDedupPrefix}:{major.Value}.";
+        var others = await _db.OeReleases.AsNoTracking()
+            .Where(r => r.IsPrerelease && r.DeletedAt == null && r.DedupKey != null
+                        && r.DedupKey != preview.DedupKey
+                        && r.DedupKey.StartsWith(sameMajorPrefix)
+                        && r.DedupKey.EndsWith(":" + cc))
+            .Select(r => new { r.Id, r.Label })
+            .ToListAsync(ct).ConfigureAwait(false);
+        foreach (var other in others)
+        {
+            await _management.SoftDeleteAsync(other.Id, ct).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Retired preview release {ReleaseId} ({Label}): the insider channel now offers {MajorMinor} for major {Major}.",
+                other.Id, other.Label, preview.MajorMinor, major.Value);
+        }
+    }
+
     /// <summary>Creates the ingesting release row for <paramref name="resolved"/> and enqueues its download job.</summary>
     private async Task<int> QueueAsync(ResolvedArtifact resolved, CancellationToken ct)
+    {
+        var (releaseId, jobRowId) = await BeginAsync(resolved, ct).ConfigureAwait(false);
+        await EnqueueAsync(releaseId, jobRowId, resolved, ct).ConfigureAwait(false);
+        return releaseId;
+    }
+
+    /// <summary>The database half of queuing: the ingesting release row plus its persisted job row.</summary>
+    private async Task<(int ReleaseId, long JobRowId)> BeginAsync(ResolvedArtifact resolved, CancellationToken ct)
     {
         var metadata = new ReleaseImportMetadata(
             Label: resolved.Label,
@@ -202,17 +267,23 @@ public sealed class ArtifactReleaseImporter
             DedupKey: resolved.DedupKey,
             IsPrerelease: resolved.IsPrerelease);
         var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
-
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing an artifact import");
         var source = new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl);
         var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
+        return (releaseId, jobRowId);
+    }
+
+    /// <summary>The in-memory half: hands the job to the worker once its rows are committed.</summary>
+    private async Task EnqueueAsync(int releaseId, long jobRowId, ResolvedArtifact resolved, CancellationToken ct)
+    {
+        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing an artifact import");
+        var source = new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl);
         await _queue.EnqueueAsync(
             new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, jobRowId), ct).ConfigureAwait(false);
 
         _logger.LogInformation(
             "Queued BC artifact import {Label} (release {ReleaseId}, version {Version}, prerelease {Prerelease}, {Url}).",
             resolved.Label, releaseId, resolved.Version, resolved.IsPrerelease, resolved.ApplicationUrl);
-        return releaseId;
     }
 }
 

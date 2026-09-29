@@ -72,6 +72,26 @@ public class ReleaseManagementService
             ?? throw NotFound(releaseId);
 
         if (release.DeletedAt is null) return;
+
+        // The active-rows unique index on dedup_key would refuse the restore
+        // when a successor already holds the key (a replaced or superseded
+        // preview is the everyday case): say so instead of surfacing a
+        // constraint violation.
+        if (release.DedupKey is not null)
+        {
+            var successor = await _db.OeReleases.AsNoTracking()
+                .Where(r => r.Id != release.Id && r.DeletedAt == null && r.DedupKey == release.DedupKey)
+                .Select(r => r.Label)
+                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            if (successor is not null)
+            {
+                throw new PlanValidationException(new Dictionary<string, string>
+                {
+                    ["Release"] = $"Can't restore \"{release.Label}\": \"{successor}\" has taken its place. Delete that release first if you want this one back.",
+                });
+            }
+        }
+
         release.DeletedAt = null;
         release.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);

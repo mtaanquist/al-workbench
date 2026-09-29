@@ -151,6 +151,10 @@
             var showHero = !searching && _kind == "first_party" && rows.Any(r => !r.IsPrerelease);
             var featured = showHero ? rows.First(r => !r.IsPrerelease) : rows[0];
             var gridRows = showHero ? rows.Where(r => r.Id != featured.Id).ToList() : rows;
+            // The newest preview, when one is ahead of the featured release: the
+            // hero offers it as a secondary link so the person who came for the
+            // next version doesn't have to hunt for it in the grid.
+            var newestPreview = showHero ? rows.FirstOrDefault(r => r.IsPrerelease) : null;
 
             @if (showHero)
             {
@@ -197,6 +201,13 @@
                                 <Icon Name="git-compare" Width="15" Height="15" />
                                 <span>Compare</span>
                             </a>
+                            @if (newestPreview is not null)
+                            {
+                                <a class="btn" href="@($"/object-explorer/release/{newestPreview.Id}")">
+                                    <Icon Name="eye" Width="15" Height="15" />
+                                    <span>Preview of @MajorMinorOf(newestPreview)</span>
+                                </a>
+                            }
                         </div>
                     </div>
                 </div>
@@ -223,7 +234,7 @@
                                     <span class="browse-card__title">@r.Label</span>
                                     @if (r.IsPrerelease)
                                     {
-                                        <StatusPill Tone="warn" Class="status-pill--inline">Preview</StatusPill>
+                                        <StatusPill Tone="warn" Class="status-pill--inline" title="Pre-release build of an upcoming version. Objects may still change before it ships.">Preview</StatusPill>
                                     }
                                     @if (!string.IsNullOrEmpty(r.BcVersion))
                                     {
@@ -373,6 +384,13 @@
         var m = Regex.Match(r.Label ?? string.Empty, @"\d+(?:\.\d+)+");
         if (m.Success && Version.TryParse(m.Value, out var lv)) return lv;
         return new Version(0, 0);
+    }
+
+    /// <summary>"29.0" for the hero's preview link, from the BC version or, failing that, the label.</summary>
+    private static string MajorMinorOf(ReleaseListItem r)
+    {
+        var v = VersionKey(r);
+        return v.Major > 0 ? $"{v.Major}.{Math.Max(v.Minor, 0)}" : "the next version";
     }
 
     /// <summary>Human "imported N ago" string relative to today (UTC).</summary>

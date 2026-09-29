@@ -233,6 +233,55 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportPreviewsAsync_keeps_a_fresh_preview_even_when_the_channel_has_a_newer_build()
+    {
+        await using var ctx = _db.NewContext();
+        // 29.0 from an older build, imported three days ago: newer build exists but
+        // the fortnight hasn't passed, so it stays put and nothing is downloaded.
+        var fresh = Release("Business Central 29.0 (DK) Preview", "bc-insider:29.0:dk",
+            prerelease: true, bcVersion: "29.0.55000.0", importedAt: DateTime.UtcNow.AddDays(-3));
+        var current = Release("Business Central 30.0 (DK) Preview", "bc-insider:30.0:dk",
+            prerelease: true, bcVersion: "30.0.55227.0");
+        ctx.OeReleases.AddRange(fresh, current);
+        await ctx.SaveChangesAsync();
+
+        var queue = new ReleaseImportQueue();
+        var outcomes = await NewImporter(ctx, queue, withInsider: true).ImportPreviewsAsync("dk");
+
+        outcomes.Should().OnlyContain(o => o.Status == ArtifactImportStatus.AlreadyImported);
+        outcomes[0].ReleaseId.Should().Be(fresh.Id);
+        queue.Reader.TryRead(out _).Should().BeFalse();
+        await using var read = _db.NewContext();
+        (await read.OeReleases.SingleAsync(r => r.Id == fresh.Id)).DeletedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ImportPreviewsAsync_retires_a_preview_of_the_same_major_under_an_earlier_minor()
+    {
+        // The insider channel dropped 29.0 and now lists 29.1 (the stub's
+        // InsiderCountryJson only carries 29.0, so here the catalogue holds the
+        // older-minor row instead): one preview per major means the 28.x-era
+        // "29.1" placeholder below must go when 29.0 is queued. The rule is
+        // symmetric, so seeding a 29.1 row and resolving 29.0 exercises it.
+        await using var ctx = _db.NewContext();
+        var otherMinor = Release("Business Central 29.1 (DK) Preview", "bc-insider:29.1:dk",
+            prerelease: true, bcVersion: "29.1.55200.0");
+        var otherCountry = Release("Business Central 29.1 (W1) Preview", "bc-insider:29.1:w1",
+            prerelease: true, bcVersion: "29.1.55200.0");
+        ctx.OeReleases.AddRange(otherMinor, otherCountry);
+        await ctx.SaveChangesAsync();
+
+        var outcomes = await NewImporter(ctx, new ReleaseImportQueue(), withInsider: true).ImportPreviewsAsync("dk");
+
+        outcomes.Select(o => o.Label).Should().Contain("Business Central 29.0 (DK) Preview");
+        await using var read = _db.NewContext();
+        (await read.OeReleases.SingleAsync(r => r.Id == otherMinor.Id)).DeletedAt.Should().NotBeNull("major 29 now has a 29.0 preview");
+        (await read.OeReleases.SingleAsync(r => r.Id == otherCountry.Id)).DeletedAt.Should().BeNull("another country's previews are untouched");
+        (await read.OeReleases.CountAsync(r => r.IsPrerelease && r.DeletedAt == null && r.DedupKey!.EndsWith(":dk")))
+            .Should().Be(2, "29.0 and 30.0");
+    }
+
+    [Fact]
     public async Task ImportPreviewsAsync_never_replaces_a_preview_that_is_still_ingesting()
     {
         await using var ctx = _db.NewContext();
@@ -251,17 +300,21 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
     }
 
     [Fact]
-    public async Task SupersedePreviewsAsync_retires_a_preview_once_its_version_ships_and_is_ready()
+    public async Task SupersedePreviewsAsync_retires_a_preview_once_its_major_ships_and_is_ready()
     {
         await using var ctx = _db.NewContext();
         var shippedPreview = Release("Business Central 29.0 (DK) Preview", "bc-insider:29.0:dk", prerelease: true);
-        var shipped = Release("Business Central 29.0 (DK)", "bc-onprem:29.0:dk");
+        // The org's first shipped 29 is 29.1 (the sweep was off when 29.0 shipped):
+        // the 29.0 preview is still retired, because its MAJOR has shipped.
+        var shipped = Release("Business Central 29.1 (DK)", "bc-onprem:29.1:dk");
+        var olderShipped = Release("Business Central 28.5 (DK)", "bc-onprem:28.5:dk");
         // 30.0 has no shipped counterpart yet: stays.
         var pending = Release("Business Central 30.0 (DK) Preview", "bc-insider:30.0:dk", prerelease: true);
         // 29.0 for another country shipped only as far as "ingesting": its preview stays too.
         var w1Preview = Release("Business Central 29.0 (W1) Preview", "bc-insider:29.0:w1", prerelease: true);
         var w1Ingesting = Release("Business Central 29.0 (W1)", "bc-onprem:29.0:w1", status: "ingesting");
-        ctx.OeReleases.AddRange(shippedPreview, shipped, pending, w1Preview, w1Ingesting);
+        var w1Older = Release("Business Central 28.5 (W1)", "bc-onprem:28.5:w1");
+        ctx.OeReleases.AddRange(shippedPreview, shipped, olderShipped, pending, w1Preview, w1Ingesting, w1Older);
         await ctx.SaveChangesAsync();
 
         var importer = NewImporter(ctx, new ReleaseImportQueue());
@@ -276,6 +329,16 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
 
         // Idempotent: a second pass finds nothing left to retire.
         (await importer.SupersedePreviewsAsync("dk")).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task SupersedePreviewsAsync_does_nothing_for_a_country_with_no_shipped_release()
+    {
+        await using var ctx = _db.NewContext();
+        ctx.OeReleases.Add(Release("Business Central 29.0 (DK) Preview", "bc-insider:29.0:dk", prerelease: true));
+        await ctx.SaveChangesAsync();
+
+        (await NewImporter(ctx, new ReleaseImportQueue()).SupersedePreviewsAsync("dk")).Should().Be(0);
     }
 
     [Fact]
