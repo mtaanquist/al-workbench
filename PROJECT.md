@@ -196,12 +196,14 @@ The MCP server (`Services/Mcp/Tools/*Tools.cs`) is a parallel front-end on the s
   area's reads (#912) live in `DeliverTools`, apart from `DeliveryTools` where the one
   write (`deploy_build`) sits behind its own gate. `DeliverToolsTests` walks the class
   and fails if any public method is not an `[McpServerTool(ReadOnly = true)]`, so a write
-  added there by accident is a red build. Its ten tools, one line each:
+  added there by accident is a red build. Its twelve tools, one line each:
   `get_solution` (hosting, version, address, connection, environments in a line),
   `list_environments` (the fleet with solution/type/status/version/storage/next-update
   filters), `get_environment` (one environment with its installed apps),
   `list_environment_history` (the Workbench history), `list_upgrades` (the Upgrades fleet,
-  behind the environment-updates grant), `list_recent_deployments` (deployments across
+  behind the environment-updates grant), `list_planned_upgrades` and `get_upgrade` (the
+  planned upgrades of #984 and one upgrade's lines with their derived states, behind the
+  same grant), `list_recent_deployments` (deployments across
   solutions), `list_customer_contacts` (contacts with phone and email, each call logged),
   `get_customer_access` (getting-in and hosting notes, integrations),
   `list_customer_knowledge` (who knows a customer, or which customers a colleague knows)

@@ -573,6 +573,53 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         (await svc.ListArchivedAsync("29.1")).Should().BeEmpty();
     }
 
+    // ── The picker's lock ───────────────────────────────────────────────
+
+    [Fact]
+    public async Task Open_line_owners_name_the_open_upgrade_and_forget_a_done_one()
+    {
+        var (projectId, onOpen) = await _f.SeedCustomerAsync();
+        var onDone = await SeedEnvironmentAsync(projectId, "UAT");
+        await SeedEnvironmentAsync(projectId, "Training");
+        var open = await CreateAsync("29.1 in January 2027", "29.1");
+        var done = await CreateAsync("28.5 in November 2026", "28.5");
+        await AddAsync(open, onOpen);
+        await AddAsync(done, onDone);
+        await CloseAsync(done);
+
+        await using var ctx = _f.Db.NewContext();
+        var owners = await _f.Upgrades(ctx).ListOpenLineOwnersAsync();
+
+        owners.Keys.Should().BeEquivalentTo([onOpen], "a done upgrade frees its environments, and one on none is free");
+        owners[onOpen].Should().Be(new UpgradeLineOwner(open, "29.1 in January 2027"));
+    }
+
+    [Fact]
+    public async Task Open_line_owners_leave_out_a_line_from_a_solution_the_caller_cannot_see()
+    {
+        var (_, visibleEnv) = await _f.SeedCustomerAsync();
+        var (hiddenProject, hiddenEnv) = await SeedCustomerWithoutUpdateTeamAsync(ProjectVisibility.Private);
+        var id = await CreateAsync();
+        await AddAsync(id, visibleEnv);
+
+        // Put there by somebody who could see it; this caller cannot.
+        await using (var ctx = _f.Db.NewContext())
+        {
+            ctx.OeEnvironmentUpgradeLines.Add(new OeEnvironmentUpgradeLine
+            {
+                OrganizationId = TestDb.DefaultOrgId, UpgradeId = id, EnvironmentId = hiddenEnv,
+                ProjectId = hiddenProject, IsOpen = true, AddedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var owners = await _f.Upgrades(ctx).ListOpenLineOwnersAsync();
+            owners.Keys.Should().BeEquivalentTo([visibleEnv]);
+        }
+    }
+
     // ── Actions carry the upgrade ───────────────────────────────────────
 
     [Fact]

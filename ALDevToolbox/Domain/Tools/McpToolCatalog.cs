@@ -166,6 +166,12 @@ public static class McpToolCatalog
         new McpToolDescriptor("list_upgrades", Operations,
             "Lists the platform updates coming to each environment, and when. Needs permission to "
             + "manage environment updates.", false),
+        new McpToolDescriptor("list_planned_upgrades", Operations,
+            "Lists the planned upgrades, open and done, with how far each one has got. Needs "
+            + "permission to manage environment updates.", false),
+        new McpToolDescriptor("get_upgrade", Operations,
+            "Shows one planned upgrade: each environment on it, where its update has got, and who "
+            + "checked it. Needs permission to manage environment updates.", false),
         new McpToolDescriptor("list_recent_deployments", Operations,
             "Lists recent deployments across all your customers, and why any of them failed.", false),
         new McpToolDescriptor("list_customer_contacts", Operations,
