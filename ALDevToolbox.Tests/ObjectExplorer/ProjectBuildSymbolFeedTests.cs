@@ -26,6 +26,8 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 public sealed class ProjectBuildSymbolFeedTests : IDisposable
 {
     private const string ArtifactVersion = "29.0.1.2";
+    private const string NextMajorVersion = "30.0.7.8";
+    private static readonly string[] InsiderVersions = ["31.0.1.1", NextMajorVersion, "29.1.3.4"];
     private const string CoreId = "4b915d7e-c02a-435f-85ab-649086c1e002";
     private const string CoreSymbols = "ContiniaSoftware.ContiniaCore.symbols." + CoreId;
     private const string PteId = "dddddddd-0000-0000-0000-000000000004";
@@ -533,9 +535,128 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         return (release.Id, build.Id);
     }
 
+    // ── Building against the next version (#993) ──────────────────────
+
+    private AlCompilerProvisioner FeedCompilers(FakeNuGet nuget) =>
+        new(nuget, NullLogger<AlCompilerProvisioner>.Instance,
+            new AlCompilerOptions { InstallDirectory = Path.Combine(_root, "altool") });
+
+    private async Task<int> SeedPreviewAsync(string dedupKey, string? bcVersion, DateTime importedAt, string status = "ready")
+    {
+        await using var seed = _db.NewContext();
+        var preview = new OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Label = "Business Central 30.0 (DK) Preview",
+            DedupKey = dedupKey,
+            Kind = "first_party",
+            Status = status,
+            IsPrerelease = true,
+            BcVersion = bcVersion,
+            ImportedAt = importedAt,
+            CreatedAt = importedAt,
+            UpdatedAt = importedAt,
+        };
+        seed.OeReleases.Add(preview);
+        await seed.SaveChangesAsync();
+        return preview.Id;
+    }
+
+    [Fact]
+    public async Task A_current_build_keeps_the_shipped_artifact_and_the_stable_compiler()
+    {
+        var (projectId, releaseId, _) = await SeedAsync();
+        var nuget = new FakeNuGet("18.0.41.62505", "30.0.42.32495-beta");
+
+        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.Current, FeedCompilers(nuget));
+
+        outcome.BcVersion.Should().Be("29.0");
+        outcome.FinalLabel.Should().Be("CRONUS on BC 29.0");
+        _tools.CompilersRun.Should().NotBeEmpty().And.OnlyContain(p => p.Contains("/18.0.41.62505/"));
+        _http.Requests.Should().NotContain(u => u.Contains(BcArtifactIndex.InsiderCdnHost));
+        nuget.Downloads.Should().Equal("18.0.41.62505");
+    }
+
+    [Fact]
+    public async Task A_next_major_build_compiles_against_the_insider_artifact_with_the_beta_compiler()
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        var previewId = await SeedPreviewAsync("bc-insider:30.0:dk", NextMajorVersion, DateTime.UtcNow);
+        var nuget = new FakeNuGet("18.0.41.62505", "30.0.42.32495-beta");
+
+        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor, FeedCompilers(nuget));
+
+        Status(outcome, "CRONUS Base Extension").Should().Be(ProjectBuildResultStatus.Compiled);
+        outcome.BcVersion.Should().Be("30.0");
+        outcome.FinalLabel.Should().Be("CRONUS on BC 30.0");
+        outcome.ParentReleaseId.Should().Be(previewId, "the build parents onto the catalogue's preview of that version");
+        _tools.CompilersRun.Should().NotBeEmpty().And.OnlyContain(p => p.Contains("/30.0.42.32495-beta/"));
+        _http.Requests.Should().Contain($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/{NextMajorVersion}/dk");
+        // The feed picks third-party symbols for the target version, not the manifests' 29.0.
+        _tools.SeenVersions["CRONUS Continia Extension"][CoreId].Should().Be("29.0.0.199323");
+
+        await using var read = _db.NewContext();
+        var buildLog = string.Join("\n", await read.OeProjectBuildLogs.AsNoTracking()
+            .Where(l => l.ProjectBuildId == buildId && l.Section == "Build").Select(l => l.Content).ToListAsync());
+        buildLog.Should().Contain($"preview build {NextMajorVersion} (dk)").And.Contain("AL compiler 30.0.42.32495-beta");
+    }
+
+    [Fact]
+    public async Task A_next_minor_build_resolves_the_next_minor_with_the_stable_compiler()
+    {
+        var (projectId, releaseId, _) = await SeedAsync();
+        var nuget = new FakeNuGet("18.0.41.62505", "30.0.42.32495-beta");
+
+        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMinor, FeedCompilers(nuget));
+
+        outcome.BcVersion.Should().Be("29.1");
+        _tools.CompilersRun.Should().NotBeEmpty().And.OnlyContain(p => p.Contains("/18.0.41.62505/"));
+        _http.Requests.Should().Contain($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/29.1.3.4/dk");
+    }
+
+    [Fact]
+    public async Task A_next_version_build_replaces_a_stale_preview_parent_with_the_current_insider_build()
+    {
+        var (projectId, releaseId, _) = await SeedAsync();
+        var staleId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", DateTime.UtcNow.AddDays(-20));
+
+        await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
+
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == staleId)).DeletedAt.Should().NotBeNull();
+        var current = await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == "bc-insider:30.0:dk" && r.DeletedAt == null);
+        current.Id.Should().NotBe(staleId);
+        current.IsPrerelease.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_failed_preview_parent_is_replaced_at_once_and_never_adopted()
+    {
+        var (projectId, releaseId, _) = await SeedAsync();
+        var failedId = await SeedPreviewAsync("bc-insider:30.0:dk", null, DateTime.UtcNow, status: "failed");
+
+        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
+
+        outcome.ParentReleaseId.Should().NotBe(failedId);
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task A_recent_preview_parent_is_kept_even_when_a_newer_insider_build_exists()
+    {
+        var (projectId, releaseId, _) = await SeedAsync();
+        var recentId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", DateTime.UtcNow.AddDays(-2));
+
+        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
+
+        outcome.ParentReleaseId.Should().Be(recentId);
+    }
+
     // ── Harness ────────────────────────────────────────────────────────
 
-    private async Task<ProjectBuildOutcome> BuildAsync(int projectId, int releaseId)
+    private async Task<ProjectBuildOutcome> BuildAsync(int projectId, int releaseId,
+        BcBuildTarget target = BcBuildTarget.Current, AlCompilerProvisioner? compiler = null)
     {
         await using var ctx = _db.NewContext();
         var translations = new TranslationImportService(ctx, _db.OrgContext,
@@ -549,7 +670,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             ctx, _db.OrgContext,
             new BcArtifactService(_http, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance),
             importer,
-            new AlCompilerProvisioner(_http, NullLogger<AlCompilerProvisioner>.Instance,
+            compiler ?? new AlCompilerProvisioner(_http, NullLogger<AlCompilerProvisioner>.Instance,
                 new AlCompilerOptions { ExplicitAlcPath = _tools.AlcPath }),
             new AlSymbolFeedResolver(_http, NullLogger<AlSymbolFeedResolver>.Instance, new AlSymbolFeedOptions
             {
@@ -562,7 +683,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             _tools,
             TimeProvider.System,
             NullLogger<ProjectBuildService>.Instance);
-        return await service.BuildAsync(projectId, releaseId, new ProjectBuildOptions(InstallationToken: "installation-token"));
+        return await service.BuildAsync(projectId, releaseId, new ProjectBuildOptions(InstallationToken: "installation-token", Target: target));
     }
 
     private async Task<(int ProjectId, int ReleaseId, int BuildId)> SeedAsync()
@@ -638,20 +759,27 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     private static string Status(ProjectBuildOutcome outcome, string appName) =>
         outcome.Results.Single(r => r.AppName == appName).Status;
 
-    /// <summary>The Business Central artifact CDN: an index naming one version, and empty application/platform zips.</summary>
+    /// <summary>
+    /// The Business Central artifact CDNs: the public one naming one shipped
+    /// version, the insider one naming the next minor, the next major and the one
+    /// after it, and empty application/platform zips for each.
+    /// </summary>
     private static HttpResponseMessage? ArtifactCdn(HttpRequestMessage request)
     {
         var uri = request.RequestUri!;
-        if (uri.Host != BcArtifactIndex.CdnHost) return null;
+        string[] versions;
+        if (uri.Host == BcArtifactIndex.CdnHost) versions = [ArtifactVersion];
+        else if (uri.Host == BcArtifactIndex.InsiderCdnHost) versions = InsiderVersions;
+        else return null;
         var path = uri.AbsolutePath;
         if (path.EndsWith("/indexes/dk.json", StringComparison.Ordinal) || path.EndsWith("/indexes/platform.json", StringComparison.Ordinal))
         {
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(JsonSerializer.Serialize(new[] { new { Version = ArtifactVersion } })),
+                Content = new StringContent(JsonSerializer.Serialize(versions.Select(v => new { Version = v }))),
             };
         }
-        if (path.EndsWith($"/{ArtifactVersion}/dk", StringComparison.Ordinal) || path.EndsWith($"/{ArtifactVersion}/platform", StringComparison.Ordinal))
+        if (versions.Any(v => path.EndsWith($"/{v}/dk", StringComparison.Ordinal) || path.EndsWith($"/{v}/platform", StringComparison.Ordinal)))
         {
             using var ms = new MemoryStream();
             using (new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true)) { }
@@ -670,6 +798,9 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         public string AlcPath { get; }
         public IReadOnlyList<FakeExtension> Extensions { get; set; } = [];
 
+        /// <summary>The compiler each compile ran: the apphost path, or the <c>alc.dll</c> <c>dotnet</c> was handed.</summary>
+        public List<string> CompilersRun { get; } = new();
+
         /// <summary>The argument list of every <c>git clone</c> run.</summary>
         public List<IReadOnlyList<string>> Clones { get; } = new();
 
@@ -678,7 +809,16 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
 
         public Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken ct = default)
         {
-            if (request.FileName == AlcPath) return Task.FromResult(Compile(request.Arguments));
+            if (request.FileName == AlcPath)
+            {
+                CompilersRun.Add(AlcPath);
+                return Task.FromResult(Compile(request.Arguments));
+            }
+            if (request.FileName == "dotnet" && request.Arguments.Count > 0 && request.Arguments[0].EndsWith("alc.dll", StringComparison.Ordinal))
+            {
+                CompilersRun.Add(request.Arguments[0]);
+                return Task.FromResult(Compile(request.Arguments.Skip(1).ToList()));
+            }
             if (request.Arguments.Count > 0 && request.Arguments[0] == "clone")
             {
                 Clones.Add(request.Arguments.ToList());
