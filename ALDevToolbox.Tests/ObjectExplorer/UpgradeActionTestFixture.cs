@@ -343,6 +343,18 @@ internal sealed class UpgradeActionTestFixture : IDisposable
         public int Polls;
         private readonly Dictionary<Guid, string> _operations = new();
 
+        /// <summary>
+        /// An operation Business Central is already running for <paramref name="name"/>, as
+        /// one accepted before a restart would be: a poll answers for it like any other.
+        /// Returns the ids a booking would have stamped.
+        /// </summary>
+        public (Guid AppId, Guid OperationId) Accepted(string name)
+        {
+            var operationId = Guid.NewGuid();
+            _operations[operationId] = name;
+            return (Guid.NewGuid(), operationId);
+        }
+
         public Task<BcAppOperation> InstallPteAsync(string accessToken, string applicationFamily, string environmentName, byte[] appBytes, string fileName, string deploymentSchedule, string syncMode, string languageId, bool installOrUpdateNeededDependencies, CancellationToken ct = default)
         {
             if (InstallThrows is not null) throw InstallThrows;

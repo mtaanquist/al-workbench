@@ -47,8 +47,8 @@ public sealed class UpgradeActionWorker : BackgroundService
         _clock = clock;
         _logger = logger;
         // Polls every 30 seconds and is idle most of the time. A sweep sends at most one
-        // booked app install (an upload or an AppSource update) in all - not per
-        // organisation - and waits for it, so
+        // booked app install (an upload or an AppSource update), or asks again about one
+        // nobody saw finish, in all - not per organisation - and waits for it, so
         // the active budget is one install plus the rest of a sweep; a batch spreads
         // over as many sweeps as it has apps. The heartbeat is ticked on every poll of
         // that install (see RunOneAsync), so the idle ceiling stays the usual few
@@ -91,8 +91,8 @@ public sealed class UpgradeActionWorker : BackgroundService
                     }
                     // Two passes. Every organisation's platform-update moves first - a
                     // date the customer agreed, seconds each - then one booked app install
-                    // in all (an upload or an AppSource update), which waits for it to
-                    // finish. So no organisation's agreed slot waits behind another's
+                    // in all (an upload or an AppSource update, or a second look at one
+                    // nobody saw finish), which waits for it to finish. So no organisation's agreed slot waits behind another's
                     // ten-minute install, a sweep costs at most one install, and two
                     // installs never run at once: that can deadlock on Business Central's
                     // own bookkeeping table.
@@ -149,6 +149,11 @@ public sealed class UpgradeActionWorker : BackgroundService
             {
                 await perOrg(orgId, isSystem, ct).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Shutting down: not one org's failure, and the rest need not be tried.
+                throw;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "UpgradeActionWorker failed for org {OrgId}.", orgId);
@@ -162,10 +167,12 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// <summary>
     /// Fires the due rows of one org: every platform-update move, then at most one app
     /// install - an upload or an AppSource update (the rest of a batch, or the org's
-    /// other installs, wait for the next sweep). Internal so a test can drive one sweep against a seeded database without
-    /// the hosted-service loop. Returns how many rows were sent; rows only settled on the
-    /// way (a dependent skipped because the app before it failed) do not count, so the
-    /// sweep does not stop on one.
+    /// other installs, wait for the next sweep). An install Business Central accepted but
+    /// nobody saw finish is asked about again in that install's place (see
+    /// <see cref="ConfirmOneAsync"/>). Internal so a test can drive one sweep against a
+    /// seeded database without the hosted-service loop. Returns how many rows were sent or
+    /// asked about again; rows only settled on the way (a dependent skipped because the
+    /// app before it failed) do not count, so the sweep does not stop on one.
     /// </summary>
     internal async Task<int> RunDueActionsAsync(int orgId, bool isSystem, CancellationToken ct, SweepPass pass = SweepPass.Both)
     {
@@ -196,16 +203,32 @@ public sealed class UpgradeActionWorker : BackgroundService
         }
 
         var sent = 0;
-        foreach (var action in due)
+        foreach (var action in due.Where(a => !UpgradeActionService.IsAppInstall(a.Kind)))
         {
             if (ct.IsCancellationRequested) break;
-            var outcome = await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false);
-            if (outcome != RunOutcome.Sent) continue;
-            sent++;
-            // One app install per sweep: it waited for its install, up to ten minutes. A
-            // batch resumes on the next sweep, where the gate below finds its predecessor
-            // settled.
-            if (UpgradeActionService.IsAppInstall(action.Kind)) break;
+            if (await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false) == RunOutcome.Sent) sent++;
+        }
+
+        // One app install per sweep: it waits for its install, up to ten minutes. An
+        // install nobody saw finish is asked about first and takes that turn, so its batch
+        // hears how it ended before the next app goes. A batch resumes on the next sweep,
+        // where the gate in RunOneAsync finds its predecessor settled.
+        if (uploads && !ct.IsCancellationRequested)
+        {
+            if (await ConfirmOneAsync(orgId, isSystem, ct).ConfigureAwait(false))
+            {
+                sent++;
+            }
+            else
+            {
+                foreach (var action in due.Where(a => UpgradeActionService.IsAppInstall(a.Kind)))
+                {
+                    if (ct.IsCancellationRequested) break;
+                    if (await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false) != RunOutcome.Sent) continue;
+                    sent++;
+                    break;
+                }
+            }
         }
 
         if (sent > 0)
@@ -243,8 +266,16 @@ public sealed class UpgradeActionWorker : BackgroundService
             var earlier = await db.OeEnvironmentUpgradeActions.AsNoTracking()
                 .Where(a => a.BatchId == batch && a.BatchOrder < order)
                 .OrderBy(a => a.BatchOrder)
-                .Select(a => new { a.Status, a.SentAt, a.PackageFileName })
+                .Select(a => new { a.Status, a.SentAt, a.PackageFileName, a.ConfirmationDue })
                 .ToListAsync(ct).ConfigureAwait(false);
+            // One Business Central accepted but nobody saw finish is asked about before
+            // its dependents go, so a failure found that way still stops them. The sweep
+            // already sees to that (ConfirmOneAsync takes the install turn while any row
+            // is marked); this holds the rule here too, where the batch rules live.
+            if (earlier.Any(e => e.ConfirmationDue))
+            {
+                return RunOutcome.Skipped;
+            }
             // A predecessor still pending is either waiting its turn or mid-install. One
             // claimed longer ago than an install can take is a row whose settling write
             // was lost; it is not waited on for ever - its dependents go, and Business
@@ -291,6 +322,9 @@ public sealed class UpgradeActionWorker : BackgroundService
 
         UpgradeActionStatus status;
         string outcome;
+        // Set when Business Central took the app but the install was not seen to finish:
+        // a later sweep asks it once more (ConfirmOneAsync).
+        var confirmationDue = false;
         // Read before the send, so nothing after a write that landed can turn it into a failure.
         var environmentName = await db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == action.EnvironmentId)
@@ -334,7 +368,8 @@ public sealed class UpgradeActionWorker : BackgroundService
                     // of the batch goes on - a dependent that needed it is refused by
                     // Business Central if it did not land.
                     status = UpgradeActionStatus.Sent;
-                    outcome = $"{action.Label} was uploaded. {result.Message}";
+                    outcome = UnconfirmedOutcome(action.Kind, action.Label, action.TargetVersion, result.Message);
+                    confirmationDue = true;
                 }
                 else
                 {
@@ -369,9 +404,10 @@ public sealed class UpgradeActionWorker : BackgroundService
                 (status, outcome) = result.Completed
                     ? (UpgradeActionStatus.Sent, UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.Label))
                     : result.IsUnconfirmed
-                        ? (UpgradeActionStatus.Sent, $"{action.Label} was sent for update to {action.TargetVersion}. {result.Message}")
+                        ? (UpgradeActionStatus.Sent, UnconfirmedOutcome(action.Kind, action.Label, action.TargetVersion, result.Message))
                         : (UpgradeActionStatus.Failed, UpgradeActionService.FailureOutcome(action.Kind,
                             result.Message ?? "Business Central didn't finish the update.", action.TargetVersion, action.Label));
+                confirmationDue = result.IsUnconfirmed;
             }
             else
             {
@@ -411,6 +447,8 @@ public sealed class UpgradeActionWorker : BackgroundService
 
         // The package goes with the outcome, whichever way it went: a sent one is with
         // Business Central now, and a failed one is not retried (see FailInterruptedAsync).
+        // An unconfirmed one is asked about again only when its operation was stamped:
+        // without both ids there is nothing to ask about.
         var finishedAt = _clock.GetUtcNow().UtcDateTime;
         await db.OeEnvironmentUpgradeActions
             .Where(a => a.Id == action.Id)
@@ -418,6 +456,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .SetProperty(a => a.Status, status)
                 .SetProperty(a => a.Outcome, outcome)
                 .SetProperty(a => a.PackageContent, (byte[]?)null)
+                .SetProperty(a => a.ConfirmationDue, a => confirmationDue && a.BcAppId != null && a.BcOperationId != null)
                 .SetProperty(a => a.SentAt, finishedAt), ct).ConfigureAwait(false);
         return RunOutcome.Sent;
     }
@@ -446,10 +485,13 @@ public sealed class UpgradeActionWorker : BackgroundService
     }
 
     /// <summary>
-    /// Fails any action left claimed-but-unfinished by a restart. Called once per org on
+    /// Settles any action left claimed-but-unfinished by a restart. Called once per org on
     /// the first sweep, when nothing of ours is running, so it can never trip a live one.
-    /// The row is failed rather than retried: we know the send started and not whether it
-    /// landed, and repeating "start the update now" on a guess is not a safe default.
+    /// An install Business Central had already accepted is recorded as sent and marked to
+    /// be asked about again, which the same sweep's install pass does
+    /// (<see cref="ConfirmOneAsync"/>). Anything else is failed rather than retried: we
+    /// know the send started and not whether it landed, and repeating "start the update
+    /// now" on a guess is not a safe default.
     /// </summary>
     internal async Task FailInterruptedAsync(int orgId, bool isSystem, CancellationToken ct)
     {
@@ -459,15 +501,16 @@ public sealed class UpgradeActionWorker : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
         // An upload or AppSource update Business Central had already accepted went on
-        // installing without us: it is recorded as sent, unconfirmed, and the rest of its batch still goes -
-        // a dependent that needed it is refused by Business Central if it did not land.
-        // (The operation ids are on the row; re-polling them after a restart is the
-        // obvious next step, not taken yet.)
+        // installing without us: it is recorded as sent, unconfirmed, and marked so the
+        // install pass asks Business Central how it ended from the stored ids before the
+        // rest of its batch goes. The wording below stands only when that cannot happen
+        // (no app id was stamped) or until it does.
         var unconfirmed = await db.OeEnvironmentUpgradeActions
             .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt != null && a.BcOperationId != null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(a => a.Status, UpgradeActionStatus.Sent)
                 .SetProperty(a => a.PackageContent, (byte[]?)null)
+                .SetProperty(a => a.ConfirmationDue, a => a.BcAppId != null)
                 .SetProperty(a => a.Outcome, a => a.Kind == UpgradeActionKind.UpdateApp
                     ? (a.AppName ?? "The app") + " was sent for update, but the workbench restarted before it could confirm the update finished. Check the environment's installed apps."
                     : (a.PackageFileName ?? "The app")
@@ -489,7 +532,7 @@ public sealed class UpgradeActionWorker : BackgroundService
         if (unconfirmed > 0 || failed > 0)
         {
             _logger.LogWarning(
-                "A restart interrupted {Unconfirmed} upload(s) mid-install (recorded as sent, unconfirmed) and {Failed} action(s) mid-send (failed) in org {OrgId}.",
+                "A restart interrupted {Unconfirmed} install(s) Business Central had accepted (recorded as sent, to be checked again) and {Failed} action(s) mid-send (failed) in org {OrgId}.",
                 unconfirmed, failed, orgId);
         }
 
@@ -505,6 +548,121 @@ public sealed class UpgradeActionWorker : BackgroundService
             _logger.LogInformation("Dropped the stored package from {Count} settled upload booking(s) in org {OrgId}.", swept, orgId);
         }
     }
+
+    /// <summary>
+    /// Asks Business Central how one accepted-but-unconfirmed install ended - the oldest
+    /// row of this org marked <see cref="OeEnvironmentUpgradeAction.ConfirmationDue"/> -
+    /// and settles the row as <see cref="RunOneAsync"/> would have: sent on success,
+    /// failed in Business Central's words, and still sent, unconfirmed, only when no answer
+    /// can be had. The mark is cleared whatever the answer, so a row is asked about once.
+    /// Returns whether a row was asked about, which takes the sweep's one install turn.
+    /// </summary>
+    private async Task<bool> ConfirmOneAsync(int orgId, bool isSystem, CancellationToken ct)
+    {
+        ConfirmAction? row;
+        using (AmbientOrganizationScope.Enter(
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem)))
+        await using (var scope = _services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            row = await db.OeEnvironmentUpgradeActions.AsNoTracking()
+                .Where(a => a.ConfirmationDue)
+                .OrderBy(a => a.SentAt)
+                .ThenBy(a => a.Id)
+                .Select(a => new ConfirmAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
+                    a.Kind == UpgradeActionKind.UpdateApp ? a.AppName : a.PackageFileName, a.BcAppId, a.BcOperationId))
+                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        }
+        if (row is null) return false;
+
+        // As the requester, as the send was: the audit trail and the access check are theirs.
+        var identity = AmbientOrganizationScope.OrganizationIdentity.ForOrganization(
+            orgId, isSystem, row.RequestedByUserId);
+        using var ambient = AmbientOrganizationScope.Enter(identity);
+        await using var actionScope = _services.CreateAsyncScope();
+        var actionDb = actionScope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var label = row.Label ?? "The app";
+
+        UpgradeActionStatus? status = null;
+        string? outcome = null;
+        if (row.AppId is { } appId && row.OperationId is { } operationId)
+        {
+            var environmentName = await actionDb.OeProjectEnvironments.AsNoTracking()
+                .Where(e => e.Id == row.EnvironmentId)
+                .Select(e => e.Name)
+                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            try
+            {
+                var actions = actionScope.ServiceProvider.GetRequiredService<UpgradeActionService>();
+                var result = await actions.ConfirmInstallAsync(row.ProjectId, row.EnvironmentId, appId, operationId, ct, _heartbeat.Tick)
+                    .ConfigureAwait(false);
+                (status, outcome) = result.Completed
+                    ? (UpgradeActionStatus.Sent, UpgradeActionService.SuccessOutcome(row.Kind, row.TargetVersion, environmentName, label))
+                    : result.IsUnconfirmed
+                        ? (UpgradeActionStatus.Sent, UnconfirmedOutcome(row.Kind, label, row.TargetVersion, result.Message))
+                        : (UpgradeActionStatus.Failed, UpgradeActionService.FailureOutcome(row.Kind,
+                            result.Message ?? (row.Kind == UpgradeActionKind.UpdateApp
+                                ? "Business Central didn't finish the update."
+                                : "Business Central didn't finish the install."), row.TargetVersion, label));
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Shutting down: the mark stays, and the first sweep after the restart asks again.
+                throw;
+            }
+            catch (PlanValidationException ex)
+            {
+                // The environment or its credentials are gone. That says nothing about the
+                // install, which Business Central ran regardless.
+                _logger.LogWarning("Couldn't check booking {ActionId} again: {Reason}", row.Id, ex.Errors.Values.FirstOrDefault());
+                (status, outcome) = (UpgradeActionStatus.Sent, UnconfirmedOutcome(row.Kind, label, row.TargetVersion,
+                    "The workbench couldn't reach the environment afterwards to check whether it finished, so it wasn't confirmed here."));
+            }
+            catch (ProjectAccessDeniedException)
+            {
+                (status, outcome) = (UpgradeActionStatus.Sent, UnconfirmedOutcome(row.Kind, label, row.TargetVersion,
+                    "The person who booked it no longer had permission to manage this customer, so the workbench didn't check whether it finished."));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Checking booking {ActionId} again on environment {EnvironmentId} (project {ProjectId}) threw.",
+                    row.Id, row.EnvironmentId, row.ProjectId);
+                (status, outcome) = (UpgradeActionStatus.Sent, UnconfirmedOutcome(row.Kind, label, row.TargetVersion,
+                    "The workbench couldn't ask Business Central afterwards whether it finished, so it wasn't confirmed here."));
+            }
+        }
+
+        // Only a row still marked is settled, and the mark goes in the same write. A row
+        // with nothing to ask about keeps what it says and just loses the mark.
+        var marked = actionDb.OeEnvironmentUpgradeActions.Where(a => a.Id == row.Id && a.ConfirmationDue);
+        if (status is { } settledStatus && outcome is not null)
+        {
+            await marked.ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.ConfirmationDue, false)
+                .SetProperty(a => a.Status, settledStatus)
+                .SetProperty(a => a.Outcome, outcome), ct).ConfigureAwait(false);
+            _logger.LogInformation("Booking {ActionId} was checked again with Business Central: {Status}.", row.Id, settledStatus);
+        }
+        else
+        {
+            await marked.ExecuteUpdateAsync(s => s.SetProperty(a => a.ConfirmationDue, false), ct).ConfigureAwait(false);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// What the history says about an install Business Central accepted but nobody saw
+    /// finish: that it was sent, then the poller's caveat or the reason it could not ask.
+    /// </summary>
+    private static string UnconfirmedOutcome(UpgradeActionKind kind, string? label, string? targetVersion, string? detail) =>
+        kind == UpgradeActionKind.UpdateApp
+            ? $"{label} was sent for update to {targetVersion}. {detail}"
+            : $"{label} was uploaded. {detail}";
+
+    /// <summary>An accepted install still to be asked about, read outside the scope that asks.</summary>
+    private sealed record ConfirmAction(
+        int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion,
+        string? Label, Guid? AppId, Guid? OperationId);
 
     /// <summary>
     /// One due row, read outside the per-action scope so the sweep holds no context open

@@ -359,20 +359,53 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task A_run_of_failed_polls_records_the_install_as_sent_unconfirmed_and_the_batch_goes_on()
+    public async Task A_run_of_failed_polls_is_asked_about_again_on_the_next_sweep_before_the_batch_goes_on()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
         var ids = await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app", "Reports.app");
         _f.Apps.PollErrorsBeforeAnswer = BcAppOperationPoller.MaxConsecutivePollErrors;
 
         _f.Clock.Advance(TimeSpan.FromHours(13));
-        await SweepUntilQuietAsync();
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
 
         var core = await _f.ReadActionAsync(ids[0]);
-        core.Status.Should().Be(UpgradeActionStatus.Sent, "Business Central has the app; only the answer is missing, as after a restart");
+        core.Status.Should().Be(UpgradeActionStatus.Sent, "Business Central has the app; only the answer is missing");
         core.Outcome.Should().Contain("Core.app was uploaded").And.Contain("wasn't confirmed here").And.NotContain("wasn't installed");
         core.PackageContent.Should().BeNull();
+        core.ConfirmationDue.Should().BeTrue();
+
+        // The next sweep asks again, and that takes its install turn.
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        core = await _f.ReadActionAsync(ids[0]);
+        core.Outcome.Should().Contain("Core.app was installed");
+        core.ConfirmationDue.Should().BeFalse();
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "Core.app" }, "the app is never sent twice, and Reports.app waits for Core.app's answer");
+
+        await SweepUntilQuietAsync();
         _f.Apps.InstalledFiles.Should().Equal("Core.app", "Reports.app");
+    }
+
+    [Fact]
+    public async Task An_install_is_asked_about_again_only_once_and_then_the_batch_goes_on()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app", "Reports.app");
+        // Enough errors to leave both the live poll and the second look without an answer.
+        _f.Apps.PollErrorsBeforeAnswer = 2 * BcAppOperationPoller.MaxConsecutivePollErrors;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var core = await _f.ReadActionAsync(ids[0]);
+        core.Status.Should().Be(UpgradeActionStatus.Sent);
+        core.Outcome.Should().Contain("Core.app was uploaded").And.Contain("wasn't confirmed here");
+        core.ConfirmationDue.Should().BeFalse("a row is asked about once, so it never keeps the worker busy for ever");
+        _f.Apps.Polls.Should().Be(2 * BcAppOperationPoller.MaxConsecutivePollErrors);
+
+        await SweepUntilQuietAsync();
+        _f.Apps.InstalledFiles.Should().Equal("Core.app", "Reports.app");
+        (await _f.ReadActionAsync(ids[0])).Outcome.Should().Contain("wasn't confirmed here", "the second look was the last");
     }
 
     [Fact]
@@ -440,30 +473,112 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task A_restart_while_an_app_is_installing_records_it_as_sent_unconfirmed_and_the_rest_of_its_batch_still_goes()
+    public async Task A_restart_while_an_app_is_installing_asks_business_central_how_it_ended_and_the_rest_of_its_batch_goes()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
         var ids = await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app", "Reports.app");
         _f.Clock.Advance(TimeSpan.FromHours(13));
-        // Business Central accepted Core.app and the workbench went down mid-poll: the row
-        // is claimed and carries the operation Business Central answered with.
-        await using (var ctx = _f.Db.NewContext())
-        {
-            await ctx.OeEnvironmentUpgradeActions.Where(a => a.Id == ids[0])
-                .ExecuteUpdateAsync(s => s
-                    .SetProperty(a => a.SentAt, _f.Clock.GetUtcNow().UtcDateTime)
-                    .SetProperty(a => a.BcAppId, Guid.NewGuid())
-                    .SetProperty(a => a.BcOperationId, Guid.NewGuid()));
-        }
+        await InterruptMidInstallAsync(ids[0], _f.Apps.Accepted("Core.app"));
 
         await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
         var core = await _f.ReadActionAsync(ids[0]);
         core.Status.Should().Be(UpgradeActionStatus.Sent, "Business Central had the app and went on installing it");
-        core.Outcome.Should().Contain("restarted before it could confirm");
         core.PackageContent.Should().BeNull();
+        core.ConfirmationDue.Should().BeTrue();
 
         await SweepUntilQuietAsync();
+        core = await _f.ReadActionAsync(ids[0]);
+        core.Status.Should().Be(UpgradeActionStatus.Sent);
+        core.Outcome.Should().Be("Core.app was installed on Production.");
+        core.ConfirmationDue.Should().BeFalse();
+        _f.Apps.InstalledFiles.Should().Equal(new[] { "Reports.app" }, "Core.app was asked about, never sent again");
+    }
+
+    [Fact]
+    public async Task A_restart_while_an_app_is_installing_finds_a_failed_install_and_stops_the_rest_of_its_batch()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app", "Reports.app");
+        _f.Apps.OnOperationStatus = name => name == "Core.app" ? BcAppOperationStatus.Failed : BcAppOperationStatus.Succeeded;
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await InterruptMidInstallAsync(ids[0], _f.Apps.Accepted("Core.app"));
+
+        await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        await SweepUntilQuietAsync();
+
+        var core = await _f.ReadActionAsync(ids[0]);
+        core.Status.Should().Be(UpgradeActionStatus.Failed, "the history says what Business Central said, not 'check it yourself'");
+        core.Outcome.Should().Contain("Core.app wasn't installed").And.Contain("Continia Core 28.0.0.0");
+        _f.Apps.InstalledFiles.Should().BeEmpty();
+        var reports = await _f.ReadActionAsync(ids[1]);
+        reports.Status.Should().Be(UpgradeActionStatus.Failed);
+        reports.Outcome.Should().Contain("Core.app before it");
+    }
+
+    [Fact]
+    public async Task A_restart_whose_install_gets_no_answer_stays_unconfirmed_and_the_rest_of_its_batch_goes()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app", "Reports.app");
+        _f.Apps.PollErrorsBeforeAnswer = BcAppOperationPoller.MaxConsecutivePollErrors;
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await InterruptMidInstallAsync(ids[0], _f.Apps.Accepted("Core.app"));
+
+        await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        await SweepUntilQuietAsync();
+
+        var core = await _f.ReadActionAsync(ids[0]);
+        core.Status.Should().Be(UpgradeActionStatus.Sent);
+        core.Outcome.Should().Contain("Core.app was uploaded").And.Contain("wasn't confirmed here");
+        core.ConfirmationDue.Should().BeFalse();
         _f.Apps.InstalledFiles.Should().Equal(new[] { "Reports.app" }, "an unconfirmed predecessor does not stop the batch; Business Central refuses a dependent if it is missing");
+    }
+
+    [Fact]
+    public async Task A_restart_whose_solution_is_gone_records_the_install_as_unconfirmed_not_failed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app");
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await InterruptMidInstallAsync(ids[0], _f.Apps.Accepted("Core.app"));
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == projectId)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        }
+
+        await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        await SweepUntilQuietAsync();
+
+        var core = await _f.ReadActionAsync(ids[0]);
+        core.Status.Should().Be(UpgradeActionStatus.Sent, "losing the connection says nothing about an install Business Central ran regardless");
+        core.Outcome.Should().Contain("Core.app was uploaded").And.Contain("couldn't reach the environment");
+        core.ConfirmationDue.Should().BeFalse();
+        _f.Apps.Polls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Asking_about_an_install_again_keeps_the_workers_heartbeat_alive()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app");
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await InterruptMidInstallAsync(ids[0], _f.Apps.Accepted("Core.app"));
+        var polls = 0;
+        _f.Apps.OnOperationStatus = _ =>
+        {
+            _f.Clock.Advance(TimeSpan.FromMinutes(2));
+            return ++polls < 4 ? BcAppOperationStatus.Running : BcAppOperationStatus.Succeeded;
+        };
+        var heartbeats = new WorkerHeartbeatRegistry(_f.Clock);
+        var worker = _f.Worker(heartbeats);
+
+        await worker.FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        await worker.RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        (await _f.ReadActionAsync(ids[0])).Outcome.Should().Contain("Core.app was installed");
+        heartbeats.All().Single().LastTickUtc.Should().BeCloseTo(_f.Clock.GetUtcNow().UtcDateTime, TimeSpan.FromMinutes(2),
+            "the last poll ticked it, minutes after the sweep began");
     }
 
     [Fact]
@@ -629,6 +744,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         var stored = await _f.ReadActionAsync(actionId);
         stored.Status.Should().Be(UpgradeActionStatus.Sent);
         stored.Outcome.Should().Contain("Continia Core was sent for update to 28.5.0.1").And.Contain("wasn't confirmed here");
+        stored.ConfirmationDue.Should().BeTrue("an update is asked about again like an upload");
     }
 
     [Fact]
@@ -699,18 +815,19 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task A_restart_while_an_update_runs_records_it_as_sent_unconfirmed()
+    public async Task A_restart_while_an_update_runs_asks_business_central_how_it_ended()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
         Waiting();
         var actionId = await BookUpdateAsync(projectId, envId, hoursAhead: 12);
         _f.Clock.Advance(TimeSpan.FromHours(13));
+        var (_, operationId) = _f.Apps.Accepted("update Continia Core");
         await using (var ctx = _f.Db.NewContext())
         {
             await ctx.OeEnvironmentUpgradeActions.Where(a => a.Id == actionId)
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(a => a.SentAt, _f.Clock.GetUtcNow().UtcDateTime)
-                    .SetProperty(a => a.BcOperationId, Guid.NewGuid()));
+                    .SetProperty(a => a.BcOperationId, operationId));
         }
 
         await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
@@ -718,6 +835,12 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         var stored = await _f.ReadActionAsync(actionId);
         stored.Status.Should().Be(UpgradeActionStatus.Sent);
         stored.Outcome.Should().Contain("Continia Core was sent for update").And.Contain("restarted before it could confirm");
+        stored.ConfirmationDue.Should().BeTrue("the booked app id and the stamped operation are all a second look needs");
+
+        await SweepUntilQuietAsync();
+        stored = await _f.ReadActionAsync(actionId);
+        stored.Outcome.Should().Be("Continia Core was updated to 28.5.0.1 on Production.");
+        _f.Apps.Updated.Should().BeEmpty("the update was asked about, never sent again");
     }
 
     [Fact]
@@ -733,6 +856,17 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         (await act.Should().ThrowAsync<ALDevToolbox.Domain.ValueObjects.PlanValidationException>())
             .Which.Errors.Values.Should().ContainMatch("*booked for a later install*");
         (await _f.ReadActionAsync(update)).ExecuteAfter.Should().BeAfter(_f.Clock.GetUtcNow().UtcDateTime);
+    }
+
+    /// <summary>The shape a restart mid-install leaves: claimed, still pending, with the operation Business Central answered with.</summary>
+    private async Task InterruptMidInstallAsync(int actionId, (Guid AppId, Guid OperationId) accepted)
+    {
+        await using var ctx = _f.Db.NewContext();
+        await ctx.OeEnvironmentUpgradeActions.Where(a => a.Id == actionId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.SentAt, _f.Clock.GetUtcNow().UtcDateTime)
+                .SetProperty(a => a.BcAppId, accepted.AppId)
+                .SetProperty(a => a.BcOperationId, accepted.OperationId));
     }
 
     /// <summary>Sweeps until a sweep sends nothing, as the worker does every thirty seconds. Returns how many rows ran in all.</summary>

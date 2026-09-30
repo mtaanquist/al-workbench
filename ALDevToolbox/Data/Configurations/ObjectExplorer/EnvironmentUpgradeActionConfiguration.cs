@@ -47,6 +47,8 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         // the app is already with it.
         entity.Property(e => e.BcAppId).HasColumnName("package_bc_app_id");
         entity.Property(e => e.BcOperationId).HasColumnName("package_bc_operation_id");
+        // An accepted install nobody saw finish, still to be asked about once (#1002).
+        entity.Property(e => e.ConfirmationDue).HasColumnName("package_confirmation_due");
         // A booked AppSource update (#1001): the app's name for the lists, and the
         // prerequisites the person agreed to, which the worker holds Business Central to.
         entity.Property(e => e.AppName).HasColumnName("app_name").HasMaxLength(250);
