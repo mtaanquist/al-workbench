@@ -14,6 +14,7 @@ internal sealed class ProjectConfiguration : IEntityTypeConfiguration<OeProject>
         entity.Property(e => e.OrganizationId).HasColumnName("organization_id").IsRequired();
         entity.Property(e => e.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
         entity.Property(e => e.ShortName).HasColumnName("short_name").HasMaxLength(50);
+        entity.Property(e => e.Slug).HasColumnName("slug").HasMaxLength(60);
         entity.Property(e => e.DefaultArtifactCountry).HasColumnName("default_artifact_country").HasMaxLength(20);
         entity.Property(e => e.CreatedByUserId).HasColumnName("created_by_user_id");
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
@@ -97,5 +98,16 @@ internal sealed class ProjectConfiguration : IEntityTypeConfiguration<OeProject>
         // but the app rejects them, an inconsistency. EF can't model a functional
         // index, so it's created via raw SQL in the migration (and intentionally
         // not declared here). See issue #432.
+
+        // Declared so EF keeps it: the slug index below starts with organization_id, but
+        // it is partial, so it does not cover the foreign key for deleted rows.
+        entity.HasIndex(e => e.OrganizationId).HasDatabaseName("IX_oe_projects_organization_id");
+
+        // Slugs are stored lowercase, so a plain unique index is enough - unlike the
+        // name above. Active rows only, so a deleted solution frees its address.
+        entity.HasIndex(e => new { e.OrganizationId, e.Slug })
+            .HasDatabaseName("ix_oe_projects_organization_id_slug")
+            .IsUnique()
+            .HasFilter("deleted_at IS NULL");
     }
 }

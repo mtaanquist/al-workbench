@@ -54,6 +54,15 @@ public class OeProject
     public string? ShortName { get; set; }
 
     /// <summary>
+    /// The solution's key in its web address - <c>/solutions/{Slug}</c> and
+    /// <c>/environments/{Slug}/{environment}</c>. Lowercase ASCII words joined by
+    /// dashes, unique per org among active rows, never all digits (that shape is an
+    /// id). Derived from <see cref="ShortName"/>, or <see cref="Name"/> when there is none, on create and editable after; a rename
+    /// leaves it alone so links keep working. See <see cref="SolutionSlug"/>.
+    /// </summary>
+    public string? Slug { get; set; }
+
+    /// <summary>
     /// BC localisation/country the project's builds compile against (e.g.
     /// <c>dk</c>, or <c>w1</c> for the worldwide base). Required on create/edit
     /// since the multi-country auto-import change removed the org-wide fallback —

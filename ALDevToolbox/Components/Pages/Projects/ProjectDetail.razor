@@ -1,5 +1,6 @@
 @page "/solutions/new"
-@page "/solutions/{Id:int}"
+@page "/solutions/{SolutionId:int}"
+@page "/solutions/{Slug}"
 @attribute [Authorize]
 @rendermode InteractiveServer
 @inject ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService Projects
@@ -46,7 +47,9 @@
 @* What the command palette opens with on this page: its tabs, its environments
    and its latest build. Nothing while it is being created - there is no record
    to be about yet. *@
-@if (Id is { } paletteId)
+@* Only once the solution has loaded: the lookup behind a readable address does not
+   decide visibility, so an id it found must not reach the page before the load has. *@
+@if (_loadedProject is not null && Id is { } paletteId)
 {
     <PaletteContext Kind="ALDevToolbox.Services.Palette.PaletteContextKind.Solution" Id="paletteId" />
 }
@@ -227,11 +230,11 @@
                 }
                 else if (_section == Section.Customer && Id is not null)
                 {
-                    <ProjectDetailCustomer Id="Id.Value" CanManage="CanEditCustomer" CanChangeHosting="_canManage" OnSaved="OnCustomerSavedAsync" />
+                    <ProjectDetailCustomer Id="Id.Value" SolutionSlug="@_loadedProject?.Slug" CanManage="CanEditCustomer" CanChangeHosting="_canManage" OnSaved="OnCustomerSavedAsync" />
                 }
                 else if (_section == Section.Bc && Id is not null && _canManage && !IsOnPremises)
                 {
-                    <ProjectDetailBc Id="Id.Value" />
+                    <ProjectDetailBc Id="Id.Value" SolutionSlug="@_loadedProject?.Slug" />
                 }
                 else if (_section == Section.Pipelines && Id is not null && _canManage)
                 {
@@ -265,7 +268,14 @@
 </DetailPage>
 
 @code {
-    [Parameter] public int? Id { get; set; }
+    /// <summary>The numeric address, /solutions/42. Still served, and forwarded to the slug one.</summary>
+    [Parameter] public int? SolutionId { get; set; }
+
+    /// <summary>The readable address, /solutions/cronus. See <see cref="SolutionSlug"/>.</summary>
+    [Parameter] public string? Slug { get; set; }
+
+    /// <summary>The solution on screen, whichever address named it; null on /solutions/new.</summary>
+    private int? Id { get; set; }
 
     /// <summary>
     /// Opens on a named tab. Only for links from elsewhere - the environment page sends
@@ -442,10 +452,15 @@
     /// which would only ever have run for the first solution opened.
     /// </summary>
     private bool _hasLoaded;
+
+    /// <summary>The address <see cref="Id"/> was last resolved from.</summary>
+    private (int? SolutionId, string? Slug)? _resolvedFor;
     private int? _loadedId;
 
     protected override async Task OnParametersSetAsync()
     {
+        if (!await ResolveAddressAsync()) return;
+
         if (_hasLoaded && _loadedId == Id)
         {
             // Same solution, so this is a navigation to it with a ?tab= - even the
@@ -460,6 +475,51 @@
         _hasLoaded = true;
         _loadedId = Id;
         await LoadPageAsync();
+    }
+
+    /// <summary>
+    /// Turns the address into <see cref="Id"/>. A numeric address for a solution this
+    /// person can see is forwarded to its slug, keeping any <c>?tab=</c>, so a page has
+    /// one address whichever link led to it. False when the page is leaving or the
+    /// slug names nothing - the not-found state is then already set.
+    /// </summary>
+    private async Task<bool> ResolveAddressAsync()
+    {
+        // The same address again - a ?tab= change, which keeps the component - needs no
+        // lookup, and must not start one: the page's own reads may still be running on
+        // the shared context.
+        if (_hasLoaded && _resolvedFor == (SolutionId, Slug)) return !_notFound || Slug is null;
+        _resolvedFor = (SolutionId, Slug);
+
+        if (Slug is not null)
+        {
+            Id = await Projects.FindIdBySlugAsync(Slug);
+            if (Id is not null) return true;
+            // Not "loaded": a later /solutions/new has Id null too, and must not be
+            // mistaken for this page again.
+            _hasLoaded = false;
+            _loadedId = null;
+            _loading = false;
+            _notFound = true;
+            _header = null;
+            return false;
+        }
+
+        Id = SolutionId;
+        // The solution already on screen, by its number (the palette links that way):
+        // move the address, read nothing.
+        if (Id is { } shown && _hasLoaded && _loadedId == shown && _loadedProject is { Slug: { } known })
+        {
+            Nav.NavigateTo(SolutionLinks.Solution(known, shown) + new Uri(Nav.Uri).Query, replace: true);
+            return false;
+        }
+        if (Id is { } id && await Projects.FindVisibleSlugAsync(id) is { } slug)
+        {
+            var query = new Uri(Nav.Uri).Query;
+            Nav.NavigateTo(SolutionLinks.Solution(slug, id) + query, replace: true);
+            return false;
+        }
+        return true;
     }
 
     private Section SectionFor(string? tab) => tab?.ToLowerInvariant() switch
@@ -595,6 +655,7 @@
         {
             Name = _loadedProject!.Name,
             ShortName = _loadedProject.ShortName ?? string.Empty,
+            Slug = _loadedProject.Slug ?? string.Empty,
             Country = _loadedProject.DefaultArtifactCountry ?? string.Empty,
             Repos = _loadedProject.Repositories
                 .Select(r => new RepoRow { Provider = r.Provider, Url = r.Url, DisplayName = r.DisplayName })
@@ -667,18 +728,28 @@
                 _edit.Name,
                 string.IsNullOrWhiteSpace(_edit.ShortName) ? null : _edit.ShortName,
                 string.IsNullOrWhiteSpace(_edit.Country) ? null : _edit.Country,
-                repos);
+                repos,
+                // Blank asks the service for one made from the name; on create, the
+                // field is not shown and null does the same.
+                Id is null ? null : _edit.Slug.Trim());
 
             if (Id is null)
             {
                 var newId = await Projects.CreateProjectAsync(input, _newAccess);
-                Nav.NavigateTo($"/solutions/{newId}");
+                Nav.NavigateTo(SolutionLinks.Solution(await Projects.FindVisibleSlugAsync(newId), newId));
                 return;
             }
+            var slugBefore = _loadedProject?.Slug;
             await Projects.UpdateProjectAsync(Id.Value, input);
             await LoadAsync();
             HydrateEdit();
             _message = "Solution saved.";
+            // A new address moves the page with it, or the one in the bar stops working.
+            if (_loadedProject is { } saved && saved.Slug != slugBefore)
+            {
+                _loadedId = Id;
+                Nav.NavigateTo(SolutionLinks.Solution(saved.Slug, saved.Id) + new Uri(Nav.Uri).Query, replace: true);
+            }
         }
         catch (PlanValidationException ex)
         {
@@ -726,6 +797,8 @@
         /// <summary>The abbreviation the generator puts in extension names. Blank means the full name is used. See .design/customer-naming.md.</summary>
         public string ShortName { get; set; } = string.Empty;
         public string Country { get; set; } = string.Empty;
+        /// <summary>The solution's key in its web address. Blank on save makes one from the name. See <see cref="SolutionSlug"/>.</summary>
+        public string Slug { get; set; } = string.Empty;
         public List<RepoRow> Repos { get; set; } = new();
     }
 

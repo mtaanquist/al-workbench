@@ -1,4 +1,5 @@
 @using ALDevToolbox.Domain.Entities.ObjectExplorer
+@using ALDevToolbox.Services.ObjectExplorer.Projects
 
 @*
     The General tab of a solution's settings: what the solution is called, which
@@ -43,6 +44,23 @@
                     <code class="code">CRO Core</code>. Leave blank to use the full name.
                 </small>
             </section>
+            @if (Id is not null)
+            {
+                <section class="field">
+                    <label class="field__label" for="proj-slug">Link name</label>
+                    @* pattern + maxlength mirror SolutionSlug.IsValid, which ProjectService.ValidateAsync applies. *@
+                    <input id="proj-slug" type="text" class="input" maxlength="@SolutionSlug.MaxLength" pattern="@SolutionSlug.HtmlPattern"
+                           title="Lowercase letters, digits and single dashes, e.g. cronus-dk"
+                           @bind="Edit.Slug" @bind:after="MarkDirty" disabled="@(Saving || !CanManage)" placeholder="e.g. cronus" />
+                    <FieldError Field="Slug" Errors="Errors" />
+                    <small class="field__hint">
+                        The last part of this solution's link, for example
+                        <code class="code">/solutions/@(SolutionSlug.IsValid(Edit.Slug.Trim()) ? Edit.Slug.Trim() : "cronus")</code>.
+                        Lowercase letters, digits and single dashes, with at least one letter.
+                        Leave blank to make one from the short name, or the name if there is none. Changing it breaks links people have already saved.
+                    </small>
+                </section>
+            }
             <section class="field">
                 <label class="field__label" for="proj-country">Country code</label>
                 <input id="proj-country" type="text" class="input" maxlength="20" pattern="[A-Za-z0-9]{2,10}" required style="max-width:220px"

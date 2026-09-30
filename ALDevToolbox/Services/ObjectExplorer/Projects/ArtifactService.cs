@@ -55,6 +55,7 @@ public sealed class ArtifactService
                 p.Id,
                 p.Name,
                 p.ShortName,
+                p.Slug,
                 p.Visibility,
                 OwnerName = p.CreatedByUser != null ? p.CreatedByUser.DisplayName : null,
                 RepoCount = p.Repositories.Count,
@@ -141,6 +142,7 @@ public sealed class ArtifactService
                 RepoNames: p.RepoNames)
             {
                 Visibility = p.Visibility,
+                Slug = p.Slug,
                 LastProductionDelivery = shipped.GetValueOrDefault(p.Id),
             });
         }
@@ -658,6 +660,17 @@ public sealed record ProjectArtifactsRow(
     /// when nothing has. Empty on a locked row.
     /// </summary>
     public DeliverySummary? LastProductionDelivery { get; init; }
+
+    /// <summary>
+    /// The solution's key in its web address. Null on a locked row, which has no page
+    /// to link to. Page-only: agents address a solution by name or id.
+    /// </summary>
+    [JsonIgnore]
+    public string? Slug { get; init; }
+
+    /// <summary>The solution's own page.</summary>
+    [JsonIgnore]
+    public string Href => SolutionLinks.Solution(Slug, Id);
 }
 
 /// <summary>

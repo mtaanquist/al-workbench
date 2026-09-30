@@ -266,6 +266,15 @@ populated; one primary button per page.
   state and **Add repository** carry the first run. *Setup only — the single primary action is
   **Create solution** in create mode and **Save solution** once it exists; building moved to
   Pipelines.*
+
+  **Readable addresses.** A solution also answers at `/solutions/{slug}` (`cronus-a-s`), and that
+  is the address the app links to and the one the page settles on: `/solutions/{id}` still
+  resolves and forwards there, keeping `?tab=`. The slug is lowercase ASCII words joined by
+  dashes, unique per organisation among active solutions, never all digits (that shape is an id)
+  and never `new`. It is derived from the short name (ABJ becomes `abj`), or the name when there is none, on create (a counter is appended when two names
+  fold to the same slug), kept on a rename so saved links keep working, and editable as
+  **Web address** on General, where a blank field makes a fresh one the same way. Environments
+  use it too: see `.design/environment-updates.md`, "The environment's own page".
 - **Pipelines** (`Components/Pages/Pipelines/`, renamed from Artifacts): `PipelinesBrowser`
   (`/pipelines`, alias `/artifacts`) — cross-project landing summarising each project's latest build
   with a quick `Download all` (latest *successful* build); `PipelineBuilds`
