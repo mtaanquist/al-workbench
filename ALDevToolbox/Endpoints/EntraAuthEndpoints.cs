@@ -116,6 +116,20 @@ internal static class EntraAuthEndpoints
         return app;
     }
 
+    /// <summary>
+    /// Whether a Microsoft step-up callback counts as a fresh interactive
+    /// sign-in. The handshake sends <c>prompt=login</c> and <c>max_age=0</c>,
+    /// but Entra only puts <c>auth_time</c> in an ID token when the app
+    /// registration lists it as an optional claim; most registrations do not,
+    /// and refusing every token without it locked Microsoft users out of
+    /// step-up entirely (found the day this shipped). So: when the claim is
+    /// there it is enforced, no older than the step-up started with a minute
+    /// of skew; when it is absent the callback trusts <c>prompt=login</c>,
+    /// and logs that the verification was client-side only.
+    /// </summary>
+    internal static bool StepUpReauthenticated(DateTime? authTime, DateTime issuedAt) =>
+        authTime is not { } at || at >= issuedAt.AddMinutes(-1);
+
     /// <summary>The token's <c>auth_time</c> (seconds since the epoch) as UTC, or null when Microsoft did not include it.</summary>
     private static DateTime? AuthTimeOf(ClaimsPrincipal principal) =>
         long.TryParse(principal.FindFirst("auth_time")?.Value, out var unix)
@@ -162,7 +176,7 @@ internal static class EntraAuthEndpoints
         // tool (StepUpEndpoints). Never a sign-in: the identity that came back
         // must already be linked to the user on this request's cookie, and the
         // sign-in must be newer than the step-up started when Microsoft says
-        // when it happened (auth_time is optional in Entra ID tokens).
+        // when it happened (see StepUpReauthenticated for when it does not).
         var authTime = AuthTimeOf(principal);
         if (ctx.Properties?.Items.TryGetValue(StepUpEndpoints.EntraStepUpUserIdItem, out var stepUpUserRaw) == true
             && int.TryParse(stepUpUserRaw, out var stepUpUserId))
@@ -170,27 +184,35 @@ internal static class EntraAuthEndpoints
             var cookie = await ctx.HttpContext.AuthenticateAsync(
                 CookieAuthenticationDefaults.AuthenticationScheme);
             if (cookie.Principal is not null) ctx.HttpContext.User = cookie.Principal;
-            // The handshake asked with max_age=0, so a conforming token carries
-            // auth_time; one without it, or one older than the step-up started
-            // (a minute of clock skew allowed), means Microsoft did not
-            // re-authenticate the person, whatever the browser sent.
+            var logger = ctx.HttpContext.RequestServices
+                .GetRequiredService<ILoggerFactory>().CreateLogger("StepUp");
             var issuedAt = ctx.Properties.Items.TryGetValue(StepUpEndpoints.EntraStepUpIssuedAtItem, out var issuedRaw)
                 && DateTime.TryParse(issuedRaw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedIssuedAt)
                 ? parsedIssuedAt : DateTime.MaxValue;
-            var reauthenticated = authTime is { } at && at >= issuedAt.AddMinutes(-1);
-            if (CurrentUserId(ctx.HttpContext) != stepUpUserId
-                || !reauthenticated
-                || !await entra.IsLinkedAsync(stepUpUserId, token, ct))
+            var sameUser = CurrentUserId(ctx.HttpContext) == stepUpUserId;
+            var reauthenticated = StepUpReauthenticated(authTime, issuedAt);
+            var linked = sameUser && await entra.IsLinkedAsync(stepUpUserId, token, ct);
+            if (!sameUser || !reauthenticated || !linked)
             {
+                // Which check refused is what an operator needs when a person
+                // reports the "didn't match your account" message.
+                logger.LogWarning(
+                    "Microsoft step-up refused for user {UserId}: sameUser={SameUser}, reauthenticated={Reauthenticated}, linked={Linked}, authTime={AuthTime}.",
+                    stepUpUserId, sameUser, reauthenticated, linked, authTime);
                 ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=entra-mismatch");
                 return;
+            }
+            if (authTime is null)
+            {
+                logger.LogInformation(
+                    "Microsoft step-up for user {UserId} accepted on prompt=login alone: the token carried no auth_time. "
+                    + "Add auth_time as an optional ID token claim on the app registration to have it verified server-side.",
+                    stepUpUserId);
             }
             var protection = ctx.HttpContext.RequestServices.GetRequiredService<Microsoft.AspNetCore.DataProtection.IDataProtectionProvider>();
             var clock = ctx.HttpContext.RequestServices.GetRequiredService<TimeProvider>();
             var pending = ReadMfaPendingCookie(ctx.HttpContext, protection, clock)
                 ?? new MfaPending(stepUpUserId, false, false, clock.GetUtcNow().UtcDateTime, safeReturn, StepUp: true);
-            var logger = ctx.HttpContext.RequestServices
-                .GetRequiredService<ILoggerFactory>().CreateLogger("StepUp");
             var auth = ctx.HttpContext.RequestServices.GetRequiredService<AuthService>();
             await StepUpEndpoints.CompleteStepUpAsync(ctx.HttpContext, auth, pending with { ReturnUrl = safeReturn }, SignInMethod.Entra, ct, logger);
             return;

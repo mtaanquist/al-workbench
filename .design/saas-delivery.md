@@ -557,20 +557,36 @@ that names the environment and says what the click does there:
   environment's own updates read reports as `available` can be chosen, and the service
   re-checks that at write time so a stale page can't schedule something Microsoft hasn't
   released.
-- **Updating an AppSource app** - to the version Business Central has waiting, in the update
-  window or right away. An app that waits for others can be updated too: the confirm lists
-  every app it waits for, and the write sends `installOrUpdateNeededDependencies` true only
-  for those. The service reads the waiting list again first and refuses if Business Central
-  now asks for an app that was not on the list the person agreed to. Business Central takes
-  each prerequisite to the newest version the environment supports, not the minimum.
-  This leaves a line in the environment's update history
-  (`oe_environment_upgrade_actions`, kind `UpdateApp`, written already `Sent` so the
-  worker that fires booked actions never sees it): who asked, when, and what moved
-  alongside. (An upload is the opposite shape - always a booking the worker sends; see
-  below.) While an update is on its way the row's button is disabled and
-  says so - from Business Central's own state on the installed app (`Updating`,
-  `UpdatePending`), and, for the minutes before it reports anything, from what the page
-  itself just asked for.
+- **Updating an AppSource app** - to the version Business Central has waiting. An app that
+  waits for others can be updated too: the confirm lists every app it waits for, and the
+  send passes `installOrUpdateNeededDependencies` true only when there are some. Business
+  Central takes each prerequisite to the newest version the environment supports, not the
+  minimum.
+
+  **Since #1001 an update is booked exactly like an upload** (below): the dialog asks the
+  same "When should it install?" (the shared `InstallTimingPicker`: delivery window, or the
+  BC update window when there is none; a picked time; now), and every answer writes one
+  `Pending` `UpdateApp` row carrying the app (`package_bc_app_id`, `app_name`), the target
+  version (`target_version`) and the prerequisites Business Central listed and the person
+  agreed to (`update_prerequisite_app_ids`). Nothing is stored as a package: the app is
+  Business Central's own. `UpgradeActionWorker` sends it in the install pass, as
+  `useEnvironmentUpdateWindow: false`, and waits for the operation with
+  `BcAppOperationPoller`, so it takes its turn with the uploads and never runs beside one.
+  Business Central's own `UpdateWindow` schedule is never handed over, for the reason an
+  upload never hands one over: order and non-overlap are promises the workbench keeps.
+
+  The waiting list is not taken on trust, twice. At booking the service reads it and books
+  only an app that is on it at exactly that version, with every prerequisite agreed to;
+  at send time it reads it again and refuses in plain words if the version has moved or
+  Business Central now asks for an app outside the agreed set, so nobody's agreement covers
+  an app they never saw. One booking per app per environment. A booked update appears under
+  *Scheduled installs* ("Update booked here", with its version) and in the Workbench
+  history, with Install now and Cancel, gated like the booking on managing the solution;
+  the app's Update button reads "Booked" and is disabled meanwhile, for the app and for the
+  prerequisites that move with it. The platform-update surfaces ignore it, as they ignore a
+  booked upload. The `UpdateApp` rows written before #1001 are records only, already
+  `Sent`, with what moved in `Outcome`; the history still reads them as "Updated an
+  AppSource app".
 - **Uploading apps** - `.app` files another company built, for which there is no pipeline
   here. Several may be chosen at once: each manifest is read on the spot
   (`AppPackageReader.TryReadManifestAsync`) and the apps are put in dependency order with

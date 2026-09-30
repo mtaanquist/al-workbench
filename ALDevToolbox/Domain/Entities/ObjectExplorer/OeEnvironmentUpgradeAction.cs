@@ -38,9 +38,11 @@ public class OeEnvironmentUpgradeAction
 
     /// <summary>
     /// The platform version a <see cref="UpgradeActionKind.SelectVersion"/> action set as
-    /// the environment's next update (e.g. <c>29.2</c>). Null for every other kind, which
-    /// act on whatever update is already chosen. Kept on the row because the history has
-    /// to say which version was asked for, and a booked row has to carry it to the worker.
+    /// the environment's next update (e.g. <c>29.2</c>), or the app version a booked
+    /// <see cref="UpgradeActionKind.UpdateApp"/> takes its app to. Null for every other
+    /// kind, which act on whatever update is already chosen. Kept on the row because the
+    /// history has to say which version was asked for, and a booked row has to carry it to
+    /// the worker.
     /// </summary>
     public string? TargetVersion { get; set; }
 
@@ -74,7 +76,9 @@ public class OeEnvironmentUpgradeAction
     /// stamped the moment the upload call returns and before the install is polled. They
     /// are what tells a restart that the app is with Business Central (the install went
     /// on without us, unconfirmed) from a row the restart caught before anything was
-    /// sent. Null until the upload is accepted and for every other kind.
+    /// sent. A booked <see cref="UpgradeActionKind.UpdateApp"/> carries its app id from
+    /// the moment it is booked, since that is what it updates, and gets the operation id
+    /// the same way an upload does. Null until then and for every other kind.
     /// </summary>
     public Guid? BcAppId { get; set; }
     public Guid? BcOperationId { get; set; }
@@ -90,6 +94,25 @@ public class OeEnvironmentUpgradeAction
 
     /// <summary>This row's place in its batch, from zero, in dependency order. Null with <see cref="BatchId"/>.</summary>
     public int? BatchOrder { get; set; }
+
+    /// <summary>
+    /// The AppSource app's name as Business Central listed it when a
+    /// <see cref="UpgradeActionKind.UpdateApp"/> was booked ("Continia Core"), so the
+    /// Scheduled installs list and the history can name it without asking Business
+    /// Central again. Null for every other kind, and for the update records written
+    /// before updates could be booked.
+    /// </summary>
+    public string? AppName { get; set; }
+
+    /// <summary>
+    /// The apps a booked <see cref="UpgradeActionKind.UpdateApp"/> was agreed to bring
+    /// along: the prerequisites Business Central listed at booking time, which the person
+    /// was shown before confirming. The worker re-reads the waiting updates before sending
+    /// and refuses if Business Central now asks for an app outside this set, so nobody's
+    /// agreement covers an app they never saw. Empty for an app that waited for nothing;
+    /// null for every other kind.
+    /// </summary>
+    public List<Guid>? PrerequisiteAppIds { get; set; }
 
     /// <summary>Where the action has got to. See <see cref="UpgradeActionStatus"/>.</summary>
     public UpgradeActionStatus Status { get; set; } = UpgradeActionStatus.Pending;
@@ -158,9 +181,15 @@ public enum UpgradeActionKind
     RunNow,
 
     /// <summary>
-    /// An AppSource app was updated from the environment's page. Never booked and never
-    /// swept by the worker: it is written already <c>Sent</c>, as a record that it was
-    /// asked for, by whom, and what moved with it (in <c>Outcome</c>).
+    /// An AppSource app updated to the version Business Central has waiting for it,
+    /// booked from the environment's page like an upload: a <c>Pending</c> row carrying
+    /// the app (<see cref="OeEnvironmentUpgradeAction.BcAppId"/>,
+    /// <see cref="OeEnvironmentUpgradeAction.AppName"/>), the version
+    /// (<see cref="OeEnvironmentUpgradeAction.TargetVersion"/>) and the prerequisites the
+    /// person agreed to (<see cref="OeEnvironmentUpgradeAction.PrerequisiteAppIds"/>),
+    /// which the worker sends when it comes due and waits on to the end, taking its turn
+    /// with the uploads. Rows written before updates could be booked (issue #1001) are
+    /// records only, already <c>Sent</c>, with what moved in <c>Outcome</c>.
     /// </summary>
     UpdateApp,
 

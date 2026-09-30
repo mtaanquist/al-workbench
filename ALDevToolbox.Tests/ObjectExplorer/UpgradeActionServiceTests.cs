@@ -363,7 +363,7 @@ public sealed class UpgradeActionServiceTests : IDisposable
 
         await using var read = _f.Db.NewContext();
         var pending = await _f.Svc(read).ListPendingAsync();
-        var uploads = await _f.Svc(read).ListPendingUploadsAsync(projectId, envId);
+        var uploads = await _f.Svc(read).ListBookedInstallsAsync(projectId, envId);
 
         pending.Should().BeEmpty("the Upgrades page must not report a vendor app waiting for tonight as a booked update");
         uploads.Should().ContainSingle().Which.PackageFileName.Should().Be("Partner.app");
