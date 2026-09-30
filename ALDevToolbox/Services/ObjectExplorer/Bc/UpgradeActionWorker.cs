@@ -47,7 +47,8 @@ public sealed class UpgradeActionWorker : BackgroundService
         _clock = clock;
         _logger = logger;
         // Polls every 30 seconds and is idle most of the time. A sweep sends at most one
-        // booked upload in all - not per organisation - and waits for its install, so
+        // booked app install (an upload or an AppSource update) in all - not per
+        // organisation - and waits for it, so
         // the active budget is one install plus the rest of a sweep; a batch spreads
         // over as many sweeps as it has apps. The heartbeat is ticked on every poll of
         // that install (see RunOneAsync), so the idle ceiling stays the usual few
@@ -89,10 +90,12 @@ public sealed class UpgradeActionWorker : BackgroundService
                         recovered = true;
                     }
                     // Two passes. Every organisation's platform-update moves first - a
-                    // date the customer agreed, seconds each - then one booked upload in
-                    // all, which waits for its install. So no organisation's agreed slot
-                    // waits behind another's ten-minute install, and a sweep costs at
-                    // most one install.
+                    // date the customer agreed, seconds each - then one booked app install
+                    // in all (an upload or an AppSource update), which waits for it to
+                    // finish. So no organisation's agreed slot waits behind another's
+                    // ten-minute install, a sweep costs at most one install, and two
+                    // installs never run at once: that can deadlock on Business Central's
+                    // own bookkeeping table.
                     await ForEachOrgAsync((org, sys, ct) => RunDueActionsAsync(org, sys, ct, SweepPass.PlatformUpdates), stoppingToken).ConfigureAwait(false);
                     var uploadSent = false;
                     await ForEachOrgAsync(async (org, sys, ct) =>
@@ -157,9 +160,9 @@ public sealed class UpgradeActionWorker : BackgroundService
     internal enum SweepPass { PlatformUpdates, OneUpload, Both }
 
     /// <summary>
-    /// Fires the due rows of one org: every platform-update move, then at most one
-    /// upload (the rest of its batch, or the org's other uploads, wait for the next
-    /// sweep). Internal so a test can drive one sweep against a seeded database without
+    /// Fires the due rows of one org: every platform-update move, then at most one app
+    /// install - an upload or an AppSource update (the rest of a batch, or the org's
+    /// other installs, wait for the next sweep). Internal so a test can drive one sweep against a seeded database without
     /// the hosted-service loop. Returns how many rows were sent; rows only settled on the
     /// way (a dependent skipped because the app before it failed) do not count, so the
     /// sweep does not stop on one.
@@ -180,15 +183,15 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .Where(a => a.Status == UpgradeActionStatus.Pending
                             && a.SentAt == null
                             && a.ExecuteAfter <= now)
-                .Where(a => a.Kind == UpgradeActionKind.UploadApp ? uploads : updates)
+                .Where(a => a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp ? uploads : updates)
                 // Platform-update moves first: they are a date the customer agreed and
                 // take seconds, and must not queue behind an app install that takes minutes.
-                .OrderBy(a => a.Kind == UpgradeActionKind.UploadApp)
+                .OrderBy(a => a.Kind == UpgradeActionKind.UploadApp || a.Kind == UpgradeActionKind.UpdateApp)
                 .ThenBy(a => a.ExecuteAfter)
                 .ThenBy(a => a.BatchOrder)
                 .ThenBy(a => a.Id)
                 .Select(a => new DueAction(a.Id, a.ProjectId, a.EnvironmentId, a.Kind, a.RequestedByUserId, a.TargetVersion,
-                    a.PackageFileName, a.BatchId, a.BatchOrder))
+                    a.PackageFileName ?? a.AppName, a.BatchId, a.BatchOrder))
                 .ToListAsync(ct).ConfigureAwait(false);
         }
 
@@ -199,10 +202,10 @@ public sealed class UpgradeActionWorker : BackgroundService
             var outcome = await RunOneAsync(orgId, isSystem, action, ct).ConfigureAwait(false);
             if (outcome != RunOutcome.Sent) continue;
             sent++;
-            // One upload per sweep: it waited for its install, up to ten minutes. A batch
-            // resumes on the next sweep, where the gate below finds its predecessor
+            // One app install per sweep: it waited for its install, up to ten minutes. A
+            // batch resumes on the next sweep, where the gate below finds its predecessor
             // settled.
-            if (action.Kind == UpgradeActionKind.UploadApp) break;
+            if (UpgradeActionService.IsAppInstall(action.Kind)) break;
         }
 
         if (sent > 0)
@@ -255,7 +258,7 @@ public sealed class UpgradeActionWorker : BackgroundService
             {
                 _logger.LogInformation(
                     "Upload booking {ActionId} ({FileName}) is not tried: {Blocked} before it in the same batch failed.",
-                    action.Id, action.PackageFileName, blocked.PackageFileName);
+                    action.Id, action.Label, blocked.PackageFileName);
                 var skippedAt = _clock.GetUtcNow().UtcDateTime;
                 var skipped = await db.OeEnvironmentUpgradeActions
                     .Where(a => a.Id == action.Id && a.Status == UpgradeActionStatus.Pending && a.SentAt == null)
@@ -264,7 +267,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                         .SetProperty(a => a.SentAt, skippedAt)
                         .SetProperty(a => a.PackageContent, (byte[]?)null)
                         .SetProperty(a => a.Outcome,
-                            $"{action.PackageFileName} wasn't installed, because {blocked.PackageFileName} before it in the same upload didn't install."),
+                            $"{action.Label} wasn't installed, because {blocked.PackageFileName} before it in the same upload didn't install."),
                         ct).ConfigureAwait(false);
                 return skipped > 0 ? RunOutcome.Settled : RunOutcome.Skipped;
             }
@@ -304,7 +307,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                     .Where(a => a.Id == action.Id)
                     .Select(a => a.PackageContent)
                     .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-                if (package is null || package.Length == 0 || action.PackageFileName is null)
+                if (package is null || package.Length == 0 || action.Label is null)
                 {
                     throw new PlanValidationException(new Dictionary<string, string>
                     {
@@ -316,27 +319,13 @@ public sealed class UpgradeActionWorker : BackgroundService
                 // us" from "never sent" - see FailInterruptedAsync. The stamp must never
                 // turn a live install into a failure: a lost write is logged and the poll
                 // goes on, and a shutdown between acceptance and the stamp still stamps.
-                var result = await actions.RunUploadAsync(action.ProjectId, action.EnvironmentId, action.PackageFileName, package,
-                    async (operation, _) =>
-                    {
-                        try
-                        {
-                            await db.OeEnvironmentUpgradeActions
-                                .Where(a => a.Id == action.Id)
-                                .ExecuteUpdateAsync(s => s
-                                    .SetProperty(a => a.BcAppId, operation.AppId)
-                                    .SetProperty(a => a.BcOperationId, operation.Id), CancellationToken.None).ConfigureAwait(false);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Couldn't record operation {OperationId} on upload booking {ActionId}; the install goes on without it.", operation.Id, action.Id);
-                        }
-                    },
+                var result = await actions.RunUploadAsync(action.ProjectId, action.EnvironmentId, action.Label, package,
+                    (operation, _) => StampOperationAsync(db, action.Id, operation),
                     ct, progress: _heartbeat.Tick).ConfigureAwait(false);
                 if (result.Completed)
                 {
                     status = UpgradeActionStatus.Sent;
-                    outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.PackageFileName);
+                    outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.Label);
                 }
                 else if (result.IsUnconfirmed)
                 {
@@ -345,7 +334,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                     // of the batch goes on - a dependent that needed it is refused by
                     // Business Central if it did not land.
                     status = UpgradeActionStatus.Sent;
-                    outcome = $"{action.PackageFileName} was uploaded. {result.Message}";
+                    outcome = $"{action.Label} was uploaded. {result.Message}";
                 }
                 else
                 {
@@ -353,14 +342,42 @@ public sealed class UpgradeActionWorker : BackgroundService
                     // in its own words.
                     status = UpgradeActionStatus.Failed;
                     outcome = UpgradeActionService.FailureOutcome(action.Kind,
-                        result.Message ?? "Business Central didn't finish the install.", action.TargetVersion, action.PackageFileName);
+                        result.Message ?? "Business Central didn't finish the install.", action.TargetVersion, action.Label);
                 }
+            }
+            else if (action.Kind == UpgradeActionKind.UpdateApp)
+            {
+                // What the person agreed to at booking time; the send re-reads the waiting
+                // updates and refuses if Business Central has moved on since.
+                var booked = await db.OeEnvironmentUpgradeActions.AsNoTracking()
+                    .Where(a => a.Id == action.Id)
+                    .Select(a => new { a.BcAppId, a.PrerequisiteAppIds })
+                    .FirstAsync(ct).ConfigureAwait(false);
+                if (booked.BcAppId is not { } appId || action.TargetVersion is null)
+                {
+                    throw new PlanValidationException(new Dictionary<string, string>
+                    {
+                        ["App"] = "The booking no longer said which app and version to update to.",
+                    });
+                }
+                // The operation is stamped as for an upload, so a restart mid-update
+                // records it as sent, unconfirmed, rather than never sent.
+                var result = await actions.RunUpdateAsync(action.ProjectId, action.EnvironmentId, appId, action.TargetVersion,
+                    booked.PrerequisiteAppIds ?? new List<Guid>(),
+                    (operation, _) => StampOperationAsync(db, action.Id, operation),
+                    ct, progress: _heartbeat.Tick).ConfigureAwait(false);
+                (status, outcome) = result.Completed
+                    ? (UpgradeActionStatus.Sent, UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.Label))
+                    : result.IsUnconfirmed
+                        ? (UpgradeActionStatus.Sent, $"{action.Label} was sent for update to {action.TargetVersion}. {result.Message}")
+                        : (UpgradeActionStatus.Failed, UpgradeActionService.FailureOutcome(action.Kind,
+                            result.Message ?? "Business Central didn't finish the update.", action.TargetVersion, action.Label));
             }
             else
             {
                 await actions.RunAsync(action.ProjectId, action.EnvironmentId, action.Kind, action.TargetVersion, ct).ConfigureAwait(false);
                 status = UpgradeActionStatus.Sent;
-                outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.PackageFileName);
+                outcome = UpgradeActionService.SuccessOutcome(action.Kind, action.TargetVersion, environmentName, action.Label);
             }
         }
         catch (PlanValidationException ex)
@@ -370,14 +387,17 @@ public sealed class UpgradeActionWorker : BackgroundService
             // were rotated. All already in plain words.
             status = UpgradeActionStatus.Failed;
             outcome = UpgradeActionService.FailureOutcome(action.Kind,
-                ex.Errors.Values.FirstOrDefault() ?? "Business Central refused the change.", action.TargetVersion, action.PackageFileName);
+                ex.Errors.Values.FirstOrDefault() ?? "Business Central refused the change.", action.TargetVersion, action.Label);
         }
         catch (ProjectAccessDeniedException)
         {
             status = UpgradeActionStatus.Failed;
-            outcome = action.Kind == UpgradeActionKind.UploadApp
-                ? "The person who booked this no longer had permission to manage this customer, so the app wasn't installed."
-                : "The person who booked this no longer had permission to change this customer's update dates, so it wasn't run.";
+            outcome = action.Kind switch
+            {
+                UpgradeActionKind.UploadApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't installed.",
+                UpgradeActionKind.UpdateApp => "The person who booked this no longer had permission to manage this customer, so the app wasn't updated.",
+                _ => "The person who booked this no longer had permission to change this customer's update dates, so it wasn't run.",
+            };
         }
         catch (Exception ex)
         {
@@ -386,7 +406,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                 "Upgrade action {ActionId} on environment {EnvironmentId} (project {ProjectId}) threw.",
                 action.Id, action.EnvironmentId, action.ProjectId);
             status = UpgradeActionStatus.Failed;
-            outcome = UpgradeActionService.FailureOutcome(action.Kind, "Business Central didn't accept the change.", action.TargetVersion, action.PackageFileName);
+            outcome = UpgradeActionService.FailureOutcome(action.Kind, "Business Central didn't accept the change.", action.TargetVersion, action.Label);
         }
 
         // The package goes with the outcome, whichever way it went: a sent one is with
@@ -403,6 +423,29 @@ public sealed class UpgradeActionWorker : BackgroundService
     }
 
     /// <summary>
+    /// Records the operation Business Central answered an install with on the booking,
+    /// before it is polled. Must never turn a live install into a failure: a lost write is
+    /// logged and the poll goes on, and a shutdown between acceptance and the stamp still
+    /// stamps. The app id is only filled in when the row has none, so a booked update
+    /// keeps the app it was booked for.
+    /// </summary>
+    private async Task StampOperationAsync(AppDbContext db, int actionId, BcAppOperation operation)
+    {
+        try
+        {
+            await db.OeEnvironmentUpgradeActions
+                .Where(a => a.Id == actionId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(a => a.BcAppId, a => a.BcAppId ?? operation.AppId)
+                    .SetProperty(a => a.BcOperationId, operation.Id), CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Couldn't record operation {OperationId} on booking {ActionId}; the install goes on without it.", operation.Id, actionId);
+        }
+    }
+
+    /// <summary>
     /// Fails any action left claimed-but-unfinished by a restart. Called once per org on
     /// the first sweep, when nothing of ours is running, so it can never trip a live one.
     /// The row is failed rather than retried: we know the send started and not whether it
@@ -415,8 +458,8 @@ public sealed class UpgradeActionWorker : BackgroundService
         await using var scope = _services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-        // An upload Business Central had already accepted went on installing without
-        // us: it is recorded as sent, unconfirmed, and the rest of its batch still goes -
+        // An upload or AppSource update Business Central had already accepted went on
+        // installing without us: it is recorded as sent, unconfirmed, and the rest of its batch still goes -
         // a dependent that needed it is refused by Business Central if it did not land.
         // (The operation ids are on the row; re-polling them after a restart is the
         // obvious next step, not taken yet.)
@@ -425,8 +468,10 @@ public sealed class UpgradeActionWorker : BackgroundService
             .ExecuteUpdateAsync(s => s
                 .SetProperty(a => a.Status, UpgradeActionStatus.Sent)
                 .SetProperty(a => a.PackageContent, (byte[]?)null)
-                .SetProperty(a => a.Outcome, a => (a.PackageFileName ?? "The app")
-                    + " was uploaded, but the workbench restarted before it could confirm the install finished. Check the environment's installed apps."),
+                .SetProperty(a => a.Outcome, a => a.Kind == UpgradeActionKind.UpdateApp
+                    ? (a.AppName ?? "The app") + " was sent for update, but the workbench restarted before it could confirm the update finished. Check the environment's installed apps."
+                    : (a.PackageFileName ?? "The app")
+                        + " was uploaded, but the workbench restarted before it could confirm the install finished. Check the environment's installed apps."),
                 ct).ConfigureAwait(false);
 
         const string uploadOutcome =
@@ -461,8 +506,12 @@ public sealed class UpgradeActionWorker : BackgroundService
         }
     }
 
-    /// <summary>One due row, read outside the per-action scope so the sweep holds no context open while it works.</summary>
+    /// <summary>
+    /// One due row, read outside the per-action scope so the sweep holds no context open
+    /// while it works. <see cref="Label"/> is what the history calls it: an upload's file
+    /// name, or an AppSource update's app name.
+    /// </summary>
     private sealed record DueAction(
         int Id, int ProjectId, int EnvironmentId, UpgradeActionKind Kind, int? RequestedByUserId, string? TargetVersion,
-        string? PackageFileName, Guid? BatchId, int? BatchOrder);
+        string? Label, Guid? BatchId, int? BatchOrder);
 }

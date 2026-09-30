@@ -347,12 +347,12 @@
                            first link in a row opens the environment, not its solution. *@
                         <td>
                             <span class="cell-stack">
-                                <a class="cell-stack__main" href="@($"/environments/{row.EnvironmentId}")">@row.EnvironmentName</a>
+                                <a class="cell-stack__main" href="@row.Href()">@row.EnvironmentName</a>
                                 <span class="cell-stack__sub">@row.EnvironmentType</span>
                             </span>
                         </td>
                         <td>
-                            <a href="@($"/solutions/{row.ProjectId}")">@row.ProjectName</a>
+                            <a href="@row.SolutionHref">@row.ProjectName</a>
                             @if (!string.IsNullOrWhiteSpace(row.ProjectShortName))
                             {
                                 <span class="sol-list__short" title="Short name">@row.ProjectShortName</span>
@@ -450,7 +450,7 @@
                                     <button type="button" class="menu__item" role="menuitem"
                                             disabled="@_busy" @onclick="() => RecoverAsync(row)">Recover this environment...</button>
                                 }
-                                <a class="menu__item" role="menuitem" href="@($"/environments/{row.EnvironmentId}")">Open environment</a>
+                                <a class="menu__item" role="menuitem" href="@row.Href()">Open environment</a>
                                 @if (row.BusinessCentralUrl is { } bcUrl)
                                 {
                                     <a class="menu__item" role="menuitem" href="@bcUrl"
@@ -1106,7 +1106,7 @@
         {
             await Connection.CopyEnvironmentAsync(row.ProjectId, row.EnvironmentId, copy.Name, copy.Type);
             _done = CopyEnvironmentDialog.DoneMessage(copy, row.EnvironmentName);
-            _doneLink = ($"/environments/{row.EnvironmentId}/operations", $"Open {row.EnvironmentName}'s Operations tab");
+            _doneLink = (row.Href("operations"), $"Open {row.EnvironmentName}'s Operations tab");
             // Business Central may not list the new one yet; the re-read is what brings
             // it in as soon as it does, and its absence is not a failure.
             await LoadAsync();

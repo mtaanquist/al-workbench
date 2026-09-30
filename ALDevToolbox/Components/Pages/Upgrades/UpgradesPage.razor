@@ -378,12 +378,12 @@
                            beside it and both stay put when the table scrolls sideways. *@
                         <td class="upg-env">
                             <span class="cell-stack">
-                                <a class="cell-stack__main" href="@($"/environments/{row.EnvironmentId}")" title="@row.EnvironmentName">@row.EnvironmentName</a>
+                                <a class="cell-stack__main" href="@row.Href()" title="@row.EnvironmentName">@row.EnvironmentName</a>
                                 <span class="cell-stack__sub">@row.EnvironmentType</span>
                             </span>
                         </td>
                         <td class="upg-customer">
-                            <a href="@($"/solutions/{row.ProjectId}")">@row.ProjectName</a>
+                            <a href="@row.SolutionHref">@row.ProjectName</a>
                             @if (!string.IsNullOrEmpty(row.ProjectShortName))
                             {
                                 <span class="sol-list__short" title="Short name">@row.ProjectShortName</span>
@@ -447,7 +447,7 @@
                                     <span>@ended.Text</span>
                                     @if (ended.ShowOperations)
                                     {
-                                        <a class="upg-note__link" href="@($"/environments/{row.EnvironmentId}/operations")">See what happened →</a>
+                                        <a class="upg-note__link" href="@row.Href("operations")">See what happened →</a>
                                     }
                                 </div>
                             }
@@ -503,7 +503,7 @@
                                 }
                                 @* The two ways out of this page, after the things done on it. *@
                                 <div class="menu__sep"></div>
-                                <a class="menu__item" role="menuitem" href="@($"/environments/{row.EnvironmentId}")">Open environment</a>
+                                <a class="menu__item" role="menuitem" href="@row.Href()">Open environment</a>
                                 @if (row.BusinessCentralUrl is { } bcUrl)
                                 {
                                     <a class="menu__item" role="menuitem" href="@bcUrl"

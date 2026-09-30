@@ -166,7 +166,7 @@
                                 <a class="sol-list__select" href="@SummaryHref(p.Id)"
                                    aria-label="@($"Show customer info for {p.Name}")"
                                    aria-current="@(p.Id == _selectedId ? "true" : null)"></a>
-                                <a class="sol-list__name" href="@($"/solutions/{p.Id}")"><strong>@p.Name</strong></a>
+                                <a class="sol-list__name" href="@p.Href"><strong>@p.Name</strong></a>
                                 @if (!string.IsNullOrEmpty(p.ShortName))
                                 {
                                     <span class="sol-list__short" title="Short name">@p.ShortName</span>
@@ -219,6 +219,11 @@
     private int? _moduleId;
     private Dictionary<int, CustomerListFacts> _facts = new();
     private int? _selectedId;
+
+    /// <summary>The chosen solution's page, by its slug when the list has it.</summary>
+    private string SelectedHref => _selectedId is { } id
+        ? _rows?.FirstOrDefault(r => r.Id == id)?.Href ?? SolutionLinks.Solution(null, id)
+        : "/solutions";
     private Summary? _summary;
 
     /// <summary>What the rail shows for the selected solution. Read only when one is selected.</summary>
@@ -283,7 +288,7 @@
                 {
                     <div class="meta-item"><span class="meta-item__label">Business Central address</span><a class="sol-rail__value" href="@url" target="_blank" rel="noopener noreferrer">@url</a></div>
                 }
-                <a class="btn btn--sm" href="@($"/solutions/{_selectedId}")">Open solution</a>
+                <a class="btn btn--sm" href="@SelectedHref">Open solution</a>
             </div>
         </section>
 
@@ -362,7 +367,7 @@
 
         <p class="u-muted sol-rail__foot">
             Something missing or out of date? It is kept on the solution's
-            <a href="@($"/solutions/{_selectedId}")">Customer tab</a>.
+            <a href="@SelectedHref">Customer tab</a>.
         </p>
     </div>;
 

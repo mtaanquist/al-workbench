@@ -256,7 +256,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
     private IRenderedComponent<EnvironmentDetail> Render(int environmentId, string? tab = null)
     {
-        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.Id, environmentId).Add(c => c.OpenTab, tab));
+        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.EnvironmentId, environmentId).Add(c => c.OpenTab, tab));
         cut.WaitForAssertion(() => cut.FindAll(".loading-block").Should().BeEmpty());
         return cut;
     }
@@ -502,6 +502,68 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.Markup.Should().Contain("and 1 other app it waits for");
     }
 
+    /// <summary>
+    /// An AppSource update is booked like an upload (#1001), so its dialog asks "when" the
+    /// same way: the delivery window first, a picked time, or now - never Business
+    /// Central's own two schedules.
+    /// </summary>
+    [Fact]
+    public async Task Updating_an_app_asks_when_the_way_an_upload_does()
+    {
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        var cut = Render(envId, "apps");
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll("table.u-compact tbody tr")[0].QuerySelector(".data-table__actions button")!.Click());
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("In the delivery window, 22:00-04:00 (Copenhagen)"));
+        cut.Markup.Should().Contain("At a time I pick (UTC time)").And.Contain("anyone working in Business Central may be interrupted");
+        cut.FindAll(".install-when__opt input[type=radio]").Should().HaveCount(3);
+    }
+
+    /// <summary>
+    /// A booked update waits under Scheduled installs with the version it goes to, and the
+    /// app's Update button stops working for as long as it is booked.
+    /// </summary>
+    [Fact]
+    public async Task A_booked_app_update_is_listed_with_the_scheduled_installs_and_its_button_says_booked()
+    {
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = projectId,
+                EnvironmentId = envId,
+                Kind = UpgradeActionKind.UpdateApp,
+                Status = UpgradeActionStatus.Pending,
+                RequestedBy = "Anna Jensen <anna@example.com>",
+                RequestedAt = DateTime.UtcNow,
+                ExecuteAfter = DateTime.UtcNow.AddHours(6),
+                BcAppId = CoreId,
+                AppName = "Continia Core",
+                TargetVersion = "28.5.0.363410",
+                PrerequisiteAppIds = new List<Guid>(),
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(envId, "apps");
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Update booked here"));
+        cut.Markup.Should().Contain("Booked for ");
+        var coreRow = cut.FindAll("table.u-compact tbody tr")[0];
+        coreRow.TextContent.Should().Contain("Continia Core").And.Contain("Booked");
+        coreRow.QuerySelector(".data-table__actions button")!.HasAttribute("disabled").Should().BeTrue(
+            "pressing it again would only book the same update twice");
+        // The app that waits for Continia Core is still free to book on its own.
+        cut.FindAll("table.u-compact tbody tr")[1].QuerySelector(".data-table__actions button")!
+            .HasAttribute("disabled").Should().BeFalse();
+    }
+
     [Fact]
     public async Task An_app_from_another_company_can_be_uploaded_but_not_before_a_file_is_chosen()
     {
@@ -538,10 +600,10 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.Markup.Should().Contain("At a time I pick (UTC time)", "the option names the zone it is read in - the test organisation shows times in UTC").And.Contain("anyone working in Business Central may be interrupted");
         cut.FindAll("input[type=datetime-local]").Should().BeEmpty("the field only appears once that option is chosen");
 
-        cut.FindAll(".upload-app__when-opt input[type=radio]")[1].Change(true);
+        cut.FindAll(".install-when__opt input[type=radio]")[1].Change(true);
 
         cut.WaitForAssertion(() => cut.FindAll("input[type=datetime-local]").Should().HaveCount(1));
-        cut.Find(".upload-app__echo").TextContent.Should().MatchRegex(
+        cut.Find(".install-when__echo").TextContent.Should().MatchRegex(
             @"^Installs at \d\d:\d\d on \d+ \w+, UTC time - \d\d:\d\d for the customer \(Copenhagen\)\.$",
             "the customer's clock differs from the page's, so both are said");
     }
@@ -567,7 +629,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.Markup.Should().Contain("has no delivery window").And.NotContain("In the delivery window");
         // Microsoft's window has not been read on the seeded row, so that option cannot be booked yet.
         cut.Markup.Should().Contain("hasn't been read yet");
-        cut.FindAll(".upload-app__when-opt input[type=radio]")[0].HasAttribute("disabled").Should().BeTrue();
+        cut.FindAll(".install-when__opt input[type=radio]")[0].HasAttribute("disabled").Should().BeTrue();
     }
 
     /// <summary>
@@ -673,7 +735,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _panels.Set(projectId, envId, Panel());
         _ctx.SetRendererInfo(new RendererInfo("Static", isInteractive: false));
 
-        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.Id, envId));
+        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.EnvironmentId, envId));
 
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("Version and update dates",
             "the head and the Updates card come from our own mirror"));
@@ -749,7 +811,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
     {
         var (_, envId) = await SeedAsync();
 
-        _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.Id, envId).Add(c => c.OpenTab, segment));
+        _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, segment));
 
         var nav = _ctx.Services.GetRequiredService<NavigationManager>();
         nav.Uri.Should().EndWith($"/environments/{envId}");
@@ -874,14 +936,14 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         // Workbench history asks Business Central nothing, so this leaves the tab without
         // starting a second read that the next assertion would have to tell apart.
-        cut.Render(p => p.Add(c => c.Id, envId).Add(c => c.OpenTab, "history"));
+        cut.Render(p => p.Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "history"));
         cut.WaitForAssertion(() =>
         {
             cut.Find(".header-tab.is-active").TextContent.Should().Be("Workbench history");
             cut.Markup.Should().NotContain("ola@cronus.example", "leaving the tab forgets the list");
         });
 
-        cut.Render(p => p.Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions"));
+        cut.Render(p => p.Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions"));
         cut.WaitForAssertion(() => _admin.Reads.Should().Be(2), TimeSpan.FromSeconds(5));
     }
 
@@ -897,7 +959,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _admin.OnSessions = () => [Session(47, "ola@cronus.example")];
 
         var cut = _ctx.Render<EnvironmentDetail>(p => p
-            .Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions")
+            .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
 
@@ -916,7 +978,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _admin.OnSessions = () => [Session(47, "ola@cronus.example")];
 
         var cut = _ctx.Render<EnvironmentDetail>(p => p
-            .Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions")
+            .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromMilliseconds(30)));
 
@@ -928,7 +990,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         // Widen the window before restarting, or the restarted loop would stop again
         // within a tick and the assertion below would be racing it rather than the code.
         cut.Render(p => p
-            .Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions")
+            .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
 
@@ -955,7 +1017,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _admin.OnSessions = () => [Session(47, "ola@cronus.example")];
 
         var cut = _ctx.Render<EnvironmentDetail>(p => p
-            .Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions")
+            .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
 
@@ -997,7 +1059,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _admin.OnSessions = () => [Session(47, "ola@cronus.example")];
         _ctx.SetRendererInfo(new RendererInfo("Static", isInteractive: false));
 
-        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions"));
+        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions"));
 
         cut.FindAll(".loading-block").Should().NotBeEmpty();
         cut.FindAll("tbody tr").Should().BeEmpty();
@@ -1081,7 +1143,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         ];
 
         var cut = _ctx.Render<EnvironmentDetail>(p => p
-            .Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions")
+            .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
 
@@ -1120,7 +1182,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         await SeedCredentialsAsync(projectId);
         _admin.HangUntilCancelled = true;
 
-        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions"));
+        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions"));
         // Not WaitForAssertion: it re-checks on renders, and a read that hangs never
         // renders again once it has started.
         SpinWait.SpinUntil(() => Volatile.Read(ref _admin.Reads) == 1, TimeSpan.FromSeconds(5)).Should().BeTrue();

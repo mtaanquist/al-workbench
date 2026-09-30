@@ -72,7 +72,12 @@ else
                             <button type="button" class="btn btn--sm eaf__cancel"
                                     disabled="@(_cancelling == entry.Id)"
                                     @onclick="() => CancelAsync(entry.Id)">
-                                @(_cancelling == entry.Id ? "Cancelling..." : entry.Kind == UpgradeActionKind.UploadApp ? "Cancel install" : "Cancel booking")
+                                @(_cancelling == entry.Id ? "Cancelling..." : entry.Kind switch
+                                {
+                                    UpgradeActionKind.UpdateApp => "Cancel update",
+                                    UpgradeActionKind.UploadApp => "Cancel install",
+                                    _ => "Cancel booking",
+                                })
                             </button>
                         }
                     </div>
@@ -98,18 +103,18 @@ else
     [Parameter] public bool CanAct { get; set; }
 
     /// <summary>
-    /// True when this person may cancel a booked upload - managing the customer, which is
-    /// the check that made the booking. A different grant from <see cref="CanAct"/>: the
+    /// True when this person may cancel a booked app install (an upload or an AppSource
+    /// update) - managing the customer, which is the check that made the booking. A different grant from <see cref="CanAct"/>: the
     /// update team moves platform updates, the solution's managers install apps.
     /// </summary>
     [Parameter] public bool CanActOnUploads { get; set; }
 
     private bool CanCancel(UpgradeActionRow entry) =>
-        entry.Kind == UpgradeActionKind.UploadApp ? CanActOnUploads : CanAct;
+        UpgradeActionService.IsAppInstall(entry.Kind) ? CanActOnUploads : CanAct;
 
-    /// <summary>An upload the worker has claimed: nothing left to cancel, and a cancel would only be refused.</summary>
+    /// <summary>An app install the worker has claimed: nothing left to cancel, and a cancel would only be refused.</summary>
     private static bool IsMidInstall(UpgradeActionRow entry) =>
-        entry.Kind == UpgradeActionKind.UploadApp && entry.SentAt is not null;
+        UpgradeActionService.IsAppInstall(entry.Kind) && entry.SentAt is not null;
 
     /// <summary>The customer's own time zone, which booked slots are shown in.</summary>
     [Parameter] public TimeZoneInfo TimeZone { get; set; } = TimeZoneInfo.Utc;
@@ -145,7 +150,22 @@ else
     /// </summary>
     internal static string Headline(UpgradeActionRow entry)
     {
-        if (entry.Kind == UpgradeActionKind.UpdateApp) return "Updated an AppSource app";
+        if (entry.Kind == UpgradeActionKind.UpdateApp)
+        {
+            // The records written before updates could be booked carry no app name; their
+            // outcome says what moved.
+            if (entry.AppName is not { } app) return "Updated an AppSource app";
+            var to = entry.TargetVersion is { } v ? $" to {v}" : "";
+            if (entry.IsBooking) return $"Booked the update of {app}{to}";
+            return entry.Status switch
+            {
+                // "Sent", not "updated": as for an upload, a sent row may be one the
+                // workbench could not see through to the end.
+                UpgradeActionStatus.Sent => $"Sent the update of {app}{to}",
+                UpgradeActionStatus.Failed => $"Tried to update {app}{to}",
+                _ => $"Asked to update {app}{to} now",
+            };
+        }
         if (entry.Kind == UpgradeActionKind.UploadApp)
         {
             // Every upload names its file: while it waits, the file is the whole of what
@@ -201,9 +221,11 @@ else
             // A booked slot leads with when it runs: that is what somebody deciding whether
             // to cancel it needs. Past its slot and still waiting is a different fact and
             // says so plainly rather than promising a time that has gone.
-            UpgradeActionStatus.Pending when entry.Kind == UpgradeActionKind.UploadApp && entry.SentAt is not null
+            UpgradeActionStatus.Pending when entry.Kind == UpgradeActionKind.UpdateApp && entry.SentAt is not null
+                => @<text>Updating now</text>,
+            UpgradeActionStatus.Pending when UpgradeActionService.IsAppInstall(entry.Kind) && entry.SentAt is not null
                 => @<text>Installing now</text>,
-            UpgradeActionStatus.Pending when entry.Kind == UpgradeActionKind.UploadApp && entry.ExecuteAfter <= DateTime.UtcNow
+            UpgradeActionStatus.Pending when UpgradeActionService.IsAppInstall(entry.Kind) && entry.ExecuteAfter <= DateTime.UtcNow
                 => @<text>Starting shortly</text>,
             UpgradeActionStatus.Pending => entry.ExecuteAfter <= DateTime.UtcNow
                 ? @<text>Was due at @SlotText(entry, entry.ExecuteAfter) - hasn't run yet.</text>
@@ -220,14 +242,14 @@ else
     /// A booked slot, named with its zone. A platform-update slot is in the customer's own
     /// time - "20:00 on 11 Sep, Europe/Copenhagen time" - not the organisation's display
     /// zone: it was booked as a wall clock in the customer's zone, and is said back the
-    /// way it was agreed. An upload's slot was picked on the page's own clock (the
+    /// way it was agreed. An app install's slot was picked on the page's own clock (the
     /// display zone), and is said back in that, as the Scheduled installs list says it.
     /// </summary>
     private string SlotText(UpgradeActionRow entry, DateTime utc)
     {
-        if (entry.Kind == UpgradeActionKind.UploadApp)
+        if (UpgradeActionService.IsAppInstall(entry.Kind))
         {
-            return UploadAppDialog.SlotText(DisplayZone, utc);
+            return InstallTimingPicker.SlotText(DisplayZone, utc);
         }
         var local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZone);
         return $"{local:HH:mm} on {local:d MMM}, {TimeZoneLabel} time";

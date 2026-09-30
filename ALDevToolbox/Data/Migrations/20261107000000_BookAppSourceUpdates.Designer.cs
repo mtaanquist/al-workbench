@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -13,9 +14,11 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261107000000_BookAppSourceUpdates")]
+    partial class BookAppSourceUpdates
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2445,11 +2448,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("short_name");
 
-                    b.Property<string>("Slug")
-                        .HasMaxLength(60)
-                        .HasColumnType("character varying(60)")
-                        .HasColumnName("slug");
-
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at");
@@ -2476,13 +2474,7 @@ namespace ALDevToolbox.Data.Migrations
 
                     b.HasIndex("CreatedByUserId");
 
-                    b.HasIndex("OrganizationId")
-                        .HasDatabaseName("IX_oe_projects_organization_id");
-
-                    b.HasIndex("OrganizationId", "Slug")
-                        .IsUnique()
-                        .HasDatabaseName("ix_oe_projects_organization_id_slug")
-                        .HasFilter("deleted_at IS NULL");
+                    b.HasIndex("OrganizationId");
 
                     b.ToTable("oe_projects", (string)null);
                 });

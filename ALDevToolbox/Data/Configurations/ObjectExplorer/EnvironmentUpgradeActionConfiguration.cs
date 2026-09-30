@@ -21,8 +21,8 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
             .HasConversion<string>().HasMaxLength(40).IsRequired();
         entity.Property(e => e.Status).HasColumnName("status")
             .HasConversion<string>().HasMaxLength(20).IsRequired();
-        // Only SelectVersion carries one; a Business Central version is "29.2" or at most
-        // four numeric segments, so 32 is generous.
+        // SelectVersion and a booked UpdateApp carry one; a Business Central version is
+        // "29.2" or at most four numeric segments, so 32 is generous.
         entity.Property(e => e.TargetVersion).HasColumnName("target_version").HasMaxLength(32);
 
         entity.Property(e => e.RequestedByUserId).HasColumnName("requested_by_user_id");
@@ -47,6 +47,10 @@ internal sealed class EnvironmentUpgradeActionConfiguration : IEntityTypeConfigu
         // the app is already with it.
         entity.Property(e => e.BcAppId).HasColumnName("package_bc_app_id");
         entity.Property(e => e.BcOperationId).HasColumnName("package_bc_operation_id");
+        // A booked AppSource update (#1001): the app's name for the lists, and the
+        // prerequisites the person agreed to, which the worker holds Business Central to.
+        entity.Property(e => e.AppName).HasColumnName("app_name").HasMaxLength(250);
+        entity.Property(e => e.PrerequisiteAppIds).HasColumnName("update_prerequisite_app_ids").HasColumnType("uuid[]");
 
         // No concurrency-token column: see the entity's remarks. The one race on this
         // table — the worker claiming a row while somebody cancels it — is decided by a
