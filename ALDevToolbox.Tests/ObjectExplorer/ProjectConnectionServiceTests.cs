@@ -2236,6 +2236,10 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
         await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(4, 0));
+        // Outside the window, so both bookings wait for its next 22:00 rather than running now.
+        var copenhagen = TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen");
+        if (UpdateWindow.IsWithin(new TimeOnly(22, 0), new TimeOnly(4, 0), copenhagen, _clock.GetUtcNow().UtcDateTime))
+            _clock.Advance(TimeSpan.FromHours(8));
         var apps = AppsWithWaiting();
 
         await using var ctx = _db.NewContext();

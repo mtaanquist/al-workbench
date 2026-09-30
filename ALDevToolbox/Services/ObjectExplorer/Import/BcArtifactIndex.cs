@@ -245,6 +245,47 @@ public static class BcArtifactIndex
             .ToList();
     }
 
+    /// <summary>
+    /// Picks the insider build a <see cref="BcBuildTarget.NextMinor"/> or
+    /// <see cref="BcBuildTarget.NextMajor"/> build compiles against, out of an
+    /// insider index (<paramref name="previewVersions"/>, newest first), judged
+    /// against <paramref name="newestReleasedVersion"/> - the newest build the
+    /// public index has shipped, so "released" is Microsoft's word, not the wall
+    /// clock's. Returns null for <see cref="BcBuildTarget.Current"/> and when the
+    /// insider index has nothing that fits.
+    /// <list type="bullet">
+    /// <item><b>NextMinor</b>: the newest build of the highest minor above the
+    /// released one on the released major (28.6 while 28.5 has shipped).</item>
+    /// <item><b>NextMajor</b>: the newest build of the lowest minor of the
+    /// <em>smallest</em> major above the released one (29.0 while 28.x has
+    /// shipped, 30.0 once 29 has). Smallest, not highest: the insider storage
+    /// already lists 30.0 while 29.0 is still in preview, and 30.0 is not what
+    /// "next" means to anyone planning the October upgrade. It is the same build
+    /// <see cref="SelectPreviewVersions"/> puts first, so a build and the
+    /// catalogue's preview agree on which one it is.</item>
+    /// </list>
+    /// </summary>
+    public static string? SelectTargetVersion(IReadOnlyList<string> previewVersions, string newestReleasedVersion, BcBuildTarget target)
+    {
+        if (!Version.TryParse(newestReleasedVersion, out var released)) return null;
+        switch (target)
+        {
+            case BcBuildTarget.NextMinor:
+                var candidates = previewVersions
+                    .Select(v => (Version: v, Parsed: ToComparableVersion(v)))
+                    .Where(x => x.Parsed.Major == released.Major && x.Parsed.Minor > released.Minor)
+                    .ToList();
+                if (candidates.Count == 0) return null;
+                var highestMinor = candidates.Max(x => x.Parsed.Minor);
+                // `previewVersions` is newest-first, so the first hit is the newest build of that minor.
+                return candidates.First(x => x.Parsed.Minor == highestMinor).Version;
+            case BcBuildTarget.NextMajor:
+                return SelectPreviewVersions(previewVersions, released.Major).FirstOrDefault();
+            default:
+                return null;
+        }
+    }
+
     /// <summary>Major of a dotted version, or null when it doesn't start with a number.</summary>
     public static int? ToMajor(string? version)
     {
@@ -441,4 +482,21 @@ public enum BcArtifactChannel
     Release,
     /// <summary>Pre-release builds of upcoming versions: the insider storage's Sandbox type.</summary>
     Preview,
+}
+
+/// <summary>
+/// Which Business Central version a project build compiles against. Everything
+/// but <see cref="Current"/> resolves a pre-release build off the insider
+/// storage and never rewrites the repository's manifests: the point is to see
+/// what the code as it stands does against the next version. See
+/// <c>.design/object-explorer-project-builds.md</c>, "Building against the next version".
+/// </summary>
+public enum BcBuildTarget
+{
+    /// <summary>The version the extensions' manifests ask for: the newest shipped build of their highest <c>application</c> Major.Minor.</summary>
+    Current,
+    /// <summary>The next minor of the newest shipped major, from the insider storage.</summary>
+    NextMinor,
+    /// <summary>The next major after the newest shipped one, from the insider storage, compiled with the newest prerelease compiler.</summary>
+    NextMajor,
 }

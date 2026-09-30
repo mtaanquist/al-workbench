@@ -123,7 +123,10 @@ public sealed class ProjectBuildService
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
         }
 
-        var compiler = await _compiler.ResolveAsync(ct).ConfigureAwait(false)
+        // A next-major build compiles with the newest beta compiler, because the
+        // stable one may not read the next major's symbols; everything else keeps
+        // the stable compiler every build has used.
+        var compiler = await _compiler.ResolveAsync(prerelease: options.Target == BcBuildTarget.NextMajor, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException(
                 "The AL compiler isn't available yet. It's downloaded from NuGet on first use — check the server has outbound access, then retry.");
 
@@ -204,9 +207,26 @@ public sealed class ProjectBuildService
                     "None of the extensions declare an 'application' (or 'platform') version, so the matching Business Central symbols can't be resolved.");
             }
 
-            var resolved = await _artifacts.ResolveOnPremAsync(country, majorMinor, ct).ConfigureAwait(false)
-                ?? throw new InvalidOperationException(
-                    $"No Business Central artifact matched application {majorMinor} for country '{country}'. Check the version and country.");
+            ResolvedArtifact resolved;
+            if (options.Target == BcBuildTarget.Current)
+            {
+                resolved = await _artifacts.ResolveOnPremAsync(country, majorMinor, ct).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException(
+                        $"No Business Central artifact matched application {majorMinor} for country '{country}'. Check the version and country.");
+            }
+            else
+            {
+                // The manifests are left as they are: the build compiles the code
+                // as it stands against the next version's symbols, which is the point.
+                var nextName = options.Target == BcBuildTarget.NextMajor ? "next major" : "next minor";
+                resolved = await _artifacts.ResolveTargetAsync(country, options.Target, ct).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException(
+                        $"Microsoft has not published a preview of the {nextName} Business Central version for country '{country}' yet.");
+                logs.Add(new PendingLog(null, "Build",
+                    $"Building against the {nextName} Business Central version: preview build {resolved.Version} ({country}) "
+                    + $"from Microsoft's insider artifacts, compiled with AL compiler {compiler.Version}. "
+                    + "The extensions' app.json files are not changed."));
+            }
 
             var symbolsDir = Path.Combine(buildRoot, "symbols");
             Directory.CreateDirectory(symbolsDir);
@@ -1301,16 +1321,51 @@ public sealed class ProjectBuildService
     {
         var existing = await _db.OeReleases.AsNoTracking()
             .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null)
-            .Select(r => (int?)r.Id)
+            .Select(r => new { r.Id, r.Status, r.ImportedAt, r.BcVersion })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        if (existing is not null) return existing;
+
+        // A next-version build parents onto the catalogue's preview of that
+        // Major.Minor, the one the daily sweep imports (#999), and refreshes it
+        // by the sweep's own rule: older than PreviewRefreshAge, a different
+        // insider build, and not mid-ingest. The org keeps one preview per
+        // Major.Minor and country whether or not it has opted into the sweep.
+        int? stalePreviewId = null;
+        if (existing is not null)
+        {
+            // A failed preview is replaced straight away rather than after the
+            // refresh age: it holds no objects to parent onto.
+            var refresh = resolved.IsPrerelease
+                && existing.Status != "ingesting"
+                && (existing.Status == "failed"
+                    || (!string.Equals(existing.BcVersion, resolved.Version, StringComparison.OrdinalIgnoreCase)
+                        && _clock.GetUtcNow().UtcDateTime - existing.ImportedAt >= ArtifactReleaseImporter.PreviewRefreshAge));
+            if (!refresh) return existing.Id;
+            stalePreviewId = existing.Id;
+        }
 
         try
         {
             var metadata = new ReleaseImportMetadata(
                 Label: resolved.Label, Kind: "first_party", ParentReleaseId: null, ApplicationVersionId: null,
-                DedupKey: resolved.DedupKey);
-            var parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+                DedupKey: resolved.DedupKey, IsPrerelease: resolved.IsPrerelease);
+            int parentId;
+            if (stalePreviewId is null)
+            {
+                parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                // One transaction, so a refused replacement (the quota guard) leaves
+                // the org the preview it had - the same rule the daily sweep keeps.
+                await using var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+                var stale = await _db.OeReleases.FirstAsync(r => r.Id == stalePreviewId.Value, ct).ConfigureAwait(false);
+                stale.DeletedAt = stale.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
+                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+                await tx.CommitAsync(ct).ConfigureAwait(false);
+                _logger.LogInformation("Replaced preview release {OldReleaseId} with build {Version} for a project build.",
+                    stalePreviewId.Value, resolved.Version);
+            }
 
             var openedStreams = new List<Stream>();
             System.IO.Compression.ZipArchive? appArchive = null;
@@ -1345,8 +1400,11 @@ public sealed class ProjectBuildService
             // good parent release now exists, adopt it rather than losing the
             // cross-release link by returning null. See issue #431.
             _db.ChangeTracker.Clear();
+            // A preview whose ingest just failed is not adopted: the next build
+            // replaces it, and until then the build carries on without a parent.
             var adopted = await _db.OeReleases.AsNoTracking()
                 .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null)
+                .Where(r => !resolved.IsPrerelease || r.Status != "failed")
                 .Select(r => (int?)r.Id)
                 .FirstOrDefaultAsync(ct).ConfigureAwait(false);
             if (adopted is not null)
@@ -1830,10 +1888,12 @@ public sealed class ProjectBuildService
 /// <param name="RepositoryId">The project repository the head commit belongs to; every other repository keeps its default branch.</param>
 /// <param name="HeadSha">The commit to check that repository out at.</param>
 /// <param name="InstallationToken">The GitHub installation token to clone with, in place of a per-user token.</param>
+/// <param name="Target">Which Business Central version to compile against; <see cref="BcBuildTarget.Current"/> is the version the manifests ask for.</param>
 public sealed record ProjectBuildOptions(
     int? RepositoryId = null,
     string? HeadSha = null,
-    string? InstallationToken = null)
+    string? InstallationToken = null,
+    BcBuildTarget Target = BcBuildTarget.Current)
 {
     /// <summary>The ordinary build: default branches, the acting user's own repository tokens.</summary>
     public static readonly ProjectBuildOptions Manual = new();

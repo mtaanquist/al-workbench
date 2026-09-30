@@ -196,6 +196,49 @@ public sealed class BcArtifactIndexTests
         BcArtifactIndex.SelectPreviewVersions(Array.Empty<string>(), newestReleasedMajor: 28).Should().BeEmpty();
     }
 
+    // The insider index as captured on 2026-09-26, trimmed: 28.6, 29.0 and 30.0
+    // are all in preview while 28.5 is the newest shipped release. Newest first.
+    private static readonly string[] InsiderSample =
+    [
+        "30.0.55227.0", "30.0.55110.0",
+        "29.0.52914.0", "29.0.52800.0",
+        "28.6.55100.0", "28.6.54990.0",
+        "28.5.54300.0",
+    ];
+
+    [Fact]
+    public void SelectTargetVersion_next_major_is_the_smallest_major_ahead_even_though_a_later_one_is_listed()
+    {
+        BcArtifactIndex.SelectTargetVersion(InsiderSample, "28.5.54151.54365", BcBuildTarget.NextMajor)
+            .Should().Be("29.0.52914.0", "30.0 is already in the insider index, but 29.0 is what ships next");
+    }
+
+    [Fact]
+    public void SelectTargetVersion_next_major_moves_on_once_the_major_has_shipped()
+    {
+        BcArtifactIndex.SelectTargetVersion(InsiderSample, "29.0.53000.53100", BcBuildTarget.NextMajor)
+            .Should().Be("30.0.55227.0");
+    }
+
+    [Fact]
+    public void SelectTargetVersion_next_minor_is_the_highest_minor_ahead_on_the_shipped_major()
+    {
+        BcArtifactIndex.SelectTargetVersion(InsiderSample, "28.5.54151.54365", BcBuildTarget.NextMinor)
+            .Should().Be("28.6.55100.0", "a preview of the minor that has already shipped is not the next one");
+        BcArtifactIndex.SelectTargetVersion(["28.7.1.0", "28.6.2.0", "28.6.1.0"], "28.5.1.1", BcBuildTarget.NextMinor)
+            .Should().Be("28.7.1.0");
+    }
+
+    [Fact]
+    public void SelectTargetVersion_is_null_when_nothing_fits()
+    {
+        // 29 has just shipped and no 29.1 is in preview yet.
+        BcArtifactIndex.SelectTargetVersion(InsiderSample, "29.0.53000.53100", BcBuildTarget.NextMinor).Should().BeNull();
+        BcArtifactIndex.SelectTargetVersion(["28.6.1.0"], "28.5.1.1", BcBuildTarget.NextMajor).Should().BeNull();
+        BcArtifactIndex.SelectTargetVersion(InsiderSample, "28.5.54151.54365", BcBuildTarget.Current).Should().BeNull();
+        BcArtifactIndex.SelectTargetVersion(InsiderSample, "not a version", BcBuildTarget.NextMajor).Should().BeNull();
+    }
+
     [Fact]
     public void Preview_channel_urls_target_the_insider_host_and_sandbox_type()
     {

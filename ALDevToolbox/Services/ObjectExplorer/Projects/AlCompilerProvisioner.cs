@@ -12,8 +12,8 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// compiler ships in the <c>Microsoft.Dynamics.BusinessCentral.Development.Tools</c>
 /// NuGet package as a framework-dependent <c>tools/&lt;tfm&gt;/any/alc.dll</c>
 /// that the host's <c>dotnet</c> runs; this service downloads the <c>.nupkg</c>
-/// (a zip), extracts that folder flat into the <c>app-altool</c> volume and
-/// records what it installed - no SDK, no <c>dotnet tool install</c> (which
+/// (a zip), extracts that folder flat into a per-version folder on the
+/// <c>app-altool</c> volume and records what it installed - no SDK, no <c>dotnet tool install</c> (which
 /// rejects these packages). Volumes provisioned before #921 hold the
 /// <c>.Linux</c> package's <c>lib/&lt;tfm&gt;/alc</c> apphost instead; that
 /// layout is still recognised and run as it was, so an existing install never
@@ -69,16 +69,39 @@ public sealed class AlCompilerProvisioner
         _explicitAlcPath = compilerOptions.ExplicitAlcPath;
     }
 
-    private string BinDir => Path.Combine(_installDir, "bin");
-    private string MarkerPath => Path.Combine(_installDir, "installed.json");
+    /// <summary>
+    /// Each compiler lives in its own folder, <c>{AL_COMPILER_DIR}/{version}/</c>,
+    /// holding a <c>bin/</c> and its own <c>installed.json</c>, so a build for the
+    /// next major can run a beta beside the stable compiler every other build
+    /// uses. Installs made before #993 sit at the root (<see cref="LegacyBinDir"/>,
+    /// <see cref="LegacyMarkerPath"/>) and are moved under their version on first use.
+    /// </summary>
+    private string VersionDir(string version) => Path.Combine(_installDir, RequireSafeVersion(version));
+    private string BinDir(string version) => Path.Combine(VersionDir(version), "bin");
+    private string MarkerPath(string version) => Path.Combine(VersionDir(version), "installed.json");
+    private string LegacyBinDir => Path.Combine(_installDir, "bin");
+    private string LegacyMarkerPath => Path.Combine(_installDir, "installed.json");
+
+    private volatile bool _migrated;
 
     /// <summary>
     /// Ensures a usable <c>alc</c> is present and returns how to invoke it, or
     /// <see langword="null"/> when the compiler can't be provisioned (offline with
-    /// an empty volume). Provisions the target version (pin, else newest) on first
-    /// use. Safe to call before every build.
+    /// an empty volume). Safe to call before every build.
+    ///
+    /// <para>
+    /// The stable line (<paramref name="prerelease"/> false, what every build but
+    /// a next-major one asks for) behaves as it always has: the pinned version
+    /// when <c>AL_COMPILER_VERSION</c> is set, otherwise whichever stable compiler
+    /// is already installed, and only when there is none, the newest stable one
+    /// NuGet lists. With <paramref name="prerelease"/> true the feed is read on
+    /// every call, because betas move weekly, and the newest prerelease newer
+    /// than the newest stable release is used (see <see cref="PickPrereleaseCandidates"/>);
+    /// when the feed has none, or cannot be reached and no beta is installed, the
+    /// stable line answers instead. The pin never applies to the prerelease line.
+    /// </para>
     /// </summary>
-    public async Task<AlCompilerInfo?> ResolveAsync(CancellationToken ct = default)
+    public async Task<AlCompilerInfo?> ResolveAsync(bool prerelease = false, CancellationToken ct = default)
     {
         if (_explicitAlcPath is not null)
         {
@@ -87,9 +110,26 @@ public sealed class AlCompilerProvisioner
                 : null;
         }
 
-        if (Installed() is { } installed) return installed;
+        await EnsureMigratedAsync(ct).ConfigureAwait(false);
 
-        // Nothing installed yet — provision the target version.
+        if (prerelease && await ResolvePrereleaseAsync(ct).ConfigureAwait(false) is { } beta) return beta;
+        return await ResolveStableAsync(ct).ConfigureAwait(false);
+    }
+
+    private async Task<AlCompilerInfo?> ResolveStableAsync(CancellationToken ct)
+    {
+        if (_versionPin is not null)
+        {
+            var pinnedFolder = InstalledVersions().FirstOrDefault(v => string.Equals(v, _versionPin, StringComparison.OrdinalIgnoreCase));
+            if (pinnedFolder is not null && Installed(pinnedFolder) is { } pinned) return pinned;
+        }
+        else if (InstalledVersions().Where(v => !IsPrerelease(v)).OrderByDescending(ToSortable).FirstOrDefault() is { } current
+                 && Installed(current) is { } installed)
+        {
+            return installed;
+        }
+
+        // Nothing installed yet (or not the pinned one) - provision the target version.
         IReadOnlyList<string> candidates;
         try
         {
@@ -97,18 +137,71 @@ public sealed class AlCompilerProvisioner
         }
         catch (Exception ex)
         {
+            // Offline: whatever the volume already holds beats no compiler at all,
+            // which is what a single-install volume always did.
+            if (AnyInstalled() is { } fallback)
+            {
+                _logger.LogWarning(ex, "NuGet is unreachable; building with the installed AL compiler {Version}.", fallback.Version);
+                return fallback;
+            }
             _logger.LogError(ex, "AL compiler is not installed and NuGet is unreachable; project builds are unavailable.");
             return null;
         }
+        return await ProvisionFirstAsync(candidates, lenient: _versionPin is null, ct).ConfigureAwait(false)
+            ?? AnyInstalled();
+    }
 
+    /// <summary>The newest installed stable compiler, else the newest installed of any kind.</summary>
+    private AlCompilerInfo? AnyInstalled() => InstalledVersions()
+        .OrderBy(IsPrerelease)
+        .ThenByDescending(ToSortable)
+        .Select(Installed)
+        .FirstOrDefault(i => i is not null);
+
+    /// <summary>The newest prerelease compiler, provisioned when needed, or null when the stable line should answer instead.</summary>
+    private async Task<AlCompilerInfo?> ResolvePrereleaseAsync(CancellationToken ct)
+    {
+        IReadOnlyList<string> candidates;
+        try
+        {
+            candidates = PickPrereleaseCandidates(await FetchVersionsAsync(ct));
+        }
+        catch (Exception ex)
+        {
+            // Offline: a beta already on the volume is better than none.
+            var newestInstalled = InstalledVersions().Where(IsPrerelease).OrderByDescending(ToSortable).FirstOrDefault();
+            _logger.LogWarning(ex, "Could not read the AL compiler feed for a prerelease; using {Version}.",
+                newestInstalled ?? "the stable compiler");
+            return newestInstalled is null ? null : Installed(newestInstalled);
+        }
+        if (candidates.Count == 0) return null;
+        if (Installed(candidates[0]) is { } installed) return installed;
+
+        var provisioned = await ProvisionFirstAsync(candidates, lenient: true, ct).ConfigureAwait(false);
+        if (provisioned is not null)
+        {
+            await _gate.WaitAsync(ct).ConfigureAwait(false);
+            try { PruneOtherPrereleases(provisioned.Version); }
+            finally { _gate.Release(); }
+        }
+        return provisioned;
+    }
+
+    /// <summary>
+    /// Installs the first of <paramref name="candidates"/> that turns out to be a
+    /// compiler and returns it. <paramref name="lenient"/> lets a package that is
+    /// not one be skipped for the next; a pinned version gets no such leniency.
+    /// </summary>
+    private async Task<AlCompilerInfo?> ProvisionFirstAsync(IReadOnlyList<string> candidates, bool lenient, CancellationToken ct)
+    {
         foreach (var version in candidates)
         {
             try
             {
                 await ProvisionVersionAsync(version, ct).ConfigureAwait(false);
-                break;
+                return Installed(version);
             }
-            catch (AlCompilerPackageException ex) when (_versionPin is null)
+            catch (AlCompilerPackageException ex) when (lenient)
             {
                 // A package without a compiler, or one the feed lists but will not
                 // serve, is a feed quirk, not a fault of ours: say so and try the next older one. A pinned version gets no such
@@ -117,24 +210,101 @@ public sealed class AlCompilerProvisioner
                     version, ex.Message);
             }
         }
-        return Installed();
+        return null;
     }
 
-    /// <summary>What the volume holds, in either layout, or null when nothing usable is installed.</summary>
-    private AlCompilerInfo? Installed()
+    /// <summary>What the volume holds for <paramref name="version"/>, in either package layout, or null when it isn't usably installed.</summary>
+    private AlCompilerInfo? Installed(string version)
     {
-        var marker = ReadMarker();
+        var marker = ReadMarker(MarkerPath(version));
         if (marker is null) return null;
         // Markers written before #921 name no entry: those installs are the
         // .Linux package's apphost.
-        var entry = Path.Combine(BinDir, marker.Entry ?? ApphostEntry);
+        var entry = Path.Combine(BinDir(version), marker.Entry ?? ApphostEntry);
         return File.Exists(entry) ? new AlCompilerInfo(entry, marker.Tfm == "net8.0", marker.Version) : null;
     }
 
+    /// <summary>The versions with a folder and a marker on the volume.</summary>
+    private IEnumerable<string> InstalledVersions()
+    {
+        if (!Directory.Exists(_installDir)) return [];
+        return Directory.EnumerateDirectories(_installDir)
+            .Select(Path.GetFileName)
+            .Where(name => name is not null && IsSafeVersion(name) && File.Exists(Path.Combine(_installDir, name, "installed.json")))
+            .Select(name => name!)
+            .ToList();
+    }
+
     /// <summary>
-    /// Downloads and installs a specific compiler version into the volume,
-    /// replacing whatever is there. Used by the admin "Update" action and lazily
-    /// by <see cref="ResolveAsync"/>. Serialised by the gate so two builds never
+    /// Drops every installed prerelease but <paramref name="keep"/> (and the pin,
+    /// if an operator pinned a beta), so weekly betas do not pile up on the
+    /// volume. Best-effort; runs under the gate after a new beta is in place.
+    /// Builds run one at a time, so no compile is using the folders being removed.
+    /// </summary>
+    private void PruneOtherPrereleases(string keep)
+    {
+        foreach (var version in InstalledVersions().Where(IsPrerelease))
+        {
+            if (string.Equals(version, keep, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(version, _versionPin, StringComparison.OrdinalIgnoreCase)) continue;
+            try
+            {
+                Directory.Delete(VersionDir(version), recursive: true);
+                _logger.LogInformation("Removed AL compiler {Version}; {Keep} replaces it for next-major builds.", version, keep);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not remove the older AL compiler {Version}.", version);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Moves an install made before compilers were kept side by side (<c>bin/</c>
+    /// and <c>installed.json</c> at the root) under its own version folder, so an
+    /// upgraded deployment keeps the compiler it has instead of downloading it
+    /// again. Written so a crash part-way leaves something the next start finishes.
+    /// </summary>
+    private async Task EnsureMigratedAsync(CancellationToken ct)
+    {
+        if (_migrated) return;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_migrated) return;
+            var marker = ReadMarker(LegacyMarkerPath);
+            if (marker is not null && IsSafeVersion(marker.Version))
+            {
+                var dir = VersionDir(marker.Version);
+                Directory.CreateDirectory(dir);
+                if (Directory.Exists(LegacyBinDir))
+                {
+                    var bin = BinDir(marker.Version);
+                    if (Directory.Exists(bin)) Directory.Delete(bin, recursive: true);
+                    Directory.Move(LegacyBinDir, bin);
+                }
+                if (!File.Exists(MarkerPath(marker.Version))) WriteMarker(MarkerPath(marker.Version), marker);
+                File.Delete(LegacyMarkerPath);
+                _logger.LogInformation("Moved the installed AL compiler {Version} into its own folder.", marker.Version);
+            }
+            _migrated = true;
+        }
+        catch (Exception ex)
+        {
+            // Leave the flag down so the next build tries again; this one can
+            // still provision a compiler of its own.
+            _logger.LogWarning(ex, "Could not move the installed AL compiler into its version folder.");
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Downloads and installs a specific compiler version into its own folder
+    /// on the volume, beside any other versions already there. Called lazily by
+    /// <see cref="ResolveAsync"/>. Serialised by the gate so two builds never
     /// provision at once.
     /// </summary>
     public async Task ProvisionVersionAsync(string version, CancellationToken ct = default)
@@ -142,13 +312,44 @@ public sealed class AlCompilerProvisioner
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            if (!IsSafeVersion(version))
+            {
+                // A feed entry that cannot name a folder is a feed quirk; the next one may install.
+                throw new AlCompilerPackageException($"'{version}' is not an AL compiler version this server can install.");
+            }
             // Re-check under the lock: another caller may have just installed it.
-            if (ReadMarker()?.Version == version && Installed() is not null)
+            if (Installed(version) is not null)
             {
                 return;
             }
 
-            Directory.CreateDirectory(_installDir);
+            // The marker goes first, so a crash part-way through the extract never
+            // leaves it standing over a half-filled bin folder.
+            var versionDir = VersionDir(version);
+            Directory.CreateDirectory(versionDir);
+            if (File.Exists(MarkerPath(version))) File.Delete(MarkerPath(version));
+            try
+            {
+                await ProvisionIntoAsync(version, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Nothing usable was installed: drop the folder rather than leave an
+                // unmarked one no cleanup would ever find.
+                try { Directory.Delete(versionDir, recursive: true); } catch { /* best-effort */ }
+                throw;
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>Downloads, verifies and extracts <paramref name="version"/> into its folder, marker last. Caller holds the gate.</summary>
+    private async Task ProvisionIntoAsync(string version, CancellationToken ct)
+    {
+        {
             var lower = version.ToLowerInvariant();
             var url = $"https://api.nuget.org/v3-flatcontainer/{PackageId}/{lower}/{PackageId}.{lower}.nupkg";
 
@@ -179,18 +380,19 @@ public sealed class AlCompilerProvisioner
                 ?? throw new AlCompilerPackageException($"AL compiler package {version} has no tools/<tfm>/any/alc.dll and no lib/<tfm>/alc.");
 
             // Fresh bin dir, then extract the chosen folder flat into it.
-            if (Directory.Exists(BinDir)) Directory.Delete(BinDir, recursive: true);
-            Directory.CreateDirectory(BinDir);
+            var binDir = BinDir(version);
+            if (Directory.Exists(binDir)) Directory.Delete(binDir, recursive: true);
+            Directory.CreateDirectory(binDir);
 
             var prefix = layout.Prefix;
-            var binRoot = Path.GetFullPath(BinDir) + Path.DirectorySeparatorChar;
+            var binRoot = Path.GetFullPath(binDir) + Path.DirectorySeparatorChar;
             foreach (var entry in zip.Entries)
             {
                 if (entry.FullName.Length <= prefix.Length || !entry.FullName.StartsWith(prefix, StringComparison.Ordinal))
                     continue;
                 var relative = entry.FullName[prefix.Length..];
                 if (relative.EndsWith('/')) continue; // directory entry
-                var dest = Path.Combine(BinDir, relative);
+                var dest = Path.Combine(binDir, relative);
                 // Zip-slip guard: a package entry with `..` segments could escape
                 // BinDir and overwrite process-writable files (the app-keys ring,
                 // the backups volume). The package origin is HTTPS-pinned but
@@ -209,21 +411,17 @@ public sealed class AlCompilerProvisioner
             // The apphost binaries are extracted without the execute bit.
             foreach (var name in new[] { "alc", "altool" })
             {
-                var p = Path.Combine(BinDir, name);
+                var p = Path.Combine(binDir, name);
                 if (File.Exists(p))
                     File.SetUnixFileMode(p, File.GetUnixFileMode(p)
                         | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
             }
 
-            if (!File.Exists(Path.Combine(BinDir, layout.Entry)))
+            if (!File.Exists(Path.Combine(binDir, layout.Entry)))
                 throw new AlCompilerPackageException($"AL compiler package {version} ({prefix}) did not contain '{layout.Entry}'.");
 
-            WriteMarker(new InstalledMarker(version, layout.Tfm, layout.Entry));
+            WriteMarker(MarkerPath(version), new InstalledMarker(version, layout.Tfm, layout.Entry));
             _logger.LogInformation("Installed AL compiler {Version} ({Prefix}{Entry}).", version, prefix, layout.Entry);
-        }
-        finally
-        {
-            _gate.Release();
         }
     }
 
@@ -264,6 +462,26 @@ public sealed class AlCompilerProvisioner
         var pool = stable.Count > 0 ? stable : versions.ToList();
         pool.Reverse();
         return pool.Take(MaxCandidates).ToList();
+    }
+
+    /// <summary>
+    /// The prerelease versions a next-major build tries, newest first: those
+    /// numbered above the newest stable release, at most <see cref="MaxCandidates"/>.
+    /// A beta below the newest stable one is a leftover of a line that has since
+    /// shipped, not the next compiler, so it is never picked; the feed then holds
+    /// no next-major compiler and the caller falls back to the stable one. The
+    /// feed does not say which Business Central major a compiler serves, so
+    /// "the newest beta ahead of stable" is the rule rather than a mapping.
+    /// </summary>
+    public static IReadOnlyList<string> PickPrereleaseCandidates(IReadOnlyList<string> versions)
+    {
+        var newestStable = versions.Where(v => !IsPrerelease(v)).Select(ToSortable).DefaultIfEmpty(new Version(0, 0)).Max()!;
+        return versions
+            .Where(IsPrerelease)
+            .Where(v => IsSafeVersion(v) && ToSortable(v) > newestStable)
+            .Reverse()
+            .Take(MaxCandidates)
+            .ToList();
     }
 
     /// <summary>The apphost the <c>.Linux</c> package shipped up to 17.x; still what older volumes hold.</summary>
@@ -319,19 +537,39 @@ public sealed class AlCompilerProvisioner
         return true;
     }
 
-    private InstalledMarker? ReadMarker()
+    private static InstalledMarker? ReadMarker(string path)
     {
         try
         {
-            return File.Exists(MarkerPath)
-                ? JsonSerializer.Deserialize<InstalledMarker>(File.ReadAllText(MarkerPath))
+            return File.Exists(path)
+                ? JsonSerializer.Deserialize<InstalledMarker>(File.ReadAllText(path))
                 : null;
         }
         catch { return null; }
     }
 
-    private void WriteMarker(InstalledMarker marker) =>
-        File.WriteAllText(MarkerPath, JsonSerializer.Serialize(marker));
+    private static void WriteMarker(string path, InstalledMarker marker) =>
+        File.WriteAllText(path, JsonSerializer.Serialize(marker));
+
+    /// <summary>
+    /// A NuGet version as it may name a folder: digits and dots, then an optional
+    /// SemVer prerelease tag. The pin comes from configuration and the rest from
+    /// the feed, so neither is trusted to be a plain folder name without this.
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex SafeVersion =
+        new(@"^\d+(\.\d+){1,3}(-[0-9A-Za-z][0-9A-Za-z.\-]*)?\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    internal static bool IsSafeVersion(string? version) => version is not null && SafeVersion.IsMatch(version);
+
+    private static string RequireSafeVersion(string version) => IsSafeVersion(version)
+        ? version
+        : throw new InvalidOperationException($"'{version}' is not an AL compiler version this server can install.");
+
+    private static bool IsPrerelease(string version) => version.Contains('-');
+
+    /// <summary>The numeric part of a version for ordering; a malformed one sorts first.</summary>
+    private static Version ToSortable(string version) =>
+        Version.TryParse(version.Split('-', 2)[0], out var v) ? v : new Version(0, 0);
 
     private static async Task<MemoryStream> BufferAsync(Stream source, CancellationToken ct)
     {

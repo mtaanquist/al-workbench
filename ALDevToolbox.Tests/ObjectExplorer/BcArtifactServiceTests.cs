@@ -113,6 +113,43 @@ public sealed class BcArtifactServiceTests : IDisposable
         var exact = await svc.ResolveOnPremAsync("dk", "28.1.49000.50000");
         exact!.Label.Should().Be("Business Central 28.1 (DK)");
     }
+
+    [Fact]
+    public async Task ResolveTargetAsync_resolves_an_insider_build_under_the_preview_key()
+    {
+        var factory = new StubHttpClientFactory(new Dictionary<string, string>
+        {
+            ["/onprem/indexes/dk.json"] = """[ { "Version": "28.5.54151.54365" } ]""",
+            ["/onprem/indexes/platform.json"] = """[ { "Version": "28.5.54151.54365" } ]""",
+            ["/sandbox/indexes/dk.json"] = """[ { "Version": "30.0.55227.0" }, { "Version": "29.0.52914.0" }, { "Version": "28.6.55100.0" } ]""",
+            ["/sandbox/indexes/platform.json"] = """[ { "Version": "30.0.55227.0" }, { "Version": "29.0.52914.0" }, { "Version": "28.6.55100.0" } ]""",
+        });
+        await using var ctx = _db.NewContext();
+        var svc = NewService(factory, ctx);
+
+        var major = await svc.ResolveTargetAsync("dk", BcBuildTarget.NextMajor);
+        major.Should().NotBeNull();
+        major!.Version.Should().Be("29.0.52914.0");
+        major.IsPrerelease.Should().BeTrue();
+        major.MajorMinor.Should().Be("29.0");
+        major.DedupKey.Should().Be("bc-insider:29.0:dk");
+        major.ApplicationUrl.Should().Be($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/29.0.52914.0/dk");
+
+        (await svc.ResolveTargetAsync("dk", BcBuildTarget.NextMinor))!.Version.Should().Be("28.6.55100.0");
+    }
+
+    [Fact]
+    public async Task ResolveTargetAsync_is_null_when_the_insider_storage_has_no_index_for_the_country()
+    {
+        await using var ctx = _db.NewContext();
+        // Only the public storage answers; the insider one 404s.
+        var factory = new StubHttpClientFactory(new Dictionary<string, string>
+        {
+            ["/onprem/indexes/dk.json"] = """[ { "Version": "28.2.50931.51727" } ]""",
+            ["/onprem/indexes/platform.json"] = PlatformJson,
+        });
+        (await NewService(factory, ctx).ResolveTargetAsync("dk", BcBuildTarget.NextMajor)).Should().BeNull();
+    }
 }
 
 /// <summary>Maps a request URL substring to a canned JSON body; 404 for anything unmatched.</summary>
