@@ -2187,22 +2187,68 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         },
     };
 
+    // Every timing is a booking, as for an upload (#1001): nothing reaches Business
+    // Central at the form, and the send re-reads the waiting updates before it goes.
+
     [Fact]
-    public async Task A_ready_app_update_is_sent_at_the_offered_version_and_clears_the_cached_panel()
+    public async Task An_app_update_for_now_is_booked_with_what_the_worker_needs_and_sends_nothing_yet()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
         var apps = AppsWithWaiting();
 
         await using var ctx = _db.NewContext();
+        var outcome = await Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
+            .BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.Now);
+
+        outcome.Timing.Should().Be(UploadAppTiming.Now);
+        outcome.RunsAtUtc.Should().Be(_clock.GetUtcNow().UtcDateTime);
+        apps.Updated.Should().BeNull("the worker sends it, never the page request");
+
+        await using var read = _db.NewContext();
+        var row = await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.EnvironmentId == envId);
+        row.Kind.Should().Be(UpgradeActionKind.UpdateApp);
+        row.Status.Should().Be(UpgradeActionStatus.Pending);
+        row.BcAppId.Should().Be(WaitingAppId);
+        row.AppName.Should().Be("Continia Core");
+        row.TargetVersion.Should().Be("28.5.0.1");
+        row.PrerequisiteAppIds.Should().BeEmpty();
+        row.PackageContent.Should().BeNull("there is no package: the app is Business Central's own");
+    }
+
+    [Fact]
+    public async Task An_app_update_for_a_picked_time_is_booked_for_that_slot_and_a_time_that_has_gone_is_refused()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var apps = AppsWithWaiting();
+        var slot = _clock.GetUtcNow().AddHours(8);
+
+        await using var ctx = _db.NewContext();
         var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
-        await svc.GetEnvironmentPanelAsync(projectId, envId);
+        var outcome = await svc.BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.AtTime, slot);
+        outcome.RunsAtUtc.Should().Be(slot.UtcDateTime);
 
-        var operation = await svc.UpdateAppAsync(projectId, envId, WaitingAppId, "28.5.0.1", useUpdateWindow: true);
+        var past = () => svc.BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.AtTime, _clock.GetUtcNow().AddHours(-1));
+        (await past.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ExecuteAt");
+    }
 
-        operation.Status.Should().Be(BcAppOperationStatus.Scheduled);
-        apps.Updated.Should().Be((WaitingAppId, "28.5.0.1", true));
-        apps.UpdatedWithDependencies.Should().BeFalse("a ready app must never pull other apps along");
-        _panelCache.Get(projectId, envId).Should().BeNull("the page must re-read after our own write, not show the old list");
+    [Fact]
+    public async Task An_app_update_waits_for_the_delivery_window_like_an_upload()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        await SetWindowsAsync(envId, deliveryStart: new TimeOnly(22, 0), deliveryEnd: new TimeOnly(4, 0));
+        var apps = AppsWithWaiting();
+
+        await using var ctx = _db.NewContext();
+        var update = await Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
+            .BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.DeliveryWindow);
+
+        await using var ctx2 = _db.NewContext();
+        var upload = await Svc(ctx2, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId, new[] { Pkg("Partner.app", 1) }, UploadAppTiming.DeliveryWindow);
+
+        update.Timing.Should().Be(UploadAppTiming.DeliveryWindow);
+        update.RunsAtUtc.Should().Be(upload.RunsAtUtc, "both book the same slot for the same answer");
+        update.RunsAtUtc.Should().BeAfter(_clock.GetUtcNow().UtcDateTime);
     }
 
     [Fact]
@@ -2214,35 +2260,36 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
 
-        var stale = () => svc.UpdateAppAsync(projectId, envId, WaitingAppId, "28.4.0.0", useUpdateWindow: false);
+        var stale = () => svc.BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.4.0.0", UploadAppTiming.Now);
         (await stale.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("28.5.0.1");
 
-        var unknown = () => svc.UpdateAppAsync(projectId, envId, Guid.NewGuid(), "28.5.0.1", useUpdateWindow: false);
+        var unknown = () => svc.BookAppUpdateAsync(projectId, envId, Guid.NewGuid(), "28.5.0.1", UploadAppTiming.Now);
         (await unknown.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("no longer has an update waiting");
 
-        var blank = () => svc.UpdateAppAsync(projectId, envId, WaitingAppId, " ", useUpdateWindow: false);
+        var blank = () => svc.BookAppUpdateAsync(projectId, envId, WaitingAppId, " ", UploadAppTiming.Now);
         (await blank.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("App");
 
-        apps.Updated.Should().BeNull("nothing may reach the customer's tenant on a refusal");
+        await using var read = _db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().AnyAsync(a => a.EnvironmentId == envId))
+            .Should().BeFalse("nothing is booked on a refusal");
     }
 
     [Fact]
-    public async Task An_app_that_waits_for_another_is_not_updated()
+    public async Task An_app_that_waits_for_another_is_not_booked_without_agreeing_to_it()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
         var apps = AppsWithWaiting(new BcAppUpdateRequirement(Guid.NewGuid(), "Continia System Application", "Continia Software", "28.5.0.0", "update"));
 
         await using var ctx = _db.NewContext();
         var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .UpdateAppAsync(projectId, envId, WaitingAppId, "28.5.0.1", useUpdateWindow: true);
+            .BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.Now);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"]
             .Should().Contain("Continia System Application");
-        apps.Updated.Should().BeNull();
     }
 
     [Fact]
-    public async Task An_app_that_waits_for_others_is_updated_with_them_once_each_one_is_confirmed()
+    public async Task An_app_that_waits_for_others_is_booked_with_them_once_each_one_is_confirmed()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
         var first = Guid.NewGuid();
@@ -2253,22 +2300,15 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using var ctx = _db.NewContext();
         await Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .UpdateAppAsync(projectId, envId, WaitingAppId, "28.5.0.1", useUpdateWindow: true, new[] { first, second });
+            .BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.Now, confirmedPrerequisiteAppIds: new[] { first, second });
 
-        apps.Updated.Should().Be((WaitingAppId, "28.5.0.1", true));
-        apps.UpdatedWithDependencies.Should().BeTrue();
-
-        // And it is on the environment's update history, with what moved alongside.
         await using var read = _db.NewContext();
-        var entry = await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.EnvironmentId == envId);
-        entry.Kind.Should().Be(UpgradeActionKind.UpdateApp);
-        entry.Status.Should().Be(UpgradeActionStatus.Sent, "a record, never something for the worker to fire");
-        entry.Outcome.Should().Contain("Continia Core to 28.5.0.1").And.Contain("BC update window")
-            .And.Contain("Continia System Application").And.Contain("Continia Connector App");
+        var row = await read.OeEnvironmentUpgradeActions.AsNoTracking().SingleAsync(a => a.EnvironmentId == envId);
+        row.PrerequisiteAppIds.Should().BeEquivalentTo(new[] { first, second }, "what the person was shown is what the send may bring along");
     }
 
     [Fact]
-    public async Task A_prerequisite_nobody_confirmed_stops_the_update()
+    public async Task A_prerequisite_nobody_confirmed_stops_the_booking()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();
         var seen = Guid.NewGuid();
@@ -2278,11 +2318,83 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using var ctx = _db.NewContext();
         var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .UpdateAppAsync(projectId, envId, WaitingAppId, "28.5.0.1", useUpdateWindow: true, new[] { seen });
+            .BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.Now, confirmedPrerequisiteAppIds: new[] { seen });
 
         var error = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"];
         error.Should().Contain("Continia Connector App").And.NotContain("Continia System Application");
-        apps.Updated.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_second_booking_for_an_app_already_booked_is_refused()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var apps = AppsWithWaiting();
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+        await svc.BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.AtTime, _clock.GetUtcNow().AddHours(8));
+
+        var again = () => svc.BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.Now);
+        (await again.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("already booked");
+    }
+
+    [Fact]
+    public async Task Sending_a_booked_update_runs_it_now_brings_the_agreed_apps_and_waits_for_it()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var prerequisite = Guid.NewGuid();
+        var apps = AppsWithWaiting(new BcAppUpdateRequirement(prerequisite, "Continia System Application", "Continia Software", "28.5.0.0", "update"));
+        apps.OnOperation = id => new BcAppOperation(
+            id, WaitingAppId, "update", BcAppOperationStatus.Failed, "failed",
+            string.Empty, "28.5.0.1", null, "Continia Core couldn't be upgraded.", "UpgradeFailed", string.Empty,
+            false, "app", DateTimeOffset.UtcNow, null, DateTimeOffset.UtcNow);
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+        svc.UploadPollDelay = TimeSpan.Zero;
+        await svc.GetEnvironmentPanelAsync(projectId, envId);
+        BcAppOperation? accepted = null;
+        var result = await svc.SendBookedUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", new[] { prerequisite },
+            (op, _) => { accepted = op; return Task.CompletedTask; }, CancellationToken.None);
+
+        apps.Updated.Should().Be((WaitingAppId, "28.5.0.1", false), "the booking is the schedule; Business Central's window is never handed over");
+        apps.UpdatedWithDependencies.Should().BeTrue();
+        accepted.Should().NotBeNull();
+        result.Completed.Should().BeFalse("the send waited for Business Central's answer");
+        result.Message.Should().Contain("couldn't be upgraded");
+        _panelCache.Get(projectId, envId).Should().BeNull("the page must re-read after our own write, not show the old list");
+    }
+
+    [Fact]
+    public async Task Sending_a_booked_update_is_refused_when_business_central_has_moved_on_since_it_was_booked()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var agreed = Guid.NewGuid();
+
+        // A newer version is waiting now.
+        await using (var ctx = _db.NewContext())
+        {
+            var newer = new FakeAppManagementClient
+            {
+                OnAvailable = () => new[] { new BcAvailableAppUpdate(WaitingAppId, "Continia Core", "Continia Software", "28.6.0.0", Array.Empty<BcAppUpdateRequirement>()) },
+            };
+            var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), newer)
+                .SendBookedUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", Array.Empty<Guid>(), null, CancellationToken.None);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("28.6.0.0");
+            newer.Updated.Should().BeNull();
+        }
+
+        // A prerequisite nobody agreed to has appeared.
+        await using (var ctx = _db.NewContext())
+        {
+            var widened = AppsWithWaiting(
+                new BcAppUpdateRequirement(agreed, "Continia System Application", "Continia Software", "28.5.0.0", "update"),
+                new BcAppUpdateRequirement(Guid.NewGuid(), "Continia Connector App", "Continia Software", "28.5.0.0", "install"));
+            var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), widened)
+                .SendBookedUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", new[] { agreed }, null, CancellationToken.None);
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"].Should().Contain("Continia Connector App");
+            widened.Updated.Should().BeNull();
+        }
     }
 
     // ── Uploading apps by hand ────────────────────────────────────────────
@@ -2560,7 +2672,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using var ctx = _db.NewContext();
         var act = () => Svc(ctx, TokenOk(), new FakeAdminClient(), apps)
-            .UpdateAppAsync(projectId, envId, WaitingAppId, "28.5.0.1", useUpdateWindow: true);
+            .BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.Now);
 
         await act.Should().ThrowAsync<ProjectAccessDeniedException>();
         apps.Updated.Should().BeNull();

@@ -1,0 +1,234 @@
+@*
+    "When should it install?" for an app booked on an environment: an uploaded .app file
+    (UploadAppDialog) or an AppSource update (the environment page's update dialog). Both
+    are bookings the workbench sends at the slot, never a schedule handed to Business
+    Central, so both ask the same question the same way. See .design/saas-delivery.md,
+    "Uploading apps" and "Updating an AppSource app".
+
+    The delivery window agreed with the customer comes first when the environment has
+    one, else Microsoft's own update window; then a time the person picks; then now. A
+    picked time is read in the organisation's display zone - the zone every other time
+    on the page is shown in - and echoed back in words, so "12:32" fires at 12:32 on the
+    clock the person is looking at, never at 12:32 UTC. The two windows are the
+    customer's, in the customer's zone, and are shown as such.
+
+    The answer lives in a TimingChoice the dialog owns, because a dialog's body is only drawn
+    while it is open: the dialog resets it before opening and reads Timing, At and IsValid
+    when the person confirms. Changed lets the dialog re-check its confirm button.
+*@
+@using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@using ALDevToolbox.Services.Organizations
+@inject DisplayTimeZone DisplayZone
+
+<fieldset class="install-when">
+    <legend class="install-when__legend">When should it install?</legend>
+    @if (Choice.DeliveryWindowText is { } deliveryWindow)
+    {
+        <label class="install-when__opt">
+            <input type="radio" name="@Name" checked="@(Choice.Timing == UploadAppTiming.DeliveryWindow)"
+                   @onchange="() => PickAsync(UploadAppTiming.DeliveryWindow)" />
+            <span>In the delivery window, @deliveryWindow</span>
+        </label>
+    }
+    else
+    {
+        <label class="install-when__opt">
+            <input type="radio" name="@Name" checked="@(Choice.Timing == UploadAppTiming.BcUpdateWindow)"
+                   disabled="@(Choice.BcWindowText is null)"
+                   @onchange="() => PickAsync(UploadAppTiming.BcUpdateWindow)" />
+            <span>In the BC update window@(Choice.BcWindowText is { } bc ? $", {bc}" : "")</span>
+        </label>
+        <small class="field__hint install-when__hint">
+            @(Choice.BcWindowText is null
+                ? "This environment has no delivery window, and Business Central's own window hasn't been read yet. It is read when the solution's Business Central connection is tested, and overnight. Pick a time instead."
+                : "This environment has no delivery window (the install time agreed with the customer), so Business Central's own window stands in for it.")
+        </small>
+    }
+    <label class="install-when__opt">
+        <input type="radio" name="@Name" checked="@(Choice.Timing == UploadAppTiming.AtTime)"
+               @onchange="() => PickAsync(UploadAppTiming.AtTime)" />
+        <span>At a time I pick (@ZoneLabel(DisplayZone.Zone.Id) time)</span>
+    </label>
+    @if (Choice.Timing == UploadAppTiming.AtTime)
+    {
+        <div class="install-when__pick">
+            <input type="datetime-local" class="input" @bind="Choice.SlotLocal" @bind:event="oninput" @bind:after="Changed.InvokeAsync" />
+            @* The browser draws that field in its own locale, which on a machine set
+               to English (US) is a 12-hour clock. The booking is said back in the
+               page's own words, always visible, and that sentence is what settles
+               what was picked - and in which zone. *@
+            <p class="install-when__echo">@SlotEchoText()</p>
+            @if (SlotProblem() is { } problem)
+            {
+                <FieldError Message="@problem" />
+            }
+            <small class="field__hint">
+                Until then you can cancel or start early under Scheduled installs on the environment.
+            </small>
+        </div>
+    }
+    <label class="install-when__opt">
+        <input type="radio" name="@Name" checked="@(Choice.Timing == UploadAppTiming.Now)"
+               @onchange="() => PickAsync(UploadAppTiming.Now)" />
+        <span>Now - anyone working in Business Central may be interrupted</span>
+    </label>
+</fieldset>
+
+@code {
+    /// <summary>The answer being edited, owned by the dialog.</summary>
+    [Parameter, EditorRequired] public TimingChoice Choice { get; set; } = default!;
+
+    /// <summary>The radio group's name, unique on the page.</summary>
+    [Parameter, EditorRequired] public string Name { get; set; } = string.Empty;
+
+    /// <summary>Raised when the answer changes, so the dialog can re-check its confirm button.</summary>
+    [Parameter] public EventCallback Changed { get; set; }
+
+    private async Task PickAsync(UploadAppTiming timing)
+    {
+        Choice.Timing = timing;
+        await Changed.InvokeAsync();
+    }
+
+    private string SlotEchoText()
+    {
+        var instant = Choice.SlotInstant().UtcDateTime;
+        var customer = CustomerClock(instant, Choice.CustomerTimeZone, DisplayZone.Zone);
+        return $"Installs at {SlotText(DisplayZone, instant)}{(customer is null ? "" : $" - {customer}")}.";
+    }
+
+    private string? SlotProblem() => Choice.IsValid ? null : "Pick a time that hasn't happened yet.";
+
+    /// <summary>
+    /// When an install should happen, as the person is answering it: the timing, the
+    /// picked wall clock, and the two windows as the picker shows them. A plain object so
+    /// it outlives the dialog body the picker is drawn in.
+    /// </summary>
+    public sealed class TimingChoice
+    {
+        private TimeZoneInfo _pageZone = TimeZoneInfo.Utc;
+
+        /// <summary>What the person chose.</summary>
+        public UploadAppTiming Timing { get; set; } = UploadAppTiming.BcUpdateWindow;
+
+        /// <summary>The picked wall clock, on the page's clock.</summary>
+        public DateTime SlotLocal { get; set; }
+
+        /// <summary>The IANA zone the customer's windows are agreed in, for saying a window slot back in it.</summary>
+        public string? CustomerTimeZone { get; private set; }
+
+        internal string? DeliveryWindowText { get; private set; }
+        internal string? BcWindowText { get; private set; }
+
+        /// <summary>The instant a picked time means; null for the other timings.</summary>
+        public DateTimeOffset? At => Timing == UploadAppTiming.AtTime ? SlotInstant() : null;
+
+        /// <summary>False while a picked time has already gone. The service refuses it with the same allowance.</summary>
+        public bool IsValid => Timing != UploadAppTiming.AtTime
+            || SlotInstant() >= DateTimeOffset.UtcNow - ProjectConnectionService.BookingPastSlack;
+
+        /// <summary>
+        /// Sets the answer up for one environment. The gentlest timing is the default each
+        /// time: the delivery window when the environment has one, else Microsoft's window
+        /// when its hours are known, else a picked time.
+        /// </summary>
+        /// <param name="zone">The page's display zone, which a picked time is read in.</param>
+        /// <param name="deliveryWindowStart">The environment's delivery window, when set. Both bounds or neither.</param>
+        /// <param name="customerTimeZone">The IANA zone the delivery window is agreed in - the solution's.</param>
+        /// <param name="bcWindowStart">Microsoft's update window as mirrored from the admin centre, when read. Both bounds or neither.</param>
+        /// <param name="bcWindowTimeZone">The IANA zone Microsoft's window is expressed in; the customer's zone when unknown.</param>
+        public async Task ResetAsync(DisplayTimeZone zone,
+            TimeOnly? deliveryWindowStart, TimeOnly? deliveryWindowEnd, string? customerTimeZone,
+            TimeOnly? bcWindowStart, TimeOnly? bcWindowEnd, string? bcWindowTimeZone)
+        {
+            await zone.EnsureLoadedAsync();
+            _pageZone = zone.Zone;
+            CustomerTimeZone = customerTimeZone;
+            DeliveryWindowText = UpdateWindow.IsConfigured(deliveryWindowStart, deliveryWindowEnd)
+                ? WindowText(deliveryWindowStart!.Value, deliveryWindowEnd!.Value, customerTimeZone)
+                : null;
+            BcWindowText = UpdateWindow.IsConfigured(bcWindowStart, bcWindowEnd)
+                ? WindowText(bcWindowStart!.Value, bcWindowEnd!.Value, bcWindowTimeZone ?? customerTimeZone)
+                : null;
+            Timing = DeliveryWindowText is not null ? UploadAppTiming.DeliveryWindow
+                : BcWindowText is not null ? UploadAppTiming.BcUpdateWindow
+                : UploadAppTiming.AtTime;
+            // The next whole hour on the page's clock, so the field never opens on a time that has gone.
+            var local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, _pageZone);
+            SlotLocal = new DateTime(local.Year, local.Month, local.Day, local.Hour, 0, 0).AddHours(1);
+        }
+
+        /// <summary>
+        /// The instant the picked wall clock means, read in the organisation's display zone.
+        /// A time that doesn't exist locally (the spring-forward hour) is nudged forward
+        /// rather than refused - the person meant "that morning", not that instant.
+        /// </summary>
+        internal DateTimeOffset SlotInstant()
+        {
+            var wall = DateTime.SpecifyKind(SlotLocal, DateTimeKind.Unspecified);
+            for (var i = 0; i < 4 && _pageZone.IsInvalidTime(wall); i++) wall = wall.AddHours(1);
+            return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(wall, _pageZone), TimeSpan.Zero);
+        }
+    }
+
+    /// <summary>
+    /// How a booked install's slot is said back in a page's success notice: "when the
+    /// delivery window next opens, 22:00 for the customer (New York) (04:00 on 3 Oct,
+    /// Berlin time)" or "at 20:00 on 3 Oct, Berlin time". Null for now, or a slot that
+    /// has already come - the worker's next sweep takes it, so the caller says "shortly".
+    /// It reports the timing that <em>applied</em>, which the service returns: a
+    /// delivery-window ask on an environment without one went to Microsoft's window.
+    /// </summary>
+    public static string? BookedWhenPhrase(UploadAppOutcome outcome, string? customerTimeZone, DisplayTimeZone zone)
+    {
+        if (outcome.Timing == UploadAppTiming.Now || outcome.RunsAtUtc <= DateTime.UtcNow) return null;
+        var when = SlotText(zone, outcome.RunsAtUtc);
+        // A window was chosen as the customer's wall clock ("22:00-04:00 (New York)"),
+        // so it is said back in that clock first, or the numbers look wrong.
+        var customer = CustomerClock(outcome.RunsAtUtc, customerTimeZone, zone.Zone);
+        return outcome.Timing switch
+        {
+            UploadAppTiming.DeliveryWindow =>
+                $"when the delivery window next opens{(customer is null ? "" : $", {customer}")} ({when})",
+            UploadAppTiming.BcUpdateWindow =>
+                $"when the BC update window next opens{(customer is null ? "" : $", {customer}")} ({when})",
+            _ => $"at {when}{(customer is null ? "" : $" - {customer}")}",
+        };
+    }
+
+    /// <summary>"20:00 on 3 Oct": the slot as a wall clock, read back through the display zone like every other time on the page.</summary>
+    private const string SlotFormat = "HH:mm 'on' d MMM";
+
+    /// <summary>
+    /// "20:00 on 3 Oct, Berlin time": a booked install's slot said back in the page's own
+    /// zone, named. The one wording for the dialogs, the Scheduled installs list and the
+    /// history, so a booking reads the same everywhere it is shown.
+    /// </summary>
+    internal static string SlotText(DisplayTimeZone zone, DateTime utc) =>
+        $"{zone.Format(utc, SlotFormat)}, {ZoneLabel(zone.Zone.Id)} time";
+
+    /// <summary>
+    /// The same instant on the customer's clock ("08:00 for the customer (New York)"), when
+    /// that clock differs from the page's. Null when the two clocks read the same at that
+    /// instant or no customer zone is known, so a Berlin consultant booking a Copenhagen
+    /// customer is not told the time twice.
+    /// </summary>
+    private static string? CustomerClock(DateTime utc, string? customerTimeZone, TimeZoneInfo pageZone)
+    {
+        if (string.IsNullOrWhiteSpace(customerTimeZone)) return null;
+        var customerZone = UpdateWindow.ResolveTimeZone(customerTimeZone);
+        var instant = DateTime.SpecifyKind(utc, DateTimeKind.Utc);
+        if (customerZone.GetUtcOffset(instant) == pageZone.GetUtcOffset(instant)) return null;
+        var local = TimeZoneInfo.ConvertTimeFromUtc(instant, customerZone);
+        return $"{UpdateWindow.Clock(TimeOnly.FromDateTime(local))} for the customer ({ZoneLabel(customerZone.Id)})";
+    }
+
+    /// <summary>"22:00-04:00 (Copenhagen)": a window as the hours it was agreed in, with whose clock.</summary>
+    private static string WindowText(TimeOnly start, TimeOnly end, string? ianaId) =>
+        $"{UpdateWindow.Clock(start)}-{UpdateWindow.Clock(end)} ({ZoneLabel(ianaId)})";
+
+    /// <summary>A zone the way a consultant names it - the city, not the region/city id.</summary>
+    private static string ZoneLabel(string? ianaId) =>
+        string.IsNullOrWhiteSpace(ianaId) || ianaId == TimeZoneInfo.Utc.Id ? "UTC" : BcUpdateWindow.CityLabel(ianaId);
+}

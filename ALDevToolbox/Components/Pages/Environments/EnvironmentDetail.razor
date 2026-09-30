@@ -487,7 +487,7 @@
                ours to show and cancel, and a tenant that will not answer today is exactly
                when somebody wants to call one off. *@
             var panel = LivePanel;
-            if (panel is not null || BookedUploads.Count > 0)
+            if (panel is not null || BookedInstalls.Count > 0)
             {
                 <div class="card">
                     <div class="card__head">
@@ -503,11 +503,11 @@
                             </button>
                         }
                     </div>
-                    @if (panel?.ScheduledInstallsError is { } scheduledErr && BookedUploads.Count == 0)
+                    @if (panel?.ScheduledInstallsError is { } scheduledErr && BookedInstalls.Count == 0)
                     {
                         <div class="card__body"><FieldError Message="@scheduledErr" /></div>
                     }
-                    else if ((panel?.ScheduledInstalls.Count ?? 0) == 0 && BookedUploads.Count == 0)
+                    else if ((panel?.ScheduledInstalls.Count ?? 0) == 0 && BookedInstalls.Count == 0)
                     {
                         <EmptyState Icon="calendar" Title="Nothing waiting to install" Quiet="true">
                             <Text>A deployment you schedule for this environment, or an app another company sent you that you upload for later, waits here until it installs.</Text>
@@ -531,20 +531,21 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                @* Uploads booked here: still in this workbench, not yet with Business
-                                   Central, which is why they can be called off or started early. *@
-                                @foreach (var booked in BookedUploads)
+                                @* Uploads and AppSource updates booked here: still in this workbench, not
+                                   yet with Business Central, which is why they can be called off or
+                                   started early. *@
+                                @foreach (var booked in BookedInstalls)
                                 {
                                     <tr @key="@($"booked-{booked.Id}")">
                                         <td>
-                                            @(booked.PackageFileName ?? "An uploaded app")
-                                            <span class="tag">Uploaded here</span>
+                                            @(booked.PackageFileName ?? booked.AppName ?? "An app")
+                                            <span class="tag">@(booked.Kind == UpgradeActionKind.UpdateApp ? "Update booked here" : "Uploaded here")</span>
                                             @if (BatchPlace(booked) is { } place)
                                             {
                                                 <span class="u-muted">@place</span>
                                             }
                                         </td>
-                                        <td class="u-num env-detail__mono">-</td>
+                                        <td class="u-num env-detail__mono">@(booked.Kind == UpgradeActionKind.UpdateApp ? booked.TargetVersion : "-")</td>
                                         <td>@BookedWhen(booked)</td>
                                         @if (_canManage)
                                         {
@@ -559,7 +560,7 @@
                                                                 @onclick="() => InstallBookedNowAsync(booked)">Install now</button>
                                                     }
                                                     <button type="button" class="btn btn--sm btn--danger" disabled="@_settingSaving"
-                                                            @onclick="() => CancelBookedUploadAsync(booked)">Cancel install</button>
+                                                            @onclick="() => CancelBookedInstallAsync(booked)">Cancel install</button>
                                                 }
                                             </td>
                                         }
@@ -806,6 +807,7 @@
                                                         {
                                                             "Updating" => "Updating...",
                                                             "Scheduled" => "Scheduled",
+                                                            "Booked" => "Booked",
                                                             _ => ready ? "Update" : $"Update + {up.Requirements.Count}",
                                                         })</span>
                                                     </button>
@@ -951,9 +953,11 @@
 
 <ConfirmDialog @ref="_confirm" />
 
-@* Its own dialog because it asks a question the others do not: when. The gentle
-   answer is the default - an app update can interrupt whoever is working in it. *@
-<ConfirmDialog @ref="_updateConfirm" Wide="true">
+@* Its own dialog because it asks a question the others do not: when. It asks it the
+   way the upload dialog does, because both are bookings the workbench sends at the
+   slot. The gentle answer is the default - an app update can interrupt whoever is
+   working in it. *@
+<ConfirmDialog @ref="_updateConfirm" Wide="true" ConfirmDisabled="@(!_updateWhen.IsValid)">
     @if (_updateAlongside.Count > 0)
     {
         <div class="env-detail__alongside">
@@ -970,19 +974,7 @@
             </ul>
         </div>
     }
-    <fieldset class="env-detail__when">
-        <legend class="env-detail__when-legend">When should it install?</legend>
-        <label class="env-detail__when-opt">
-            <input type="radio" name="env-update-when" checked="@_updateInWindow"
-                   @onchange="() => _updateInWindow = true" />
-            <span>In the BC update window@(BcWindowSuffix())</span>
-        </label>
-        <label class="env-detail__when-opt">
-            <input type="radio" name="env-update-when" checked="@(!_updateInWindow)"
-                   @onchange="() => _updateInWindow = false" />
-            <span>Now - anyone working in Business Central may be interrupted</span>
-        </label>
-    </fieldset>
+    <InstallTimingPicker Choice="_updateWhen" Name="env-update-when" Changed="() => { }" />
 </ConfirmDialog>
 
 <UploadAppDialog @ref="_uploadDialog" />
@@ -1027,7 +1019,7 @@
     private ConfirmDialog? _updateConfirm;
 
     /// <summary>The update dialog's answer to "when". Reset to the gentle one each time it opens.</summary>
-    private bool _updateInWindow = true;
+    private readonly InstallTimingPicker.TimingChoice _updateWhen = new();
 
     private UploadAppDialog? _uploadDialog;
     private CopyEnvironmentDialog? _copyDialog;
@@ -1157,7 +1149,7 @@
             await LoadPanelAsync(forceRefresh: true);
             // The Apps tab lists the uploads booked here among the scheduled installs, and
             // one whose slot has passed may have been sent since the page loaded.
-            if (_tab == Section.Apps) await LoadBookedUploadsAsync();
+            if (_tab == Section.Apps) await LoadBookedInstallsAsync();
         }
     }
 
@@ -1183,7 +1175,6 @@
             _operations = null;
             _operationsError = null;
             LeaveSessionsTab();
-            _startedUpdates.Clear();
             await Zone.EnsureLoadedAsync();
             await LoadEnvironmentAsync();
             _loaded = true;
@@ -1192,7 +1183,7 @@
 
             _canManage = await Read(ct => Access.CanManageAsync(Row.ProjectId, _env.CreatedByUserId, ct));
             _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
-            await LoadBookedUploadsAsync();
+            await LoadBookedInstallsAsync();
         }
         if (_env is null) return;
 
@@ -1494,7 +1485,7 @@
             await Write(() => Connection.CancelEnvironmentSessionAsync(Row.ProjectId, Id, session.SessionId));
             _settingDone = $"{who}'s session on {Row.EnvironmentName} was ended.";
             _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
-            await LoadBookedUploadsAsync();
+            await LoadBookedInstallsAsync();
         }
         catch (PlanValidationException ex)
         {
@@ -1797,22 +1788,20 @@
 
     /// <summary>The edge bar: green for an update that can go now, grey for one that waits on another.</summary>
     /// <summary>
-    /// Apps this page has asked Business Central to update since it was opened, and
-    /// whether that was for the update window. Business Central's own word on an app
-    /// (below) is the better source and outlives the page; this covers the minutes
-    /// before it reports anything, which is exactly when a second press would happen.
+    /// "Updating", "Scheduled", "Booked", or null when nothing is on its way for this app.
+    /// Business Central's own word on the installed app comes first; then an update booked
+    /// here, for the app or as a prerequisite that moves with one - the button stops
+    /// working for every app it covers, since pressing it again would only book the same
+    /// thing twice.
     /// </summary>
-    private readonly Dictionary<Guid, bool> _startedUpdates = new();
-
-    /// <summary>"Updating", "Scheduled", or null when nothing is on its way for this app.</summary>
     private string? UpdateProgress(BcEnvironmentPanel panel, BcAvailableAppUpdate update)
     {
         var state = panel.InstalledApps.FirstOrDefault(a => a.AppId == update.AppId)?.State;
         if (string.Equals(state, "Updating", StringComparison.OrdinalIgnoreCase)) return "Updating";
         if (string.Equals(state, "UpdatePending", StringComparison.OrdinalIgnoreCase)) return "Scheduled";
-        return _startedUpdates.TryGetValue(update.AppId, out var inWindow)
-            ? (inWindow ? "Scheduled" : "Updating")
-            : null;
+        var booked = BookedInstalls.FirstOrDefault(b => b.Kind == UpgradeActionKind.UpdateApp
+            && (b.AppId == update.AppId || (b.PrerequisiteAppIds?.Contains(update.AppId) ?? false)));
+        return booked is null ? null : booked.SentAt is not null ? "Updating" : "Booked";
     }
 
     private static string UpdateRowClass(BcAvailableAppUpdate update) =>
@@ -1859,15 +1848,17 @@
     private static string UpdateBusyKey(BcAvailableAppUpdate update) => $"app-{update.AppId}";
 
     /// <summary>
-    /// Updates one AppSource app to the version Business Central has waiting. The
-    /// service re-reads the waiting list before it writes, so a row that went stale
-    /// while the page sat open is refused with a sentence rather than acted on.
+    /// Books one AppSource app to be updated to the version Business Central has waiting,
+    /// at the slot the person picks - the same bookings an upload makes. The service
+    /// re-reads the waiting list before it books, and again before it sends, so a row
+    /// that went stale is refused with a sentence rather than acted on.
     /// </summary>
     private async Task UpdateAppAsync(BcAvailableAppUpdate update)
     {
         if (_updateConfirm is null) return;
-        _updateInWindow = true;
         _updateAlongside = update.Requirements;
+        await _updateWhen.ResetAsync(Zone, _env!.DeliveryWindowStart, _env.DeliveryWindowEnd, Row.TimeZone,
+            _env.BcUpdateWindowStart, _env.BcUpdateWindowEnd, _env.BcUpdateWindowTimeZoneIana);
         var others = update.Requirements.Count;
         var installed = _panel?.InstalledApps.FirstOrDefault(a => a.AppId == update.AppId)?.Version;
         var from = string.IsNullOrWhiteSpace(installed) ? "" : $" from {installed}";
@@ -1883,26 +1874,17 @@
             others == 0 ? "Update the app" : $"Update all {others + 1} apps", "btn--danger");
         if (!confirmed) return;
 
-        var inWindow = _updateInWindow;
+        var timing = _updateWhen.Timing;
+        var at = _updateWhen.At;
+        var customerZone = _updateWhen.CustomerTimeZone;
         var alongside = update.Requirements.Where(r => r.AppId is not null).Select(r => r.AppId!.Value).ToList();
-        var started = await RunSettingWriteAsync(UpdateBusyKey(update),
-            () => Connection.UpdateAppAsync(Row.ProjectId, Id, update.AppId, update.Version, inWindow, alongside),
-            $"Couldn't update {update.Name}. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.",
-            () => inWindow
-                ? $"Business Central will update {what} in {Row.EnvironmentName}'s BC update window."
-                : $"Business Central has started updating {what}. Use Refresh in a few minutes to see it finish.");
-        if (started)
-        {
-            _startedUpdates[update.AppId] = inWindow;
-            foreach (var id in alongside) _startedUpdates[id] = inWindow;
-        }
-    }
-
-    /// <summary>The window's hours when Business Central reported them, so "when" is a time and not just a name.</summary>
-    private string BcWindowSuffix()
-    {
-        var text = BcWindowText();
-        return string.IsNullOrWhiteSpace(text) || !text.Any(char.IsDigit) ? string.Empty : $", {text}";
+        UploadAppOutcome? outcome = null;
+        await RunSettingWriteAsync(UpdateBusyKey(update),
+            async () => outcome = await Connection.BookAppUpdateAsync(Row.ProjectId, Id, update.AppId, update.Version, timing, at, alongside),
+            $"Couldn't book the update of {update.Name}. Check AL Workbench still has admin access in the customer's Business Central admin centre, then try again.",
+            () => InstallTimingPicker.BookedWhenPhrase(outcome!, customerZone, Zone) is { } when
+                ? $"{what} will be updated on {Row.EnvironmentName} {when}. Until then you can cancel or start it early under Scheduled installs."
+                : $"{what} will start updating on {Row.EnvironmentName} shortly. Follow it under Scheduled installs.");
     }
 
     private static string AppCount(int count) => count == 1 ? "1 other app" : $"{count} other apps";
@@ -1926,21 +1908,21 @@
     }
 
     /// <summary>
-    /// Uploads booked here and still waiting for their slot - shown among the scheduled
-    /// installs, because to the person asking "what is going to install here?" they are
+    /// Uploads and AppSource updates booked here and still waiting for their slot - shown
+    /// among the scheduled installs, because to the person asking "what is going to install here?" they are
     /// one list, whichever side is holding the file.
     /// </summary>
-    private List<UpgradeActionRow> BookedUploads => _bookedUploads ?? new();
+    private List<UpgradeActionRow> BookedInstalls => _bookedInstalls ?? new();
 
     /// <summary>
-    /// The uploads still booked here, read on their own rather than out of the history:
+    /// The installs still booked here, read on their own rather than out of the history:
     /// the history is capped, and a booking must not drop off the Scheduled installs
     /// because the environment has been busy.
     /// </summary>
-    private List<UpgradeActionRow>? _bookedUploads;
+    private List<UpgradeActionRow>? _bookedInstalls;
 
-    private async Task LoadBookedUploadsAsync() =>
-        _bookedUploads = await Read(ct => UpgradeActions.ListPendingUploadsAsync(Row.ProjectId, Id, ct));
+    private async Task LoadBookedInstallsAsync() =>
+        _bookedInstalls = await Read(ct => UpgradeActions.ListBookedInstallsAsync(Row.ProjectId, Id, ct));
 
     /// <summary>"2 of 3" for a row of a multi-app upload, so the list shows the order they go in; null for a single one.</summary>
     private string? BatchPlace(UpgradeActionRow booked)
@@ -1948,7 +1930,7 @@
         if (booked.BatchId is not { } batch || booked.BatchOrder is not { } order) return null;
         // The batch may have settled rows already, which the pending list no longer
         // holds; the history has them for as long as it reaches.
-        var size = Math.Max(BookedUploads.Count(a => a.BatchId == batch), _activity?.Count(a => a.BatchId == batch) ?? 0);
+        var size = Math.Max(BookedInstalls.Count(a => a.BatchId == batch), _activity?.Count(a => a.BatchId == batch) ?? 0);
         return size > 1 ? $"{order + 1} of {size}" : null;
     }
 
@@ -1959,46 +1941,58 @@
         : $"Booked for {BookedSlotText(booked.ExecuteAfter)}";
 
     /// <summary>A booked slot in the page's own zone - the one it was picked in - so it reads back as picked.</summary>
-    private string BookedSlotText(DateTime utc) => UploadAppDialog.SlotText(Zone, utc);
+    private string BookedSlotText(DateTime utc) => InstallTimingPicker.SlotText(Zone, utc);
 
-    /// <summary>Sends a booked upload straight away, behind a confirm: from here it interrupts whoever is working.</summary>
+    /// <summary>What a booked install is called on this page: an upload's file, or the app an AppSource update moves.</summary>
+    private static string BookedName(UpgradeActionRow booked) =>
+        booked.PackageFileName ?? booked.AppName ?? "the app";
+
+    /// <summary>Sends a booked install straight away, behind a confirm: from here it interrupts whoever is working.</summary>
     private async Task InstallBookedNowAsync(UpgradeActionRow booked)
     {
         if (_confirm is null) return;
-        var name = booked.PackageFileName ?? "the app";
+        var name = BookedName(booked);
         var batch = BatchPlace(booked) is not null;
+        var update = booked.Kind == UpgradeActionKind.UpdateApp;
         var confirmed = await _confirm.OpenAsync(
-            batch ? $"Install {name} and the apps booked with it now?" : $"Install {name} now?",
+            update ? $"Update {name} now?" : batch ? $"Install {name} and the apps booked with it now?" : $"Install {name} now?",
             (batch
                 ? $"They were booked for {BookedSlotText(booked.ExecuteAfter)} and install one after another. Installing them now may interrupt anyone working in {Row.EnvironmentName}."
                 : $"It was booked for {BookedSlotText(booked.ExecuteAfter)}. Installing it now may interrupt anyone working in {Row.EnvironmentName}."),
-            "Install now");
+            update ? "Update now" : "Install now");
         if (!confirmed) return;
 
         await RunSettingWriteAsync("install-now",
-            () => UpgradeActions.RunUploadNowAsync(booked.Id),
-            $"Couldn't start the install of {name}.",
-            () => batch
+            () => UpgradeActions.RunBookedInstallNowAsync(booked.Id),
+            update ? $"Couldn't start the update of {name}." : $"Couldn't start the install of {name}.",
+            () => update
+                ? $"{name} will start updating on {Row.EnvironmentName} shortly."
+                : batch
                 ? $"{name} and the apps booked with it will start installing on {Row.EnvironmentName} within a minute."
                 : $"{name} will start installing on {Row.EnvironmentName} within a minute.");
     }
 
-    /// <summary>Calls off a booked upload. The stored file goes with the booking, so the confirm says to upload it again.</summary>
-    private async Task CancelBookedUploadAsync(UpgradeActionRow booked)
+    /// <summary>
+    /// Calls off a booked install. An upload's stored file goes with the booking, so the
+    /// confirm says to upload it again; an AppSource update can simply be booked again.
+    /// </summary>
+    private async Task CancelBookedInstallAsync(UpgradeActionRow booked)
     {
         if (_confirm is null) return;
-        var name = booked.PackageFileName ?? "the app";
+        var name = BookedName(booked);
         var others = BatchPlace(booked) is null ? "" : " The other apps booked with it still install; any that needs it will be refused by Business Central.";
         var confirmed = await _confirm.OpenAsync(
             "Call off this install?",
-            $"{name} won't be installed on {Row.EnvironmentName}. To install it later, upload it again.{others}",
+            booked.Kind == UpgradeActionKind.UpdateApp
+                ? $"{name} won't be updated to {booked.TargetVersion} on {Row.EnvironmentName}. To update it later, use Update under Available updates again."
+                : $"{name} won't be installed on {Row.EnvironmentName}. To install it later, upload it again.{others}",
             "Call off the install");
         if (!confirmed) return;
 
         await RunSettingWriteAsync("cancel-booked",
             () => UpgradeActions.CancelUpgradeActionAsync(booked.Id),
             "Couldn't cancel the booked install.",
-            () => $"The install of {name} was cancelled.");
+            () => booked.Kind == UpgradeActionKind.UpdateApp ? $"The update of {name} was cancelled." : $"The install of {name} was cancelled.");
     }
 
     // ── Copying the environment ─────────────────────────────────────────
@@ -2246,7 +2240,7 @@
             await LoadEnvironmentAsync();
             await LoadPanelAsync();
             _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
-            await LoadBookedUploadsAsync();
+            await LoadBookedInstallsAsync();
             _settingDone = successMessage();
             return true;
         }
@@ -2284,11 +2278,11 @@
     private async Task CancelUpgradeActionAsync(int actionId)
     {
         var entry = _activity?.FirstOrDefault(a => a.Id == actionId);
-        if (entry?.Kind == UpgradeActionKind.UploadApp)
+        if (entry is not null && UpgradeActionService.IsAppInstall(entry.Kind))
         {
-            // The same confirm the Scheduled installs card gives: the stored file goes
-            // with the booking.
-            await CancelBookedUploadAsync(entry);
+            // The same confirm the Scheduled installs card gives: an upload's stored file
+            // goes with the booking.
+            await CancelBookedInstallAsync(entry);
             return;
         }
         try
@@ -2307,6 +2301,6 @@
         }
 
         _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
-        await LoadBookedUploadsAsync();
+        await LoadBookedInstallsAsync();
     }
 }

@@ -49,17 +49,6 @@
     font-size: var(--text-sm);
 }
 
-/* The update dialog's one question. Same shape as the Upgrades page's "when". */
-.env-detail__when {
-    margin: var(--space-3) 0 0;
-    padding: var(--space-3);
-    border: 1px solid var(--border);
-    border-radius: var(--r);
-    background: var(--surface-2);
-    display: grid;
-    gap: var(--space-2);
-}
-
 /* The apps that move with the one being updated. Capped and scrollable: an app
    can wait for a dozen others, and the question below must stay on screen. */
 .env-detail__alongside {
@@ -101,14 +90,6 @@
     padding: 0 var(--space-1);
     font-size: var(--text-sm);
     font-weight: 600;
-    color: var(--ink-2);
-}
-
-.env-detail__when-opt {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: var(--text-sm);
     color: var(--ink-2);
 }
 
