@@ -72,7 +72,12 @@ else
                             <button type="button" class="btn btn--sm eaf__cancel"
                                     disabled="@(_cancelling == entry.Id)"
                                     @onclick="() => CancelAsync(entry.Id)">
-                                @(_cancelling == entry.Id ? "Cancelling..." : UpgradeActionService.IsAppInstall(entry.Kind) ? "Cancel install" : "Cancel booking")
+                                @(_cancelling == entry.Id ? "Cancelling..." : entry.Kind switch
+                                {
+                                    UpgradeActionKind.UpdateApp => "Cancel update",
+                                    UpgradeActionKind.UploadApp => "Cancel install",
+                                    _ => "Cancel booking",
+                                })
                             </button>
                         }
                     </div>
@@ -216,6 +221,8 @@ else
             // A booked slot leads with when it runs: that is what somebody deciding whether
             // to cancel it needs. Past its slot and still waiting is a different fact and
             // says so plainly rather than promising a time that has gone.
+            UpgradeActionStatus.Pending when entry.Kind == UpgradeActionKind.UpdateApp && entry.SentAt is not null
+                => @<text>Updating now</text>,
             UpgradeActionStatus.Pending when UpgradeActionService.IsAppInstall(entry.Kind) && entry.SentAt is not null
                 => @<text>Installing now</text>,
             UpgradeActionStatus.Pending when UpgradeActionService.IsAppInstall(entry.Kind) && entry.ExecuteAfter <= DateTime.UtcNow

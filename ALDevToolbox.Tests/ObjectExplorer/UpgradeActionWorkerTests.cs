@@ -592,6 +592,46 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_booked_updates_due_together_go_one_per_sweep()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var otherAppId = Guid.NewGuid();
+        _f.Apps.OnAvailable = () => new[]
+        {
+            new BcAvailableAppUpdate(CoreAppId, "Continia Core", "Continia Software", "28.5.0.1", Array.Empty<BcAppUpdateRequirement>()),
+            new BcAvailableAppUpdate(otherAppId, "Continia Banking", "Continia Software", "28.5.0.2", Array.Empty<BcAppUpdateRequirement>()),
+        };
+        await BookUpdateAsync(projectId, envId, hoursAhead: 12);
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using (var ctx = _f.Db.NewContext())
+            await _f.Connections(ctx).BookAppUpdateAsync(projectId, envId, otherAppId, "28.5.0.2",
+                ALDevToolbox.Domain.ValueObjects.ObjectExplorer.UploadAppTiming.AtTime, _f.Clock.GetUtcNow().AddHours(12));
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        _f.Apps.Updated.Should().ContainSingle();
+        await SweepUntilQuietAsync();
+        _f.Apps.Updated.Select(u => u.AppId).Should().Equal(CoreAppId, otherAppId);
+    }
+
+    [Fact]
+    public async Task An_update_the_workbench_could_not_see_finish_is_recorded_as_sent_unconfirmed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        Waiting();
+        var actionId = await BookUpdateAsync(projectId, envId, hoursAhead: 12);
+        _f.Apps.OnOperationStatus = _ => BcAppOperationStatus.Running;
+        _f.UploadPollTimeout = TimeSpan.Zero;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Sent);
+        stored.Outcome.Should().Contain("Continia Core was sent for update to 28.5.0.1").And.Contain("wasn't confirmed here");
+    }
+
+    [Fact]
     public async Task A_booked_update_is_refused_in_plain_words_when_the_waiting_version_changed()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();

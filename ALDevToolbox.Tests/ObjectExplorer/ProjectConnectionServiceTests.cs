@@ -2339,6 +2339,31 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task An_app_already_moving_with_another_booked_update_is_not_booked_again()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var systemApp = Guid.NewGuid();
+        var apps = new FakeAppManagementClient
+        {
+            OnAvailable = () => new[]
+            {
+                new BcAvailableAppUpdate(WaitingAppId, "Continia Core", "Continia Software", "28.5.0.1",
+                    new[] { new BcAppUpdateRequirement(systemApp, "Continia System Application", "Continia Software", "28.5.0.0", "update") }),
+                new BcAvailableAppUpdate(systemApp, "Continia System Application", "Continia Software", "28.5.0.0", Array.Empty<BcAppUpdateRequirement>()),
+            },
+        };
+
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+        await svc.BookAppUpdateAsync(projectId, envId, WaitingAppId, "28.5.0.1", UploadAppTiming.AtTime,
+            _clock.GetUtcNow().AddHours(8), new[] { systemApp });
+
+        var prerequisiteAlone = () => svc.BookAppUpdateAsync(projectId, envId, systemApp, "28.5.0.0", UploadAppTiming.Now);
+        (await prerequisiteAlone.Should().ThrowAsync<PlanValidationException>()).Which.Errors["App"]
+            .Should().Contain("Continia Core").And.Contain("Cancel that booking");
+    }
+
+    [Fact]
     public async Task Sending_a_booked_update_runs_it_now_brings_the_agreed_apps_and_waits_for_it()
     {
         var (projectId, envId) = await SeedEnvironmentAsync();

@@ -1750,14 +1750,22 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             throw Validation("App", "Business Central didn't list the waiting updates. " + ex.Message);
         }
 
-        // One booking per app: a second would only ask Business Central for the same
-        // update twice, and the first to run would leave the second nothing to do.
-        var alreadyBooked = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
-            .AnyAsync(a => a.EnvironmentId == env.Id && a.Kind == UpgradeActionKind.UpdateApp
-                           && a.Status == UpgradeActionStatus.Pending && a.BcAppId == appId, ct);
-        if (alreadyBooked)
+        // One booking per app, counting the apps a booking brings along: a second would
+        // only ask Business Central for the same update twice, and whichever ran first
+        // would leave the other failing on an update that is no longer waiting.
+        var covered = offered.Requirements.Select(r => r.AppId!.Value).Append(appId).ToList();
+        var clash = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.EnvironmentId == env.Id && a.Kind == UpgradeActionKind.UpdateApp
+                        && a.Status == UpgradeActionStatus.Pending
+                        && ((a.BcAppId != null && covered.Contains(a.BcAppId.Value))
+                            || (a.PrerequisiteAppIds != null && a.PrerequisiteAppIds.Any(p => covered.Contains(p)))))
+            .Select(a => new { a.BcAppId, a.AppName })
+            .FirstOrDefaultAsync(ct);
+        if (clash is not null)
         {
-            throw Validation("App", $"An update of {offered.Name} is already booked for {env.Name}. Cancel it under Scheduled installs to book a different time.");
+            throw Validation("App", clash.BcAppId == appId
+                ? $"An update of {offered.Name} is already booked for {env.Name}. Cancel it under Scheduled installs to book a different time."
+                : $"The update of {clash.AppName ?? "another app"} already booked for {env.Name} moves {offered.Name} or an app it waits for. Cancel that booking under Scheduled installs first.");
         }
 
         _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction

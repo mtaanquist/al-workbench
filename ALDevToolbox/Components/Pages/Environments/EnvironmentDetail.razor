@@ -801,7 +801,9 @@
                                                     <button type="button" class="btn btn--sm"
                                                             disabled="@(_settingSaving || progress is not null)" @onclick="() => UpdateAppAsync(up)"
                                                             title="@(progress == "Booked" ? "Booked to update later - see Scheduled installs to start it now or cancel it." : null)"
-                                                            aria-label="@(ready
+                                                            aria-label="@(progress == "Booked"
+                                                                ? $"{up.Name} is booked to update to {up.Version}; see Scheduled installs"
+                                                                : ready
                                                                 ? $"Update {up.Name} to {up.Version}"
                                                                 : $"Update {up.Name} to {up.Version}, along with the {up.Requirements.Count} it waits for")">
                                                         <span class="btn__label">@(progress switch
@@ -1938,7 +1940,7 @@
 
     /// <summary>When a booked row goes: its slot, "starting shortly" once that has come, or "installing now" while the worker has it.</summary>
     private string BookedWhen(UpgradeActionRow booked) =>
-        booked.SentAt is not null ? "Installing now"
+        booked.SentAt is not null ? (booked.Kind == UpgradeActionKind.UpdateApp ? "Updating now" : "Installing now")
         : booked.ExecuteAfter <= DateTime.UtcNow ? "Starting shortly"
         : $"Booked for {BookedSlotText(booked.ExecuteAfter)}";
 
