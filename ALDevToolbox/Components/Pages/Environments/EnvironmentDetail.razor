@@ -48,7 +48,11 @@
 
 @* What the command palette opens with on this page: its tabs, the way out to
    Business Central, and its solution. *@
-<PaletteContext Kind="ALDevToolbox.Services.Palette.PaletteContextKind.Environment" Id="Id" />
+@* Only once found: the lookup behind a readable address does not decide visibility. *@
+@if (_env is not null)
+{
+    <PaletteContext Kind="ALDevToolbox.Services.Palette.PaletteContextKind.Environment" Id="Id" />
+}
 
 <DetailPage IsLoading="@(!_loaded)"
             LoadingText="Loading environment..."
@@ -1121,7 +1125,7 @@
     private string TabHref(Section section) => SectionHref(section == Section.Overview ? null : section.ToString().ToLowerInvariant());
 
     /// <summary>This page's own address, on <paramref name="tab"/> when given: the readable one once the environment is loaded.</summary>
-    private string SectionHref(string? tab) => _env is not null
+    private string SectionHref(string? tab) => _env is not null && _loadedId == Id
         ? Row.Href(tab)
         : ALDevToolbox.Services.ObjectExplorer.Projects.SolutionLinks.Environment(Solution, Environment, Id, tab);
 
@@ -1183,7 +1187,13 @@
     {
         // Looked up once per address: a change of tab keeps the component, and its
         // reads (the live sessions loop among them) may still be using the context.
-        if (_resolvedFor != (EnvironmentId, Solution, Environment))
+        if (EnvironmentId is { } numbered)
+        {
+            // A number needs no lookup.
+            _resolvedFor = (EnvironmentId, Solution, Environment);
+            Id = numbered;
+        }
+        else if (_resolvedFor != (EnvironmentId, Solution, Environment))
         {
             _resolvedFor = (EnvironmentId, Solution, Environment);
             Id = EnvironmentId
@@ -1222,17 +1232,18 @@
             _canManage = await Read(ct => Access.CanManageAsync(Row.ProjectId, _env.CreatedByUserId, ct));
             _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
             await LoadBookedUploadsAsync();
-
-            // A numeric address forwards to the readable one, on the same tab, so the
-            // page has one address whichever link led here. Last, so the pass that
-            // lands on the new address finds everything above already read.
-            if (EnvironmentId is not null && Row.ProjectSlug is not null)
-            {
-                Nav.NavigateTo(SectionHref(_tab == Section.Overview ? null : OpenTab!.ToLowerInvariant()), replace: true);
-                return;
-            }
         }
         if (_env is null) return;
+
+        // A numeric address forwards to the readable one, on the same tab, so the page
+        // has one address whichever link led here - including a palette link to the
+        // environment already open. After the load, so the pass that lands on the new
+        // address finds everything already read and asks nothing again.
+        if (EnvironmentId is not null && Row.ProjectSlug is not null)
+        {
+            Nav.NavigateTo(SectionHref(_tab == Section.Overview ? null : _tab.ToString().ToLowerInvariant()), replace: true);
+            return;
+        }
 
         // Leaving the Sessions tab always stops it reading, whatever else is true -
         // and it drops the list it held, because coming back to a sessions list that

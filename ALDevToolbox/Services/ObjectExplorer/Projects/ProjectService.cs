@@ -220,7 +220,18 @@ public sealed class ProjectService
             }).ToList(),
         };
         _db.OeProjects.Add(project);
-        await SaveTranslatingNameClashAsync(ct);
+        try
+        {
+            await SaveTranslatingNameClashAsync(ct);
+        }
+        catch (PlanValidationException ex) when (slug is null && ex.Errors.ContainsKey("Slug"))
+        {
+            // A concurrent create took the derived slug between the read and the write.
+            // The create form has no field to show that on, and nobody asked for this
+            // slug, so pick the next free one and save again.
+            project.Slug = await FreeSlugAsync(SolutionSlug.Derive(shortName ?? name), existingId: null, ct);
+            await SaveTranslatingNameClashAsync(ct);
+        }
 
         _logger.LogInformation("Created project {ProjectId} ({Name}) with {RepoCount} repo(s) at {Visibility} with {TeamCount} team(s) for org {OrgId}.",
             project.Id, name, project.Repositories.Count, visibility, teamIds.Count, orgId);

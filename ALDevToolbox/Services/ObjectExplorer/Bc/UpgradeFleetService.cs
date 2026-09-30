@@ -162,7 +162,7 @@ public sealed class UpgradeFleetService
     public async Task<int?> FindEnvironmentIdAsync(string solutionSlug, string environmentName, CancellationToken ct = default)
     {
         var slug = (solutionSlug ?? string.Empty).Trim().ToLowerInvariant();
-        var name = (environmentName ?? string.Empty).Trim().ToLower();
+        var name = (environmentName ?? string.Empty).Trim().ToLowerInvariant();
         if (!SolutionSlug.IsValid(slug) || name.Length == 0) return null;
         return await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.MissingSince == null

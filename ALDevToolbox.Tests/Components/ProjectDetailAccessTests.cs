@@ -155,7 +155,8 @@ public sealed class ProjectDetailAccessTests : IDisposable
 
         var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
 
-        var marker = cut.Find("[data-palette-context]");
+        // Drawn once the solution has loaded, not before.
+        var marker = cut.WaitForElement("[data-palette-context]");
         marker.GetAttribute("data-palette-context").Should().Be($"solution:{projectId}");
         marker.GetAttribute("data-palette-href").Should().Be($"/solutions/{projectId}");
         marker.HasAttribute("hidden").Should().BeTrue();

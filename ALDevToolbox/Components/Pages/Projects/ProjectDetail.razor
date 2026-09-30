@@ -47,7 +47,9 @@
 @* What the command palette opens with on this page: its tabs, its environments
    and its latest build. Nothing while it is being created - there is no record
    to be about yet. *@
-@if (Id is { } paletteId)
+@* Only once the solution has loaded: the lookup behind a readable address does not
+   decide visibility, so an id it found must not reach the page before the load has. *@
+@if (_loadedProject is not null && Id is { } paletteId)
 {
     <PaletteContext Kind="ALDevToolbox.Services.Palette.PaletteContextKind.Solution" Id="paletteId" />
 }
@@ -493,7 +495,9 @@
         {
             Id = await Projects.FindIdBySlugAsync(Slug);
             if (Id is not null) return true;
-            _hasLoaded = true;
+            // Not "loaded": a later /solutions/new has Id null too, and must not be
+            // mistaken for this page again.
+            _hasLoaded = false;
             _loadedId = null;
             _loading = false;
             _notFound = true;
@@ -502,6 +506,13 @@
         }
 
         Id = SolutionId;
+        // The solution already on screen, by its number (the palette links that way):
+        // move the address, read nothing.
+        if (Id is { } shown && _hasLoaded && _loadedId == shown && _loadedProject is { Slug: { } known })
+        {
+            Nav.NavigateTo(SolutionLinks.Solution(known, shown) + new Uri(Nav.Uri).Query, replace: true);
+            return false;
+        }
         if (Id is { } id && await Projects.FindVisibleSlugAsync(id) is { } slug)
         {
             var query = new Uri(Nav.Uri).Query;

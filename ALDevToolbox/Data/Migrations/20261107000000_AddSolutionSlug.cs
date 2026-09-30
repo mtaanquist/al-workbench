@@ -22,7 +22,7 @@ namespace ALDevToolbox.Data.Migrations
                                        'œ', 'oe'), 'Œ', 'oe'), 'þ', 'th')),
                                    'øØðÐđĐłŁáàâäãÁÀÂÄÃéèêëÉÈÊËíìîïÍÌÎÏóòôöõÓÒÔÖÕúùûüÚÙÛÜýÿÝñÑçÇ',
                                    'ooddddllaaaaaaaaaaeeeeeeeeiiiiiiiioooooooooouuuuuuuuyyynncc'),
-                               '[^a-z0-9]+', '-', 'g')), 50) AS s
+                               '[^a-z0-9]+', '-', 'g')), 40) AS s
                     FROM oe_projects
                 ),
                 shaped AS (
@@ -47,6 +47,19 @@ namespace ALDevToolbox.Data.Migrations
                 SET slug = CASE WHEN r.n = 1 THEN r.slug ELSE r.slug || '-' || p.id END
                 FROM ranked r
                 WHERE r.id = p.id;
+
+                -- A suffixed slug can still equal another row's own ("CRONUS 5" beside a
+                -- second "CRONUS" with id 5). The rare row left clashing keeps numeric
+                -- links until someone gives it a slug, rather than failing the index.
+                UPDATE oe_projects p
+                SET slug = NULL
+                WHERE p.deleted_at IS NULL
+                  AND EXISTS (
+                      SELECT 1 FROM oe_projects q
+                      WHERE q.organization_id = p.organization_id
+                        AND q.deleted_at IS NULL
+                        AND q.slug = p.slug
+                        AND q.id < p.id);
                 """;
 
         /// <inheritdoc />
@@ -67,7 +80,8 @@ namespace ALDevToolbox.Data.Migrations
             // a starting value people can edit. Letters that do not fold to ASCII by
             // translate() become dashes; empty, all-digit and reserved results get the
             // "solution-" prefix Derive gives them. Active rows that still collide in
-            // one org take their id as a suffix, which no other active row can have.
+            // one org take their id as a suffix; the cut to 40 leaves room for both the
+            // prefix and the suffix within the column's 60.
             migrationBuilder.Sql(BackfillSql);
 
             migrationBuilder.CreateIndex(

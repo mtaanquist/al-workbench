@@ -248,6 +248,64 @@ public sealed class SolutionSlugServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task The_backfill_never_leaves_two_active_solutions_on_one_slug()
+    {
+        // "CRONUS 5" folds to what the second "CRONUS" would be suffixed to when its id
+        // is 5, and long all-digit names get both the prefix and the suffix.
+        var ids = new List<int>();
+        await using (var seed = _db.NewContext())
+        {
+            // Names are unique, short names are not: the second row collides through its short name.
+            var rows = new (string Name, string? ShortName)[]
+            {
+                ("CRONUS", null), ("CRONUS Holding", "CRONUS"), ("cronus!", null),
+                (new string('1', 70), null), (new string('1', 70) + "!", null),
+            };
+            foreach (var (name, shortName) in rows)
+            {
+                var p = new OeProject
+                {
+                    OrganizationId = TestDb.DefaultOrgId,
+                    Name = name,
+                    ShortName = shortName,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow,
+                };
+                seed.OeProjects.Add(p);
+                await seed.SaveChangesAsync();
+                ids.Add(p.Id);
+            }
+            // The clash the id suffix cannot see on its own.
+            seed.OeProjects.Add(new OeProject
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Name = $"CRONUS {ids[1]}",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        // As the migration runs it: the backfill first, then the unique index, which
+        // is what would fail - and block startup - if two active rows shared a slug.
+        await using (var run = _db.NewContext())
+        {
+            await run.Database.ExecuteSqlRawAsync("DROP INDEX ix_oe_projects_organization_id_slug;");
+            await run.Database.ExecuteSqlRawAsync(AddSolutionSlug.BackfillSql);
+            await run.Database.ExecuteSqlRawAsync(
+                "CREATE UNIQUE INDEX ix_oe_projects_organization_id_slug ON oe_projects (organization_id, slug) WHERE deleted_at IS NULL;");
+        }
+
+        await using var read = _db.NewContext();
+        var slugs = await read.OeProjects.AsNoTracking()
+            .Where(p => p.DeletedAt == null && p.Slug != null)
+            .Select(p => p.Slug!)
+            .ToListAsync();
+        slugs.Should().OnlyHaveUniqueItems();
+        slugs.Should().OnlyContain(s => SolutionSlug.IsValid(s));
+    }
+
+    [Fact]
     public async Task The_backfill_gives_existing_solutions_unique_valid_slugs()
     {
         var names = new[] { "CRONUS A/S", "CRONUS A-S", "Jørgensen Møbler", "2024", "New", "!!!" };
