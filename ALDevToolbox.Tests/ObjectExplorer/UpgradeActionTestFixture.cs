@@ -375,14 +375,30 @@ internal sealed class UpgradeActionTestFixture : IDisposable
 
         public Task<IReadOnlyList<BcInstalledApp>> ListInstalledAppsAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
             => throw new NotSupportedException();
+        /// <summary>The AppSource updates Business Central has waiting; none unless a test says otherwise.</summary>
+        public Func<IReadOnlyList<BcAvailableAppUpdate>> OnAvailable = Array.Empty<BcAvailableAppUpdate>;
+        /// <summary>Every AppSource update sent: the app, the version, whether the update window was used and whether prerequisites came along.</summary>
+        public List<(Guid AppId, string Version, bool InWindow, bool WithDependencies)> Updated { get; } = new();
+
         public Task<IReadOnlyList<BcAvailableAppUpdate>> ListAvailableUpdatesAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
-            => throw new NotSupportedException();
+            => Task.FromResult(OnAvailable());
         public Task<IReadOnlyList<BcScheduledPteOperation>> ListScheduledPteOperationsAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
             => throw new NotSupportedException();
         public Task<BcAppOperation> RemoveScheduledPteVersionAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, string targetVersion, string scheduleKind, CancellationToken ct = default)
             => throw new NotSupportedException();
         public Task<BcAppOperation> UpdateAppAsync(string accessToken, string applicationFamily, string environmentName, Guid appId, string targetVersion, bool useEnvironmentUpdateWindow, bool installOrUpdateNeededDependencies, CancellationToken ct = default)
-            => throw new NotSupportedException();
+        {
+            Updated.Add((appId, targetVersion, useEnvironmentUpdateWindow, installOrUpdateNeededDependencies));
+            // Into the one send log with the uploads, so a test can pin the order across both.
+            var name = $"update {appId}";
+            InstalledFiles.Add(name);
+            var operationId = Guid.NewGuid();
+            _operations[operationId] = name;
+            return Task.FromResult(new BcAppOperation(
+                operationId, appId, "update", BcAppOperationStatus.Running, "running",
+                string.Empty, targetVersion, null, string.Empty, string.Empty, string.Empty,
+                false, "app", DateTimeOffset.UtcNow, null, null));
+        }
     }
 
     private sealed class UnusedAppManagementClient : IBcAppManagementClient

@@ -1697,33 +1697,37 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     }
 
     /// <summary>
-    /// Updates one AppSource app on the environment to the version Business Central has
-    /// waiting for it. Manage-gated, like the other writes that are not about the platform
-    /// update.
+    /// Books one AppSource app to be updated to the version Business Central has waiting
+    /// for it. Manage-gated, like the other writes that are not about the platform update.
     /// <para>
-    /// The version is not taken on trust. The waiting updates are read again first, and
-    /// the write goes ahead only for an app that is on that list, at exactly that version
-    /// - so a stale page, or a caller that is not the page, cannot move an app to a
-    /// version Business Central never offered.
+    /// Every timing is a booking, as for an uploaded app: one <c>Pending</c> row of kind
+    /// <see cref="UpgradeActionKind.UpdateApp"/> that <see cref="UpgradeActionWorker"/>
+    /// sends as an immediate update when the slot arrives, waiting for it to finish, in
+    /// turn with the uploads. Business Central's own <c>UpdateWindow</c> schedule is never
+    /// handed over, so the workbench keeps the promise that no two installs on an
+    /// environment overlap (see <c>.design/saas-delivery.md</c>, "Updating an AppSource
+    /// app"). The slot is worked out as for an upload.
+    /// </para>
+    /// <para>
+    /// The version is not taken on trust. The waiting updates are read now, and the
+    /// booking is made only for an app that is on that list, at exactly that version - so
+    /// a stale page, or a caller that is not the page, cannot book a version Business
+    /// Central never offered. They are read again when the booking is sent.
     /// </para>
     /// <para>
     /// An app that waits for others is updated together with them, but only the ones in
     /// <paramref name="confirmedPrerequisiteAppIds"/>: the apps somebody was shown and
-    /// agreed to. If Business Central now asks for one that is not in that set the write
-    /// is refused, so nobody's agreement covers an app they never saw.
-    /// </para>
-    /// <para>
-    /// Changes the customer's tenant and touches no row of ours, so like Microsoft 365
-    /// access it is recorded in the log rather than the audit trail - see
-    /// <c>.design/saas-delivery.md</c>.
+    /// agreed to. The ones Business Central listed are stored on the booking, and if it
+    /// asks for one outside that set - now or at send time - the update is refused, so
+    /// nobody's agreement covers an app they never saw.
     /// </para>
     /// </summary>
-    /// <param name="useUpdateWindow">True to let it run in the environment's next update window; false starts it now.</param>
+    /// <param name="at">The slot for <see cref="UploadAppTiming.AtTime"/>; ignored for the other timings.</param>
     /// <param name="confirmedPrerequisiteAppIds">The apps the caller agreed may be installed or updated alongside; null or empty for none.</param>
-    /// <returns>The operation Business Central started or scheduled.</returns>
-    public async Task<BcAppOperation> UpdateAppAsync(
-        int projectId, int environmentId, Guid appId, string targetVersion, bool useUpdateWindow,
-        IReadOnlyCollection<Guid>? confirmedPrerequisiteAppIds = null, CancellationToken ct = default)
+    /// <returns>The timing that applied and the slot the update waits for.</returns>
+    public async Task<UploadAppOutcome> BookAppUpdateAsync(
+        int projectId, int environmentId, Guid appId, string targetVersion, UploadAppTiming timing,
+        DateTimeOffset? at = null, IReadOnlyCollection<Guid>? confirmedPrerequisiteAppIds = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(targetVersion))
         {
@@ -1732,35 +1736,87 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
         var confirmed = confirmedPrerequisiteAppIds ?? Array.Empty<Guid>();
+        // The slot first: a time that has gone is refused without asking Business Central anything.
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var (applied, runsAt) = await ResolveBookingSlotAsync(environmentId, timing, at, now, ct);
+
+        BcAvailableAppUpdate offered;
+        try
+        {
+            offered = await ReadOfferedUpdateAsync(env, appId, targetVersion, confirmed, ct);
+        }
+        catch (BcApiException ex)
+        {
+            throw Validation("App", "Business Central didn't list the waiting updates. " + ex.Message);
+        }
+
+        // One booking per app, counting the apps a booking brings along: a second would
+        // only ask Business Central for the same update twice, and whichever ran first
+        // would leave the other failing on an update that is no longer waiting.
+        var covered = offered.Requirements.Select(r => r.AppId!.Value).Append(appId).ToList();
+        var clash = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.EnvironmentId == env.Id && a.Kind == UpgradeActionKind.UpdateApp
+                        && a.Status == UpgradeActionStatus.Pending
+                        && ((a.BcAppId != null && covered.Contains(a.BcAppId.Value))
+                            || (a.PrerequisiteAppIds != null && a.PrerequisiteAppIds.Any(p => covered.Contains(p)))))
+            .Select(a => new { a.BcAppId, a.AppName })
+            .FirstOrDefaultAsync(ct);
+        if (clash is not null)
+        {
+            throw Validation("App", clash.BcAppId == appId
+                ? $"An update of {offered.Name} is already booked for {env.Name}. Cancel it under Scheduled installs to book a different time."
+                : $"The update of {clash.AppName ?? "another app"} already booked for {env.Name} moves {offered.Name} or an app it waits for. Cancel that booking under Scheduled installs first.");
+        }
+
+        _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+        {
+            OrganizationId = RequireOrganizationId(),
+            ProjectId = projectId,
+            EnvironmentId = env.Id,
+            Kind = UpgradeActionKind.UpdateApp,
+            Status = UpgradeActionStatus.Pending,
+            RequestedByUserId = _orgContext.CurrentUserId,
+            RequestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct),
+            RequestedAt = now,
+            ExecuteAfter = runsAt,
+            BcAppId = appId,
+            AppName = Truncate(offered.Name, 250),
+            TargetVersion = offered.Version,
+            // What the person was shown, and so what the send may bring along. The check
+            // above has made sure each one has an id and was agreed to.
+            PrerequisiteAppIds = offered.Requirements.Select(r => r.AppId!.Value).ToList(),
+        });
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "User {UserId} booked app {AppId} ({AppName}) to be updated to {Version} on {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}), along with {PrerequisiteCount} prerequisites.",
+            _orgContext.CurrentUserId, appId, offered.Name, offered.Version, env.Name, projectId, runsAt, applied, offered.Requirements.Count);
+        return new UploadAppOutcome(applied, runsAt, 1);
+    }
+
+    /// <summary>
+    /// Sends one booked AppSource update when its slot arrives and waits for Business
+    /// Central to finish it, re-checking the requester's access, the connection and the
+    /// waiting updates now rather than trusting what held at booking time. Refused in
+    /// plain words if the waiting version has changed or Business Central now asks for a
+    /// prerequisite outside <paramref name="agreedPrerequisiteAppIds"/>. Always sent to
+    /// run now: the booking is the schedule. The caller (<see cref="UpgradeActionWorker"/>)
+    /// records the outcome on the booking's own row.
+    /// </summary>
+    /// <param name="accepted">Called with the operation the moment Business Central accepts the update, before it is polled, as for an upload.</param>
+    /// <param name="progress">Called on each poll, so a worker can keep its heartbeat alive through a long one.</param>
+    internal async Task<BcAppOperationResult> SendBookedUpdateAsync(
+        int projectId, int environmentId, Guid appId, string targetVersion, IReadOnlyCollection<Guid> agreedPrerequisiteAppIds,
+        Func<BcAppOperation, CancellationToken, Task>? accepted, CancellationToken ct, Action? progress = null)
+    {
+        var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
 
         BcAppOperation operation;
         try
         {
-            var waiting = await _apps.ListAvailableUpdatesAsync(env.Token, env.Family, env.Name, ct);
-            var offered = waiting.FirstOrDefault(u => u.AppId == appId)
-                ?? throw Validation("App", "Business Central no longer has an update waiting for that app. Refresh and look again.");
-            if (!string.Equals(offered.Version, targetVersion.Trim(), StringComparison.OrdinalIgnoreCase))
-            {
-                throw Validation("App", $"Business Central now offers {offered.Name} {offered.Version}, not {targetVersion}. Refresh and try again.");
-            }
-            var unconfirmed = offered.Requirements
-                .Where(r => r.AppId is not { } id || !confirmed.Contains(id))
-                .ToList();
-            if (unconfirmed.Count > 0)
-            {
-                throw Validation("App", confirmed.Count == 0
-                    ? $"{offered.Name} has to wait for {string.Join(", ", unconfirmed.Select(r => r.Name))} to be updated first."
-                    : $"{offered.Name} now also waits for {string.Join(", ", unconfirmed.Select(r => r.Name))}. Refresh and look again.");
-            }
-
-            operation = await _apps.UpdateAppAsync(env.Token, env.Family, env.Name, appId, offered.Version, useUpdateWindow,
+            var offered = await ReadOfferedUpdateAsync(env, appId, targetVersion, agreedPrerequisiteAppIds, ct);
+            operation = await _apps.UpdateAppAsync(env.Token, env.Family, env.Name, appId, offered.Version, useEnvironmentUpdateWindow: false,
                 installOrUpdateNeededDependencies: offered.Requirements.Count > 0, ct);
-
-            var alongside = offered.Requirements.Count == 0
-                ? string.Empty
-                : $" Along with {string.Join(", ", offered.Requirements.Select(r => r.Name))}.";
-            await RecordEnvironmentActionAsync(projectId, env.Id, UpgradeActionKind.UpdateApp,
-                $"{offered.Name} to {offered.Version}, {(useUpdateWindow ? "in the BC update window" : "right away")}.{alongside}", ct);
         }
         catch (BcApiException ex)
         {
@@ -1768,11 +1824,53 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
 
         _panelCache.Invalidate(projectId, environmentId);
-
         _logger.LogInformation(
-            "User {UserId} asked for app {AppId} to be updated to {Version} on {Environment} (project {ProjectId}, in the update window: {InWindow}, along with {PrerequisiteCount} prerequisites); operation {OperationId}.",
-            _orgContext.CurrentUserId, appId, targetVersion, env.Name, projectId, useUpdateWindow, confirmed.Count, operation.Id);
-        return operation;
+            "User {UserId} updated app {AppId} to {Version} on {Environment} (project {ProjectId}), along with {PrerequisiteCount} agreed prerequisites; operation {OperationId}.",
+            _orgContext.CurrentUserId, appId, targetVersion, env.Name, projectId, agreedPrerequisiteAppIds.Count, operation.Id);
+        if (accepted is not null)
+        {
+            await accepted(operation, ct);
+        }
+
+        // Business Central may answer without the app id; it is the one we asked about.
+        var polled = operation.AppId is null ? operation with { AppId = appId } : operation;
+        var result = await BcAppOperationPoller.PollUntilTerminalAsync(
+            _apps, env.Token, env.Family, env.Name, polled, UploadPollDelay, UploadPollTimeout, ct, progress);
+        _panelCache.Invalidate(projectId, environmentId);
+        if (result.Raw is { } raw)
+        {
+            _logger.LogWarning("Business Central reported the update of app {AppId} on {Environment} as failed: {Raw}", appId, env.Name, raw);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// The waiting update for <paramref name="appId"/>, read live, when it is still at
+    /// <paramref name="targetVersion"/> and every prerequisite Business Central lists is
+    /// one in <paramref name="confirmed"/>. Throws the refusal in plain words otherwise.
+    /// Shared by the booking and the send, so a slot fired tonight is held to what the
+    /// person agreed to this afternoon.
+    /// </summary>
+    private async Task<BcAvailableAppUpdate> ReadOfferedUpdateAsync(
+        (string Token, string Family, string Name, int Id) env, Guid appId, string targetVersion, IReadOnlyCollection<Guid> confirmed, CancellationToken ct)
+    {
+        var waiting = await _apps.ListAvailableUpdatesAsync(env.Token, env.Family, env.Name, ct);
+        var offered = waiting.FirstOrDefault(u => u.AppId == appId)
+            ?? throw Validation("App", "Business Central no longer has an update waiting for that app. Refresh and look again.");
+        if (!string.Equals(offered.Version, targetVersion.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            throw Validation("App", $"Business Central now offers {offered.Name} {offered.Version}, not {targetVersion}. Refresh and try again.");
+        }
+        var unconfirmed = offered.Requirements
+            .Where(r => r.AppId is not { } id || !confirmed.Contains(id))
+            .ToList();
+        if (unconfirmed.Count > 0)
+        {
+            throw Validation("App", confirmed.Count == 0
+                ? $"{offered.Name} has to wait for {string.Join(", ", unconfirmed.Select(r => r.Name))} to be updated first."
+                : $"{offered.Name} now also waits for {string.Join(", ", unconfirmed.Select(r => r.Name))}. Refresh and look again.");
+        }
+        return offered;
     }
 
     /// <summary>
@@ -1839,6 +1937,48 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
         var now = _clock.GetUtcNow().UtcDateTime;
 
+        var (applied, runsAt) = await ResolveBookingSlotAsync(environmentId, timing, at, now, ct);
+
+        var requestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
+        var batchId = cleaned.Count > 1 ? Guid.NewGuid() : (Guid?)null;
+        for (var i = 0; i < cleaned.Count; i++)
+        {
+            _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            {
+                OrganizationId = RequireOrganizationId(),
+                ProjectId = projectId,
+                EnvironmentId = env.Id,
+                Kind = UpgradeActionKind.UploadApp,
+                Status = UpgradeActionStatus.Pending,
+                RequestedByUserId = _orgContext.CurrentUserId,
+                RequestedBy = requestedBy,
+                RequestedAt = now,
+                ExecuteAfter = runsAt,
+                PackageFileName = cleaned[i].Name,
+                PackageContent = cleaned[i].Bytes,
+                BatchId = batchId,
+                BatchOrder = batchId is null ? null : i,
+            });
+        }
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "User {UserId} booked {Count} app(s) ({Files}) for {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}).",
+            _orgContext.CurrentUserId, cleaned.Count, string.Join(", ", cleaned.Select(c => c.Name)), env.Name, projectId, runsAt, applied);
+        return new UploadAppOutcome(applied, runsAt, cleaned.Count);
+    }
+
+    /// <summary>
+    /// The instant a booked install waits for, and the timing that applied: a picked time
+    /// as given (refused if it has gone), the delivery window's next opening, or - when
+    /// the environment has none, or it was asked for - the next opening of Microsoft's
+    /// update window from the hours mirrored on the environment (refused until read).
+    /// Shared by uploads and AppSource updates, so both book the same slot for the same
+    /// answer.
+    /// </summary>
+    private async Task<(UploadAppTiming Applied, DateTime RunsAtUtc)> ResolveBookingSlotAsync(
+        int environmentId, UploadAppTiming timing, DateTimeOffset? at, DateTime now, CancellationToken ct)
+    {
         var windows = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == environmentId)
             .Select(e => new
@@ -1890,33 +2030,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 break;
         }
 
-        var requestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
-        var batchId = cleaned.Count > 1 ? Guid.NewGuid() : (Guid?)null;
-        for (var i = 0; i < cleaned.Count; i++)
-        {
-            _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
-            {
-                OrganizationId = RequireOrganizationId(),
-                ProjectId = projectId,
-                EnvironmentId = env.Id,
-                Kind = UpgradeActionKind.UploadApp,
-                Status = UpgradeActionStatus.Pending,
-                RequestedByUserId = _orgContext.CurrentUserId,
-                RequestedBy = requestedBy,
-                RequestedAt = now,
-                ExecuteAfter = runsAt,
-                PackageFileName = cleaned[i].Name,
-                PackageContent = cleaned[i].Bytes,
-                BatchId = batchId,
-                BatchOrder = batchId is null ? null : i,
-            });
-        }
-        await _db.SaveChangesAsync(ct);
-
-        _logger.LogInformation(
-            "User {UserId} booked {Count} app(s) ({Files}) for {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}).",
-            _orgContext.CurrentUserId, cleaned.Count, string.Join(", ", cleaned.Select(c => c.Name)), env.Name, projectId, runsAt, applied);
-        return new UploadAppOutcome(applied, runsAt, cleaned.Count);
+        return (applied, runsAt);
     }
 
     /// <summary>The most apps one upload may book together. A vendor's suite, not a whole environment.</summary>

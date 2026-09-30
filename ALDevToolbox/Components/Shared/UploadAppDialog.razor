@@ -13,14 +13,9 @@
     whose manifest cannot be read (a protected vendor app) cannot be placed by its
     dependencies, and the hint says to upload such apps separately, dependencies first.
 
-    When: the delivery window agreed with the customer comes first when the environment
-    has one, else Microsoft's own update window; then a time the person picks; then now.
-    Every choice is a booking the workbench sends at the slot, never a schedule handed
-    to Business Central, which is what makes the order a promise. A picked time is read
-    in the organisation's display zone - the zone every other time on the page is shown
-    in - and echoed back in words, so "12:32" fires at 12:32 on the clock the person is
-    looking at, never at 12:32 UTC. The two windows are the customer's, in the
-    customer's zone, and are shown as such.
+    When: asked by InstallTimingPicker, the same question the AppSource update dialog
+    asks. Every choice is a booking the workbench sends at the slot, never a schedule
+    handed to Business Central, which is what makes the order a promise.
 *@
 @using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
 @using ALDevToolbox.Services.ObjectExplorer
@@ -30,7 +25,7 @@
 @inject DisplayTimeZone DisplayZone
 @inject ILogger<UploadAppDialog> Log
 
-<ConfirmDialog @ref="_confirm" ConfirmDisabled="@(_files.Count == 0 || (_timing == UploadAppTiming.AtTime && SlotProblem() is not null))">
+<ConfirmDialog @ref="_confirm" ConfirmDisabled="@(_files.Count == 0 || !_when.IsValid)">
     <div class="upload-app__file">
         <label class="btn btn--sm btn--file" for="upload-app-file">
             <Icon Name="upload" Width="14" Height="14" />
@@ -78,59 +73,7 @@
             </small>
         }
     }
-    <fieldset class="upload-app__when">
-        <legend class="upload-app__when-legend">When should it install?</legend>
-        @if (_deliveryWindowText is { } deliveryWindow)
-        {
-            <label class="upload-app__when-opt">
-                <input type="radio" name="upload-app-when" checked="@(_timing == UploadAppTiming.DeliveryWindow)"
-                       @onchange="() => _timing = UploadAppTiming.DeliveryWindow" />
-                <span>In the delivery window, @deliveryWindow</span>
-            </label>
-        }
-        else
-        {
-            <label class="upload-app__when-opt">
-                <input type="radio" name="upload-app-when" checked="@(_timing == UploadAppTiming.BcUpdateWindow)"
-                       disabled="@(_bcWindowText is null)"
-                       @onchange="() => _timing = UploadAppTiming.BcUpdateWindow" />
-                <span>In the BC update window@(_bcWindowText is { } bc ? $", {bc}" : "")</span>
-            </label>
-            <small class="field__hint upload-app__hint">
-                @(_bcWindowText is null
-                    ? "This environment has no delivery window, and Business Central's own window hasn't been read yet. It is read when the solution's Business Central connection is tested, and overnight. Pick a time instead."
-                    : "This environment has no delivery window (the install time agreed with the customer), so Business Central's own window stands in for it.")
-            </small>
-        }
-        <label class="upload-app__when-opt">
-            <input type="radio" name="upload-app-when" checked="@(_timing == UploadAppTiming.AtTime)"
-                   @onchange="() => _timing = UploadAppTiming.AtTime" />
-            <span>At a time I pick (@ZoneLabel(DisplayZone.Zone.Id) time)</span>
-        </label>
-        @if (_timing == UploadAppTiming.AtTime)
-        {
-            <div class="upload-app__pick">
-                <input type="datetime-local" class="input" @bind="_slotLocal" @bind:event="oninput" />
-                @* The browser draws that field in its own locale, which on a machine set
-                   to English (US) is a 12-hour clock. The booking is said back in the
-                   page's own words, always visible, and that sentence is what settles
-                   what was picked - and in which zone. *@
-                <p class="upload-app__echo">@SlotEchoText()</p>
-                @if (SlotProblem() is { } problem)
-                {
-                    <FieldError Message="@problem" />
-                }
-                <small class="field__hint">
-                    Until then you can cancel or start early under Scheduled installs on the environment.
-                </small>
-            </div>
-        }
-        <label class="upload-app__when-opt">
-            <input type="radio" name="upload-app-when" checked="@(_timing == UploadAppTiming.Now)"
-                   @onchange="() => _timing = UploadAppTiming.Now" />
-            <span>Now - anyone working in Business Central may be interrupted</span>
-        </label>
-    </fieldset>
+    <InstallTimingPicker Choice="_when" Name="upload-app-when" Changed="() => { }" />
 </ConfirmDialog>
 
 @code {
@@ -145,16 +88,11 @@
     private List<UploadFile> _files = new();
     private string? _error;
     private bool _reading;
-    private UploadAppTiming _timing = UploadAppTiming.BcUpdateWindow;
-    private string? _bcWindowText;
-    private string? _deliveryWindowText;
-    private string? _customerTimeZone;
-    private DateTime _slotLocal;
+    private readonly InstallTimingPicker.TimingChoice _when = new();
 
     /// <summary>
     /// Asks for the files and the timing. Null when the person backed out. The gentlest
-    /// timing is the default each time: the delivery window when the environment has
-    /// one, else Microsoft's window when its hours are known, else a picked time.
+    /// timing is the default each time (see <see cref="InstallTimingPicker.TimingChoice.ResetAsync"/>).
     /// </summary>
     /// <param name="deliveryWindowStart">The environment's delivery window, when set. Both bounds or neither.</param>
     /// <param name="bcWindowStart">Microsoft's update window as mirrored from the admin centre, when read. Both bounds or neither.</param>
@@ -166,20 +104,9 @@
         TimeOnly? bcWindowStart = null, TimeOnly? bcWindowEnd = null, string? bcWindowTimeZone = null)
     {
         if (_confirm is null) return null;
-        await DisplayZone.EnsureLoadedAsync();
         _files = new();
         _error = null;
-        _customerTimeZone = customerTimeZone;
-        _deliveryWindowText = UpdateWindow.IsConfigured(deliveryWindowStart, deliveryWindowEnd)
-            ? WindowText(deliveryWindowStart!.Value, deliveryWindowEnd!.Value, customerTimeZone)
-            : null;
-        _bcWindowText = UpdateWindow.IsConfigured(bcWindowStart, bcWindowEnd)
-            ? WindowText(bcWindowStart!.Value, bcWindowEnd!.Value, bcWindowTimeZone ?? customerTimeZone)
-            : null;
-        _timing = _deliveryWindowText is not null ? UploadAppTiming.DeliveryWindow
-            : _bcWindowText is not null ? UploadAppTiming.BcUpdateWindow
-            : UploadAppTiming.AtTime;
-        _slotLocal = DefaultSlot();
+        await _when.ResetAsync(DisplayZone, deliveryWindowStart, deliveryWindowEnd, customerTimeZone, bcWindowStart, bcWindowEnd, bcWindowTimeZone);
         StateHasChanged();
 
         var confirmed = await _confirm.OpenAsync(
@@ -192,7 +119,7 @@
         var files = _files;
         _files = new();
         if (!confirmed || files.Count == 0) return null;
-        return new Upload(files, _timing, _timing == UploadAppTiming.AtTime ? SlotInstant() : null, _customerTimeZone);
+        return new Upload(files, _when.Timing, _when.At, _when.CustomerTimeZone);
     }
 
     /// <summary>
@@ -207,28 +134,15 @@
         var tail = upload.Files.Count == 1
             ? " Until then you can cancel or start it early under Scheduled installs on the environment."
             : " Until then you can cancel or start them early under Scheduled installs on the environment.";
-        if (outcome.Timing == UploadAppTiming.Now || outcome.RunsAtUtc <= DateTime.UtcNow)
+        if (InstallTimingPicker.BookedWhenPhrase(outcome, upload.CustomerTimeZone, zone) is not { } when)
         {
-            // "Shortly", not a promise of a minute: the worker sends one upload at a time
+            // "Shortly", not a promise of a minute: the worker sends one install at a time
             // across every customer, and one may be mid-install.
             return upload.Files.Count == 1
                 ? $"{what} will start installing on {environmentName} shortly. Follow it under Scheduled installs on the environment."
                 : $"{what} will start installing on {environmentName} shortly, one after another in the order shown. Follow them under Scheduled installs on the environment.";
         }
-
-        var when = SlotText(zone, outcome.RunsAtUtc);
-        // A window was chosen as the customer's wall clock ("22:00-04:00 (New York)"),
-        // so it is said back in that clock first, or the numbers look wrong.
-        var customer = CustomerClock(outcome.RunsAtUtc, upload.CustomerTimeZone, zone.Zone);
-        var lead = outcome.Timing switch
-        {
-            UploadAppTiming.DeliveryWindow =>
-                $"{what} will be installed on {environmentName} when the delivery window next opens{(customer is null ? "" : $", {customer}")} ({when}).",
-            UploadAppTiming.BcUpdateWindow =>
-                $"{what} will be installed on {environmentName} when the BC update window next opens{(customer is null ? "" : $", {customer}")} ({when}).",
-            _ => $"{what} will be installed on {environmentName} at {when}{(customer is null ? "" : $" - {customer}")}.",
-        };
-        return lead + tail;
+        return $"{what} will be installed on {environmentName} {when}." + tail;
     }
 
     /// <summary>The most files one upload takes - the service's limit, mirrored here so the refusal is instant.</summary>
@@ -290,73 +204,6 @@
             f => f.Manifest?.AppId.ToString(),
             f => f.Manifest?.Dependencies.Select(d => d.AppId.ToString()) ?? Enumerable.Empty<string>())
         .ToList();
-
-    // -- The picked time ------------------------------------------------------
-
-    /// <summary>The next whole hour on the page's clock, so the field never opens on a time that has gone.</summary>
-    private DateTime DefaultSlot()
-    {
-        var local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, DisplayZone.Zone);
-        return new DateTime(local.Year, local.Month, local.Day, local.Hour, 0, 0).AddHours(1);
-    }
-
-    /// <summary>
-    /// The instant the picked wall clock means, read in the organisation's display zone.
-    /// A time that doesn't exist locally (the spring-forward hour) is nudged forward
-    /// rather than refused - the person meant "that morning", not that instant.
-    /// </summary>
-    private DateTimeOffset SlotInstant()
-    {
-        var zone = DisplayZone.Zone;
-        var wall = DateTime.SpecifyKind(_slotLocal, DateTimeKind.Unspecified);
-        for (var i = 0; i < 4 && zone.IsInvalidTime(wall); i++) wall = wall.AddHours(1);
-        return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(wall, zone), TimeSpan.Zero);
-    }
-
-    /// <summary>"20:00 on 3 Oct": the slot as a wall clock, read back through the display zone like every other time on the page.</summary>
-    private const string SlotFormat = "HH:mm 'on' d MMM";
-
-    /// <summary>
-    /// "20:00 on 3 Oct, Berlin time": an upload's slot said back in the page's own zone,
-    /// named. The one wording for the dialog, the Scheduled installs list and the history,
-    /// so a booking reads the same everywhere it is shown.
-    /// </summary>
-    internal static string SlotText(DisplayTimeZone zone, DateTime utc) =>
-        $"{zone.Format(utc, SlotFormat)}, {ZoneLabel(zone.Zone.Id)} time";
-
-    private string SlotEchoText()
-    {
-        var instant = SlotInstant().UtcDateTime;
-        var customer = CustomerClock(instant, _customerTimeZone, DisplayZone.Zone);
-        return $"Installs at {SlotText(DisplayZone, instant)}{(customer is null ? "" : $" - {customer}")}.";
-    }
-
-    /// <summary>
-    /// The same instant on the customer's clock ("08:00 for the customer (New York)"), when
-    /// that clock differs from the page's. Null when the two clocks read the same at that
-    /// instant or no customer zone is known, so a Berlin consultant booking a Copenhagen
-    /// customer is not told the time twice.
-    /// </summary>
-    private static string? CustomerClock(DateTime utc, string? customerTimeZone, TimeZoneInfo pageZone)
-    {
-        if (string.IsNullOrWhiteSpace(customerTimeZone)) return null;
-        var customerZone = UpdateWindow.ResolveTimeZone(customerTimeZone);
-        var instant = DateTime.SpecifyKind(utc, DateTimeKind.Utc);
-        if (customerZone.GetUtcOffset(instant) == pageZone.GetUtcOffset(instant)) return null;
-        var local = TimeZoneInfo.ConvertTimeFromUtc(instant, customerZone);
-        return $"{UpdateWindow.Clock(TimeOnly.FromDateTime(local))} for the customer ({ZoneLabel(customerZone.Id)})";
-    }
-
-    private string? SlotProblem() =>
-        SlotInstant() < DateTimeOffset.UtcNow - ProjectConnectionService.BookingPastSlack ? "Pick a time that hasn't happened yet." : null;
-
-    /// <summary>"22:00-04:00 (Copenhagen)": a window as the hours it was agreed in, with whose clock.</summary>
-    private static string WindowText(TimeOnly start, TimeOnly end, string? ianaId) =>
-        $"{UpdateWindow.Clock(start)}-{UpdateWindow.Clock(end)} ({ZoneLabel(ianaId)})";
-
-    /// <summary>A zone the way a consultant names it - the city, not the region/city id.</summary>
-    private static string ZoneLabel(string? ianaId) =>
-        string.IsNullOrWhiteSpace(ianaId) || ianaId == TimeZoneInfo.Utc.Id ? "UTC" : BcUpdateWindow.CityLabel(ianaId);
 
     private static string FileSize(int bytes) => bytes < 1024 * 1024
         ? $"{Math.Max(1, bytes / 1024)} KB"

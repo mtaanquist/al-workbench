@@ -1,12 +1,13 @@
 namespace ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 
 /// <summary>
-/// When apps somebody was handed should install on an environment. All four are
-/// bookings the workbench sends itself as <see cref="BcDeploymentSchedule.Immediate"/>
-/// when the slot arrives - never a schedule handed to Business Central - so several
-/// apps go in order, each after the one before it has finished installing. The rows
-/// live in <c>oe_environment_upgrade_actions</c> and <c>UpgradeActionWorker</c> sends
-/// them. See <c>.design/saas-delivery.md</c>, "Uploading apps".
+/// When apps somebody was handed - or an AppSource update (issue #1001) - should install
+/// on an environment. All four are bookings the workbench sends itself to run now when
+/// the slot arrives - never a schedule handed to Business Central - so several apps go
+/// in order, each after the one before it has finished installing, and no two installs
+/// overlap. The rows live in <c>oe_environment_upgrade_actions</c> and
+/// <c>UpgradeActionWorker</c> sends them. See <c>.design/saas-delivery.md</c>, "Uploading
+/// apps" and "Updating an AppSource app".
 /// </summary>
 public enum UploadAppTiming
 {

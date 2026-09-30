@@ -284,7 +284,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
 
         _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
         await using (var ctx = _f.Db.NewContext())
-            await _f.Svc(ctx).RunUploadNowAsync(ids[1]);
+            await _f.Svc(ctx).RunBookedInstallNowAsync(ids[1]);
 
         _f.Apps.InstalledFiles.Should().BeEmpty("nothing is sent from the page request");
         var ran = await SweepUntilQuietAsync();
@@ -302,7 +302,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
             await _f.Svc(cancelCtx).CancelUpgradeActionAsync(actionId);
 
         await using var ctx = _f.Db.NewContext();
-        var act = () => _f.Svc(ctx).RunUploadNowAsync(actionId);
+        var act = () => _f.Svc(ctx).RunBookedInstallNowAsync(actionId);
 
         await act.Should().ThrowAsync<ALDevToolbox.Domain.ValueObjects.PlanValidationException>();
     }
@@ -525,7 +525,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         {
             var act = () => _f.Svc(ctx).CancelUpgradeActionAsync(ids[0]);
             await act.Should().ThrowAsync<Exception>();
-            var now = () => _f.Svc(ctx).RunUploadNowAsync(ids[1]);
+            var now = () => _f.Svc(ctx).RunBookedInstallNowAsync(ids[1]);
             await now.Should().ThrowAsync<Exception>();
         }
         (await _f.ReadActionAsync(ids[0])).Status.Should().Be(UpgradeActionStatus.Pending);
@@ -539,15 +539,196 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         (await _f.ReadActionAsync(ids[0])).Status.Should().Be(UpgradeActionStatus.Cancelled);
     }
 
+    // ── Booked AppSource updates (#1001) ────────────────────────────────
+
+    private static readonly Guid CoreAppId = Guid.NewGuid();
+    private static readonly Guid SystemAppId = Guid.NewGuid();
+
+    /// <summary>Continia Core 28.5.0.1 waiting, and waiting for Continia System Application unless told otherwise.</summary>
+    private void Waiting(string version = "28.5.0.1", params BcAppUpdateRequirement[] requirements) =>
+        _f.Apps.OnAvailable = () => new[] { new BcAvailableAppUpdate(CoreAppId, "Continia Core", "Continia Software", version, requirements) };
+
+    private static BcAppUpdateRequirement SystemApp() =>
+        new(SystemAppId, "Continia System Application", "Continia Software", "28.5.0.0", "update");
+
     [Fact]
-    public async Task Install_now_is_only_for_uploads()
+    public async Task A_booked_app_update_is_sent_to_run_now_when_due_and_waited_for()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        Waiting(requirements: SystemApp());
+        var actionId = await BookUpdateAsync(projectId, envId, hoursAhead: 12, SystemAppId);
+
+        _f.Clock.Advance(TimeSpan.FromHours(1));
+        (await SweepUntilQuietAsync()).Should().Be(0, "its slot has not come");
+
+        _f.Clock.Advance(TimeSpan.FromHours(12));
+        var ran = await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        ran.Should().Be(1);
+        _f.Apps.Updated.Should().Equal((CoreAppId, "28.5.0.1", false, true));
+        _f.Apps.Polls.Should().BeGreaterThan(0, "the worker waits for the update like an install");
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Sent);
+        stored.Outcome.Should().Contain("Continia Core was updated to 28.5.0.1");
+        stored.BcAppId.Should().Be(CoreAppId);
+        stored.BcOperationId.Should().NotBeNull("the operation is stamped before the poll, as for an upload");
+    }
+
+    [Fact]
+    public async Task A_booked_update_takes_its_turn_behind_an_upload_due_in_the_same_sweep()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        Waiting();
+        await BookUploadAsync(projectId, envId, hoursAhead: 12, "Partner.app");
+        await BookUpdateAsync(projectId, envId, hoursAhead: 12);
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        var first = await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        first.Should().Be(1, "a sweep runs one install at a time: two at once can deadlock in Business Central");
+        _f.Apps.InstalledFiles.Should().Equal("Partner.app");
+        await SweepUntilQuietAsync();
+        _f.Apps.InstalledFiles.Should().Equal("Partner.app", $"update {CoreAppId}");
+    }
+
+    [Fact]
+    public async Task Two_booked_updates_due_together_go_one_per_sweep()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var otherAppId = Guid.NewGuid();
+        _f.Apps.OnAvailable = () => new[]
+        {
+            new BcAvailableAppUpdate(CoreAppId, "Continia Core", "Continia Software", "28.5.0.1", Array.Empty<BcAppUpdateRequirement>()),
+            new BcAvailableAppUpdate(otherAppId, "Continia Banking", "Continia Software", "28.5.0.2", Array.Empty<BcAppUpdateRequirement>()),
+        };
+        await BookUpdateAsync(projectId, envId, hoursAhead: 12);
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using (var ctx = _f.Db.NewContext())
+            await _f.Connections(ctx).BookAppUpdateAsync(projectId, envId, otherAppId, "28.5.0.2",
+                ALDevToolbox.Domain.ValueObjects.ObjectExplorer.UploadAppTiming.AtTime, _f.Clock.GetUtcNow().AddHours(12));
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        (await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(1);
+        _f.Apps.Updated.Should().ContainSingle();
+        await SweepUntilQuietAsync();
+        _f.Apps.Updated.Select(u => u.AppId).Should().Equal(CoreAppId, otherAppId);
+    }
+
+    [Fact]
+    public async Task An_update_the_workbench_could_not_see_finish_is_recorded_as_sent_unconfirmed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        Waiting();
+        var actionId = await BookUpdateAsync(projectId, envId, hoursAhead: 12);
+        _f.Apps.OnOperationStatus = _ => BcAppOperationStatus.Running;
+        _f.UploadPollTimeout = TimeSpan.Zero;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Sent);
+        stored.Outcome.Should().Contain("Continia Core was sent for update to 28.5.0.1").And.Contain("wasn't confirmed here");
+    }
+
+    [Fact]
+    public async Task A_booked_update_is_refused_in_plain_words_when_the_waiting_version_changed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        Waiting();
+        var actionId = await BookUpdateAsync(projectId, envId, hoursAhead: 12);
+        Waiting("28.6.0.0");
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Apps.Updated.Should().BeEmpty();
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("Continia Core wasn't updated to 28.5.0.1").And.Contain("28.6.0.0");
+    }
+
+    [Fact]
+    public async Task A_booked_update_is_refused_when_business_central_now_wants_an_app_nobody_agreed_to()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        Waiting();
+        var actionId = await BookUpdateAsync(projectId, envId, hoursAhead: 12);
+        Waiting(requirements: SystemApp());
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Apps.Updated.Should().BeEmpty();
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("Continia System Application");
+    }
+
+    [Fact]
+    public async Task Install_now_and_cancel_work_on_a_booked_update_for_whoever_manages_the_solution()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        Waiting();
+        var actionId = await BookUpdateAsync(projectId, envId, hoursAhead: 12);
+
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        await using (var ctx = _f.Db.NewContext())
+            await _f.Svc(ctx).RunBookedInstallNowAsync(actionId);
+        (await _f.ReadActionAsync(actionId)).ExecuteAfter.Should().Be(_f.Clock.GetUtcNow().UtcDateTime);
+
+        await using (var ctx = _f.Db.NewContext())
+            await _f.Svc(ctx).CancelUpgradeActionAsync(actionId);
+        (await _f.ReadActionAsync(actionId)).Status.Should().Be(UpgradeActionStatus.Cancelled);
+        (await SweepUntilQuietAsync()).Should().Be(0);
+        _f.Apps.Updated.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_booked_update_is_listed_with_the_scheduled_installs_and_not_as_a_platform_update_booking()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        Waiting();
+        var actionId = await BookUpdateAsync(projectId, envId, hoursAhead: 12);
+
+        await using var ctx = _f.Db.NewContext();
+        var installs = await _f.Svc(ctx).ListBookedInstallsAsync(projectId, envId);
+        installs.Should().ContainSingle(r => r.Id == actionId && r.AppName == "Continia Core" && r.AppId == CoreAppId);
+        (await _f.Svc(ctx).ListPendingAsync()).Should().NotContain(r => r.Id == actionId,
+            "the Upgrades page must not read an app update as a booked platform move");
+    }
+
+    [Fact]
+    public async Task A_restart_while_an_update_runs_records_it_as_sent_unconfirmed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        Waiting();
+        var actionId = await BookUpdateAsync(projectId, envId, hoursAhead: 12);
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeEnvironmentUpgradeActions.Where(a => a.Id == actionId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(a => a.SentAt, _f.Clock.GetUtcNow().UtcDateTime)
+                    .SetProperty(a => a.BcOperationId, Guid.NewGuid()));
+        }
+
+        await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Sent);
+        stored.Outcome.Should().Contain("Continia Core was sent for update").And.Contain("restarted before it could confirm");
+    }
+
+    [Fact]
+    public async Task Install_now_is_only_for_app_installs()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
         var update = await BookAsync(projectId, envId, hoursAhead: 12);
 
         _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
         await using var ctx = _f.Db.NewContext();
-        var act = () => _f.Svc(ctx).RunUploadNowAsync(update);
+        var act = () => _f.Svc(ctx).RunBookedInstallNowAsync(update);
 
         (await act.Should().ThrowAsync<ALDevToolbox.Domain.ValueObjects.PlanValidationException>())
             .Which.Errors.Values.Should().ContainMatch("*booked for a later install*");
@@ -585,6 +766,30 @@ public sealed class UpgradeActionWorkerTests : IDisposable
                 .Where(a => a.EnvironmentId == environmentId && a.Kind == UpgradeActionKind.UploadApp)
                 .OrderBy(a => a.BatchOrder).ThenBy(a => a.Id)
                 .Select(a => a.Id).ToListAsync();
+        }
+        finally
+        {
+            _f.ActAs(acting);
+        }
+    }
+
+    /// <summary>Books Continia Core's waiting update as the solution's owner, agreeing to <paramref name="prerequisites"/>. Returns the row id.</summary>
+    private async Task<int> BookUpdateAsync(int projectId, int environmentId, int hoursAhead, params Guid[] prerequisites)
+    {
+        var acting = _f.Db.OrgContext.CurrentUserId;
+        _f.ActAs(UpgradeActionTestFixture.OwnerUserId);
+        try
+        {
+            await using var ctx = _f.Db.NewContext();
+            await _f.Connections(ctx).BookAppUpdateAsync(
+                projectId, environmentId, CoreAppId, "28.5.0.1",
+                ALDevToolbox.Domain.ValueObjects.ObjectExplorer.UploadAppTiming.AtTime,
+                _f.Clock.GetUtcNow().AddHours(hoursAhead), prerequisites);
+            await using var read = _f.Db.NewContext();
+            return await read.OeEnvironmentUpgradeActions.AsNoTracking()
+                .Where(a => a.EnvironmentId == environmentId && a.Kind == UpgradeActionKind.UpdateApp)
+                .OrderByDescending(a => a.Id)
+                .Select(a => a.Id).FirstAsync();
         }
         finally
         {
