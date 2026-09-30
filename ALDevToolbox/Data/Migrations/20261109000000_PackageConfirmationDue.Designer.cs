@@ -14,7 +14,7 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20261108000000_PackageConfirmationDue")]
+    [Migration("20261109000000_PackageConfirmationDue")]
     partial class PackageConfirmationDue
     {
         /// <inheritdoc />
