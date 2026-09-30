@@ -1034,6 +1034,13 @@ Row menus anywhere in the app now open upwards when there is no room under them
 
 ## The environment's own page, against its designed sheet
 
+Its readable address is `/environments/{solution slug}/{environment name}`, e.g.
+`/environments/cronus/Production`, with the tabs below it (`.../Production/apps`). The pair
+is unique because Business Central names are unique within a tenant and a solution has one
+tenant; the name matches case-insensitively, as Business Central's does. `/environments/{id}`
+and `/environments/{id}/{tab}` still resolve and forward to the readable form on the same
+tab; a solution without a slug keeps the numeric one. See `.design/artifacts.md` for the slug.
+
 `/environments/{id}` is `.design/handoff/PageEnvironmentDetail.dc.html` on the `DetailPage`
 frame (#809). Named user: an ops engineer with a fleet of customer environments, who would
 otherwise open each customer's admin centre. It follows the sheet top to bottom: crumbs

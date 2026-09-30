@@ -332,6 +332,27 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task SupersedePreviewsAsync_keeps_a_next_minor_preview_until_that_minor_ships()
+    {
+        await using var ctx = _db.NewContext();
+        // A next-minor build's parent (#993): 28.6 in preview while 28.5 is the newest shipped.
+        var nextMinor = Release("Business Central 28.6 (DK) Preview", "bc-insider:28.6:dk", prerelease: true);
+        var shipped = Release("Business Central 28.5 (DK)", "bc-onprem:28.5:dk");
+        ctx.OeReleases.AddRange(nextMinor, shipped);
+        await ctx.SaveChangesAsync();
+
+        var importer = NewImporter(ctx, new ReleaseImportQueue());
+        (await importer.SupersedePreviewsAsync("dk")).Should().Be(0);
+
+        ctx.OeReleases.Add(Release("Business Central 28.6 (DK)", "bc-onprem:28.6:dk"));
+        await ctx.SaveChangesAsync();
+        (await importer.SupersedePreviewsAsync("dk")).Should().Be(1);
+
+        await using var read = _db.NewContext();
+        (await read.OeReleases.SingleAsync(r => r.Id == nextMinor.Id)).DeletedAt.Should().NotBeNull();
+    }
+
+    [Fact]
     public async Task SupersedePreviewsAsync_does_nothing_for_a_country_with_no_shipped_release()
     {
         await using var ctx = _db.NewContext();

@@ -170,12 +170,14 @@ public sealed class ArtifactReleaseImporter
 
     /// <summary>
     /// Soft-deletes every preview release for <paramref name="country"/> whose
-    /// major has shipped: a <c>ready</c>, non-deleted <c>bc-onprem:</c> release
-    /// of the same or a higher major exists for the country. That is the
+    /// version has shipped: a <c>ready</c>, non-deleted <c>bc-onprem:</c> release
+    /// at the same or a higher Major.Minor exists for the country. That is the
     /// "replace them once they get published for real" half of the preview flow,
-    /// and comparing majors rather than exact Major.Minor keys means a 29.0
+    /// and comparing versions rather than looking for the exact key means a 29.0
     /// preview is still retired when the org's first shipped 29 is 29.1 (the sweep
-    /// was off for a while, or the org joined late). Keyed on the dedup keys, so a
+    /// was off for a while, or the org joined late). Major.Minor, not major: a
+    /// next-minor build's 28.6 preview (#993) has to survive while 28.5 is the
+    /// newest shipped release. Keyed on the dedup keys, so a
     /// renamed label changes nothing. Returns the number of previews retired.
     /// Soft, not hard: the admin release list can still restore or purge them.
     /// </summary>
@@ -196,31 +198,29 @@ public sealed class ArtifactReleaseImporter
                         && r.DedupKey.EndsWith(":" + cc))
             .Select(r => r.DedupKey!)
             .ToListAsync(ct).ConfigureAwait(false);
-        var newestShippedMajor = shippedKeys
-            .Select(k => BcArtifactIndex.ParseDedupKey(k))
-            .Where(p => p is not null)
-            .Select(p => BcArtifactIndex.ToMajor(p!.Value.MajorMinor))
-            .Where(m => m is not null)
-            .Select(m => m!.Value)
-            .DefaultIfEmpty(-1)
+        var newestShipped = shippedKeys
+            .Select(k => ParseMajorMinor(BcArtifactIndex.ParseDedupKey(k)))
+            .Where(v => v is not null)
             .Max();
-        if (newestShippedMajor < 0) return 0;
+        if (newestShipped is null) return 0;
 
         var retired = 0;
         foreach (var preview in previews)
         {
-            var parsed = BcArtifactIndex.ParseDedupKey(preview.DedupKey);
-            var previewMajor = parsed is null ? null : BcArtifactIndex.ToMajor(parsed.Value.MajorMinor);
-            if (previewMajor is null || previewMajor.Value > newestShippedMajor) continue;
+            var previewVersion = ParseMajorMinor(BcArtifactIndex.ParseDedupKey(preview.DedupKey));
+            if (previewVersion is null || previewVersion > newestShipped) continue;
 
             await _management.SoftDeleteAsync(preview.Id, ct).ConfigureAwait(false);
             retired++;
             _logger.LogInformation(
-                "Retired preview release {ReleaseId} ({Label}): version {Major} has shipped for {Country}.",
-                preview.Id, preview.Label, previewMajor.Value, cc);
+                "Retired preview release {ReleaseId} ({Label}): {Shipped} has shipped for {Country}.",
+                preview.Id, preview.Label, $"{newestShipped.Major}.{newestShipped.Minor}", cc);
         }
         return retired;
     }
+
+    private static Version? ParseMajorMinor((string MajorMinor, string Country)? key) =>
+        key is not null && Version.TryParse(key.Value.MajorMinor, out var v) ? v : null;
 
     /// <summary>
     /// Soft-deletes any active preview of <paramref name="preview"/>'s major for

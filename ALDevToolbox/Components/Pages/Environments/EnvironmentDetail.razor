@@ -1,5 +1,7 @@
-@page "/environments/{Id:int}"
-@page "/environments/{Id:int}/{OpenTab}"
+@page "/environments/{EnvironmentId:int}"
+@page "/environments/{EnvironmentId:int}/{OpenTab}"
+@page "/environments/{Solution}/{Environment}"
+@page "/environments/{Solution}/{Environment}/{OpenTab}"
 @attribute [Authorize]
 @rendermode InteractiveServer
 @implements IAsyncDisposable
@@ -46,7 +48,11 @@
 
 @* What the command palette opens with on this page: its tabs, the way out to
    Business Central, and its solution. *@
-<PaletteContext Kind="ALDevToolbox.Services.Palette.PaletteContextKind.Environment" Id="Id" />
+@* Only once found: the lookup behind a readable address does not decide visibility. *@
+@if (_env is not null)
+{
+    <PaletteContext Kind="ALDevToolbox.Services.Palette.PaletteContextKind.Environment" Id="Id" />
+}
 
 <DetailPage IsLoading="@(!_loaded)"
             LoadingText="Loading environment..."
@@ -69,7 +75,7 @@
     <Crumbs>
         <a href="/solutions">Solutions</a>
         <Icon Name="chevron-right" Width="14" Height="14" />
-        <a href="@($"/solutions/{Row.ProjectId}")">@Row.ProjectName</a>
+        <a href="@Row.SolutionHref">@Row.ProjectName</a>
         <Icon Name="chevron-right" Width="14" Height="14" />
         <a href="/environments">Environments</a>
         <Icon Name="chevron-right" Width="14" Height="14" />
@@ -263,7 +269,7 @@
                     </div>
                     @if (_canManage && _panel is not null && Choosable().Count > 0)
                     {
-                        <a class="btn btn--sm" href="@($"/environments/{Id}#env-next-update")">
+                        <a class="btn btn--sm" href="@(Row.Href() + "#env-next-update")">
                             <Icon Name="arrow-down" Width="14" Height="14" />
                             <span>Change the next version</span>
                         </a>
@@ -400,7 +406,7 @@
                                     {
                                         <text>
                                             Couldn't read this setting right now - try Refresh above, or check the
-                                            connection on the <a href="@($"/solutions/{Row.ProjectId}?tab=bc")">solution's Business Central tab</a>.
+                                            connection on the <a href="@(Row.SolutionHref + "?tab=bc")">solution's Business Central tab</a>.
                                         </text>
                                     }
                                     else if (_m365 is null)
@@ -984,7 +990,20 @@
 <CopyEnvironmentDialog @ref="_copyDialog" />
 
 @code {
-    [Parameter] public int Id { get; set; }
+    /// <summary>The numeric address, /environments/42. Still served, and forwarded to the readable one.</summary>
+    [Parameter] public int? EnvironmentId { get; set; }
+
+    /// <summary>The solution's slug in the readable address, /environments/{Solution}/{Environment}.</summary>
+    [Parameter] public string? Solution { get; set; }
+
+    /// <summary>The environment's name in the readable address.</summary>
+    [Parameter] public string? Environment { get; set; }
+
+    /// <summary>The environment on screen, whichever address named it; 0 when the address names none.</summary>
+    private int Id { get; set; }
+
+    /// <summary>The address <see cref="Id"/> was last resolved from.</summary>
+    private (int?, string?, string?)? _resolvedFor;
 
     /// <summary>Rows shown before "Show all", as on the sheet.</summary>
     private const int InstalledPreview = 6;
@@ -1098,9 +1117,12 @@
     private HeaderTabs.HeaderTabItem Tab(string label, Section section) =>
         new(label, TabHref(section), IsActive: _tab == section);
 
-    private string TabHref(Section section) => section == Section.Overview
-        ? $"/environments/{Id}"
-        : $"/environments/{Id}/{section.ToString().ToLowerInvariant()}";
+    private string TabHref(Section section) => SectionHref(section == Section.Overview ? null : section.ToString().ToLowerInvariant());
+
+    /// <summary>This page's own address, on <paramref name="tab"/> when given: the readable one once the environment is loaded.</summary>
+    private string SectionHref(string? tab) => _env is not null && _loadedId == Id
+        ? Row.Href(tab)
+        : ALDevToolbox.Services.ObjectExplorer.Projects.SolutionLinks.Environment(Solution, Environment, Id, tab);
 
     /// <summary>The live panel when there is one to draw, else null and <see cref="LiveUnavailable"/> says why.</summary>
     private BcEnvironmentPanel? LivePanel => _panelError is null ? _panel : null;
@@ -1136,7 +1158,7 @@
     private RenderFragment? ConnectionAction()
     {
         if (!_canManage) return null;
-        return @<a class="btn" href="@($"/solutions/{Row.ProjectId}?tab=bc")">Check the solution's connection</a>;
+        return @<a class="btn" href="@(Row.SolutionHref + "?tab=bc")">Check the solution's connection</a>;
     }
 
     private bool Refreshing => _panelLoading || _operationsLoading || _sessionsLoading;
@@ -1158,13 +1180,30 @@
 
     protected override async Task OnParametersSetAsync()
     {
+        // Looked up once per address: a change of tab keeps the component, and its
+        // reads (the live sessions loop among them) may still be using the context.
+        if (EnvironmentId is { } numbered)
+        {
+            // A number needs no lookup.
+            _resolvedFor = (EnvironmentId, Solution, Environment);
+            Id = numbered;
+        }
+        else if (_resolvedFor != (EnvironmentId, Solution, Environment))
+        {
+            _resolvedFor = (EnvironmentId, Solution, Environment);
+            Id = EnvironmentId
+                ?? (Solution is not null && Environment is not null
+                    ? await Read(ct => Fleet.FindEnvironmentIdAsync(Solution, Environment, ct)) ?? 0
+                    : 0);
+        }
+
         var known = Enum.TryParse<Section>(OpenTab, ignoreCase: true, out var asked)
             && Enum.IsDefined(asked) && !int.TryParse(OpenTab, out _);
         if (OpenTab is not null && (!known || asked == Section.Overview))
         {
             // A segment that names no tab is dropped from the address rather than left
             // there looking like a place: Overview has one address, the bare one.
-            Nav.NavigateTo($"/environments/{Id}", replace: true);
+            Nav.NavigateTo(SectionHref(null), replace: true);
             return;
         }
         _tab = known ? asked : Section.Overview;
@@ -1189,6 +1228,16 @@
             await LoadBookedInstallsAsync();
         }
         if (_env is null) return;
+
+        // A numeric address forwards to the readable one, on the same tab, so the page
+        // has one address whichever link led here - including a palette link to the
+        // environment already open. After the load, so the pass that lands on the new
+        // address finds everything already read and asks nothing again.
+        if (EnvironmentId is not null && Row.ProjectSlug is not null)
+        {
+            Nav.NavigateTo(SectionHref(_tab == Section.Overview ? null : _tab.ToString().ToLowerInvariant()), replace: true);
+            return;
+        }
 
         // Leaving the Sessions tab always stops it reading, whatever else is true -
         // and it drops the list it held, because coming back to a sessions list that
@@ -2023,7 +2072,7 @@
         if (made)
         {
             // The copy outlives this page load, so the notice says where to watch it.
-            _settingDoneLink = ($"/environments/{Id}/operations", "Open the Operations tab");
+            _settingDoneLink = (Row.Href("operations"), "Open the Operations tab");
         }
     }
 

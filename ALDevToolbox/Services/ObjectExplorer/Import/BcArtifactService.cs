@@ -125,6 +125,34 @@ public sealed class BcArtifactService
             .ToList();
     }
 
+    /// <summary>
+    /// Resolves the insider build a <see cref="BcBuildTarget.NextMinor"/> or
+    /// <see cref="BcBuildTarget.NextMajor"/> project build compiles against for
+    /// <paramref name="country"/> (see <see cref="BcArtifactIndex.SelectTargetVersion"/>).
+    /// The result carries the preview channel's <c>bc-insider:{Major}.{Minor}:{cc}</c>
+    /// key, so the build's parent release is the same catalogue preview the
+    /// daily sweep keeps. Null when the country has no shipped release to judge
+    /// against, when the insider storage publishes no index for it, or when it
+    /// has no build for the target yet.
+    /// </summary>
+    public async Task<ResolvedArtifact?> ResolveTargetAsync(string country, BcBuildTarget target, CancellationToken ct = default)
+    {
+        if (target == BcBuildTarget.Current)
+        {
+            throw new ArgumentOutOfRangeException(nameof(target), "The current version resolves by Major.Minor; use ResolveOnPremAsync.");
+        }
+
+        var released = await ListAvailableVersionsAsync(country, ct).ConfigureAwait(false);
+        var newestReleased = released.FirstOrDefault();
+        if (newestReleased is null) return null;
+
+        var previews = await TryListVersionsAsync(country, BcArtifactChannel.Preview, ct).ConfigureAwait(false);
+        if (previews is null) return null;
+
+        var selected = BcArtifactIndex.SelectTargetVersion(previews, newestReleased, target);
+        return selected is null ? null : Resolve(selected, country, BcArtifactChannel.Preview);
+    }
+
     private static ResolvedArtifact Resolve(string version, string country, BcArtifactChannel channel)
     {
         var prerelease = channel == BcArtifactChannel.Preview;

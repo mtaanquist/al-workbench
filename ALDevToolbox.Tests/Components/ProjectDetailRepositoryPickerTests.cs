@@ -111,7 +111,7 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
     {
         var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
         nav.NavigateTo(Microsoft.AspNetCore.Components.NavigationManagerExtensions.GetUriWithQueryParameter(nav, "tab", "general"));
-        return _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        return _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
     }
 
     public void Dispose()
