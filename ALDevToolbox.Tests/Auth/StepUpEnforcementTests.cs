@@ -205,6 +205,20 @@ public sealed class StepUpEnforcementTests : IDisposable
             .Should().BeNull("a step-up state replayed under another user's cookie must not verify for them");
     }
 
+    // ---- Microsoft step-up: auth_time is enforced only when Microsoft sends it ----
+
+    [Fact]
+    public void A_microsoft_step_up_is_accepted_without_auth_time_and_checked_when_it_is_there()
+    {
+        var issuedAt = Now;
+        // Entra omits auth_time unless the registration lists it as an
+        // optional claim; refusing on absence locked Microsoft users out.
+        EntraAuthEndpoints.StepUpReauthenticated(null, issuedAt).Should().BeTrue();
+        EntraAuthEndpoints.StepUpReauthenticated(Now.AddSeconds(30), issuedAt).Should().BeTrue("signed in after the step-up started");
+        EntraAuthEndpoints.StepUpReauthenticated(Now.AddSeconds(-30), issuedAt).Should().BeTrue("a minute of clock skew is allowed");
+        EntraAuthEndpoints.StepUpReauthenticated(Now.AddMinutes(-10), issuedAt).Should().BeFalse("Microsoft reused a session from before the step-up");
+    }
+
     // ---- Passkey user verification flag ---------------------------------------
 
     [Fact]

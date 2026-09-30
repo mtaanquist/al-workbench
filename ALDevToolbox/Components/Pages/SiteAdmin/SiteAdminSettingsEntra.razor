@@ -29,7 +29,7 @@
                 <AntiforgeryToken />
                 <div class="setting-list">
                     <SettingRow Name="Redirect URI"
-                                Hint="In the Entra admin center, add a Web platform with this address before you save here. Sign-in fails without it.">
+                                Hint="In the Entra admin center, add a Web platform with this address before you save here. Sign-in fails without it. Under Token configuration, also add auth_time as an optional ID token claim so a 'confirm it's you' Microsoft sign-in can be checked to have happened just now.">
                         <input class="input input--ro" type="text" value="@RedirectUri" readonly
                                aria-label="Redirect URI to copy into Microsoft Entra" />
                     </SettingRow>
