@@ -308,7 +308,10 @@
                                 registration to live in your own Microsoft organisation. When you
                                 create it, add a <strong>Web</strong> platform with this
                                 <strong>Redirect URI</strong>:
-                                <code class="code">@RedirectUri</code>
+                                <code class="code">@RedirectUri</code>.
+                                Under Token configuration, add <strong>auth_time</strong> as an
+                                optional ID token claim: it lets AL Workbench check that a
+                                "confirm it's you" Microsoft sign-in really happened just now.
                             </p>
                             <div class="field">
                                 <label class="field__label" for="entra-client-id">Application (client) ID</label>
