@@ -154,7 +154,9 @@ else
             if (entry.IsBooking) return $"Booked the update of {app}{to}";
             return entry.Status switch
             {
-                UpgradeActionStatus.Sent => $"Updated {app}{to}",
+                // "Sent", not "updated": as for an upload, a sent row may be one the
+                // workbench could not see through to the end.
+                UpgradeActionStatus.Sent => $"Sent the update of {app}{to}",
                 UpgradeActionStatus.Failed => $"Tried to update {app}{to}",
                 _ => $"Asked to update {app}{to} now",
             };

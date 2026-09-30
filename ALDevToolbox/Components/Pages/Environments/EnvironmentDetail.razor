@@ -557,10 +557,10 @@
                                                     @if (booked.ExecuteAfter > DateTime.UtcNow)
                                                     {
                                                         <button type="button" class="btn btn--sm" disabled="@_settingSaving"
-                                                                @onclick="() => InstallBookedNowAsync(booked)">Install now</button>
+                                                                @onclick="() => InstallBookedNowAsync(booked)">@(booked.Kind == UpgradeActionKind.UpdateApp ? "Update now" : "Install now")</button>
                                                     }
                                                     <button type="button" class="btn btn--sm btn--danger" disabled="@_settingSaving"
-                                                            @onclick="() => CancelBookedInstallAsync(booked)">Cancel install</button>
+                                                            @onclick="() => CancelBookedInstallAsync(booked)">@(booked.Kind == UpgradeActionKind.UpdateApp ? "Cancel update" : "Cancel install")</button>
                                                 }
                                             </td>
                                         }
@@ -800,6 +800,7 @@
                                                        only ask Business Central for the same thing twice. *@
                                                     <button type="button" class="btn btn--sm"
                                                             disabled="@(_settingSaving || progress is not null)" @onclick="() => UpdateAppAsync(up)"
+                                                            title="@(progress == "Booked" ? "Booked to update later - see Scheduled installs to start it now or cancel it." : null)"
                                                             aria-label="@(ready
                                                                 ? $"Update {up.Name} to {up.Version}"
                                                                 : $"Update {up.Name} to {up.Version}, along with the {up.Requirements.Count} it waits for")">
@@ -1871,7 +1872,8 @@
             $"{update.Name} by {update.Publisher} will go{from} to {update.Version} in {Row.ProjectName}'s Business Central."
             + (others == 0 ? " " : $" It waits for {AppCount(others)}, so Business Central will install or update those as well, each to the newest version this environment supports. ")
             + "Once installed, none of it can be rolled back from here.",
-            others == 0 ? "Update the app" : $"Update all {others + 1} apps", "btn--danger");
+            // "Book": every timing is a booking, "now" included, and the notice says when.
+            others == 0 ? "Book the update" : $"Book all {others + 1} updates", "btn--danger");
         if (!confirmed) return;
 
         var timing = _updateWhen.Timing;
@@ -1958,7 +1960,9 @@
             update ? $"Update {name} now?" : batch ? $"Install {name} and the apps booked with it now?" : $"Install {name} now?",
             (batch
                 ? $"They were booked for {BookedSlotText(booked.ExecuteAfter)} and install one after another. Installing them now may interrupt anyone working in {Row.EnvironmentName}."
-                : $"It was booked for {BookedSlotText(booked.ExecuteAfter)}. Installing it now may interrupt anyone working in {Row.EnvironmentName}."),
+                : update
+                    ? $"It was booked for {BookedSlotText(booked.ExecuteAfter)}. Updating it now may interrupt anyone working in {Row.EnvironmentName}."
+                    : $"It was booked for {BookedSlotText(booked.ExecuteAfter)}. Installing it now may interrupt anyone working in {Row.EnvironmentName}."),
             update ? "Update now" : "Install now");
         if (!confirmed) return;
 
@@ -1981,12 +1985,13 @@
         if (_confirm is null) return;
         var name = BookedName(booked);
         var others = BatchPlace(booked) is null ? "" : " The other apps booked with it still install; any that needs it will be refused by Business Central.";
+        var update = booked.Kind == UpgradeActionKind.UpdateApp;
         var confirmed = await _confirm.OpenAsync(
-            "Call off this install?",
-            booked.Kind == UpgradeActionKind.UpdateApp
+            update ? "Call off this update?" : "Call off this install?",
+            update
                 ? $"{name} won't be updated to {booked.TargetVersion} on {Row.EnvironmentName}. To update it later, use Update under Available updates again."
                 : $"{name} won't be installed on {Row.EnvironmentName}. To install it later, upload it again.{others}",
-            "Call off the install");
+            update ? "Call off the update" : "Call off the install");
         if (!confirmed) return;
 
         await RunSettingWriteAsync("cancel-booked",
