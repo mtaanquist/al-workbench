@@ -185,6 +185,10 @@ public sealed class ProjectDetailAccessTests : IDisposable
         nav.NavigateTo($"/solutions/{projectId}?tab=customer");
         var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         cut.WaitForAssertion(() => ActiveTab(cut).Should().Be("Customer"));
+        // Let the Customer tab finish its reads before leaving it: switching away
+        // disposes the tab but not its chain of queries, and a slow CI runner can
+        // still be inside it at teardown.
+        cut.WaitForAssertion(() => cut.Markup.Should().NotContain("Loading customer details"));
 
         // What an enhanced navigation does to a page it keeps: new parameters,
         // same component.
