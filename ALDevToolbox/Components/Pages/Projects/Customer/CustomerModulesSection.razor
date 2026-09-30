@@ -17,7 +17,7 @@
                 {
                     @if (_modules.EnvironmentName is { } envName && _modules.FetchedAt is { } fetched)
                     {
-                        <text>What is installed in <a href="@($"/environments/{_modules.EnvironmentId}/apps")">@envName</a>, as Business Central reported it <Timestamp Value="@fetched" Relative="true" />. Only modules in your organisation's catalogue are shown.</text>
+                        <text>What is installed in <a href="@EnvironmentAppsHref(_modules.EnvironmentId!.Value)">@envName</a>, as Business Central reported it <Timestamp Value="@fetched" Relative="true" />. Only modules in your organisation's catalogue are shown.</text>
                     }
                     else
                     {
@@ -109,7 +109,7 @@
                 }
                 else if (_modules.ReadFromEnvironment && _modules.EnvironmentId is { } envId && CanManageSolution)
                 {
-                    <a class="btn btn--sm" href="@($"/environments/{envId}/apps")">@(_modules.FetchedAt is null ? "Read them now" : $"Open {_modules.EnvironmentName}")</a>
+                    <a class="btn btn--sm" href="@EnvironmentAppsHref(envId)">@(_modules.FetchedAt is null ? "Read them now" : $"Open {_modules.EnvironmentName}")</a>
                 }
                 else if (CanEdit)
                 {
@@ -157,6 +157,9 @@
 
 @code {
     [Parameter, EditorRequired] public int Id { get; set; }
+
+    /// <summary>The solution's slug, for readable links to its environments. Null falls back to numeric ones.</summary>
+    [Parameter] public string? SolutionSlug { get; set; }
     [Parameter] public bool CanManage { get; set; }
 
     /// <summary>The Business Central tab and an environment's Apps tab are for people who manage the solution; only they are sent there.</summary>
@@ -265,4 +268,7 @@
         }
         catch (ProjectAccessDeniedException ex) { _error = ex.Message; }
     }
+
+    private string EnvironmentAppsHref(int environmentId) =>
+        ALDevToolbox.Services.ObjectExplorer.Projects.SolutionLinks.Environment(SolutionSlug, _modules.EnvironmentName, environmentId, "apps");
 }

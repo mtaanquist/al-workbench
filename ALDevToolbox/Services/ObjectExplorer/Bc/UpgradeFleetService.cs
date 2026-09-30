@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
 using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 
@@ -151,6 +152,29 @@ public sealed class UpgradeFleetService
     }
 
     /// <summary>
+    /// The id of the environment the readable address names -
+    /// <c>/environments/{solution slug}/{environment name}</c> - or null when nothing
+    /// matches. The name matches case-insensitively, as Business Central's own does.
+    /// Visibility is not decided here: the page loads what this finds through
+    /// <see cref="GetEnvironmentAsync"/>, which answers a private solution's environment
+    /// exactly as it answers one that does not exist.
+    /// </summary>
+    public async Task<int?> FindEnvironmentIdAsync(string solutionSlug, string environmentName, CancellationToken ct = default)
+    {
+        var slug = (solutionSlug ?? string.Empty).Trim().ToLowerInvariant();
+        var name = (environmentName ?? string.Empty).Trim().ToLower();
+        if (!SolutionSlug.IsValid(slug) || name.Length == 0) return null;
+        return await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.MissingSince == null
+                        && e.Project!.DeletedAt == null
+                        && e.Project.Slug == slug
+                        && e.Name.ToLower() == name)
+            .OrderBy(e => e.Id)
+            .Select(e => (int?)e.Id)
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// The fleet with each row's detail - what <see cref="GetEnvironmentAsync"/> gives one
     /// environment - for a caller that needs the windows of every row, which is the
     /// <c>list_environments</c> MCP tool. One extra query for the whole list rather than
@@ -282,7 +306,8 @@ public sealed class UpgradeFleetService
             e.HardDeletePendingOn,
             _db.OeProjects.Where(manageable).Any(p => p.Id == e.ProjectId),
             e.BcOfferedVersions,
-            e.Project!.ShortName);
+            e.Project!.ShortName,
+            e.Project!.Slug);
 
     // ── Change the next version (issue #960) ────────────────────────────
 
@@ -587,8 +612,20 @@ public sealed record UpgradeFleetRow(
     /// null when none is set. Shown after the solution name and matched by the search
     /// box, the way the Solutions list does it (issue #966).
     /// </summary>
-    string? ProjectShortName = null)
+    string? ProjectShortName = null,
+    /// <summary>The solution's key in its web address; see <see cref="SolutionSlug"/>.</summary>
+    string? ProjectSlug = null)
 {
+    /// <summary>
+    /// This environment's own page, on <paramref name="tab"/> when given - the readable
+    /// address, /environments/{solution}/{environment}.
+    /// </summary>
+    public string Href(string? tab = null) =>
+        SolutionLinks.Environment(ProjectSlug, EnvironmentName, EnvironmentId, tab);
+
+    /// <summary>The page of the solution this environment belongs to.</summary>
+    public string SolutionHref => SolutionLinks.Solution(ProjectSlug, ProjectId);
+
     /// <summary>
     /// True for an environment the customer deleted and Business Central is still
     /// keeping. Either signal counts, for the reason the mirror stores both. Nothing can

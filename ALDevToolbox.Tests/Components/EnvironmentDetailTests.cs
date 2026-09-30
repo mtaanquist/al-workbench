@@ -256,7 +256,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
     private IRenderedComponent<EnvironmentDetail> Render(int environmentId, string? tab = null)
     {
-        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.Id, environmentId).Add(c => c.OpenTab, tab));
+        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.EnvironmentId, environmentId).Add(c => c.OpenTab, tab));
         cut.WaitForAssertion(() => cut.FindAll(".loading-block").Should().BeEmpty());
         return cut;
     }
@@ -673,7 +673,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _panels.Set(projectId, envId, Panel());
         _ctx.SetRendererInfo(new RendererInfo("Static", isInteractive: false));
 
-        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.Id, envId));
+        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.EnvironmentId, envId));
 
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("Version and update dates",
             "the head and the Updates card come from our own mirror"));
@@ -749,7 +749,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
     {
         var (_, envId) = await SeedAsync();
 
-        _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.Id, envId).Add(c => c.OpenTab, segment));
+        _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, segment));
 
         var nav = _ctx.Services.GetRequiredService<NavigationManager>();
         nav.Uri.Should().EndWith($"/environments/{envId}");
@@ -874,14 +874,14 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         // Workbench history asks Business Central nothing, so this leaves the tab without
         // starting a second read that the next assertion would have to tell apart.
-        cut.Render(p => p.Add(c => c.Id, envId).Add(c => c.OpenTab, "history"));
+        cut.Render(p => p.Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "history"));
         cut.WaitForAssertion(() =>
         {
             cut.Find(".header-tab.is-active").TextContent.Should().Be("Workbench history");
             cut.Markup.Should().NotContain("ola@cronus.example", "leaving the tab forgets the list");
         });
 
-        cut.Render(p => p.Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions"));
+        cut.Render(p => p.Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions"));
         cut.WaitForAssertion(() => _admin.Reads.Should().Be(2), TimeSpan.FromSeconds(5));
     }
 
@@ -897,7 +897,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _admin.OnSessions = () => [Session(47, "ola@cronus.example")];
 
         var cut = _ctx.Render<EnvironmentDetail>(p => p
-            .Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions")
+            .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
 
@@ -916,7 +916,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _admin.OnSessions = () => [Session(47, "ola@cronus.example")];
 
         var cut = _ctx.Render<EnvironmentDetail>(p => p
-            .Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions")
+            .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromMilliseconds(30)));
 
@@ -928,7 +928,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         // Widen the window before restarting, or the restarted loop would stop again
         // within a tick and the assertion below would be racing it rather than the code.
         cut.Render(p => p
-            .Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions")
+            .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
 
@@ -955,7 +955,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _admin.OnSessions = () => [Session(47, "ola@cronus.example")];
 
         var cut = _ctx.Render<EnvironmentDetail>(p => p
-            .Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions")
+            .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
 
@@ -997,7 +997,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _admin.OnSessions = () => [Session(47, "ola@cronus.example")];
         _ctx.SetRendererInfo(new RendererInfo("Static", isInteractive: false));
 
-        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions"));
+        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions"));
 
         cut.FindAll(".loading-block").Should().NotBeEmpty();
         cut.FindAll("tbody tr").Should().BeEmpty();
@@ -1081,7 +1081,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         ];
 
         var cut = _ctx.Render<EnvironmentDetail>(p => p
-            .Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions")
+            .Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions")
             .Add(c => c.SessionsLiveEvery, TimeSpan.FromMilliseconds(60))
             .Add(c => c.SessionsLiveFor, TimeSpan.FromSeconds(30)));
 
@@ -1120,7 +1120,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         await SeedCredentialsAsync(projectId);
         _admin.HangUntilCancelled = true;
 
-        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.Id, envId).Add(c => c.OpenTab, "sessions"));
+        var cut = _ctx.Render<EnvironmentDetail>(p => p.Add(c => c.EnvironmentId, envId).Add(c => c.OpenTab, "sessions"));
         // Not WaitForAssertion: it re-checks on renders, and a read that hangs never
         // renders again once it has started.
         SpinWait.SpinUntil(() => Volatile.Read(ref _admin.Reads) == 1, TimeSpan.FromSeconds(5)).Should().BeTrue();

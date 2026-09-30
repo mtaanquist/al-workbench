@@ -282,7 +282,7 @@
                                         @* Apps, updates waiting and the settings that write to the
                                            customer's tenant have a page of their own now; the row
                                            links to it rather than unfolding a second copy here. *@
-                                        <a class="btn btn--sm" href="@($"/environments/{env.Id}")">
+                                        <a class="btn btn--sm" href="@ALDevToolbox.Services.ObjectExplorer.Projects.SolutionLinks.Environment(SolutionSlug, env.Name, env.Id)">
                                             <Icon Name="chevron-right" Width="14" Height="14" />
                                             <span>Environment details</span>
                                         </a>
@@ -307,6 +307,9 @@
 @code {
     /// <summary>The solution whose Business Central connection this tab manages.</summary>
     [Parameter, EditorRequired] public int Id { get; set; }
+
+    /// <summary>The solution's slug, for readable links to its environments. Null falls back to numeric ones.</summary>
+    [Parameter] public string? SolutionSlug { get; set; }
 
     // Business Central connection (owner/admin only).
     private BcConnectionStatus? _bc;

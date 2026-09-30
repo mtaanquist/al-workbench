@@ -153,7 +153,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
     {
         var (projectId, _) = await SeedAsync();
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
 
         var marker = cut.Find("[data-palette-context]");
         marker.GetAttribute("data-palette-context").Should().Be($"solution:{projectId}");
@@ -182,13 +182,13 @@ public sealed class ProjectDetailAccessTests : IDisposable
 
         var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
         nav.NavigateTo($"/solutions/{projectId}?tab=customer");
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         cut.WaitForAssertion(() => ActiveTab(cut).Should().Be("Customer"));
 
         // What an enhanced navigation does to a page it keeps: new parameters,
         // same component.
         nav.NavigateTo($"/solutions/{projectId}?tab=repositories");
-        cut.Render(p => p.Add(c => c.Id, projectId));
+        cut.Render(p => p.Add(c => c.SolutionId, projectId));
 
         cut.WaitForAssertion(() => ActiveTab(cut).Should().Be("Repositories"));
     }
@@ -204,7 +204,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
         var (projectId, _) = await SeedAsync();
         _db.OrgContext.CurrentUserId = OutsiderUserId;
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
 
         cut.WaitForAssertion(() =>
             cut.FindAll(".settings__tabs button, .settings__tabs a")
@@ -217,7 +217,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
     {
         var (projectId, _) = await SeedAsync();
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         await OpenAccessTabAsync(cut);
 
         var labels = cut.FindAll(".module-card__title").Select(t => t.TextContent.Trim()).ToList();
@@ -231,7 +231,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
     {
         var (projectId, teamId) = await SeedAsync();
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         await OpenAccessTabAsync(cut);
 
         // Pick Private, then tick the NDA team, then save.
@@ -261,7 +261,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
                 .SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId });
         }
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         await OpenAccessTabAsync(cut);
 
         await PickAsync(cut, "Public");
@@ -279,7 +279,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
     {
         var (projectId, _) = await SeedAsync();
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         await OpenAccessTabAsync(cut);
         await PickAsync(cut, "Private");
         await ClickSaveAccessAsync(cut);
@@ -292,7 +292,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
     {
         var (projectId, _) = await SeedAsync(withTeam: false);
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         await OpenAccessTabAsync(cut);
 
         cut.Find(".empty-state__title").TextContent.Trim().Should().Be("No teams yet");
@@ -314,7 +314,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
     {
         var (projectId, _) = await SeedAsync(withTeam: false);
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         await OpenAccessTabAsync(cut);
 
         foreach (var label in new[] { "View-only for everyone else", "Private" })
@@ -334,7 +334,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
     {
         var (projectId, _) = await SeedAsync();
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         await OpenAccessTabAsync(cut);
 
         SaveButton(cut).HasAttribute("disabled").Should().BeTrue("nothing has changed yet");
@@ -356,7 +356,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
     {
         var (projectId, _) = await SeedAsync();
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         await OpenAccessTabAsync(cut);
 
         cut.FindAll("input[type=checkbox]").Should().BeEmpty("a public solution has no teams to pick");
@@ -386,7 +386,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
             await ctx.SaveChangesAsync();
         }
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         await OpenAccessTabAsync(cut);
         await PickAsync(cut, "Private");
 
@@ -409,7 +409,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
                 .SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId });
         }
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         cut.WaitForAssertion(() =>
             cut.Find(".detail-head__title-row .status-pill").TextContent.Trim().Should().Be("Private"));
     }
@@ -419,7 +419,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
     {
         var (projectId, _) = await SeedAsync();
 
-        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.Id, projectId));
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         await OpenAccessTabAsync(cut);
 
         cut.FindAll(".detail-head__title-row .status-pill").Should().BeEmpty();

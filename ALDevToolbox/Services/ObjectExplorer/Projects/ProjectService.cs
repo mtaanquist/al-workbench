@@ -181,7 +181,7 @@ public sealed class ProjectService
         ProjectInput input, ProjectAccessSettings? access = null, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var (name, shortName, country, repos) = await ValidateAsync(input, existingId: null, orgId, ct);
+        var (name, shortName, country, repos, slug) = await ValidateAsync(input, existingId: null, orgId, ct);
 
         // The level is chosen on the create form, and it is written in the same
         // SaveChanges as the solution itself. Not a create followed by SetAccessAsync:
@@ -197,6 +197,7 @@ public sealed class ProjectService
             OrganizationId = orgId,
             Name = name,
             ShortName = shortName,
+            Slug = slug ?? await FreeSlugAsync(SolutionSlug.Derive(shortName ?? name), existingId: null, ct),
             DefaultArtifactCountry = country,
             // The creator owns the project: they (or an org Admin) manage repos,
             // settings, builds, and deletion. See .design/artifacts.md.
@@ -246,7 +247,7 @@ public sealed class ProjectService
     public async Task UpdateProjectAsync(int id, ProjectInput input, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var (name, shortName, country, repos) = await ValidateAsync(input, existingId: id, orgId, ct);
+        var (name, shortName, country, repos, slug) = await ValidateAsync(input, existingId: id, orgId, ct);
 
         var project = await _db.OeProjects
             .Include(c => c.Repositories)
@@ -259,6 +260,10 @@ public sealed class ProjectService
 
         project.Name = name;
         project.ShortName = shortName;
+        // Null keeps the address the solution already has: a rename must not break
+        // every link to it. Blank asks for a fresh one from the (new) name.
+        if (slug is not null) project.Slug = slug;
+        else if (input.Slug is not null) project.Slug = await FreeSlugAsync(SolutionSlug.Derive(shortName ?? name), existingId: id, ct);
         project.DefaultArtifactCountry = country;
         project.UpdatedAt = DateTime.UtcNow;
 
@@ -688,7 +693,7 @@ public sealed class ProjectService
     /// Validates the input and returns the normalised name/country/repos. Throws
     /// <see cref="PlanValidationException"/> with field-keyed errors otherwise.
     /// </summary>
-    private async Task<(string Name, string? ShortName, string? Country, IReadOnlyList<ProjectRepositoryInput> Repos)> ValidateAsync(
+    private async Task<(string Name, string? ShortName, string? Country, IReadOnlyList<ProjectRepositoryInput> Repos, string? Slug)> ValidateAsync(
         ProjectInput input, int? existingId, int orgId, CancellationToken ct)
     {
         var errors = new Dictionary<string, string>();
@@ -727,6 +732,36 @@ public sealed class ProjectService
         if (shortName.Length > CustomerNaming.MaxShortNameLength || shortName.Any(char.IsControl))
         {
             errors["ShortName"] = "At most 50 characters.";
+        }
+
+        // A typed slug is used as typed (lowercased) or refused - never quietly
+        // changed into a different address than the one the user asked for. Blank
+        // and null come back null; the caller derives one from the name.
+        string? slug = null;
+        var typedSlug = (input.Slug ?? string.Empty).Trim().ToLowerInvariant();
+        // A pasted link ("https://.../solutions/cronus") means its last part.
+        if (typedSlug.Contains('/'))
+        {
+            typedSlug = typedSlug.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? string.Empty;
+        }
+        if (typedSlug.Length > 0)
+        {
+            if (!SolutionSlug.IsValid(typedSlug))
+            {
+                errors["Slug"] = typedSlug.All(char.IsAsciiDigit)
+                    ? "Use at least one letter, e.g. cronus."
+                    : typedSlug == "new"
+                        ? "'new' is reserved and can't be used. Pick another, e.g. cronus-new."
+                        : $"Use lowercase letters, digits and single dashes, at most {SolutionSlug.MaxLength} characters, e.g. cronus-dk.";
+            }
+            else if (await SlugTakenAsync(typedSlug, existingId, ct))
+            {
+                errors["Slug"] = $"Another solution already uses /solutions/{typedSlug}. Pick a different one, e.g. {SolutionSlug.WithCounter(typedSlug, 2)}.";
+            }
+            else
+            {
+                slug = typedSlug;
+            }
         }
 
         // Required: builds compile against this localisation's base symbols, and
@@ -772,7 +807,68 @@ public sealed class ProjectService
         }
 
         if (errors.Count > 0) throw new PlanValidationException(errors);
-        return (name, shortName.Length == 0 ? null : shortName, country, normalised);
+        return (name, shortName.Length == 0 ? null : shortName, country, normalised, slug);
+    }
+
+    /// <summary>
+    /// True when an active solution other than <paramref name="existingId"/> in this org
+    /// already has <paramref name="slug"/>. Org-scoped by the ambient query filter.
+    /// </summary>
+    private Task<bool> SlugTakenAsync(string slug, int? existingId, CancellationToken ct) =>
+        _db.OeProjects.AsNoTracking()
+            .AnyAsync(p => p.DeletedAt == null && p.Id != (existingId ?? 0) && p.Slug == slug, ct);
+
+    /// <summary>
+    /// <paramref name="derived"/> itself when it is free, else the first free
+    /// <c>-2</c>, <c>-3</c>... variant. Two names can derive the same slug ("A/S Jensen"
+    /// and "AS Jensen"), and that must not be the user's problem to solve.
+    /// </summary>
+    private async Task<string> FreeSlugAsync(string derived, int? existingId, CancellationToken ct)
+    {
+        // Every variant shares the first few characters of the stem, even once a long
+        // stem is cut to make room for the counter, so one prefix read covers them all.
+        var prefix = derived[..Math.Min(derived.Length, SolutionSlug.MaxLength - 4)];
+        var used = (await _db.OeProjects.AsNoTracking()
+                .Where(p => p.DeletedAt == null && p.Id != (existingId ?? 0) && p.Slug != null && p.Slug.StartsWith(prefix))
+                .Select(p => p.Slug)
+                .ToListAsync(ct))
+            .ToHashSet(StringComparer.Ordinal);
+        for (var attempt = 1; ; attempt++)
+        {
+            var candidate = SolutionSlug.WithCounter(derived, attempt);
+            if (!used.Contains(candidate)) return candidate;
+        }
+    }
+
+    /// <summary>
+    /// The slug of solution <paramref name="id"/>, or null when it is deleted, in another
+    /// org, or private to people this caller is not among - the numeric address then
+    /// renders its own not-found rather than naming the solution in a redirect.
+    /// </summary>
+    public async Task<string?> FindVisibleSlugAsync(int id, CancellationToken ct = default)
+    {
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        return await _db.OeProjects.AsNoTracking()
+            .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
+            .Where(p => p.Id == id && p.DeletedAt == null)
+            .Select(p => p.Slug)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    /// <summary>
+    /// The id of the active solution whose slug is <paramref name="slug"/>, or null when
+    /// there is none in this org. Visibility is not decided here: the page that asked
+    /// loads the solution through <see cref="GetProjectAsync"/>, which refuses a private
+    /// one the same way it refuses an id.
+    /// </summary>
+    public async Task<int?> FindIdBySlugAsync(string slug, CancellationToken ct = default)
+    {
+        var key = (slug ?? string.Empty).Trim().ToLowerInvariant();
+        if (!SolutionSlug.IsValid(key)) return null;
+        return await _db.OeProjects.AsNoTracking()
+            .Where(p => p.DeletedAt == null && p.Slug == key)
+            .Select(p => (int?)p.Id)
+            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>True when <paramref name="url"/> is an https URL on a host the provider serves.</summary>
@@ -802,6 +898,10 @@ public sealed class ProjectService
         try
         {
             await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex, "ix_oe_projects_organization_id_slug"))
+        {
+            throw Validation("Slug", "Another solution already uses this link name. Pick a different one, e.g. add the country: cronus-dk.");
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {
@@ -874,11 +974,17 @@ public sealed class ProjectService
 }
 
 /// <summary>Form-post shape for a project and its repositories. The repo list is owned wholesale by the editor.</summary>
+/// <param name="Slug">
+/// The solution's key in its web address. Null keeps the current one (a create derives
+/// one from the name); blank derives a fresh one from the name; anything else is used
+/// as typed, lowercased, and must be free. See <see cref="SolutionSlug"/>.
+/// </param>
 public sealed record ProjectInput(
     string Name,
     string? ShortName,
     string? DefaultArtifactCountry,
-    IReadOnlyList<ProjectRepositoryInput> Repositories);
+    IReadOnlyList<ProjectRepositoryInput> Repositories,
+    string? Slug = null);
 
 /// <summary>
 /// One solution as the generator's Solution picker sees it: what it searches on

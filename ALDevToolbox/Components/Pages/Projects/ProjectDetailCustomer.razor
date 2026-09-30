@@ -235,7 +235,7 @@ else
     <CustomerContactsSection Id="Id" CanManage="CanManage" Initial="all.Contacts" />
     @if (_modules is { } modules)
     {
-        <CustomerModulesSection Id="Id" CanManage="CanManage" CanManageSolution="CanChangeHosting" Initial="modules" />
+        <CustomerModulesSection Id="Id" SolutionSlug="@SolutionSlug" CanManage="CanManage" CanManageSolution="CanChangeHosting" Initial="modules" />
     }
     <CustomerPeopleSection Id="Id" CanManage="CanManage" Initial="all.People" />
     <CustomerIntegrationsSection Id="Id" CanManage="CanManage" Initial="all.Integrations" />
@@ -243,6 +243,9 @@ else
 
 @code {
     [Parameter, EditorRequired] public int Id { get; set; }
+
+    /// <summary>The solution's slug, for readable links to its environments. Null falls back to numeric ones.</summary>
+    [Parameter] public string? SolutionSlug { get; set; }
     /// <summary>May edit the customer information here - wider than managing the solution.</summary>
     [Parameter] public bool CanManage { get; set; }
 
