@@ -2,6 +2,7 @@ using System.Text.Json;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using ALDevToolbox.Tests.Infrastructure;
@@ -184,6 +185,55 @@ public sealed class PipelineServiceTests : IDisposable
         var act = () => NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null, BcTarget: target));
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("BcTarget");
+    }
+
+    [Fact]
+    public async Task A_pipeline_a_deployment_pipeline_draws_from_cannot_switch_to_a_preview_version()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
+        var env = new OeProjectEnvironment
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "Production", Type = "Production",
+            FetchedAt = DateTime.UtcNow,
+        };
+        ctx.OeProjectEnvironments.Add(env);
+        await ctx.SaveChangesAsync();
+        ctx.OeReleasePipelines.Add(new OeReleasePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "Production deploy",
+            BuildPipelineId = id, ProjectEnvironmentId = env.Id,
+            DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+
+        var act = () => svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production", null, BcTarget: ProjectBuildTarget.NextMajor));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("BcTarget");
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == id)).BcTarget.Should().Be(ProjectBuildTarget.Current);
+    }
+
+    [Fact]
+    public async Task A_preview_pipeline_cannot_also_publish_github_releases()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var repo = new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Provider = RepositoryProvider.GitHub,
+            Url = "https://github.com/cronus/core", DisplayName = "core",
+        };
+        ctx.OeProjectRepositories.Add(repo);
+        await ctx.SaveChangesAsync();
+
+        var act = () => NewService(ctx).CreatePipelineAsync(new PipelineInput(
+            projectId, "Next major check", null, GithubReleaseRepositoryId: repo.Id, BcTarget: ProjectBuildTarget.NextMajor));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("GithubReleaseRepositoryId");
     }
 
     // --- The watched branch (#963) ------------------------------------------

@@ -623,6 +623,19 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     }
 
     [Fact]
+    public async Task An_explicit_next_version_target_is_written_onto_the_build_row()
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+
+        await BuildAsync(projectId, releaseId, BcBuildTarget.NextMinor);
+
+        // Every guard (publishing, deploying, symbols) reads the row.
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.Id == buildId))
+            .BcTarget.Should().Be(ProjectBuildTarget.NextMinor);
+    }
+
+    [Fact]
     public async Task A_current_build_records_the_exact_business_central_build_it_used()
     {
         var (projectId, releaseId, buildId) = await SeedAsync();

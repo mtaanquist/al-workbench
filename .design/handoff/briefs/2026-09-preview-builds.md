@@ -16,6 +16,11 @@ Current (default), Next minor, Next major, and one `.field__hint`:
 > Current is the version your extensions declare. Next minor and Next major compile against
 > Microsoft's preview builds to catch breaking changes early; those builds cannot be deployed.
 
+The Name field's placeholder and hint now allow for a pipeline named for the version it
+checks ("e.g. Production, Test environment or Next major check"). With Next minor or Next
+major chosen, "Publish successful builds to GitHub" is disabled and its hint reads "Builds
+against Next minor or Next major are never published, because they cannot be deployed."
+
 ## The build pipelines list (`PagePipelines.dc.html`, Builds)
 
 A pipeline that builds against Next minor or Next major gets a `.tag` with that word after
@@ -27,7 +32,9 @@ its name in the Pipeline cell. Current pipelines show nothing.
   "Preview build" after the state pill.
 - Facts strip: a "Builds against" `.meta-item` (Next minor / Next major), only on a preview
   pipeline. "Latest BC" now shows the exact build number (`29.0.52914.0`) where it is known.
-- Latest build topline: "on BC 29.0.52914.0" in place of "BC 29.0".
+- Latest build topline: "on BC 29.0.52914.0" in place of "BC 29.0". Below it, for a preview
+  build, a `.pb-note`: "This build checks your extensions against the next Business Central
+  version. It can't be deployed; fix any errors before that version reaches your customers."
 - Build history, Description cell: a `.tag` "Preview build" on a preview build's row, then
   "on BC 29.0.52914.0" in the muted `.pb-more` style. A preview build's row has no
   "Deploy..." action.

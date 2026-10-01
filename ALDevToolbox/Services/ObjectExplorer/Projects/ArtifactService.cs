@@ -71,10 +71,12 @@ public sealed class ArtifactService
         // build the GitHub App started, a release imported from GitHub - and none
         // of them is what the list's "Latest build" column means: the state of
         // the deliverable a pipeline produces. A solution with no pipeline has no
-        // build status at all, however many pull requests have been checked.
+        // build status at all, however many pull requests have been checked. Preview
+        // builds are left out for the same reason: a red next-major check is not the
+        // state of what the customer gets, and one can never be deployed (#994).
         var projectIds = projects.Select(p => p.Id).ToList();
         var builds = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => projectIds.Contains(b.ProjectId) && b.PipelineId != null)
+            .Where(b => projectIds.Contains(b.ProjectId) && b.PipelineId != null && b.BcTarget == ProjectBuildTarget.Current)
             .Select(b => new
             {
                 b.Id, b.ProjectId, b.Status, b.BcVersion, b.Branch, b.StartedAt, b.FinishedAt,

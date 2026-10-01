@@ -65,8 +65,8 @@
                     <div class="field">
                         <label class="field__label" for="pe-name">Name</label>
                         <input id="pe-name" type="text" class="input" maxlength="200" @bind="_name"
-                               disabled="@_saving" placeholder="e.g. Production or Test environment" />
-                        <small class="field__hint">A solution can have several pipelines, each compiling a different set of extensions - name this one for its environment.</small>
+                               disabled="@_saving" placeholder="e.g. Production, Test environment or Next major check" />
+                        <small class="field__hint">A solution can have several pipelines, each compiling a different set of extensions - name this one for its environment, or for the version it checks.</small>
                     </div>
                     <div class="field">
                         <label class="field__label" for="pe-branch">Branch (optional)</label>
@@ -169,7 +169,7 @@
                     <div class="field">
                         <label class="field__label" for="pe-release-repo">Publish successful builds to GitHub</label>
                         <SelectBox>
-                            <select id="pe-release-repo" class="select" @bind="_releaseRepositoryId" disabled="@_saving">
+                            <select id="pe-release-repo" class="select" @bind="_releaseRepositoryId" disabled="@(_saving || IsPreviewTarget)">
                                 <option value="0">Don't publish releases</option>
                                 @foreach (var repo in _releaseRepositories)
                                 {
@@ -177,7 +177,14 @@
                                 }
                             </select>
                         </SelectBox>
-                        <small class="field__hint">All apps in a build have to share one version number, because the release is tagged with it. If they don't match, the build still succeeds and its files can still be downloaded here; only the release is skipped.</small>
+                        @if (IsPreviewTarget)
+                        {
+                            <small class="field__hint">Builds against Next minor or Next major are never published, because they cannot be deployed.</small>
+                        }
+                        else
+                        {
+                            <small class="field__hint">All apps in a build have to share one version number, because the release is tagged with it. If they don't match, the build still succeeds and its files can still be downloaded here; only the release is skipped.</small>
+                        }
                     </div>
                 }
                 else if (ShowUnavailableReleaseField)
@@ -257,6 +264,9 @@
     // The Business Central version builds compile against; Current unless the
     // pipeline exists to check the next one (#994).
     private string _bcTarget = ProjectBuildTarget.Current;
+
+    /// <summary>A preview target's builds are never published, so the publishing choice is shown disabled rather than silently ignored.</summary>
+    private bool IsPreviewTarget => ProjectBuildTarget.IsPreview(_bcTarget);
     // The solution's GitHub repositories inside the connected organisation. Empty
     // (and the whole field hidden) when there is no GitHub connection - an
     // organisation on Azure DevOps is shown no GitHub machinery at all.
@@ -655,7 +665,7 @@
             var selection = picked.Count == _extensions.Count ? null : picked;
             var input = new PipelineInput(
                 _projectId, _name.Trim(), selection,
-                _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
+                _releaseRepositoryId == 0 || IsPreviewTarget ? null : _releaseRepositoryId,
                 string.IsNullOrWhiteSpace(_branch) ? null : _branch.Trim(),
                 _bcTarget);
 

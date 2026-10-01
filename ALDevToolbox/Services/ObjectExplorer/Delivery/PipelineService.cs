@@ -234,6 +234,20 @@ public sealed class PipelineService
         {
             errors["BcTarget"] = "Choose Current, Next minor or Next major.";
         }
+        else if (ProjectBuildTarget.IsPreview(bcTarget))
+        {
+            // A preview build is check-only (#994): it is never published, and it can
+            // never be deployed, so neither setting may quietly stop working.
+            if (releaseRepositoryId is not null)
+            {
+                errors["GithubReleaseRepositoryId"] = "Builds against Next minor or Next major are never published. Choose Don't publish releases, or build against Current.";
+            }
+            if (existingId is { } pipelineId && await _db.OeReleasePipelines.AsNoTracking()
+                    .AnyAsync(r => r.BuildPipelineId == pipelineId && r.DeletedAt == null, ct))
+            {
+                errors["BcTarget"] = "A deployment pipeline deploys this pipeline's builds, and preview builds can't be deployed. Keep Current, or create a separate pipeline for the preview check.";
+            }
+        }
 
         if (errors.Count > 0) throw new PlanValidationException(errors);
 

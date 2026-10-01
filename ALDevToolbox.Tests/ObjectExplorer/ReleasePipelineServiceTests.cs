@@ -133,6 +133,24 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateReleasePipelineAsync_rejects_a_preview_build_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var preview = await SeedBuildPipelineAsync(ctx, projectId);
+        await ctx.OePipelines.Where(p => p.Id == preview)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.BcTarget, ProjectBuildTarget.NextMajor));
+        var envId = await SeedEnvironmentAsync(ctx, projectId);
+
+        var act = () => NewService(ctx).CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, "Rel", preview, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        var errors = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors;
+        errors.Should().ContainKey("BuildPipelineId");
+        errors["BuildPipelineId"].Should().Contain("preview");
+    }
+
+    [Fact]
     public async Task CreateReleasePipelineAsync_rejects_a_build_pipeline_from_another_project()
     {
         await using var ctx = _db.NewContext();

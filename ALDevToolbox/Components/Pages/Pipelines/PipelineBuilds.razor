@@ -356,6 +356,16 @@
                                 <span class="pb-topline__meta pb-topline__when" title="@StartedBy(_latest)">@StartedVerb(_latest) <Timestamp Value="@StartedWhen(_latest)" Relative="true" /></span>
                             </div>
 
+                            @* The tooltip on the head's pill is not enough on its own: touch
+                               and keyboard users never see it (#994). *@
+                            @if (_latest.IsPreview)
+                            {
+                                <p class="pb-note">
+                                    This build checks your extensions against the next Business Central version. It can't be deployed;
+                                    fix any errors before that version reaches your customers.
+                                </p>
+                            }
+
                             @* What the compiler said, as a count rather than as a log to
                                read. Only shown once the build has something to count -
                                a queued build has said nothing yet, and "0 errors" before

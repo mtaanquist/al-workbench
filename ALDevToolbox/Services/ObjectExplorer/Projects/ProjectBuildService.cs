@@ -131,6 +131,18 @@ public sealed class ProjectBuildService
         {
             options = options with { Target = ProjectBuildTarget.ToBuildTarget(build.BcTarget) };
         }
+        else if (build is not null && ProjectBuildTarget.ToBuildTarget(build.BcTarget) != options.Target)
+        {
+            // Every guard (publishing, deploying, symbols) reads the row, so the row has
+            // to say what was actually built.
+            build.BcTarget = options.Target switch
+            {
+                BcBuildTarget.NextMinor => ProjectBuildTarget.NextMinor,
+                BcBuildTarget.NextMajor => ProjectBuildTarget.NextMajor,
+                _ => ProjectBuildTarget.Current,
+            };
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
 
         // A next-major build compiles with the newest beta compiler, because the
         // stable one may not read the next major's symbols; everything else keeps
@@ -676,9 +688,12 @@ public sealed class ProjectBuildService
         var gitPath = NullIfBlank(Environment.GetEnvironmentVariable("GIT_PATH")) ?? "git";
         var orgId = build.OrganizationId;
 
-        // The previous successful build's commit per repo (the changelog baseline).
+        // The previous successful build's commit per repo (the changelog baseline). A
+        // preview build is a check, not something that shipped, so it never becomes the
+        // baseline a current build's "what changed" is measured from (#994).
         var prevBuildId = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.ProjectId == project.Id && b.Id != build.Id && b.Status == ProjectBuildStatus.Ready)
+            .Where(b => b.ProjectId == project.Id && b.Id != build.Id && b.Status == ProjectBuildStatus.Ready
+                        && b.BcTarget == ProjectBuildTarget.Current)
             .OrderByDescending(b => b.StartedAt)
             .Select(b => (int?)b.Id)
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
