@@ -161,7 +161,9 @@
         try
         {
             var recipe = await Suggestions.ApproveAsync(_suggestion.Id);
-            Nav.NavigateTo($"/admin/cookbook/{recipe.Id}");
+            // Replace, not push: once decided, this page is a dead end, so Back
+            // from the new recipe should land on the review list instead.
+            Nav.NavigateTo($"/admin/cookbook/{recipe.Id}", replace: true);
         }
         catch (PlanValidationException ex)
         {
@@ -192,7 +194,7 @@
         try
         {
             await Suggestions.RejectAsync(_suggestion.Id, _rejectNote);
-            Nav.NavigateTo("/admin/cookbook/suggestions");
+            Nav.NavigateTo("/admin/cookbook/suggestions", replace: true);
         }
         catch (PlanValidationException ex)
         {
