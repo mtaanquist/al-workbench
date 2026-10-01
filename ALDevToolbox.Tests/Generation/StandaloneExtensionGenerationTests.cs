@@ -72,6 +72,25 @@ public sealed class StandaloneExtensionGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task Sibling_workspace_file_keeps_the_root_entry_last_and_excludes_every_extension()
+    {
+        await SeedTemplateAsync(TemplateBuilder.Default());
+
+        var archive = await NewService().GenerateExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "My Custom Feature"),
+            new SiblingWorkspaceContext("CRONUS Customer", Array.Empty<string>(), new[] { "Core" }));
+        using var zip = new ZipArchive(archive.Stream, ZipArchiveMode.Read, leaveOpen: false);
+
+        using var doc = JsonDocument.Parse(ReadEntry(zip.GetEntry("CRONUSCustomer.code-workspace")!));
+        doc.RootElement.GetProperty("folders").EnumerateArray()
+            .Select(f => f.GetProperty("path").GetString())
+            .Should().Equal("Core", "MyCustomFeature", ".");
+        doc.RootElement.GetProperty("settings").GetProperty("files.exclude").EnumerateObject()
+            .Select(p => p.Name)
+            .Should().Equal("Core", "MyCustomFeature");
+    }
+
+    [Fact]
     public async Task Sibling_extension_leaves_the_workspace_root_org_files_to_the_existing_workspace()
     {
         await SeedTemplateAsync(TemplateBuilder.Default());

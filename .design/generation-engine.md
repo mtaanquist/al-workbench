@@ -192,9 +192,15 @@ A JSON file with:
     "folders": [
         { "path": "Core" },
         { "path": "Hotfix" },
-        { "path": "DocumentCapture" }
+        { "path": "DocumentCapture" },
+        { "path": ".", "name": "Workspace" }
     ],
     "settings": {
+        "files.exclude": {
+            "Core": true,
+            "Hotfix": true,
+            "DocumentCapture": true
+        },
         "editor.formatOnSave": true,
         "editor.autoIndent": "full",
         "editor.detectIndentation": false,
@@ -216,12 +222,15 @@ That JSON is not a constant. `WorkspaceZipBuilder.BuildCodeWorkspace` layers thr
 1. The organisation's base template, `organization_settings.code_workspace_json`, edited at `/admin/templates/workspace` (falling back to `OrganizationDefaults.CodeWorkspaceJson` when the org hasn't set one).
 2. The optional per-template overlay, `runtime_templates.code_workspace_json`, edited on the template's own edit page. It deep-merges on the `settings` object and replaces wholesale on every other top-level key.
 3. The computed `folders` array, written last and always authoritative — the workspace has to point at the folders the generator actually emitted, whatever either layer pasted.
+4. The computed `settings."files.exclude"` entries: one `true` per extension folder, merged into whatever exclusions the two layers already set.
 
 Mustache substitution runs over each layer before the merge, so both can use `{{publisher}}`, `{{workspace_folder}}` and the rest. A layer that doesn't parse as a JSON object raises a field-keyed `PlanValidationException` so the workspace and template error surfaces stay distinct.
 
 Each `folders` entry uses the extension's `path`, which is also its on-disk folder name. For a module clone that path is the module's `extension_name` (PascalCase), not its `key` — the key is the admin/URL slug and the dependency-reference target.
 
-The array is built from the emitted extensions alone. The template's declared empty root folders are deliberately left out: each entry here is an AL app root, and pointing the AL extension at a folder with no `app.json` breaks the workspace. `MergeTemplateOverlay` already skips the `folders` key, so neither layer can add one either.
+The array is built from the emitted extensions, followed by one entry for the workspace root itself (`"path": "."`, named `Workspace`) so the root files (README, `.gitignore`, `.assets`, the declared empty folders) are reachable from the VS Code explorer. Without more, the root entry would list every extension a second time, so each extension's path is also written into `settings."files.exclude"` as `true`. Both come from the same folder list, so the sibling New Extension flow, which rebuilds the file with the new folder added, gets them too.
+
+Apart from the root entry, the array is built from the emitted extensions alone. The template's declared empty root folders are deliberately left out: each entry here is an AL app root, and pointing the AL extension at a folder with no `app.json` breaks the workspace. `MergeTemplateOverlay` already skips the `folders` key, so neither layer can add one either.
 
 ## Mustache substitution
 

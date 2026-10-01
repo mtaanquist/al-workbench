@@ -739,7 +739,9 @@ public sealed class WorkspaceZipBuilder
     ///   <item>The computed <c>folders</c> array, written last and always
     ///         authoritative — the workspace must point at the folders the
     ///         generator actually emits, regardless of what either layer
-    ///         pasted.</item>
+    ///         pasted. It ends with the workspace root itself
+    ///         (<c>"."</c>), whose copies of the extension folders are hidden
+    ///         through <c>files.exclude</c>.</item>
     /// </list>
     /// Mustache substitution runs over each layer before merging so both can
     /// use <c>{{publisher}}</c>, <c>{{shortName}}</c>, etc.
@@ -760,8 +762,44 @@ public sealed class WorkspaceZipBuilder
 
         var folders = new JsonArray();
         foreach (var path in folderPaths) folders.Add(new JsonObject { ["path"] = path });
+        folders.Add(new JsonObject { ["path"] = ".", ["name"] = RootFolderName });
         root["folders"] = folders;
+        ExcludeExtensionFoldersFromRoot(root, folderPaths);
         return SerializeIndented(root);
+    }
+
+    /// <summary>
+    /// Display name of the workspace-root entry appended to the
+    /// <c>folders</c> array, so the root files (README, <c>.gitignore</c>,
+    /// <c>.assets</c>) are reachable from the explorer.
+    /// </summary>
+    private const string RootFolderName = "Workspace";
+
+    /// <summary>
+    /// The root entry would otherwise show every extension a second time
+    /// under it, so each extension folder is hidden there via
+    /// <c>settings["files.exclude"]</c>. Merged into whatever the admin or
+    /// template layer already excludes; an extension's own key is always
+    /// forced to <c>true</c>. A non-object <c>settings</c> is left alone
+    /// rather than overwritten.
+    /// </summary>
+    private static void ExcludeExtensionFoldersFromRoot(JsonObject root, IReadOnlyList<string> folderPaths)
+    {
+        if (folderPaths.Count == 0) return;
+
+        if (!root.TryGetPropertyValue("settings", out var settingsNode) || settingsNode is null)
+        {
+            settingsNode = new JsonObject();
+            root["settings"] = settingsNode;
+        }
+        if (settingsNode is not JsonObject settings) return;
+
+        if (settings["files.exclude"] is not JsonObject exclude)
+        {
+            exclude = new JsonObject();
+            settings["files.exclude"] = exclude;
+        }
+        foreach (var path in folderPaths) exclude[path] = true;
     }
 
     /// <summary>
