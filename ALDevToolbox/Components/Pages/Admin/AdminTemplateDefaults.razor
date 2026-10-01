@@ -70,8 +70,10 @@
                         <label class="field__label" for="cfg-logo-path">Default logo path</label>
                         <input class="input" id="cfg-logo-path" type="text"
                                placeholder="e.g. ../.assets/images/logo.png"
+                               pattern="\s*(\.\.[\/\\])[A-Za-z0-9._\-]+([\/\\][A-Za-z0-9._\-]+)*\s*"
                                @bind="_logoPath" @bind:event="oninput" />
-                        <span class="field__hint">Where each extension looks for the logo below. Leave blank to omit it.</span>
+                        <span class="field__hint">Where each extension looks for the logo below, starting from its own folder. Leave blank to omit it.</span>
+                        <FieldError Field="@nameof(OrganizationSettingsInput.DefaultLogo)" Errors="_errors" />
                     </div>
 
                     @* IdRangeEditor rather than a hand-rolled pair, so this page gets

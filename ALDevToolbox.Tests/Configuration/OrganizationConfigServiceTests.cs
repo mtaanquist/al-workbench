@@ -4,6 +4,7 @@ using ALDevToolbox.Services;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using ALDevToolbox.Services.Organizations;
+using ALDevToolbox.Services.Generation;
 
 namespace ALDevToolbox.Tests.Configuration;
 
@@ -65,6 +66,65 @@ public sealed class OrganizationConfigServiceTests : IDisposable
         var act = () => svc.SaveSettingsAsync(input);
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey(expectedField);
+    }
+
+    // The logo path is relative to an extension folder, which sits directly
+    // under the workspace root: it must start with exactly one '../'.
+    [Theory]
+    [InlineData("../.assets/logo.png", "../.assets/logo.png")]
+    [InlineData("..\\.assets\\images\\logo.png", "../.assets/images/logo.png")]
+    [InlineData("  ../logo.svg  ", "../logo.svg")]
+    public async Task SaveSettings_accepts_logo_paths_at_the_workspace_root(string logo, string stored)
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = _db.NewOrganizationConfigService(ctx);
+            await svc.SaveSettingsAsync(new OrganizationSettingsInput(
+                "CRONUS", 50000, 50999, string.Empty, string.Empty, DefaultLogo: logo));
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = _db.NewOrganizationConfigService(ctx);
+            (await svc.GetCurrentAsync()).Settings.DefaultLogo.Should().Be(stored);
+        }
+    }
+
+    [Theory]
+    [InlineData("../../logo.png")]
+    [InlineData("../../../etc/passwd")]
+    [InlineData("..\\..\\logo.png")]
+    [InlineData("./../logo.png")]
+    [InlineData("../.assets/../../logo.png")]
+    [InlineData("images/../../logo.png")]
+    [InlineData("/etc/logo.png")]
+    [InlineData("..//logo.png")]
+    [InlineData("../")]
+    [InlineData("../.")]
+    [InlineData("../images/my logo.png")]
+    // No leading '../' points inside the extension folder, where no logo is written.
+    [InlineData(".assets/images/logo.png")]
+    [InlineData("./images/logo.png")]
+    public async Task SaveSettings_rejects_logo_paths_outside_the_workspace_root(string logo)
+    {
+        await using var ctx = _db.NewContext();
+        var svc = _db.NewOrganizationConfigService(ctx);
+        var act = () => svc.SaveSettingsAsync(new OrganizationSettingsInput(
+            "CRONUS", 50000, 50999, string.Empty, string.Empty, DefaultLogo: logo));
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey(nameof(OrganizationSettingsInput.DefaultLogo));
+    }
+
+    // The ZIP entry for an accepted path lands at the workspace root, where the
+    // app.json reference from an extension folder resolves to.
+    [Theory]
+    [InlineData("../.assets/logo.png", ".assets/logo.png")]
+    [InlineData("../.assets/images/logo.png", ".assets/images/logo.png")]
+    [InlineData("../logo.png", "logo.png")]
+    public void Accepted_logo_path_maps_to_a_workspace_root_entry(string logo, string entry)
+    {
+        OrganizationConfigService.IsValidLogoPath(logo).Should().BeTrue();
+        WorkspaceZipBuilder.NormaliseLogoPath(logo, "png").Should().Be(entry);
     }
 
     [Fact]

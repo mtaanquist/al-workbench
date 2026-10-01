@@ -94,7 +94,7 @@ public class OrganizationConfigService
         row.DefaultBrief = input.DefaultBrief?.Trim() ?? string.Empty;
         row.DefaultCoreDescription = input.DefaultCoreDescription?.Trim() ?? string.Empty;
         row.DefaultUrl = string.IsNullOrWhiteSpace(input.DefaultUrl) ? null : input.DefaultUrl.Trim();
-        row.DefaultLogo = string.IsNullOrWhiteSpace(input.DefaultLogo) ? null : input.DefaultLogo.Trim();
+        row.DefaultLogo = string.IsNullOrWhiteSpace(input.DefaultLogo) ? null : NormaliseLogoInput(input.DefaultLogo);
         // DefaultSupportedCountries is no longer surfaced in the admin form or
         // the TOML import (AppSourceCop.json moved into Always-included files or
         // per-template overrides). The entity column stays so older rows keep
@@ -502,21 +502,40 @@ public class OrganizationConfigService
             errors[nameof(input.DefaultIdRangeFrom)] = "Must be greater than zero.";
         if (input.DefaultIdRangeTo <= input.DefaultIdRangeFrom)
             errors[nameof(input.DefaultIdRangeTo)] = "Must be greater than 'from'.";
-        // The logo path is written verbatim into the generated app.json and a ZIP
-        // entry path. Validate it with the same single-relative-path / no-'..'
-        // rule as org files so a traversal value can't escape the extraction root
-        // on the end user's machine. See issue #369.
-        if (!string.IsNullOrWhiteSpace(input.DefaultLogo))
+        if (!string.IsNullOrWhiteSpace(input.DefaultLogo) && !IsValidLogoPath(input.DefaultLogo))
         {
-            var logo = input.DefaultLogo.Trim().Replace('\\', '/');
-            if (!PathRegex.IsMatch(logo) || logo.Contains(".."))
-            {
-                errors[nameof(input.DefaultLogo)] =
-                    "Use a relative path with letters, digits, '_', '-', '.' and '/'. No '..' segments.";
-            }
+            errors[nameof(input.DefaultLogo)] =
+                "Start with '../' to reach the workspace folder, then use letters, digits, '_', '-', '.' "
+                + "and '/', e.g. '../.assets/images/logo.png'.";
         }
         if (errors.Count > 0) throw new PlanValidationException(errors);
     }
+
+    /// <summary>
+    /// The logo path is written verbatim into each generated app.json, so it is
+    /// relative to an extension folder. Extension folders sit directly under the
+    /// workspace root, and the workspace build writes the logo file relative to
+    /// that root (<see cref="Generation.WorkspaceZipBuilder.NormaliseLogoPath"/>),
+    /// so the path must start with exactly one <c>../</c>: without it app.json
+    /// looks inside the extension where no logo is written, and a second one
+    /// leaves the workspace. The rest is a plain relative path with no <c>.</c>
+    /// or <c>..</c> segment, which also keeps the ZIP entry inside the
+    /// extraction root (issue #369). Backslashes count as <c>/</c>.
+    /// </summary>
+    internal static bool IsValidLogoPath(string logoPath)
+    {
+        var logo = NormaliseLogoInput(logoPath);
+        if (!logo.StartsWith("../", StringComparison.Ordinal)) return false;
+        var rest = logo[3..];
+        return PathRegex.IsMatch(rest) && !rest.Split('/').Any(static s => s is "." or "..");
+    }
+
+    /// <summary>
+    /// Trims and turns backslashes into <c>/</c>. The stored value is substituted
+    /// into a JSON string in app.json, where a backslash would be read as an
+    /// escape and break the file.
+    /// </summary>
+    private static string NormaliseLogoInput(string logoPath) => logoPath.Trim().Replace('\\', '/');
 
     /// <summary>
     /// Server-side validation for the workspace-settings JSON: must be
