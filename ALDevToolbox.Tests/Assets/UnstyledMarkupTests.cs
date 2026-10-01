@@ -112,7 +112,7 @@ public sealed class UnstyledMarkupTests
         "source-viewer--inline", "object-explorer", "oe-hero", "oe-release",
         "cb-card", "field__value", "piper-page", "icon-missing", "diff__ln--",
         "fdrop--options", "build-pill--", "rp-app__state--", "run-row--",
-        "status-pill--", "tok-", "folder-editor__row--depth-",
+        "status-pill--", "pcs__item--", "tok-", "folder-editor__row--depth-",
         // State words the markup toggles, always compounded onto a real class.
         "active", "collapsed", "gone", "is", "isChecked", "isCurrent", "isProd",
         "open", "over", "passed", "picked", "selected", "state", "status", "tab",

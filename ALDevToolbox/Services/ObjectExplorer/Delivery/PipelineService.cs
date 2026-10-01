@@ -98,6 +98,8 @@ public sealed class PipelineService
             RequestedAppIdsJson = selectionJson,
             GithubReleaseRepositoryId = releaseRepositoryId,
             Branch = branch,
+            PreviewCheck = input.PreviewCheck,
+            PreviewCheckByUserId = input.PreviewCheck ? _orgContext.CurrentUserId : null,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -109,7 +111,12 @@ public sealed class PipelineService
         return pipeline.Id;
     }
 
-    /// <summary>Updates a pipeline's name, extension selection, publishing target and branch.</summary>
+    /// <summary>
+    /// Updates a pipeline's name, extension selection, publishing target, branch and
+    /// nightly preview check. Turning the check on makes the caller the person it runs
+    /// as; so does saving while it is paused (its person gone or refused), which is
+    /// how someone with access takes it over.
+    /// </summary>
     public async Task UpdatePipelineAsync(int id, PipelineInput input, CancellationToken ct = default)
     {
         RequireOrganizationId();
@@ -125,9 +132,45 @@ public sealed class PipelineService
         pipeline.RequestedAppIdsJson = selectionJson;
         pipeline.GithubReleaseRepositoryId = releaseRepositoryId;
         pipeline.Branch = branch;
+        if (!input.PreviewCheck)
+        {
+            pipeline.PreviewCheckByUserId = null;
+            pipeline.PreviewCheckBlocked = null;
+        }
+        else if (!pipeline.PreviewCheck || pipeline.PreviewCheckByUserId is null || pipeline.PreviewCheckBlocked is not null)
+        {
+            pipeline.PreviewCheckByUserId = _orgContext.CurrentUserId;
+            pipeline.PreviewCheckBlocked = null;
+        }
+        pipeline.PreviewCheck = input.PreviewCheck;
         pipeline.UpdatedAt = DateTime.UtcNow;
         await SaveTranslatingNameClashAsync(ct);
         _logger.LogInformation("Updated pipeline {PipelineId} ({Name}).", pipeline.Id, name);
+    }
+
+    /// <summary>
+    /// Resumes a paused nightly preview check by making the caller the person it runs
+    /// as. Same rule as saving the pipeline while the check is paused.
+    /// </summary>
+    public async Task TakeOverPreviewCheckAsync(int id, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var pipeline = await _db.OePipelines
+            .FirstOrDefaultAsync(p => p.Id == id && p.DeletedAt == null, ct)
+            ?? throw Validation("Name", "This pipeline no longer exists.");
+        if (!pipeline.PreviewCheck) throw Validation("PreviewCheck", "This pipeline doesn't run the preview check.");
+
+        var ownerId = await _db.OeProjects.AsNoTracking()
+            .Where(c => c.Id == pipeline.ProjectId)
+            .Select(c => c.CreatedByUserId)
+            .FirstOrDefaultAsync(ct);
+        await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
+
+        pipeline.PreviewCheckByUserId = _orgContext.CurrentUserId;
+        pipeline.PreviewCheckBlocked = null;
+        pipeline.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Pipeline {PipelineId}'s preview check now runs as user {UserId}.", id, _orgContext.CurrentUserId);
     }
 
     /// <summary>Soft-deletes a pipeline. Its past builds stay reachable (their pipeline_id is nulled by the FK).</summary>
@@ -286,7 +329,13 @@ public sealed record PipelineInput(
     /// repository's default branch. See <c>.design/github-integration-phase2.md</c>,
     /// "Branch watching" (#963).
     /// </summary>
-    string? Branch = null);
+    string? Branch = null,
+    /// <summary>
+    /// Whether the pipeline also runs the nightly preview check against the next
+    /// minor and next major versions. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "The nightly preview check".
+    /// </summary>
+    bool PreviewCheck = false);
 
 /// <summary>A project choice for the "New pipeline" dialog's project picker.</summary>
 public sealed record PipelineProjectOption(int Id, string Name);

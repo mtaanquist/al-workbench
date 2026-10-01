@@ -457,7 +457,8 @@
 
     /// <summary>
     /// The picker's options from a build pipeline's builds: the successful ones, newest
-    /// first, each with the apps it carries. Shared by every page that opens this
+    /// first, each with the apps it carries. Preview builds are left out: they are
+    /// check-only and the deployment would refuse them (#994). Shared by every page that opens this
     /// dialog for a build pipeline, so the picker reads the same wherever it opens
     /// (#938). <paramref name="zone"/> is the page's display zone, for the build time.
     /// </summary>
@@ -466,7 +467,7 @@
         IReadOnlyDictionary<int, List<ALDevToolbox.Services.ObjectExplorer.Projects.BuildAppRow>> appsByBuild,
         ALDevToolbox.Services.Organizations.DisplayTimeZone zone) =>
         builds
-            .Where(b => b.Status == "ready")
+            .Where(b => b.Status == "ready" && !b.IsPreview)
             .OrderByDescending(b => b.FinishedAt ?? b.StartedAt)
             .Select(b =>
             {

@@ -143,6 +143,39 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
 
     // ── The release pipeline's artifact source ──────────────────────────────
 
+    // ── Nightly preview check (#994) ────────────────────────────────────────
+
+    [Fact]
+    public async Task The_pipeline_editor_offers_the_nightly_preview_check_off_by_default()
+    {
+        var seed = await SeedAsync();
+        _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
+
+        var cut = _ctx.Render<PipelineEditorDialog>();
+        await cut.InvokeAsync(() => cut.Instance.OpenForCreateAsync(seed.ProjectId, "CRONUS A/S"));
+
+        var box = cut.Find("#pe-preview-check");
+        box.HasAttribute("checked").Should().BeFalse("a new pipeline only builds what the extensions declare");
+        box.Closest("label")!.TextContent.Trim().Should().Be("Check against upcoming Business Central versions every night");
+        var caption = box.Closest(".field")!.QuerySelector(".field__hint")!.TextContent.Trim();
+        caption.Should().Be("Builds against Microsoft's previews of the next minor and next major Business Central versions, to catch breaking changes before they reach your customers. These preview builds can't be deployed; their results show beside the pipeline in the pipelines list.");
+        // The caption says what the person needs, not how the tool does it.
+        caption.Should().NotContainAny("insider", "artifact", "compiler", "scheduler");
+    }
+
+    [Fact]
+    public async Task Editing_a_pipeline_with_the_check_on_shows_it_ticked()
+    {
+        var seed = await SeedAsync();
+        _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
+
+        var cut = _ctx.Render<PipelineEditorDialog>();
+        await cut.InvokeAsync(() => cut.Instance.OpenForEditAsync(
+            seed.PipelineId, seed.ProjectId, "CRONUS A/S", "Nightly", null, previewCheck: true));
+
+        cut.Find("#pe-preview-check").HasAttribute("checked").Should().BeTrue();
+    }
+
     [Fact]
     public async Task The_release_editor_offers_the_two_sources_and_swaps_the_field_underneath()
     {

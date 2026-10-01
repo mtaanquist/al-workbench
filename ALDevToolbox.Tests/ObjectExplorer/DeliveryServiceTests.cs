@@ -69,6 +69,35 @@ public sealed class DeliveryServiceTests : IDisposable
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Build");
     }
 
+    [Theory]
+    [InlineData(ProjectBuildTarget.NextMinor)]
+    [InlineData(ProjectBuildTarget.NextMajor)]
+    public async Task ReleaseBuildNowAsync_refuses_a_preview_build(string target)
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await MakePreviewAsync(ctx, seed.BuildId, target);
+
+        var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        var errors = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors;
+        errors.Should().ContainKey("Build");
+        errors["Build"].Should().Contain("preview build");
+        (await _db.NewContext().OeProjectDeliveries.AnyAsync(d => d.ProjectBuildId == seed.BuildId)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ScheduleDeliveryAsync_refuses_a_preview_build_for_later_too()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await MakePreviewAsync(ctx, seed.BuildId, ProjectBuildTarget.NextMajor);
+
+        var act = () => NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddDays(1));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Build");
+    }
+
     [Fact]
     public async Task ReleaseBuildNowAsync_refuses_an_environment_that_is_upgrading()
     {
@@ -1061,6 +1090,18 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ProposeReleasesForBuildAsync_ignores_preview_builds()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        await MakePreviewAsync(ctx, seed.BuildId, ProjectBuildTarget.NextMajor);
+
+        (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Should().Be(0);
+        (await _db.NewContext().OeProjectDeliveries.AnyAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId)).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task ProposeReleasesForBuildAsync_schedules_by_the_delivery_window_rule()
     {
         await using var ctx = _db.NewContext();
@@ -1269,6 +1310,10 @@ public sealed class DeliveryServiceTests : IDisposable
         await approve.Should().ThrowAsync<PlanValidationException>();
         await dismiss.Should().ThrowAsync<PlanValidationException>();
     }
+
+    private static async Task MakePreviewAsync(AppDbContext ctx, int buildId, string target) =>
+        await ctx.OeProjectBuilds.Where(b => b.Id == buildId)
+            .ExecuteUpdateAsync(s => s.SetProperty(b => b.BcTarget, target));
 
     private static async Task PrepareOnNewBuildAsync(AppDbContext ctx, int releasePipelineId) =>
         await ctx.OeReleasePipelines.Where(r => r.Id == releasePipelineId)

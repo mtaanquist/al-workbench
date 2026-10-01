@@ -166,6 +166,50 @@ public sealed class PipelinesDashboardTests : IDisposable
     }
 
     [Fact]
+    public async Task The_failed_builds_tile_says_how_many_of_its_failures_are_preview_checks()
+    {
+        var projectId = await SeedSolutionAsync();
+        var broken = await SeedBuildPipelineAsync(projectId);
+        await SeedBuildAsync(projectId, broken, ProjectBuildStatus.Failed, _now.AddHours(-2));
+        int checkedPipeline;
+        await using (var ctx = _db.NewContext())
+        {
+            var pipeline = new OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "CRONUS Retail",
+                PreviewCheck = true, CreatedAt = _now, UpdatedAt = _now,
+            };
+            ctx.OePipelines.Add(pipeline);
+            await ctx.SaveChangesAsync();
+            checkedPipeline = pipeline.Id;
+        }
+        await SeedBuildAsync(projectId, checkedPipeline, ProjectBuildStatus.Ready, _now.AddHours(-3));
+        await using (var ctx = _db.NewContext())
+        {
+            // Its own build is green; last night's check against the next major is not.
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = checkedPipeline,
+                Status = ProjectBuildStatus.Failed, BcTarget = ProjectBuildTarget.NextMajor,
+                Trigger = ProjectBuildTrigger.PreviewCheck,
+                StartedAt = _now.AddHours(-1), FinishedAt = _now.AddMinutes(-56),
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<PipelinesDashboard>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var failed = cut.FindAll(".cue-grid a.cue")
+                .Single(t => t.QuerySelector(".cue__label")!.TextContent.Trim() == "Failed builds");
+            failed.QuerySelector(".cue__value")!.TextContent.Trim().Should().Be("2");
+            failed.QuerySelector(".cue__foot")!.TextContent.Trim().Should().Be("2 failed (1 in a preview check)");
+            failed.ClassList.Should().Contain("cue--attention");
+        });
+    }
+
+    [Fact]
     public async Task Empty_offers_the_first_build_pipeline_as_the_one_primary_button()
     {
         await SeedSolutionAsync();

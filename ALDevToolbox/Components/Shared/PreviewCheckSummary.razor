@@ -1,0 +1,71 @@
+@using ALDevToolbox.Services.ObjectExplorer.Projects
+
+@*
+    The nightly preview check's newest result per upcoming version - "Next minor:
+    Passed", "Next major: Failed" - each linking to that build on the pipeline page,
+    where its errors are. Shared by the pipelines list (one line in a row) and the
+    pipeline page (a card). Renders nothing when the check is off.
+    See .design/object-explorer-project-builds.md, "The nightly preview check".
+*@
+
+@if (Enabled)
+{
+    <span class="pcs" role="group" aria-label="Preview check">
+        @if (Blocked is { Length: > 0 })
+        {
+            @* A link, not a tooltip: the pipeline page says why and offers the fix. *@
+            <a class="pcs__item pcs__item--paused" href="@($"/pipelines/{PipelineId}")">
+                <Icon Name="circle-pause" Width="13" Height="13" />
+                <span>Preview check paused - see why</span>
+            </a>
+        }
+        else if (Results is not { Count: > 0 })
+        {
+            <span class="pcs__item pcs__item--waiting">
+                <Icon Name="moon" Width="13" Height="13" />
+                <span>Preview check hasn't run yet</span>
+            </span>
+        }
+        else
+        {
+            @foreach (var r in Results)
+            {
+                <a class="pcs__item pcs__item--@r.Outcome" href="@($"/pipelines/{PipelineId}?build={r.BuildId}")"
+                   title="@Title(r)">
+                    <Icon Name="@Glyph(r.Outcome)" Width="13" Height="13" />
+                    <span>@r.Label: @Word(r.Outcome)</span>
+                </a>
+            }
+        }
+    </span>
+}
+
+@code {
+    [Parameter, EditorRequired] public int PipelineId { get; set; }
+
+    /// <summary>Whether the pipeline has the check turned on.</summary>
+    [Parameter] public bool Enabled { get; set; }
+
+    [Parameter] public IReadOnlyList<PreviewCheckResult>? Results { get; set; }
+
+    /// <summary>Why the check could not start, when it couldn't.</summary>
+    [Parameter] public string? Blocked { get; set; }
+
+    internal static string Word(string outcome) => outcome switch
+    {
+        PreviewCheckOutcome.Passed => "Passed",
+        PreviewCheckOutcome.Failed => "Failed",
+        _ => "Running",
+    };
+
+    private static string Glyph(string outcome) => outcome switch
+    {
+        PreviewCheckOutcome.Passed => "circle-check",
+        PreviewCheckOutcome.Failed => "circle-x",
+        _ => "refresh-cw",
+    };
+
+    private static string Title(PreviewCheckResult r) => r.BcArtifactVersion is { Length: > 0 } version
+        ? $"{r.Label} ({version}): {Word(r.Outcome)}"
+        : $"{r.Label}: {Word(r.Outcome)}";
+}

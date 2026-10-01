@@ -18,6 +18,9 @@ internal sealed class PipelineConfiguration : IEntityTypeConfiguration<OePipelin
         entity.Property(e => e.RequestedAppIdsJson).HasColumnName("requested_app_ids_json");
         entity.Property(e => e.GithubReleaseRepositoryId).HasColumnName("github_release_repository_id");
         entity.Property(e => e.Branch).HasColumnName("branch").HasMaxLength(255);
+        entity.Property(e => e.PreviewCheck).HasColumnName("preview_check").HasDefaultValue(false).IsRequired();
+        entity.Property(e => e.PreviewCheckByUserId).HasColumnName("preview_check_by_user_id");
+        entity.Property(e => e.PreviewCheckBlocked).HasColumnName("preview_check_blocked").HasMaxLength(500);
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
         entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");
@@ -38,6 +41,13 @@ internal sealed class PipelineConfiguration : IEntityTypeConfiguration<OePipelin
         entity.HasOne(e => e.CreatedByUser)
             .WithMany()
             .HasForeignKey(e => e.CreatedByUserId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        // Who the nightly preview check runs as. SET NULL on delete, which pauses
+        // the check rather than removing the pipeline.
+        entity.HasOne(e => e.PreviewCheckByUser)
+            .WithMany()
+            .HasForeignKey(e => e.PreviewCheckByUserId)
             .OnDelete(DeleteBehavior.SetNull);
 
         // The build relationship is configured from the ProjectBuild side; don't

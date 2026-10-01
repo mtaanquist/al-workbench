@@ -51,6 +51,67 @@ public sealed class ProjectBuildImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task StartBuildAsync_builds_against_the_current_version()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+
+        var releaseId = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+
+        await using var read = _db.NewContext();
+        var build = await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId);
+        build.BcTarget.Should().Be(ProjectBuildTarget.Current);
+        build.Trigger.Should().Be(ProjectBuildTrigger.Manual);
+    }
+
+    [Theory]
+    [InlineData(ProjectBuildTarget.NextMinor)]
+    [InlineData(ProjectBuildTarget.NextMajor)]
+    public async Task StartPreviewCheckAsync_queues_a_check_build_of_the_pipeline(string target)
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var queue = new ReleaseImportQueue();
+
+        var releaseId = await NewImporter(ctx, queue).StartPreviewCheckAsync(pipelineId, target);
+
+        await using var read = _db.NewContext();
+        var build = await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId);
+        build.BcTarget.Should().Be(target);
+        build.Trigger.Should().Be(ProjectBuildTrigger.PreviewCheck);
+        build.PipelineId.Should().Be(pipelineId);
+    }
+
+    [Fact]
+    public async Task StartPreviewCheckAsync_refuses_the_current_version()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.Current);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public async Task A_pull_request_build_always_builds_against_the_current_version()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+
+        var (_, buildId) = await NewImporter(ctx, new ReleaseImportQueue()).StartPullRequestBuildAsync(
+            projectId, repositoryId, "cronus/core", installationId: 1, headSha: new string('a', 40),
+            headRef: "feature/vat", pullRequestNumber: 7, checkRunId: null);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.SingleAsync(b => b.Id == buildId)).BcTarget.Should().Be(ProjectBuildTarget.Current);
+    }
+
+    [Fact]
     public async Task StartBuildAsync_stores_null_when_the_pipeline_builds_everything()
     {
         await using var ctx = _db.NewContext();

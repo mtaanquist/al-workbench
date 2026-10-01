@@ -178,6 +178,7 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `DISABLE_BCQUALITY_REFRESH`                   | `1` to disable the daily mirror of Microsoft's BCQuality knowledge base. | unset    |
 | `DISABLE_RELEASE_AUTO_IMPORT_SCHEDULER`       | `1` to disable the daily auto-import of new Microsoft OnPrem releases for orgs that opted in. | unset |
 | `DISABLE_DELIVERY_SCHEDULER`                  | `1` to disable the scheduler that enqueues due deliveries, so scheduled publishes never fire. | unset |
+| `DISABLE_PREVIEW_CHECK_SCHEDULER`             | `1` to disable the nightly preview check, so pipelines never build against the next minor or next major preview. | unset |
 | `DISABLE_ENVIRONMENT_REFRESH_SCHEDULER`       | `1` to disable the nightly refresh of Business Central environment data behind the Upgrades page. | unset |
 | `DISABLE_GITHUB_REPOSITORY_DISCOVERY_SCHEDULER` | `1` to disable the daily sweep that lists the connected GitHub organisation's repositories and offers the AL ones no solution tracks yet. | unset |
 | `DISABLE_TRANSLATION_MEMORY_INGEST_SCHEDULER` | `1` to disable the nightly pass that fills the translation memory from the `.xlf` files in each organisation's own repositories. | unset |

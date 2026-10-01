@@ -191,10 +191,14 @@ public sealed class DetailHeadTests
     {
         var markup = StripComments(Read("ALDevToolbox/Components/Pages/Pipelines/PipelineBuilds.razor"));
 
-        Regex.Matches(markup, @"<StatusPill\s").Count.Should().Be(1,
+        // Pills that say the build's state. The "Preview build" pill beside it (#994)
+        // says a different fact - what the build was compiled against - so it does not count.
+        Regex.Matches(markup, @"<StatusPill\s+Tone=""@RowStateIcon\.PillTone\(").Count.Should().Be(1,
             because: "the build's state belongs beside the page title, where the archetype "
                    + "puts it. The Latest-build card had a second pill saying the same word, "
                    + "which reads as two different facts until you look twice");
+        Regex.Matches(markup, @"<StatusPill\s").Count.Should().Be(2,
+            because: "the only other pill is the Preview build one beside the state");
     }
 
     [Fact]

@@ -251,9 +251,21 @@ public sealed class DeliveryService
 
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.Id == projectBuildId)
-            .Select(b => new { b.Id, b.ProjectId, b.PipelineId, b.Status, b.GithubReleaseTag })
+            .Select(b => new { b.Id, b.ProjectId, b.PipelineId, b.Status, b.GithubReleaseTag, b.BcTarget })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("Build", "That build no longer exists.");
+
+        // A preview build is a check: compiled against a Business Central version the
+        // customers don't run yet, from manifests that still name the current one, so
+        // it would install on today's environment while built for tomorrow's. Refused
+        // here, the one place every deployment passes through - the dialog, an
+        // approval, a prepared deployment and the agent's deploy_build alike. See
+        // .design/object-explorer-project-builds.md, "Building against the next version".
+        if (ProjectBuildTarget.IsPreview(build.BcTarget))
+        {
+            throw Validation("Build",
+                "That is a preview build. It was compiled against an upcoming Business Central version to check for breaking changes, so it can't be deployed.");
+        }
 
         // Which builds this pipeline may publish depends on where it draws its apps
         // from. A build pipeline's own runs, or - for a Release-sourced pipeline - a
@@ -357,18 +369,19 @@ public sealed class DeliveryService
     /// valid - is skipped with a warning in the log, never an error: the build is fine.
     /// Called by the build worker under the build's own organisation once it is ready;
     /// needs no access check, because preparing sends nothing and approving checks.
-    /// Pull-request builds are never prepared. Returns how many were prepared.
+    /// Pull-request builds and preview builds are never prepared. Returns how many were prepared.
     /// </summary>
     public async Task<int> ProposeReleasesForBuildAsync(int projectBuildId, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.Id == projectBuildId)
-            .Select(b => new { b.Id, b.PipelineId, b.Status, b.Trigger })
+            .Select(b => new { b.Id, b.PipelineId, b.Status, b.Trigger, b.BcTarget })
             .FirstOrDefaultAsync(ct);
         if (build?.PipelineId is not { } buildPipelineId
             || build.Status != ProjectBuildStatus.Ready
-            || build.Trigger == ProjectBuildTrigger.PullRequest)
+            || build.Trigger == ProjectBuildTrigger.PullRequest
+            || ProjectBuildTarget.IsPreview(build.BcTarget))
         {
             return 0;
         }

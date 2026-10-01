@@ -185,10 +185,15 @@ public sealed class GitHubReleaseService
                 RepositoryUrl = b.Pipeline.GithubReleaseRepository!.Url,
                 RepositoryProvider = (RepositoryProvider?)b.Pipeline.GithubReleaseRepository.Provider,
                 PipelineName = b.Pipeline.Name,
+                b.BcTarget,
             })
             .FirstOrDefaultAsync(ct);
 
-        if (build is null || build.RepositoryId is null)
+        // A preview build compiled against a Business Central version the customers
+        // don't run yet, from manifests that still name the current one: a release
+        // of it would install on today's environments while built for tomorrow's.
+        // It is a check, so it is never tagged, whatever the pipeline names.
+        if (build is null || build.RepositoryId is null || ProjectBuildTarget.IsPreview(build.BcTarget))
         {
             return GitHubReleasePublishResult.NotRequested;
         }

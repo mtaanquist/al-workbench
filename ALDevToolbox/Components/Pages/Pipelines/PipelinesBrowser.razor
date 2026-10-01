@@ -205,6 +205,12 @@
                                     {
                                         <span class="cell-stack__sub"><FreshnessLine Summary="@fresh" /></span>
                                     }
+                                    @if (p.PreviewCheck)
+                                    {
+                                        <span class="cell-stack__sub">
+                                            <PreviewCheckSummary PipelineId="@p.Id" Enabled="true" Results="@p.PreviewChecks" Blocked="@p.PreviewCheckBlocked" />
+                                        </span>
+                                    }
                                 </div>
                                 @if (ready && _canBuild.Contains(p.Id))
                                 {
@@ -358,7 +364,7 @@
         : _statusFilter switch
         {
             "building" => _rows.Where(p => p.Latest?.Status is "building" or "queued").ToList(),
-            "failed" => _rows.Where(p => p.Latest?.Status == "failed").ToList(),
+            "failed" => _rows.Where(IsFailing).ToList(),
             "ready" => _rows.Where(IsReady).ToList(),
             _ => _rows,
         };
@@ -380,7 +386,7 @@
         var all = await Artifacts.ListPipelinesAsync();
         _totalCount = all.Count;
         _buildingCount = all.Count(p => p.Latest?.Status is "building" or "queued");
-        _failedCount = all.Count(p => p.Latest?.Status == "failed");
+        _failedCount = all.Count(IsFailing);
 
         var freshness = await Freshness.ListAsync();
         _summaries = freshness.ToDictionary(f => f.PipelineId, PipelineFreshnessSummary.From);
@@ -389,6 +395,15 @@
 
         _rows = string.IsNullOrEmpty(_search) ? all : await Artifacts.ListPipelinesAsync(_search);
     }
+
+    /// <summary>
+    /// Failing: the newest build failed, or the nightly preview check against an
+    /// upcoming version did not pass (#994). Same rule as the dashboard's Failed
+    /// builds tile, which links here.
+    /// </summary>
+    private static bool IsFailing(PipelineArtifactsRow p) =>
+        p.Latest?.Status == "failed"
+        || (p.PreviewChecks?.Any(c => c.Outcome == PreviewCheckOutcome.Failed) ?? false);
 
     /// <summary>
     /// The branch has moved past the last build and nothing is building it already: a

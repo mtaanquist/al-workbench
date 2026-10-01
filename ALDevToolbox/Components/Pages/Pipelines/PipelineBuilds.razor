@@ -17,6 +17,7 @@
 @using ALDevToolbox.Services.ObjectExplorer.Projects
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
+@using ALDevToolbox.Domain.Entities.ObjectExplorer
 
 @*
     One pipeline's builds: the Build action (runs the pipeline's saved extension
@@ -74,6 +75,14 @@
             <StatusPill Tone="@RowStateIcon.PillTone(_latest.Status)">
                 <span>@RowStateIcon.StateLabel(_latest.Status)</span>
             </StatusPill>
+            @if (_latest.IsPreview)
+            {
+                @* Beside the state, because it changes what that state means: a
+                   red preview build is the check doing its job (#994). *@
+                <StatusPill Tone="info" title="Compiled against an upcoming Business Central version to catch breaking changes. Preview builds cannot be deployed.">
+                    <span>Preview build</span>
+                </StatusPill>
+            }
         }
     </TitleRow>
     <SubtitleContent>
@@ -116,9 +125,18 @@
             <span class="meta-item__label">Builds</span>
             <span class="meta-item__value">@_builds.Count</span>
         </span>
+        @if (_header!.PreviewCheck)
+        {
+            <span class="meta-item">
+                <span class="meta-item__label">Preview check</span>
+                <span class="meta-item__value">
+                    <PreviewCheckSummary PipelineId="@PipelineId" Enabled="true" Results="@_header!.PreviewChecks" Blocked="@_header!.PreviewCheckBlocked" />
+                </span>
+            </span>
+        }
         <span class="meta-item">
             <span class="meta-item__label">Latest BC</span>
-            <span class="meta-item__value meta-item__value--mono">@(_latest?.BcVersion is { Length: > 0 } mb ? mb : "—")</span>
+            <span class="meta-item__value meta-item__value--mono">@(_latest is not null && BcShown(_latest) is { Length: > 0 } mb ? mb : "—")</span>
         </span>
         <span class="meta-item">
             <span class="meta-item__label">Last build</span>
@@ -136,6 +154,19 @@
         @if (_buildError is { } be)
         {
             <Alert Tone="AlertTone.Danger"><span>@be</span></Alert>
+        }
+
+        @if (_header!.PreviewCheckBlocked is { Length: > 0 } paused)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>The nightly preview check is paused: @paused</span>
+                @if (_canManage)
+                {
+                    <button type="button" class="btn btn--sm" @onclick="TakeOverPreviewCheckAsync" disabled="@_takingOver">
+                        <span>@(_takingOver ? "Saving..." : "Run the check as me")</span>
+                    </button>
+                }
+            </Alert>
         }
 
         @if (_releaseNote is { } note)
@@ -306,7 +337,11 @@
                     @* ── Latest build ──────────────────────────────────── *@
                     <section class="card">
                         <div class="card__head">
-                            <h2 class="card__title">Latest build</h2>
+                            <h2 class="card__title">@HeroTitle</h2>
+                            @if (_showingOther)
+                            {
+                                <a class="btn btn--sm btn--ghost" href="@($"/pipelines/{PipelineId}")">Back to the latest build</a>
+                            }
                             @* No pill here: the head already carries this build's
                                state beside the page title, and two pills saying
                                the same word is one too many. No commit hash
@@ -333,12 +368,23 @@
                                 {
                                     <span class="commit-chip"><Icon Name="git-branch" Width="11" Height="11" />@_latest.Branch</span>
                                 }
-                                @if (!string.IsNullOrEmpty(_latest.BcVersion))
+                                @if (BcShown(_latest) is { Length: > 0 } builtOn)
                                 {
-                                    <span class="pb-topline__meta">BC @_latest.BcVersion</span>
+                                    <span class="pb-topline__meta">on BC @builtOn</span>
                                 }
                                 <span class="pb-topline__meta pb-topline__when" title="@StartedBy(_latest)">@StartedVerb(_latest) <Timestamp Value="@StartedWhen(_latest)" Relative="true" /></span>
                             </div>
+
+                            @* The tooltip on the head's pill is not enough on its own: touch
+                               and keyboard users never see it (#994). *@
+                            @if (_latest.IsPreview)
+                            {
+                                <p class="pb-note">
+                                    This preview build checks your extensions against the @ProjectBuildTarget.Label(_latest.BcTarget).ToLowerInvariant()
+                                    Business Central version@(BcShown(_latest) is { Length: > 0 } previewOn ? $" ({previewOn})" : ""). It can't be deployed;
+                                    fix any errors before that version reaches your customers.
+                                </p>
+                            }
 
                             @* What the compiler said, as a count rather than as a log to
                                read. Only shown once the build has something to count -
@@ -556,6 +602,15 @@
                                             {
                                                 <span class="u-muted">No commit details</span>
                                             }
+                                            @if (b.IsPreview)
+                                            {
+                                                <a class="tag pb-preview" href="@($"/pipelines/{PipelineId}?build={b.Id}")"
+                                                   title="Show this preview build">@ProjectBuildTarget.Label(b.BcTarget) preview build</a>
+                                            }
+                                            @if (BcShown(b) is { Length: > 0 } rowBc)
+                                            {
+                                                <span class="pb-more">on BC @rowBc</span>
+                                            }
                                         </td>
                                         <td>@(string.IsNullOrEmpty(b.Branch) ? "—" : b.Branch)</td>
                                         <td><Timestamp Value="@(b.FinishedAt ?? b.StartedAt)" Relative="true" /></td>
@@ -571,7 +626,7 @@
                                             }
                                             else if (b.ArtifactCount > 0)
                                             {
-                                                @if (b.Status == "ready" && _canManage)
+                                                @if (b.Status == "ready" && _canManage && !b.IsPreview)
                                                 {
                                                     <button type="button" class="btn btn--sm" @onclick="() => StartReleaseAsync(b)"
                                                             disabled="@_openingRelease" aria-label="@($"Deploy build #{b.Id}")">
@@ -772,6 +827,14 @@
 @code {
     [Parameter] public int PipelineId { get; set; }
 
+    /// <summary>
+    /// A build to show in place of the latest one, which is how a preview check's
+    /// result links to its errors (#994). Ignored when it is not one of this
+    /// pipeline's builds.
+    /// </summary>
+    [SupplyParameterFromQuery(Name = "build")] public int? BuildId { get; set; }
+    private int? _loadedBuildId;
+
     private bool _loading = true;
     private bool _notFound;
     private bool _inFlight;
@@ -829,9 +892,59 @@
     protected override async Task OnInitializedAsync()
     {
         await Zone.EnsureLoadedAsync();
+        _loadedBuildId = BuildId;
         await LoadAsync();
         _loading = false;
         if (_inFlight) StartPoll();
+    }
+
+    /// <summary>A link to another build of this pipeline lands here, not in a fresh page.</summary>
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loading || BuildId == _loadedBuildId) return;
+        _loadedBuildId = BuildId;
+        await LoadAsync();
+        if (_inFlight) StartPoll();
+    }
+
+    /// <summary>
+    /// The build the hero shows: the one asked for, else the newest build of the
+    /// pipeline's own. The nightly preview check's builds are left out of "latest",
+    /// so a red check never reads as the pipeline being broken - unless they are all
+    /// there is.
+    /// </summary>
+    private static BuildRow? Shown(List<BuildRow> builds, int? buildId) =>
+        (buildId is { } id ? builds.FirstOrDefault(b => b.Id == id) : null)
+        ?? builds.FirstOrDefault(b => !b.IsPreview)
+        ?? builds.FirstOrDefault();
+
+    /// <summary>True when the hero shows something other than the latest build.</summary>
+    private bool _showingOther;
+
+    private string HeroTitle => _latest is null || !_showingOther
+        ? "Latest build"
+        : _latest.IsPreview ? $"{ProjectBuildTarget.Label(_latest.BcTarget)} preview build #{_latest.Id}" : $"Build #{_latest.Id}";
+
+    private bool _takingOver;
+
+    /// <summary>Resumes a paused preview check, running it as the person who pressed the button from now on.</summary>
+    private async Task TakeOverPreviewCheckAsync()
+    {
+        if (_takingOver) return;
+        _takingOver = true;
+        try
+        {
+            await Pipelines.TakeOverPreviewCheckAsync(PipelineId);
+            await LoadAsync();
+        }
+        catch (PlanValidationException ex)
+        {
+            _buildError = ex.Errors.Values.FirstOrDefault();
+        }
+        finally
+        {
+            _takingOver = false;
+        }
     }
 
     /// <summary>Everything one page load reads, so a background poll can gather it
@@ -867,7 +980,7 @@
 
             var canManage = await pipelines.CanManageAsync(PipelineId, ct);
             var builds = await artifacts.ListBuildsAsync(PipelineId, ct);
-            var latest = builds.FirstOrDefault();
+            var latest = Shown(builds, BuildId);
             var latestDetail = latest is null ? null : await artifacts.GetBuildDetailAsync(latest.Id, ct);
             var comparable = await artifacts.ListComparableBuildsAsync(PipelineId, ct);
             var inFlight = await artifacts.HasBuildInFlightAsync(PipelineId, ct);
@@ -888,13 +1001,18 @@
         _header = s.Header;
         _canManage = s.CanManage;
         _builds = s.Builds;
-        _latest = s.Builds.FirstOrDefault();
+        _latest = Shown(s.Builds, BuildId);
+        _showingOther = _latest is not null && _latest.Id != Shown(s.Builds, null)?.Id;
         _latestDetail = s.LatestDetail;
         _comparable = s.Comparable;
-        if (_comparable.Count >= 2)
+        // Preselect the pipeline's own two newest builds; the nightly preview check's
+        // builds stay in the lists, labelled, but are not the default comparison.
+        var defaults = _comparable.Where(c => !ProjectBuildTarget.IsPreview(c.BcTarget)).ToList();
+        if (defaults.Count < 2) defaults = _comparable;
+        if (defaults.Count >= 2)
         {
-            _compareLeft = _comparable[0].ReleaseId;
-            _compareRight = _comparable[1].ReleaseId;
+            _compareLeft = defaults[0].ReleaseId;
+            _compareRight = defaults[1].ReleaseId;
         }
         _inFlight = s.InFlight;
         _freshness = s.Freshness;
@@ -1124,7 +1242,7 @@
         if (pipeline is null || _editor is null) return;
         await _editor.OpenForEditAsync(
             pipeline.Id, pipeline.ProjectId, pipeline.Project?.Name ?? _header?.ProjectName ?? "",
-            pipeline.Name, pipeline.RequestedAppIdsJson, pipeline.GithubReleaseRepositoryId, pipeline.Branch);
+            pipeline.Name, pipeline.RequestedAppIdsJson, pipeline.GithubReleaseRepositoryId, pipeline.Branch, pipeline.PreviewCheck);
     }
 
     private async Task OnPipelineSavedAsync(int _)
@@ -1215,10 +1333,19 @@
     }
 
     /// <summary>
+    /// The Business Central version a build compiled against, as exact as it was
+    /// recorded: the full build number where there is one ("29.0.52914.0"), else the
+    /// Major.Minor older builds carry.
+    /// </summary>
+    private static string? BcShown(BuildRow b) =>
+        b.BcArtifactVersion is { Length: > 0 } exact ? exact : b.BcVersion;
+
+    /// <summary>
     /// The hero's verb before its relative build time ("Built 2 days ago"). The time
     /// itself is a Timestamp, whose hover title is the exact instant; who started the
     /// build is the hover title around it.
     /// </summary>
+
     private static string StartedVerb(BuildRow b) => b.Status switch
     {
         "ready" => "Built",
@@ -1253,7 +1380,8 @@
 
     /// <summary>A build in the compare picker. An option holds text only, so the time goes through the display zone here rather than through a Timestamp.</summary>
     private string BuildLabel(ComparableBuildRow c) =>
-        $"{Zone.Format(c.StartedAt, "yyyy-MM-dd HH:mm")}{(string.IsNullOrEmpty(c.BcVersion) ? "" : $" · BC {c.BcVersion}")}";
+        $"{Zone.Format(c.StartedAt, "yyyy-MM-dd HH:mm")}{(string.IsNullOrEmpty(c.BcVersion) ? "" : $" · BC {c.BcVersion}")}"
+        + (ProjectBuildTarget.IsPreview(c.BcTarget) ? $" · {ProjectBuildTarget.Label(c.BcTarget)} preview" : "");
 
     private static string Short(string hash) => hash.Length > 7 ? hash[..7] : hash;
 

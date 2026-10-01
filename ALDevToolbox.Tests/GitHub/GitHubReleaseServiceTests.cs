@@ -200,6 +200,32 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         api.Calls.Should().BeEmpty();
     }
 
+    [Theory]
+    [InlineData(ProjectBuildTarget.NextMinor)]
+    [InlineData(ProjectBuildTarget.NextMajor)]
+    public async Task A_preview_build_is_never_tagged_even_when_the_pipeline_publishes(string target)
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectBuilds.Where(b => b.Id == seed.BuildId)
+                .ExecuteUpdateAsync(s => s.SetProperty(b => b.BcTarget, target));
+        }
+        var api = PublishableApi(existingRelease: false);
+
+        await using var svcCtx = _db.NewContext();
+        var result = await NewService(svcCtx, api).PublishBuildAsync(seed.BuildId);
+
+        result.Published.Should().BeFalse();
+        result.Error.Should().BeNull("a preview build was never asked to be published, so nothing failed");
+        api.Calls.Should().BeEmpty();
+        await using var verify = _db.NewContext();
+        var build = await verify.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.Id == seed.BuildId);
+        build.GithubReleaseTag.Should().BeNull();
+        build.Status.Should().Be(ProjectBuildStatus.Ready);
+    }
+
     [Fact]
     public async Task The_outcome_is_written_onto_the_build_and_into_its_log()
     {

@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Components;
 using ALDevToolbox.Components.Pages.Pipelines;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
@@ -351,6 +352,116 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
             // They can still download - only the release is withheld.
             cut.FindAll(".data-table__actions a").Should().HaveCount(2);
             cut.FindAll(".data-table__actions button").Should().BeEmpty();
+        });
+    }
+
+    // ── Nightly preview check (#994) ────────────────────────────────────────
+
+    /// <summary>
+    /// The pipeline has the check on, and the newer build becomes last night's check
+    /// against the next major. The older build stays the pipeline's own.
+    /// </summary>
+    private async Task MakeNewerAPreviewCheckAsync(Seed seed)
+    {
+        await using var ctx = _db.NewContext();
+        await ctx.OePipelines.Where(p => p.Id == seed.PipelineId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.PreviewCheck, true));
+        await ctx.OeProjectBuilds.Where(b => b.Id == seed.NewerBuildId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(b => b.BcTarget, ProjectBuildTarget.NextMajor)
+                .SetProperty(b => b.Trigger, ProjectBuildTrigger.PreviewCheck)
+                .SetProperty(b => b.BcVersion, "29.0")
+                .SetProperty(b => b.BcArtifactVersion, "29.0.52914.0"));
+        await ctx.OeProjectBuilds.Where(b => b.Id == seed.OlderBuildId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(b => b.BcVersion, "28.4")
+                .SetProperty(b => b.BcArtifactVersion, "28.4.47110.0"));
+    }
+
+    [Fact]
+    public async Task The_latest_build_stays_the_pipelines_own_and_the_check_result_sits_beside_it()
+    {
+        var seed = await SeedAsync();
+        await MakeNewerAPreviewCheckAsync(seed);
+
+        var cut = RenderPage(seed);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".detail-head .status-pill").Select(p => p.TextContent.Trim()).Should().NotContain("Preview build");
+            cut.Find(".pb-topline").TextContent.Should().Contain("on BC 28.4.47110.0");
+            var result = cut.Find(".pcs a.pcs__item");
+            result.TextContent.Trim().Should().Be("Next major: Passed");
+            result.GetAttribute("href").Should().Be($"/pipelines/{seed.PipelineId}?build={seed.NewerBuildId}");
+        });
+    }
+
+    [Fact]
+    public async Task Following_a_check_result_shows_that_build_with_a_Preview_build_pill()
+    {
+        var seed = await SeedAsync();
+        await MakeNewerAPreviewCheckAsync(seed);
+
+        var nav = _ctx.Services.GetRequiredService<NavigationManager>();
+        nav.NavigateTo(nav.GetUriWithQueryParameter("build", seed.NewerBuildId));
+        var cut = _ctx.Render<PipelineBuilds>(p => p.Add(c => c.PipelineId, seed.PipelineId));
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".detail-head .status-pill").Select(p => p.TextContent.Trim()).Should().Contain("Preview build");
+            cut.Find(".pb-topline").TextContent.Should().Contain("on BC 29.0.52914.0");
+            cut.Markup.Should().Contain($"Next major preview build #{seed.NewerBuildId}");
+            cut.Markup.Should().Contain("Back to the latest build");
+        });
+    }
+
+    [Fact]
+    public async Task A_check_builds_row_says_so_and_offers_no_deploy()
+    {
+        var seed = await SeedAsync();
+        await SeedReleasePipelineAsync(seed, "CRONUS App → Production", seed.ProductionEnvId);
+        await MakeNewerAPreviewCheckAsync(seed);
+
+        var cut = RenderPage(seed);
+
+        cut.WaitForAssertion(() =>
+        {
+            var rows = cut.FindAll(".data-table tbody tr");
+            rows[0].TextContent.Should().Contain("Next major preview build").And.Contain("on BC 29.0.52914.0");
+            rows[1].TextContent.Should().NotContain("preview").And.Contain("on BC 28.4.47110.0");
+            cut.FindAll(ReleaseButton(seed.NewerBuildId)).Should().BeEmpty("a preview build cannot be deployed");
+            cut.FindAll(ReleaseButton(seed.OlderBuildId)).Should().ContainSingle();
+        });
+    }
+
+    [Fact]
+    public async Task The_deploy_dialog_leaves_preview_builds_out_of_its_list()
+    {
+        var seed = await SeedAsync();
+        await SeedReleasePipelineAsync(seed, "CRONUS App → Production", seed.ProductionEnvId);
+        await MakeNewerAPreviewCheckAsync(seed);
+        var cut = RenderPage(seed);
+
+        ActThen(cut,
+            () => cut.Find(ReleaseButton(seed.OlderBuildId)).Click(),
+            () => cut.Find("#rb-title").TextContent.Should().Be("Deploy to CRONUS Denmark — Production"));
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll("#rb-build option").Select(o => o.GetAttribute("value"))
+                .Should().Equal(seed.OlderBuildId.ToString()));
+    }
+
+    [Fact]
+    public async Task A_pipeline_without_the_check_shows_neither_the_pill_nor_the_check()
+    {
+        var seed = await SeedAsync();
+
+        var cut = RenderPage(seed);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".detail-head .status-pill").Select(p => p.TextContent.Trim()).Should().NotContain("Preview build");
+            cut.Markup.Should().NotContain("Preview check");
         });
     }
 

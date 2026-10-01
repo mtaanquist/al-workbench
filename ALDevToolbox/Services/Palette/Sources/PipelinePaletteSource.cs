@@ -91,7 +91,7 @@ public sealed class PipelinePaletteSource : IPaletteSource
                 ProjectName = p.Project!.Name,
                 ProjectShortName = p.Project.ShortName,
                 Latest = _db.OeProjectBuilds
-                    .Where(b => b.PipelineId == p.Id)
+                    .Where(b => b.PipelineId == p.Id && b.BcTarget == ProjectBuildTarget.Current)
                     .OrderByDescending(b => b.StartedAt)
                     .Select(b => new { b.Status, b.StartedAt, b.FinishedAt })
                     .FirstOrDefault(),

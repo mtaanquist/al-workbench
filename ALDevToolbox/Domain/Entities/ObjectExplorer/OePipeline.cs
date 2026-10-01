@@ -64,6 +64,31 @@ public class OePipeline
     /// </summary>
     public string? Branch { get; set; }
 
+    /// <summary>
+    /// Whether this pipeline also runs the nightly preview check: a build against
+    /// Microsoft's next minor and next major preview versions, each recorded as an
+    /// <see cref="OeProjectBuild"/> whose <see cref="OeProjectBuild.BcTarget"/> says
+    /// which. The pipeline's own builds stay on the current version. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "The nightly preview check".
+    /// </summary>
+    public bool PreviewCheck { get; set; }
+
+    /// <summary>
+    /// Who turned the preview check on. The nightly builds run as this person, the
+    /// way a scheduled upgrade action runs as its requester: the clone uses their
+    /// repository access and the build is theirs on the page. Null once that user is
+    /// deleted, which pauses the check until someone turns it on again.
+    /// </summary>
+    public int? PreviewCheckByUserId { get; set; }
+    public User? PreviewCheckByUser { get; set; }
+
+    /// <summary>
+    /// Why the last night's preview check could not start (the person who turned it
+    /// on lost access, the solution has no country), shown on the pipeline. Null when
+    /// the last attempt queued its builds.
+    /// </summary>
+    public string? PreviewCheckBlocked { get; set; }
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 

@@ -123,6 +123,26 @@ public sealed class ProjectBuildService
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
         }
 
+        // The build row carries the target it was started with (so a restart-resumed
+        // job builds the same thing). An explicit target in the options wins, which is
+        // how a caller with no pipeline asks for one.
+        if (options.Target == BcBuildTarget.Current && build is not null)
+        {
+            options = options with { Target = ProjectBuildTarget.ToBuildTarget(build.BcTarget) };
+        }
+        else if (build is not null && ProjectBuildTarget.ToBuildTarget(build.BcTarget) != options.Target)
+        {
+            // Every guard (publishing, deploying, symbols) reads the row, so the row has
+            // to say what was actually built.
+            build.BcTarget = options.Target switch
+            {
+                BcBuildTarget.NextMinor => ProjectBuildTarget.NextMinor,
+                BcBuildTarget.NextMajor => ProjectBuildTarget.NextMajor,
+                _ => ProjectBuildTarget.Current,
+            };
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
+
         // A next-major build compiles with the newest beta compiler, because the
         // stable one may not read the next major's symbols; everything else keeps
         // the stable compiler every build has used.
@@ -141,9 +161,10 @@ public sealed class ProjectBuildService
         try
         {
             // 1. Clone every repo. A clone failure fails only that repo.
-            // A manual build checks out the branch its pipeline watches; a
-            // pull-request build keeps its own head and ignores it (#963).
-            var branch = build is { Trigger: ProjectBuildTrigger.Manual } ? build.Branch : null;
+            // A pipeline build (manual or the nightly preview check) checks out the
+            // branch its pipeline watches; a pull-request build keeps its own head and
+            // ignores it (#963).
+            var branch = build is not null && build.Trigger != ProjectBuildTrigger.PullRequest ? build.Branch : null;
             var clones = await CloneRepositoriesAsync(project, buildRoot, results, logs, options, branch, ct).ConfigureAwait(false);
 
             // Record the per-repo commit set + changelog while the clones are still
@@ -226,6 +247,15 @@ public sealed class ProjectBuildService
                     $"Building against the {nextName} Business Central version: preview build {resolved.Version} ({country}) "
                     + $"from Microsoft's insider artifacts, compiled with AL compiler {compiler.Version}. "
                     + "The extensions' app.json files are not changed."));
+            }
+
+            // Stamped now rather than when the build finishes: a preview build that
+            // fails to compile is the expected outcome, and it still has to say which
+            // Business Central build it failed against.
+            if (build is not null)
+            {
+                build.BcArtifactVersion = resolved.Version;
+                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
             }
 
             var symbolsDir = Path.Combine(buildRoot, "symbols");
@@ -658,9 +688,12 @@ public sealed class ProjectBuildService
         var gitPath = NullIfBlank(Environment.GetEnvironmentVariable("GIT_PATH")) ?? "git";
         var orgId = build.OrganizationId;
 
-        // The previous successful build's commit per repo (the changelog baseline).
+        // The previous successful build's commit per repo (the changelog baseline). A
+        // preview build is a check, not something that shipped, so it never becomes the
+        // baseline a current build's "what changed" is measured from (#994).
         var prevBuildId = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.ProjectId == project.Id && b.Id != build.Id && b.Status == ProjectBuildStatus.Ready)
+            .Where(b => b.ProjectId == project.Id && b.Id != build.Id && b.Status == ProjectBuildStatus.Ready
+                        && b.BcTarget == ProjectBuildTarget.Current)
             .OrderByDescending(b => b.StartedAt)
             .Select(b => (int?)b.Id)
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);

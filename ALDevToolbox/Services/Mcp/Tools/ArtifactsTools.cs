@@ -53,7 +53,7 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "list_solution_builds", ReadOnly = true)]
-    [Description("Lists a solution's builds, newest first. Each build is a compile of the solution's repositories at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version, timings, who started it, the number of downloadable .app files, and the Object Explorer release id (when ready). Use a build id with get_solution_build.")]
+    [Description("Lists a solution's builds, newest first. Each build is a compile of the solution's repositories at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version, timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'); a build with isPreview true is check-only and can't be deployed. Use a build id with get_solution_build.")]
     public async Task<IReadOnlyList<BuildRow>> ListProjectBuildsAsync(
         [Description("Solution name or numeric id (from list_solutions).")] string solutionNameOrId,
         CancellationToken ct = default)
@@ -63,14 +63,14 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "list_pipelines", ReadOnly = true)]
-    [Description("Lists the pipelines you can see in the organisation. A pipeline is a named build flow under a solution that compiles a chosen subset of the solution's extensions (a solution can have several). Returns each pipeline's id, name, its solution, owner, and a summary of its newest build (status, BC version). Pipelines under a private solution you are not on the team for are not listed. Use the id with list_pipeline_builds.")]
+    [Description("Lists the pipelines you can see in the organisation. A pipeline is a named build flow under a solution that compiles a chosen subset of the solution's extensions (a solution can have several). Returns each pipeline's id, name, its solution, owner, a summary of its newest build (status, BC version), and its nightly preview check: previewCheck says whether it is on, previewChecks holds the newest result per upcoming version (bcTarget 'next_minor' or 'next_major', outcome 'passed'/'failed'/'running', the exact bcArtifactVersion, and the buildId to pass to get_solution_build for the errors), and previewCheckBlocked says why the check is paused, when it is. Preview check builds are check-only and can't be deployed; the newest build summary leaves them out. Pipelines under a private solution you are not on the team for are not listed. Use the id with list_pipeline_builds.")]
     public async Task<IReadOnlyList<PipelineArtifactsRow>> ListPipelinesAsync(
         [Description("Optional substring to filter by pipeline name, solution name, or owner.")] string? search = null,
         CancellationToken ct = default) =>
         await _artifacts.ListPipelinesAsync(search, ct);
 
     [McpServerTool(Name = "list_pipeline_builds", ReadOnly = true)]
-    [Description("Lists one pipeline's builds, newest first. Each build is a run of the pipeline — a compile of its chosen extensions at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version, timings, who started it, the number of downloadable .app files, and the Object Explorer release id (when ready). Use a build id with get_solution_build.")]
+    [Description("Lists one pipeline's builds, newest first. Each build is a run of the pipeline — a compile of its chosen extensions at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version (bcArtifactVersion is the exact Business Central build it compiled against), timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'). A build with isPreview true is one of the nightly preview check's builds, compiled against an upcoming Business Central version to check for breaking changes: it is never published as a GitHub release and can't be deployed. Use a build id with get_solution_build.")]
     public async Task<IReadOnlyList<BuildRow>> ListPipelineBuildsAsync(
         [Description("Pipeline id (from list_pipelines).")] int pipelineId,
         CancellationToken ct = default)
@@ -86,7 +86,7 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "get_solution_build", ReadOnly = true)]
-    [Description("Returns one build's full detail: the per-repository commit it was built from, the changelog since the solution's last successful build (grouped by repository), and the downloadable deliverables. Each deliverable and the whole-build zip and raw log carry a DownloadPath the user appends to the app's base URL to fetch (the bytes are not returned inline). When the build is ready it also returns the Object Explorer release id so its objects can be searched/compared.")]
+    [Description("Returns one build's full detail: the per-repository commit it was built from, the changelog since the solution's last successful build (grouped by repository), and the downloadable deliverables. Each deliverable and the whole-build zip and raw log carry a DownloadPath the user appends to the app's base URL to fetch (the bytes are not returned inline). When the build is ready it also returns the Object Explorer release id so its objects can be searched/compared. bcTarget says which Business Central version it compiled against ('current', 'next_minor' or 'next_major') and bcArtifactVersion the exact build; a build with isPreview true is check-only and can't be deployed.")]
     public async Task<ProjectBuildDetailResult> GetProjectBuildAsync(
         [Description("Build id (from list_solution_builds).")] int buildId,
         CancellationToken ct = default)
@@ -125,7 +125,9 @@ public sealed class ArtifactsTools
             Changelog: detail.Changelog,
             Apps: apps,
             DownloadAllPath: apps.Count > 0 ? $"/artifacts/build/{buildId}/all" : null,
-            RawLogPath: detail.Logs.Count > 0 ? $"/artifacts/build/{buildId}/log" : null);
+            RawLogPath: detail.Logs.Count > 0 ? $"/artifacts/build/{buildId}/log" : null,
+            BcTarget: detail.BcTarget,
+            BcArtifactVersion: detail.BcArtifactVersion);
     }
 
     [McpServerTool(Name = "compare_solution_builds", ReadOnly = true)]
@@ -178,7 +180,13 @@ public sealed record ProjectBuildDetailResult(
     IReadOnlyList<ChangelogGroup> Changelog,
     IReadOnlyList<BuildAppDownload> Apps,
     string? DownloadAllPath,
-    string? RawLogPath);
+    string? RawLogPath,
+    string BcTarget = ProjectBuildTarget.Current,
+    string? BcArtifactVersion = null)
+{
+    /// <summary>True for a build against a preview version: check-only, never deployable or published.</summary>
+    public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);
+}
 
 /// <summary>One downloadable deliverable for an MCP caller — metadata plus the path the user fetches it from.</summary>
 public sealed record BuildAppDownload(

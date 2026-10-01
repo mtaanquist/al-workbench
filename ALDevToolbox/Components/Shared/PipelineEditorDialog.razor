@@ -74,6 +74,15 @@
                                disabled="@_saving" placeholder="e.g. main or release/25.0" spellcheck="false" autocomplete="off" />
                         <small class="field__hint">Builds check out this branch. Leave empty for each repository's default branch.</small>
                     </div>
+                    <div class="field">
+                        <label class="@(_previewCheck ? "check is-checked" : "check")">
+                            <input id="pe-preview-check" type="checkbox" checked="@_previewCheck" disabled="@_saving"
+                                   @onchange="e => _previewCheck = (bool)(e.Value ?? false)" />
+                            <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                            <span>Check against upcoming Business Central versions every night</span>
+                        </label>
+                        <small class="field__hint">Builds against Microsoft's previews of the next minor and next major Business Central versions, to catch breaking changes before they reach your customers. These preview builds can't be deployed; their results show beside the pipeline in the pipelines list.</small>
+                    </div>
                 }
 
                 @if (_pickProject && _projectId == 0)
@@ -241,6 +250,8 @@
     private string _name = string.Empty;
     // The branch the pipeline builds; blank = each repository's default branch (#963).
     private string _branch = string.Empty;
+    // The nightly preview check against the next minor and next major (#994).
+    private bool _previewCheck;
     // The solution's GitHub repositories inside the connected organisation. Empty
     // (and the whole field hidden) when there is no GitHub connection - an
     // organisation on Azure DevOps is shown no GitHub machinery at all.
@@ -301,7 +312,7 @@
 
     /// <summary>Opens the dialog to edit an existing pipeline. <paramref name="requestedAppIdsJson"/> is the stored selection (null = all).</summary>
     public async Task OpenForEditAsync(int pipelineId, int projectId, string projectName, string name, string? requestedAppIdsJson,
-        int? githubReleaseRepositoryId = null, string? branch = null)
+        int? githubReleaseRepositoryId = null, string? branch = null, bool previewCheck = false)
     {
         ResetForCreate();
         _editing = true;
@@ -315,6 +326,7 @@
         _initialIsAll = parsed is null;
         _releaseRepositoryId = githubReleaseRepositoryId ?? 0;
         _branch = branch ?? string.Empty;
+        _previewCheck = previewCheck;
         _open = true;
         _focusPending = true;
         await LoadReleaseRepositoriesAsync();
@@ -328,6 +340,7 @@
         _pipelineId = null;
         _name = string.Empty;
         _branch = string.Empty;
+        _previewCheck = false;
         _initialSelection = null;
         _initialIsAll = true; // new pipelines default to "build everything"
         _selectionSeeded = false;
@@ -638,7 +651,8 @@
             var input = new PipelineInput(
                 _projectId, _name.Trim(), selection,
                 _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
-                string.IsNullOrWhiteSpace(_branch) ? null : _branch.Trim());
+                string.IsNullOrWhiteSpace(_branch) ? null : _branch.Trim(),
+                _previewCheck);
 
             int id;
             if (_editing && _pipelineId is { } pid)
