@@ -17,6 +17,7 @@
 @using ALDevToolbox.Services.ObjectExplorer.Projects
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
+@using ALDevToolbox.Domain.Entities.ObjectExplorer
 
 @*
     One pipeline's builds: the Build action (runs the pipeline's saved extension
@@ -74,6 +75,14 @@
             <StatusPill Tone="@RowStateIcon.PillTone(_latest.Status)">
                 <span>@RowStateIcon.StateLabel(_latest.Status)</span>
             </StatusPill>
+            @if (_latest.IsPreview)
+            {
+                @* Beside the state, because it changes what that state means: a
+                   red preview build is the check doing its job (#994). *@
+                <StatusPill Tone="info" title="Compiled against an upcoming Business Central version to catch breaking changes. Preview builds cannot be deployed.">
+                    <span>Preview build</span>
+                </StatusPill>
+            }
         }
     </TitleRow>
     <SubtitleContent>
@@ -116,9 +125,16 @@
             <span class="meta-item__label">Builds</span>
             <span class="meta-item__value">@_builds.Count</span>
         </span>
+        @if (ProjectBuildTarget.IsPreview(_header!.BcTarget))
+        {
+            <span class="meta-item">
+                <span class="meta-item__label">Builds against</span>
+                <span class="meta-item__value">@ProjectBuildTarget.Label(_header!.BcTarget)</span>
+            </span>
+        }
         <span class="meta-item">
             <span class="meta-item__label">Latest BC</span>
-            <span class="meta-item__value meta-item__value--mono">@(_latest?.BcVersion is { Length: > 0 } mb ? mb : "—")</span>
+            <span class="meta-item__value meta-item__value--mono">@(_latest is not null && BcShown(_latest) is { Length: > 0 } mb ? mb : "—")</span>
         </span>
         <span class="meta-item">
             <span class="meta-item__label">Last build</span>
@@ -333,9 +349,9 @@
                                 {
                                     <span class="commit-chip"><Icon Name="git-branch" Width="11" Height="11" />@_latest.Branch</span>
                                 }
-                                @if (!string.IsNullOrEmpty(_latest.BcVersion))
+                                @if (BcShown(_latest) is { Length: > 0 } builtOn)
                                 {
-                                    <span class="pb-topline__meta">BC @_latest.BcVersion</span>
+                                    <span class="pb-topline__meta">on BC @builtOn</span>
                                 }
                                 <span class="pb-topline__meta pb-topline__when" title="@StartedBy(_latest)">@StartedVerb(_latest) <Timestamp Value="@StartedWhen(_latest)" Relative="true" /></span>
                             </div>
@@ -556,6 +572,14 @@
                                             {
                                                 <span class="u-muted">No commit details</span>
                                             }
+                                            @if (b.IsPreview)
+                                            {
+                                                <span class="tag pb-preview">Preview build</span>
+                                            }
+                                            @if (BcShown(b) is { Length: > 0 } rowBc)
+                                            {
+                                                <span class="pb-more">on BC @rowBc</span>
+                                            }
                                         </td>
                                         <td>@(string.IsNullOrEmpty(b.Branch) ? "—" : b.Branch)</td>
                                         <td><Timestamp Value="@(b.FinishedAt ?? b.StartedAt)" Relative="true" /></td>
@@ -571,7 +595,7 @@
                                             }
                                             else if (b.ArtifactCount > 0)
                                             {
-                                                @if (b.Status == "ready" && _canManage)
+                                                @if (b.Status == "ready" && _canManage && !b.IsPreview)
                                                 {
                                                     <button type="button" class="btn btn--sm" @onclick="() => StartReleaseAsync(b)"
                                                             disabled="@_openingRelease" aria-label="@($"Deploy build #{b.Id}")">
@@ -1124,7 +1148,7 @@
         if (pipeline is null || _editor is null) return;
         await _editor.OpenForEditAsync(
             pipeline.Id, pipeline.ProjectId, pipeline.Project?.Name ?? _header?.ProjectName ?? "",
-            pipeline.Name, pipeline.RequestedAppIdsJson, pipeline.GithubReleaseRepositoryId, pipeline.Branch);
+            pipeline.Name, pipeline.RequestedAppIdsJson, pipeline.GithubReleaseRepositoryId, pipeline.Branch, pipeline.BcTarget);
     }
 
     private async Task OnPipelineSavedAsync(int _)
@@ -1219,6 +1243,14 @@
     /// itself is a Timestamp, whose hover title is the exact instant; who started the
     /// build is the hover title around it.
     /// </summary>
+    /// <summary>
+    /// The Business Central version a build compiled against, as exact as it was
+    /// recorded: the full build number where there is one ("29.0.52914.0"), else the
+    /// Major.Minor older builds carry.
+    /// </summary>
+    private static string? BcShown(BuildRow b) =>
+        b.BcArtifactVersion is { Length: > 0 } exact ? exact : b.BcVersion;
+
     private static string StartedVerb(BuildRow b) => b.Status switch
     {
         "ready" => "Built",

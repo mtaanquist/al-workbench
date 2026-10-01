@@ -86,7 +86,7 @@ public sealed class PipelineService
     public async Task<int> CreatePipelineAsync(PipelineInput input, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var (name, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input, existingId: null, ct);
+        var (name, selectionJson, releaseRepositoryId, branch, bcTarget) = await ValidateAsync(input, existingId: null, ct);
 
         var now = DateTime.UtcNow;
         var pipeline = new OePipeline
@@ -98,6 +98,7 @@ public sealed class PipelineService
             RequestedAppIdsJson = selectionJson,
             GithubReleaseRepositoryId = releaseRepositoryId,
             Branch = branch,
+            BcTarget = bcTarget,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -109,7 +110,7 @@ public sealed class PipelineService
         return pipeline.Id;
     }
 
-    /// <summary>Updates a pipeline's name, extension selection, publishing target and branch.</summary>
+    /// <summary>Updates a pipeline's name, extension selection, publishing target, branch and the Business Central version it builds against.</summary>
     public async Task UpdatePipelineAsync(int id, PipelineInput input, CancellationToken ct = default)
     {
         RequireOrganizationId();
@@ -119,12 +120,13 @@ public sealed class PipelineService
 
         // Validate against the pipeline's own project (input.ProjectId is ignored on
         // update — a pipeline can't move between projects).
-        var (name, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
+        var (name, selectionJson, releaseRepositoryId, branch, bcTarget) = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
 
         pipeline.Name = name;
         pipeline.RequestedAppIdsJson = selectionJson;
         pipeline.GithubReleaseRepositoryId = releaseRepositoryId;
         pipeline.Branch = branch;
+        pipeline.BcTarget = bcTarget;
         pipeline.UpdatedAt = DateTime.UtcNow;
         await SaveTranslatingNameClashAsync(ct);
         _logger.LogInformation("Updated pipeline {PipelineId} ({Name}).", pipeline.Id, name);
@@ -156,7 +158,7 @@ public sealed class PipelineService
     /// selection serialised to JSON (null = build everything). Throws
     /// <see cref="PlanValidationException"/> with field-keyed errors otherwise.
     /// </summary>
-    private async Task<(string Name, string? SelectionJson, int? GithubReleaseRepositoryId, string? Branch)> ValidateAsync(
+    private async Task<(string Name, string? SelectionJson, int? GithubReleaseRepositoryId, string? Branch, string BcTarget)> ValidateAsync(
         PipelineInput input, int? existingId, CancellationToken ct)
     {
         var errors = new Dictionary<string, string>();
@@ -225,13 +227,21 @@ public sealed class PipelineService
             errors["Branch"] = "That isn't a valid branch name. Type it exactly as GitHub shows it, e.g. main or release/25.0 - no spaces or '..'.";
         }
 
+        // Blank means Current, so a caller that predates the setting keeps building
+        // what the manifests ask for.
+        var bcTarget = string.IsNullOrWhiteSpace(input.BcTarget) ? ProjectBuildTarget.Current : input.BcTarget.Trim();
+        if (!ProjectBuildTarget.IsValid(bcTarget))
+        {
+            errors["BcTarget"] = "Choose Current, Next minor or Next major.";
+        }
+
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
         // null/empty selection = build everything (the default), stored as a null column.
         var selectionJson = input.SelectedAppIds is { Count: > 0 }
             ? JsonSerializer.Serialize(input.SelectedAppIds)
             : null;
-        return (name, selectionJson, releaseRepositoryId, branch);
+        return (name, selectionJson, releaseRepositoryId, branch, bcTarget);
     }
 
     /// <summary>
@@ -286,7 +296,13 @@ public sealed record PipelineInput(
     /// repository's default branch. See <c>.design/github-integration-phase2.md</c>,
     /// "Branch watching" (#963).
     /// </summary>
-    string? Branch = null);
+    string? Branch = null,
+    /// <summary>
+    /// Which Business Central version the pipeline builds against, one of
+    /// <see cref="ProjectBuildTarget"/>. Null or blank means <c>current</c>. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "Building against the next version".
+    /// </summary>
+    string? BcTarget = null);
 
 /// <summary>A project choice for the "New pipeline" dialog's project picker.</summary>
 public sealed record PipelineProjectOption(int Id, string Name);

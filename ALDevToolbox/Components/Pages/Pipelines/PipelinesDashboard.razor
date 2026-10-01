@@ -32,6 +32,12 @@
     the Admin dashboard's, and "Review" is the look of the approval row's destination -
     the deployment pipeline page, where approving happens - rather than a second target.
 
+    ADDITION (#994, not in the sheet yet): when some of the failed builds are preview
+    builds (a pipeline set to build against the next minor or major), the Failed builds
+    tile still counts them but its foot says so - "2 failed, 1 on a preview build" - in
+    place of the latest-failure time. Recorded in
+    .design/handoff/briefs/2026-09-preview-builds.md.
+
     ADDITION (#964, not in the sheet yet): a "Ready to build" tile after "Failed builds",
     counting build pipelines whose branch has moved past their last successful build,
     and one attention row per such pipeline ("CRONUS Base is 3 commits ahead of its last
@@ -428,7 +434,9 @@
                 : new("None in the last 7 days"),
                 "/pipelines/builds", "cue"));
             cues.Add(new("Failed builds", d.FailedBuildPipelines,
-                noBuilds ? new(NoBuildPipeline) : d.FailedBuildPipelines > 0 ? LatestFailure(d, PipelinesAttentionKind.FailedBuild) : new("None"),
+                noBuilds ? new(NoBuildPipeline)
+                : d.FailedPreviewBuildPipelines > 0 ? new($"{d.FailedBuildPipelines} failed, {d.FailedPreviewBuildPipelines} on a preview build")
+                : d.FailedBuildPipelines > 0 ? LatestFailure(d, PipelinesAttentionKind.FailedBuild) : new("None"),
                 d.FailedBuildPipelines > 0 ? "/pipelines/builds?show=failed" : "/pipelines/builds",
                 d.FailedBuildPipelines > 0 ? "cue cue--attention" : "cue"));
             cues.Add(new("Ready to build", d.ReadyToBuild,

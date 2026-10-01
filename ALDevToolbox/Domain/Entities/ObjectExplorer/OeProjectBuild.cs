@@ -1,4 +1,5 @@
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 
 namespace ALDevToolbox.Domain.Entities.ObjectExplorer;
 
@@ -91,6 +92,24 @@ public class OeProjectBuild
     /// <summary>Resolved BC application version the build compiled against (e.g. <c>25.18</c>). Null until known.</summary>
     public string? BcVersion { get; set; }
 
+    /// <summary>
+    /// The exact Business Central build the symbols came from (e.g. <c>29.0.52914.0</c>),
+    /// stamped as soon as it is resolved so a build that then fails still says what
+    /// it was compiled against. <see cref="BcVersion"/> stays the Major.Minor, because
+    /// earlier builds' apps are matched against it as symbols. Null until known, and
+    /// for builds made before it was recorded.
+    /// </summary>
+    public string? BcArtifactVersion { get; set; }
+
+    /// <summary>
+    /// Which Business Central version this build compiled against, snapshotted from
+    /// its pipeline when the build is started. One of <see cref="ProjectBuildTarget"/>;
+    /// anything but <c>current</c> is a preview build, which is check-only: never
+    /// published as a GitHub release and never deployable. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "Building against the next version".
+    /// </summary>
+    public string BcTarget { get; set; } = ProjectBuildTarget.Current;
+
     /// <summary>Why a <c>failed</c> build failed (the whole-build reason); null otherwise.</summary>
     public string? FailureMessage { get; set; }
 
@@ -148,6 +167,51 @@ public static class ProjectBuildTrigger
     /// <c>.design/github-integration-phase2.md</c> (#627).
     /// </summary>
     public const string PullRequest = "pull_request";
+}
+
+/// <summary>
+/// The stored names of <see cref="BcBuildTarget"/>, on <see cref="OePipeline.BcTarget"/>
+/// and <see cref="OeProjectBuild.BcTarget"/>. Stored as words rather than the enum's
+/// ordinal so the column reads on its own.
+/// </summary>
+public static class ProjectBuildTarget
+{
+    /// <summary>The version the extensions' manifests ask for. The default, and what every build before the setting existed was.</summary>
+    public const string Current = "current";
+
+    /// <summary>The next minor version, from Microsoft's preview builds.</summary>
+    public const string NextMinor = "next_minor";
+
+    /// <summary>The next major version, from Microsoft's preview builds.</summary>
+    public const string NextMajor = "next_major";
+
+    /// <summary>The longest stored value, for the column width.</summary>
+    public const int MaxLength = 20;
+
+    /// <summary>Every stored value, in the order the editor offers them.</summary>
+    public static readonly IReadOnlyList<string> All = [Current, NextMinor, NextMajor];
+
+    /// <summary>True for a stored value this version knows.</summary>
+    public static bool IsValid(string? value) => value is not null && All.Contains(value);
+
+    /// <summary>True when a build of this target compiles against a preview, which makes it check-only.</summary>
+    public static bool IsPreview(string? value) => value is NextMinor or NextMajor;
+
+    /// <summary>The engine's target for a stored value. Anything unknown is <see cref="BcBuildTarget.Current"/>.</summary>
+    public static BcBuildTarget ToBuildTarget(string? value) => value switch
+    {
+        NextMinor => BcBuildTarget.NextMinor,
+        NextMajor => BcBuildTarget.NextMajor,
+        _ => BcBuildTarget.Current,
+    };
+
+    /// <summary>What the person reads for a stored value: "Current", "Next minor", "Next major".</summary>
+    public static string Label(string? value) => value switch
+    {
+        NextMinor => "Next minor",
+        NextMajor => "Next major",
+        _ => "Current",
+    };
 }
 
 /// <summary>The lifecycle states a <see cref="OeProjectBuild"/> moves through.</summary>

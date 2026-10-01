@@ -64,6 +64,18 @@ public class OePipeline
     /// </summary>
     public string? Branch { get; set; }
 
+    /// <summary>
+    /// Which Business Central version this pipeline's builds compile against: one of
+    /// <see cref="ProjectBuildTarget"/>, <c>current</c> by default. Next minor and
+    /// next major compile against Microsoft's preview builds to show breaking changes
+    /// early, and their builds are check-only. Copied onto each
+    /// <see cref="OeProjectBuild.BcTarget"/> when the build starts. Not the old
+    /// <c>version_mode</c>, which became the deployment pipeline's
+    /// <c>deployment_schedule</c> and means a time, not a version. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "Building against the next version".
+    /// </summary>
+    public string BcTarget { get; set; } = ProjectBuildTarget.Current;
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 

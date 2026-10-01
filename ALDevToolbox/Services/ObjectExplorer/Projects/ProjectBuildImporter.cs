@@ -70,6 +70,7 @@ public sealed class ProjectBuildImporter
                 p.ProjectId,
                 p.RequestedAppIdsJson,
                 p.Branch,
+                p.BcTarget,
                 ProjectName = p.Project!.Name,
                 OwnerId = p.Project.CreatedByUserId,
                 RepoCount = p.Project.Repositories.Count,
@@ -126,6 +127,9 @@ public sealed class ProjectBuildImporter
             // The branch is snapshotted the same way: a restart-resumed job, or a
             // pipeline edited while this build waits, still checks out what was asked.
             Branch = pipeline.Branch,
+            // And the Business Central version it builds against, which also decides
+            // whether the build is a check-only preview build.
+            BcTarget = pipeline.BcTarget,
             StartedAt = now,
         });
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);

@@ -223,7 +223,7 @@ public sealed class ArtifactService
             .Where(p => _db.OeProjects.Where(visible).Any(v => v.Id == p.ProjectId))
             .Select(p => new
             {
-                p.Id, p.Name, p.ProjectId,
+                p.Id, p.Name, p.ProjectId, p.BcTarget,
                 ProjectName = p.Project!.Name,
                 OwnerName = p.Project.CreatedByUser != null ? p.Project.CreatedByUser.DisplayName : null,
             })
@@ -263,7 +263,8 @@ public sealed class ArtifactService
                 p.Id, p.Name, p.ProjectId, p.ProjectName, p.OwnerName,
                 Latest: latest is null ? null : new BuildSummary(
                     latest.Id, latest.Status, latest.BcVersion, latest.Branch, commitShort, latest.StartedAt, latest.FinishedAt, latest.ArtifactCount),
-                LatestSuccessfulBuildId: latestSuccessful?.Id));
+                LatestSuccessfulBuildId: latestSuccessful?.Id,
+                BcTarget: p.BcTarget));
         }
 
         if (!string.IsNullOrWhiteSpace(search))
@@ -291,7 +292,8 @@ public sealed class ArtifactService
             .Select(p => new PipelineHeader(
                 p.Id, p.Name, p.ProjectId, p.Project!.Name,
                 p.Project.CreatedByUser != null ? p.Project.CreatedByUser.DisplayName : null,
-                p.Project.CreatedByUserId))
+                p.Project.CreatedByUserId,
+                p.BcTarget))
             .FirstOrDefaultAsync(ct);
     }
 
@@ -358,6 +360,7 @@ public sealed class ArtifactService
                 b.Id, b.ReleaseId, b.Status, b.BcVersion, b.Branch,
                 b.StartedAt, b.FinishedAt, b.FailureMessage,
                 b.GithubReleaseTag, b.GithubReleaseUrl, b.GithubReleaseError,
+                b.BcTarget, b.BcArtifactVersion,
                 StartedByName = b.StartedByUser != null ? b.StartedByUser.DisplayName : null,
                 ArtifactCount = b.Artifacts.Count,
             })
@@ -418,7 +421,9 @@ public sealed class ArtifactService
                 CommitCount: realCommits.Count,
                 GitHubReleaseTag: b.GithubReleaseTag,
                 GitHubReleaseUrl: b.GithubReleaseUrl,
-                GitHubReleaseError: b.GithubReleaseError);
+                GitHubReleaseError: b.GithubReleaseError,
+                BcTarget: b.BcTarget,
+                BcArtifactVersion: b.BcArtifactVersion);
         }).ToList();
     }
 
@@ -443,7 +448,7 @@ public sealed class ArtifactService
             .Select(b => new
             {
                 b.Id, b.ProjectId, b.PipelineId, b.ReleaseId, b.Status, b.BcVersion, b.Branch,
-                b.StartedAt, b.FinishedAt, b.FailureMessage,
+                b.StartedAt, b.FinishedAt, b.FailureMessage, b.BcTarget, b.BcArtifactVersion,
                 StartedBy = b.StartedByUser != null ? b.StartedByUser.DisplayName : null,
                 ProjectName = b.Project != null ? b.Project.Name : string.Empty,
                 PipelineName = b.Pipeline != null ? b.Pipeline.Name : null,
@@ -528,7 +533,7 @@ public sealed class ArtifactService
             build.ReleaseId, build.Status,
             build.BcVersion, build.Branch, build.StartedAt, build.FinishedAt, build.FailureMessage,
             build.StartedBy, repoCommits, changelogGroups, artifacts, logSections,
-            errorCount, warningCount, failedApps);
+            errorCount, warningCount, failedApps, build.BcTarget, build.BcArtifactVersion);
     }
 
     /// <summary>The deliverables of a build (metadata only), ordered by file name.</summary>
@@ -702,10 +707,17 @@ public sealed record PipelineArtifactsRow(
     string ProjectName,
     string? OwnerName,
     BuildSummary? Latest,
-    int? LatestSuccessfulBuildId);
+    int? LatestSuccessfulBuildId,
+    /// <summary>Which Business Central version the pipeline builds against: <c>current</c>, <c>next_minor</c> or <c>next_major</c>.</summary>
+    string BcTarget = ProjectBuildTarget.Current)
+{
+    /// <summary>True when the pipeline builds against a preview version, so its builds are check-only.</summary>
+    public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);
+}
 
 /// <summary>A pipeline's header for the pipeline detail page (its project + owner drive the breadcrumb and manage-gating).</summary>
-public sealed record PipelineHeader(int Id, string Name, int ProjectId, string ProjectName, string? OwnerName, int? OwnerUserId);
+public sealed record PipelineHeader(int Id, string Name, int ProjectId, string ProjectName, string? OwnerName, int? OwnerUserId,
+    string BcTarget = ProjectBuildTarget.Current);
 
 /// <summary>One build in the history list.</summary>
 /// <remarks>
@@ -734,7 +746,15 @@ public sealed record BuildRow(
     /// <summary>The Release's page on GitHub, when there is one.</summary>
     string? GitHubReleaseUrl = null,
     /// <summary>Why the build was not published as a Release. The build itself still succeeded.</summary>
-    string? GitHubReleaseError = null);
+    string? GitHubReleaseError = null,
+    /// <summary>Which Business Central version the build compiled against: <c>current</c>, <c>next_minor</c> or <c>next_major</c>.</summary>
+    string BcTarget = ProjectBuildTarget.Current,
+    /// <summary>The exact Business Central build the symbols came from (e.g. <c>29.0.52914.0</c>). Null for builds made before it was recorded.</summary>
+    string? BcArtifactVersion = null)
+{
+    /// <summary>True for a build against a preview version: check-only, never deployable or published.</summary>
+    public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);
+}
 
 /// <summary>One build's full detail for the Artifacts build card.</summary>
 public sealed record BuildDetail(
@@ -757,7 +777,13 @@ public sealed record BuildDetail(
     IReadOnlyList<LogSectionRow> Logs,
     int ErrorCount = 0,
     int WarningCount = 0,
-    IReadOnlyList<FailedAppRow>? FailedApps = null);
+    IReadOnlyList<FailedAppRow>? FailedApps = null,
+    string BcTarget = ProjectBuildTarget.Current,
+    string? BcArtifactVersion = null)
+{
+    /// <summary>True for a build against a preview version: check-only, never deployable or published.</summary>
+    public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);
+}
 
 /// <summary>
 /// One extension a build could not produce, and why. <see cref="NeedsSymbols"/> is

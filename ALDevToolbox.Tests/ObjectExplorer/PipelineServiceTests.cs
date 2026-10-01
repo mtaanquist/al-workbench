@@ -138,6 +138,54 @@ public sealed class PipelineServiceTests : IDisposable
         (await read.OePipelines.IgnoreQueryFilters().SingleAsync(p => p.Id == id)).DeletedAt.Should().NotBeNull();
     }
 
+    // --- Build against (#994) ----------------------------------------------
+
+    [Fact]
+    public async Task A_new_pipeline_builds_against_the_current_version_unless_told_otherwise()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
+
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == id)).BcTarget.Should().Be(ProjectBuildTarget.Current);
+    }
+
+    [Fact]
+    public async Task A_pipeline_keeps_and_changes_the_version_it_builds_against()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Next major check", null, BcTarget: ProjectBuildTarget.NextMajor));
+        await using (var read = _db.NewContext())
+        {
+            (await read.OePipelines.SingleAsync(p => p.Id == id)).BcTarget.Should().Be(ProjectBuildTarget.NextMajor);
+        }
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Next major check", null, BcTarget: ProjectBuildTarget.NextMinor));
+        await using (var read = _db.NewContext())
+        {
+            (await read.OePipelines.SingleAsync(p => p.Id == id)).BcTarget.Should().Be(ProjectBuildTarget.NextMinor);
+        }
+    }
+
+    [Theory]
+    [InlineData("next")]
+    [InlineData("NextMajor")]
+    [InlineData("version_mode")]
+    public async Task A_target_the_tool_does_not_know_is_rejected_against_the_field(string target)
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+
+        var act = () => NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null, BcTarget: target));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("BcTarget");
+    }
+
     // --- The watched branch (#963) ------------------------------------------
 
     [Fact]

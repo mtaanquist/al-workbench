@@ -24,6 +24,9 @@ internal sealed class ProjectBuildConfiguration : IEntityTypeConfiguration<OePro
         entity.Property(e => e.CheckRunId).HasColumnName("check_run_id");
         entity.Property(e => e.Status).HasColumnName("status").HasMaxLength(20).IsRequired();
         entity.Property(e => e.BcVersion).HasColumnName("bc_version").HasMaxLength(50);
+        entity.Property(e => e.BcArtifactVersion).HasColumnName("bc_artifact_version").HasMaxLength(50);
+        entity.Property(e => e.BcTarget).HasColumnName("bc_target").HasMaxLength(ProjectBuildTarget.MaxLength)
+            .HasDefaultValue(ProjectBuildTarget.Current).IsRequired();
         entity.Property(e => e.FailureMessage).HasColumnName("failure_message");
         entity.Property(e => e.RequestedAppIdsJson).HasColumnName("requested_app_ids_json");
         entity.Property(e => e.GithubReleaseTag).HasColumnName("github_release_tag").HasMaxLength(200);

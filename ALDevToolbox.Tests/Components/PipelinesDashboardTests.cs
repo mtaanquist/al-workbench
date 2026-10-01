@@ -166,6 +166,42 @@ public sealed class PipelinesDashboardTests : IDisposable
     }
 
     [Fact]
+    public async Task The_failed_builds_tile_says_how_many_of_its_failures_are_preview_builds()
+    {
+        var projectId = await SeedSolutionAsync();
+        var current = await SeedBuildPipelineAsync(projectId);
+        await SeedBuildAsync(projectId, current, ProjectBuildStatus.Failed, _now.AddHours(-2));
+        await using (var ctx = _db.NewContext())
+        {
+            var preview = new OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "CRONUS Base next major",
+                BcTarget = ProjectBuildTarget.NextMajor, CreatedAt = _now, UpdatedAt = _now,
+            };
+            ctx.OePipelines.Add(preview);
+            await ctx.SaveChangesAsync();
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = preview.Id,
+                Status = ProjectBuildStatus.Failed, BcTarget = ProjectBuildTarget.NextMajor,
+                StartedAt = _now.AddHours(-1), FinishedAt = _now.AddMinutes(-56),
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<PipelinesDashboard>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var failed = cut.FindAll(".cue-grid a.cue")
+                .Single(t => t.QuerySelector(".cue__label")!.TextContent.Trim() == "Failed builds");
+            failed.QuerySelector(".cue__value")!.TextContent.Trim().Should().Be("2");
+            failed.QuerySelector(".cue__foot")!.TextContent.Trim().Should().Be("2 failed, 1 on a preview build");
+            failed.ClassList.Should().Contain("cue--attention");
+        });
+    }
+
+    [Fact]
     public async Task Empty_offers_the_first_build_pipeline_as_the_one_primary_button()
     {
         await SeedSolutionAsync();

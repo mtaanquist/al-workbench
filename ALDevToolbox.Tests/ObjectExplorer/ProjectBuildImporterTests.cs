@@ -51,6 +51,42 @@ public sealed class ProjectBuildImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task StartBuildAsync_snapshots_the_version_the_pipeline_builds_against()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Next major check", requestedAppIdsJson: null);
+        var pipeline = await ctx.OePipelines.SingleAsync(p => p.Id == pipelineId);
+        pipeline.BcTarget = ProjectBuildTarget.NextMajor;
+        await ctx.SaveChangesAsync();
+
+        var releaseId = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+
+        // Editing the pipeline afterwards does not rewrite the build that is waiting.
+        pipeline.BcTarget = ProjectBuildTarget.Current;
+        await ctx.SaveChangesAsync();
+
+        await using var read = _db.NewContext();
+        var build = await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId);
+        build.BcTarget.Should().Be(ProjectBuildTarget.NextMajor);
+    }
+
+    [Fact]
+    public async Task A_pull_request_build_always_builds_against_the_current_version()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+
+        var (_, buildId) = await NewImporter(ctx, new ReleaseImportQueue()).StartPullRequestBuildAsync(
+            projectId, repositoryId, "cronus/core", installationId: 1, headSha: new string('a', 40),
+            headRef: "feature/vat", pullRequestNumber: 7, checkRunId: null);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.SingleAsync(b => b.Id == buildId)).BcTarget.Should().Be(ProjectBuildTarget.Current);
+    }
+
+    [Fact]
     public async Task StartBuildAsync_stores_null_when_the_pipeline_builds_everything()
     {
         await using var ctx = _db.NewContext();

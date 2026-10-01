@@ -100,6 +100,7 @@ public sealed class PipelinesDashboardService
                         b.StartedAt,
                         b.FinishedAt,
                         b.FailureMessage,
+                        b.BcTarget,
                     })
                     .First())
                 .ToListAsync(ct);
@@ -284,6 +285,7 @@ public sealed class PipelinesDashboardService
             BuildsThisWeek: counts?.Week ?? 0,
             BuildsToday: counts?.Today ?? 0,
             FailedBuildPipelines: latest.Count(b => b.Status == ProjectBuildStatus.Failed),
+            FailedPreviewBuildPipelines: latest.Count(b => b.Status == ProjectBuildStatus.Failed && ProjectBuildTarget.IsPreview(b.BcTarget)),
             ReadyToBuild: readyToBuild,
             DeploymentPipelineCount: targets.Count,
             LastDeploymentAt: targets.Where(t => t.LastDelivery is not null).Select(t => (DateTime?)t.LastDelivery!.At).Max(),
@@ -388,6 +390,11 @@ public sealed class PipelinesDashboardService
 /// <summary>The Pipelines dashboard, assembled. Counts cover only the solutions the caller can see.</summary>
 /// <param name="LastBuild">The newest build of any build pipeline, or null when none has run.</param>
 /// <param name="FailedBuildPipelines">Build pipelines whose newest build failed.</param>
+/// <param name="FailedPreviewBuildPipelines">
+/// Of <paramref name="FailedBuildPipelines"/>, those whose failed build was a preview build
+/// (#994): counted separately because a red next-version check is the signal it exists to
+/// give, not a broken customer build.
+/// </param>
 /// <param name="LastDeploymentAt">When the newest finished deployment finished, or null.</param>
 /// <param name="ShippingNow">Deployments running this moment, the longest-running first.</param>
 /// <param name="FailedDeploymentPipelines">Deployment pipelines whose last deployment failed and nothing is running now.</param>
@@ -408,7 +415,8 @@ public sealed record PipelinesDashboardData(
     DateTime? OldestWaitingAt,
     int DeploymentsToday,
     List<PipelinesAttentionItem> Attention,
-    List<PipelinesActivityItem> Activity);
+    List<PipelinesActivityItem> Activity,
+    int FailedPreviewBuildPipelines = 0);
 
 /// <summary>The newest build: which one, on which pipeline and branch (null for a manual build), and when it started.</summary>
 public sealed record PipelinesLastBuild(int BuildId, int PipelineId, string PipelineName, string? Branch, DateTime At);

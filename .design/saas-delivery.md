@@ -1020,6 +1020,12 @@ the pipeline's own schema sync mode and has no parameter to change it: a one-tim
 palette write may escalate to it. A deployment the pipeline prepared from a new build (#934) is
 read-only to agents: it reads as `proposed`, then `dismissed` if set aside, and approving or dismissing it is a person's act in
 the web UI.
+A preview build (#994: a build pipeline set to build against the next minor or next major) is
+refused by `deploy_build` the same way the web refuses it, because the refusal lives in
+`DeliveryService.ResolveReleaseAsync` rather than in either surface; the build reads tools
+(`list_pipelines`, `list_pipeline_builds`, `list_solution_builds`, `get_solution_build`) say
+`isPreview` so an agent knows before it asks. See `object-explorer-project-builds.md`,
+"Building against the next version".
 
 **The Deliver reads (#912):** ten read-only tools in their own class, `DeliverTools`, so the
 area's one write stays in `DeliveryTools` and a test (`DeliverToolsTests`) can walk the new

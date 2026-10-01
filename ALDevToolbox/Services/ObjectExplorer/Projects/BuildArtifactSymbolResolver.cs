@@ -28,8 +28,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// <para>
 /// Of the candidates, the highest version at or above the <c>app.json</c> floor
 /// wins (newest build breaking a tie), from a <c>ready</c> build that was not a
-/// pull-request check - a pull request's apps are unreviewed - and was not compiled
-/// against a newer Business Central than this build targets. A resolved app's own
+/// pull-request check - a pull request's apps are unreviewed - nor a preview build,
+/// whose apps were compiled against symbols no shipped Business Central has, and was
+/// not compiled against a newer Business Central than this build targets. A resolved app's own
 /// dependencies are followed the same way, and the ones no artifact carries are
 /// handed back so the caller can give the feeds a second look at them.
 /// </para>
@@ -109,6 +110,7 @@ internal sealed class BuildArtifactSymbolResolver
             .Where(a => a.AppId == appId
                 && a.ProjectBuild!.Status == ProjectBuildStatus.Ready
                 && a.ProjectBuild.Trigger != ProjectBuildTrigger.PullRequest
+                && a.ProjectBuild.BcTarget == ProjectBuildTarget.Current
                 && a.ProjectBuild.Project!.DeletedAt == null
                 && (a.ProjectBuild.ProjectId == projectId || a.ProjectBuild.Project.Visibility != ProjectVisibility.Private))
             .Select(a => new

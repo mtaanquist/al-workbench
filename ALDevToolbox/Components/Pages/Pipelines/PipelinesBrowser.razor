@@ -11,6 +11,7 @@
 @using ALDevToolbox.Services.ObjectExplorer.Projects
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Domain.Entities.ObjectExplorer
 
 @*
     The Pipelines landing: every pipeline across the org's solutions, with its latest
@@ -200,7 +201,15 @@
                                about the sentence next to it. *@
                             <div class="pl-name">
                                 <div class="cell-stack">
-                                    <span class="cell-stack__main"><a href="@($"/pipelines/{p.Id}")"><strong>@p.Name</strong></a></span>
+                                    <span class="cell-stack__main">
+                                        <a href="@($"/pipelines/{p.Id}")"><strong>@p.Name</strong></a>
+                                        @* A quiet tag, so a pipeline that exists only to check the
+                                           next version reads as one at a glance (#994). *@
+                                        @if (p.IsPreview)
+                                        {
+                                            <span class="tag pl-target">@ProjectBuildTarget.Label(p.BcTarget)</span>
+                                        }
+                                    </span>
                                     @if (fresh is { Headline: not PipelineFreshnessHeadline.None })
                                     {
                                         <span class="cell-stack__sub"><FreshnessLine Summary="@fresh" /></span>

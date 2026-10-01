@@ -143,6 +143,40 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
 
     // ── The release pipeline's artifact source ──────────────────────────────
 
+    // ── Build against (#994) ────────────────────────────────────────────────
+
+    [Fact]
+    public async Task The_pipeline_editor_offers_three_versions_to_build_against_with_one_caption()
+    {
+        var seed = await SeedAsync();
+        _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
+
+        var cut = _ctx.Render<PipelineEditorDialog>();
+        await cut.InvokeAsync(() => cut.Instance.OpenForCreateAsync(seed.ProjectId, "CRONUS A/S"));
+
+        cut.Find("label[for='pe-target']").TextContent.Trim().Should().Be("Build against");
+        cut.FindAll("#pe-target option").Select(o => o.TextContent.Trim())
+            .Should().Equal("Current", "Next minor", "Next major");
+        cut.Find("#pe-target").GetAttribute("value").Should().Be(ProjectBuildTarget.Current, "a new pipeline builds what the extensions declare");
+        var caption = cut.Find("#pe-target").Closest(".field")!.QuerySelector(".field__hint")!.TextContent.Trim();
+        caption.Should().Be("Current is the version your extensions declare. Next minor and Next major compile against Microsoft's preview builds to catch breaking changes early; those builds cannot be deployed.");
+        // The caption says what the person needs, not how the tool does it.
+        caption.Should().NotContainAny("insider", "artifact", "compiler");
+    }
+
+    [Fact]
+    public async Task Editing_a_preview_pipeline_shows_the_version_it_builds_against()
+    {
+        var seed = await SeedAsync();
+        _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
+
+        var cut = _ctx.Render<PipelineEditorDialog>();
+        await cut.InvokeAsync(() => cut.Instance.OpenForEditAsync(
+            seed.PipelineId, seed.ProjectId, "CRONUS A/S", "Nightly", null, bcTarget: ProjectBuildTarget.NextMajor));
+
+        cut.Find("#pe-target").GetAttribute("value").Should().Be(ProjectBuildTarget.NextMajor);
+    }
+
     [Fact]
     public async Task The_release_editor_offers_the_two_sources_and_swaps_the_field_underneath()
     {

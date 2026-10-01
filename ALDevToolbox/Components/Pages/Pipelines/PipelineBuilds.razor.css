@@ -24,6 +24,8 @@
 /* "+4 more" after a commit message: the build has a changelog, and the row is
    showing its head commit only. */
 .pb-more { margin-left: var(--space-1); font-size: var(--text-xs); color: var(--ink-4); white-space: nowrap; }
+/* The quiet "Preview build" tag in a history row (#994). */
+.pb-preview { margin-left: var(--space-1); }
 
 /* The latest build's identity line: commit and branch as chips, then the
    version and the time as quiet meta. Wraps rather than truncating - a long

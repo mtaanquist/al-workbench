@@ -602,6 +602,39 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     }
 
     [Fact]
+    public async Task A_build_started_from_a_next_major_pipeline_takes_its_target_off_the_build_row()
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            // What StartBuildAsync snapshots from a pipeline set to Next major (#994).
+            await ctx.OeProjectBuilds.Where(b => b.Id == buildId)
+                .ExecuteUpdateAsync(s => s.SetProperty(b => b.BcTarget, ProjectBuildTarget.NextMajor));
+        }
+        var nuget = new FakeNuGet("18.0.41.62505", "30.0.42.32495-beta");
+
+        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.Current, FeedCompilers(nuget));
+
+        outcome.BcVersion.Should().Be("30.0");
+        _http.Requests.Should().Contain($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/{NextMajorVersion}/dk");
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.Id == buildId))
+            .BcArtifactVersion.Should().Be(NextMajorVersion, "the exact preview build is recorded on the build");
+    }
+
+    [Fact]
+    public async Task A_current_build_records_the_exact_business_central_build_it_used()
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+
+        var outcome = await BuildAsync(projectId, releaseId);
+
+        await using var read = _db.NewContext();
+        var stored = (await read.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.Id == buildId)).BcArtifactVersion;
+        stored.Should().NotBeNullOrEmpty().And.StartWith(outcome.BcVersion + ".");
+    }
+
+    [Fact]
     public async Task A_next_minor_build_resolves_the_next_minor_with_the_stable_compiler()
     {
         var (projectId, releaseId, _) = await SeedAsync();

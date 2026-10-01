@@ -74,6 +74,26 @@ public sealed class PipelinesDashboardServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_failed_preview_build_still_counts_as_failing_and_is_counted_separately()
+    {
+        var projectId = await SeedSolutionAsync("CRONUS");
+        var current = await SeedBuildPipelineAsync(projectId, "CRONUS Base");
+        var preview = await SeedBuildPipelineAsync(projectId, "CRONUS Base next major");
+        await SeedBuildAsync(projectId, current, ProjectBuildStatus.Failed, _now.AddHours(-2));
+        var previewBuild = await SeedBuildAsync(projectId, preview, ProjectBuildStatus.Failed, _now.AddHours(-1));
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectBuilds.Where(b => b.Id == previewBuild)
+                .ExecuteUpdateAsync(s => s.SetProperty(b => b.BcTarget, ProjectBuildTarget.NextMajor));
+        }
+
+        var d = await GetAsync();
+
+        d.FailedBuildPipelines.Should().Be(2, "a red next-major check is the signal the pipeline exists to give");
+        d.FailedPreviewBuildPipelines.Should().Be(1);
+    }
+
+    [Fact]
     public async Task A_pipeline_whose_newest_build_passed_is_not_failing_even_after_an_older_failure()
     {
         var projectId = await SeedSolutionAsync("CRONUS");

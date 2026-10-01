@@ -123,6 +123,15 @@ public sealed class ProjectBuildService
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
         }
 
+        // The build row carries the target its pipeline asked for (snapshotted when
+        // the build was started, so a restart-resumed job builds the same thing). An
+        // explicit target in the options wins, which is how a caller with no
+        // pipeline asks for one.
+        if (options.Target == BcBuildTarget.Current && build is not null)
+        {
+            options = options with { Target = ProjectBuildTarget.ToBuildTarget(build.BcTarget) };
+        }
+
         // A next-major build compiles with the newest beta compiler, because the
         // stable one may not read the next major's symbols; everything else keeps
         // the stable compiler every build has used.
@@ -226,6 +235,15 @@ public sealed class ProjectBuildService
                     $"Building against the {nextName} Business Central version: preview build {resolved.Version} ({country}) "
                     + $"from Microsoft's insider artifacts, compiled with AL compiler {compiler.Version}. "
                     + "The extensions' app.json files are not changed."));
+            }
+
+            // Stamped now rather than when the build finishes: a preview build that
+            // fails to compile is the expected outcome, and it still has to say which
+            // Business Central build it failed against.
+            if (build is not null)
+            {
+                build.BcArtifactVersion = resolved.Version;
+                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
             }
 
             var symbolsDir = Path.Combine(buildRoot, "symbols");
