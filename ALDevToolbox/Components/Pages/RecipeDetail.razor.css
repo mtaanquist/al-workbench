@@ -20,6 +20,8 @@
     line-height: var(--leading-normal);
     max-width: 76ch;
     text-wrap: pretty;
+    /* Typed into a textarea; keep the author's line breaks. */
+    white-space: pre-line;
 }
 
 .rd-tags {

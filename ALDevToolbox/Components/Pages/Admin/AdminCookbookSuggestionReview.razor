@@ -90,7 +90,7 @@
             </span>
         </div>
         <div class="card__body form-sec">
-            <p class="form-sec__cap">@_suggestion!.Description</p>
+            <p class="suggestion-text suggestion-desc">@_suggestion!.Description</p>
             @if (!string.IsNullOrWhiteSpace(_suggestion!.Keywords))
             {
                 <div class="u-row suggestion-tags">
@@ -107,7 +107,7 @@
                         <Icon Name="list" Width="14" Height="14" />
                         <span>Suggested instructions</span>
                     </summary>
-                    <div class="hint-details__intro">@Markdown.Render(_suggestion!.Instructions)</div>
+                    <div class="hint-details__intro suggestion-text">@Markdown.Render(_suggestion!.Instructions)</div>
                 </details>
             }
         </div>
