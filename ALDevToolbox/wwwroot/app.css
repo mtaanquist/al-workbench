@@ -411,6 +411,13 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
 .rp-page .page-head__actions,
 .pb-page .page-head__actions { flex: 0 1 auto; flex-wrap: wrap; }
 
+/* The cookbook suggestion review's head holds four actions while rejecting
+   (reason, Cancel, Confirm reject, Approve), too wide for a narrow window; a
+   head that cannot wrap widens the page and clips Approve off screen. */
+.suggestion-review .page-head { flex-wrap: wrap; }
+.suggestion-review .page-head > div:first-child { min-width: 0; flex: 1 1 300px; }
+.suggestion-review .page-head__actions { flex: 0 1 auto; flex-wrap: wrap; min-width: 0; }
+
 /* A solution's short name after its name, quieter: it is how colleagues say the
    customer aloud, and a second way to spot the row. Shared by every list that names a
    solution - the Solutions list and Upgrades so far (#966) - so they read alike. */

@@ -19,8 +19,8 @@
     Archetype 3 (master-detail), same shape as /pipelines/{id} and /releases/{id}:
     crumbs outside the head, the page's actions on the title row, and the facts in
     a factbox rail beside the content (.detail-body + .detail-body__aside). The
-    rail also holds the jump list, which appears once there is more than one file
-    to jump between. Each file is a .code-block. See .design/design-migration.md.
+    files open in the shared FileBrowser: a folder tree beside a read-only code
+    viewer, the same one a suggestion is reviewed in. See .design/design-migration.md.
 
     Named user: a BC consultant opening a pattern for the first time to pull it
     into a customer solution. Primary action: the download.
@@ -188,37 +188,7 @@
                     }
                     else
                     {
-                        @foreach (var file in _recipe.Files)
-                        {
-                            var path = DisplayPath(file);
-                            var anchor = AnchorFor(path);
-                            var collapsed = _collapsed.Contains(path);
-                            var lines = SplitLines(file.Content);
-                            <div id="@anchor" class="code-block rd-file @(collapsed ? "is-collapsed" : "")">
-                                <div class="code-block__bar">
-                                    <button type="button" class="rd-file__name"
-                                            aria-expanded="@((!collapsed).ToString().ToLowerInvariant())"
-                                            aria-controls="@($"{anchor}-body")"
-                                            @onclick="() => ToggleCollapsed(path)">
-                                        <Icon Name="chevron-down" Width="15" Height="15" Css="rd-file__chev" />
-                                        <Icon Name="file-code" Width="15" Height="15" />
-                                        <span class="code-block__name">@path</span>
-                                        <span class="rd-file__lines">@lines.Length line@(lines.Length == 1 ? "" : "s")</span>
-                                    </button>
-                                    <button type="button" class="btn btn--sm" @onclick="() => CopyAsync(file.Content, path)">
-                                        <Icon Name="copy" Width="14" Height="14" />
-                                        <span>Copy</span>
-                                    </button>
-                                </div>
-                                @if (!collapsed)
-                                {
-                                    <div class="rd-file__body" id="@($"{anchor}-body")">
-                                        <pre><code>@for (var li = 0; li < lines.Length; li++)
-{<span class="cl"><span class="cl-n">@(li + 1)</span><span class="cl-c">@if (lines[li].Length == 0){<text>&#8203;</text>}else{@foreach (var tok in AlSyntaxHighlighter.TokenizeLine(lines[li])){@if (tok.Cls.Length == 0){@tok.Text}else{<span class="@tok.Cls">@tok.Text</span>}}}</span></span>}</code></pre>
-                                    </div>
-                                }
-                            </div>
-                        }
+                        <FileBrowser Files="_files" OnCopy="CopyFileAsync" />
                     }
                 </section>
             </div>
@@ -261,43 +231,6 @@
                         }
                     </div>
                 </section>
-
-                @if (HasJumpList)
-                {
-                    <section class="card card--flush">
-                        <div class="card__head"><h2 class="card__title">Jump to file</h2></div>
-                        <div class="rd-jumps">
-                            @foreach (var file in _recipe.Files)
-                            {
-                                var path = DisplayPath(file);
-                                var anchor = AnchorFor(path);
-                                @* The href carries the full path, not a bare
-                                   "#anchor": a fragment-only URL resolves
-                                   against <base href="/">, not the current
-                                   document, so every jump link navigated to
-                                   the site root. *@
-                                <a class="rd-jump @(_active == path ? "is-active" : "")"
-                                   href="@($"/cookbook/{Id}#{anchor}")"
-                                   title="@path"
-                                   @onclick="() => SelectFile(path)"
-                                   @onclick:preventDefault="false">
-                                    <Icon Name="file-code" Width="14" Height="14" />
-                                    @* File name over folder, each truncating on its
-                                       own line: a rail is 280px wide and these paths
-                                       share prefixes, so one long line would ellipsise
-                                       away the only part that tells them apart. *@
-                                    <span class="rd-jump__stack">
-                                        <span class="rd-jump__name">@file.FileName</span>
-                                        @if (!string.IsNullOrEmpty(file.RelativePath))
-                                        {
-                                            <span class="rd-jump__dir">@file.RelativePath</span>
-                                        }
-                                    </span>
-                                </a>
-                            }
-                        </div>
-                    </section>
-                }
             </aside>
         </div>
     }
@@ -417,9 +350,8 @@
 
     private Recipe? _recipe;
     private bool _loaded;
-    private string? _active;
+    private IReadOnlyList<FileBrowser.Entry> _files = [];
     private ToastHost? _toast;
-    private readonly HashSet<string> _collapsed = new(StringComparer.Ordinal);
     private bool _showDownloadModal;
     private bool _copyRecorded;
     private string _customerName = string.Empty;
@@ -441,22 +373,15 @@
         // may still be in flight on it once the recipe is there.
         _repoReady = (await Repositories.GetAccessAsync()).IsReady;
         _recipe = await Recipes.GetAsync(Id);
+        _files = _recipe?.Files
+            .Select(f => new FileBrowser.Entry(f.RelativePath, f.FileName, f.Content))
+            .ToList() ?? [];
         _loaded = true;
-        // Deliberately no initial _active: the rail's highlight is the universal
-        // "you are here" signal, and it only tracks clicks - it does not follow
-        // scrolling. Pre-selecting file 1 made it lie the moment you scrolled.
     }
 
     /// <summary>Formats the estimated-value hours compactly, e.g. <c>8 hours</c>.</summary>
     private static string FormatHours(decimal hours) =>
         $"{hours.ToString("0.##")} {(hours == 1 ? "hour" : "hours")}";
-
-    /// <summary>
-    /// Whether to show the jump list in the rail. It exists to jump between
-    /// files, so a single-file recipe — the common case for a snippet — gets the
-    /// facts card alone rather than a list with one entry in it.
-    /// </summary>
-    private bool HasJumpList => _recipe is { } r && r.Files.Count > 1;
 
     private async Task OpenDownloadModal()
     {
@@ -567,49 +492,17 @@
         }
     }
 
-    private static string DisplayPath(RecipeFile file) =>
-        string.IsNullOrEmpty(file.RelativePath) ? file.FileName : file.RelativePath + "/" + file.FileName;
-
-    private static string[] SplitLines(string content) =>
-        content.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
-
     private static List<string> SplitKeywords(string? keywords) =>
         string.IsNullOrWhiteSpace(keywords)
             ? new List<string>()
             : keywords.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
-    private void ToggleCollapsed(string path)
-    {
-        if (!_collapsed.Add(path))
-        {
-            _collapsed.Remove(path);
-        }
-    }
-
-    /// <summary>Rail click: mark the file active and ensure its block is expanded
-    /// so the hash-scroll lands on visible content.</summary>
-    private void SelectFile(string path)
-    {
-        _active = path;
-        _collapsed.Remove(path);
-    }
-
-    private static string AnchorFor(string path)
-    {
-        var sb = new System.Text.StringBuilder("recipe-file-");
-        foreach (var c in path)
-        {
-            sb.Append(char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : '-');
-        }
-        return sb.ToString().TrimEnd('-');
-    }
-
-    private async Task CopyAsync(string content, string path)
+    private async Task CopyFileAsync(FileBrowser.Entry file)
     {
         try
         {
-            await JS.InvokeVoidAsync("navigator.clipboard.writeText", content);
-            _toast?.Show($"Copied {path}");
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", file.Content);
+            _toast?.Show($"Copied {file.Path}");
             await RecordCopyOnceAsync();
         }
         catch

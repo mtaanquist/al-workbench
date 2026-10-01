@@ -13,18 +13,33 @@
 
 <EditPage Title="@(_suggestion?.Title ?? (_loaded ? "Suggestion not found" : "Review suggestion"))"
           IsLoading="@(!_loaded)" IsNotFound="@(_suggestion is null)" Sticky="true"
+          PageClass="suggestion-review"
           Trail='@([new("Suggestions", "/admin/cookbook/suggestions"), new("Review")])'>
     <SubtitleContent>
         @if (_suggestion is { } s)
         {
-            <text>
-                Suggested by @(s.SuggestedByUser?.DisplayName ?? "an unknown user")
-                on <Timestamp Value="@s.RequestedAt" />
-            </text>
+            @* The facts a reviewer weighs before reading the code, on the line
+               under the title rather than as small tags at the far end of the
+               card header where they were easy to miss. *@
+            <span class="suggestion-meta">
+                <span>
+                    Suggested by @(s.SuggestedByUser?.DisplayName ?? "an unknown user")
+                    on <Timestamp Value="@s.RequestedAt" />
+                </span>
+                <RecipeTypeBadge Type="s.Type" />
+                @if (s.MinimumApplicationVersion is { } minV)
+                {
+                    <span>Requires @minV.Name or later</span>
+                }
+                @if (s.EstimatedValueHours is { } hours)
+                {
+                    <span>Time saved: @hours.ToString("0.##") @(hours == 1 ? "hour" : "hours")</span>
+                }
+            </span>
         }
         else if (_loaded)
         {
-            <text>This one doesn't exist, or someone has already reviewed it.</text>
+            <text>This suggestion doesn't exist.</text>
         }
     </SubtitleContent>
     <Notices>
@@ -34,11 +49,51 @@
                 <span>@_lastError</span>
             </Alert>
         }
+        @* A decided suggestion is reached by an old link or a bookmark. Saying
+           what happened to it beats "not found", which reads as if it was lost. *@
+        @if (_suggestion is { Decision: RecipeSuggestionDecision.Approved } approved)
+        {
+            <Alert Tone="AlertTone.Success">
+                <span>
+                    Approved by @(approved.DecidedByUser?.DisplayName ?? "an unknown user")@if (approved.DecidedAt is { } at)
+                    {<text> on <Timestamp Value="@at" /></text>}.
+                    The suggestion is shown below as it was submitted; the published
+                    recipe may have been edited since.
+                </span>
+            </Alert>
+        }
+        else if (_suggestion is { Decision: RecipeSuggestionDecision.Rejected } rejected)
+        {
+            <Alert Tone="AlertTone.Neutral">
+                <span>
+                    Rejected by @(rejected.DecidedByUser?.DisplayName ?? "an unknown user")@if (rejected.DecidedAt is { } at)
+                    {<text> on <Timestamp Value="@at" /></text>}.
+                    @if (!string.IsNullOrWhiteSpace(rejected.DecisionNote))
+                    {
+                        <text> Reason: @rejected.DecisionNote</text>
+                    }
+                </span>
+            </Alert>
+        }
     </Notices>
     @* In the sticky head so the decision stays in view however long the
        suggestion runs, instead of at the foot of the page. *@
     <Actions>
-        @if (_suggestion is not null)
+        @if (_suggestion is { Decision: RecipeSuggestionDecision.Approved, ApprovedRecipeId: { } recipeId })
+        {
+            <a class="btn" href="@($"/cookbook/{recipeId}")">
+                <Icon Name="book-open" Width="14" Height="14" />
+                <span>Open published recipe</span>
+            </a>
+        }
+        else if (_suggestion is not null && !IsPending)
+        {
+            <a class="btn" href="/admin/cookbook/suggestions">
+                <Icon Name="arrow-left" Width="14" Height="14" />
+                <span>Back to suggestions</span>
+            </a>
+        }
+        @if (IsPending)
         {
             if (_rejecting)
             {
@@ -70,32 +125,27 @@
     <section class="card">
         <div class="card__head">
             <h2 class="card__title">What was suggested</h2>
-            <span class="u-row suggestion-tags">
-                @* A .tag, not a .status-pill, for the same reason
-                   AdminTemplateList gives its "Default" marker one: a
-                   recipe type is an attribute of the suggestion, not its
-                   lifecycle state. It also sat between two .tag siblings
-                   saying attributes, reading as the only status in a row
-                   that has none. *@
-                <span class="tag" title="Suggested recipe type">@_suggestion!.Type</span>
-                @if (_suggestion!.MinimumApplicationVersion is { } minV)
-                {
-                    <span class="tag" title="Suggested minimum BC application version">Min: @minV.Name (@minV.Application)</span>
-                }
-                @if (_suggestion!.EstimatedValueHours is { } hours)
-                {
-                    <span class="tag" title="Suggested estimated value in hours">Est. value: @hours.ToString("0.##") h</span>
-                }
-            </span>
         </div>
         <div class="card__body form-sec">
-            <p class="form-sec__cap">@_suggestion!.Description</p>
-            @if (!string.IsNullOrWhiteSpace(_suggestion!.Keywords))
+            <p class="suggestion-text suggestion-desc">@_suggestion!.Description</p>
+            @if (_keywords.Count > 0)
             {
+                @* Keywords are mostly there to help assistants find the recipe,
+                   so a long list is noise to a person: show the first few and
+                   let the rest open on request. *@
                 <div class="u-row suggestion-tags">
-                    @foreach (var kw in _suggestion!.Keywords.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    <span class="suggestion-tags__label">Search keywords</span>
+                    @foreach (var kw in _showAllKeywords ? _keywords : _keywords.Take(KeywordPreview))
                     {
                         <span class="tag">@kw</span>
+                    }
+                    @if (_keywords.Count > KeywordPreview)
+                    {
+                        <button type="button" class="btn btn--sm btn--ghost suggestion-more"
+                                aria-expanded="@(_showAllKeywords ? "true" : "false")"
+                                @onclick="() => _showAllKeywords = !_showAllKeywords">
+                            @(_showAllKeywords ? "Show fewer" : $"and {_keywords.Count - KeywordPreview} more")
+                        </button>
                     }
                 </div>
             }
@@ -106,7 +156,7 @@
                         <Icon Name="list" Width="14" Height="14" />
                         <span>Suggested instructions</span>
                     </summary>
-                    <div class="hint-details__intro">@Markdown.Render(_suggestion!.Instructions)</div>
+                    <div class="hint-details__intro suggestion-text">@Markdown.Render(_suggestion!.Instructions)</div>
                 </details>
             }
         </div>
@@ -116,20 +166,17 @@
         <div class="card__head">
             <h2 class="card__title">@_suggestion!.Files.Count file@(_suggestion!.Files.Count == 1 ? "" : "s")</h2>
         </div>
-        <div class="card__body form-sec">
-            @foreach (var f in _suggestion!.Files.OrderBy(f => f.Ordering))
-            {
-                var displayPath = string.IsNullOrEmpty(f.RelativePath) ? f.FileName : f.RelativePath + "/" + f.FileName;
-                <div class="code-block">
-                    <div class="code-block__bar">
-                        <span class="code-block__name">@displayPath</span>
-                    </div>
-                    <pre>@f.Content</pre>
-                </div>
-            }
+        <div class="card__body">
+            <FileBrowser Files="_files" />
         </div>
     </section>
 
+    <ConfirmDialog @ref="_approveConfirm"
+                   Title="Publish this recipe?"
+                   Message="It goes into the Cookbook straight away, where everyone in your organisation can find and use it. You can still edit it afterwards."
+                   ConfirmLabel="Approve and publish"
+                   ConfirmIcon="check"
+                   ConfirmButtonClass="btn--primary" />
     </ChildContent>
 </EditPage>
 
@@ -142,33 +189,54 @@
     private string? _lastError;
     private bool _rejecting;
     private string _rejectNote = string.Empty;
+    private ConfirmDialog? _approveConfirm;
+    private IReadOnlyList<string> _keywords = [];
+    private bool _showAllKeywords;
+    private IReadOnlyList<FileBrowser.Entry> _files = [];
 
-    protected override async Task OnParametersSetAsync()
+    private const int KeywordPreview = 10;
+
+    private bool IsPending => _suggestion is { Decision: RecipeSuggestionDecision.Pending };
+
+    protected override Task OnParametersSetAsync() => LoadAsync();
+
+    private async Task LoadAsync()
     {
-        var s = await Suggestions.GetAsync(Id);
-        // Only pending suggestions are reviewable; a decided one shows the
-        // same not-found state as a bad id so stale links don't offer actions.
-        _suggestion = s?.Decision == RecipeSuggestionDecision.Pending ? s : null;
+        // A decided suggestion still renders, read-only and with its outcome
+        // in the notices; only a pending one offers Approve and Reject.
+        _suggestion = await Suggestions.GetAsync(Id);
+        _keywords = _suggestion?.Keywords
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [];
+        _files = _suggestion?.Files
+            .OrderBy(f => f.Ordering)
+            .Select(f => new FileBrowser.Entry(f.RelativePath, f.FileName, f.Content))
+            .ToList() ?? [];
         _loaded = true;
     }
 
     private async Task ApproveAsync()
     {
-        if (_busy || _suggestion is null) return;
+        if (_busy || !IsPending || _approveConfirm is null) return;
+        if (!await _approveConfirm.OpenAsync()) return;
         _busy = true;
         _lastError = null;
         try
         {
-            var recipe = await Suggestions.ApproveAsync(_suggestion.Id);
-            Nav.NavigateTo($"/admin/cookbook/{recipe.Id}");
+            var recipe = await Suggestions.ApproveAsync(_suggestion!.Id);
+            // Replace, not push: once decided, this page is a dead end, so Back
+            // from the new recipe should land on the review list instead.
+            Nav.NavigateTo($"/admin/cookbook/{recipe.Id}", replace: true);
         }
         catch (PlanValidationException ex)
         {
             _lastError = ex.Errors.FirstOrDefault().Value ?? "Validation failed.";
+            // Most often someone else decided it first: reload so the page
+            // shows that outcome instead of still offering the decision.
+            await LoadAsync();
         }
         catch (Exception ex)
         {
-            Log.LogError(ex, "Failed to approve recipe suggestion {Id}.", _suggestion.Id);
+            Log.LogError(ex, "Failed to approve recipe suggestion {Id}.", _suggestion!.Id);
             _lastError = "An unexpected error occurred. The suggestion was not approved.";
         }
         finally
@@ -185,21 +253,24 @@
 
     private async Task RejectAsync()
     {
-        if (_busy || _suggestion is null) return;
+        if (_busy || !IsPending) return;
         _busy = true;
         _lastError = null;
         try
         {
-            await Suggestions.RejectAsync(_suggestion.Id, _rejectNote);
-            Nav.NavigateTo("/admin/cookbook/suggestions");
+            await Suggestions.RejectAsync(_suggestion!.Id, _rejectNote);
+            Nav.NavigateTo("/admin/cookbook/suggestions", replace: true);
         }
         catch (PlanValidationException ex)
         {
             _lastError = ex.Errors.FirstOrDefault().Value ?? "Validation failed.";
+            // Most often someone else decided it first: reload so the page
+            // shows that outcome instead of still offering the decision.
+            await LoadAsync();
         }
         catch (Exception ex)
         {
-            Log.LogError(ex, "Failed to reject recipe suggestion {Id}.", _suggestion.Id);
+            Log.LogError(ex, "Failed to reject recipe suggestion {Id}.", _suggestion!.Id);
             _lastError = "An unexpected error occurred. The suggestion was not rejected.";
         }
         finally
