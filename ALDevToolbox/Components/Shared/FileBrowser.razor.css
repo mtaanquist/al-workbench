@@ -1,0 +1,78 @@
+/* Tree and viewer share one bordered box, like an editor window. */
+.fb {
+    display: grid;
+    grid-template-columns: minmax(160px, 300px) minmax(0, 1fr);
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    background: var(--surface);
+    overflow: hidden;
+}
+
+.fb--single { grid-template-columns: minmax(0, 1fr); }
+
+/* .otree is a grid sized to its widest row; capped, so long names ellipsise
+   instead of pushing the viewer over. */
+.fb__tree {
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    max-height: 70vh;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    background: var(--surface-2);
+}
+
+.fb__group { display: grid; grid-template-columns: minmax(0, 1fr); }
+
+.fb__main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.fb__bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: 30px;
+    padding: 0 var(--space-3);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--ink-3);
+}
+
+.fb__path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+}
+
+.fb__lines {
+    margin-left: auto;
+    flex: none;
+    font-size: var(--text-2xs);
+    color: var(--ink-4);
+}
+
+/* Inside the browser's own border the viewer drops its frame. It grows with
+   the file up to the same cap as the tree, and from there the editor's own
+   scroller takes both axes, so the sideways scrollbar stays in view rather
+   than sitting at the foot of a tall file. */
+.fb__main ::deep .code-viewer-host {
+    border: 0;
+    border-radius: 0;
+}
+
+.fb__main ::deep .cm-scroller {
+    max-height: 70vh;
+    overflow: auto;
+}
+
+/* Last, so it wins over the side-by-side rules above at equal specificity. */
+@container (max-width: 760px) {
+    .fb { grid-template-columns: minmax(0, 1fr); }
+    .fb__tree { max-height: 12rem; border-right: 0; border-bottom: 1px solid var(--border); }
+}

@@ -1,0 +1,160 @@
+@*
+    A read-only file browser: a folder tree on the left, the selected file in the
+    shared CodeViewer on the right, the way an editor's explorer works. Built for
+    reviewing a set of files someone else wrote (a cookbook suggestion), where a
+    stack of full-height code blocks made the page as long as every file put
+    together.
+
+    The tree borrows the Object Explorer's .otree rows. Files keep the order they
+    were given in, and folders appear where their first file does: the author's
+    ordering usually says which file to read first, and alphabetical would undo
+    that. With a single file there is nothing to navigate, so the tree is left
+    out and the viewer takes the full width.
+*@
+
+<div class="fb @(Files.Count == 1 ? "fb--single" : null)">
+    @if (Files.Count > 1)
+    {
+        <nav class="fb__tree otree" aria-label="Files">
+            @RenderFolder(_root, 0)
+        </nav>
+    }
+    <div class="fb__main">
+        @if (_selected is { } file)
+        {
+            <div class="fb__bar">
+                <Icon Name="file-code" Width="14" Height="14" />
+                <span class="fb__path" title="@file.Path">@file.Path</span>
+                @{ var lines = LineCount(file.Content); }
+                <span class="fb__lines">@lines line@(lines == 1 ? "" : "s")</span>
+            </div>
+            @* Keyed by path: the viewer reads its language only when it mounts,
+               so switching from an .al file to a .json one needs a fresh mount. *@
+            <CodeViewer @key="file.Path" Content="@file.Content" Language="@LanguageFor(file.Name)" Fluid="true" />
+        }
+    </div>
+</div>
+
+@code {
+    /// <summary>One file to show. <paramref name="Folder"/> is the slash-separated folder, empty for the root.</summary>
+    public sealed record Entry(string Folder, string Name, string Content)
+    {
+        public string Path => string.IsNullOrEmpty(Folder) ? Name : Folder + "/" + Name;
+    }
+
+    /// <summary>The files, in the order they should be listed.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<Entry> Files { get; set; } = [];
+
+    private sealed class Folder
+    {
+        public string Name = string.Empty;
+        public string Key = string.Empty;
+        // Children in first-seen order, folders and files interleaved as they arrive.
+        public readonly List<object> Children = [];
+    }
+
+    private Folder _root = new();
+    private IReadOnlyList<Entry>? _builtFrom;
+    private Entry? _selected;
+    private readonly HashSet<string> _collapsed = new(StringComparer.Ordinal);
+    // Keeps group ids unique when a page shows more than one browser.
+    private readonly string _instance = Guid.NewGuid().ToString("N")[..8];
+
+    protected override void OnParametersSet()
+    {
+        if (ReferenceEquals(_builtFrom, Files)) return;
+        _builtFrom = Files;
+        _root = BuildTree(Files);
+        _collapsed.Clear();
+        // Keep the open file across a reload of the same set, matched by path:
+        // the entries are new instances even when nothing changed.
+        _selected = Files.FirstOrDefault(f => f.Path == _selected?.Path)
+            ?? (Files.Count > 0 ? Files[0] : null);
+    }
+
+    private static Folder BuildTree(IReadOnlyList<Entry> files)
+    {
+        var root = new Folder();
+        foreach (var file in files)
+        {
+            var node = root;
+            if (!string.IsNullOrEmpty(file.Folder))
+            {
+                foreach (var part in file.Folder.Split('/', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var key = node.Key.Length == 0 ? part : node.Key + "/" + part;
+                    var child = node.Children.OfType<Folder>().FirstOrDefault(f => f.Key == key);
+                    if (child is null)
+                    {
+                        child = new Folder { Name = part, Key = key };
+                        node.Children.Add(child);
+                    }
+                    node = child;
+                }
+            }
+            node.Children.Add(file);
+        }
+        return root;
+    }
+
+    private RenderFragment RenderFolder(Folder folder, int depth) => __builder =>
+    {
+        foreach (var child in folder.Children)
+        {
+            if (child is Folder sub)
+            {
+                var open = !_collapsed.Contains(sub.Key);
+                var groupId = $"fb-{_instance}-{sub.Key.Replace('/', '-')}";
+                <button type="button" class="otree__row" style="--d: @depth"
+                        aria-expanded="@(open ? "true" : "false")"
+                        aria-controls="@groupId"
+                        @onclick="() => ToggleFolder(sub.Key)">
+                    <span class="otree__caret @(open ? "is-open" : null)" aria-hidden="true">
+                        <Icon Name="chevron-right" Width="12" Height="12" />
+                    </span>
+                    <Icon Name="@(open ? "folder-open" : "folder")" Width="13" Height="13" Css="otree__ico" />
+                    <span class="otree__name">@sub.Name</span>
+                </button>
+                @* A group per folder, so assistive tech hears which folder a
+                   file sits in; the indentation alone says it only visually. *@
+                @if (open)
+                {
+                    <div class="fb__group" role="group" id="@groupId" aria-label="@sub.Name">
+                        @RenderFolder(sub, depth + 1)
+                    </div>
+                }
+            }
+            else if (child is Entry file)
+            {
+                var active = file.Path == _selected?.Path;
+                @* The caret's width again as a spacer, so a file's icon lines up
+                   under its folder's icon rather than under the caret. *@
+                <button type="button" class="otree__row @(active ? "is-active" : null)" style="--d: @depth"
+                        aria-current="@(active ? "true" : null)"
+                        title="@file.Path"
+                        @onclick="() => _selected = file">
+                    <span class="otree__caret" aria-hidden="true"></span>
+                    <Icon Name="file-code" Width="13" Height="13" Css="otree__ico" />
+                    <span class="otree__name">@file.Name</span>
+                </button>
+            }
+        }
+    };
+
+    private void ToggleFolder(string key)
+    {
+        if (!_collapsed.Remove(key)) _collapsed.Add(key);
+    }
+
+    private static int LineCount(string content) =>
+        content.Length == 0 ? 0 : content.TrimEnd('\n').Split('\n').Length;
+
+    private static string LanguageFor(string fileName) =>
+        System.IO.Path.GetExtension(fileName).ToLowerInvariant() switch
+        {
+            ".al" => "al",
+            ".json" => "json",
+            ".toml" => "toml",
+            _ => "",
+        };
+}
