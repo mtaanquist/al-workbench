@@ -2092,6 +2092,37 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         return result;
     }
 
+    /// <summary>
+    /// Asks Business Central again how a booked install it had already accepted ended,
+    /// from the app and operation ids stamped on the booking, and waits for it as the send
+    /// would have. For an install the workbench did not see finish: a restart during the
+    /// poll, or a poll that gave up as unconfirmed. Resolves the connection the way the
+    /// send does, as the requester, so an access change since the booking is honoured;
+    /// refusals come back as the send's would (a validation or access exception), and the
+    /// caller (<see cref="UpgradeActionWorker"/>) decides what the row says.
+    /// </summary>
+    /// <param name="progress">Called on each poll, so a worker can keep its heartbeat alive through a long one.</param>
+    internal async Task<BcAppOperationResult> ConfirmBookedInstallAsync(
+        int projectId, int environmentId, Guid appId, Guid operationId, CancellationToken ct, Action? progress = null)
+    {
+        var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
+
+        // The poller reads only the two ids; the rest is filler for the record's shape.
+        var started = new BcAppOperation(operationId, appId, string.Empty, BcAppOperationStatus.Unknown, string.Empty,
+            string.Empty, string.Empty, null, string.Empty, string.Empty, string.Empty, false, string.Empty, null, null, null);
+        var result = await BcAppOperationPoller.PollUntilTerminalAsync(
+            _apps, env.Token, env.Family, env.Name, started, UploadPollDelay, UploadPollTimeout, ct, progress);
+        _panelCache.Invalidate(projectId, environmentId);
+        _logger.LogInformation(
+            "Checked operation {OperationId} of app {AppId} on {Environment} (project {ProjectId}) again: completed {Completed}, unconfirmed {Unconfirmed}.",
+            operationId, appId, env.Name, projectId, result.Completed, result.IsUnconfirmed);
+        if (result.Raw is { } raw)
+        {
+            _logger.LogWarning("Business Central reported operation {OperationId} of app {AppId} on {Environment} as failed: {Raw}", operationId, appId, env.Name, raw);
+        }
+        return result;
+    }
+
     /// <summary>How long one booked upload's install is waited for before it is given up as unconfirmed. The worker's budget is worked out from it.</summary>
     internal static readonly TimeSpan DefaultUploadPollTimeout = TimeSpan.FromMinutes(10);
 

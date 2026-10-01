@@ -440,6 +440,15 @@ public sealed class UpgradeActionService
         _connections.SendBookedUpdateAsync(projectId, environmentId, appId, targetVersion, agreedPrerequisiteAppIds, accepted, ct, progress);
 
     /// <summary>
+    /// Asks Business Central again how a booked install it had already accepted ended
+    /// (<see cref="UpgradeActionKind.UploadApp"/> or <see cref="UpgradeActionKind.UpdateApp"/>),
+    /// and waits for it. Only the worker calls this, for an install it did not see finish.
+    /// </summary>
+    internal Task<BcAppOperationResult> ConfirmInstallAsync(
+        int projectId, int environmentId, Guid appId, Guid operationId, CancellationToken ct, Action? progress = null) =>
+        _connections.ConfirmBookedInstallAsync(projectId, environmentId, appId, operationId, ct, progress);
+
+    /// <summary>
     /// True for the kinds that install an app - an upload or an AppSource update. They are
     /// booked by the solution's managers, take minutes, and the worker runs them one at a
     /// time in their own pass; the rest are the update team's platform-update moves.

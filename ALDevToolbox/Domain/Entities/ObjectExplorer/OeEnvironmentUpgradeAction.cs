@@ -84,6 +84,17 @@ public class OeEnvironmentUpgradeAction
     public Guid? BcOperationId { get; set; }
 
     /// <summary>
+    /// True while an install Business Central accepted still owes the history an answer:
+    /// the row is recorded as sent, but a restart or a poll that gave up (a run of API
+    /// errors, or the wait running out) means nobody saw it finish. The worker asks
+    /// Business Central once more from <see cref="BcAppId"/> and <see cref="BcOperationId"/>,
+    /// settles the row from what it hears, and clears this whatever the answer, so a row
+    /// is re-checked once and never keeps the worker busy for ever. The rest of the row's
+    /// batch waits for that answer. False for every other row.
+    /// </summary>
+    public bool ConfirmationDue { get; set; }
+
+    /// <summary>
     /// Groups the rows of one multi-app upload: several apps booked together, one row
     /// each, sent one after another in <see cref="BatchOrder"/>. The worker waits for
     /// each install to finish before starting the next, because two installs running at

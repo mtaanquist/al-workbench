@@ -618,12 +618,20 @@ that names the environment and says what the click does there:
   has apps, no customer's agreed update slot waits behind another's install, and a sweep
   costs at most one install (the worker's heartbeat is ticked on every poll of it). "Now"
   therefore means "shortly", not "within a minute", when another install is running. An
-  install the workbench could not see finish - a run of failed polls, or the wait ran
-  out - is recorded as **sent, unconfirmed**, as a restart while an app is installing
-  records it (the operation ids Business Central answered with are on the row,
-  `package_bc_app_id` / `package_bc_operation_id`); in both cases the rest of the batch
-  still goes, and a dependent that needed the app is refused by Business Central if it
-  did not land. Only Business Central's own refusal is a failure that stops a batch. A
+  install the workbench could not see finish - a run of failed polls, the wait ran out,
+  or a restart while it was installing - is recorded as **sent, unconfirmed** and marked
+  to be asked about again (`package_confirmation_due`, #1002). A later sweep re-polls it
+  **once** from the operation ids Business Central answered with (`package_bc_app_id` /
+  `package_bc_operation_id`), in place of that sweep's one install and as the requester,
+  and settles the row from the answer: installed, failed in Business Central's words, or
+  still unconfirmed when no answer can be had (the poll gives up again, or the solution,
+  environment, credentials or the requester's access are gone). The mark is cleared
+  whatever the answer, so a row never keeps the worker busy for ever. The rest of the
+  batch waits for that second look: a failure it finds stops the dependents like any
+  other, and installed or still-unconfirmed lets them go, where a dependent that needed
+  the app is refused by Business Central if it did not land. A booked AppSource update is
+  asked about the same way. Only Business Central's own refusal is a failure that stops
+  a batch. A
   pending upload is **not** a platform-update booking: the Upgrades page's "already
   booked" marker and the bulk version change ignore it.
 
