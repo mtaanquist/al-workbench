@@ -87,13 +87,17 @@ public sealed class RecipeSuggestionService
             .ToListAsync(ct);
     }
 
-    /// <summary>Returns one suggestion (with files) for the detail view.</summary>
+    /// <summary>
+    /// Returns one suggestion (with files) for the detail view, whatever its
+    /// decision, with the deciding user so a decided one can say who decided it.
+    /// </summary>
     public Task<RecipeSuggestion?> GetAsync(int id, CancellationToken ct = default)
     {
         return _db.RecipeSuggestions
             .AsNoTracking()
             .Include(s => s.Files.OrderBy(f => f.Ordering))
             .Include(s => s.SuggestedByUser)
+            .Include(s => s.DecidedByUser)
             .Include(s => s.MinimumApplicationVersion)
             .FirstOrDefaultAsync(s => s.Id == id, ct);
     }

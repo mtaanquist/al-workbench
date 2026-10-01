@@ -2,4 +2,36 @@
    widens the page and pushes the head's actions off screen. */
 .suggestion-tags { flex-wrap: wrap; min-width: 0; }
 
+/* .page and .form-sec are grids with auto tracks, so a child's min-content
+   width sets the track's floor: one unwrapped code line used to widen every
+   card on the page (#1003 wrapped the tags, but at that widened width). A
+   zero floor keeps the cards at the page's width and leaves the scrolling to
+   whatever holds the long line. */
+.card { min-width: 0; }
+.form-sec { grid-template-columns: minmax(0, 1fr); }
+
 .suggestion-reject-note { width: 16rem; }
+
+/* The description and instructions are what the reviewer is here to read, so
+   body text at a wider measure than the 68ch caption style they used to
+   borrow. The description is plain text typed into a textarea: keep its line
+   breaks. */
+.suggestion-text { margin: 0; max-width: 100ch; font-size: var(--text-sm); color: var(--ink-2); line-height: var(--leading-normal); }
+.suggestion-desc { white-space: pre-line; text-wrap: pretty; }
+.hint-details__intro.suggestion-text { margin: var(--space-2) 0; }
+
+/* The suggested instructions are rendered Markdown, so they can hold a fenced
+   code block, a table or a long URL. Inside the bounded track above those
+   would spill past the card; scroll them instead, and break long words. */
+.hint-details { min-width: 0; }
+.hint-details ::deep .hint-details__intro { overflow-wrap: anywhere; }
+.hint-details ::deep pre,
+.hint-details ::deep table { display: block; max-width: 100%; overflow-x: auto; }
+.suggestion-tags .tag { max-width: 100%; overflow-wrap: anywhere; }
+
+/* The facts line under the title: who and when, then the recipe's type,
+   version floor and value, wrapping as a unit on a narrow window. */
+.suggestion-meta { display: inline-flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-3); row-gap: var(--space-1); }
+
+.suggestion-more { height: auto; padding-block: 1px; font-size: var(--text-xs); }
+.suggestion-tags__label { font-size: var(--text-xs); color: var(--ink-3); }
