@@ -199,14 +199,15 @@
 
         @* Logo section - folded in from the retired /admin/templates/logo page so
            admins manage one Defaults form instead of two. The image is bundled
-           into every generated workspace under .assets/images/logo.<ext>.
+           into every generated workspace and downloaded extension, at the
+           default logo path (or .assets/images/logo.<ext> when that is blank).
            SVG uploads have <script> tags and on* attributes stripped on save. *@
         <section class="card">
             <div class="card__head">
                 <div>
                     <h2 class="card__title">Logo</h2>
                     <p class="card__sub">
-                        Bundled into every generated workspace. SVG or PNG,
+                        Bundled into every generated workspace and downloaded extension. SVG or PNG,
                         up to @(OrganizationBrandingService.MaxLogoBytes / 1024) KB.
                     </p>
                 </div>
