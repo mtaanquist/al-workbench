@@ -123,6 +123,10 @@ Same preview / stats / Generate pattern, but:
    > ```json
    > { "path": "MyCustomFeature" }
    > ```
+   > If the file also has a `files.exclude` list under `settings`, add this line there too, so the folder isn't shown twice:
+   > ```json
+   > "MyCustomFeature": true
+   > ```
 
    With a copy button on the snippet.
 

@@ -125,8 +125,98 @@ public sealed class CodeWorkspaceJsonTests : IDisposable
             .EnumerateArray()
             .Select(f => f.GetProperty("path").GetString())
             .ToList();
-        paths.Should().Equal("Core");
+        paths.Should().Equal("Core", ".");
         paths.Should().NotContain("BogusUserChoice");
+    }
+
+    [Fact]
+    public async Task Folders_end_with_the_workspace_root_and_extensions_are_excluded_from_it()
+    {
+        var template = TemplateBuilder.Default();
+        template.WorkspaceExtensions.Add(new WorkspaceExtension
+        {
+            OrganizationId = template.OrganizationId,
+            Path = "Hotfix",
+            NameTemplate = "{{extension_prefix}} Hotfix",
+            Required = false,
+            Ordering = 1,
+        });
+        await SeedTemplateAsync(template);
+
+        using var zip = await GenerateAsync(
+            PlanBuilder.WorkspacePlan(selectedExtensions: new[] { "Hotfix" }));
+
+        using var doc = ReadCodeWorkspace(zip);
+        var folders = doc.RootElement.GetProperty("folders").EnumerateArray().ToList();
+        folders.Select(f => f.GetProperty("path").GetString())
+            .Should().Equal("Core", "Hotfix", ".");
+        // Only the root entry carries a display name.
+        folders[^1].GetProperty("name").GetString().Should().Be("Root");
+        folders[0].TryGetProperty("name", out _).Should().BeFalse();
+
+        // Every extension folder is hidden under the root entry so it is not
+        // listed twice in the explorer, and nothing else is.
+        var exclude = doc.RootElement.GetProperty("settings").GetProperty("files.exclude");
+        exclude.EnumerateObject().Select(p => (p.Name, p.Value.GetBoolean()))
+            .Should().Equal(("Core", true), ("Hotfix", true));
+    }
+
+    [Fact]
+    public async Task Files_exclude_merges_into_what_the_admin_already_excludes()
+    {
+        await SeedTemplateAsync(TemplateBuilder.Default());
+        await SetCodeWorkspaceJsonAsync("""
+            {
+              "settings": {
+                "files.exclude": { "**/.git": true, "Core": false }
+              }
+            }
+            """);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan());
+
+        using var doc = ReadCodeWorkspace(zip);
+        var exclude = doc.RootElement.GetProperty("settings").GetProperty("files.exclude");
+        exclude.GetProperty("**/.git").GetBoolean().Should().BeTrue();
+        // The generator owns its extension folders' keys.
+        exclude.GetProperty("Core").GetBoolean().Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Template_overlay_files_exclude_adds_to_the_org_exclusions()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var template = TemplateBuilder.Default();
+            template.CodeWorkspaceJson = """
+                { "settings": { "files.exclude": { "**/.alpackages": true } } }
+                """;
+            ctx.RuntimeTemplates.Add(template);
+            await ctx.SaveChangesAsync();
+        }
+        await SetCodeWorkspaceJsonAsync("""
+            { "settings": { "files.exclude": { "**/.git": true } } }
+            """);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan());
+
+        using var doc = ReadCodeWorkspace(zip);
+        doc.RootElement.GetProperty("settings").GetProperty("files.exclude").EnumerateObject()
+            .Select(p => p.Name)
+            .Should().Equal("**/.git", "**/.alpackages", "Core");
+    }
+
+    [Fact]
+    public async Task Files_exclude_is_written_when_the_admin_json_has_no_settings()
+    {
+        await SeedTemplateAsync(TemplateBuilder.Default());
+        await SetCodeWorkspaceJsonAsync("{}");
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan());
+
+        using var doc = ReadCodeWorkspace(zip);
+        doc.RootElement.GetProperty("settings").GetProperty("files.exclude")
+            .GetProperty("Core").GetBoolean().Should().BeTrue();
     }
 
     [Fact]
@@ -264,7 +354,7 @@ public sealed class CodeWorkspaceJsonTests : IDisposable
             .EnumerateArray()
             .Select(f => f.GetProperty("path").GetString())
             .ToList();
-        paths.Should().Equal("Core");
+        paths.Should().Equal("Core", ".");
         paths.Should().NotContain("BogusFromTemplate");
     }
 
@@ -354,6 +444,9 @@ public sealed class CodeWorkspaceJsonTests : IDisposable
         var archive = await NewService().GenerateWorkspaceAsync(plan);
         return new ZipArchive(archive.Stream, ZipArchiveMode.Read, leaveOpen: false);
     }
+
+    private static JsonDocument ReadCodeWorkspace(ZipArchive zip) =>
+        JsonDocument.Parse(ReadEntry(zip.GetEntry("AcmeCustomer/AcmeCustomer.code-workspace")!));
 
     private static string ReadEntry(ZipArchiveEntry entry)
     {
