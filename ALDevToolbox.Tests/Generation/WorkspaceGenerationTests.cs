@@ -593,10 +593,10 @@ public sealed class WorkspaceGenerationTests : IDisposable
     }
 
     [Fact]
-    public async Task Root_folders_stay_out_of_the_code_workspace_folders_array()
+    public async Task Root_folders_get_no_code_workspace_entry_of_their_own()
     {
-        // .alpackages holds no app.json; listing it would have the AL
-        // extension try to load an app that isn't there.
+        // .alpackages holds no app.json and already shows under the
+        // workspace-root entry, so it is not listed separately.
         var template = TemplateBuilder.Default();
         template.RootFolders.Add(new RuntimeTemplateRootFolder
         {
@@ -616,8 +616,7 @@ public sealed class WorkspaceGenerationTests : IDisposable
             .EnumerateArray()
             .Select(f => f.GetProperty("path").GetString())
             .ToList();
-        folders.Should().NotContain(".alpackages");
-        folders.Should().Contain("Core");
+        folders.Should().Equal("Core", ".");
     }
 
     [Fact]
