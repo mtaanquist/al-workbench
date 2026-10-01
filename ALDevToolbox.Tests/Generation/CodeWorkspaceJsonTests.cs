@@ -151,7 +151,7 @@ public sealed class CodeWorkspaceJsonTests : IDisposable
         folders.Select(f => f.GetProperty("path").GetString())
             .Should().Equal("Core", "Hotfix", ".");
         // Only the root entry carries a display name.
-        folders[^1].GetProperty("name").GetString().Should().Be("Workspace");
+        folders[^1].GetProperty("name").GetString().Should().Be("Root");
         folders[0].TryGetProperty("name", out _).Should().BeFalse();
 
         // Every extension folder is hidden under the root entry so it is not

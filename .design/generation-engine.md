@@ -193,7 +193,7 @@ A JSON file with:
         { "path": "Core" },
         { "path": "Hotfix" },
         { "path": "DocumentCapture" },
-        { "path": ".", "name": "Workspace" }
+        { "path": ".", "name": "Root" }
     ],
     "settings": {
         "editor.formatOnSave": true,
@@ -228,7 +228,7 @@ Mustache substitution runs over each layer before the merge, so both can use `{{
 
 Each `folders` entry uses the extension's `path`, which is also its on-disk folder name. For a module clone that path is the module's `extension_name` (PascalCase), not its `key` — the key is the admin/URL slug and the dependency-reference target.
 
-The array is built from the emitted extensions, followed by one entry for the workspace root itself (`"path": "."`, named `Workspace`) so the root files (README, `.gitignore`, `.assets`, the declared empty folders) are reachable from the VS Code explorer. Without more, the root entry would list every extension a second time, so each extension's path is also written into `settings."files.exclude"` as `true`. Both come from the same folder list, so the sibling New Extension flow, which rebuilds the file with the new folder added, gets them too. VS Code applies `files.exclude` to every folder in the workspace, not just the root, so a top-level subfolder inside one extension that shares another extension's name is hidden as well; a workspace file has no root-only alternative. A sibling folder name containing glob characters is left out of the exclusions.
+The array is built from the emitted extensions, followed by one entry for the workspace root itself (`"path": "."`, named `Root`) so the root files (README, `.gitignore`, `.assets`, the declared empty folders) are reachable from the VS Code explorer. Without more, the root entry would list every extension a second time, so each extension's path is also written into `settings."files.exclude"` as `true`. Both come from the same folder list, so the sibling New Extension flow, which rebuilds the file with the new folder added, gets them too. VS Code applies `files.exclude` to every folder in the workspace, not just the root, so a top-level subfolder inside one extension that shares another extension's name is hidden as well; a workspace file has no root-only alternative. A sibling folder name containing glob characters is left out of the exclusions.
 
 Apart from the root entry, the array is built from the emitted extensions alone. The template's declared empty root folders get no entry of their own, since they already show under the root. `MergeTemplateOverlay` skips the `folders` key, so neither layer can add one either.
 

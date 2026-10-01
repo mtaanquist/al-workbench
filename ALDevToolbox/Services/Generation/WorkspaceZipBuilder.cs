@@ -771,7 +771,7 @@ public sealed class WorkspaceZipBuilder
     /// <c>folders</c> array, so the root files (README, <c>.gitignore</c>,
     /// <c>.assets</c>) are reachable from the explorer.
     /// </summary>
-    private const string RootFolderName = "Workspace";
+    private const string RootFolderName = "Root";
 
     /// <summary>
     /// The root entry would otherwise show every extension a second time
