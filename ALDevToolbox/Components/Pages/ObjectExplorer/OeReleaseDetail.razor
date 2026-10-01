@@ -633,16 +633,17 @@
     }
 
     /// <summary>
-    /// The releases this one can be compared with: every other ready release,
-    /// except that a Microsoft release only offers other Microsoft releases. With
-    /// hundreds of customer and pipeline-build releases imported, those buried
-    /// the handful of BC versions a first-party compare is ever made against.
+    /// The releases this one can be compared with: every other ready release of
+    /// the same kind. Microsoft code and customisations live in separate apps now,
+    /// so a cross-kind compare is not one anyone makes, and with hundreds of
+    /// customer and pipeline-build releases imported the full list buried the
+    /// few releases worth comparing against.
     /// </summary>
     internal static List<ReleaseListItem> CompareCandidates(
         IEnumerable<ReleaseListItem> releases, int releaseId, string releaseKind) =>
         releases
             .Where(r => r.Id != releaseId && r.Status == "ready" && r.DeletedAt is null)
-            .Where(r => releaseKind != "first_party" || r.Kind == "first_party")
+            .Where(r => r.Kind == releaseKind)
             .ToList();
 
     /// <summary>
