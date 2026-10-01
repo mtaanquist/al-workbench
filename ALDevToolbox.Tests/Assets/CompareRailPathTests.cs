@@ -71,8 +71,12 @@ public sealed class CompareRailPathTests
         read.Should().BeGreaterThan(-1, "the widths are measured in one batch");
         var write = fit.IndexOf("el.textContent = fitted;", StringComparison.Ordinal);
         write.Should().BeGreaterThan(read, "every read has to come before the first write");
-        fit[(read + batchRead.Length)..].Should().NotContain("clientWidth",
-            because: "a layout read between writes forces a layout per row");
+        var afterBatch = fit[(read + batchRead.Length)..];
+        foreach (var layoutRead in new[] { "clientWidth", "offsetWidth", "scrollWidth", "getBoundingClientRect" })
+        {
+            afterBatch.Should().NotContain(layoutRead,
+                because: "a layout read between writes forces a layout per row");
+        }
     }
 
     /// <summary>

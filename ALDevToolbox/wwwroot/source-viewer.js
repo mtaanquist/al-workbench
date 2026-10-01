@@ -695,9 +695,13 @@ function wireRailPathFit() {
         cancelAnimationFrame(frame);
         frame = requestAnimationFrame(fitRailPaths);
     };
-    schedule();
+    // The observer's first notification is the initial fit. Scheduling one
+    // here as well ran the whole fit twice on every open: the notification
+    // lands after this frame's callbacks, so the cancel never caught it.
     if (typeof ResizeObserver === "function") {
         new ResizeObserver(schedule).observe(rail);
+    } else {
+        schedule();
     }
     rail.__refitPaths = schedule;
 }
