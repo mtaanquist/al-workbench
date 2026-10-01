@@ -11,3 +11,12 @@
 .form-sec { grid-template-columns: minmax(0, 1fr); }
 
 .suggestion-reject-note { width: 16rem; }
+
+/* The suggested instructions are rendered Markdown, so they can hold a fenced
+   code block, a table or a long URL. Inside the bounded track above those
+   would spill past the card; scroll them instead, and break long words. */
+.hint-details { min-width: 0; }
+.hint-details ::deep .hint-details__intro { overflow-wrap: anywhere; }
+.hint-details ::deep pre,
+.hint-details ::deep table { display: block; max-width: 100%; overflow-x: auto; }
+.suggestion-tags .tag { max-width: 100%; overflow-wrap: anywhere; }

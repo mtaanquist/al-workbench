@@ -13,6 +13,7 @@
 
 <EditPage Title="@(_suggestion?.Title ?? (_loaded ? "Suggestion not found" : "Review suggestion"))"
           IsLoading="@(!_loaded)" IsNotFound="@(_suggestion is null)" Sticky="true"
+          PageClass="suggestion-review"
           Trail='@([new("Suggestions", "/admin/cookbook/suggestions"), new("Review")])'>
     <SubtitleContent>
         @if (_suggestion is { } s)
