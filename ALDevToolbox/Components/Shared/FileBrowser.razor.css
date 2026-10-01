@@ -64,6 +64,7 @@
 .fb__main ::deep .code-viewer-host {
     border: 0;
     border-radius: 0;
+    min-height: 0;
 }
 
 .fb__main ::deep .cm-scroller {

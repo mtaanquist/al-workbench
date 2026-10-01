@@ -54,83 +54,14 @@
     gap: var(--space-3);
 }
 
-.rd-jumps {
-    padding: var(--space-1);
-    display: grid;
-    gap: 1px;
-    /* The rail track is a fixed 280px. Without this a grid item is free to grow
-       to its content's min-content width, and a jump row's min-content is the
-       longest unbroken file name in the recipe - which pushed the whole card out
-       past the right edge of .app__content (overflow-x: hidden, so it was cut
-       off rather than scrollable). See issue #605. */
-    min-width: 0;
-}
-
-.rd-jump {
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2);
-    border-radius: var(--r);
-    color: var(--ink-2);
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    text-decoration: none;
-    transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.rd-jump svg {
-    color: var(--ink-4);
-    flex: none;
-}
-
-.rd-jump__stack {
-    min-width: 0;
-    display: grid;
-    gap: 1px;
-}
-
-.rd-jump__name,
-.rd-jump__dir {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.rd-jump__dir {
-    color: var(--ink-4);
-}
-
-.rd-jump:hover {
-    background: var(--surface-2);
-    color: var(--ink);
-}
-
-.rd-jump.is-active {
-    background: var(--primary-weak);
-    color: var(--primary-ink);
-}
-
-.rd-jump.is-active svg {
-    color: var(--primary);
-}
-
-.rd-jump:focus-visible {
-    outline: var(--focus-ring);
-    outline-offset: calc(var(--focus-offset) * -1);
-}
-
 /* ---------- sections ---------- */
 
 /* minmax(0, 1fr), not the implicit `auto` column: a grid's auto track is sized
-   to its content's MIN-content, and `.cl-c { white-space: pre }` makes a code
-   line's min-content its full unwrapped width. So one long AL procedure
-   signature stretched this section to 1600px inside a 916px column, pushing the
-   block off the right edge — and `.app__content` has `overflow-x: hidden`, so
-   it was clipped rather than scrollable. Letting the track shrink below its
-   content puts the scrolling back where it belongs, in .rd-file__body. */
+   to its content's MIN-content, and an unwrapped code line's min-content is its
+   full width. One long AL procedure signature once stretched this section past
+   its column and off the right edge, where `.app__content`'s
+   `overflow-x: hidden` clipped it. Letting the track shrink puts the scrolling
+   back in the code viewer. */
 .rd-sec {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -176,124 +107,32 @@
 /* The stand-in when a recipe ships no write-up. Same weight as the Files
    section's empty state: a quiet line, not an empty-state card - there is
    nothing here for the reader to do about it. */
+/* Markdown can carry a fenced code block, a wide table or a long URL. Left
+   alone they spill out of the column and under the rail; scroll or break them. */
+.rd-prose {
+    overflow-wrap: anywhere;
+}
+
+.rd-prose ::deep pre,
+.rd-prose ::deep table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
 .rd-prose--muted {
     margin: 0;
     color: var(--ink-3);
 }
 
-/* ---------- file blocks ---------- */
-
-.rd-file + .rd-file {
-    margin-top: var(--space-3);
-}
-
-/* .code-block__bar is built for a name and a button; the name is a toggle here
-   so the whole left side collapses the block. */
-.rd-file__name {
-    appearance: none;
-    border: 0;
-    background: transparent;
-    font: inherit;
-    cursor: pointer;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: 0;
-    color: var(--ink-2);
-    text-align: left;
-}
-
-.rd-file__name > svg {
-    flex: none;
-    color: var(--ink-4);
-}
-
-.rd-file__name:hover .code-block__name {
-    color: var(--ink);
-}
-
-.rd-file__name:focus-visible {
-    outline: var(--focus-ring);
-    outline-offset: var(--focus-offset);
-}
-
-.rd-file__chev {
-    transition: transform var(--transition-fast);
-}
-
-.rd-file.is-collapsed .rd-file__chev {
-    transform: rotate(-90deg);
-}
-
-.rd-file.is-collapsed .code-block__bar {
-    border-bottom: 0;
-}
-
-.rd-file__lines {
-    flex: none;
-    font-size: var(--text-2xs);
-    color: var(--ink-4);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-}
-
-/* The handoff's .code-block pre pads and scrolls itself. Ours can't: the line
-   numbers are a per-row grid, so the gutter has to stay put while the code
-   scrolls, which means the scroll belongs to the wrapper and the padding to the
-   rows. */
-.rd-file__body {
-    overflow-x: auto;
-}
-
-.rd-file pre {
-    padding: 0;
-    overflow: visible;
-    white-space: normal;
-}
-
-.rd-file code {
-    display: block;
-    padding-block: var(--space-2);
-    white-space: normal;
-}
-
-.rd-file .cl {
-    display: grid;
-    grid-template-columns: 46px 1fr;
-}
-
-.rd-file .cl-n {
-    text-align: right;
-    padding-right: var(--space-4);
-    color: var(--ink-4);
-    opacity: .65;
-    user-select: none;
-    font-variant-numeric: tabular-nums;
-}
-
-.rd-file .cl-c {
-    white-space: pre;
-    padding-right: var(--space-5);
-    color: var(--ink-2);
-}
-
 /* Collapsed to one column the rail lands after the files it describes, which
-   buries the facts a reader wants first and puts a jump list below its own
-   targets. Ordering it above the content is what the FactBox does on a narrow
+   buries the facts a reader wants first. Ordering it above the content is what the FactBox does on a narrow
    Business Central page, and it beats the old rule here, which hid the rail
    outright - the facts have to survive. The breakpoint is .detail-body's own. */
 @container (max-width: 1080px) {
     .detail-body__aside {
         order: -1;
     }
-}
-
-/* .code-block__name ellipsises, but only if it is allowed to shrink; as a flex
-   item its default min-width is its (unwrapped, nowrap) text, so a long file
-   name widened the whole block instead. Same fix as the rail's, same issue. */
-.rd-file__name .code-block__name {
-    min-width: 0;
 }
 
 /* The second way out of the dialog (issue #626): commit the recipe into a

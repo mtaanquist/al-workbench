@@ -174,7 +174,7 @@ public sealed class AdminCookbookSuggestionReviewTests : IDisposable
 
         cut.Find(".suggestion-more").Click();
 
-        cut.FindAll(".suggestion-tags .tag").Should().HaveCount(14);
+        cut.WaitForAssertion(() => cut.FindAll(".suggestion-tags .tag").Should().HaveCount(14));
     }
 
     [Fact]

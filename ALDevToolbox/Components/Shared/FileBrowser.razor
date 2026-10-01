@@ -1,9 +1,9 @@
 @*
     A read-only file browser: a folder tree on the left, the selected file in the
     shared CodeViewer on the right, the way an editor's explorer works. Built for
-    reviewing a set of files someone else wrote (a cookbook suggestion), where a
-    stack of full-height code blocks made the page as long as every file put
-    together.
+    reading a set of files someone else wrote (a cookbook suggestion, a published
+    recipe), where a stack of full-height code blocks made the page as long as
+    every file put together.
 
     The tree borrows the Object Explorer's .otree rows. Files keep the order they
     were given in, and folders appear where their first file does: the author's
@@ -27,6 +27,13 @@
                 <span class="fb__path" title="@file.Path">@file.Path</span>
                 @{ var lines = LineCount(file.Content); }
                 <span class="fb__lines">@lines line@(lines == 1 ? "" : "s")</span>
+                @if (OnCopy.HasDelegate)
+                {
+                    <button type="button" class="btn btn--sm" @onclick="() => OnCopy.InvokeAsync(file)">
+                        <Icon Name="copy" Width="14" Height="14" />
+                        <span>Copy</span>
+                    </button>
+                }
             </div>
             @* Keyed by path: the viewer reads its language only when it mounts,
                so switching from an .al file to a .json one needs a fresh mount. *@
@@ -44,6 +51,12 @@
 
     /// <summary>The files, in the order they should be listed.</summary>
     [Parameter, EditorRequired] public IReadOnlyList<Entry> Files { get; set; } = [];
+
+    /// <summary>
+    /// When set, the file bar gets a Copy button for the open file. The page does
+    /// the copying, so it can also record that the file was used.
+    /// </summary>
+    [Parameter] public EventCallback<Entry> OnCopy { get; set; }
 
     private sealed class Folder
     {
