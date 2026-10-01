@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Generation;
 using ALDevToolbox.Services.Templates;
+using ALDevToolbox.Services.Organizations;
 
 namespace ALDevToolbox.Tests.Generation;
 
@@ -158,6 +159,53 @@ public sealed class StandaloneExtensionGenerationTests : IDisposable
         zip.GetEntry("MyCustomFeature/.alpackages/.gitkeep").Should().BeNull();
     }
 
+    [Fact]
+    public async Task Downloaded_extension_carries_the_logo_and_points_app_json_at_it()
+    {
+        await SeedTemplateAsync(TemplateBuilder.Default());
+        await SeedLogoAsync("../.assets/logo.png");
+
+        using var zip = await GenerateExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "My Custom Feature"));
+
+        // The extension folder is the root of the download, so the logo the
+        // workspace build puts at the workspace root lands here, and app.json
+        // points at it without the '../' that would leave the folder.
+        zip.GetEntry("MyCustomFeature/.assets/logo.png").Should().NotBeNull();
+        AppJsonLogo(zip).Should().Be(".assets/logo.png");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_points_at_the_existing_workspace_logo()
+    {
+        await SeedTemplateAsync(TemplateBuilder.Default());
+        await SeedLogoAsync("../.assets/logo.png");
+
+        var archive = await NewService().GenerateExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "My Custom Feature"),
+            new SiblingWorkspaceContext("CRONUS Customer", Array.Empty<string>(), new[] { "Core" }));
+        using var zip = new ZipArchive(archive.Stream, ZipArchiveMode.Read, leaveOpen: false);
+
+        // The workspace it is added to already has the logo at its root.
+        zip.Entries.Should().NotContain(e => e.FullName.EndsWith("logo.png"));
+        AppJsonLogo(zip).Should().Be("../.assets/logo.png");
+    }
+
+    [Fact]
+    public async Task Extension_added_to_a_repository_points_at_the_existing_workspace_logo()
+    {
+        await SeedTemplateAsync(TemplateBuilder.Default());
+        await SeedLogoAsync("../.assets/logo.png");
+
+        var archive = await NewService().GenerateExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "My Custom Feature"),
+            includeWorkspaceRootFiles: false);
+        using var zip = new ZipArchive(archive.Stream, ZipArchiveMode.Read, leaveOpen: false);
+
+        zip.Entries.Should().NotContain(e => e.FullName.EndsWith("logo.png"));
+        AppJsonLogo(zip).Should().Be("../.assets/logo.png");
+    }
+
     private static RuntimeTemplate TemplateWithRootFolder()
     {
         var template = TemplateBuilder.Default();
@@ -223,6 +271,22 @@ public sealed class StandaloneExtensionGenerationTests : IDisposable
         {
             await ctx.SaveChangesAsync();
         }
+    }
+
+    private async Task SeedLogoAsync(string defaultLogoPath)
+    {
+        await using var ctx = _db.NewContext();
+        await _db.NewOrganizationConfigService(ctx).SaveSettingsAsync(new OrganizationSettingsInput(
+            "CRONUS", 50000, 50999, string.Empty, string.Empty, DefaultLogo: defaultLogoPath));
+        await _db.NewOrganizationBrandingService(ctx).UploadLogoAsync(
+            "image/png", new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+    }
+
+    private static string? AppJsonLogo(ZipArchive zip)
+    {
+        var entry = zip.GetEntry("MyCustomFeature/app.json");
+        entry.Should().NotBeNull();
+        return JsonDocument.Parse(ReadEntry(entry!)).RootElement.GetProperty("logo").GetString();
     }
 
     private static string ReadEntry(ZipArchiveEntry entry)

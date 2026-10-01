@@ -1042,6 +1042,14 @@
         contents.Add(PreviewNode.File(ALDevToolbox.Services.Generation.WorkspaceConfigService.FileName));
         if (includeWorkspaceRootFiles)
         {
+            // The org logo rides along at the same path it takes in a
+            // generated workspace, now relative to this folder.
+            if (_orgConfig?.Logo is not null)
+            {
+                var logoExt = _orgConfig.Logo.ContentType == "image/svg+xml" ? "svg" : "png";
+                PreviewTreeBuilder.GraftFile(contents, ALDevToolbox.Services.Generation.WorkspaceZipBuilder.NormaliseLogoPath(
+                    _orgConfig.Settings.DefaultLogo, logoExt));
+            }
             foreach (var path in workspaceRootPaths)
             {
                 PreviewTreeBuilder.GraftFile(contents, path);

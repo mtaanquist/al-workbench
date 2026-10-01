@@ -208,10 +208,24 @@ public sealed class WorkspaceZipBuilder
                 TenantId: string.Empty);
             var allExtensions = new[] { standaloneExt };
             var includedFiles = FilterIncluded(orgConfig.Files, template);
+
+            // A download's extension folder is the root of what the user
+            // unzips, so the logo the workspace build puts at the workspace
+            // root lands here instead, and app.json points at it without the
+            // '../'. Added to an existing workspace (sibling mode, or a GitHub
+            // repository) the extension keeps the '../' path, which resolves
+            // to the logo that workspace already carries at its root.
+            var isOwnRoot = sibling is null && includeWorkspaceRootFiles;
+            var logoPath = isOwnRoot ? ResolveStandaloneLogoPath(orgConfig) : null;
+            if (isOwnRoot)
+            {
+                fileCount += WriteOrgLogo(archive, folderName, orgConfig.Logo, orgConfig.Settings.DefaultLogo);
+            }
+
             fileCount += WritePerExtensionOrgFiles(
                 archive, folderName,
                 includedFiles,
-                standaloneExt, allExtensions, template, standaloneAsWorkspacePlan, orgConfig, ct);
+                standaloneExt, allExtensions, template, standaloneAsWorkspacePlan, orgConfig, logoPath, ct);
 
             // Workspace-root-scoped org files (.gitignore, README.md, the
             // shared ruleset, …) land at the extension folder's root — for a
@@ -238,7 +252,7 @@ public sealed class WorkspaceZipBuilder
                 fileCount += WriteRootFolders(archive, folderName, template, includedFiles, ct);
             }
 
-            var substitutionCtx = BuildExtensionMustacheContext(standaloneExt, allExtensions, template, standaloneAsWorkspacePlan, orgConfig);
+            var substitutionCtx = BuildExtensionMustacheContext(standaloneExt, allExtensions, template, standaloneAsWorkspacePlan, orgConfig, logoPath);
             fileCount += EmitFolderTree(archive, folderName, scaffoldFolderRoots, plan.IncludeExamples, substitutionCtx, ct);
 
             WriteString(archive, $"{folderName}/{WorkspaceConfigService.FileName}", _config.BuildExtension(plan));
@@ -303,7 +317,7 @@ public sealed class WorkspaceZipBuilder
         // EveryExtension and a mustache template body). The substitution
         // resolves the per-extension app.json inputs through the renderer
         // context built below.
-        fileCount += WritePerExtensionOrgFiles(archive, extPath, includedFiles, ext, allExtensions, template, plan, orgConfig, ct);
+        fileCount += WritePerExtensionOrgFiles(archive, extPath, includedFiles, ext, allExtensions, template, plan, orgConfig, logoPath: null, ct);
 
         var substitutionCtx = BuildExtensionMustacheContext(ext, allExtensions, template, plan, orgConfig);
 
@@ -323,7 +337,8 @@ public sealed class WorkspaceZipBuilder
         IReadOnlyList<EmittableExtension> allExtensions,
         RuntimeTemplate template,
         ProjectPlan plan,
-        OrganizationConfig orgConfig)
+        OrganizationConfig orgConfig,
+        string? logoPath = null)
     {
         var deps = ResolveDependencies(ext, allExtensions);
         var idRanges = new JsonArray(new JsonObject
@@ -346,7 +361,7 @@ public sealed class WorkspaceZipBuilder
             Brief: plan.Brief,
             Description: plan.Description,
             Url: orgConfig.Settings.DefaultUrl ?? template.Defaults.Url ?? string.Empty,
-            LogoPath: ResolveLogoPathForApp(orgConfig),
+            LogoPath: logoPath ?? ResolveLogoPathForApp(orgConfig),
             PlatformVersion: template.Defaults.Platform,
             ApplicationVersion: ext.Application,
             Runtime: ext.Runtime,
@@ -368,6 +383,20 @@ public sealed class WorkspaceZipBuilder
             return orgConfig.Settings.DefaultLogo.Trim();
         }
         return string.Empty;
+    }
+
+    /// <summary>
+    /// The app.json logo path for a downloaded standalone extension, whose
+    /// folder is the root of the ZIP: the same file
+    /// <see cref="WriteOrgLogo"/> writes there, reached without the leading
+    /// <c>../</c> the workspace build needs. Empty when no logo path is set,
+    /// matching <see cref="ResolveLogoPathForApp"/>.
+    /// </summary>
+    private static string ResolveStandaloneLogoPath(OrganizationConfig orgConfig)
+    {
+        if (string.IsNullOrWhiteSpace(orgConfig.Settings.DefaultLogo)) return string.Empty;
+        var ext = orgConfig.Logo?.ContentType == "image/svg+xml" ? "svg" : "png";
+        return NormaliseLogoPath(orgConfig.Settings.DefaultLogo, ext);
     }
 
     /// <summary>
@@ -688,6 +717,7 @@ public sealed class WorkspaceZipBuilder
         RuntimeTemplate template,
         ProjectPlan plan,
         OrganizationConfig orgConfig,
+        string? logoPath,
         CancellationToken ct)
     {
         if (files.Count == 0) return 0;
@@ -699,7 +729,7 @@ public sealed class WorkspaceZipBuilder
         // verbatim (after substitution): admins authoring a JSON file own
         // its formatting, and inline `{{dependencies_array}}` interpolates
         // to a valid compact JSON array without needing a re-format pass.
-        var ctx = BuildExtensionMustacheContext(ext, allExtensions, template, plan, orgConfig);
+        var ctx = BuildExtensionMustacheContext(ext, allExtensions, template, plan, orgConfig, logoPath);
         foreach (var file in files)
         {
             ct.ThrowIfCancellationRequested();

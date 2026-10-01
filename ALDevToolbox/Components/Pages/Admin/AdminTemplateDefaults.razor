@@ -70,8 +70,10 @@
                         <label class="field__label" for="cfg-logo-path">Default logo path</label>
                         <input class="input" id="cfg-logo-path" type="text"
                                placeholder="e.g. ../.assets/images/logo.png"
+                               pattern="\s*(\.\.[\/\\])[A-Za-z0-9._\-]+([\/\\][A-Za-z0-9._\-]+)*\s*"
                                @bind="_logoPath" @bind:event="oninput" />
-                        <span class="field__hint">Where each extension looks for the logo below. Leave blank to omit it.</span>
+                        <span class="field__hint">Where each extension looks for the logo below, starting from its own folder. Leave blank to omit it.</span>
+                        <FieldError Field="@nameof(OrganizationSettingsInput.DefaultLogo)" Errors="_errors" />
                     </div>
 
                     @* IdRangeEditor rather than a hand-rolled pair, so this page gets
@@ -197,14 +199,15 @@
 
         @* Logo section - folded in from the retired /admin/templates/logo page so
            admins manage one Defaults form instead of two. The image is bundled
-           into every generated workspace under .assets/images/logo.<ext>.
+           into every generated workspace and downloaded extension, at the
+           default logo path (or .assets/images/logo.<ext> when that is blank).
            SVG uploads have <script> tags and on* attributes stripped on save. *@
         <section class="card">
             <div class="card__head">
                 <div>
                     <h2 class="card__title">Logo</h2>
                     <p class="card__sub">
-                        Bundled into every generated workspace. SVG or PNG,
+                        Bundled into every generated workspace and downloaded extension. SVG or PNG,
                         up to @(OrganizationBrandingService.MaxLogoBytes / 1024) KB.
                     </p>
                 </div>

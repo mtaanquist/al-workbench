@@ -80,7 +80,9 @@ public class OrganizationConfigTomlImporter
             DefaultIdRangeFrom: seed.Settings.DefaultIdRangeFrom,
             DefaultIdRangeTo: seed.Settings.DefaultIdRangeTo,
             DefaultBrief: seed.Settings.DefaultBrief,
-            DefaultCoreDescription: seed.Settings.DefaultCoreDescription);
+            DefaultCoreDescription: seed.Settings.DefaultCoreDescription,
+            DefaultUrl: seed.Settings.DefaultUrl,
+            DefaultLogo: seed.Settings.DefaultLogo);
         OrganizationConfigService.Validate(settingsInput);
 
         // Pre-Issue-#61 exports omit the field — fall back to the in-app default
@@ -142,6 +144,13 @@ public class OrganizationConfigTomlImporter
 
         // Settings: upsert the single row.
         var settings = await GetOrCreateSettingsAsync(orgId, ct);
+        // An export from before the URL and logo path were carried leaves them
+        // null; keep what the org already has instead of wiping it.
+        settingsInput = settingsInput with
+        {
+            DefaultUrl = seed.Settings.DefaultUrl ?? settings.DefaultUrl,
+            DefaultLogo = seed.Settings.DefaultLogo ?? settings.DefaultLogo,
+        };
         OrganizationConfigService.ApplySettingsFields(settings, settingsInput, now);
         settings.CodeWorkspaceJson = codeWorkspaceJson;
 

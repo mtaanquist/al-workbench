@@ -238,6 +238,8 @@ public class ExportService
                 DefaultBrief = settings.DefaultBrief,
                 DefaultCoreDescription = settings.DefaultCoreDescription,
                 CodeWorkspaceJson = settings.CodeWorkspaceJson,
+                DefaultUrl = settings.DefaultUrl ?? string.Empty,
+                DefaultLogo = settings.DefaultLogo ?? string.Empty,
             },
             Logo = logo is null ? null : new OrganizationLogoSeed
             {

@@ -34,7 +34,9 @@ public sealed class ConfigExportImportRoundTripTests : IDisposable
                 "RoundTrip",
                 40000, 40999,
                 "round-trip brief",
-                "round-trip core description"));
+                "round-trip core description",
+                DefaultUrl: "https://cronus.com",
+                DefaultLogo: "../.assets/images/logo.png"));
             // Customise the workspace JSON template so the round-trip
             // assertion below catches a regression in the export/import path
             // for Issue #61's new column.
@@ -88,6 +90,8 @@ public sealed class ConfigExportImportRoundTripTests : IDisposable
             var snapshot = await svc.GetCurrentAsync();
             snapshot.Settings.DefaultPublisher.Should().Be("RoundTrip");
             snapshot.Settings.DefaultIdRangeFrom.Should().Be(40000);
+            snapshot.Settings.DefaultUrl.Should().Be("https://cronus.com");
+            snapshot.Settings.DefaultLogo.Should().Be("../.assets/images/logo.png");
             snapshot.Settings.DefaultIdRangeTo.Should().Be(40999);
             snapshot.Settings.DefaultBrief.Should().Be("round-trip brief");
             snapshot.Settings.DefaultCoreDescription.Should().Be("round-trip core description");
