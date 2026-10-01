@@ -657,13 +657,18 @@ function fitRailPaths() {
     const measure = textMeasurer(names[0]);
     if (!measure) return;
 
-    for (const el of names) {
+    // Every width is read before any text is written. Reading one row's width
+    // after writing the previous row's text forces a synchronous layout of the
+    // whole page, both editors included, once per row; with the rail at its
+    // 500-row cap that froze the tab for seconds on opening a file compare.
+    const widths = Array.from(names, el => el.clientWidth);
+    for (const [i, el] of names.entries()) {
         const full = el.parentElement?.dataset.rowPath ?? "";
         if (full === "") continue;
         // A row the filter has hidden measures zero, and fitting a path to no
         // width would replace every one of them with a bare ellipsis. They are
         // re-fitted when the filter puts them back.
-        const width = el.clientWidth;
+        const width = widths[i];
         if (width === 0) continue;
 
         const fitted = fitPath(full, width, measure);
@@ -690,9 +695,13 @@ function wireRailPathFit() {
         cancelAnimationFrame(frame);
         frame = requestAnimationFrame(fitRailPaths);
     };
-    schedule();
+    // The observer's first notification is the initial fit. Scheduling one
+    // here as well ran the whole fit twice on every open: the notification
+    // lands after this frame's callbacks, so the cancel never caught it.
     if (typeof ResizeObserver === "function") {
         new ResizeObserver(schedule).observe(rail);
+    } else {
+        schedule();
     }
     rail.__refitPaths = schedule;
 }

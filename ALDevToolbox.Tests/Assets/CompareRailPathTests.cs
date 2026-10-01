@@ -55,6 +55,31 @@ public sealed class CompareRailPathTests
     }
 
     /// <summary>
+    /// Opening a file compare froze the browser for seconds: the fit read each
+    /// row's width straight after writing the previous row's text, so every row
+    /// forced a synchronous layout of the whole page, both editors included.
+    /// With the rail at its 500-row cap that was 500 layouts in one task. The
+    /// widths have to be read in one pass before anything is written.
+    /// </summary>
+    [Fact]
+    public void Every_width_is_read_before_any_row_is_rewritten()
+    {
+        var fit = Code(Between(Read(ViewerJs), "function fitRailPaths()", "\n}\n"));
+
+        const string batchRead = "Array.from(names, el => el.clientWidth)";
+        var read = fit.IndexOf(batchRead, StringComparison.Ordinal);
+        read.Should().BeGreaterThan(-1, "the widths are measured in one batch");
+        var write = fit.IndexOf("el.textContent = fitted;", StringComparison.Ordinal);
+        write.Should().BeGreaterThan(read, "every read has to come before the first write");
+        var afterBatch = fit[(read + batchRead.Length)..];
+        foreach (var layoutRead in new[] { "clientWidth", "offsetWidth", "scrollWidth", "getBoundingClientRect" })
+        {
+            afterBatch.Should().NotContain(layoutRead,
+                because: "a layout read between writes forces a layout per row");
+        }
+    }
+
+    /// <summary>
     /// The stylesheet's <c>direction: rtl</c> is the CSS truncation strategy.
     /// It has to stay for the case JS hands back — and has to be overridden for
     /// the case JS handles, or the ellipsis it just wrote lands on the wrong end.
