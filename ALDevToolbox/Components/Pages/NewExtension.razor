@@ -468,6 +468,14 @@
                     <div class="code-block">
                         <pre><code>@WorkspaceFoldersSnippet</code></pre>
                     </div>
+                    <p>
+                        If the file also has a <code class="code">files.exclude</code> list under
+                        <code class="code">settings</code>, add this line there too, so the folder
+                        isn't shown twice:
+                    </p>
+                    <div class="code-block">
+                        <pre><code>@WorkspaceExcludeSnippet</code></pre>
+                    </div>
                 }
             </div>
         </div>
@@ -581,6 +589,8 @@
         : CustomerNaming.Apply(_extensionName, NamingStyle.PascalCase);
 
     private string WorkspaceFoldersSnippet => $"{{ \"path\": \"{FolderName}\" }}";
+
+    private string WorkspaceExcludeSnippet => $"\"{FolderName}\": true";
 
     private OrganizationConfig? _orgConfig;
 

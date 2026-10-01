@@ -13,9 +13,10 @@
 @*
     Workspace settings sub-page (Issue #61). Admin-owned JSON template for the
     generated workspace's {{workspace_folder}}.code-workspace file. The generator
-    overlays the computed folders array onto whatever is saved here, so the
-    admin owns the settings block (and any other top-level keys) but doesn't
-    have to manage folders.
+    overlays the computed folders array onto whatever is saved here, and adds
+    one settings."files.exclude" entry per extension folder (always true), so
+    the admin owns the rest of the settings block (and any other top-level
+    keys) but doesn't have to manage folders.
 *@
 
 <PageTitle>Workspace settings · Configuration · AL Workbench</PageTitle>

@@ -183,6 +183,30 @@ public sealed class CodeWorkspaceJsonTests : IDisposable
     }
 
     [Fact]
+    public async Task Template_overlay_files_exclude_adds_to_the_org_exclusions()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var template = TemplateBuilder.Default();
+            template.CodeWorkspaceJson = """
+                { "settings": { "files.exclude": { "**/.alpackages": true } } }
+                """;
+            ctx.RuntimeTemplates.Add(template);
+            await ctx.SaveChangesAsync();
+        }
+        await SetCodeWorkspaceJsonAsync("""
+            { "settings": { "files.exclude": { "**/.git": true } } }
+            """);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan());
+
+        using var doc = ReadCodeWorkspace(zip);
+        doc.RootElement.GetProperty("settings").GetProperty("files.exclude").EnumerateObject()
+            .Select(p => p.Name)
+            .Should().Equal("**/.git", "**/.alpackages", "Core");
+    }
+
+    [Fact]
     public async Task Files_exclude_is_written_when_the_admin_json_has_no_settings()
     {
         await SeedTemplateAsync(TemplateBuilder.Default());

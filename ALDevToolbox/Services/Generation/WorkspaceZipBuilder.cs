@@ -96,9 +96,9 @@ public sealed class WorkspaceZipBuilder
                 fileCount += WriteExtension(archive, rootFolder, ext, extensions, template, plan, orgConfig, includedFiles, ct);
             }
 
-            // Extensions only. The template's declared empty root folders stay
-            // out: each entry here is an AL app root, and pointing the AL
-            // extension at a folder with no app.json breaks the workspace.
+            // Extensions only. The template's declared empty root folders are
+            // not listed on their own: they show under the workspace-root
+            // entry BuildCodeWorkspace appends.
             var folderNames = extensions.Select(e => e.Path).ToList();
             var workspaceJsonCtx = new MustacheContext(
                 Name: plan.WorkspaceName,
@@ -383,11 +383,9 @@ public sealed class WorkspaceZipBuilder
     /// overlap at save time, so this is the belt-and-braces half — an admin can
     /// opt a template into a new org file after declaring the folder.
     /// </para>
-    /// These folders are deliberately absent from the <c>.code-workspace</c>
-    /// <c>folders</c> array: they hold no <c>app.json</c>, so listing them
-    /// would have the AL extension try to load a non-existent app. See
-    /// <see cref="BuildCodeWorkspace"/>, which builds that array from the
-    /// emitted extensions alone.
+    /// These folders get no <c>.code-workspace</c> <c>folders</c> entry of
+    /// their own; they are reachable through the workspace-root entry
+    /// <see cref="BuildCodeWorkspace"/> appends after the extensions.
     /// </summary>
     private static int WriteRootFolders(
         ZipArchive archive,
@@ -777,16 +775,23 @@ public sealed class WorkspaceZipBuilder
 
     /// <summary>
     /// The root entry would otherwise show every extension a second time
-    /// under it, so each extension folder is hidden there via
-    /// <c>settings["files.exclude"]</c>. Merged into whatever the admin or
-    /// template layer already excludes; an extension's own key is always
-    /// forced to <c>true</c>. A non-object <c>settings</c> is left alone
-    /// rather than overwritten.
+    /// under it, so each extension folder goes into
+    /// <c>settings["files.exclude"]</c>. VS Code applies that setting to every
+    /// folder in the workspace, not just the root, so a subfolder inside an
+    /// extension named like another extension is hidden too; there is no
+    /// root-only alternative for a <c>"."</c> entry.
+    /// <para>
+    /// Merged into whatever the admin or template layer already excludes, and
+    /// an extension's own key is always forced to <c>true</c>. A non-object
+    /// <c>settings</c> or <c>files.exclude</c> is not something VS Code reads,
+    /// so the first is left as it is and the second is replaced. A sibling
+    /// folder name read back from <c>workspace.aldt.toml</c> that carries glob
+    /// characters is skipped, since as a pattern it would hide far more than
+    /// that folder; generated names never do.
+    /// </para>
     /// </summary>
     private static void ExcludeExtensionFoldersFromRoot(JsonObject root, IReadOnlyList<string> folderPaths)
     {
-        if (folderPaths.Count == 0) return;
-
         if (!root.TryGetPropertyValue("settings", out var settingsNode) || settingsNode is null)
         {
             settingsNode = new JsonObject();
@@ -799,8 +804,14 @@ public sealed class WorkspaceZipBuilder
             exclude = new JsonObject();
             settings["files.exclude"] = exclude;
         }
-        foreach (var path in folderPaths) exclude[path] = true;
+        foreach (var path in folderPaths)
+        {
+            if (path.IndexOfAny(GlobCharacters) >= 0) continue;
+            exclude[path] = true;
+        }
     }
+
+    private static readonly char[] GlobCharacters = ['*', '?', '[', ']', '{', '}', '!'];
 
     /// <summary>
     /// Substitute mustache vars and parse the result as a JSON object. Validation
@@ -839,7 +850,10 @@ public sealed class WorkspaceZipBuilder
     ///         it last regardless of either layer.</item>
     ///   <item><c>settings</c>: when both layers carry a JSON object, the
     ///         overlay's keys win individually so a template can add one new
-    ///         AL/VS Code setting without restating the org block.</item>
+    ///         AL/VS Code setting without restating the org block.
+    ///         <c>files.exclude</c> goes one level deeper the same way, so a
+    ///         template's exclusions add to the org's instead of dropping
+    ///         them.</item>
     ///   <item>everything else: the overlay replaces the org's value wholesale.
     ///         This keeps semantics predictable for arbitrarily-shaped keys
     ///         like <c>tasks</c> or <c>launch</c> without inventing
@@ -859,6 +873,13 @@ public sealed class WorkspaceZipBuilder
             {
                 foreach (var (sk, sv) in overlaySettings.ToList())
                 {
+                    if (string.Equals(sk, "files.exclude", StringComparison.Ordinal)
+                        && sv is JsonObject overlayExclude
+                        && targetSettings[sk] is JsonObject targetExclude)
+                    {
+                        foreach (var (ek, ev) in overlayExclude.ToList()) targetExclude[ek] = ev?.DeepClone();
+                        continue;
+                    }
                     targetSettings[sk] = sv?.DeepClone();
                 }
             }

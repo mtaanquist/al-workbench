@@ -148,7 +148,7 @@ Root-level folders come from two places: every emitted extension contributes one
      in the ZIP either way, with real content rather than a placeholder. The
      template validator refuses that overlap at save time; the check here is
      the belt-and-braces half, because an admin can opt a template into a new
-     org file after declaring the folder. These folders do NOT appear in the
+     org file after declaring the folder. These folders get no entry of their own in the
      `.code-workspace` `folders` array — see below.
 6. Generate .assets:
      a. images/logo.{png|svg|jpg} — bytes from organization_assets for the
@@ -196,11 +196,6 @@ A JSON file with:
         { "path": ".", "name": "Workspace" }
     ],
     "settings": {
-        "files.exclude": {
-            "Core": true,
-            "Hotfix": true,
-            "DocumentCapture": true
-        },
         "editor.formatOnSave": true,
         "editor.autoIndent": "full",
         "editor.detectIndentation": false,
@@ -212,7 +207,12 @@ A JSON file with:
             "${UICop}"
         ],
         "al.enableCodeAnalysis": true,
-        "al.ruleSetPath": "../.assets/rulesets/Company.ruleset.json"
+        "al.ruleSetPath": "../.assets/rulesets/Company.ruleset.json",
+        "files.exclude": {
+            "Core": true,
+            "Hotfix": true,
+            "DocumentCapture": true
+        }
     }
 }
 ```
@@ -220,7 +220,7 @@ A JSON file with:
 That JSON is not a constant. `WorkspaceZipBuilder.BuildCodeWorkspace` layers three sources (Issue #61):
 
 1. The organisation's base template, `organization_settings.code_workspace_json`, edited at `/admin/templates/workspace` (falling back to `OrganizationDefaults.CodeWorkspaceJson` when the org hasn't set one).
-2. The optional per-template overlay, `runtime_templates.code_workspace_json`, edited on the template's own edit page. It deep-merges on the `settings` object and replaces wholesale on every other top-level key.
+2. The optional per-template overlay, `runtime_templates.code_workspace_json`, edited on the template's own edit page. It deep-merges on the `settings` object (and one level further on `settings."files.exclude"`) and replaces wholesale on every other top-level key.
 3. The computed `folders` array, written last and always authoritative — the workspace has to point at the folders the generator actually emitted, whatever either layer pasted.
 4. The computed `settings."files.exclude"` entries: one `true` per extension folder, merged into whatever exclusions the two layers already set.
 
@@ -228,9 +228,9 @@ Mustache substitution runs over each layer before the merge, so both can use `{{
 
 Each `folders` entry uses the extension's `path`, which is also its on-disk folder name. For a module clone that path is the module's `extension_name` (PascalCase), not its `key` — the key is the admin/URL slug and the dependency-reference target.
 
-The array is built from the emitted extensions, followed by one entry for the workspace root itself (`"path": "."`, named `Workspace`) so the root files (README, `.gitignore`, `.assets`, the declared empty folders) are reachable from the VS Code explorer. Without more, the root entry would list every extension a second time, so each extension's path is also written into `settings."files.exclude"` as `true`. Both come from the same folder list, so the sibling New Extension flow, which rebuilds the file with the new folder added, gets them too.
+The array is built from the emitted extensions, followed by one entry for the workspace root itself (`"path": "."`, named `Workspace`) so the root files (README, `.gitignore`, `.assets`, the declared empty folders) are reachable from the VS Code explorer. Without more, the root entry would list every extension a second time, so each extension's path is also written into `settings."files.exclude"` as `true`. Both come from the same folder list, so the sibling New Extension flow, which rebuilds the file with the new folder added, gets them too. VS Code applies `files.exclude` to every folder in the workspace, not just the root, so a top-level subfolder inside one extension that shares another extension's name is hidden as well; a workspace file has no root-only alternative. A sibling folder name containing glob characters is left out of the exclusions.
 
-Apart from the root entry, the array is built from the emitted extensions alone. The template's declared empty root folders are deliberately left out: each entry here is an AL app root, and pointing the AL extension at a folder with no `app.json` breaks the workspace. `MergeTemplateOverlay` already skips the `folders` key, so neither layer can add one either.
+Apart from the root entry, the array is built from the emitted extensions alone. The template's declared empty root folders get no entry of their own, since they already show under the root. `MergeTemplateOverlay` skips the `folders` key, so neither layer can add one either.
 
 ## Mustache substitution
 
