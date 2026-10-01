@@ -322,6 +322,8 @@ The output is a single folder (no workspace wrapper, no `.code-workspace`), zipp
 MyExtension/
 ├── .alpackages/.gitkeep          # folder the template declares empty, if any
 ├── .assets/
+│   ├── images/
+│   │   └── logo.png              # the org logo, if one is uploaded (at the default logo path)
 │   └── rulesets/
 │       └── Company.ruleset.json  # workspace-root-scoped org file, if the template opts in
 ├── app.json                      # per-extension-scoped org file
@@ -335,10 +337,11 @@ MyExtension/
 
 **Both scopes of `organization_files` land here** (issue #522). The extension folder *is* the root of what the user unzips, so the workspace-root-scoped rows the template opts into (`.gitignore`, `README.md`, the shared ruleset, whatever else an admin curated) are emitted at that folder's root alongside the per-extension-scoped ones (`app.json`, `AppSourceCop.json`). Previously only the per-extension scope was written, so a standalone extension silently shipped without the `.gitignore` its template declares. `{{publisher}}` in those root files resolves to the plan's user-editable `Publisher` — the same value the extension's own `app.json` carries — rather than the org default the workspace flow uses.
 
-Two exceptions:
+**The org logo lands here too**, for the same reason: at the default logo path with its leading `../` dropped, which is where the workspace build puts it relative to the workspace root. `app.json`'s `logo` field points at that same path without the `../`, since this folder is the root.
 
-- **The org logo is not emitted.** It's an `organization_assets` row, not a file, and `app.json`'s `logo` field points at it with a `../`-relative path that assumes the workspace wrapper this flow doesn't produce.
-- **Sibling mode skips the workspace-root scope.** When the New Extension form has imported a `workspace.aldt.toml` and is scaffolding a sibling for an existing workspace, that workspace already carries these files at its own root; a second copy nested one level down would be noise. The sibling ZIP still carries the rewritten `{{workspace_folder}}.code-workspace` at its root.
+One exception:
+
+- **Sibling mode skips the workspace-root scope.** When the New Extension form has imported a `workspace.aldt.toml` and is scaffolding a sibling for an existing workspace, that workspace already carries these files at its own root; a second copy nested one level down would be noise. The logo follows the same rule: it is not emitted, and `app.json` keeps the `../` path so it resolves to the logo at that workspace's root. Committing into a GitHub repository that already has a workspace root behaves the same way. The sibling ZIP still carries the rewritten `{{workspace_folder}}.code-workspace` at its root.
 
 The template's **declared empty root folders follow the workspace-root files exactly**: emitted in the normal standalone flow (the extension folder is the root of what the user unzips), skipped in sibling mode and when the caller is committing into a repository that already has a workspace root. A `.alpackages` one level down from the workspace root is not the folder the compiler looks in.
 

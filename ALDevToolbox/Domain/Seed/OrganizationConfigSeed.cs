@@ -27,6 +27,19 @@ public class OrganizationSettingsSeed
     /// fallback (<see cref="ValueObjects.OrganizationDefaults.CodeWorkspaceJson"/>).
     /// </summary>
     public string CodeWorkspaceJson { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Default URL. Null when the export predates the field, in which case the
+    /// import keeps the current value rather than clearing it; an empty string
+    /// means "no URL".
+    /// </summary>
+    public string? DefaultUrl { get; set; }
+
+    /// <summary>
+    /// Default logo path written into app.json. Same null-means-absent rule as
+    /// <see cref="DefaultUrl"/>.
+    /// </summary>
+    public string? DefaultLogo { get; set; }
 }
 
 public class OrganizationLogoSeed
