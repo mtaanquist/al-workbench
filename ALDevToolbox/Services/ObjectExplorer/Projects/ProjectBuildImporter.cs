@@ -61,7 +61,26 @@ public sealed class ProjectBuildImporter
     /// when the pipeline/project is gone (or the project has no repositories) so the
     /// trigger UI can show the reason inline.
     /// </summary>
-    public async Task<int> StartBuildAsync(int pipelineId, CancellationToken ct = default)
+    public Task<int> StartBuildAsync(int pipelineId, CancellationToken ct = default) =>
+        StartPipelineBuildAsync(pipelineId, ProjectBuildTarget.Current, ProjectBuildTrigger.Manual, ct);
+
+    /// <summary>
+    /// Starts one build of the nightly preview check: the same pipeline build as
+    /// <see cref="StartBuildAsync"/>, against <paramref name="bcTarget"/> (next minor
+    /// or next major) and marked <see cref="ProjectBuildTrigger.PreviewCheck"/>. The
+    /// caller runs it as the person who turned the check on, so the access check and
+    /// the clone credential are theirs. See <see cref="PreviewCheckScheduler"/>.
+    /// </summary>
+    public Task<int> StartPreviewCheckAsync(int pipelineId, string bcTarget, CancellationToken ct = default)
+    {
+        if (!ProjectBuildTarget.IsPreview(bcTarget))
+        {
+            throw new ArgumentOutOfRangeException(nameof(bcTarget), bcTarget, "A preview check builds against next minor or next major.");
+        }
+        return StartPipelineBuildAsync(pipelineId, bcTarget, ProjectBuildTrigger.PreviewCheck, ct);
+    }
+
+    private async Task<int> StartPipelineBuildAsync(int pipelineId, string bcTarget, string trigger, CancellationToken ct)
     {
         var pipeline = await _db.OePipelines.AsNoTracking()
             .Where(p => p.Id == pipelineId && p.DeletedAt == null)
@@ -70,7 +89,6 @@ public sealed class ProjectBuildImporter
                 p.ProjectId,
                 p.RequestedAppIdsJson,
                 p.Branch,
-                p.BcTarget,
                 ProjectName = p.Project!.Name,
                 OwnerId = p.Project.CreatedByUserId,
                 RepoCount = p.Project.Repositories.Count,
@@ -127,9 +145,10 @@ public sealed class ProjectBuildImporter
             // The branch is snapshotted the same way: a restart-resumed job, or a
             // pipeline edited while this build waits, still checks out what was asked.
             Branch = pipeline.Branch,
-            // And the Business Central version it builds against, which also decides
+            // The Business Central version it builds against, which also decides
             // whether the build is a check-only preview build.
-            BcTarget = pipeline.BcTarget,
+            BcTarget = bcTarget,
+            Trigger = trigger,
             StartedAt = now,
         });
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
@@ -141,8 +160,8 @@ public sealed class ProjectBuildImporter
             new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, jobRowId), ct).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "Queued project build for {Project} (pipeline {PipelineId}, project {ProjectId}, release {ReleaseId}).",
-            pipeline.ProjectName, pipelineId, pipeline.ProjectId, releaseId);
+            "Queued project build for {Project} against {BcTarget} (pipeline {PipelineId}, project {ProjectId}, release {ReleaseId}).",
+            pipeline.ProjectName, bcTarget, pipelineId, pipeline.ProjectId, releaseId);
         return releaseId;
     }
 

@@ -1,0 +1,9 @@
+/* The nightly preview check's results, one item per upcoming version (#994). */
+.pcs { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); font-size: var(--text-xs); }
+.pcs__item { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--ink-3); white-space: nowrap; }
+a.pcs__item { text-decoration: none; }
+a.pcs__item:hover span { text-decoration: underline; }
+.pcs__item--passed { color: var(--success-text); }
+.pcs__item--failed { color: var(--danger-text); }
+.pcs__item--paused { color: var(--warning-text); }
+.pcs__item--waiting { color: var(--ink-3); }

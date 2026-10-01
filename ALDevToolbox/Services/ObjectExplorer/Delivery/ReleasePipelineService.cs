@@ -408,21 +408,13 @@ public sealed class ReleasePipelineService
         else if (artifactSource == ReleaseArtifactSource.Build)
         {
             // Source build pipeline: must be an active pipeline in the same project.
-            var source = input.BuildPipelineId == 0 ? null : await _db.OePipelines.AsNoTracking()
-                .Where(p => p.Id == input.BuildPipelineId
-                            && p.DeletedAt == null
-                            && p.ProjectId == input.ProjectId)
-                .Select(p => new { p.BcTarget })
-                .FirstOrDefaultAsync(ct);
-            if (source is null)
+            var buildPipelineOk = input.BuildPipelineId != 0 && await _db.OePipelines.AsNoTracking()
+                .AnyAsync(p => p.Id == input.BuildPipelineId
+                               && p.DeletedAt == null
+                               && p.ProjectId == input.ProjectId, ct);
+            if (!buildPipelineOk)
             {
                 errors["BuildPipelineId"] = "Choose a build pipeline to deploy from.";
-            }
-            // A preview build pipeline's builds are check-only, so a deployment
-            // pipeline drawing from it could never deploy anything (#994).
-            else if (ProjectBuildTarget.IsPreview(source.BcTarget))
-            {
-                errors["BuildPipelineId"] = "That build pipeline builds against a preview version, so its builds can't be deployed. Choose one that builds against Current.";
             }
             else
             {

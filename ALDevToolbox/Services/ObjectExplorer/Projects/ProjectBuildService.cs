@@ -123,10 +123,9 @@ public sealed class ProjectBuildService
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
         }
 
-        // The build row carries the target its pipeline asked for (snapshotted when
-        // the build was started, so a restart-resumed job builds the same thing). An
-        // explicit target in the options wins, which is how a caller with no
-        // pipeline asks for one.
+        // The build row carries the target it was started with (so a restart-resumed
+        // job builds the same thing). An explicit target in the options wins, which is
+        // how a caller with no pipeline asks for one.
         if (options.Target == BcBuildTarget.Current && build is not null)
         {
             options = options with { Target = ProjectBuildTarget.ToBuildTarget(build.BcTarget) };
@@ -162,9 +161,10 @@ public sealed class ProjectBuildService
         try
         {
             // 1. Clone every repo. A clone failure fails only that repo.
-            // A manual build checks out the branch its pipeline watches; a
-            // pull-request build keeps its own head and ignores it (#963).
-            var branch = build is { Trigger: ProjectBuildTrigger.Manual } ? build.Branch : null;
+            // A pipeline build (manual or the nightly preview check) checks out the
+            // branch its pipeline watches; a pull-request build keeps its own head and
+            // ignores it (#963).
+            var branch = build is not null && build.Trigger != ProjectBuildTrigger.PullRequest ? build.Branch : null;
             var clones = await CloneRepositoriesAsync(project, buildRoot, results, logs, options, branch, ct).ConfigureAwait(false);
 
             // Record the per-repo commit set + changelog while the clones are still

@@ -51,24 +51,49 @@ public sealed class ProjectBuildImporterTests : IDisposable
     }
 
     [Fact]
-    public async Task StartBuildAsync_snapshots_the_version_the_pipeline_builds_against()
+    public async Task StartBuildAsync_builds_against_the_current_version()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectWithRepoAsync(ctx);
-        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Next major check", requestedAppIdsJson: null);
-        var pipeline = await ctx.OePipelines.SingleAsync(p => p.Id == pipelineId);
-        pipeline.BcTarget = ProjectBuildTarget.NextMajor;
-        await ctx.SaveChangesAsync();
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
 
         var releaseId = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
 
-        // Editing the pipeline afterwards does not rewrite the build that is waiting.
-        pipeline.BcTarget = ProjectBuildTarget.Current;
-        await ctx.SaveChangesAsync();
+        await using var read = _db.NewContext();
+        var build = await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId);
+        build.BcTarget.Should().Be(ProjectBuildTarget.Current);
+        build.Trigger.Should().Be(ProjectBuildTrigger.Manual);
+    }
+
+    [Theory]
+    [InlineData(ProjectBuildTarget.NextMinor)]
+    [InlineData(ProjectBuildTarget.NextMajor)]
+    public async Task StartPreviewCheckAsync_queues_a_check_build_of_the_pipeline(string target)
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var queue = new ReleaseImportQueue();
+
+        var releaseId = await NewImporter(ctx, queue).StartPreviewCheckAsync(pipelineId, target);
 
         await using var read = _db.NewContext();
         var build = await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId);
-        build.BcTarget.Should().Be(ProjectBuildTarget.NextMajor);
+        build.BcTarget.Should().Be(target);
+        build.Trigger.Should().Be(ProjectBuildTrigger.PreviewCheck);
+        build.PipelineId.Should().Be(pipelineId);
+    }
+
+    [Fact]
+    public async Task StartPreviewCheckAsync_refuses_the_current_version()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.Current);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }
 
     [Fact]

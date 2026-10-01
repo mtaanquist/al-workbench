@@ -74,23 +74,100 @@ public sealed class PipelinesDashboardServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_failed_preview_build_still_counts_as_failing_and_is_counted_separately()
+    public async Task A_failed_preview_check_counts_as_failing_and_is_counted_separately()
     {
         var projectId = await SeedSolutionAsync("CRONUS");
-        var current = await SeedBuildPipelineAsync(projectId, "CRONUS Base");
-        var preview = await SeedBuildPipelineAsync(projectId, "CRONUS Base next major");
-        await SeedBuildAsync(projectId, current, ProjectBuildStatus.Failed, _now.AddHours(-2));
-        var previewBuild = await SeedBuildAsync(projectId, preview, ProjectBuildStatus.Failed, _now.AddHours(-1));
+        var broken = await SeedBuildPipelineAsync(projectId, "CRONUS Base");
+        var checkedPipeline = await SeedBuildPipelineAsync(projectId, "CRONUS Retail");
+        await SeedBuildAsync(projectId, broken, ProjectBuildStatus.Failed, _now.AddHours(-3));
+        await SeedBuildAsync(projectId, checkedPipeline, ProjectBuildStatus.Ready, _now.AddHours(-2));
+        // Last night's check is the pipeline's newest build, but not its "latest".
+        await SeedPreviewCheckAsync(projectId, checkedPipeline, ProjectBuildStatus.Failed, _now.AddHours(-1));
+
+        var d = await GetAsync();
+
+        d.FailedBuildPipelines.Should().Be(2, "a red next-major check is the signal the check exists to give");
+        d.FailedPreviewBuildPipelines.Should().Be(1);
+        d.Attention.Where(a => a.Kind == PipelinesAttentionKind.FailedBuild).Select(a => a.PipelineId)
+            .Should().Equal((int?)broken);
+    }
+
+    [Fact]
+    public async Task A_check_that_built_but_could_not_compile_an_extension_counts_as_failed()
+    {
+        var projectId = await SeedSolutionAsync("CRONUS");
+        var pipeline = await SeedBuildPipelineAsync(projectId, "CRONUS Base");
+        await SeedBuildAsync(projectId, pipeline, ProjectBuildStatus.Ready, _now.AddHours(-2));
+        var check = await SeedPreviewCheckAsync(projectId, pipeline, ProjectBuildStatus.Ready, _now.AddHours(-1));
         await using (var ctx = _db.NewContext())
         {
-            await ctx.OeProjectBuilds.Where(b => b.Id == previewBuild)
-                .ExecuteUpdateAsync(s => s.SetProperty(b => b.BcTarget, ProjectBuildTarget.NextMajor));
+            var release = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS Base on BC 29.0", Kind = "project", Status = "ready",
+                ImportedAt = _now, CreatedAt = _now, UpdatedAt = _now,
+            };
+            ctx.OeReleases.Add(release);
+            await ctx.SaveChangesAsync();
+            ctx.OeProjectBuildResults.Add(new OeProjectBuildResult
+            {
+                OrganizationId = TestDb.DefaultOrgId, ReleaseId = release.Id, AppName = "CRONUS Sales",
+                AppId = Guid.NewGuid().ToString(), Status = ProjectBuildResultStatus.Failed, CreatedAt = _now,
+            });
+            await ctx.SaveChangesAsync();
+            await ctx.OeProjectBuilds.Where(b => b.Id == check)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.ReleaseId, release.Id));
         }
 
         var d = await GetAsync();
 
-        d.FailedBuildPipelines.Should().Be(2, "a red next-major check is the signal the pipeline exists to give");
+        d.FailedBuildPipelines.Should().Be(1);
         d.FailedPreviewBuildPipelines.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_passing_check_does_not_hide_a_failed_build()
+    {
+        var projectId = await SeedSolutionAsync("CRONUS");
+        var pipeline = await SeedBuildPipelineAsync(projectId, "CRONUS Base");
+        await SeedBuildAsync(projectId, pipeline, ProjectBuildStatus.Failed, _now.AddHours(-2));
+        await SeedPreviewCheckAsync(projectId, pipeline, ProjectBuildStatus.Ready, _now.AddHours(-1));
+
+        var d = await GetAsync();
+
+        d.FailedBuildPipelines.Should().Be(1);
+        d.FailedPreviewBuildPipelines.Should().Be(0);
+    }
+
+    private async Task<int> SeedPreviewCheckAsync(int projectId, int pipelineId, string status, DateTime startedAt)
+    {
+        var id = await SeedBuildAsync(projectId, pipelineId, status, startedAt);
+        await using var ctx = _db.NewContext();
+        await ctx.OeProjectBuilds.Where(b => b.Id == id)
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(b => b.BcTarget, ProjectBuildTarget.NextMajor)
+                .SetProperty(b => b.Trigger, ProjectBuildTrigger.PreviewCheck));
+        await ctx.OePipelines.Where(p => p.Id == pipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.PreviewCheck, true));
+        return id;
+    }
+
+    [Fact]
+    public async Task A_failed_check_stops_counting_once_the_check_is_turned_off()
+    {
+        var projectId = await SeedSolutionAsync("CRONUS");
+        var pipeline = await SeedBuildPipelineAsync(projectId, "CRONUS Base");
+        await SeedBuildAsync(projectId, pipeline, ProjectBuildStatus.Ready, _now.AddHours(-2));
+        await SeedPreviewCheckAsync(projectId, pipeline, ProjectBuildStatus.Failed, _now.AddHours(-1));
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OePipelines.Where(p => p.Id == pipeline)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.PreviewCheck, false));
+        }
+
+        var d = await GetAsync();
+
+        d.FailedBuildPipelines.Should().Be(0);
+        d.FailedPreviewBuildPipelines.Should().Be(0);
     }
 
     [Fact]

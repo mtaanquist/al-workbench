@@ -102,11 +102,12 @@ public class OeProjectBuild
     public string? BcArtifactVersion { get; set; }
 
     /// <summary>
-    /// Which Business Central version this build compiled against, snapshotted from
-    /// its pipeline when the build is started. One of <see cref="ProjectBuildTarget"/>;
-    /// anything but <c>current</c> is a preview build, which is check-only: never
-    /// published as a GitHub release and never deployable. See
-    /// <c>.design/object-explorer-project-builds.md</c>, "Building against the next version".
+    /// Which Business Central version this build compiled against, one of
+    /// <see cref="ProjectBuildTarget"/>. Set when the build is started: <c>current</c>
+    /// for every build a person or a pull request starts, and next minor or next major
+    /// for the nightly preview check. Anything but <c>current</c> is a preview build,
+    /// which is check-only: never published as a GitHub release and never deployable.
+    /// See <c>.design/object-explorer-project-builds.md</c>, "The nightly preview check".
     /// </summary>
     public string BcTarget { get; set; } = ProjectBuildTarget.Current;
 
@@ -167,11 +168,17 @@ public static class ProjectBuildTrigger
     /// <c>.design/github-integration-phase2.md</c> (#627).
     /// </summary>
     public const string PullRequest = "pull_request";
+
+    /// <summary>
+    /// The nightly preview check on a pipeline queued it, as the person who turned
+    /// the check on (<see cref="OePipeline.PreviewCheckByUserId"/>). Always a preview
+    /// build. See <c>.design/object-explorer-project-builds.md</c>, "The nightly preview check".
+    /// </summary>
+    public const string PreviewCheck = "preview_check";
 }
 
 /// <summary>
-/// The stored names of <see cref="BcBuildTarget"/>, on <see cref="OePipeline.BcTarget"/>
-/// and <see cref="OeProjectBuild.BcTarget"/>. Stored as words rather than the enum's
+/// The stored names of <see cref="BcBuildTarget"/>, on <see cref="OeProjectBuild.BcTarget"/>. Stored as words rather than the enum's
 /// ordinal so the column reads on its own.
 /// </summary>
 public static class ProjectBuildTarget
@@ -188,11 +195,8 @@ public static class ProjectBuildTarget
     /// <summary>The longest stored value, for the column width.</summary>
     public const int MaxLength = 20;
 
-    /// <summary>Every stored value, in the order the editor offers them.</summary>
-    public static readonly IReadOnlyList<string> All = [Current, NextMinor, NextMajor];
-
-    /// <summary>True for a stored value this version knows.</summary>
-    public static bool IsValid(string? value) => value is not null && All.Contains(value);
+    /// <summary>The targets the nightly preview check builds, in the order they are shown.</summary>
+    public static readonly IReadOnlyList<string> Previews = [NextMinor, NextMajor];
 
     /// <summary>True when a build of this target compiles against a preview, which makes it check-only.</summary>
     public static bool IsPreview(string? value) => value is NextMinor or NextMajor;

@@ -11,11 +11,10 @@
 @using ALDevToolbox.Services.ObjectExplorer.Projects
 @using ALDevToolbox.Services.GitHub
 @using ALDevToolbox.Domain.ValueObjects
-@using ALDevToolbox.Domain.Entities.ObjectExplorer
 
 @*
-    Create / edit a pipeline: name it, pick which of the solution's extensions it
-    compiles, and which Business Central version it builds against (#994). The checklist is served from the solution's discovered-extensions cache
+    Create / edit a pipeline: name it and pick which of the solution's extensions it
+    compiles. The checklist is served from the solution's discovered-extensions cache
     (warmed in the background when repos change), so it appears instantly; a Refresh
     re-discovers on demand. Shared by the Pipelines landing (New pipeline), the
     solution detail page (New pipeline), and the pipeline detail page (Edit pipeline).
@@ -65,8 +64,8 @@
                     <div class="field">
                         <label class="field__label" for="pe-name">Name</label>
                         <input id="pe-name" type="text" class="input" maxlength="200" @bind="_name"
-                               disabled="@_saving" placeholder="e.g. Production, Test environment or Next major check" />
-                        <small class="field__hint">A solution can have several pipelines, each compiling a different set of extensions - name this one for its environment, or for the version it checks.</small>
+                               disabled="@_saving" placeholder="e.g. Production or Test environment" />
+                        <small class="field__hint">A solution can have several pipelines, each compiling a different set of extensions - name this one for its environment.</small>
                     </div>
                     <div class="field">
                         <label class="field__label" for="pe-branch">Branch (optional)</label>
@@ -76,16 +75,13 @@
                         <small class="field__hint">Builds check out this branch. Leave empty for each repository's default branch.</small>
                     </div>
                     <div class="field">
-                        <label class="field__label" for="pe-target">Build against</label>
-                        <SelectBox>
-                            <select id="pe-target" class="select" @bind="_bcTarget" disabled="@_saving">
-                                @foreach (var target in ProjectBuildTarget.All)
-                                {
-                                    <option value="@target">@ProjectBuildTarget.Label(target)</option>
-                                }
-                            </select>
-                        </SelectBox>
-                        <small class="field__hint">Current is the version your extensions declare. Next minor and Next major compile against Microsoft's preview builds to catch breaking changes early; those builds cannot be deployed.</small>
+                        <label class="@(_previewCheck ? "check is-checked" : "check")">
+                            <input id="pe-preview-check" type="checkbox" checked="@_previewCheck" disabled="@_saving"
+                                   @onchange="e => _previewCheck = (bool)(e.Value ?? false)" />
+                            <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                            <span>Check against upcoming Business Central versions every night</span>
+                        </label>
+                        <small class="field__hint">Builds against Microsoft's previews of the next minor and next major Business Central versions, to catch breaking changes before they reach your customers. These preview builds can't be deployed; their results show beside the pipeline in the pipelines list.</small>
                     </div>
                 }
 
@@ -169,7 +165,7 @@
                     <div class="field">
                         <label class="field__label" for="pe-release-repo">Publish successful builds to GitHub</label>
                         <SelectBox>
-                            <select id="pe-release-repo" class="select" @bind="_releaseRepositoryId" disabled="@(_saving || IsPreviewTarget)">
+                            <select id="pe-release-repo" class="select" @bind="_releaseRepositoryId" disabled="@_saving">
                                 <option value="0">Don't publish releases</option>
                                 @foreach (var repo in _releaseRepositories)
                                 {
@@ -177,14 +173,7 @@
                                 }
                             </select>
                         </SelectBox>
-                        @if (IsPreviewTarget)
-                        {
-                            <small class="field__hint">Builds against Next minor or Next major are never published, because they cannot be deployed.</small>
-                        }
-                        else
-                        {
-                            <small class="field__hint">All apps in a build have to share one version number, because the release is tagged with it. If they don't match, the build still succeeds and its files can still be downloaded here; only the release is skipped.</small>
-                        }
+                        <small class="field__hint">All apps in a build have to share one version number, because the release is tagged with it. If they don't match, the build still succeeds and its files can still be downloaded here; only the release is skipped.</small>
                     </div>
                 }
                 else if (ShowUnavailableReleaseField)
@@ -261,12 +250,8 @@
     private string _name = string.Empty;
     // The branch the pipeline builds; blank = each repository's default branch (#963).
     private string _branch = string.Empty;
-    // The Business Central version builds compile against; Current unless the
-    // pipeline exists to check the next one (#994).
-    private string _bcTarget = ProjectBuildTarget.Current;
-
-    /// <summary>A preview target's builds are never published, so the publishing choice is shown disabled rather than silently ignored.</summary>
-    private bool IsPreviewTarget => ProjectBuildTarget.IsPreview(_bcTarget);
+    // The nightly preview check against the next minor and next major (#994).
+    private bool _previewCheck;
     // The solution's GitHub repositories inside the connected organisation. Empty
     // (and the whole field hidden) when there is no GitHub connection - an
     // organisation on Azure DevOps is shown no GitHub machinery at all.
@@ -327,7 +312,7 @@
 
     /// <summary>Opens the dialog to edit an existing pipeline. <paramref name="requestedAppIdsJson"/> is the stored selection (null = all).</summary>
     public async Task OpenForEditAsync(int pipelineId, int projectId, string projectName, string name, string? requestedAppIdsJson,
-        int? githubReleaseRepositoryId = null, string? branch = null, string? bcTarget = null)
+        int? githubReleaseRepositoryId = null, string? branch = null, bool previewCheck = false)
     {
         ResetForCreate();
         _editing = true;
@@ -341,7 +326,7 @@
         _initialIsAll = parsed is null;
         _releaseRepositoryId = githubReleaseRepositoryId ?? 0;
         _branch = branch ?? string.Empty;
-        _bcTarget = ProjectBuildTarget.IsValid(bcTarget) ? bcTarget! : ProjectBuildTarget.Current;
+        _previewCheck = previewCheck;
         _open = true;
         _focusPending = true;
         await LoadReleaseRepositoriesAsync();
@@ -355,7 +340,7 @@
         _pipelineId = null;
         _name = string.Empty;
         _branch = string.Empty;
-        _bcTarget = ProjectBuildTarget.Current;
+        _previewCheck = false;
         _initialSelection = null;
         _initialIsAll = true; // new pipelines default to "build everything"
         _selectionSeeded = false;
@@ -665,9 +650,9 @@
             var selection = picked.Count == _extensions.Count ? null : picked;
             var input = new PipelineInput(
                 _projectId, _name.Trim(), selection,
-                _releaseRepositoryId == 0 || IsPreviewTarget ? null : _releaseRepositoryId,
+                _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
                 string.IsNullOrWhiteSpace(_branch) ? null : _branch.Trim(),
-                _bcTarget);
+                _previewCheck);
 
             int id;
             if (_editing && _pipelineId is { } pid)

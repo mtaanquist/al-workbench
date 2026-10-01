@@ -190,7 +190,8 @@ public sealed partial class PaletteContextService
         if (!_tools.IsEnabled(ToolKey.Pipelines, user)) return null;
 
         var build = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.ProjectId == projectId && b.PipelineId != null && b.Pipeline!.DeletedAt == null)
+            .Where(b => b.ProjectId == projectId && b.PipelineId != null && b.Pipeline!.DeletedAt == null
+                && b.BcTarget == ProjectBuildTarget.Current)
             .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
             .Select(b => new { PipelineId = b.PipelineId!.Value, PipelineName = b.Pipeline!.Name, b.Status, b.StartedAt })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);

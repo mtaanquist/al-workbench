@@ -14,8 +14,8 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20261110000000_PipelineBuildTarget")]
-    partial class PipelineBuildTarget
+    [Migration("20261110000000_PipelinePreviewCheck")]
+    partial class PipelinePreviewCheck
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -2266,14 +2266,6 @@ namespace ALDevToolbox.Data.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("BcTarget")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasDefaultValue("current")
-                        .HasColumnName("bc_target");
-
                     b.Property<string>("Branch")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)")
@@ -2305,6 +2297,21 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("organization_id");
 
+                    b.Property<bool>("PreviewCheck")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("preview_check");
+
+                    b.Property<string>("PreviewCheckBlocked")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("preview_check_blocked");
+
+                    b.Property<int?>("PreviewCheckByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("preview_check_by_user_id");
+
                     b.Property<int>("ProjectId")
                         .HasColumnType("integer")
                         .HasColumnName("project_id");
@@ -2324,6 +2331,8 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("GithubReleaseRepositoryId");
 
                     b.HasIndex("OrganizationId");
+
+                    b.HasIndex("PreviewCheckByUserId");
 
                     b.HasIndex("ProjectId")
                         .HasDatabaseName("ix_oe_pipelines_project");
@@ -7328,6 +7337,11 @@ namespace ALDevToolbox.Data.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "PreviewCheckByUser")
+                        .WithMany()
+                        .HasForeignKey("PreviewCheckByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject", "Project")
                         .WithMany()
                         .HasForeignKey("ProjectId")
@@ -7339,6 +7353,8 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("GithubReleaseRepository");
 
                     b.Navigation("Organization");
+
+                    b.Navigation("PreviewCheckByUser");
 
                     b.Navigation("Project");
                 });

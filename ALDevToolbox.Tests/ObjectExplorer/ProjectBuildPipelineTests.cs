@@ -242,10 +242,10 @@ public sealed class ProjectBuildPipelineTests : IDisposable
         UpdatedAt = DateTime.UtcNow,
     };
 
-    // ── Build against (#994) ────────────────────────────────────────────
+    // ── Nightly preview check (#994) ────────────────────────────────────
 
     [Fact]
-    public async Task A_pipeline_and_its_build_default_to_the_current_version()
+    public async Task A_pipeline_and_its_build_default_to_no_check_and_the_current_version()
     {
         int pipelineId, buildId;
         await using (var ctx = _db.NewContext())
@@ -257,19 +257,25 @@ public sealed class ProjectBuildPipelineTests : IDisposable
         }
 
         await using var read = _db.NewContext();
-        (await read.OePipelines.SingleAsync(p => p.Id == pipelineId)).BcTarget.Should().Be(ProjectBuildTarget.Current);
+        var storedPipeline = await read.OePipelines.SingleAsync(p => p.Id == pipelineId);
+        storedPipeline.PreviewCheck.Should().BeFalse();
+        storedPipeline.PreviewCheckByUserId.Should().BeNull();
+        storedPipeline.PreviewCheckBlocked.Should().BeNull();
         var stored = await read.OeProjectBuilds.SingleAsync(b => b.Id == buildId);
         stored.BcTarget.Should().Be(ProjectBuildTarget.Current);
+        stored.Trigger.Should().Be(ProjectBuildTrigger.Manual);
         stored.BcArtifactVersion.Should().BeNull();
     }
 
     [Fact]
-    public async Task Rows_written_before_the_column_existed_read_as_current()
+    public async Task Rows_written_before_the_columns_existed_read_as_no_check_and_current()
     {
         int pipelineId, buildId;
         await using (var ctx = _db.NewContext())
         {
             var (pipeline, build) = SeedPipelineAndBuild(ctx);
+            pipeline.PreviewCheck = true;
+            build.BcTarget = ProjectBuildTarget.NextMajor;
             await ctx.SaveChangesAsync();
             pipelineId = pipeline.Id;
             buildId = build.Id;
@@ -280,27 +286,29 @@ public sealed class ProjectBuildPipelineTests : IDisposable
         await using (var raw = _db.NewContext())
         {
             await raw.Database.ExecuteSqlRawAsync(
-                "UPDATE oe_pipelines SET bc_target = DEFAULT WHERE id = {0}", pipelineId);
+                "UPDATE oe_pipelines SET preview_check = DEFAULT WHERE id = {0}", pipelineId);
             await raw.Database.ExecuteSqlRawAsync(
                 "UPDATE oe_project_builds SET bc_target = DEFAULT WHERE id = {0}", buildId);
         }
 
         await using var read = _db.NewContext();
-        (await read.OePipelines.SingleAsync(p => p.Id == pipelineId)).BcTarget.Should().Be(ProjectBuildTarget.Current);
+        (await read.OePipelines.SingleAsync(p => p.Id == pipelineId)).PreviewCheck.Should().BeFalse();
         (await read.OeProjectBuilds.SingleAsync(b => b.Id == buildId)).BcTarget.Should().Be(ProjectBuildTarget.Current);
     }
 
     [Theory]
     [InlineData(ProjectBuildTarget.NextMinor)]
     [InlineData(ProjectBuildTarget.NextMajor)]
-    public async Task The_build_target_and_exact_version_round_trip(string target)
+    public async Task The_check_settings_and_a_check_build_round_trip(string target)
     {
         int pipelineId, buildId;
         await using (var ctx = _db.NewContext())
         {
             var (pipeline, build) = SeedPipelineAndBuild(ctx);
-            pipeline.BcTarget = target;
+            pipeline.PreviewCheck = true;
+            pipeline.PreviewCheckBlocked = "This solution doesn't have a country code yet.";
             build.BcTarget = target;
+            build.Trigger = ProjectBuildTrigger.PreviewCheck;
             build.BcArtifactVersion = "29.0.52914.0";
             await ctx.SaveChangesAsync();
             pipelineId = pipeline.Id;
@@ -308,9 +316,12 @@ public sealed class ProjectBuildPipelineTests : IDisposable
         }
 
         await using var read = _db.NewContext();
-        (await read.OePipelines.SingleAsync(p => p.Id == pipelineId)).BcTarget.Should().Be(target);
+        var storedPipeline = await read.OePipelines.SingleAsync(p => p.Id == pipelineId);
+        storedPipeline.PreviewCheck.Should().BeTrue();
+        storedPipeline.PreviewCheckBlocked.Should().Be("This solution doesn't have a country code yet.");
         var stored = await read.OeProjectBuilds.SingleAsync(b => b.Id == buildId);
         stored.BcTarget.Should().Be(target);
+        stored.Trigger.Should().Be(ProjectBuildTrigger.PreviewCheck);
         stored.BcArtifactVersion.Should().Be("29.0.52914.0");
         ProjectBuildTarget.IsPreview(stored.BcTarget).Should().BeTrue();
     }
@@ -328,7 +339,7 @@ public sealed class ProjectBuildPipelineTests : IDisposable
         {
             OrganizationId = TestDb.DefaultOrgId,
             Project = project,
-            Name = "Next major check",
+            Name = "Production",
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         };

@@ -65,16 +65,29 @@ public class OePipeline
     public string? Branch { get; set; }
 
     /// <summary>
-    /// Which Business Central version this pipeline's builds compile against: one of
-    /// <see cref="ProjectBuildTarget"/>, <c>current</c> by default. Next minor and
-    /// next major compile against Microsoft's preview builds to show breaking changes
-    /// early, and their builds are check-only. Copied onto each
-    /// <see cref="OeProjectBuild.BcTarget"/> when the build starts. Not the old
-    /// <c>version_mode</c>, which became the deployment pipeline's
-    /// <c>deployment_schedule</c> and means a time, not a version. See
-    /// <c>.design/object-explorer-project-builds.md</c>, "Building against the next version".
+    /// Whether this pipeline also runs the nightly preview check: a build against
+    /// Microsoft's next minor and next major preview versions, each recorded as an
+    /// <see cref="OeProjectBuild"/> whose <see cref="OeProjectBuild.BcTarget"/> says
+    /// which. The pipeline's own builds stay on the current version. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "The nightly preview check".
     /// </summary>
-    public string BcTarget { get; set; } = ProjectBuildTarget.Current;
+    public bool PreviewCheck { get; set; }
+
+    /// <summary>
+    /// Who turned the preview check on. The nightly builds run as this person, the
+    /// way a scheduled upgrade action runs as its requester: the clone uses their
+    /// repository access and the build is theirs on the page. Null once that user is
+    /// deleted, which pauses the check until someone turns it on again.
+    /// </summary>
+    public int? PreviewCheckByUserId { get; set; }
+    public User? PreviewCheckByUser { get; set; }
+
+    /// <summary>
+    /// Why the last night's preview check could not start (the person who turned it
+    /// on lost access, the solution has no country), shown on the pipeline. Null when
+    /// the last attempt queued its builds.
+    /// </summary>
+    public string? PreviewCheckBlocked { get; set; }
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }

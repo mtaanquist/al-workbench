@@ -86,7 +86,7 @@ public sealed class PipelineService
     public async Task<int> CreatePipelineAsync(PipelineInput input, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var (name, selectionJson, releaseRepositoryId, branch, bcTarget) = await ValidateAsync(input, existingId: null, ct);
+        var (name, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input, existingId: null, ct);
 
         var now = DateTime.UtcNow;
         var pipeline = new OePipeline
@@ -98,7 +98,8 @@ public sealed class PipelineService
             RequestedAppIdsJson = selectionJson,
             GithubReleaseRepositoryId = releaseRepositoryId,
             Branch = branch,
-            BcTarget = bcTarget,
+            PreviewCheck = input.PreviewCheck,
+            PreviewCheckByUserId = input.PreviewCheck ? _orgContext.CurrentUserId : null,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -110,7 +111,12 @@ public sealed class PipelineService
         return pipeline.Id;
     }
 
-    /// <summary>Updates a pipeline's name, extension selection, publishing target, branch and the Business Central version it builds against.</summary>
+    /// <summary>
+    /// Updates a pipeline's name, extension selection, publishing target, branch and
+    /// nightly preview check. Turning the check on makes the caller the person it runs
+    /// as; so does saving while it is paused (its person gone or refused), which is
+    /// how someone with access takes it over.
+    /// </summary>
     public async Task UpdatePipelineAsync(int id, PipelineInput input, CancellationToken ct = default)
     {
         RequireOrganizationId();
@@ -120,16 +126,51 @@ public sealed class PipelineService
 
         // Validate against the pipeline's own project (input.ProjectId is ignored on
         // update — a pipeline can't move between projects).
-        var (name, selectionJson, releaseRepositoryId, branch, bcTarget) = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
+        var (name, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
 
         pipeline.Name = name;
         pipeline.RequestedAppIdsJson = selectionJson;
         pipeline.GithubReleaseRepositoryId = releaseRepositoryId;
         pipeline.Branch = branch;
-        pipeline.BcTarget = bcTarget;
+        if (!input.PreviewCheck)
+        {
+            pipeline.PreviewCheckByUserId = null;
+            pipeline.PreviewCheckBlocked = null;
+        }
+        else if (!pipeline.PreviewCheck || pipeline.PreviewCheckByUserId is null || pipeline.PreviewCheckBlocked is not null)
+        {
+            pipeline.PreviewCheckByUserId = _orgContext.CurrentUserId;
+            pipeline.PreviewCheckBlocked = null;
+        }
+        pipeline.PreviewCheck = input.PreviewCheck;
         pipeline.UpdatedAt = DateTime.UtcNow;
         await SaveTranslatingNameClashAsync(ct);
         _logger.LogInformation("Updated pipeline {PipelineId} ({Name}).", pipeline.Id, name);
+    }
+
+    /// <summary>
+    /// Resumes a paused nightly preview check by making the caller the person it runs
+    /// as. Same rule as saving the pipeline while the check is paused.
+    /// </summary>
+    public async Task TakeOverPreviewCheckAsync(int id, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var pipeline = await _db.OePipelines
+            .FirstOrDefaultAsync(p => p.Id == id && p.DeletedAt == null, ct)
+            ?? throw Validation("Name", "This pipeline no longer exists.");
+        if (!pipeline.PreviewCheck) throw Validation("PreviewCheck", "This pipeline doesn't run the preview check.");
+
+        var ownerId = await _db.OeProjects.AsNoTracking()
+            .Where(c => c.Id == pipeline.ProjectId)
+            .Select(c => c.CreatedByUserId)
+            .FirstOrDefaultAsync(ct);
+        await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
+
+        pipeline.PreviewCheckByUserId = _orgContext.CurrentUserId;
+        pipeline.PreviewCheckBlocked = null;
+        pipeline.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Pipeline {PipelineId}'s preview check now runs as user {UserId}.", id, _orgContext.CurrentUserId);
     }
 
     /// <summary>Soft-deletes a pipeline. Its past builds stay reachable (their pipeline_id is nulled by the FK).</summary>
@@ -158,7 +199,7 @@ public sealed class PipelineService
     /// selection serialised to JSON (null = build everything). Throws
     /// <see cref="PlanValidationException"/> with field-keyed errors otherwise.
     /// </summary>
-    private async Task<(string Name, string? SelectionJson, int? GithubReleaseRepositoryId, string? Branch, string BcTarget)> ValidateAsync(
+    private async Task<(string Name, string? SelectionJson, int? GithubReleaseRepositoryId, string? Branch)> ValidateAsync(
         PipelineInput input, int? existingId, CancellationToken ct)
     {
         var errors = new Dictionary<string, string>();
@@ -227,35 +268,13 @@ public sealed class PipelineService
             errors["Branch"] = "That isn't a valid branch name. Type it exactly as GitHub shows it, e.g. main or release/25.0 - no spaces or '..'.";
         }
 
-        // Blank means Current, so a caller that predates the setting keeps building
-        // what the manifests ask for.
-        var bcTarget = string.IsNullOrWhiteSpace(input.BcTarget) ? ProjectBuildTarget.Current : input.BcTarget.Trim();
-        if (!ProjectBuildTarget.IsValid(bcTarget))
-        {
-            errors["BcTarget"] = "Choose Current, Next minor or Next major.";
-        }
-        else if (ProjectBuildTarget.IsPreview(bcTarget))
-        {
-            // A preview build is check-only (#994): it is never published, and it can
-            // never be deployed, so neither setting may quietly stop working.
-            if (releaseRepositoryId is not null)
-            {
-                errors["GithubReleaseRepositoryId"] = "Builds against Next minor or Next major are never published. Choose Don't publish releases, or build against Current.";
-            }
-            if (existingId is { } pipelineId && await _db.OeReleasePipelines.AsNoTracking()
-                    .AnyAsync(r => r.BuildPipelineId == pipelineId && r.DeletedAt == null, ct))
-            {
-                errors["BcTarget"] = "A deployment pipeline deploys this pipeline's builds, and preview builds can't be deployed. Keep Current, or create a separate pipeline for the preview check.";
-            }
-        }
-
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
         // null/empty selection = build everything (the default), stored as a null column.
         var selectionJson = input.SelectedAppIds is { Count: > 0 }
             ? JsonSerializer.Serialize(input.SelectedAppIds)
             : null;
-        return (name, selectionJson, releaseRepositoryId, branch, bcTarget);
+        return (name, selectionJson, releaseRepositoryId, branch);
     }
 
     /// <summary>
@@ -312,11 +331,11 @@ public sealed record PipelineInput(
     /// </summary>
     string? Branch = null,
     /// <summary>
-    /// Which Business Central version the pipeline builds against, one of
-    /// <see cref="ProjectBuildTarget"/>. Null or blank means <c>current</c>. See
-    /// <c>.design/object-explorer-project-builds.md</c>, "Building against the next version".
+    /// Whether the pipeline also runs the nightly preview check against the next
+    /// minor and next major versions. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "The nightly preview check".
     /// </summary>
-    string? BcTarget = null);
+    bool PreviewCheck = false);
 
 /// <summary>A project choice for the "New pipeline" dialog's project picker.</summary>
 public sealed record PipelineProjectOption(int Id, string Name);

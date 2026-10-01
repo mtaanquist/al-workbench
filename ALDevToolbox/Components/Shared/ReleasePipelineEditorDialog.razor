@@ -519,10 +519,7 @@
         StateHasChanged();
         try
         {
-            // Preview build pipelines are left out: their builds can never be deployed (#994).
-            _buildPipelines = (await Pipelines.ListPipelinesAsync(_projectId))
-                .Where(p => !ProjectBuildTarget.IsPreview(p.BcTarget))
-                .ToList();
+            _buildPipelines = await Pipelines.ListPipelinesAsync(_projectId);
             // Never fails the dialog: without a GitHub connection the source choice
             // isn't offered and the pipeline draws from a build pipeline as before.
             try

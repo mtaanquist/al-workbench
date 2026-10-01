@@ -94,8 +94,9 @@ the override then. When a doc in `.design/` says something "needs a design pass 
 that brief is where it is tracked. The Solutions list's entry has an addendum checked in
 here, `briefs/2026-09-solutions-list-rail.md` (#906: the row as the selector, the rail
 reserved with an empty state, new columns), waiting to be folded into it upstream.
-A second addendum, `briefs/2026-09-preview-builds.md` (#994), records the "Build against"
-field, the preview tags and pill, and the dashboard tile's foot, also waiting to be folded in.
+A second addendum, `briefs/2026-09-preview-builds.md` (#994), records the nightly preview
+check's editor box, its results on the pipelines list and pipeline page, the preview pill and
+tags, and the dashboard tile's foot, also waiting to be folded in.
 
 **The command palette** has its own brief, `briefs/2026-09-command-palette.md`, for the
 same reason and written to the same shape: the palette ([#880]-[#888]) shipped without a

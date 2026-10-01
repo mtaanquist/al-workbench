@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Components;
 using ALDevToolbox.Components.Pages.Pipelines;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
@@ -354,17 +355,21 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         });
     }
 
-    // ── Preview builds (#994) ───────────────────────────────────────────────
+    // ── Nightly preview check (#994) ────────────────────────────────────────
 
-    /// <summary>The newer build becomes a next-major preview build, as if the pipeline had just been switched.</summary>
-    private async Task MakeNewerAPreviewAsync(Seed seed)
+    /// <summary>
+    /// The pipeline has the check on, and the newer build becomes last night's check
+    /// against the next major. The older build stays the pipeline's own.
+    /// </summary>
+    private async Task MakeNewerAPreviewCheckAsync(Seed seed)
     {
         await using var ctx = _db.NewContext();
         await ctx.OePipelines.Where(p => p.Id == seed.PipelineId)
-            .ExecuteUpdateAsync(s => s.SetProperty(p => p.BcTarget, ProjectBuildTarget.NextMajor));
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.PreviewCheck, true));
         await ctx.OeProjectBuilds.Where(b => b.Id == seed.NewerBuildId)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(b => b.BcTarget, ProjectBuildTarget.NextMajor)
+                .SetProperty(b => b.Trigger, ProjectBuildTrigger.PreviewCheck)
                 .SetProperty(b => b.BcVersion, "29.0")
                 .SetProperty(b => b.BcArtifactVersion, "29.0.52914.0"));
         await ctx.OeProjectBuilds.Where(b => b.Id == seed.OlderBuildId)
@@ -374,37 +379,56 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     }
 
     [Fact]
-    public async Task A_preview_build_wears_a_Preview_build_pill_beside_its_state_and_names_the_version()
+    public async Task The_latest_build_stays_the_pipelines_own_and_the_check_result_sits_beside_it()
     {
         var seed = await SeedAsync();
-        await MakeNewerAPreviewAsync(seed);
+        await MakeNewerAPreviewCheckAsync(seed);
 
         var cut = RenderPage(seed);
 
         cut.WaitForAssertion(() =>
         {
-            var pills = cut.FindAll(".detail-head .status-pill").Select(p => p.TextContent.Trim()).ToList();
-            pills.Should().Contain("Preview build");
-            cut.Find(".pb-topline").TextContent.Should().Contain("on BC 29.0.52914.0");
-            cut.Markup.Should().Contain("Builds against");
-            cut.Markup.Should().Contain("Next major");
+            cut.FindAll(".detail-head .status-pill").Select(p => p.TextContent.Trim()).Should().NotContain("Preview build");
+            cut.Find(".pb-topline").TextContent.Should().Contain("on BC 28.4.47110.0");
+            var result = cut.Find(".pcs a.pcs__item");
+            result.TextContent.Trim().Should().Be("Next major: Passed");
+            result.GetAttribute("href").Should().Be($"/pipelines/{seed.PipelineId}?build={seed.NewerBuildId}");
         });
     }
 
     [Fact]
-    public async Task A_preview_builds_row_says_so_and_offers_no_deploy()
+    public async Task Following_a_check_result_shows_that_build_with_a_Preview_build_pill()
+    {
+        var seed = await SeedAsync();
+        await MakeNewerAPreviewCheckAsync(seed);
+
+        var nav = _ctx.Services.GetRequiredService<NavigationManager>();
+        nav.NavigateTo(nav.GetUriWithQueryParameter("build", seed.NewerBuildId));
+        var cut = _ctx.Render<PipelineBuilds>(p => p.Add(c => c.PipelineId, seed.PipelineId));
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".detail-head .status-pill").Select(p => p.TextContent.Trim()).Should().Contain("Preview build");
+            cut.Find(".pb-topline").TextContent.Should().Contain("on BC 29.0.52914.0");
+            cut.Markup.Should().Contain($"Next major preview build #{seed.NewerBuildId}");
+            cut.Markup.Should().Contain("Back to the latest build");
+        });
+    }
+
+    [Fact]
+    public async Task A_check_builds_row_says_so_and_offers_no_deploy()
     {
         var seed = await SeedAsync();
         await SeedReleasePipelineAsync(seed, "CRONUS App → Production", seed.ProductionEnvId);
-        await MakeNewerAPreviewAsync(seed);
+        await MakeNewerAPreviewCheckAsync(seed);
 
         var cut = RenderPage(seed);
 
         cut.WaitForAssertion(() =>
         {
             var rows = cut.FindAll(".data-table tbody tr");
-            rows[0].TextContent.Should().Contain("Preview build").And.Contain("on BC 29.0.52914.0");
-            rows[1].TextContent.Should().NotContain("Preview build").And.Contain("on BC 28.4.47110.0");
+            rows[0].TextContent.Should().Contain("Next major preview build").And.Contain("on BC 29.0.52914.0");
+            rows[1].TextContent.Should().NotContain("preview").And.Contain("on BC 28.4.47110.0");
             cut.FindAll(ReleaseButton(seed.NewerBuildId)).Should().BeEmpty("a preview build cannot be deployed");
             cut.FindAll(ReleaseButton(seed.OlderBuildId)).Should().ContainSingle();
         });
@@ -415,7 +439,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     {
         var seed = await SeedAsync();
         await SeedReleasePipelineAsync(seed, "CRONUS App → Production", seed.ProductionEnvId);
-        await MakeNewerAPreviewAsync(seed);
+        await MakeNewerAPreviewCheckAsync(seed);
         var cut = RenderPage(seed);
 
         ActThen(cut,
@@ -428,7 +452,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     }
 
     [Fact]
-    public async Task A_current_build_wears_no_preview_pill()
+    public async Task A_pipeline_without_the_check_shows_neither_the_pill_nor_the_check()
     {
         var seed = await SeedAsync();
 
@@ -437,7 +461,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.FindAll(".detail-head .status-pill").Select(p => p.TextContent.Trim()).Should().NotContain("Preview build");
-            cut.Markup.Should().NotContain("Builds against");
+            cut.Markup.Should().NotContain("Preview check");
         });
     }
 

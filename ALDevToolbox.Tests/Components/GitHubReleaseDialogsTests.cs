@@ -143,10 +143,10 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
 
     // ── The release pipeline's artifact source ──────────────────────────────
 
-    // ── Build against (#994) ────────────────────────────────────────────────
+    // ── Nightly preview check (#994) ────────────────────────────────────────
 
     [Fact]
-    public async Task The_pipeline_editor_offers_three_versions_to_build_against_with_one_caption()
+    public async Task The_pipeline_editor_offers_the_nightly_preview_check_off_by_default()
     {
         var seed = await SeedAsync();
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
@@ -154,27 +154,26 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         var cut = _ctx.Render<PipelineEditorDialog>();
         await cut.InvokeAsync(() => cut.Instance.OpenForCreateAsync(seed.ProjectId, "CRONUS A/S"));
 
-        cut.Find("label[for='pe-target']").TextContent.Trim().Should().Be("Build against");
-        cut.FindAll("#pe-target option").Select(o => o.TextContent.Trim())
-            .Should().Equal("Current", "Next minor", "Next major");
-        cut.Find("#pe-target").GetAttribute("value").Should().Be(ProjectBuildTarget.Current, "a new pipeline builds what the extensions declare");
-        var caption = cut.Find("#pe-target").Closest(".field")!.QuerySelector(".field__hint")!.TextContent.Trim();
-        caption.Should().Be("Current is the version your extensions declare. Next minor and Next major compile against Microsoft's preview builds to catch breaking changes early; those builds cannot be deployed.");
+        var box = cut.Find("#pe-preview-check");
+        box.HasAttribute("checked").Should().BeFalse("a new pipeline only builds what the extensions declare");
+        box.Closest("label")!.TextContent.Trim().Should().Be("Check against upcoming Business Central versions every night");
+        var caption = box.Closest(".field")!.QuerySelector(".field__hint")!.TextContent.Trim();
+        caption.Should().Be("Builds against Microsoft's previews of the next minor and next major Business Central versions, to catch breaking changes before they reach your customers. These preview builds can't be deployed; their results show beside the pipeline in the pipelines list.");
         // The caption says what the person needs, not how the tool does it.
-        caption.Should().NotContainAny("insider", "artifact", "compiler");
+        caption.Should().NotContainAny("insider", "artifact", "compiler", "scheduler");
     }
 
     [Fact]
-    public async Task Editing_a_preview_pipeline_shows_the_version_it_builds_against()
+    public async Task Editing_a_pipeline_with_the_check_on_shows_it_ticked()
     {
         var seed = await SeedAsync();
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
 
         var cut = _ctx.Render<PipelineEditorDialog>();
         await cut.InvokeAsync(() => cut.Instance.OpenForEditAsync(
-            seed.PipelineId, seed.ProjectId, "CRONUS A/S", "Nightly", null, bcTarget: ProjectBuildTarget.NextMajor));
+            seed.PipelineId, seed.ProjectId, "CRONUS A/S", "Nightly", null, previewCheck: true));
 
-        cut.Find("#pe-target").GetAttribute("value").Should().Be(ProjectBuildTarget.NextMajor);
+        cut.Find("#pe-preview-check").HasAttribute("checked").Should().BeTrue();
     }
 
     [Fact]

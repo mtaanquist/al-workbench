@@ -74,7 +74,7 @@ public sealed class PipelinesDashboardService
         var pipelines = await _db.OePipelines.AsNoTracking()
             .Where(p => p.DeletedAt == null)
             .Where(p => _db.OeProjects.Where(visible).Any(v => v.Id == p.ProjectId))
-            .Select(p => new { p.Id, p.Name, p.ProjectId, ProjectName = p.Project!.Name })
+            .Select(p => new { p.Id, p.Name, p.ProjectId, ProjectName = p.Project!.Name, p.PreviewCheck })
             .ToListAsync(ct);
         var pipelineIds = pipelines.Select(p => p.Id).ToList();
         var pipelineById = pipelines.ToDictionary(p => p.Id);
@@ -83,10 +83,12 @@ public sealed class PipelinesDashboardService
             .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId!.Value));
 
         // The newest build of each pipeline: what "failed builds" counts, the same
-        // question the Builds list's Failed tab asks.
+        // question the Builds list's Failed tab asks. The nightly preview check's
+        // builds are counted on their own below, not as the pipeline's latest.
         var latest = pipelineIds.Count == 0
             ? []
             : await builds
+                .Where(b => b.BcTarget == ProjectBuildTarget.Current)
                 .GroupBy(b => b.PipelineId!.Value)
                 .Select(g => g
                     .OrderByDescending(b => b.StartedAt)
@@ -100,15 +102,47 @@ public sealed class PipelinesDashboardService
                         b.StartedAt,
                         b.FinishedAt,
                         b.FailureMessage,
-                        b.BcTarget,
                     })
                     .First())
                 .ToListAsync(ct);
 
+        // Pipelines whose newest preview check against either upcoming version did not
+        // pass (#994): a failed build, or a ready one with an extension that did not
+        // compile.
+        // Only pipelines that still run the check, as the Builds list does: a check
+        // turned off is not failing any more.
+        var checkedPipelineIds = pipelines.Where(p => p.PreviewCheck).Select(p => p.Id).ToList();
+        var previewChecks = checkedPipelineIds.Count == 0
+            ? []
+            : (await builds
+                .Where(b => b.BcTarget != ProjectBuildTarget.Current && checkedPipelineIds.Contains(b.PipelineId!.Value))
+                .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.BcTarget, b.Status, b.ReleaseId, b.StartedAt })
+                .ToListAsync(ct))
+                .GroupBy(b => (b.PipelineId, b.BcTarget))
+                .Select(g => g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).First())
+                .ToList();
+        var checkedReleaseIds = previewChecks
+            .Where(b => b.Status == ProjectBuildStatus.Ready && b.ReleaseId != null)
+            .Select(b => b.ReleaseId!.Value)
+            .ToList();
+        var releasesWithFailures = checkedReleaseIds.Count == 0
+            ? []
+            : (await _db.OeProjectBuildResults.AsNoTracking()
+                .Where(r => checkedReleaseIds.Contains(r.ReleaseId) && r.Status == ProjectBuildResultStatus.Failed)
+                .Select(r => r.ReleaseId)
+                .Distinct()
+                .ToListAsync(ct))
+                .ToHashSet();
+        var failedPreviewPipelines = previewChecks
+            .Where(b => b.Status == ProjectBuildStatus.Failed
+                        || (b.ReleaseId is { } r && releasesWithFailures.Contains(r)))
+            .Select(b => b.PipelineId)
+            .ToHashSet();
+
         var counts = pipelineIds.Count == 0
             ? null
             : await builds
-                .Where(b => b.StartedAt >= weekStart)
+                .Where(b => b.StartedAt >= weekStart && b.BcTarget == ProjectBuildTarget.Current)
                 .GroupBy(_ => 1)
                 .Select(g => new { Week = g.Count(), Today = g.Count(b => b.StartedAt >= todayStart) })
                 .FirstOrDefaultAsync(ct);
@@ -126,6 +160,7 @@ public sealed class PipelinesDashboardService
                     b.Status,
                     b.Branch,
                     b.Trigger,
+                    b.BcTarget,
                     b.PullRequestNumber,
                     b.StartedAt,
                     b.FinishedAt,
@@ -226,12 +261,18 @@ public sealed class PipelinesDashboardService
                 ProjectBuildStatus.Failed => (PipelinesActivityKind.BuildFailed, b.FinishedAt ?? b.StartedAt),
                 _ => (PipelinesActivityKind.BuildRunning, b.StartedAt),
             };
+            // The nightly preview check runs as a person, but nobody pressed anything:
+            // the pipeline is the actor, and its name says which check it was.
+            var previewCheck = ProjectBuildTarget.IsPreview(b.BcTarget);
             var actor = b.Trigger == ProjectBuildTrigger.PullRequest ? PipelinesActor.PullRequest
+                : previewCheck ? PipelinesActor.Pipeline
                 : b.StartedBy is not null ? PipelinesActor.Person
                 : PipelinesActor.Unknown;
             activity.Add(new PipelinesActivityItem(
-                kind, at, actor, b.StartedBy, p.ProjectId, p.ProjectName,
-                BuildId: b.Id, PipelineId: p.Id, PipelineName: p.Name, Branch: b.Branch,
+                kind, at, actor, previewCheck ? null : b.StartedBy, p.ProjectId, p.ProjectName,
+                BuildId: b.Id, PipelineId: p.Id,
+                PipelineName: previewCheck ? $"{p.Name} ({ProjectBuildTarget.Label(b.BcTarget)} check)" : p.Name,
+                Branch: b.Branch,
                 PullRequestNumber: b.PullRequestNumber, AppCount: b.AppCount, Detail: b.FailureMessage));
         }
 
@@ -284,8 +325,9 @@ public sealed class PipelinesDashboardService
             LastBuild: lastBuild,
             BuildsThisWeek: counts?.Week ?? 0,
             BuildsToday: counts?.Today ?? 0,
-            FailedBuildPipelines: latest.Count(b => b.Status == ProjectBuildStatus.Failed),
-            FailedPreviewBuildPipelines: latest.Count(b => b.Status == ProjectBuildStatus.Failed && ProjectBuildTarget.IsPreview(b.BcTarget)),
+            FailedBuildPipelines: latest.Where(b => b.Status == ProjectBuildStatus.Failed).Select(b => b.PipelineId)
+                .Union(failedPreviewPipelines).Count(),
+            FailedPreviewBuildPipelines: failedPreviewPipelines.Count,
             ReadyToBuild: readyToBuild,
             DeploymentPipelineCount: targets.Count,
             LastDeploymentAt: targets.Where(t => t.LastDelivery is not null).Select(t => (DateTime?)t.LastDelivery!.At).Max(),
@@ -389,11 +431,11 @@ public sealed class PipelinesDashboardService
 
 /// <summary>The Pipelines dashboard, assembled. Counts cover only the solutions the caller can see.</summary>
 /// <param name="LastBuild">The newest build of any build pipeline, or null when none has run.</param>
-/// <param name="FailedBuildPipelines">Build pipelines whose newest build failed.</param>
+/// <param name="FailedBuildPipelines">Build pipelines whose newest build failed, or whose nightly preview check did not pass.</param>
 /// <param name="FailedPreviewBuildPipelines">
-/// Of <paramref name="FailedBuildPipelines"/>, those whose failed build was a preview build
-/// (#994): counted separately because a red next-version check is the signal it exists to
-/// give, not a broken customer build.
+/// Of <paramref name="FailedBuildPipelines"/>, those whose preview check did not pass (#994):
+/// counted separately because a red next-version check is the signal it exists to give,
+/// not a broken customer build.
 /// </param>
 /// <param name="LastDeploymentAt">When the newest finished deployment finished, or null.</param>
 /// <param name="ShippingNow">Deployments running this moment, the longest-running first.</param>

@@ -33,9 +33,3 @@
 .pl-name { display: flex; align-items: center; gap: var(--space-3); }
 .pl-name .cell-stack { flex: 1 1 auto; }
 .pl-name .btn { flex: none; }
-
-/* The "Next minor" / "Next major" tag beside a preview pipeline's name (#994). */
-.pl-target {
-    margin-left: var(--space-1);
-    vertical-align: middle;
-}

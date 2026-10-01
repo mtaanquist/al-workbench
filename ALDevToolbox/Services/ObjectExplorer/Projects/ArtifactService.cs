@@ -225,16 +225,19 @@ public sealed class ArtifactService
             .Where(p => _db.OeProjects.Where(visible).Any(v => v.Id == p.ProjectId))
             .Select(p => new
             {
-                p.Id, p.Name, p.ProjectId, p.BcTarget,
+                p.Id, p.Name, p.ProjectId, p.PreviewCheck, p.PreviewCheckBlocked,
                 ProjectName = p.Project!.Name,
                 OwnerName = p.Project.CreatedByUser != null ? p.Project.CreatedByUser.DisplayName : null,
             })
             .ToListAsync(ct);
 
         // The newest build per pipeline (and the newest successful one) in one query.
+        // The nightly preview check's builds are left out: the pipeline's state is
+        // what it builds for real, and the check has its own results below.
         var pipelineIds = pipelines.Select(p => p.Id).ToList();
         var builds = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId!.Value))
+            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId!.Value)
+                        && b.BcTarget == ProjectBuildTarget.Current)
             .Select(b => new
             {
                 b.Id, PipelineId = b.PipelineId!.Value, b.Status, b.BcVersion, b.Branch, b.StartedAt, b.FinishedAt,
@@ -252,6 +255,9 @@ public sealed class ArtifactService
             .GroupBy(c => c.ProjectBuildId)
             .ToDictionary(g => g.Key, g => g.First().CommitHash);
 
+        var previewChecks = await LatestPreviewChecksAsync(
+            pipelines.Where(p => p.PreviewCheck).Select(p => p.Id).ToList(), ct);
+
         var rows = new List<PipelineArtifactsRow>(pipelines.Count);
         foreach (var p in pipelines)
         {
@@ -266,7 +272,9 @@ public sealed class ArtifactService
                 Latest: latest is null ? null : new BuildSummary(
                     latest.Id, latest.Status, latest.BcVersion, latest.Branch, commitShort, latest.StartedAt, latest.FinishedAt, latest.ArtifactCount),
                 LatestSuccessfulBuildId: latestSuccessful?.Id,
-                BcTarget: p.BcTarget));
+                PreviewCheck: p.PreviewCheck,
+                PreviewChecks: previewChecks.GetValueOrDefault(p.Id, []),
+                PreviewCheckBlocked: p.PreviewCheck ? p.PreviewCheckBlocked : null));
         }
 
         if (!string.IsNullOrWhiteSpace(search))
@@ -285,18 +293,74 @@ public sealed class ArtifactService
             .ToList();
     }
 
-    /// <summary>The pipeline header (name + project + owner) for the pipeline detail page, or null when not found / deleted.</summary>
+    /// <summary>
+    /// The pipeline header (name + project + owner, and the nightly preview check's
+    /// latest results) for the pipeline detail page, or null when not found / deleted.
+    /// </summary>
     public async Task<PipelineHeader?> GetPipelineHeaderAsync(int pipelineId, CancellationToken ct = default)
     {
         await EnsureCanViewPipelineAsync(pipelineId, ct);
-        return await _db.OePipelines.AsNoTracking()
+        var header = await _db.OePipelines.AsNoTracking()
             .Where(p => p.Id == pipelineId && p.DeletedAt == null)
             .Select(p => new PipelineHeader(
                 p.Id, p.Name, p.ProjectId, p.Project!.Name,
                 p.Project.CreatedByUser != null ? p.Project.CreatedByUser.DisplayName : null,
                 p.Project.CreatedByUserId,
-                p.BcTarget))
+                p.PreviewCheck,
+                p.PreviewCheck ? p.PreviewCheckBlocked : null,
+                null))
             .FirstOrDefaultAsync(ct);
+        if (header is null || !header.PreviewCheck) return header;
+
+        var checks = await LatestPreviewChecksAsync([pipelineId], ct);
+        return header with { PreviewChecks = checks.GetValueOrDefault(pipelineId, []) };
+    }
+
+    /// <summary>
+    /// The newest nightly preview check build per preview target, for each of
+    /// <paramref name="pipelineIds"/>, in <see cref="ProjectBuildTarget.Previews"/>
+    /// order. A target that has never been checked is simply missing. The caller has
+    /// already gated the pipelines on visibility.
+    /// </summary>
+    private async Task<Dictionary<int, IReadOnlyList<PreviewCheckResult>>> LatestPreviewChecksAsync(
+        IReadOnlyCollection<int> pipelineIds, CancellationToken ct)
+    {
+        if (pipelineIds.Count == 0) return [];
+
+        var builds = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value)
+                        && b.BcTarget != ProjectBuildTarget.Current)
+            .Select(b => new
+            {
+                b.Id, PipelineId = b.PipelineId!.Value, b.BcTarget, b.Status, b.ReleaseId,
+                b.BcArtifactVersion, b.StartedAt, b.FinishedAt,
+            })
+            .ToListAsync(ct);
+        var latest = builds
+            .GroupBy(b => (b.PipelineId, b.BcTarget))
+            .Select(g => g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).First())
+            .ToList();
+
+        // A build with some failed extensions still goes ready, so "passed" has to
+        // look at the per-extension results too.
+        var releaseIds = latest.Where(b => b.ReleaseId != null).Select(b => b.ReleaseId!.Value).ToList();
+        var failedByRelease = (await _db.OeProjectBuildResults.AsNoTracking()
+                .Where(r => releaseIds.Contains(r.ReleaseId) && r.Status == ProjectBuildResultStatus.Failed)
+                .GroupBy(r => r.ReleaseId)
+                .Select(g => new { ReleaseId = g.Key, Count = g.Count() })
+                .ToListAsync(ct))
+            .ToDictionary(r => r.ReleaseId, r => r.Count);
+
+        return latest
+            .GroupBy(b => b.PipelineId)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyList<PreviewCheckResult>)g
+                    .OrderBy(b => ProjectBuildTarget.Previews.ToList().IndexOf(b.BcTarget))
+                    .Select(b => new PreviewCheckResult(
+                        b.BcTarget, b.Id, b.Status, b.BcArtifactVersion, b.StartedAt, b.FinishedAt,
+                        b.ReleaseId is { } r ? failedByRelease.GetValueOrDefault(r) : 0))
+                    .ToList());
     }
 
     // ── Build history + detail ──────────────────────────────────────────
@@ -563,7 +627,7 @@ public sealed class ArtifactService
         return await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId == pipelineId && b.Status == ProjectBuildStatus.Ready && b.ReleaseId != null)
             .OrderByDescending(b => b.StartedAt)
-            .Select(b => new ComparableBuildRow(b.Id, b.ReleaseId!.Value, b.BcVersion, b.StartedAt))
+            .Select(b => new ComparableBuildRow(b.Id, b.ReleaseId!.Value, b.BcVersion, b.StartedAt, b.BcTarget))
             .ToListAsync(ct);
     }
 
@@ -710,16 +774,56 @@ public sealed record PipelineArtifactsRow(
     string? OwnerName,
     BuildSummary? Latest,
     int? LatestSuccessfulBuildId,
-    /// <summary>Which Business Central version the pipeline builds against: <c>current</c>, <c>next_minor</c> or <c>next_major</c>.</summary>
-    string BcTarget = ProjectBuildTarget.Current)
+    /// <summary>Whether the pipeline runs the nightly preview check.</summary>
+    bool PreviewCheck = false,
+    /// <summary>The check's newest result per preview target; empty until the first night.</summary>
+    IReadOnlyList<PreviewCheckResult>? PreviewChecks = null,
+    /// <summary>Why the check could not start last night, when it couldn't.</summary>
+    string? PreviewCheckBlocked = null);
+
+/// <summary>
+/// A pipeline's header for the pipeline detail page (its project + owner drive the
+/// breadcrumb and manage-gating), with the nightly preview check's state.
+/// </summary>
+public sealed record PipelineHeader(int Id, string Name, int ProjectId, string ProjectName, string? OwnerName, int? OwnerUserId,
+    bool PreviewCheck = false,
+    string? PreviewCheckBlocked = null,
+    IReadOnlyList<PreviewCheckResult>? PreviewChecks = null);
+
+/// <summary>
+/// The newest build of the nightly preview check for one preview target. See
+/// <c>.design/object-explorer-project-builds.md</c>, "The nightly preview check".
+/// </summary>
+/// <param name="BcTarget"><c>next_minor</c> or <c>next_major</c>.</param>
+/// <param name="FailedAppCount">Extensions that did not compile, which fail the check even when the build went ready.</param>
+public sealed record PreviewCheckResult(
+    string BcTarget,
+    int BuildId,
+    string Status,
+    string? BcArtifactVersion,
+    DateTime StartedAt,
+    DateTime? FinishedAt,
+    int FailedAppCount)
 {
-    /// <summary>True when the pipeline builds against a preview version, so its builds are check-only.</summary>
-    public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);
+    /// <summary><c>running</c>, <c>passed</c> or <c>failed</c>.</summary>
+    public string Outcome => Status switch
+    {
+        ProjectBuildStatus.Queued or ProjectBuildStatus.Building => PreviewCheckOutcome.Running,
+        ProjectBuildStatus.Ready when FailedAppCount == 0 => PreviewCheckOutcome.Passed,
+        _ => PreviewCheckOutcome.Failed,
+    };
+
+    /// <summary>"Next minor" or "Next major".</summary>
+    public string Label => ProjectBuildTarget.Label(BcTarget);
 }
 
-/// <summary>A pipeline's header for the pipeline detail page (its project + owner drive the breadcrumb and manage-gating).</summary>
-public sealed record PipelineHeader(int Id, string Name, int ProjectId, string ProjectName, string? OwnerName, int? OwnerUserId,
-    string BcTarget = ProjectBuildTarget.Current);
+/// <summary>The words <see cref="PreviewCheckResult.Outcome"/> takes.</summary>
+public static class PreviewCheckOutcome
+{
+    public const string Running = "running";
+    public const string Passed = "passed";
+    public const string Failed = "failed";
+}
 
 /// <summary>One build in the history list.</summary>
 /// <remarks>
@@ -813,7 +917,9 @@ public sealed record BuildAppRow(string AppName, string AppVersion);
 public sealed record LogSectionRow(string Section, string Content);
 
 /// <summary>A build eligible for project-scoped comparison.</summary>
-public sealed record ComparableBuildRow(int BuildId, int ReleaseId, string? BcVersion, DateTime StartedAt);
+/// <param name="BcTarget">Which version it compiled against; the picker labels preview builds and does not preselect them.</param>
+public sealed record ComparableBuildRow(int BuildId, int ReleaseId, string? BcVersion, DateTime StartedAt,
+    string BcTarget = ProjectBuildTarget.Current);
 
 /// <summary>A file's bytes ready to stream from a download endpoint.</summary>
 public sealed record DownloadFile(string FileName, byte[] Content);

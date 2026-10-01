@@ -33,6 +33,9 @@ public static class BackgroundWorkerRegistration
         // Enqueues scheduled SaaS deliveries when due, and fails restart-orphaned ones on its
         // first sweep.
         services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryScheduler>();
+        // Nightly preview check: builds each opted-in pipeline against the next minor
+        // and next major Business Central previews, as the person who turned it on.
+        services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Projects.PreviewCheckScheduler>();
         // Nightly sweep that re-reads every BC-connected project's environments, keeping the
         // mirrored next-platform-update columns fresh for the fleet view.
         services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Bc.EnvironmentRefreshScheduler>();

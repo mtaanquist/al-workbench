@@ -2,7 +2,6 @@ using System.Text.Json;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
-using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using ALDevToolbox.Tests.Infrastructure;
@@ -139,10 +138,10 @@ public sealed class PipelineServiceTests : IDisposable
         (await read.OePipelines.IgnoreQueryFilters().SingleAsync(p => p.Id == id)).DeletedAt.Should().NotBeNull();
     }
 
-    // --- Build against (#994) ----------------------------------------------
+    // --- Nightly preview check (#994) ---------------------------------------
 
     [Fact]
-    public async Task A_new_pipeline_builds_against_the_current_version_unless_told_otherwise()
+    public async Task A_new_pipeline_has_the_preview_check_off_unless_asked()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
@@ -150,90 +149,118 @@ public sealed class PipelineServiceTests : IDisposable
         var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
 
         await using var read = _db.NewContext();
-        (await read.OePipelines.SingleAsync(p => p.Id == id)).BcTarget.Should().Be(ProjectBuildTarget.Current);
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.PreviewCheck.Should().BeFalse();
+        pipeline.PreviewCheckByUserId.Should().BeNull();
     }
 
     [Fact]
-    public async Task A_pipeline_keeps_and_changes_the_version_it_builds_against()
+    public async Task Turning_the_check_on_runs_it_as_you_and_turning_it_off_forgets_you()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
+        var userId = await SeedUserAsync(ctx, "alice@cronus.test");
+        _db.OrgContext.CurrentUserId = userId;
         var svc = NewService(ctx);
 
-        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Next major check", null, BcTarget: ProjectBuildTarget.NextMajor));
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null, PreviewCheck: true));
         await using (var read = _db.NewContext())
         {
-            (await read.OePipelines.SingleAsync(p => p.Id == id)).BcTarget.Should().Be(ProjectBuildTarget.NextMajor);
+            var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+            pipeline.PreviewCheck.Should().BeTrue();
+            pipeline.PreviewCheckByUserId.Should().Be(userId);
         }
 
-        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Next major check", null, BcTarget: ProjectBuildTarget.NextMinor));
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production", null, PreviewCheck: false));
         await using (var read = _db.NewContext())
         {
-            (await read.OePipelines.SingleAsync(p => p.Id == id)).BcTarget.Should().Be(ProjectBuildTarget.NextMinor);
+            var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+            pipeline.PreviewCheck.Should().BeFalse();
+            pipeline.PreviewCheckByUserId.Should().BeNull();
         }
-    }
-
-    [Theory]
-    [InlineData("next")]
-    [InlineData("NextMajor")]
-    [InlineData("version_mode")]
-    public async Task A_target_the_tool_does_not_know_is_rejected_against_the_field(string target)
-    {
-        await using var ctx = _db.NewContext();
-        var projectId = await SeedProjectAsync(ctx);
-
-        var act = () => NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null, BcTarget: target));
-
-        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("BcTarget");
     }
 
     [Fact]
-    public async Task A_pipeline_a_deployment_pipeline_draws_from_cannot_switch_to_a_preview_version()
+    public async Task Someone_else_saving_the_pipeline_leaves_the_check_running_as_its_owner()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
+        var alice = await SeedUserAsync(ctx, "alice@cronus.test");
+        var bob = await SeedUserAsync(ctx, "bob@cronus.test");
         var svc = NewService(ctx);
-        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
-        var env = new OeProjectEnvironment
-        {
-            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "Production", Type = "Production",
-            FetchedAt = DateTime.UtcNow,
-        };
-        ctx.OeProjectEnvironments.Add(env);
-        await ctx.SaveChangesAsync();
-        ctx.OeReleasePipelines.Add(new OeReleasePipeline
-        {
-            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "Production deploy",
-            BuildPipelineId = id, ProjectEnvironmentId = env.Id,
-            DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
-            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
-        });
-        await ctx.SaveChangesAsync();
+        _db.OrgContext.CurrentUserId = alice;
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null, PreviewCheck: true));
 
-        var act = () => svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production", null, BcTarget: ProjectBuildTarget.NextMajor));
+        _db.OrgContext.CurrentUserId = bob;
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production line", null, PreviewCheck: true));
 
-        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("BcTarget");
         await using var read = _db.NewContext();
-        (await read.OePipelines.SingleAsync(p => p.Id == id)).BcTarget.Should().Be(ProjectBuildTarget.Current);
+        (await read.OePipelines.SingleAsync(p => p.Id == id)).PreviewCheckByUserId.Should().Be(alice);
     }
 
     [Fact]
-    public async Task A_preview_pipeline_cannot_also_publish_github_releases()
+    public async Task Saving_a_paused_check_takes_it_over()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
-        var repo = new OeProjectRepository
+        var alice = await SeedUserAsync(ctx, "alice@cronus.test");
+        var bob = await SeedUserAsync(ctx, "bob@cronus.test");
+        var svc = NewService(ctx);
+        _db.OrgContext.CurrentUserId = alice;
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null, PreviewCheck: true));
+        await using (var paused = _db.NewContext())
         {
-            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Provider = RepositoryProvider.GitHub,
-            Url = "https://github.com/cronus/core", DisplayName = "core",
-        };
-        ctx.OeProjectRepositories.Add(repo);
-        await ctx.SaveChangesAsync();
+            await paused.OePipelines.Where(p => p.Id == id)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.PreviewCheckBlocked, "Alice can no longer manage this solution."));
+        }
 
-        var act = () => NewService(ctx).CreatePipelineAsync(new PipelineInput(
-            projectId, "Next major check", null, GithubReleaseRepositoryId: repo.Id, BcTarget: ProjectBuildTarget.NextMajor));
+        _db.OrgContext.CurrentUserId = bob;
+        await using var edit = _db.NewContext();
+        await NewService(edit).UpdatePipelineAsync(id, new PipelineInput(projectId, "Production", null, PreviewCheck: true));
 
-        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("GithubReleaseRepositoryId");
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.PreviewCheckByUserId.Should().Be(bob);
+        pipeline.PreviewCheckBlocked.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Run_the_check_as_me_resumes_a_paused_check()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var alice = await SeedUserAsync(ctx, "alice@cronus.test");
+        var bob = await SeedUserAsync(ctx, "bob@cronus.test");
+        _db.OrgContext.CurrentUserId = alice;
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null, PreviewCheck: true));
+        await using (var paused = _db.NewContext())
+        {
+            await paused.OePipelines.Where(p => p.Id == id)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.PreviewCheckBlocked, "Alice can no longer manage this solution."));
+        }
+
+        _db.OrgContext.CurrentUserId = bob;
+        await using (var act = _db.NewContext())
+        {
+            await NewService(act).TakeOverPreviewCheckAsync(id);
+        }
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.PreviewCheckByUserId.Should().Be(bob);
+        pipeline.PreviewCheckBlocked.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Run_the_check_as_me_refuses_a_pipeline_without_the_check()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
+
+        var act = () => NewService(ctx).TakeOverPreviewCheckAsync(id);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("PreviewCheck");
     }
 
     // --- The watched branch (#963) ------------------------------------------
@@ -334,6 +361,19 @@ public sealed class PipelineServiceTests : IDisposable
 
     private PipelineService NewService(AppDbContext ctx) =>
         new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<PipelineService>.Instance);
+
+    private static async Task<int> SeedUserAsync(AppDbContext ctx, string email)
+    {
+        var user = new ALDevToolbox.Domain.Entities.User
+        {
+            OrganizationId = TestDb.DefaultOrgId, Email = email, DisplayName = email, PasswordHash = "x",
+            Role = ALDevToolbox.Domain.Entities.UserRole.Admin, Status = ALDevToolbox.Domain.Entities.UserStatus.Active,
+            CreatedAt = DateTime.UtcNow,
+        };
+        ctx.Users.Add(user);
+        await ctx.SaveChangesAsync();
+        return user.Id;
+    }
 
     private static async Task<int> SeedProjectAsync(AppDbContext ctx)
     {

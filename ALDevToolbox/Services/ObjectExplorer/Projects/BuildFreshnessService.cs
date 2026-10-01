@@ -99,7 +99,8 @@ public sealed class BuildFreshnessService
         // each repository. A repository added after that build, or whose clone
         // failed in it, has no commit there and reads as never built.
         var readyBuilds = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value) && b.Status == ProjectBuildStatus.Ready)
+            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value) && b.Status == ProjectBuildStatus.Ready
+                && b.BcTarget == ProjectBuildTarget.Current)
             .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.StartedAt, b.FinishedAt })
             .ToListAsync(ct).ConfigureAwait(false);
         var lastBuilds = readyBuilds

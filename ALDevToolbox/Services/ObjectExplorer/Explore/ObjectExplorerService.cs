@@ -176,7 +176,8 @@ public class ObjectExplorerService
                         && b.Status == ProjectBuildStatus.Ready
                         && b.Release!.Status == "ready"
                         && b.Release!.DeletedAt == null
-                        && b.Pipeline!.DeletedAt == null)
+                        && b.Pipeline!.DeletedAt == null
+                        && b.BcTarget == ProjectBuildTarget.Current)
             .GroupBy(b => b.PipelineId)
             .Select(g => g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).First().Id)
             .ToListAsync(ct);
