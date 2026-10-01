@@ -619,9 +619,7 @@
 
         _modules = await ObjectExplorer.ListModuleSummariesAsync(ReleaseId);
         var allReleases = await ObjectExplorer.ListReleasesAsync();
-        _otherReleases = allReleases
-            .Where(r => r.Id != ReleaseId && r.Status == "ready" && r.DeletedAt is null)
-            .ToList();
+        _otherReleases = CompareCandidates(allReleases, ReleaseId, _release.Kind);
 
         // Seed filter state from the URL query string so back-navigation
         // from a result detail page restores what the user was searching.
@@ -633,6 +631,19 @@
 
         await ReloadAsync();
     }
+
+    /// <summary>
+    /// The releases this one can be compared with: every other ready release,
+    /// except that a Microsoft release only offers other Microsoft releases. With
+    /// hundreds of customer and pipeline-build releases imported, those buried
+    /// the handful of BC versions a first-party compare is ever made against.
+    /// </summary>
+    internal static List<ReleaseListItem> CompareCandidates(
+        IEnumerable<ReleaseListItem> releases, int releaseId, string releaseKind) =>
+        releases
+            .Where(r => r.Id != releaseId && r.Status == "ready" && r.DeletedAt is null)
+            .Where(r => releaseKind != "first_party" || r.Kind == "first_party")
+            .ToList();
 
     /// <summary>
     /// Reads <c>scope</c>, <c>search</c>, <c>kind</c>, <c>module</c>,
