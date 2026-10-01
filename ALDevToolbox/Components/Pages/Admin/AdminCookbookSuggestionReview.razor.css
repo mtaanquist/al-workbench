@@ -2,4 +2,12 @@
    widens the page and pushes the head's actions off screen. */
 .suggestion-tags { flex-wrap: wrap; min-width: 0; }
 
+/* .page and .form-sec are grids with auto tracks, so a child's min-content
+   width sets the track's floor. A suggested file's <pre> never wraps, so its
+   longest line widened the files card, the page track with it, and every
+   card on the page (#1003 wrapped the tags, but at that widened width). A
+   zero floor keeps the cards at the page's width and lets the <pre> scroll. */
+.card { min-width: 0; }
+.form-sec { grid-template-columns: minmax(0, 1fr); }
+
 .suggestion-reject-note { width: 16rem; }
