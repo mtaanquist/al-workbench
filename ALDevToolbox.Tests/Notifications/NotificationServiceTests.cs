@@ -259,6 +259,18 @@ public sealed class NotificationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_timeout_inside_a_send_is_a_failed_send_not_a_cancellation()
+    {
+        var slow = await SeedUserAsync("slow@cronus.example");
+        var fine = await SeedUserAsync("fine@cronus.example");
+        _email.TimeOutFor = "slow@cronus.example";
+
+        await NotifyAsync(Notification(slow, fine));
+
+        _email.Sent.Select(s => s.To).Should().Equal("fine@cronus.example");
+    }
+
+    [Fact]
     public void Every_category_has_an_outbox_label()
     {
         foreach (var category in Enum.GetValues<NotificationCategory>())
@@ -322,6 +334,7 @@ public sealed class NotificationServiceTests : IDisposable
     {
         public List<(string To, string Subject, EmailPurpose Purpose)> Sent { get; } = [];
         public string? FailFor { get; set; }
+        public string? TimeOutFor { get; set; }
         public bool Configured { get; set; } = true;
 
         public Task<bool> IsConfiguredAsync(CancellationToken ct = default) => Task.FromResult(Configured);
@@ -329,6 +342,7 @@ public sealed class NotificationServiceTests : IDisposable
         public Task SendAsync(string toEmail, EmailContent content, EmailPurpose purpose, CancellationToken ct = default)
         {
             if (toEmail == FailFor) throw new InvalidOperationException("The mail server said no.");
+            if (toEmail == TimeOutFor) throw new TaskCanceledException("The mail server timed out.");
             Sent.Add((toEmail, content.Subject, purpose));
             return Task.CompletedTask;
         }

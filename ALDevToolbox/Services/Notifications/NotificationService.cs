@@ -19,7 +19,8 @@ namespace ALDevToolbox.Services.Notifications;
 /// </para>
 ///
 /// <para>
-/// Never throws (cancellation aside). A notification is a side effect of work
+/// Never throws, except when <c>ct</c> itself is cancelled: a timeout
+/// inside a send is a failed send, not a shutdown. A notification is a side effect of work
 /// that already succeeded (a build finished, a deployment ran), and that work
 /// must not fail because an email could not be queued.
 /// </para>
@@ -91,7 +92,7 @@ public sealed class NotificationService
         {
             await DeliverAsync(notification, orgId.Value, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "{Category} notification could not be delivered.", notification.Category);
         }
@@ -180,7 +181,7 @@ public sealed class NotificationService
             await _email.SendAsync(recipient.Email, content, PurposeFor(notification.Category), ct);
             return true;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "{Category} notification to user {UserId} could not be sent.",
                 notification.Category, recipient.UserId);
