@@ -36,7 +36,7 @@ public sealed partial class EmailPreviewTests : IDisposable
             .ToList();
 
         emails.Should().NotBeEmpty();
-        EmailPreviews.All.Select(p => p.Component).Should().BeEquivalentTo(emails,
+        EmailPreviews.All.Select(p => p.Component).Distinct().Should().BeEquivalentTo(emails,
             "a new email needs an entry in EmailPreviews to show up on the preview tab");
     }
 

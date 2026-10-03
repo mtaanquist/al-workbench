@@ -1,5 +1,6 @@
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Email;
+using ALDevToolbox.Services.Notifications;
 
 namespace ALDevToolbox.Components.Email;
 
@@ -79,6 +80,19 @@ public static class EmailPreviews
             "To the new address when an administrator changes someone's email.",
             typeof(EmailChangeConfirmEmail),
             (r, ct) => EmailChangeConfirmEmail.RenderAsync(r, Person, $"{SampleOrigin}/account/confirm-email?{SampleToken}", ct)),
+        new("build-failed", "Build failed",
+            "When a build pipeline someone started or created fails after working. Sent again only once it works.",
+            typeof(BuildNotificationEmail),
+            (r, ct) => BuildNotificationEmail.RenderAsync(r, Person, Organization, "CRONUS Coffee", "Main",
+                failed: true, nightlyCheck: false, target: null, bcVersion: "26.4",
+                failureMessage: "Coffee Extension: 2 errors.\nsrc/Codeunit/CoffeeMgt.Codeunit.al(41,17): error AL0118: The name 'Brew' does not exist in the current context.",
+                $"{SampleOrigin}/pipelines/12?build=345", $"{SampleOrigin}{NotificationService.SettingsPath}", ct)),
+        new("build-working-again", "Nightly check working again",
+            "When the nightly check against an upcoming Business Central version works after failing.",
+            typeof(BuildNotificationEmail),
+            (r, ct) => BuildNotificationEmail.RenderAsync(r, Person, Organization, "CRONUS Coffee", "Main",
+                failed: false, nightlyCheck: true, target: "Next major", bcVersion: "27.0",
+                failureMessage: null, $"{SampleOrigin}/pipelines/12?build=351", $"{SampleOrigin}{NotificationService.SettingsPath}", ct)),
         new("test", "Test email",
             "When a site administrator sends a test from the email settings.",
             typeof(SiteAdminTestEmail),

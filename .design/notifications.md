@@ -21,7 +21,7 @@ Agreed with the maintainer on 2026-10-03:
 
 | Category | Events | Issue |
 | --- | --- | --- |
-| Builds | Build failed, build recovered (manual builds and nightly preview checks; pull request builds are left to GitHub) | #1035 |
+| Builds | Build failed, build working again (manual builds and nightly checks; pull request builds are left to GitHub) | #1035 |
 | Deployments | Waiting for approval, deployed, failed | #1036 |
 
 Phase 3 adds Upgrades and Solutions.
@@ -51,3 +51,20 @@ Phase 3 adds Upgrades and Solutions.
 - Every notification email passes `SettingsUrl` to `EmailLayout`, which puts a "Change
   which emails you get" link in the footer, pointing at `/account?section=notifications`.
 - Every notification email has an `EmailPreviews` entry like any other email.
+
+## Builds (#1035)
+
+`BuildNotifier.BuildFinishedAsync` runs from the release import worker once a pipeline
+build is marked ready or failed.
+
+- **What counts as a change.** The build is compared with the previous finished build of the
+  same pipeline, trigger (manual or nightly check) and Business Central target. A failure
+  after a success, or as the first build, is news; a success is news only after a failure.
+  Keeping the triggers and targets apart means a nightly next-major failure does not hide
+  behind a manual current-version success, and the other way round.
+- **Skipped:** pull request builds (GitHub shows the result on the pull request) and builds
+  outside a pipeline (GitHub release imports).
+- **Recipients:** a manual build goes to whoever started it, a nightly check to whoever
+  turned the check on; the pipeline's creator gets both.
+- The email shows the first lines of the failure message and links to the build on the
+  pipeline page; the digest entry carries the first line.

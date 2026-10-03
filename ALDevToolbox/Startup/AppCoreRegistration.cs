@@ -51,6 +51,7 @@ public static class AppCoreRegistration
         // Who gets which notification, and how. See .design/notifications.md.
         services.AddScoped<NotificationPreferenceService>();
         services.AddScoped<NotificationService>();
+        services.AddScoped<BuildNotifier>();
         return services;
     }
 

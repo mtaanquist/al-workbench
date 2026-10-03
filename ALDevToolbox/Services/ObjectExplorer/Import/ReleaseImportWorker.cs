@@ -76,6 +76,13 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
     }
 
     /// <summary>
+    /// Emails the people behind a pipeline when this build changed whether it
+    /// works (#1035). The notifier never throws, so the build's outcome stands.
+    /// </summary>
+    private static Task NotifyBuildFinishedAsync(IServiceProvider services, int releaseId, CancellationToken ct) =>
+        services.GetRequiredService<Notifications.BuildNotifier>().BuildFinishedAsync(releaseId, ct);
+
+    /// <summary>
     /// Prepares a release of the finished build through every release pipeline that has
     /// "Prepare a release when a new build succeeds" on (#934). Nothing is sent: the
     /// release waits for a person to approve it. Swallows everything for the same reason
@@ -362,6 +369,7 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                         jobFailureMessage = "No extensions compiled successfully. See the build report on the release.";
                         await importer.MarkFailedAsync(job.ReleaseId, jobFailureMessage, ct).ConfigureAwait(false);
                         await buildService.MarkBuildFailedAsync(job.ReleaseId, jobFailureMessage, ct).ConfigureAwait(false);
+                        await NotifyBuildFinishedAsync(scope.ServiceProvider, job.ReleaseId, ct).ConfigureAwait(false);
                         return;
                     }
 
@@ -369,6 +377,7 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                     await buildService.MarkCompiledResultsIngestedAsync(job.ReleaseId, ct).ConfigureAwait(false);
                     // Flip the first-class build row ready alongside the Release.
                     await buildService.MarkBuildReadyAsync(job.ReleaseId, outcome.BcVersion, ct).ConfigureAwait(false);
+                    await NotifyBuildFinishedAsync(scope.ServiceProvider, job.ReleaseId, ct).ConfigureAwait(false);
                     // The build is final at this point, so publishing it to GitHub can
                     // only ever add to it: a pipeline that names a repository gets a
                     // Release, and every refusal is recorded on the build rather than
@@ -389,6 +398,7 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                     _logger.LogError(ex, "Release {ReleaseId} project build failed.", job.ReleaseId);
                     await importer.MarkFailedAsync(job.ReleaseId, jobFailureMessage, ct).ConfigureAwait(false);
                     await buildService.MarkBuildFailedAsync(job.ReleaseId, jobFailureMessage, ct).ConfigureAwait(false);
+                    await NotifyBuildFinishedAsync(scope.ServiceProvider, job.ReleaseId, ct).ConfigureAwait(false);
                 }
                 return;
             }
