@@ -39,6 +39,7 @@ public static class EmailPreviews
     private const string Admin = "Sam Berg";
     private const string Organization = "CRONUS A/S";
     private const string SampleToken = "token=preview";
+    private static readonly string[] SampleApps = ["CRONUS Coffee 1.4.0.0", "CRONUS Coffee Reports 1.4.0.0"];
 
     public static IReadOnlyList<EmailPreview> All { get; } =
     [
@@ -93,6 +94,19 @@ public static class EmailPreviews
             (r, ct) => BuildNotificationEmail.RenderAsync(r, Person, Organization, "CRONUS Coffee", "Main",
                 failed: false, nightlyCheck: false, target: null, bcVersion: "26.4",
                 failureMessage: null, $"{SampleOrigin}/pipelines/12?build=351", $"{SampleOrigin}{NotificationService.SettingsPath}", ct)),
+        new("deployment-waiting", "Deployment waiting for approval",
+            "When a new build is ready to deploy through a deployment pipeline that waits for approval. Sent straight away even to people who chose a digest.",
+            typeof(DeploymentNotificationEmail),
+            (r, ct) => DeploymentNotificationEmail.RenderAsync(r, Person, Organization, DeploymentOutcome.WaitingForApproval,
+                "CRONUS Coffee", "Coffee to Production", "Production", SampleApps, null,
+                $"{SampleOrigin}/pipelines/deployments/7", $"{SampleOrigin}{NotificationService.SettingsPath}", ct)),
+        new("deployment-failed", "Deployment failed",
+            "To whoever started or approved a deployment, when it fails. A finished deployment sends a similar email.",
+            typeof(DeploymentNotificationEmail),
+            (r, ct) => DeploymentNotificationEmail.RenderAsync(r, Person, Organization, DeploymentOutcome.Failed,
+                "CRONUS Coffee", "Coffee to Production", "Production", SampleApps,
+                "CRONUS Coffee 1.4.0.0 failed: the extension could not be installed because a newer version is already there.",
+                $"{SampleOrigin}/pipelines/deployments/7", $"{SampleOrigin}{NotificationService.SettingsPath}", ct)),
         new("test", "Test email",
             "When a site administrator sends a test from the email settings.",
             typeof(SiteAdminTestEmail),

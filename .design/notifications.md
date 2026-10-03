@@ -77,3 +77,18 @@ build is marked ready or failed.
 - The email shows the failed extensions (or the build's own message when it failed as a
   whole) and links to the build on the pipeline page; the digest entry carries the first
   line.
+
+## Deployments (#1036)
+
+`DeploymentNotifier` has two entry points:
+
+- `ProposedAsync`, from the release import worker after a build prepared deployments
+  waiting for approval. Goes to the solution's owner and the deployment pipeline's creator,
+  marked urgent, so a digest choice still gets it straight away.
+- `FinishedAsync`, from the delivery worker after a run it claimed ends deployed, accepted
+  by Business Central for a scheduled install, or failed. Goes to the person it ran as (who
+  started it, or who approved a prepared one), or the pipeline's creator when nobody did.
+  A run that found the deployment already claimed sends nothing, so nothing is announced
+  twice. Deployments failed at startup because the app stopped mid-run are not announced.
+
+Each deployment is its own event, so there is no "only on change" rule here.

@@ -715,10 +715,11 @@ public sealed class DeliveryService
 
     /// <summary>
     /// Claims the delivery (atomic <c>scheduled → claimed</c>) and runs the publish.
-    /// Returns quietly if the row was already taken or cancelled. All failures are
-    /// recorded on the row; this method does not throw on a publish failure.
+    /// Returns false if the row was already taken or cancelled, true once this call ran
+    /// it. All failures are recorded on the row; this method does not throw on a publish
+    /// failure.
     /// </summary>
-    public async Task RunDeliveryAsync(int deliveryId, CancellationToken ct = default)
+    public async Task<bool> RunDeliveryAsync(int deliveryId, CancellationToken ct = default)
     {
         var claimedAt = DateTime.UtcNow;
         var claimed = await _db.OeProjectDeliveries
@@ -730,7 +731,7 @@ public sealed class DeliveryService
         if (claimed == 0)
         {
             _logger.LogInformation("Delivery {DeliveryId} was already claimed or cancelled; skipping.", deliveryId);
-            return;
+            return false;
         }
 
         var delivery = await _db.OeProjectDeliveries
@@ -739,7 +740,7 @@ public sealed class DeliveryService
         if (delivery is null)
         {
             _logger.LogWarning("Delivery {DeliveryId} vanished after being claimed.", deliveryId);
-            return;
+            return false;
         }
 
         // A deployment that was prepared and approved (#934) already carries those lines;
@@ -759,6 +760,7 @@ public sealed class DeliveryService
             _logger.LogError(ex, "Delivery {DeliveryId} failed unexpectedly.", deliveryId);
             await FailAsync(delivery, log, "The delivery failed unexpectedly. " + Short(ex.Message), ct);
         }
+        return true;
     }
 
     /// <summary>

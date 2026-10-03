@@ -36,7 +36,13 @@ public sealed class DeliveryWorker : QueueDrainWorker<DeliveryJob>
         using var orgScope = AmbientOrganizationScope.Enter(job.Identity);
         await using var scope = _services.CreateAsyncScope();
         var deliveries = scope.ServiceProvider.GetRequiredService<DeliveryService>();
-        await deliveries.RunDeliveryAsync(job.DeliveryId, ct).ConfigureAwait(false);
+        if (await deliveries.RunDeliveryAsync(job.DeliveryId, ct).ConfigureAwait(false))
+        {
+            // Only when this run claimed it, so a delivery another run already took is
+            // never announced twice (#1036). The notifier never throws.
+            await scope.ServiceProvider.GetRequiredService<Notifications.DeploymentNotifier>()
+                .FinishedAsync(job.DeliveryId, ct).ConfigureAwait(false);
+        }
     }
 
     protected override void OnJobFinished(DeliveryJob job) => _queue.Complete(job.DeliveryId);
