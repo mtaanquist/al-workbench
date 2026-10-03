@@ -16,7 +16,9 @@ Agreed with the maintainer on 2026-10-03:
 - **Each person chooses per category**, like GitHub: whether it shows in the app (on or
   off), and when it is emailed (Immediately, Daily digest, Weekly digest or Off). A category
   with no stored choice is in the app and Immediately, so a category added later starts on
-  for everyone without a backfill.
+  for everyone without a backfill. Solutions is the exception: its email starts Off. People
+  follow a solution without asking (the owner and its People list), so its email is opt-in
+  to avoid suddenly mailing a whole team (Mads, 2026-10-03); it still shows in the app.
 - **Customer-facing email is out of scope.** These emails go to colleagues only.
 
 ## Categories

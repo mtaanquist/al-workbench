@@ -1781,6 +1781,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var id = await SeedProjectAsync("CRONUS Coffee");
         await using (var ctx = _db.NewContext())
             await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        await OptInToUpdateEmailsAsync();
         var first = DateTimeOffset.UtcNow.AddDays(20);
         var admin = new FakeAdminClient
         {
@@ -1805,6 +1806,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var id = await SeedProjectAsync("CRONUS Coffee");
         await using (var ctx = _db.NewContext())
             await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        await OptInToUpdateEmailsAsync();
         var when = DateTimeOffset.UtcNow.AddDays(20);
         var admin = new FakeAdminClient
         {
@@ -1830,6 +1832,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
             await Follows(ctx).SetFollowingAsync(id, following: false);
         }
+        await OptInToUpdateEmailsAsync();
         var admin = new FakeAdminClient
         {
             OnList = () => new[] { new BcEnvironment("Production", "Production") },
@@ -1841,6 +1844,35 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await RefreshNotifyingAsync(id, admin, email);
 
         email.Subjects.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Followers_hear_in_the_app_only_until_they_turn_update_emails_on()
+    {
+        var id = await SeedProjectAsync("CRONUS Coffee");
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        var admin = new FakeAdminClient
+        {
+            OnList = () => new[] { new BcEnvironment("Production", "Production") },
+            OnEnvironmentUpdates = _ => Array.Empty<BcEnvironmentUpdate>(),
+        };
+        var email = new UpdateEmailCapture();
+        await RefreshNotifyingAsync(id, admin, email);
+        admin.OnEnvironmentUpdates = _ => new[] { Update("27.6", selected: true, selectedAt: DateTimeOffset.UtcNow.AddDays(20)) };
+        await RefreshNotifyingAsync(id, admin, email);
+
+        email.Subjects.Should().BeEmpty("following is automatic, so its email is opt-in");
+        await using var verify = _db.NewContext();
+        (await verify.UserNotifications.CountAsync(n => n.UserId == OwnerUserId)).Should().Be(1);
+    }
+
+    private async Task OptInToUpdateEmailsAsync()
+    {
+        await using var ctx = _db.NewContext();
+        await new ALDevToolbox.Services.Notifications.NotificationPreferenceService(
+                ctx, _db.OrgContext, TimeProvider.System, NullLogger<ALDevToolbox.Services.Notifications.NotificationPreferenceService>.Instance)
+            .SetEmailForCurrentUserAsync(NotificationCategory.Solutions, NotificationDelivery.Immediately);
     }
 
     private ALDevToolbox.Services.ObjectExplorer.Projects.ProjectFollowService Follows(ALDevToolbox.Data.AppDbContext ctx) =>

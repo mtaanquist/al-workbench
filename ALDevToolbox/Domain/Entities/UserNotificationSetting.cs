@@ -27,9 +27,9 @@ public enum NotificationDelivery
 
 /// <summary>
 /// One person's choice for one category. A missing row means
-/// <see cref="Services.Notifications.NotificationPreferenceService.DefaultDelivery"/>
-/// and shown in the app, so a category added later starts on for everyone
-/// without a backfill.
+/// <see cref="Services.Notifications.NotificationPreferenceService.DefaultDeliveryFor"/>
+/// and shown in the app, so a category added later starts at its default for
+/// everyone without a backfill.
 /// </summary>
 public class UserNotificationSetting
 {
