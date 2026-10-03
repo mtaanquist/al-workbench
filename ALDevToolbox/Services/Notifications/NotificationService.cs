@@ -163,36 +163,37 @@ public sealed class NotificationService
             }
         }
 
-        var stored = await StoreAsync(listed, digestItems, notification.Category, ct);
+        var listedCount = await StoreAsync(db => db.UserNotifications.AddRange(listed), listed.Count,
+            "in-app", notification.Category, ct);
+        var kept = await StoreAsync(db => db.NotificationDigestItems.AddRange(digestItems), digestItems.Count,
+            "digest", notification.Category, ct);
         _logger.LogInformation(
             "{Category} notification: {Listed} listed in the app, {Sent} emailed, {Kept} kept for a digest, of {Recipients} recipients.",
-            notification.Category, stored ? listed.Count : 0, sent, stored ? digestItems.Count : 0, recipients.Count);
+            notification.Category, listedCount, sent, kept, recipients.Count);
     }
 
     /// <summary>
-    /// Stores the in-app rows and digest items through a context of their own,
-    /// never the caller's: a worker calling mid-way must not have its pending
-    /// changes saved here, nor be left holding rows that failed to save. Same
-    /// reason as <see cref="EmailOutbox"/>.
+    /// Stores in-app rows or digest items through a context of their own, never
+    /// the caller's: a worker calling mid-way must not have its pending changes
+    /// saved here, nor be left holding rows that failed to save. Same reason as
+    /// <see cref="EmailOutbox"/>. The two kinds save separately, so a problem
+    /// with one does not lose the other.
     /// </summary>
-    private async Task<bool> StoreAsync(
-        List<UserNotification> listed, List<NotificationDigestItem> digestItems,
-        NotificationCategory category, CancellationToken ct)
+    private async Task<int> StoreAsync(
+        Action<AppDbContext> add, int count, string kind, NotificationCategory category, CancellationToken ct)
     {
-        if (listed.Count == 0 && digestItems.Count == 0) return true;
+        if (count == 0) return 0;
         try
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
-            db.UserNotifications.AddRange(listed);
-            db.NotificationDigestItems.AddRange(digestItems);
+            add(db);
             await db.SaveChangesAsync(ct);
-            return true;
+            return count;
         }
         catch (DbUpdateException ex)
         {
-            _logger.LogWarning(ex, "Could not store {Listed} in-app and {Kept} digest {Category} notifications.",
-                listed.Count, digestItems.Count, category);
-            return false;
+            _logger.LogWarning(ex, "Could not store {Count} {Kind} {Category} notifications.", count, kind, category);
+            return 0;
         }
     }
 

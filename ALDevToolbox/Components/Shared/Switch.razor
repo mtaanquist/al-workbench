@@ -23,13 +23,13 @@
         @* Interactive page: the switch drives component state and saves on
            change. No name, because nothing is posting a form. *@
         <input type="checkbox" checked="@Checked" disabled="@Disabled"
-               aria-describedby="@AriaDescribedBy"
+               aria-label="@AriaLabel" aria-describedby="@AriaDescribedBy"
                @onchange="OnChangedAsync" />
     }
     else
     {
         <input type="checkbox" name="@Name" value="true" checked="@Checked" disabled="@Disabled"
-               aria-describedby="@AriaDescribedBy" />
+               aria-label="@AriaLabel" aria-describedby="@AriaDescribedBy" />
     }
     <span class="switch__track"><span class="switch__knob"></span></span>
     <span>@Label</span>
@@ -54,6 +54,10 @@
     /// it switches the input from a form field to a state-driven one - a page
     /// that saves on toggle has no form to post.</summary>
     [Parameter] public EventCallback<bool> CheckedChanged { get; set; }
+
+    /// <summary>The checkbox's accessible name, when several rows share the
+    /// same visible <see cref="Label"/> and need telling apart.</summary>
+    [Parameter] public string? AriaLabel { get; set; }
 
     [Parameter] public string? AriaDescribedBy { get; set; }
     [Parameter] public string? Css { get; set; }

@@ -48,8 +48,12 @@
             {
                 var id = $"notify-{category.ToString().ToLowerInvariant()}";
                 <SettingRow Name="@Name(category)" Hint="@Hint(category)">
-                    <Switch Name="@($"{id}-in-app")"
+                    @* Keyed on the failure count, so a save that fails rebuilds the
+                       switch from the stored choice rather than leaving it flipped. *@
+                    <Switch @key="@($"{category}-{_failures}")"
+                            Name="@($"{id}-in-app")"
                             Label="In app"
+                            AriaLabel="@($"Show {Name(category)} in the app")"
                             Checked="_choices[category].InApp"
                             CheckedChanged="@(v => SaveInAppAsync(category, v))"
                             Disabled="@_saving" />
@@ -79,6 +83,7 @@
     private NotificationCategory? _saved;
     private NotificationCategory? _failed;
     private string? _error;
+    private int _failures;
 
     protected override async Task OnInitializedAsync()
     {
@@ -115,12 +120,14 @@
         }
         catch (PlanValidationException ex)
         {
+            _failures++;
             _failed = category;
             _error = ex.Errors.Values.FirstOrDefault();
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Saving {Category} notification setting failed.", category);
+            _failures++;
             _failed = category;
             _error = "Could not save. Try again in a moment.";
         }

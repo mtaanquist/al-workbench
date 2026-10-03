@@ -54,8 +54,9 @@ Phase 4 adds Upgrades and Solutions.
   sender has no request host to fall back on, and an email whose links point nowhere is
   worse than none. The startup warning says so. The in-app list still fills: it stores
   paths, not addresses.
-- In-app rows and digest items are saved through a context of their own, in one save, so
-  the calling worker's pending changes are never saved with them.
+- In-app rows and digest items are saved through a context of their own, so the calling
+  worker's pending changes are never saved with them. The two save separately, so a
+  problem with one kind does not lose the other.
 - In-app notifications are deleted after 30 days, by the digest scheduler's run for each
   organisation (it already prunes digest items on the same window).
 - Every notification email passes `SettingsUrl` to `EmailLayout`, which puts a "Change
