@@ -1,8 +1,10 @@
+using ALDevToolbox.Components.Email;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.Email;
 using ALDevToolbox.Services.SingleTenant;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Diagnostics;
@@ -301,7 +303,7 @@ internal static class SiteAdminEndpoints
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
 
         app.MapPost("/site-admin/settings/test-email", async (
-            HttpContext ctx, IEmailService email, AppDbContext db, IOrganizationContext orgCtx,
+            HttpContext ctx, IEmailService email, EmailRenderer renderer, AppDbContext db, IOrganizationContext orgCtx,
             IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("SiteAdminTestEmail");
@@ -323,8 +325,8 @@ internal static class SiteAdminEndpoints
                 .FirstAsync(ct);
             try
             {
-                var (subject, body) = EmailTemplates.SiteAdminTest(recipient.DisplayName);
-                await email.SendAsync(recipient.Email, subject, body, EmailPurpose.SiteAdminTest, ct);
+                var content = await SiteAdminTestEmail.RenderAsync(renderer, recipient.DisplayName, ct);
+                await email.SendAsync(recipient.Email, content, EmailPurpose.SiteAdminTest, ct);
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminSettings}?{RouteConstants.OkQuery}=test-sent");
             }
             catch (Exception ex)

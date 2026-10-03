@@ -16,6 +16,7 @@ internal sealed class EmailOutboxMessageConfiguration : IEntityTypeConfiguration
             .HasColumnName("purpose").HasConversion<string>().HasMaxLength(64).IsRequired();
         entity.Property(e => e.Subject).HasColumnName("subject").IsRequired();
         entity.Property(e => e.BodyEncrypted).HasColumnName("body_encrypted");
+        entity.Property(e => e.TextBodyEncrypted).HasColumnName("text_body_encrypted");
         entity.Property(e => e.Status)
             .HasColumnName("status").HasConversion<string>().HasMaxLength(32).IsRequired();
         entity.Property(e => e.AttemptCount).HasColumnName("attempt_count").HasDefaultValue(0);

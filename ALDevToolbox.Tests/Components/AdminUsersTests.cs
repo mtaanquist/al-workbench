@@ -53,7 +53,7 @@ public sealed class AdminUsersTests : IDisposable
     {
         public Task<bool> IsConfiguredAsync(CancellationToken ct = default) => Task.FromResult(false);
         public Task SendAsync(
-            string toEmail, string subject, string htmlBody, EmailPurpose purpose, CancellationToken ct = default)
+            string toEmail, EmailContent content, EmailPurpose purpose, CancellationToken ct = default)
             => Task.CompletedTask;
     }
 

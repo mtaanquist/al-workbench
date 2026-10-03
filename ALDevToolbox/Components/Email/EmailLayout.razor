@@ -1,0 +1,81 @@
+@*
+    The frame every email shares: wordmark, a white card holding the message,
+    and a footer saying who sent it and why. Table layout and inline styles
+    throughout, because that is what email clients reliably render. See
+    .design/email.md before changing it, and keep it light: an email should
+    look like it came from AL Workbench, not like a newsletter.
+*@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+</head>
+<body style="margin: 0; padding: 0; background-color: @EmailTheme.Background;">
+    @if (!string.IsNullOrWhiteSpace(Preheader))
+    {
+        @* The line inbox lists show after the subject. Hidden in the message itself. *@
+        <div data-email-text="skip" style="display: none; max-height: 0; overflow: hidden; mso-hide: all;">@Preheader</div>
+    }
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: @EmailTheme.Background;">
+        <tr>
+            <td align="center" style="padding: 24px 16px;">
+                @* width="560" is for Outlook on Windows, which ignores max-width; every other client uses the style. *@
+                <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="width: 100%; max-width: 560px;">
+                    <tr>
+                        <td style="padding: 0 2px 12px;">
+                            @* The brand square is a sized cell rather than an empty span, which Outlook and some webmail drop. *@
+                            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                                <tr>
+                                    <td valign="middle" style="padding-right: 8px;">
+                                        <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                                            <tr>
+                                                <td width="10" height="10" bgcolor="@EmailTheme.Brand" style="width: 10px; height: 10px; background-color: @EmailTheme.Brand; border-radius: 2px; font-size: 0; line-height: 0;">&nbsp;</td>
+                                            </tr>
+                                        </table>
+                                    </td>
+                                    <td valign="middle" style="font-family: @EmailTheme.Font; font-size: 15px; font-weight: 600; line-height: 20px; color: @EmailTheme.Ink;">AL Workbench</td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 28px 28px 12px; background-color: @EmailTheme.Surface; border: 1px solid @EmailTheme.Border; border-radius: 4px; font-family: @EmailTheme.Font; font-size: 16px; line-height: 24px; color: @EmailTheme.Body;">
+                            @ChildContent
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 16px 2px 0; font-family: @EmailTheme.Font; font-size: 13px; line-height: 20px; color: @EmailTheme.Muted;">
+                            <p style="margin: 0;">@SentBy</p>
+                            @if (!string.IsNullOrWhiteSpace(Reason))
+                            {
+                                <p style="margin: 4px 0 0;">@Reason</p>
+                            }
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+
+@code {
+    /// <summary>The message: <see cref="EmailParagraph"/>s and at most one <see cref="EmailButton"/>.</summary>
+    [Parameter, EditorRequired] public RenderFragment ChildContent { get; set; } = default!;
+
+    /// <summary>The short line inbox lists show after the subject. Optional; it never appears in the message itself.</summary>
+    [Parameter] public string? Preheader { get; set; }
+
+    /// <summary>The organisation the email is about, named in the footer. Null for emails that belong to no organisation yet, like a signup.</summary>
+    [Parameter] public string? OrganizationName { get; set; }
+
+    /// <summary>One sentence in the footer saying why the recipient got this, e.g. "You received this because you asked to reset your password."</summary>
+    [Parameter] public string? Reason { get; set; }
+
+    private string SentBy => string.IsNullOrWhiteSpace(OrganizationName)
+        ? "Sent by AL Workbench."
+        : $"Sent by AL Workbench for {OrganizationName}.";
+}

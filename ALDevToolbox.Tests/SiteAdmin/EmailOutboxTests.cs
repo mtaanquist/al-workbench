@@ -38,7 +38,7 @@ public sealed class EmailOutboxTests : IDisposable
     private async Task<int> EnqueueOneAsync(
         EmailOutbox outbox, EmailPurpose purpose = EmailPurpose.PasswordReset, int? orgId = null)
     {
-        await outbox.EnqueueAsync("user@cronus.com", "Reset your password", "<p>link</p>", purpose, orgId);
+        await outbox.EnqueueAsync("user@cronus.com", new EmailContent("Reset your password", "<p>link</p>"), purpose, orgId);
         await using var ctx = _db.NewContext();
         return await ctx.EmailOutboxMessages.OrderByDescending(m => m.Id).Select(m => m.Id).FirstAsync();
     }
@@ -64,7 +64,7 @@ public sealed class EmailOutboxTests : IDisposable
     {
         var outbox = NewOutbox();
         await outbox.EnqueueAsync(
-            "user@cronus.com", "Reset your password", "<p>https://example.com/reset?token=secret</p>",
+            "user@cronus.com", new EmailContent("Reset your password", "<p>https://example.com/reset?token=secret</p>"),
             EmailPurpose.PasswordReset, organizationId: null);
 
         var row = await RowAsync((await RowIdsAsync()).Single());
@@ -73,16 +73,48 @@ public sealed class EmailOutboxTests : IDisposable
         row.BodyEncrypted.Should().NotBeNullOrEmpty();
         row.BodyEncrypted.Should().NotContain("secret");
 
-        outbox.TryReadBody(row).Should().Be("<p>https://example.com/reset?token=secret</p>");
+        outbox.TryReadContent(row)!.HtmlBody.Should().Be("<p>https://example.com/reset?token=secret</p>");
     }
 
     [Fact]
-    public async Task TryReadBody_returns_null_when_the_ciphertext_cannot_be_read()
+    public async Task Enqueue_stores_the_plain_text_part_encrypted_and_reads_it_back()
+    {
+        var outbox = NewOutbox();
+        await outbox.EnqueueAsync(
+            "user@cronus.com",
+            new EmailContent("Reset your password", "<p>link</p>", "Reset password:\nhttps://example.com/reset?token=secret"),
+            EmailPurpose.PasswordReset, organizationId: null);
+
+        var row = await RowAsync((await RowIdsAsync()).Single());
+        // The text part carries the same link as the HTML, so it gets the same protection.
+        row.TextBodyEncrypted.Should().NotBeNullOrEmpty();
+        row.TextBodyEncrypted.Should().NotContain("secret");
+
+        var content = outbox.TryReadContent(row)!;
+        content.Subject.Should().Be("Reset your password");
+        content.TextBody.Should().Be("Reset password:\nhttps://example.com/reset?token=secret");
+    }
+
+    [Fact]
+    public async Task A_message_queued_without_a_plain_text_part_reads_back_without_one()
+    {
+        var outbox = NewOutbox();
+        await outbox.EnqueueAsync(
+            "user@cronus.com", new EmailContent("Reset your password", "<p>link</p>"),
+            EmailPurpose.PasswordReset, organizationId: null);
+
+        var row = await RowAsync((await RowIdsAsync()).Single());
+        row.TextBodyEncrypted.Should().BeNull();
+        outbox.TryReadContent(row)!.TextBody.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task TryReadContent_returns_null_when_the_ciphertext_cannot_be_read()
     {
         var outbox = NewOutbox();
         // What a replaced Data Protection key ring looks like from here.
         var unreadable = new EmailOutboxMessage { Id = 1, BodyEncrypted = "not-really-ciphertext" };
-        outbox.TryReadBody(unreadable).Should().BeNull();
+        outbox.TryReadContent(unreadable).Should().BeNull();
     }
 
     [Fact]

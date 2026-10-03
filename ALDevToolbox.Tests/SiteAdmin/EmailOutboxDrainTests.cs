@@ -36,7 +36,7 @@ public sealed class EmailOutboxDrainTests : IDisposable
     private async Task<EmailOutboxMessage> QueueOneAsync(EmailOutbox outbox)
     {
         await outbox.EnqueueAsync(
-            "user@cronus.com", "Reset your password", "<p>link</p>", EmailPurpose.PasswordReset, null);
+            "user@cronus.com", new EmailContent("Reset your password", "<p>link</p>"), EmailPurpose.PasswordReset, null);
         return (await outbox.DueAsync(1)).Single();
     }
 
@@ -53,6 +53,24 @@ public sealed class EmailOutboxDrainTests : IDisposable
         var row = await RowAsync(message.Id);
         row.Status.Should().Be(EmailOutboxStatus.Sent);
         row.BodyEncrypted.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_delivered_message_with_a_plain_text_part_sends_both_and_drops_both()
+    {
+        var outbox = NewOutbox();
+        var transport = new FakeTransport();
+        await outbox.EnqueueAsync(
+            "user@cronus.com", new EmailContent("Reset your password", "<p>link</p>", "link"),
+            EmailPurpose.PasswordReset, null);
+        var message = (await outbox.DueAsync(1)).Single();
+
+        await EmailOutboxScheduler.SendOneAsync(outbox, transport, message, default, default);
+
+        transport.Contents.Should().ContainSingle().Which.TextBody.Should().Be("link");
+        var row = await RowAsync(message.Id);
+        row.BodyEncrypted.Should().BeNull();
+        row.TextBodyEncrypted.Should().BeNull();
     }
 
     [Fact]
@@ -126,6 +144,7 @@ public sealed class EmailOutboxDrainTests : IDisposable
     private sealed class FakeTransport : IEmailService
     {
         public List<(string To, string Subject, string Body, EmailPurpose Purpose)> Sent { get; } = [];
+        public List<EmailContent> Contents { get; } = [];
 
         /// <summary>Set to make the next send fail with this exception.</summary>
         public Func<Exception>? Throw { get; set; }
@@ -133,10 +152,11 @@ public sealed class EmailOutboxDrainTests : IDisposable
         public Task<bool> IsConfiguredAsync(CancellationToken ct = default) => Task.FromResult(true);
 
         public Task SendAsync(
-            string toEmail, string subject, string htmlBody, EmailPurpose purpose, CancellationToken ct = default)
+            string toEmail, EmailContent content, EmailPurpose purpose, CancellationToken ct = default)
         {
             if (Throw is not null) throw Throw();
-            Sent.Add((toEmail, subject, htmlBody, purpose));
+            Sent.Add((toEmail, content.Subject, content.HtmlBody, purpose));
+            Contents.Add(content);
             return Task.CompletedTask;
         }
     }

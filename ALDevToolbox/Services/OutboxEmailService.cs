@@ -79,16 +79,16 @@ public sealed class OutboxEmailService : IEmailService
     public Task<bool> IsConfiguredAsync(CancellationToken ct = default) => _inner.IsConfiguredAsync(ct);
 
     public async Task SendAsync(
-        string toEmail, string subject, string htmlBody, EmailPurpose purpose, CancellationToken ct = default)
+        string toEmail, EmailContent content, EmailPurpose purpose, CancellationToken ct = default)
     {
         if (EmailPurposes.SendsInline(purpose))
         {
-            await _inner.SendAsync(toEmail, subject, htmlBody, purpose, ct);
+            await _inner.SendAsync(toEmail, content, purpose, ct);
             return;
         }
 
         // Null on the pre-auth flows, which have no organisation yet. It is a
         // label on the operator's list, never a fence - see EmailOutboxMessage.
-        await _outbox.EnqueueAsync(toEmail, subject, htmlBody, purpose, _orgContext.CurrentOrganizationId, ct);
+        await _outbox.EnqueueAsync(toEmail, content, purpose, _orgContext.CurrentOrganizationId, ct);
     }
 }

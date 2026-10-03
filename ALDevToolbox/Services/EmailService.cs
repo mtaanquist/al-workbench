@@ -32,7 +32,21 @@ public interface IEmailService
     /// send fails.
     /// </param>
     Task SendAsync(
-        string toEmail, string subject, string htmlBody, EmailPurpose purpose, CancellationToken ct = default);
+        string toEmail, EmailContent content, EmailPurpose purpose, CancellationToken ct = default);
+}
+
+/// <summary>
+/// The subject-and-HTML form of <see cref="IEmailService.SendAsync"/>, for the
+/// emails still built by <see cref="EmailTemplates"/>. They have no plain-text
+/// part. Goes away once every email is rendered through the shared layout
+/// (issue #1029).
+/// </summary>
+public static class EmailServiceExtensions
+{
+    public static Task SendAsync(
+        this IEmailService email, string toEmail, string subject, string htmlBody, EmailPurpose purpose,
+        CancellationToken ct = default)
+        => email.SendAsync(toEmail, new EmailContent(subject, htmlBody), purpose, ct);
 }
 
 /// <summary>
@@ -86,7 +100,7 @@ public sealed class SmtpEmailService : IEmailService
         await ResolveOnceAsync(ct) is not null;
 
     public async Task SendAsync(
-        string toEmail, string subject, string htmlBody, EmailPurpose purpose, CancellationToken ct = default)
+        string toEmail, EmailContent content, EmailPurpose purpose, CancellationToken ct = default)
     {
         var resolved = await ResolveOnceAsync(ct);
         if (resolved is null)
@@ -95,7 +109,7 @@ public sealed class SmtpEmailService : IEmailService
                 "Email is not configured. Set SMTP via /site-admin/settings or the SMTP_* env vars before triggering email-driven flows.");
         }
 
-        var message = BuildMessage(resolved, toEmail, subject, htmlBody);
+        var message = BuildMessage(resolved, toEmail, content);
 
         using var client = new SmtpClient
         {
@@ -127,7 +141,7 @@ public sealed class SmtpEmailService : IEmailService
             _logger.LogWarning(ex, "Disconnecting from the mail server failed after the message was accepted.");
         }
 
-        _logger.LogInformation("Sent {Purpose} email to {To} subject {Subject}.", purpose, toEmail, subject);
+        _logger.LogInformation("Sent {Purpose} email to {To} subject {Subject}.", purpose, toEmail, content.Subject);
     }
 
     /// <summary>
@@ -138,8 +152,7 @@ public sealed class SmtpEmailService : IEmailService
     /// Transport (connect, authenticate, send) stays in <see cref="SendAsync"/>
     /// and is still only exercised against a real server.
     /// </summary>
-    internal static MimeMessage BuildMessage(
-        ResolvedSmtpSettings resolved, string toEmail, string subject, string htmlBody)
+    internal static MimeMessage BuildMessage(ResolvedSmtpSettings resolved, string toEmail, EmailContent content)
     {
         var message = new MimeMessage();
         var fromAddress = MailboxAddress.Parse(resolved.From);
@@ -152,8 +165,13 @@ public sealed class SmtpEmailService : IEmailService
         }
         message.From.Add(fromAddress);
         message.To.Add(MailboxAddress.Parse(toEmail));
-        message.Subject = subject;
-        message.Body = new TextPart("html") { Text = htmlBody };
+        message.Subject = content.Subject;
+        // With a plain-text part the body is multipart/alternative, text first:
+        // RFC 2046 orders the parts from least to most preferred, so a client
+        // that can show HTML picks the last one.
+        message.Body = content.TextBody is null
+            ? new TextPart("html") { Text = content.HtmlBody }
+            : new BodyBuilder { TextBody = content.TextBody, HtmlBody = content.HtmlBody }.ToMessageBody();
         return message;
     }
 
@@ -167,9 +185,10 @@ public sealed class SmtpEmailService : IEmailService
 }
 
 /// <summary>
-/// Renders the three transactional email bodies. Bodies are simple HTML
-/// strings — Razor partials are an option once the templates need real
-/// design, but the M13 contract is "send a working link", not "look pretty".
+/// The account emails still built as bare HTML strings. New emails are Razor
+/// components in <c>Components/Email/</c> rendered by
+/// <see cref="Email.EmailRenderer"/> (see <c>.design/email.md</c>); these move
+/// onto that layout in issue #1029, and the class goes with them.
 /// </summary>
 public static class EmailTemplates
 {
@@ -249,11 +268,6 @@ public static class EmailTemplates
             + "Click below within 24 hours to confirm. Until then, sign-in still uses your old address.</p>"
             + $"<p><a href=\"{Html(confirmUrl)}\">{Html(confirmUrl)}</a></p>"
             + "<p>If you weren't expecting this, ignore the message — the change won't take effect.</p>");
-
-    public static (string Subject, string HtmlBody) SiteAdminTest(string displayName)
-        => ("AL Workbench SMTP test",
-            $"<p>Hi {Html(displayName)},</p>"
-            + "<p>This is a test from /site-admin/settings. If you're reading it, the SMTP configuration is working.</p>");
 
     private static string Html(string value)
         => System.Net.WebUtility.HtmlEncode(value ?? string.Empty);

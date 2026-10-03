@@ -1,0 +1,17 @@
+@* The "does SMTP work" probe from the site admin email settings. *@
+<EmailLayout Preheader="Your email settings are working." Reason="You received this because you sent a test email from the site admin settings.">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>This is a test email from AL Workbench. If you are reading it, the email settings are working.</EmailParagraph>
+</EmailLayout>
+
+@code {
+    public const string Subject = "AL Workbench test email";
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(EmailRenderer renderer, string displayName, CancellationToken ct = default)
+        => renderer.RenderAsync<SiteAdminTestEmail>(Subject, new Dictionary<string, object?>
+        {
+            [nameof(DisplayName)] = displayName,
+        }, ct);
+}

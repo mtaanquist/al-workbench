@@ -39,7 +39,7 @@ public sealed class EmailMessageTests
     public void From_pairs_the_display_name_with_the_configured_address()
     {
         var message = RoundTrip(SmtpEmailService.BuildMessage(
-            Smtp(), "user@example.com", "Subject", "<p>Body</p>"));
+            Smtp(), "user@example.com", new EmailContent("Subject", "<p>Body</p>")));
 
         var from = message.From.Mailboxes.Single();
         from.Name.Should().Be("AL Workbench");
@@ -53,7 +53,7 @@ public sealed class EmailMessageTests
     public void From_falls_back_to_the_bare_address_when_no_display_name_is_set(string? fromName)
     {
         var message = RoundTrip(SmtpEmailService.BuildMessage(
-            Smtp(fromName: fromName), "user@example.com", "Subject", "<p>Body</p>"));
+            Smtp(fromName: fromName), "user@example.com", new EmailContent("Subject", "<p>Body</p>")));
 
         var from = message.From.Mailboxes.Single();
         from.Address.Should().Be("noreply@example.com");
@@ -64,7 +64,7 @@ public sealed class EmailMessageTests
     public void Recipient_survives_the_round_trip()
     {
         var message = RoundTrip(SmtpEmailService.BuildMessage(
-            Smtp(), "user@example.com", "Subject", "<p>Body</p>"));
+            Smtp(), "user@example.com", new EmailContent("Subject", "<p>Body</p>")));
 
         message.To.Mailboxes.Single().Address.Should().Be("user@example.com");
     }
@@ -78,7 +78,7 @@ public sealed class EmailMessageTests
     public void Subject_survives_the_round_trip(string subject)
     {
         var message = RoundTrip(SmtpEmailService.BuildMessage(
-            Smtp(), "user@example.com", subject, "<p>Body</p>"));
+            Smtp(), "user@example.com", new EmailContent(subject, "<p>Body</p>")));
 
         message.Subject.Should().Be(subject);
     }
@@ -87,7 +87,7 @@ public sealed class EmailMessageTests
     public void A_display_name_with_non_ascii_characters_survives_the_round_trip()
     {
         var message = RoundTrip(SmtpEmailService.BuildMessage(
-            Smtp(fromName: "AL Workbench — Ærø"), "user@example.com", "Subject", "<p>Body</p>"));
+            Smtp(fromName: "AL Workbench — Ærø"), "user@example.com", new EmailContent("Subject", "<p>Body</p>")));
 
         var from = message.From.Mailboxes.Single();
         from.Name.Should().Be("AL Workbench — Ærø");
@@ -100,7 +100,7 @@ public sealed class EmailMessageTests
         const string html = "<p>Hello <strong>CRONUS A/S</strong></p>";
 
         var message = RoundTrip(SmtpEmailService.BuildMessage(
-            Smtp(), "user@example.com", "Subject", html));
+            Smtp(), "user@example.com", new EmailContent("Subject", html)));
 
         message.Body.Should().BeOfType<TextPart>();
         var body = (TextPart)message.Body;
@@ -119,10 +119,22 @@ public sealed class EmailMessageTests
         var html = "<p>" + string.Concat(Enumerable.Repeat("Ærø, Ålborg og Østerbro. ", 20)) + "</p>";
 
         var message = RoundTrip(SmtpEmailService.BuildMessage(
-            Smtp(), "user@example.com", "Subject", html));
+            Smtp(), "user@example.com", new EmailContent("Subject", html)));
 
         // Trailing line break trimmed for the same reason as above.
         message.Body.Should().BeOfType<TextPart>()
             .Which.Text.TrimEnd('\r', '\n').Should().Be(html);
+    }
+
+    [Fact]
+    public void A_plain_text_part_makes_the_body_multipart_alternative_with_text_first()
+    {
+        var message = RoundTrip(SmtpEmailService.BuildMessage(
+            Smtp(), "user@example.com", new EmailContent("Subject", "<p>Hello</p>", "Hello")));
+
+        var alternative = message.Body.Should().BeOfType<MultipartAlternative>().Subject;
+        alternative.Select(p => p.ContentType.MimeType).Should().Equal("text/plain", "text/html");
+        alternative.TextBody!.TrimEnd('\r', '\n').Should().Be("Hello");
+        alternative.HtmlBody!.TrimEnd('\r', '\n').Should().Be("<p>Hello</p>");
     }
 }

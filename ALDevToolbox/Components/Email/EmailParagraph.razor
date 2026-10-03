@@ -1,0 +1,6 @@
+@* A paragraph of email body text. The bottom margin is the only spacing between blocks. *@
+<p style="margin: 0 0 16px;">@ChildContent</p>
+
+@code {
+    [Parameter, EditorRequired] public RenderFragment ChildContent { get; set; } = default!;
+}
