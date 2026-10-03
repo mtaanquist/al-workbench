@@ -57,6 +57,7 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped<ProjectFollowService>();
         _ctx.Services.AddScoped<ProjectCustomerInfoService>();
         _ctx.Services.AddScoped<CustomerModuleService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();

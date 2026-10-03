@@ -4,6 +4,7 @@
 @attribute [Authorize]
 @rendermode InteractiveServer
 @inject ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService Projects
+@inject ALDevToolbox.Services.ObjectExplorer.Projects.ProjectFollowService Follows
 @inject ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService PipelinesSvc
 @inject ALDevToolbox.Services.ObjectExplorer.Delivery.ReleasePipelineService ReleasePipelinesSvc
 @inject ALDevToolbox.Services.ObjectExplorer.Projects.ArtifactService Artifacts
@@ -114,6 +115,16 @@
 
     </SubtitleContent>
     <Actions>
+        @* Following decides who hears about the solution's own events, such as
+           Business Central update dates (#1048). Anyone who can see it may follow. *@
+        @if (Id is not null && _loadedProject is not null)
+        {
+            <button type="button" class="btn" @onclick="ToggleFollowAsync" disabled="@_followSaving" data-follow
+                    title="@(_following ? "You're told when Business Central schedules or moves an update for this solution's environments. You follow solutions you own or are listed on. Click to stop." : "Get notified when Business Central schedules or moves an update for this solution's environments")">
+                <Icon Name="@(_following ? "check" : "bell")" Width="15" Height="15" />
+                <span>@(_following ? "Following" : "Follow")</span>
+            </button>
+        }
         <a class="btn" href="/solutions">
             <Icon Name="arrow-left" Width="15" Height="15" />
             <span>All solutions</span>
@@ -139,7 +150,15 @@
            pill: a solution has no run state of its own. *@
         @if (_message is not null)
         {
-            <Alert Tone="AlertTone.Success"><span>@_message</span></Alert>
+            <Alert Tone="AlertTone.Success">
+                <span>
+                    @_message
+                    @if (_messageLinksToSettings)
+                    {
+                        <a href="@ALDevToolbox.Services.Notifications.NotificationService.SettingsPath">Choose how you hear about it</a>
+                    }
+                </span>
+            </Alert>
         }
         @* Only the page-level failures ("_") stack up here; everything the user typed
            gets its error inline next to the field, the way the Access tab does. *@
@@ -542,6 +561,9 @@
         _saving = false;
         _dirty = false;
         _canManage = false;
+        _following = false;
+        _followSaving = false;
+        _messageLinksToSettings = false;
         _canChangeAccess = false;
         _canPickFromGitHub = false;
         _message = null;
@@ -576,6 +598,7 @@
             {
                 _canManage = await Projects.CanManageAsync(Id.Value);
                 _canChangeAccess = await Projects.CanChangeAccessAsync(Id.Value);
+                _following = await Follows.IsFollowingAsync(Id.Value);
                 HydrateEdit();
                 if (_canChangeAccess)
                 {
@@ -627,6 +650,46 @@
     }
 
     private OeProject? _loadedProject;
+
+    private bool _following;
+    /// <summary>The follow confirmation points at the notification settings; other messages do not.</summary>
+    private bool _messageLinksToSettings;
+    private bool _followSaving;
+
+    private async Task ToggleFollowAsync()
+    {
+        if (Id is not { } id) return;
+        var target = !_following;
+        _followSaving = true;
+        _message = null;
+        _errors.Remove("_");
+        try
+        {
+            await Follows.SetFollowingAsync(id, target);
+            // Moved to another solution meanwhile: that page has loaded its own state.
+            if (Id != id) return;
+            _following = target;
+            _messageLinksToSettings = true;
+            _message = _following
+                ? "You're following this solution. You'll hear when Business Central schedules or moves an update for its environments."
+                : "You're no longer following this solution. You won't hear when Business Central schedules or moves an update for its environments.";
+        }
+        catch (Exception ex) when (ex is PlanValidationException or ProjectAccessDeniedException)
+        {
+            _errors["_"] = ex is PlanValidationException pv
+                ? pv.Errors.Values.FirstOrDefault() ?? "Couldn't change whether you follow this solution."
+                : "You no longer have access to this solution.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Could not change whether the user follows solution {ProjectId}.", Id);
+            _errors["_"] = "Couldn't change whether you follow this solution. Try again.";
+        }
+        finally
+        {
+            _followSaving = false;
+        }
+    }
 
     /// <summary>Deployments prepared from a new build and waiting for someone to approve them (#934).</summary>
     private List<ALDevToolbox.Services.ObjectExplorer.Delivery.ReleaseWaitingForApproval> _waitingForApproval = new();
@@ -714,6 +777,7 @@
         if (_saving) return;
         _saving = true;
         _message = null;
+        _messageLinksToSettings = false;
         _errors = new();
         _repoErrors = new();
         // The rows actually sent, in order: the service keys repository errors by

@@ -49,6 +49,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped<ProjectFollowService>();
         _ctx.Services.AddScoped<ProjectCustomerInfoService>();
         _ctx.Services.AddScoped<CustomerModuleService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
@@ -429,6 +430,23 @@ public sealed class ProjectDetailAccessTests : IDisposable
 
         cut.FindAll(".detail-head__title-row .status-pill").Should().BeEmpty();
     }
+
+    [Fact]
+    public async Task The_owner_follows_by_default_and_can_stop()
+    {
+        var (projectId, _) = await SeedAsync();
+
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
+        cut.WaitForAssertion(() => FollowButton(cut).TextContent.Should().Contain("Following"));
+
+        await cut.InvokeAsync(() => FollowButton(cut).Click());
+
+        cut.WaitForAssertion(() => FollowButton(cut).TextContent.Trim().Should().Be("Follow"));
+        FollowButton(cut).ClassList.Should().NotContain("btn--primary", "Save stays the only primary button");
+    }
+
+    private static IElement FollowButton(IRenderedComponent<ProjectDetail> cut) =>
+        cut.Find("button[data-follow]");
 
     private static IElement SaveButton(IRenderedComponent<ProjectDetail> cut) =>
         cut.FindAll("button").First(b => b.TextContent.Contains("Save access"));

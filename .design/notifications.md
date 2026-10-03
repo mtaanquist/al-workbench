@@ -124,6 +124,16 @@ private solution still gets its emails. Accepted for now.
 
 Each deployment is its own event, so there is no "only on change" rule here.
 
+## Following a solution (#1048)
+
+A solution's own events (Business Central update dates, #1049) go to its followers. The
+owner and the people on the solution's People list follow by default, without a stored
+row, so someone added to the list later starts following with nothing to backfill. Anyone
+who can see a solution can follow it from the Follow button in its header, and anyone can
+stop; stopping stores a row that overrides the default. A follower who can no longer see a
+Private solution (taken off its team) is left out of its notifications but keeps the
+choice, so it applies again if access comes back. Disabled accounts are left out.
+
 ## Digests (#1037)
 
 `NotificationDigestScheduler` (a `PolledScheduler`, `DISABLE_NOTIFICATION_DIGEST_SCHEDULER`)

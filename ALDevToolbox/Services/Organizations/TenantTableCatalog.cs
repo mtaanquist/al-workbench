@@ -91,6 +91,9 @@ internal static class TenantTableCatalog
         "oe_project_teams",
         "oe_project_contacts",
         "oe_project_people",
+        // Who follows which solution (#1048). Restored with the solutions, like the
+        // People list it extends.
+        "oe_project_followers",
         "oe_project_integrations",
         "customer_modules",
         "oe_project_modules",
