@@ -85,13 +85,17 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         if (before.CompareWith(row, _clock.GetUtcNow().UtcDateTime) is { } change) _scheduleChanges.Add(change);
     }
 
-    /// <summary>Announces the changes found by the reads just saved. The notifier never throws.</summary>
-    private async Task AnnounceScheduleChangesAsync(CancellationToken ct)
+    /// <summary>
+    /// Announces the changes found by the reads just saved. Not cancellable: the rows
+    /// already hold the new values, so a cancel here would lose the news for good. The
+    /// notifier never throws.
+    /// </summary>
+    private async Task AnnounceScheduleChangesAsync()
     {
         if (_scheduleChanges.Count == 0) return;
         var changes = _scheduleChanges.ToList();
         _scheduleChanges.Clear();
-        if (_updateNotifier is not null) await _updateNotifier.NotifyAsync(changes, ct);
+        if (_updateNotifier is not null) await _updateNotifier.NotifyAsync(changes, CancellationToken.None);
     }
 
     /// <summary>
@@ -504,9 +508,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         // After the save, so newly-discovered environments already have rows to mirror
         // onto, and so a failure here can never cost us the environment list itself.
+        // A refresh in this scope that failed after reading leaves nothing for this one to announce.
+        _scheduleChanges.Clear();
         await MirrorBcEnvironmentDetailsAsync(project, token, ct);
         await _db.SaveChangesAsync(ct);
-        await AnnounceScheduleChangesAsync(ct);
+        await AnnounceScheduleChangesAsync();
 
         _logger.LogInformation("BC test connection succeeded for project {ProjectId}: {Count} environment(s).", projectId, environments.Count);
         return new BcConnectionTestResult(BcConnectionResult.Success, environments.Count,
@@ -1488,9 +1494,10 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         var now = _clock.GetUtcNow().UtcDateTime;
         ApplyFetched(row, fetched, now);
+        _scheduleChanges.Clear();
         ApplyReadNextUpdate(row, updates);
         await _db.SaveChangesAsync(ct);
-        await AnnounceScheduleChangesAsync(ct);
+        await AnnounceScheduleChangesAsync();
 
         // What the panel cached before this read is now older than the row.
         _panelCache.Invalidate(projectId, environmentId);

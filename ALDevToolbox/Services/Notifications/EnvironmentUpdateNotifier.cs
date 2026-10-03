@@ -105,7 +105,7 @@ public sealed class EnvironmentUpdateNotifier
                 var local = TimeZoneInfo.ConvertTimeFromUtc(when, TimeZoneInfo.FindSystemTimeZoneById(ianaZone));
                 return local.ToString("ddd d MMM yyyy", CultureInfo.InvariantCulture);
             }
-            catch (TimeZoneNotFoundException)
+            catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
             {
                 // Falls through to UTC.
             }

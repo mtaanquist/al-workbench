@@ -42,6 +42,19 @@ public sealed class BcUpdateScheduleChangeTests
         Snapshot("27.1", Date, Latest).CompareWith(Row("27.1", Date, Latest), Now).Should().BeNull();
 
     [Fact]
+    public void A_time_moved_within_the_same_day_announces_nothing() =>
+        Snapshot("27.1", Date, Latest).CompareWith(Row("27.1", Date.AddHours(2), Latest), Now).Should().BeNull();
+
+    [Fact]
+    public void An_update_under_way_announces_nothing()
+    {
+        var row = Row("27.2", Date, Latest);
+        row.BcNextUpdateStatus = "Running";
+
+        Snapshot("27.1", Date, Latest).CompareWith(row, Now).Should().BeNull();
+    }
+
+    [Fact]
     public void No_date_announces_nothing() =>
         Snapshot("27.0", Date, Latest).CompareWith(Row("27.1", null, Latest), Now).Should().BeNull();
 

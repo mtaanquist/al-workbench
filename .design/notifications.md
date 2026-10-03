@@ -137,14 +137,21 @@ choice, so it applies again if access comes back. Disabled accounts are left out
 
 ## Business Central update dates (#1049)
 
-When a refresh (the scheduled environment refresh, Refresh on the solution, or the
-environment page re-reading an update it watches) finds an environment's next update
+When a refresh (the scheduled environment refresh, Refresh or Test connection on the
+solution, the refresh after recovering or copying an environment, or the environment page
+re-reading an update it watches) finds an environment's next update
 changed, the solution's followers hear about it in the Solutions category: a newly
 scheduled update (a version not seen before, or a date where there was none), a moved date,
 or the latest date the update can be postponed to coming within a week. At most one per
-read, in that order. Nothing is said on an environment's first read, which has nothing to
+read, in that order; when a new or moved date and the latest date coming close land on the
+same read, the latest-date notice is not sent separately, but the email names the latest
+date anyway. A move counts only when the day changes in the environment's update-window time
+zone, since the notice names days. Nothing is said while an update is under way or once its
+date has come. Nothing is said on an environment's first read, which has nothing to
 compare with, and nothing about a date the app moved itself: the write path stores the new
-date straight away, so the next read finds nothing new. The latest-date notice needs no
+date straight away, so the next read finds nothing new. Two known gaps, accepted: when the
+re-read after the app's own change fails, the next refresh announces that change as news;
+and two refreshes of the same environment overlapping can both announce one change. The latest-date notice needs no
 stored flag: it fires on the read where the date first comes within the week, which the
 previous read's own time says. Dates are shown in the environment's update-window time
 zone when Business Central reports one, otherwise in UTC, said so.
