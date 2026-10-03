@@ -1,9 +1,11 @@
 using System.Security.Claims;
+using ALDevToolbox.Components.Email;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.Email;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -100,6 +102,8 @@ internal static class AccountAuthEndpoints
             AccountService accounts,
             AppDbContext db,
             IEmailService email,
+            EmailRenderer emailRenderer,
+            PublicOrigin publicOrigin,
             IAntiforgery antiforgery,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
@@ -151,7 +155,7 @@ internal static class AccountAuthEndpoints
                 // the signup.
                 if (org is not null && await email.IsConfiguredAsync(ct))
                 {
-                    await AccountEndpoints.NotifyAdminsOfPendingSignupAsync(ctx, db, email, org, user!, logger, ct);
+                    await AccountEndpoints.NotifyAdminsOfPendingSignupAsync(ctx, db, email, emailRenderer, publicOrigin, org, user!, logger, ct);
                 }
 
                 ctx.Response.Redirect("/signup?ok=pending");
@@ -176,6 +180,7 @@ internal static class AccountAuthEndpoints
             HttpContext ctx,
             PendingSignupService pending,
             IEmailService email,
+            EmailRenderer emailRenderer,
             IAntiforgery antiforgery,
             PublicOrigin publicOrigin,
             ILoggerFactory loggerFactory,
@@ -192,8 +197,8 @@ internal static class AccountAuthEndpoints
                 if (start is not null && await email.IsConfiguredAsync(ct))
                 {
                     var verifyUrl = $"{publicOrigin.For(ctx)}/auth/signup/verify?token={Uri.EscapeDataString(start.LinkToken)}";
-                    var (subject, body) = EmailTemplates.SignupVerification(verifyUrl, start.Code);
-                    await email.SendAsync(AuthService.NormaliseEmail(emailInput), subject, body, EmailPurpose.SignupVerification, ct);
+                    var content = await SignupVerificationEmail.RenderAsync(emailRenderer, verifyUrl, start.Code, ct);
+                    await email.SendAsync(AuthService.NormaliseEmail(emailInput), content, EmailPurpose.SignupVerification, ct);
                 }
             }
             catch (Exception ex)
@@ -252,6 +257,8 @@ internal static class AccountAuthEndpoints
             AccountService accounts,
             AppDbContext db,
             IEmailService email,
+            EmailRenderer emailRenderer,
+            PublicOrigin publicOrigin,
             IDataProtectionProvider protection,
             TimeProvider clock,
             IAntiforgery antiforgery,
@@ -315,7 +322,7 @@ internal static class AccountAuthEndpoints
                 // the queued message. SMTP failures don't roll back the signup.
                 if (org is not null && await email.IsConfiguredAsync(ct))
                 {
-                    await AccountEndpoints.NotifyAdminsOfPendingSignupAsync(ctx, db, email, org, user!, logger, ct);
+                    await AccountEndpoints.NotifyAdminsOfPendingSignupAsync(ctx, db, email, emailRenderer, publicOrigin, org, user!, logger, ct);
                 }
 
                 ctx.Response.Redirect("/signup?ok=pending");
@@ -332,6 +339,7 @@ internal static class AccountAuthEndpoints
             PasswordResetService passwordReset,
             AppDbContext db,
             IEmailService email,
+            EmailRenderer emailRenderer,
             IAntiforgery antiforgery,
             PublicOrigin publicOrigin,
             ILoggerFactory loggerFactory,
@@ -355,8 +363,8 @@ internal static class AccountAuthEndpoints
                     // pinned to the typed email.
                     var user = await db.Users.IgnoreQueryFilters().FirstAsync(u => u.Email == addr.Trim().ToLowerInvariant(), ct);
                     var url = $"{publicOrigin.For(ctx)}/reset-password?token={Uri.EscapeDataString(token)}";
-                    var (subject, body) = EmailTemplates.ForgotPassword(user.DisplayName, url);
-                    await email.SendAsync(user.Email, subject, body, EmailPurpose.PasswordReset, ct);
+                    var content = await PasswordResetEmail.RenderAsync(emailRenderer, user.DisplayName, url, ct);
+                    await email.SendAsync(user.Email, content, EmailPurpose.PasswordReset, ct);
                 }
             }
             catch (Exception ex)
@@ -375,6 +383,7 @@ internal static class AccountAuthEndpoints
             PasswordResetService passwordReset,
             AppDbContext db,
             IEmailService email,
+            EmailRenderer emailRenderer,
             IAntiforgery antiforgery,
             PublicOrigin publicOrigin,
             ILoggerFactory loggerFactory,
@@ -399,8 +408,8 @@ internal static class AccountAuthEndpoints
                     var user = await db.Users.IgnoreQueryFilters()
                         .FirstAsync(u => u.Email == addr.Trim().ToLowerInvariant(), ct);
                     var url = $"{publicOrigin.For(ctx)}/auth/login/magic/consume?token={Uri.EscapeDataString(token)}";
-                    var (subject, body) = EmailTemplates.MagicLink(user.DisplayName, url);
-                    await email.SendAsync(user.Email, subject, body, EmailPurpose.MagicLink, ct);
+                    var content = await MagicLinkEmail.RenderAsync(emailRenderer, user.DisplayName, url, ct);
+                    await email.SendAsync(user.Email, content, EmailPurpose.MagicLink, ct);
                 }
             }
             catch (Exception ex)

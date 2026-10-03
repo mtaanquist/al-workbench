@@ -3,6 +3,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.Email;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -280,10 +281,12 @@ internal static class EntraAuthEndpoints
             // log and never surface to the visitor.
             var db = ctx.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
             var email = ctx.HttpContext.RequestServices.GetRequiredService<IEmailService>();
+            var emailRenderer = ctx.HttpContext.RequestServices.GetRequiredService<EmailRenderer>();
+            var publicOrigin = ctx.HttpContext.RequestServices.GetRequiredService<PublicOrigin>();
             var logger = ctx.HttpContext.RequestServices
                 .GetRequiredService<ILoggerFactory>().CreateLogger("EntraSignIn");
             await AccountEndpoints.NotifyAdminsOfPendingSignupAsync(
-                ctx.HttpContext, db, email, jitUser.Organization, jitUser, logger, ct);
+                ctx.HttpContext, db, email, emailRenderer, publicOrigin, jitUser.Organization, jitUser, logger, ct);
         }
 
         var code = result.Outcome switch

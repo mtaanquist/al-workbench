@@ -42,4 +42,7 @@ public static class EmailTheme
     /// <summary><c>--font-sans</c>, with single quotes so it fits inside a style attribute.</summary>
     public const string Font =
         "'Segoe UI', 'Segoe WP', Segoe, Selawik, system-ui, -apple-system, Tahoma, Helvetica, Arial, sans-serif";
+
+    /// <summary><c>--font-mono</c>, with single quotes so it fits inside a style attribute. For one-time codes.</summary>
+    public const string Mono = "ui-monospace, 'Cascadia Code', 'JetBrains Mono', Consolas, 'SF Mono', monospace";
 }

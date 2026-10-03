@@ -1,7 +1,9 @@
+using ALDevToolbox.Components.Email;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.Email;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Endpoints;
@@ -38,6 +40,8 @@ internal static class AccountEndpoints
         HttpContext ctx,
         AppDbContext db,
         IEmailService email,
+        EmailRenderer emailRenderer,
+        PublicOrigin publicOrigin,
         Organization org,
         User user,
         ILogger logger,
@@ -54,9 +58,9 @@ internal static class AccountEndpoints
                 .ToListAsync(ct);
             foreach (var admin in admins)
             {
-                var url = $"{ctx.Request.Scheme}://{ctx.Request.Host}{RouteConstants.AdminUsers}";
-                var (subject, body) = EmailTemplates.SignupPending(admin.DisplayName, user.Email, org.Name, url);
-                await email.SendAsync(admin.Email, subject, body, EmailPurpose.SignupPendingNotice, ct);
+                var url = $"{publicOrigin.For(ctx)}{RouteConstants.AdminUsers}";
+                var content = await SignupPendingEmail.RenderAsync(emailRenderer, admin.DisplayName, user.Email, org.Name, url, ct);
+                await email.SendAsync(admin.Email, content, EmailPurpose.SignupPendingNotice, ct);
             }
         }
         catch (Exception ex)

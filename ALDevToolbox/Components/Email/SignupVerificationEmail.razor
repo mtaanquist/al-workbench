@@ -1,0 +1,23 @@
+@* Step 1 of the email-first signup: prove the address is yours. No name is known yet, the account does not exist. *@
+<EmailLayout Preheader="Confirm your address to continue signing up." Reason="You received this because someone started signing up for AL Workbench with this address.">
+    <EmailParagraph>Hi,</EmailParagraph>
+    <EmailParagraph>Someone, hopefully you, started signing up for AL Workbench with this address. Confirm it is yours to continue. The link and the code work for the next 30 minutes.</EmailParagraph>
+    <EmailButton Href="@VerifyUrl">Confirm email address</EmailButton>
+    <EmailParagraph>Or enter this code on the signup page:</EmailParagraph>
+    <EmailCode Code="@Code" />
+    <EmailParagraph>If you did not start a signup, you can ignore this email. No account is created until the address is confirmed.</EmailParagraph>
+</EmailLayout>
+
+@code {
+    public const string Subject = "Confirm your email for AL Workbench";
+
+    [Parameter, EditorRequired] public string VerifyUrl { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string Code { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(EmailRenderer renderer, string verifyUrl, string code, CancellationToken ct = default)
+        => renderer.RenderAsync<SignupVerificationEmail>(Subject, new Dictionary<string, object?>
+        {
+            [nameof(VerifyUrl)] = verifyUrl,
+            [nameof(Code)] = code,
+        }, ct);
+}

@@ -1,0 +1,25 @@
+@*
+    Six-digit code, sent both when signing in with email as the second step and when
+    turning that step on from the account page, so the copy has to fit both. The code
+    stays out of the preheader, which inbox lists and lock screens show to anyone nearby.
+*@
+<EmailLayout Preheader="Your AL Workbench code expires in 10 minutes." Reason="You received this because someone asked for a sign-in code for your AL Workbench account.">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>Your sign-in code is:</EmailParagraph>
+    <EmailCode Code="@Code" />
+    <EmailParagraph>It expires in 10 minutes. If you did not ask for this code, ignore this email and change your password.</EmailParagraph>
+</EmailLayout>
+
+@code {
+    public const string Subject = "Your AL Workbench sign-in code";
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string Code { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(EmailRenderer renderer, string displayName, string code, CancellationToken ct = default)
+        => renderer.RenderAsync<MfaCodeEmail>(Subject, new Dictionary<string, object?>
+        {
+            [nameof(DisplayName)] = displayName,
+            [nameof(Code)] = code,
+        }, ct);
+}

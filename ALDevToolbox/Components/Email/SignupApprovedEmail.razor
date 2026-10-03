@@ -1,0 +1,21 @@
+@* Tells someone who asked to join an organisation that they were approved. *@
+<EmailLayout Preheader="Your signup was approved. You can sign in now." OrganizationName="@OrganizationName" Reason="@($"You received this because you asked to join {OrganizationName}.")">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>Your request to join <strong>@OrganizationName</strong> on AL Workbench has been approved. You can sign in now.</EmailParagraph>
+    <EmailButton Href="@SignInUrl" ShowLink="false">Sign in</EmailButton>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SignInUrl { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer, string displayName, string organizationName, string signInUrl, CancellationToken ct = default)
+        => renderer.RenderAsync<SignupApprovedEmail>($"You're in: {organizationName} on AL Workbench", new Dictionary<string, object?>
+        {
+            [nameof(DisplayName)] = displayName,
+            [nameof(OrganizationName)] = organizationName,
+            [nameof(SignInUrl)] = signInUrl,
+        }, ct);
+}
