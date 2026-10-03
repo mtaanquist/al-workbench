@@ -44,6 +44,11 @@ survive that.
 - Links are absolute: an email has no page to be relative to. Build them from `PublicOrigin`
   (`PUBLIC_BASE_URL`) rather than the request's host, so a forged `Host` header cannot point a
   link somewhere else. When it is unset, links fall back to the request host and startup warns.
+- Every email has an entry in `EmailPreviews` with sample data, which is what the Previews tab
+  on /site-admin/email shows (HTML in a sandboxed frame, the text part beside it) and what
+  "Send to me" mails, with "Preview:" in front of the subject. Sample links point at
+  `https://workbench.cronus.example`, so they go nowhere. `EmailPreviewTests` fails while an
+  email has no entry.
 
 ## Copy
 
