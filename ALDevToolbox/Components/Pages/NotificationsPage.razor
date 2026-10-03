@@ -22,7 +22,7 @@
 *@
 
 <ListPage Title="Notifications"
-          Subtitle="Builds and deployments you started or set up, from the last 30 days."
+          Subtitle="Builds, deployments and environment changes you started or set up, from the last 30 days."
           IsLoading="@(_rows is null)"
           IsEmpty="@(_rows is { Count: 0 })">
     <Actions>
@@ -48,7 +48,8 @@
             <EmptyState Icon="bell" Title="No notifications yet">
                 <Text>
                     Builds you started or set up show up here when they fail and when they work again.
-                    Deployments show up when they need your approval, finish or fail.
+                    Deployments show up when they need your approval, finish or fail, and changes
+                    you schedule on an environment when they have run or failed.
                 </Text>
                 <Action>
                     <a class="btn" href="@NotificationService.SettingsPath">Choose what you hear about</a>
@@ -107,6 +108,7 @@
     {
         NotificationCategory.Builds => "workflow",
         NotificationCategory.Deployments => "rocket",
+        NotificationCategory.Upgrades => "calendar-clock",
         _ => "bell",
     };
 }
