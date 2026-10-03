@@ -178,7 +178,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
 
         var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
         sent.To.Should().Be("upgrade@example.com");
-        sent.Subject.Should().Be("Done: Start the update on Production");
+        sent.Subject.Should().Be("Done: Start the update on CRONUS Denmark / Production");
         sent.Purpose.Should().Be(EmailPurpose.UpgradeNotification);
         sent.Html.Should().Contain($"/environments/{envId}/history");
         await using var ctx = _f.Db.NewContext();
@@ -198,7 +198,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
 
         var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
-        sent.Subject.Should().Be("Failed: Start the update on Production");
+        sent.Subject.Should().Be("Failed: Start the update on CRONUS Denmark / Production");
         sent.Html.Should().Contain("No update");
     }
 
@@ -214,7 +214,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Emails.Sent.Should().BeEmpty("the answer is still to come");
 
         await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
-        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Done: Install Core.app on Production");
+        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Done: Install Core.app on CRONUS Denmark / Production");
     }
 
     [Fact]
@@ -229,7 +229,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
 
         var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
-        sent.Subject.Should().Be("Check: Install Core.app on Production");
+        sent.Subject.Should().Be("Not confirmed: Install Core.app on CRONUS Denmark / Production");
         sent.Html.Should().Contain("could not confirm");
     }
 
@@ -245,7 +245,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Emails.Sent.Should().BeEmpty("Business Central is still to be asked how it ended");
 
         await SweepUntilQuietAsync();
-        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Done: Install Core.app on Production");
+        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Done: Install Core.app on CRONUS Denmark / Production");
     }
 
     [Fact]
@@ -287,7 +287,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
 
         await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
 
-        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Failed: Start the update on Production");
+        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Failed: Start the update on CRONUS Denmark / Production");
     }
 
     [Fact]
@@ -301,7 +301,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         await SweepUntilQuietAsync();
 
         _f.Emails.Sent.Select(s => s.Subject).Should().Equal(
-            "Failed: Install Core.app on Production", "Failed: Install Reports.app on Production");
+            "Failed: Install Core.app on CRONUS Denmark / Production", "Failed: Install Reports.app on CRONUS Denmark / Production");
     }
 
     // ── Booked uploads ──────────────────────────────────────────────────

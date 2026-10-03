@@ -9,7 +9,7 @@
         @switch (Result)
         {
             case UpgradeActionResult.Failed:
-                @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> did not go through.
+                @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> did not go through. Fix the cause, then schedule it again from the environment.
                 break;
             case UpgradeActionResult.Unconfirmed:
                 @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> was sent to Business Central, but we could not confirm that it finished. Check the environment to be sure.
@@ -39,13 +39,14 @@
     [Parameter, EditorRequired] public string EnvironmentUrl { get; set; } = string.Empty;
     [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
 
-    private string Preheader => Outcome ?? SubjectFor(Result, What, EnvironmentName);
+    private string Preheader => Outcome ?? SubjectFor(Result, What, SolutionName, EnvironmentName);
 
-    public static string SubjectFor(UpgradeActionResult result, string what, string environmentName) => result switch
+    /// <summary>Names the solution too: every customer has a Production.</summary>
+    public static string SubjectFor(UpgradeActionResult result, string what, string solutionName, string environmentName) => result switch
     {
-        UpgradeActionResult.Failed => $"Failed: {what} on {environmentName}",
-        UpgradeActionResult.Unconfirmed => $"Check: {what} on {environmentName}",
-        _ => $"Done: {what} on {environmentName}",
+        UpgradeActionResult.Failed => $"Failed: {what} on {solutionName} / {environmentName}",
+        UpgradeActionResult.Unconfirmed => $"Not confirmed: {what} on {solutionName} / {environmentName}",
+        _ => $"Done: {what} on {solutionName} / {environmentName}",
     };
 
     public static Task<EmailContent> RenderAsync(
@@ -61,7 +62,7 @@
         string settingsUrl,
         CancellationToken ct = default)
         => renderer.RenderAsync<UpgradeActionEmail>(
-            SubjectFor(result, what, environmentName),
+            SubjectFor(result, what, solutionName, environmentName),
             new Dictionary<string, object?>
             {
                 [nameof(DisplayName)] = displayName,

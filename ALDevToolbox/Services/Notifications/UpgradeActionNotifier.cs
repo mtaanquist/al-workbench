@@ -97,7 +97,7 @@ public sealed class UpgradeActionNotifier
             NotificationCategory.Upgrades,
             [recipient],
             new NotificationSummary(
-                UpgradeActionEmail.SubjectFor(result, what, action.EnvironmentName),
+                UpgradeActionEmail.SubjectFor(result, what, action.SolutionName, action.EnvironmentName),
                 action.Outcome,
                 path,
                 action.SolutionName),

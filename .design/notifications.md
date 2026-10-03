@@ -134,7 +134,7 @@ final state: after a run, for the apps in a batch skipped because an earlier one
 after the second look at an install nobody saw finish, and for the changes a restart cut
 off. An install still waiting for that second look sends nothing yet, so each change is
 announced once. An install Business Central took but nobody saw finish is announced as
-"Check: ..." rather than "Done": the row records it as sent, so the worker, which knows,
+"Not confirmed: ..." rather than "Done": the row records it as sent, so the worker, which knows,
 tells the notifier. Changes made on the spot are not announced; the person saw the result
 on the page. Each app in a batch is its own notification. Failures are not urgent, like
 deployments. The link goes to the environment's history tab. A booking someone else
