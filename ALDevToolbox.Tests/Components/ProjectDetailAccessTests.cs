@@ -442,12 +442,11 @@ public sealed class ProjectDetailAccessTests : IDisposable
         await cut.InvokeAsync(() => FollowButton(cut).Click());
 
         cut.WaitForAssertion(() => FollowButton(cut).TextContent.Trim().Should().Be("Follow"));
-        FollowButton(cut).GetAttribute("aria-pressed").Should().Be("false");
         FollowButton(cut).ClassList.Should().NotContain("btn--primary", "Save stays the only primary button");
     }
 
     private static IElement FollowButton(IRenderedComponent<ProjectDetail> cut) =>
-        cut.FindAll(".detail-head button, button").First(b => b.HasAttribute("aria-pressed"));
+        cut.Find("button[data-follow]");
 
     private static IElement SaveButton(IRenderedComponent<ProjectDetail> cut) =>
         cut.FindAll("button").First(b => b.TextContent.Contains("Save access"));

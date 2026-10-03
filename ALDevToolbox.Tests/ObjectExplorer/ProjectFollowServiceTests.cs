@@ -6,6 +6,7 @@ using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.ObjectExplorer;
@@ -106,6 +107,75 @@ public sealed class ProjectFollowServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_team_member_can_follow_a_private_solution_and_anyone_can_follow_a_read_only_one()
+    {
+        var privateId = await SeedAsync(people: [PersonUserId]);
+        await AssignTeamAsync(privateId, ColleagueUserId, ProjectVisibility.Private);
+        var readOnlyId = await SeedAsync(name: "CRONUS Tea");
+        await AssignTeamAsync(readOnlyId, PersonUserId, ProjectVisibility.ReadOnly);
+
+        await SetAsAsync(ColleagueUserId, privateId, true);
+        await SetAsAsync(ColleagueUserId, readOnlyId, true);
+
+        (await ListAsync(privateId)).Should().Equal(OwnerUserId, ColleagueUserId);
+        (await ListAsync(readOnlyId)).Should().Equal(OwnerUserId, ColleagueUserId);
+    }
+
+    [Fact]
+    public async Task Someone_on_the_people_list_can_stop_following()
+    {
+        var projectId = await SeedAsync(people: [PersonUserId]);
+
+        await SetAsAsync(PersonUserId, projectId, false);
+
+        (await ListAsync(projectId)).Should().Equal(OwnerUserId);
+    }
+
+    [Fact]
+    public async Task A_deleted_solution_cannot_be_followed_and_has_no_followers()
+    {
+        var projectId = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.OeProjects.FindAsync(projectId))!.DeletedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+
+        var act = () => SetAsAsync(ColleagueUserId, projectId, true);
+
+        await act.Should().ThrowAsync<PlanValidationException>();
+        (await ListAsync(projectId)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Another_organisations_solution_cannot_be_followed_or_read()
+    {
+        var projectId = await SeedAsync(people: [PersonUserId]);
+        int otherOrg;
+        await using (var ctx = _db.NewContext())
+        {
+            var org = new Organization { Name = "Fabrikam", Slug = "fabrikam", CreatedAt = DateTime.UtcNow };
+            ctx.Organizations.Add(org);
+            await ctx.SaveChangesAsync();
+            otherOrg = org.Id;
+        }
+
+        _db.OrgContext.CurrentOrganizationId = otherOrg;
+        try
+        {
+            var act = () => SetAsAsync(ColleagueUserId, projectId, true);
+            await act.Should().ThrowAsync<PlanValidationException>();
+            (await ListAsync(projectId)).Should().BeEmpty();
+        }
+        finally
+        {
+            _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+        }
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectFollowers.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
     public async Task A_disabled_account_is_left_out()
     {
         var projectId = await SeedAsync(people: [DisabledUserId]);
@@ -139,12 +209,24 @@ public sealed class ProjectFollowServiceTests : IDisposable
         await Svc(ctx).SetFollowingAsync(projectId, following);
     }
 
-    private async Task<int> SeedAsync(ProjectVisibility visibility = ProjectVisibility.Public, int[]? people = null)
+    private async Task AssignTeamAsync(int projectId, int memberId, ProjectVisibility visibility)
+    {
+        await using var ctx = _db.NewContext();
+        var team = new Team { OrganizationId = TestDb.DefaultOrgId, Name = $"Team {projectId}", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        team.Members.Add(new TeamMember { OrganizationId = TestDb.DefaultOrgId, UserId = memberId, CreatedAt = DateTime.UtcNow });
+        ctx.Teams.Add(team);
+        await ctx.SaveChangesAsync();
+        ctx.OeProjectTeams.Add(new OeProjectTeam { OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, TeamId = team.Id, CreatedAt = DateTime.UtcNow });
+        (await ctx.OeProjects.FindAsync(projectId))!.Visibility = visibility;
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task<int> SeedAsync(ProjectVisibility visibility = ProjectVisibility.Public, int[]? people = null, string name = "CRONUS Coffee")
     {
         await using var ctx = _db.NewContext();
         var project = new OeProject
         {
-            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Coffee", CreatedByUserId = OwnerUserId,
+            OrganizationId = TestDb.DefaultOrgId, Name = name, CreatedByUserId = OwnerUserId,
             Visibility = visibility, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         };
         ctx.OeProjects.Add(project);

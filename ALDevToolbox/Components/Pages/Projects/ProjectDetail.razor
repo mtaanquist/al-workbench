@@ -119,7 +119,7 @@
            Business Central update dates (#1048). Anyone who can see it may follow. *@
         @if (Id is not null && _loadedProject is not null)
         {
-            <button type="button" class="btn" @onclick="ToggleFollowAsync" disabled="@_followSaving" aria-pressed="@(_following ? "true" : "false")"
+            <button type="button" class="btn" @onclick="ToggleFollowAsync" disabled="@_followSaving" data-follow
                     title="@(_following ? "Stop getting notifications about this solution" : "Get notified when Business Central schedules or moves an update for this solution's environments")">
                 <Icon Name="@(_following ? "check" : "bell")" Width="15" Height="15" />
                 <span>@(_following ? "Following" : "Follow")</span>
@@ -554,6 +554,7 @@
         _dirty = false;
         _canManage = false;
         _following = false;
+        _followSaving = false;
         _canChangeAccess = false;
         _canPickFromGitHub = false;
         _message = null;
@@ -646,14 +647,17 @@
 
     private async Task ToggleFollowAsync()
     {
-        if (Id is null) return;
+        if (Id is not { } id) return;
+        var target = !_following;
         _followSaving = true;
         _message = null;
         _errors.Remove("_");
         try
         {
-            await Follows.SetFollowingAsync(Id.Value, !_following);
-            _following = !_following;
+            await Follows.SetFollowingAsync(id, target);
+            // Moved to another solution meanwhile: that page has loaded its own state.
+            if (Id != id) return;
+            _following = target;
             _message = _following
                 ? "You're following this solution. Choose how you hear about it under Notifications in your account."
                 : "You're no longer following this solution.";
