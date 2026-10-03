@@ -53,6 +53,7 @@ public static class AppCoreRegistration
         services.AddScoped<NotificationService>();
         services.AddScoped<BuildNotifier>();
         services.AddScoped<DeploymentNotifier>();
+        services.AddScoped<NotificationDigestService>();
         return services;
     }
 

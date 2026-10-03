@@ -57,6 +57,9 @@ public static class BackgroundWorkerRegistration
         // Sends the queued transactional email, retries what fails, and prunes
         // what it no longer needs to keep. See issue #790.
         services.AddHostedService<ALDevToolbox.Services.EmailOutboxScheduler>();
+        // Sends the daily and weekly notification digests, and drops items that
+        // waited too long. See .design/notifications.md.
+        services.AddHostedService<ALDevToolbox.Services.Notifications.NotificationDigestScheduler>();
         return services;
     }
 }
