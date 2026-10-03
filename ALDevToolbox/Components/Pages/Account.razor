@@ -186,6 +186,10 @@ else
                     }
                 </p>
             }
+            else if (_section == Section.Notifications)
+            {
+                <AccountNotificationsSection />
+            }
             else if (_section == Section.Security)
             {
                 <section class="card">
@@ -1112,7 +1116,7 @@ else
 <ConfirmDialog @ref="_confirmDelete" />
 
 @code {
-    private enum Section { Profile, Security, Ai, Repos }
+    private enum Section { Profile, Notifications, Security, Ai, Repos }
 
     [SupplyParameterFromQuery(Name = "section")] public string? SectionParam { get; set; }
     [SupplyParameterFromQuery(Name = "err")] public string? Error { get; set; }
@@ -1353,6 +1357,7 @@ else
         _tabs = new HeaderTabs.HeaderTabItem[]
         {
             new("Profile", "/account?section=profile", _section == Section.Profile),
+            new("Notifications", "/account?section=notifications", _section == Section.Notifications),
             new("Sign-in & security", "/account?section=security", _section == Section.Security),
             new("AI assistants", "/account?section=ai", _section == Section.Ai),
             new("Repository access", "/account?section=repos", _section == Section.Repos),

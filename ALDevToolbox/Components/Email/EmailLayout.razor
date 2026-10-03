@@ -53,6 +53,10 @@
                             {
                                 <p style="margin: 4px 0 0;">@Reason</p>
                             }
+                            @if (!string.IsNullOrWhiteSpace(SettingsUrl))
+                            {
+                                <p style="margin: 4px 0 0;"><a href="@SettingsUrl" style="color: @EmailTheme.Muted; text-decoration: underline;">Change which emails you get</a></p>
+                            }
                         </td>
                     </tr>
                 </table>
@@ -74,6 +78,13 @@
 
     /// <summary>One sentence in the footer saying why the recipient got this, e.g. "You received this because you asked to reset your password."</summary>
     [Parameter] public string? Reason { get; set; }
+
+    /// <summary>
+    /// Link to the recipient's notification settings, shown in the footer of a
+    /// notification email so turning it off is one click away. Null for account
+    /// emails, which people cannot turn off.
+    /// </summary>
+    [Parameter] public string? SettingsUrl { get; set; }
 
     private string SentBy => string.IsNullOrWhiteSpace(OrganizationName)
         ? "Sent by AL Workbench."

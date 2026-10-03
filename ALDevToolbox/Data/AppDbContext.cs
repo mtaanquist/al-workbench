@@ -146,6 +146,8 @@ public class AppDbContext : DbContext
     public DbSet<UserPasskey> UserPasskeys => Set<UserPasskey>();
     public DbSet<PersonalAccessToken> PersonalAccessTokens => Set<PersonalAccessToken>();
     public DbSet<UserRepositoryToken> UserRepositoryTokens => Set<UserRepositoryToken>();
+    public DbSet<UserNotificationSetting> UserNotificationSettings => Set<UserNotificationSetting>();
+    public DbSet<NotificationDigestItem> NotificationDigestItems => Set<NotificationDigestItem>();
     public DbSet<UserExternalLogin> UserExternalLogins => Set<UserExternalLogin>();
 
     // Teams and their membership — see .design/teams-and-visibility.md.
@@ -392,6 +394,8 @@ public class AppDbContext : DbContext
         ScopeToOrganization<RecipeSuggestionFile>(modelBuilder);
         ScopeToOrganization<PersonalAccessToken>(modelBuilder);
         ScopeToOrganization<UserRepositoryToken>(modelBuilder);
+        ScopeToOrganization<UserNotificationSetting>(modelBuilder);
+        ScopeToOrganization<NotificationDigestItem>(modelBuilder);
         ScopeToOrganization<OAuthConsent>(modelBuilder);
         // AuditLogEntry carries a *nullable* organization_id: startup seed and
         // bootstrap-admin inserts happen before any org context exists. The

@@ -369,9 +369,10 @@ public sealed class DeliveryService
     /// valid - is skipped with a warning in the log, never an error: the build is fine.
     /// Called by the build worker under the build's own organisation once it is ready;
     /// needs no access check, because preparing sends nothing and approving checks.
-    /// Pull-request builds and preview builds are never prepared. Returns how many were prepared.
+    /// Pull-request builds and preview builds are never prepared. Returns the ids of the
+    /// deployments it prepared, so the people who approve them can be told (#1036).
     /// </summary>
-    public async Task<int> ProposeReleasesForBuildAsync(int projectBuildId, CancellationToken ct = default)
+    public async Task<List<int>> ProposeReleasesForBuildAsync(int projectBuildId, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
         var build = await _db.OeProjectBuilds.AsNoTracking()
@@ -383,7 +384,7 @@ public sealed class DeliveryService
             || build.Trigger == ProjectBuildTrigger.PullRequest
             || ProjectBuildTarget.IsPreview(build.BcTarget))
         {
-            return 0;
+            return [];
         }
 
         var pipelineIds = await _db.OeReleasePipelines.AsNoTracking()
@@ -395,7 +396,7 @@ public sealed class DeliveryService
             .Select(r => r.Id)
             .ToListAsync(ct);
 
-        var prepared = 0;
+        var prepared = new List<int>();
         foreach (var releasePipelineId in pipelineIds)
         {
             var waiting = await _db.OeProjectDeliveries.AsNoTracking()
@@ -437,7 +438,7 @@ public sealed class DeliveryService
             }
 
             var delivery = await WriteDeliveryAsync(orgId, plan, plan.RuleTime(DateTime.UtcNow), forceSyncOnce: false, proposed: true, ct);
-            prepared++;
+            prepared.Add(delivery.Id);
             _logger.LogInformation(
                 "Prepared delivery {DeliveryId}: build {BuildId} → deployment pipeline {ReleasePipelineId} ({Env}), waiting for approval; replaced {Replaced} older.",
                 delivery.Id, build.Id, releasePipelineId, plan.EnvName, waiting.Count);
@@ -679,9 +680,9 @@ public sealed class DeliveryService
     /// died mid-publish. Called once per org on the scheduler's first sweep after startup,
     /// when nothing is running yet, so it never trips an actively-running delivery. The
     /// publish isn't safely resumable (partial uploads to BC), so these are failed, not
-    /// retried. Returns the count.
+    /// retried. Returns the ids it failed, so the people behind them can be told (#1036).
     /// </summary>
-    public async Task<int> FailInterruptedDeliveriesAsync(CancellationToken ct = default)
+    public async Task<List<int>> FailInterruptedDeliveriesAsync(CancellationToken ct = default)
     {
         var orphans = await _db.OeProjectDeliveries
             .Where(d => d.Status == ProjectDeliveryStatus.Claimed
@@ -689,7 +690,7 @@ public sealed class DeliveryService
                         || d.Status == ProjectDeliveryStatus.Installing)
             .Include(d => d.Results)
             .ToListAsync(ct);
-        if (orphans.Count == 0) return 0;
+        if (orphans.Count == 0) return [];
 
         var now = DateTime.UtcNow;
         foreach (var d in orphans)
@@ -708,17 +709,18 @@ public sealed class DeliveryService
         }
         await _db.SaveChangesAsync(ct);
         _logger.LogWarning("Failed {Count} delivery(ies) interrupted by a restart.", orphans.Count);
-        return orphans.Count;
+        return orphans.Select(d => d.Id).ToList();
     }
 
     // ── Run (worker entry) ────────────────────────────────────────────────────
 
     /// <summary>
     /// Claims the delivery (atomic <c>scheduled → claimed</c>) and runs the publish.
-    /// Returns quietly if the row was already taken or cancelled. All failures are
-    /// recorded on the row; this method does not throw on a publish failure.
+    /// Returns false if the row was already taken or cancelled, true once this call ran
+    /// it. All failures are recorded on the row; this method does not throw on a publish
+    /// failure.
     /// </summary>
-    public async Task RunDeliveryAsync(int deliveryId, CancellationToken ct = default)
+    public async Task<bool> RunDeliveryAsync(int deliveryId, CancellationToken ct = default)
     {
         var claimedAt = DateTime.UtcNow;
         var claimed = await _db.OeProjectDeliveries
@@ -730,7 +732,7 @@ public sealed class DeliveryService
         if (claimed == 0)
         {
             _logger.LogInformation("Delivery {DeliveryId} was already claimed or cancelled; skipping.", deliveryId);
-            return;
+            return false;
         }
 
         var delivery = await _db.OeProjectDeliveries
@@ -739,7 +741,7 @@ public sealed class DeliveryService
         if (delivery is null)
         {
             _logger.LogWarning("Delivery {DeliveryId} vanished after being claimed.", deliveryId);
-            return;
+            return false;
         }
 
         // A deployment that was prepared and approved (#934) already carries those lines;
@@ -759,6 +761,7 @@ public sealed class DeliveryService
             _logger.LogError(ex, "Delivery {DeliveryId} failed unexpectedly.", deliveryId);
             await FailAsync(delivery, log, "The delivery failed unexpectedly. " + Short(ex.Message), ct);
         }
+        return true;
     }
 
     /// <summary>
