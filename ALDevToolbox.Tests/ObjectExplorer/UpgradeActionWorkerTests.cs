@@ -304,6 +304,82 @@ public sealed class UpgradeActionWorkerTests : IDisposable
             "Failed: Install Core.app on CRONUS Denmark / Production", "Failed: Install Reports.app on CRONUS Denmark / Production");
     }
 
+    // ── Ready to check (#1047) ──────────────────────────────────────────
+
+    [Fact]
+    public async Task The_assigned_checker_hears_once_when_the_environment_reaches_the_target()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+
+        (await _f.Worker().NotifyReadyToCheckAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None)).Should().Be(0,
+            "the environment is still on 27.5");
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await _f.Worker().NotifyReadyToCheckAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        await _f.Worker().NotifyReadyToCheckAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
+        sent.To.Should().Be("upgrade@example.com");
+        sent.Subject.Should().Be("Ready to check: CRONUS Denmark / Production is on 27.6.40000.0");
+        sent.Html.Should().Contain($"/upgrades/{upgradeId}");
+    }
+
+    [Fact]
+    public async Task With_nobody_assigned_the_person_who_planned_the_upgrade_hears()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await PlanUpgradeAsync(projectId, envId, "27.6", assignee: null);
+        await SetVersionAsync(envId, "27.6.40000.0");
+
+        await _f.Worker().NotifyReadyToCheckAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
+        sent.To.Should().Be("owner@example.com");
+        sent.Html.Should().Contain("Nobody is assigned");
+    }
+
+    [Fact]
+    public async Task A_line_already_checked_or_on_a_closed_upgrade_sends_nothing()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeEnvironmentUpgradeLines.Where(l => l.UpgradeId == upgradeId)
+                .ExecuteUpdateAsync(s => s.SetProperty(l => l.IsOpen, false));
+        }
+
+        await _f.Worker().NotifyReadyToCheckAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Emails.Sent.Should().BeEmpty();
+    }
+
+    private async Task<int> PlanUpgradeAsync(int projectId, int envId, string target, int? assignee)
+    {
+        await using var ctx = _f.Db.NewContext();
+        var upgrade = new OeEnvironmentUpgrade
+        {
+            OrganizationId = TestDb.DefaultOrgId, Name = "Spring release", TargetVersion = target,
+            CreatedByUserId = UpgradeActionTestFixture.OwnerUserId, CreatedBy = "owner <owner@example.com>", CreatedAt = DateTime.UtcNow,
+        };
+        ctx.OeEnvironmentUpgrades.Add(upgrade);
+        await ctx.SaveChangesAsync();
+        ctx.OeEnvironmentUpgradeLines.Add(new OeEnvironmentUpgradeLine
+        {
+            OrganizationId = TestDb.DefaultOrgId, UpgradeId = upgrade.Id, EnvironmentId = envId, ProjectId = projectId,
+            AssigneeUserId = assignee, AddedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+        return upgrade.Id;
+    }
+
+    private async Task SetVersionAsync(int envId, string version)
+    {
+        await using var ctx = _f.Db.NewContext();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == envId).ExecuteUpdateAsync(s => s.SetProperty(e => e.Version, version));
+    }
+
     // ── Booked uploads ──────────────────────────────────────────────────
     // Apps somebody was handed, booked for a picked time or a window: the package waits
     // in the row, the sweep sends it and waits for Business Central to finish, and

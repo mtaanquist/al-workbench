@@ -1,0 +1,62 @@
+@*
+    An environment on a planned upgrade reached the target version and is ready for
+    its after-upgrade check (issue #1047). See .design/notifications.md.
+*@
+<EmailLayout Preheader="@Preheader" OrganizationName="@OrganizationName" Reason="@Reason" SettingsUrl="@SettingsUrl">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph><strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> has been updated to @Version, as part of the planned upgrade <strong>@UpgradeName</strong>. It is ready to check.</EmailParagraph>
+    @if (!Assigned)
+    {
+        <EmailParagraph>Nobody is assigned to check it yet, so you hear about it as the person who planned the upgrade.</EmailParagraph>
+    }
+    <EmailButton Href="@UpgradeUrl">Open the planned upgrade</EmailButton>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SolutionName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string EnvironmentName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string Version { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string UpgradeName { get; set; } = string.Empty;
+    /// <summary>True when the recipient is the one assigned to check it; false when they planned the upgrade and nobody is.</summary>
+    [Parameter] public bool Assigned { get; set; }
+    [Parameter, EditorRequired] public string UpgradeUrl { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private string Preheader => $"{EnvironmentName} for {SolutionName} is on {Version} and ready to check.";
+
+    private string Reason => Assigned
+        ? "You received this because you are assigned to check this environment."
+        : "You received this because you planned this upgrade.";
+
+    public static string SubjectFor(string solutionName, string environmentName, string version) =>
+        $"Ready to check: {solutionName} / {environmentName} is on {version}";
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer,
+        string displayName,
+        string organizationName,
+        string solutionName,
+        string environmentName,
+        string version,
+        string upgradeName,
+        bool assigned,
+        string upgradeUrl,
+        string settingsUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<EnvironmentReadyToCheckEmail>(
+            SubjectFor(solutionName, environmentName, version),
+            new Dictionary<string, object?>
+            {
+                [nameof(DisplayName)] = displayName,
+                [nameof(OrganizationName)] = organizationName,
+                [nameof(SolutionName)] = solutionName,
+                [nameof(EnvironmentName)] = environmentName,
+                [nameof(Version)] = version,
+                [nameof(UpgradeName)] = upgradeName,
+                [nameof(Assigned)] = assigned,
+                [nameof(UpgradeUrl)] = upgradeUrl,
+                [nameof(SettingsUrl)] = settingsUrl,
+            }, ct);
+}

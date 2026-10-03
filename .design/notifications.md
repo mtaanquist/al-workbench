@@ -140,6 +140,17 @@ on the page. Each app in a batch is its own notification. Failures are not urgen
 deployments. The link goes to the environment's history tab. A booking someone else
 cancels is not announced to the person who made it; considered and left out for now.
 
+## Ready to check (#1047)
+
+On a planned upgrade, the person assigned to check an environment (or whoever planned the
+upgrade when nobody is) hears in the Upgrades category once the environment is on the
+target version, with a link to the planned upgrade. The upgrade action worker looks every
+sweep, in each organisation, for unchecked lines of open upgrades whose environment's
+mirrored version has reached the target, by the same Major.Minor rule the page uses for
+"Updated". Each line carries `updated_notified_at`, claimed before sending, so it is told
+once whichever refresh noticed the new version. A line added after its environment was
+already updated is told on the next sweep, which is still news to its checker.
+
 ## Digests (#1037)
 
 `NotificationDigestScheduler` (a `PolledScheduler`, `DISABLE_NOTIFICATION_DIGEST_SCHEDULER`)
