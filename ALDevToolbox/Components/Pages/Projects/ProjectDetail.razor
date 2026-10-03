@@ -120,7 +120,7 @@
         @if (Id is not null && _loadedProject is not null)
         {
             <button type="button" class="btn" @onclick="ToggleFollowAsync" disabled="@_followSaving" data-follow
-                    title="@(_following ? "Stop getting notifications about this solution" : "Get notified when Business Central schedules or moves an update for this solution's environments")">
+                    title="@(_following ? "You're told when Business Central schedules or moves an update for this solution's environments. You follow solutions you own or are listed on. Click to stop." : "Get notified when Business Central schedules or moves an update for this solution's environments")">
                 <Icon Name="@(_following ? "check" : "bell")" Width="15" Height="15" />
                 <span>@(_following ? "Following" : "Follow")</span>
             </button>
@@ -150,7 +150,15 @@
            pill: a solution has no run state of its own. *@
         @if (_message is not null)
         {
-            <Alert Tone="AlertTone.Success"><span>@_message</span></Alert>
+            <Alert Tone="AlertTone.Success">
+                <span>
+                    @_message
+                    @if (_messageLinksToSettings)
+                    {
+                        <a href="@ALDevToolbox.Services.Notifications.NotificationService.SettingsPath">Choose how you hear about it</a>
+                    }
+                </span>
+            </Alert>
         }
         @* Only the page-level failures ("_") stack up here; everything the user typed
            gets its error inline next to the field, the way the Access tab does. *@
@@ -555,6 +563,7 @@
         _canManage = false;
         _following = false;
         _followSaving = false;
+        _messageLinksToSettings = false;
         _canChangeAccess = false;
         _canPickFromGitHub = false;
         _message = null;
@@ -643,6 +652,8 @@
     private OeProject? _loadedProject;
 
     private bool _following;
+    /// <summary>The follow confirmation points at the notification settings; other messages do not.</summary>
+    private bool _messageLinksToSettings;
     private bool _followSaving;
 
     private async Task ToggleFollowAsync()
@@ -658,9 +669,10 @@
             // Moved to another solution meanwhile: that page has loaded its own state.
             if (Id != id) return;
             _following = target;
+            _messageLinksToSettings = true;
             _message = _following
-                ? "You're following this solution. Choose how you hear about it under Notifications in your account."
-                : "You're no longer following this solution.";
+                ? "You're following this solution. You'll hear when Business Central schedules or moves an update for its environments."
+                : "You're no longer following this solution. You won't hear when Business Central schedules or moves an update for its environments.";
         }
         catch (Exception ex) when (ex is PlanValidationException or ProjectAccessDeniedException)
         {
@@ -765,6 +777,7 @@
         if (_saving) return;
         _saving = true;
         _message = null;
+        _messageLinksToSettings = false;
         _errors = new();
         _repoErrors = new();
         // The rows actually sent, in order: the service keys repository errors by
