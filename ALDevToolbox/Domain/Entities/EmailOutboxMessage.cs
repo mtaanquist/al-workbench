@@ -35,6 +35,12 @@ public enum EmailPurpose
 
     /// <summary>The "does SMTP work" probe on the SiteAdmin email settings. Sent inline.</summary>
     SiteAdminTest,
+
+    /// <summary>A build notification: a build pipeline failed or recovered. See <c>.design/notifications.md</c>.</summary>
+    BuildNotification,
+
+    /// <summary>A deployment notification: waiting for approval, deployed or failed.</summary>
+    DeploymentNotification,
 }
 
 /// <summary>Where an outbox row is in its life.</summary>

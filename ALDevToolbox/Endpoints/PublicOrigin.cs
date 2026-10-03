@@ -90,7 +90,7 @@ public sealed class PublicOrigin
         else
         {
             logger.LogWarning(
-                "No {EnvVar} configured — password reset, magic-link, invite and email verification links will use whatever Host header the request carries. Set {EnvVar} (and AllowedHosts) for internet-facing deployments.",
+                "No {EnvVar} configured — password reset, magic-link, invite and email verification links will use whatever Host header the request carries, and notification emails are not sent. Set {EnvVar} (and AllowedHosts) for internet-facing deployments.",
                 EnvVarName, EnvVarName);
         }
     }
