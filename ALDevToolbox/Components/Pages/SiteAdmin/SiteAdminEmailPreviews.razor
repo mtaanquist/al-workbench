@@ -1,0 +1,166 @@
+@*
+    What every email looks like, without sending one (issue #1030).
+
+    For a site administrator checking the wording or the look of an email that
+    is rarely sent. Each preview is rendered from sample data in
+    Components/Email/EmailPreviews.cs, so the links in it go nowhere; a new
+    email shows up here once it has an entry there.
+
+    The HTML sits in a sandboxed frame, so the email's own styles cannot touch
+    the page and nothing in it can run or navigate the page away.
+*@
+
+@page "/site-admin/email/previews"
+@attribute [Authorize(Roles = HttpOrganizationContext.SiteAdminRole)]
+@using ALDevToolbox.Components.Email
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Endpoints
+@using ALDevToolbox.Services
+@using ALDevToolbox.Services.Email
+@inject EmailRenderer Renderer
+@inject IEmailService Email
+@inject ILogger<SiteAdminEmailPreviews> Logger
+@implements IDisposable
+
+<PageTitle>Email previews · Site administration · AL Workbench</PageTitle>
+
+<SiteAdminEmailHeader ActiveTab="SiteAdminEmailHeader.Tab.Previews">
+    <Sub>What each email looks like, filled in with example names. Links in the previews are examples and do not open anything.</Sub>
+    <Actions>
+        <a class="btn btn--sm" href="/site-admin/settings/smtp">
+            <Icon Name="server-cog" Width="14" Height="14" />
+            <span>Email settings</span>
+        </a>
+    </Actions>
+    <ChildContent>
+        @if (Ok == "sent")
+        {
+            <Alert Tone="AlertTone.Success" Role="status">
+                <span>Preview sent to your email address. It may take a minute to arrive.</span>
+            </Alert>
+        }
+        else if (!string.IsNullOrEmpty(Message))
+        {
+            <Alert Tone="AlertTone.Danger" Role="status"><span>@Message</span></Alert>
+        }
+
+        <div class="email-previews">
+            <nav class="card email-previews__list" aria-label="Emails">
+                @foreach (var preview in EmailPreviews.All)
+                {
+                    var active = preview == _selected;
+                    <a class="email-previews__item @(active ? "is-active" : null)"
+                       href="/site-admin/email/previews?email=@(preview.Key)#preview"
+                       aria-current="@(active ? "page" : null)">
+                        <span class="email-previews__name">@preview.Name</span>
+                        <span class="email-previews__when">@preview.WhenSent</span>
+                    </a>
+                }
+            </nav>
+
+            <section class="card email-previews__view" id="preview">
+                <div class="card__head">
+                    <div>
+                        <h2 class="card__title">@_selected.Name</h2>
+                        <p class="card__sub">@_selected.WhenSent</p>
+                    </div>
+                    @if (_emailConfigured)
+                    {
+                        <form method="post" action="/site-admin/email/previews/@_selected.Key/send"
+                              title="Sends this preview to your own email address. The links in it do not work.">
+                            <AntiforgeryToken />
+                            <button type="submit" class="btn btn--sm">
+                                <Icon Name="send" Width="14" Height="14" />
+                                <span>Send a copy to me</span>
+                            </button>
+                        </form>
+                    }
+                    else
+                    {
+                        <a class="btn btn--sm" href="/site-admin/settings/smtp">Set up email to send yourself a copy</a>
+                    }
+                </div>
+
+                @if (_renderFailed)
+                {
+                    <div class="error-block">
+                        <span class="error-block__icon"><Icon Name="circle-alert" Width="21" Height="21" /></span>
+                        <span class="error-block__title">Could not build this preview</span>
+                        <span class="error-block__text">The real email may fail the same way. Report this to whoever maintains AL Workbench.</span>
+                    </div>
+                }
+                else if (_content is null)
+                {
+                    <LoadingBlock />
+                }
+                else
+                {
+                    <dl class="email-previews__subject">
+                        <dt>Subject</dt>
+                        <dd>@_content.Subject</dd>
+                    </dl>
+                    <div class="email-previews__parts">
+                        <div class="code-block">
+                            <div class="code-block__bar">
+                                <span class="code-block__name">Formatted version</span>
+                            </div>
+                            <iframe class="email-previews__frame" sandbox="" srcdoc="@FrameHtml(_content.HtmlBody)"
+                                    title="@($"Preview of the {_selected.Name} email")"></iframe>
+                        </div>
+                        <div class="code-block">
+                            <div class="code-block__bar">
+                                <span class="code-block__name">Plain-text version, for email apps that do not show formatting</span>
+                            </div>
+                            <pre class="email-previews__text">@_content.TextBody</pre>
+                        </div>
+                    </div>
+                }
+            </section>
+        </div>
+    </ChildContent>
+</SiteAdminEmailHeader>
+
+@code {
+    [SupplyParameterFromQuery(Name = "email")] public string? Key { get; set; }
+    [SupplyParameterFromQuery(Name = RouteConstants.OkQuery)] public string? Ok { get; set; }
+    [SupplyParameterFromQuery(Name = RouteConstants.MsgQuery)] public string? Message { get; set; }
+
+    private EmailPreview _selected = EmailPreviews.All[0];
+    private EmailContent? _content;
+    private bool _renderFailed;
+    private bool _emailConfigured;
+    private readonly CancellationTokenSource _cts = new();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // An unknown key (an email renamed since the link was copied) shows
+        // the first email rather than an error.
+        _selected = EmailPreviews.Find(Key) ?? EmailPreviews.All[0];
+        _content = null;
+        _renderFailed = false;
+        try
+        {
+            _content = await _selected.RenderAsync(Renderer, _cts.Token);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning(ex, "Email preview {Preview} failed to render.", _selected.Key);
+            _renderFailed = true;
+        }
+        _emailConfigured = await Email.IsConfiguredAsync(_cts.Token);
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    /// <summary>
+    /// Opens every link in a new window, which the sandbox then refuses, so a
+    /// click on a sample link leaves the preview in place instead of replacing
+    /// it with a "site can't be reached" page.
+    /// </summary>
+    private static string FrameHtml(string html) =>
+        html.Replace("<head>", "<head><base target=\"_blank\">", StringComparison.OrdinalIgnoreCase);
+}

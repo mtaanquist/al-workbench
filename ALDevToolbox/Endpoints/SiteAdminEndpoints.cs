@@ -337,6 +337,54 @@ internal static class SiteAdminEndpoints
             }
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
 
+        // Sends one of the email previews to the signed-in site admin, so they can
+        // see it in a real mail client. Sample data only, see EmailPreviews.
+        app.MapPost("/site-admin/email/previews/{key}/send", async (
+            string key,
+            HttpContext ctx,
+            IEmailService email,
+            EmailRenderer renderer,
+            AppDbContext db,
+            IOrganizationContext orgCtx,
+            IAntiforgery antiforgery,
+            ILoggerFactory loggerFactory,
+            CancellationToken ct) =>
+        {
+            var logger = loggerFactory.CreateLogger("SiteAdminEmailPreview");
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            var preview = EmailPreviews.Find(key);
+            if (preview is null)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+            var back = $"/site-admin/email/previews?email={Uri.EscapeDataString(preview.Key)}";
+            if (!await email.IsConfiguredAsync(ct))
+            {
+                ctx.Response.Redirect($"{back}&{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString("Email is not set up yet. Fill in Email settings first."));
+                return;
+            }
+            var recipient = await db.Users.AsNoTracking()
+                .Where(u => u.Id == orgCtx.CurrentUserId!.Value)
+                .Select(u => u.Email)
+                .FirstAsync(ct);
+            try
+            {
+                var content = await preview.RenderAsync(renderer, ct);
+                // Marked in the subject so it is not mistaken for the real thing.
+                content = content with { Subject = $"Preview: {content.Subject}" };
+                await email.SendAsync(recipient, content, EmailPurpose.SiteAdminTest, ct);
+                ctx.Response.Redirect($"{back}&{RouteConstants.OkQuery}=sent");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Email preview {Preview} could not be sent to {Email}.", preview.Key, recipient);
+                ctx.Response.Redirect($"{back}&{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString("The preview could not be sent. The details are in the app log."));
+            }
+        }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
+
         app.MapPost("/site-admin/backups/create", async (
             HttpContext ctx, BackupService backups, IAntiforgery antiforgery, CancellationToken ct) =>
         {

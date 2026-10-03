@@ -1,0 +1,31 @@
+@*
+    The /site-admin/email family: whether mail is getting through, and what
+    each email looks like.
+*@
+
+@using ALDevToolbox.Components.Shared
+
+<TabbedPage Title="Email"
+            CrumbLabel="Site administration" CrumbHref="/site-admin"
+            Tabs="@_tabs" TabsLabel="Email sections"
+            Sub="@Sub" Actions="@Actions">
+    @ChildContent
+</TabbedPage>
+
+@code {
+    public enum Tab { Delivery, Previews }
+
+    [Parameter, EditorRequired] public Tab ActiveTab { get; set; }
+    [Parameter] public RenderFragment? Sub { get; set; }
+    [Parameter] public RenderFragment? Actions { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    private IReadOnlyList<HeaderTabs.HeaderTabItem> _tabs = Array.Empty<HeaderTabs.HeaderTabItem>();
+
+    protected override void OnParametersSet() =>
+        _tabs =
+        [
+            new("Delivery", "/site-admin/email", ActiveTab == Tab.Delivery),
+            new("Previews", "/site-admin/email/previews", ActiveTab == Tab.Previews),
+        ];
+}
