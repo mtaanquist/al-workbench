@@ -5,12 +5,17 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Notifications;
 
+/// <summary>One person's choice for one <see cref="NotificationCategory"/>.</summary>
+/// <param name="InApp">Listed on their Notifications page.</param>
+/// <param name="Email">When they are emailed.</param>
+public sealed record NotificationChoice(bool InApp, NotificationDelivery Email);
+
 /// <summary>
-/// Each person's choice, per <see cref="NotificationCategory"/>, of when they
-/// are emailed: immediately, in a daily or weekly digest, or not at all. Read
-/// and written from the Notifications section of the account page, and read by
-/// <see cref="NotificationService"/> for each event's recipients. See
-/// <c>.design/notifications.md</c>.
+/// Each person's choice, per <see cref="NotificationCategory"/>, of whether
+/// they see it in the app, and when they are emailed: immediately, in a daily
+/// or weekly digest, or not at all. Read and written from the Notifications
+/// section of the account page, and read by <see cref="NotificationService"/>
+/// for each event's recipients. See <c>.design/notifications.md</c>.
 /// </summary>
 public sealed class NotificationPreferenceService
 {
@@ -20,6 +25,9 @@ public sealed class NotificationPreferenceService
     /// links to the place to turn it off.
     /// </summary>
     public const NotificationDelivery DefaultDelivery = NotificationDelivery.Immediately;
+
+    /// <summary>The choice of someone who has not made one: shown in the app, emailed immediately.</summary>
+    public static readonly NotificationChoice Default = new(InApp: true, DefaultDelivery);
 
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
@@ -39,32 +47,26 @@ public sealed class NotificationPreferenceService
     }
 
     /// <summary>The signed-in person's choice for every category, defaults filled in.</summary>
-    public async Task<Dictionary<NotificationCategory, NotificationDelivery>> GetForCurrentUserAsync(CancellationToken ct = default)
+    public async Task<Dictionary<NotificationCategory, NotificationChoice>> GetForCurrentUserAsync(CancellationToken ct = default)
     {
         var userId = RequireUserId();
         var stored = await _db.UserNotificationSettings.AsNoTracking()
             .Where(s => s.UserId == userId)
-            .ToDictionaryAsync(s => s.Category, s => s.Delivery, ct);
+            .ToDictionaryAsync(s => s.Category, s => new NotificationChoice(s.InApp, s.Delivery), ct);
         return Enum.GetValues<NotificationCategory>()
-            .ToDictionary(c => c, c => stored.GetValueOrDefault(c, DefaultDelivery));
+            .ToDictionary(c => c, c => stored.GetValueOrDefault(c, Default));
     }
 
-    /// <summary>Saves the signed-in person's choice for one category.</summary>
-    public async Task SetForCurrentUserAsync(
+    /// <summary>Saves when the signed-in person is emailed about one category.</summary>
+    public async Task SetEmailForCurrentUserAsync(
         NotificationCategory category, NotificationDelivery delivery, CancellationToken ct = default)
     {
-        if (!Enum.IsDefined(category))
-        {
-            throw new PlanValidationException(new Dictionary<string, string>
-            {
-                ["Category"] = "Pick one of the notification types listed.",
-            });
-        }
+        RequireKnown(category);
         if (!Enum.IsDefined(delivery))
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["Delivery"] = "Pick Immediately, Daily digest, Weekly digest or Off.",
+                ["Delivery"] = "Pick when to be emailed: immediately, in a daily or weekly digest, or not at all.",
             });
         }
 
@@ -76,26 +78,56 @@ public sealed class NotificationPreferenceService
         // tracked either, so a failed save leaves the page's context clean for
         // the next one.
         await _db.Database.ExecuteSqlInterpolatedAsync($"""
-            INSERT INTO user_notification_settings (user_id, organization_id, category, delivery, updated_at)
-            VALUES ({userId}, {orgId}, {category.ToString()}, {delivery.ToString()}, {now})
+            INSERT INTO user_notification_settings (user_id, organization_id, category, delivery, in_app, updated_at)
+            VALUES ({userId}, {orgId}, {category.ToString()}, {delivery.ToString()}, {Default.InApp}, {now})
             ON CONFLICT (user_id, category)
             DO UPDATE SET delivery = EXCLUDED.delivery, updated_at = EXCLUDED.updated_at
             """, ct);
         _logger.LogInformation(
-            "User {UserId} set {Category} notifications to {Delivery}.", userId, category, delivery);
+            "User {UserId} set {Category} emails to {Delivery}.", userId, category, delivery);
+    }
+
+    /// <summary>Saves whether the signed-in person sees one category on their Notifications page.</summary>
+    public async Task SetInAppForCurrentUserAsync(
+        NotificationCategory category, bool inApp, CancellationToken ct = default)
+    {
+        RequireKnown(category);
+        var userId = RequireUserId();
+        var orgId = RequireOrganizationId();
+        var now = _clock.GetUtcNow().UtcDateTime;
+        // The same single-statement upsert as the email choice, leaving that alone.
+        await _db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO user_notification_settings (user_id, organization_id, category, delivery, in_app, updated_at)
+            VALUES ({userId}, {orgId}, {category.ToString()}, {DefaultDelivery.ToString()}, {inApp}, {now})
+            ON CONFLICT (user_id, category)
+            DO UPDATE SET in_app = EXCLUDED.in_app, updated_at = EXCLUDED.updated_at
+            """, ct);
+        _logger.LogInformation(
+            "User {UserId} turned {Category} in-app notifications {State}.", userId, category, inApp ? "on" : "off");
     }
 
     /// <summary>
     /// Each listed person's choice for one category, defaults filled in. Only
     /// people in the current organisation come back: the query filter applies.
     /// </summary>
-    public async Task<Dictionary<int, NotificationDelivery>> GetForUsersAsync(
+    public async Task<Dictionary<int, NotificationChoice>> GetForUsersAsync(
         IReadOnlyCollection<int> userIds, NotificationCategory category, CancellationToken ct = default)
     {
         var stored = await _db.UserNotificationSettings.AsNoTracking()
             .Where(s => s.Category == category && userIds.Contains(s.UserId))
-            .ToDictionaryAsync(s => s.UserId, s => s.Delivery, ct);
-        return userIds.Distinct().ToDictionary(id => id, id => stored.GetValueOrDefault(id, DefaultDelivery));
+            .ToDictionaryAsync(s => s.UserId, s => new NotificationChoice(s.InApp, s.Delivery), ct);
+        return userIds.Distinct().ToDictionary(id => id, id => stored.GetValueOrDefault(id, Default));
+    }
+
+    private static void RequireKnown(NotificationCategory category)
+    {
+        if (!Enum.IsDefined(category))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Category"] = "Pick one of the notification types listed.",
+            });
+        }
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId

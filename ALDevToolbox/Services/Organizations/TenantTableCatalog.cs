@@ -164,6 +164,7 @@ internal static class TenantTableCatalog
             ["organization_usage_snapshots"] = "Derived storage figures, recomputed on a schedule by UsageSnapshotScheduler. Backing them up would restore stale numbers over fresh ones. Never cascade-deleted by a restore: its only parent is organizations.",
             ["email_outbox"] = "Transactional email in flight. Restoring it would re-send mail the recipient either already got or no longer needs, carrying reset and invite links that expired long before the restore. Rows are pruned within a day of sending anyway, and its organization_id is a label for the SiteAdmin list rather than a tenant link - there is no foreign key to cascade. See issue #790.",
             ["notification_digest_items"] = "Notifications waiting for someone's next daily or weekly digest. Restoring them would send old news again in the next digest, and they are deleted as soon as that digest goes out (or after 30 days). See .design/notifications.md.",
+            ["user_notifications"] = "The in-app list of notifications. Restoring it would bring back old news as unread, it is tied to users (which are not restored), and rows are deleted after 30 days anyway. See .design/notifications.md.",
         };
 
     /// <summary>All tables that carry an <c>organization_id</c>.</summary>

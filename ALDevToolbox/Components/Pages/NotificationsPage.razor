@@ -1,0 +1,112 @@
+@page "/notifications"
+@attribute [Authorize]
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Domain.Entities
+@using ALDevToolbox.Services.Notifications
+@inject InAppNotificationService Notifications
+
+<PageTitle>Notifications · AL Workbench</PageTitle>
+
+@*
+    The signed-in person's notifications, newest first (issue #1043): the same
+    events as the notification emails, listed whatever the email choice.
+
+    Named user: a developer coming back to the app who wants to know whether
+    anything they started or set up broke, without searching their inbox. So
+    unread ones stand out, each says what happened in one line, and clicking
+    it goes to the page it is about.
+
+    Static, like the header count beside it: opening one and "Mark all as read"
+    are plain links and form posts that redirect, so the count is right on the
+    next page. See .design/notifications.md.
+*@
+
+<ListPage Title="Notifications"
+          Subtitle="Builds and deployments you started or set up, from the last 30 days."
+          IsLoading="@(_rows is null)"
+          IsEmpty="@(_rows is { Count: 0 })">
+    <Actions>
+        @if (_unread > 0)
+        {
+            <form method="post" action="/notifications/read-all">
+                <AntiforgeryToken />
+                @* Only what this page showed: one that arrives meanwhile stays unread. *@
+                <input type="hidden" name="upToId" value="@_newestId" />
+                <button type="submit" class="btn">
+                    <Icon Name="check-check" Width="15" Height="15" />
+                    <span>Mark all as read</span>
+                </button>
+            </form>
+        }
+        <a class="btn" href="@NotificationService.SettingsPath">
+            <Icon Name="settings" Width="15" Height="15" />
+            <span>Notification settings</span>
+        </a>
+    </Actions>
+    <Empty>
+        <div class="card">
+            <EmptyState Icon="bell" Title="No notifications yet">
+                <Text>
+                    Builds you started or set up show up here when they fail and when they work again.
+                    Deployments show up when they need your approval, finish or fail.
+                </Text>
+                <Action>
+                    <a class="btn" href="@NotificationService.SettingsPath">Choose what you hear about</a>
+                </Action>
+            </EmptyState>
+        </div>
+    </Empty>
+    <ChildContent>
+        <div class="card card--flush">
+            <ul class="notif-list">
+                @foreach (var row in _rows!)
+                {
+                    <li class="@(row.Read ? "notif" : "notif notif--unread")" @key="row.Id">
+                        <a class="notif__link" href="@($"/notifications/{row.Id}/open")">
+                            <span class="notif__icon" aria-hidden="true">
+                                <Icon Name="@CategoryIcon(row.Category)" Width="15" Height="15" />
+                            </span>
+                            <span class="notif__body">
+                                <span class="notif__title">
+                                    @if (!row.Read)
+                                    {
+                                        <span class="u-sr">Unread: </span>
+                                    }
+                                    @row.Title
+                                </span>
+                                @if (!string.IsNullOrWhiteSpace(row.Detail))
+                                {
+                                    <span class="notif__detail">@row.Detail</span>
+                                }
+                            </span>
+                            <span class="notif__when">
+                                <Timestamp Value="@row.CreatedAt" Relative="true" />
+                            </span>
+                        </a>
+                    </li>
+                }
+            </ul>
+        </div>
+    </ChildContent>
+</ListPage>
+
+@code {
+    private List<InAppNotificationRow>? _rows;
+    private int _unread;
+    private int _newestId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _rows = await Notifications.ListForCurrentUserAsync();
+        // The same count as the bell, which also covers unread ones older than the page shows.
+        _unread = await Notifications.CountUnreadForCurrentUserAsync();
+        _newestId = _rows.Count > 0 ? _rows.Max(r => r.Id) : 0;
+    }
+
+    private static string CategoryIcon(NotificationCategory category) => category switch
+    {
+        NotificationCategory.Builds => "workflow",
+        NotificationCategory.Deployments => "rocket",
+        _ => "bell",
+    };
+}

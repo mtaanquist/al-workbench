@@ -122,7 +122,7 @@ public sealed class DeploymentNotifierTests : IDisposable
     }
 
     [Fact]
-    public async Task Without_a_public_base_url_nothing_is_sent()
+    public async Task Without_a_public_base_url_nothing_is_emailed_but_it_shows_in_the_app()
     {
         await SeedAsync();
         var id = await AddDeliveryAsync(ProjectDeliveryStatus.Failed, triggeredBy: _approver, failure: "Install refused.");
@@ -130,6 +130,10 @@ public sealed class DeploymentNotifierTests : IDisposable
         await Notifier(origin: null).NotifyAsync(id);
 
         _email.Sent.Should().BeEmpty();
+        await using var ctx = _db.NewContext();
+        var listed = (await ctx.UserNotifications.ToListAsync()).Should().ContainSingle().Subject;
+        listed.UserId.Should().Be(_approver);
+        listed.Path.Should().StartWith("/pipelines/deployments/");
     }
 
     [Fact]
@@ -164,7 +168,7 @@ public sealed class DeploymentNotifierTests : IDisposable
         _db.OrgContext.CurrentUserId = userId;
         await using var ctx = _db.NewContext();
         await new NotificationPreferenceService(ctx, _db.OrgContext, TimeProvider.System,
-            NullLogger<NotificationPreferenceService>.Instance).SetForCurrentUserAsync(NotificationCategory.Deployments, delivery);
+            NullLogger<NotificationPreferenceService>.Instance).SetEmailForCurrentUserAsync(NotificationCategory.Deployments, delivery);
         _db.OrgContext.CurrentUserId = null;
     }
 

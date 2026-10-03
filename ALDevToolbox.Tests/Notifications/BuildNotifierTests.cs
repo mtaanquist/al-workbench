@@ -117,7 +117,7 @@ public sealed class BuildNotifierTests : IDisposable
         {
             await new NotificationPreferenceService(ctx, _db.OrgContext, TimeProvider.System,
                 NullLogger<NotificationPreferenceService>.Instance)
-                .SetForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Daily);
+                .SetEmailForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Daily);
         }
         _db.OrgContext.CurrentUserId = null;
 

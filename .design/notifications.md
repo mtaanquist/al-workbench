@@ -1,20 +1,22 @@
 # Notifications
 
-Emails that tell people something happened to work they started or look after: a build
-pipeline broke, a deployment waits for approval. Phase 2 of the email work (milestone
-"E-mail notifications"); the message design is `email.md`.
+Notifications tell people something happened to work they started or look after: a build
+pipeline broke, a deployment waits for approval. They are listed in the app and emailed.
+Phase 2 of the email work (milestone "E-mail notifications") added the emails, phase 3 the
+in-app list; the message design is `email.md`.
 
 ## Decisions
 
 Agreed with the maintainer on 2026-10-03:
 
-- **Recipients** are the person who triggered or owns the thing. Phase 3 adds people who
+- **Recipients** are the person who triggered or owns the thing. Phase 4 adds people who
   follow a solution. No organisation-wide broadcasts.
 - **State changes only.** A pipeline that fails every night sends one email when it starts
   failing and one when it works again, not one per night.
-- **Each person chooses per category** when they hear about it: Immediately, Daily digest,
-  Weekly digest or Off. A category with no stored choice is Immediately, so a category
-  added later starts on for everyone without a backfill.
+- **Each person chooses per category**, like GitHub: whether it shows in the app (on or
+  off), and when it is emailed (Immediately, Daily digest, Weekly digest or Off). A category
+  with no stored choice is in the app and Immediately, so a category added later starts on
+  for everyone without a backfill.
 - **Customer-facing email is out of scope.** These emails go to colleagues only.
 
 ## Categories
@@ -24,7 +26,7 @@ Agreed with the maintainer on 2026-10-03:
 | Builds | Build failed, build working again (manual builds and nightly checks; pull request builds are left to GitHub) | #1035 |
 | Deployments | Waiting for approval, deployed, failed | #1036 |
 
-Phase 3 adds Upgrades and Solutions.
+Phase 4 adds Upgrades and Solutions.
 
 ## How it works
 
@@ -32,25 +34,50 @@ Phase 3 adds Upgrades and Solutions.
   per person and category). The account page's Notifications section edits them; each
   choice saves on its own.
 - A caller (a worker, usually) builds a `Notification`: its category, the recipient user
-  ids, a one-line digest entry, and a function that renders the email for one recipient.
+  ids, a one-line summary (title, detail, the path of the page it is about, solution), and
+  a function that renders the email for one recipient.
   `NotificationService.NotifyAsync` then, per active recipient in the current
   organisation:
-  - Immediately: renders the email and puts it on the outbox, labelled with the
+  - In app on: stores the summary in `user_notifications` (#1042), whatever the email
+    choice;
+  - Email Immediately: renders the email and puts it on the outbox, labelled with the
     category's email purpose so the SiteAdmin Delivery tab names it;
-  - Daily or Weekly: stores the digest entry in `notification_digest_items` for the
+  - Email Daily or Weekly: stores the summary, with an absolute link, in `notification_digest_items` for the
     digest sender (#1037);
-  - Off: nothing.
+  - Email Off: no email.
 - An urgent notification (`Urgent = true`: a deployment waiting for approval) treats a
   digest choice as Immediately, because someone is waiting on the recipient. Only Off stops
-  it, and the account page says so.
+  the email, and the account page says so.
 - It never throws for a failed send: the notification is a side effect of work that
   already succeeded.
-- Nothing is sent when `PUBLIC_BASE_URL` is unset. A background sender has no request
-  host to fall back on, and a notification whose links point nowhere is worse than none.
-  The startup warning says so.
+- No email is sent or kept for a digest when `PUBLIC_BASE_URL` is unset. A background
+  sender has no request host to fall back on, and an email whose links point nowhere is
+  worse than none. The startup warning says so. The in-app list still fills: it stores
+  paths, not addresses.
+- In-app rows and digest items are saved through a context of their own, so the calling
+  worker's pending changes are never saved with them. The two save separately, so a
+  problem with one kind does not lose the other.
+- In-app notifications are deleted after 30 days, by the digest scheduler's run for each
+  organisation (it already prunes digest items on the same window).
 - Every notification email passes `SettingsUrl` to `EmailLayout`, which puts a "Change
   which emails you get" link in the footer, pointing at `/account?section=notifications`.
 - Every notification email has an `EmailPreviews` entry like any other email.
+
+## In the app (#1042, #1043)
+
+- Every notification is stored per recipient in `user_notifications` unless they turned
+  In app off for its category. Rows hold a path within the app, not an address.
+- A bell in the top bar links to `/notifications` and shows the unread count (99+ above
+  99). The shell is static, so the count is the one at page load; there is no live push,
+  which would need a held connection on every page.
+- `/notifications` lists the person's own notifications newest first (at most 200; they
+  are pruned after 30 days anyway), unread ones in bold with a dot. Opening one goes
+  through `/notifications/{id}/open`, which marks it read and redirects to its page;
+  "Mark all as read" posts to `/notifications/read-all`. Both redirect, so the count is
+  current on the next page.
+- `InAppNotificationService` names the signed-in user in every query on top of the
+  organisation filter, and reads through the context factory because the count renders
+  in the layout beside the page's own queries.
 
 ## Builds (#1035)
 

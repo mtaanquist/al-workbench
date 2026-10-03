@@ -17,6 +17,9 @@ internal sealed class UserNotificationSettingConfiguration : IEntityTypeConfigur
             .HasColumnName("category").HasConversion<string>().HasMaxLength(32).IsRequired();
         entity.Property(e => e.Delivery)
             .HasColumnName("delivery").HasConversion<string>().HasMaxLength(16).IsRequired();
+        // The database default fills existing rows; the sentinel keeps EF from
+        // reading an explicit false as "not set" and storing the default instead.
+        entity.Property(e => e.InApp).HasColumnName("in_app").HasDefaultValue(true).HasSentinel(true).IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
 
         // One choice per person per category: the upsert key, and the lookup

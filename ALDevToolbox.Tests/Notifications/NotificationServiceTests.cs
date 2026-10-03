@@ -13,9 +13,9 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace ALDevToolbox.Tests.Notifications;
 
 /// <summary>
-/// Notification settings and the sender (issue #1034): each recipient gets a
-/// notification the way they chose for its category, and nothing about a
-/// failed send reaches the caller.
+/// Notification settings and the sender (issues #1034 and #1042): each
+/// recipient gets a notification the way they chose for its category, in the
+/// app and by email, and nothing about a failed send reaches the caller.
 /// </summary>
 public sealed class NotificationServiceTests : IDisposable
 {
@@ -34,7 +34,7 @@ public sealed class NotificationServiceTests : IDisposable
     // ---- preferences -------------------------------------------------------
 
     [Fact]
-    public async Task Every_category_starts_on_immediately()
+    public async Task Every_category_starts_in_app_and_emailed_immediately()
     {
         var userId = await SeedUserAsync("alex@cronus.example");
         _db.OrgContext.CurrentUserId = userId;
@@ -43,7 +43,7 @@ public sealed class NotificationServiceTests : IDisposable
         var choices = await Preferences(ctx).GetForCurrentUserAsync();
 
         choices.Should().HaveCount(Enum.GetValues<NotificationCategory>().Length);
-        choices.Values.Should().AllSatisfy(d => d.Should().Be(NotificationDelivery.Immediately));
+        choices.Values.Should().AllSatisfy(c => c.Should().Be(new NotificationChoice(true, NotificationDelivery.Immediately)));
     }
 
     [Fact]
@@ -53,16 +53,44 @@ public sealed class NotificationServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = userId;
         await using (var ctx = _db.NewContext())
         {
-            await Preferences(ctx).SetForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Daily);
+            await Preferences(ctx).SetEmailForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Daily);
         }
         await using (var ctx = _db.NewContext())
         {
-            await Preferences(ctx).SetForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Off);
+            await Preferences(ctx).SetEmailForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Off);
         }
 
         await using var read = _db.NewContext();
-        (await Preferences(read).GetForCurrentUserAsync())[NotificationCategory.Builds].Should().Be(NotificationDelivery.Off);
+        (await Preferences(read).GetForCurrentUserAsync())[NotificationCategory.Builds].Email.Should().Be(NotificationDelivery.Off);
         (await read.UserNotificationSettings.CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task The_in_app_and_email_choices_are_saved_without_touching_each_other()
+    {
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("alex@cronus.example");
+        await using (var ctx = _db.NewContext())
+        {
+            await Preferences(ctx).SetEmailForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Weekly);
+            await Preferences(ctx).SetInAppForCurrentUserAsync(NotificationCategory.Builds, false);
+            await Preferences(ctx).SetInAppForCurrentUserAsync(NotificationCategory.Deployments, false);
+        }
+
+        await using var read = _db.NewContext();
+        var choices = await Preferences(read).GetForCurrentUserAsync();
+        choices[NotificationCategory.Builds].Should().Be(new NotificationChoice(false, NotificationDelivery.Weekly));
+        choices[NotificationCategory.Deployments].Should().Be(new NotificationChoice(false, NotificationDelivery.Immediately));
+    }
+
+    [Fact]
+    public async Task An_unknown_category_is_refused_for_the_in_app_choice_too()
+    {
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("alex@cronus.example");
+        await using var ctx = _db.NewContext();
+
+        var act = () => Preferences(ctx).SetInAppForCurrentUserAsync((NotificationCategory)42, true);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Category");
     }
 
     [Fact]
@@ -71,7 +99,7 @@ public sealed class NotificationServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = await SeedUserAsync("alex@cronus.example");
         await using var ctx = _db.NewContext();
 
-        var act = () => Preferences(ctx).SetForCurrentUserAsync(NotificationCategory.Builds, (NotificationDelivery)42);
+        var act = () => Preferences(ctx).SetEmailForCurrentUserAsync(NotificationCategory.Builds, (NotificationDelivery)42);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Delivery");
     }
@@ -82,7 +110,7 @@ public sealed class NotificationServiceTests : IDisposable
         _db.OrgContext.CurrentUserId = await SeedUserAsync("alex@cronus.example");
         await using var ctx = _db.NewContext();
 
-        var act = () => Preferences(ctx).SetForCurrentUserAsync((NotificationCategory)42, NotificationDelivery.Off);
+        var act = () => Preferences(ctx).SetEmailForCurrentUserAsync((NotificationCategory)42, NotificationDelivery.Off);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Category");
     }
@@ -95,14 +123,14 @@ public sealed class NotificationServiceTests : IDisposable
         await using var second = _db.NewContext();
 
         await Task.WhenAll(
-            Preferences(first).SetForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Daily),
-            Preferences(second).SetForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Weekly));
+            Preferences(first).SetEmailForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Daily),
+            Preferences(second).SetEmailForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Weekly));
 
         await using var read = _db.NewContext();
         (await read.UserNotificationSettings.CountAsync()).Should().Be(1);
         // The same page can save again afterwards: nothing failed is left tracked.
-        await Preferences(first).SetForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Off);
-        (await Preferences(read).GetForCurrentUserAsync())[NotificationCategory.Builds].Should().Be(NotificationDelivery.Off);
+        await Preferences(first).SetEmailForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Off);
+        (await Preferences(read).GetForCurrentUserAsync())[NotificationCategory.Builds].Email.Should().Be(NotificationDelivery.Off);
     }
 
     // ---- sending -----------------------------------------------------------
@@ -166,6 +194,50 @@ public sealed class NotificationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Every_recipient_sees_it_in_the_app_whatever_their_email_choice()
+    {
+        var now = await SeedUserAsync("now@cronus.example");
+        var weekly = await SeedUserAsync("weekly@cronus.example");
+        var noEmail = await SeedUserAsync("noemail@cronus.example");
+        await SetChoiceAsync(weekly, NotificationDelivery.Weekly);
+        await SetChoiceAsync(noEmail, NotificationDelivery.Off);
+
+        await NotifyAsync(Notification(now, weekly, noEmail));
+
+        await using var ctx = _db.NewContext();
+        var listed = await ctx.UserNotifications.OrderBy(n => n.UserId).ToListAsync();
+        listed.Select(n => n.UserId).Should().Equal(now, weekly, noEmail);
+        listed.Should().AllSatisfy(n =>
+        {
+            n.Title.Should().Be("Build failed: CRONUS Coffee - Main");
+            n.Detail.Should().Be("error AL0118");
+            n.Path.Should().Be("/pipelines/1");
+            n.SolutionName.Should().Be("CRONUS Coffee");
+            n.Category.Should().Be(NotificationCategory.Builds);
+            n.OrganizationId.Should().Be(TestDb.DefaultOrgId);
+            n.ReadAt.Should().BeNull();
+        });
+    }
+
+    [Fact]
+    public async Task In_app_off_lists_nothing_but_still_emails()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        _db.OrgContext.CurrentUserId = alex;
+        await using (var prefs = _db.NewContext())
+        {
+            await Preferences(prefs).SetInAppForCurrentUserAsync(NotificationCategory.Builds, false);
+        }
+        _db.OrgContext.CurrentUserId = null;
+
+        await NotifyAsync(Notification(alex));
+
+        _email.Sent.Select(s => s.To).Should().Equal("alex@cronus.example");
+        await using var ctx = _db.NewContext();
+        (await ctx.UserNotifications.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task Disabled_and_pending_people_get_nothing()
     {
         var disabled = await SeedUserAsync("gone@cronus.example", status: UserStatus.Disabled);
@@ -174,6 +246,8 @@ public sealed class NotificationServiceTests : IDisposable
         await NotifyAsync(Notification(disabled, pending));
 
         _email.Sent.Should().BeEmpty();
+        await using var ctx = _db.NewContext();
+        (await ctx.UserNotifications.AnyAsync()).Should().BeFalse();
     }
 
     [Fact]
@@ -187,13 +261,30 @@ public sealed class NotificationServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Without_a_public_base_url_nothing_is_sent()
+    public async Task Without_a_public_base_url_nothing_is_emailed_but_it_shows_in_the_app()
     {
-        var alex = await SeedUserAsync("alex@cronus.example");
+        var now = await SeedUserAsync("alex@cronus.example");
+        var daily = await SeedUserAsync("sam@cronus.example");
+        await SetChoiceAsync(daily, NotificationDelivery.Daily);
 
-        await NotifyAsync(Notification(alex), origin: null);
+        await NotifyAsync(Notification(now, daily), origin: null);
 
         _email.Sent.Should().BeEmpty();
+        await using var ctx = _db.NewContext();
+        (await ctx.NotificationDigestItems.AnyAsync()).Should().BeFalse();
+        (await ctx.UserNotifications.Select(n => n.UserId).OrderBy(id => id).ToListAsync()).Should().Equal(now, daily);
+    }
+
+    [Fact]
+    public async Task A_digest_item_links_to_the_page_on_the_public_address()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        await SetChoiceAsync(alex, NotificationDelivery.Daily);
+
+        await NotifyAsync(Notification(alex));
+
+        await using var ctx = _db.NewContext();
+        (await ctx.NotificationDigestItems.SingleAsync()).Url.Should().Be($"{Origin}/pipelines/1");
     }
 
     [Fact]
@@ -247,7 +338,7 @@ public sealed class NotificationServiceTests : IDisposable
         await SetChoiceAsync(userId, NotificationDelivery.Weekly);
         await using var ctx = _db.NewContext();
         // PostgreSQL refuses a NUL character in text, so this item fails to save.
-        var unsavable = Notification(userId) with { Digest = new NotificationDigestEntry("Bad\0title", null, Origin, null) };
+        var unsavable = Notification(userId) with { Summary = new NotificationSummary("Bad\0title", null, "/", null) };
 
         await NotifyAsync(unsavable, ctx: ctx);
 
@@ -255,6 +346,7 @@ public sealed class NotificationServiceTests : IDisposable
         await ctx.SaveChangesAsync();
         await using var read = _db.NewContext();
         (await read.NotificationDigestItems.CountAsync()).Should().Be(0);
+        (await read.UserNotifications.CountAsync()).Should().Be(0);
         (await read.Users.SingleAsync(u => u.Id == userId)).DisplayName.Should().Be("Renamed");
     }
 
@@ -285,7 +377,7 @@ public sealed class NotificationServiceTests : IDisposable
     private static Notification Notification(params int[] recipients) => new(
         NotificationCategory.Builds,
         recipients,
-        new NotificationDigestEntry("Build failed: CRONUS Coffee - Main", "error AL0118", $"{Origin}/pipelines/1", "CRONUS Coffee"),
+        new NotificationSummary("Build failed: CRONUS Coffee - Main", "error AL0118", "/pipelines/1", "CRONUS Coffee"),
         (_, recipient, _) => Task.FromResult(new EmailContent($"For {recipient.DisplayName}", "<p>Body</p>", "Body")));
 
     private async Task NotifyAsync(
@@ -306,7 +398,7 @@ public sealed class NotificationServiceTests : IDisposable
     {
         _db.OrgContext.CurrentUserId = userId;
         await using var ctx = _db.NewContext();
-        await Preferences(ctx).SetForCurrentUserAsync(NotificationCategory.Builds, delivery);
+        await Preferences(ctx).SetEmailForCurrentUserAsync(NotificationCategory.Builds, delivery);
         _db.OrgContext.CurrentUserId = null;
     }
 

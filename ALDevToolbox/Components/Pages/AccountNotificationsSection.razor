@@ -1,7 +1,8 @@
 @*
     The Notifications section of the account page: for each kind of
-    notification email, when it reaches you. Each choice saves on its own the
-    moment it changes, like the other per-row settings in the app.
+    notification, whether it is listed on your Notifications page and when it
+    is emailed. Each choice saves on its own the moment it changes, like the
+    other per-row settings in the app.
     See .design/notifications.md.
 *@
 
@@ -16,10 +17,11 @@
 <section class="card">
     <div class="card__head">
         <div>
-            <h2 class="card__title">Email notifications</h2>
+            <h2 class="card__title">Notifications</h2>
             <p class="card__sub">
-                Emails about builds and deployments you started or set up. Choose when each kind reaches you;
-                changes save as you make them. Digests arrive at 06:00 UTC, the weekly one on Mondays.
+                About builds and deployments you started or set up. Choose whether each kind shows on your
+                <a href="/notifications">Notifications page</a> and when it is emailed; changes save as you make them.
+                Digests arrive at 06:00 UTC, the weekly one on Mondays.
             </p>
         </div>
     </div>
@@ -35,7 +37,7 @@
             <div class="card__body">
                 <Alert Tone="AlertTone.Info" Role="status">
                     <span>
-                        This site cannot send notification emails yet, so none are sent whatever you choose here.
+                        Email is not set up on this site yet, so notifications only show on your Notifications page.
                         Ask a site administrator to set up email.
                     </span>
                 </Alert>
@@ -46,17 +48,30 @@
             {
                 var id = $"notify-{category.ToString().ToLowerInvariant()}";
                 <SettingRow Name="@Name(category)" Hint="@Hint(category)">
+                    @* Keyed on the failure count, so a save that fails rebuilds the
+                       switch from the stored choice rather than leaving it flipped. *@
+                    <Switch @key="@($"{category}-{_failures}")"
+                            Name="@($"{id}-in-app")"
+                            Label="On Notifications page"
+                            AriaLabel="@($"Show {Name(category)} on your Notifications page")"
+                            Checked="_choices[category].InApp"
+                            CheckedChanged="@(v => SaveInAppAsync(category, v))"
+                            Disabled="@_saving" />
                     <SelectBox>
                         <select class="select" id="@id" aria-label="@($"{Name(category)} emails")"
-                                disabled="@_saving"
-                                @bind:get="_choices[category]"
-                                @bind:set="(NotificationDelivery d) => SaveAsync(category, d)">
+                                disabled="@(_saving || !_canSend)"
+                                @bind:get="_choices[category].Email"
+                                @bind:set="(NotificationDelivery d) => SaveEmailAsync(category, d)">
                             @foreach (var delivery in Enum.GetValues<NotificationDelivery>())
                             {
                                 <option value="@delivery">@Label(delivery)</option>
                             }
                         </select>
                     </SelectBox>
+                    @if (!_choices[category].InApp && (_choices[category].Email == NotificationDelivery.Off || !_canSend))
+                    {
+                        <span class="field-warn">You will not hear about @Name(category).ToLowerInvariant() anywhere.</span>
+                    }
                     <FeedbackLine Ok="@(_saved == category ? "Saved" : null)"
                                   Error="@(_failed == category ? _error : null)" />
                 </SettingRow>
@@ -66,12 +81,13 @@
 </section>
 
 @code {
-    private Dictionary<NotificationCategory, NotificationDelivery>? _choices;
+    private Dictionary<NotificationCategory, NotificationChoice>? _choices;
     private bool _canSend;
     private bool _saving;
     private NotificationCategory? _saved;
     private NotificationCategory? _failed;
     private string? _error;
+    private int _failures;
 
     protected override async Task OnInitializedAsync()
     {
@@ -83,7 +99,18 @@
     /// Bound with get/set rather than value plus onchange so a failed save puts
     /// the dropdown back on the choice that is actually stored.
     /// </summary>
-    private async Task SaveAsync(NotificationCategory category, NotificationDelivery delivery)
+    private Task SaveEmailAsync(NotificationCategory category, NotificationDelivery delivery) =>
+        SaveAsync(category, c => c with { Email = delivery },
+            ct => Preferences.SetEmailForCurrentUserAsync(category, delivery, ct));
+
+    private Task SaveInAppAsync(NotificationCategory category, bool inApp) =>
+        SaveAsync(category, c => c with { InApp = inApp },
+            ct => Preferences.SetInAppForCurrentUserAsync(category, inApp, ct));
+
+    private async Task SaveAsync(
+        NotificationCategory category,
+        Func<NotificationChoice, NotificationChoice> change,
+        Func<CancellationToken, Task> save)
     {
         if (_choices is null) return;
         _saving = true;
@@ -91,18 +118,20 @@
         _failed = null;
         try
         {
-            await Preferences.SetForCurrentUserAsync(category, delivery);
-            _choices[category] = delivery;
+            await save(CancellationToken.None);
+            _choices[category] = change(_choices[category]);
             _saved = category;
         }
         catch (PlanValidationException ex)
         {
+            _failures++;
             _failed = category;
             _error = ex.Errors.Values.FirstOrDefault();
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Saving {Category} notification setting failed.", category);
+            _failures++;
             _failed = category;
             _error = "Could not save. Try again in a moment.";
         }
@@ -122,18 +151,18 @@
     private static string Hint(NotificationCategory category) => category switch
     {
         NotificationCategory.Builds =>
-            "A build pipeline you started or created starts failing, or works again. Also covers the nightly check against upcoming Business Central versions.",
+            "When a build pipeline you started or set up first fails, and again when it works. Also covers the nightly check against upcoming Business Central versions.",
         NotificationCategory.Deployments =>
-            "A deployment needs your approval, finishes, or fails. Approval requests arrive straight away even with a digest chosen.",
+            "A deployment needs your approval, finishes, or fails. Approval requests are emailed straight away even with a digest chosen.",
         _ => string.Empty,
     };
 
     private static string Label(NotificationDelivery delivery) => delivery switch
     {
-        NotificationDelivery.Immediately => "Immediately",
-        NotificationDelivery.Daily => "Daily digest",
-        NotificationDelivery.Weekly => "Weekly digest",
-        NotificationDelivery.Off => "Off",
+        NotificationDelivery.Immediately => "Email immediately",
+        NotificationDelivery.Daily => "Email in a daily digest",
+        NotificationDelivery.Weekly => "Email in a weekly digest",
+        NotificationDelivery.Off => "No email",
         _ => delivery.ToString(),
     };
 }
