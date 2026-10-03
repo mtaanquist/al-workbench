@@ -9,9 +9,12 @@ namespace ALDevToolbox.Services.Notifications;
 /// <summary>
 /// Tells the person down to check an environment on a planned upgrade that it has
 /// reached the target version (issue #1047), or the person who planned the upgrade
-/// when nobody is assigned. Each line is told once: the stamp on it is claimed before
-/// sending, so whichever read noticed the new version, and however often the sweep
-/// runs, nobody hears it twice. See <c>.design/notifications.md</c>.
+/// when nobody is assigned. Each line is told at most once per assignee and target:
+/// the stamp on it is claimed before sending, so however often the sweep runs nobody
+/// hears it twice. A crash between the claim and the send loses that notice, which is
+/// the better failure for an advisory email than a duplicate. Changing the assignee or
+/// the target clears the stamp (<see cref="EnvironmentUpgradeService"/>). See
+/// <c>.design/notifications.md</c>.
 /// </summary>
 public sealed class UpgradeCheckNotifier
 {
@@ -50,7 +53,9 @@ public sealed class UpgradeCheckNotifier
     {
         var candidates = await _db.OeEnvironmentUpgradeLines.AsNoTracking()
             .Where(l => l.IsOpen && l.CheckedAt == null && l.UpdatedNotifiedAt == null
-                        && l.Environment!.Version != null && l.Environment.MissingSince == null)
+                        && l.Project!.DeletedAt == null
+                        && l.Environment!.Version != null && l.Environment.MissingSince == null
+                        && l.Environment.SoftDeletedOn == null)
             .Select(l => new
             {
                 l.Id,
@@ -59,13 +64,20 @@ public sealed class UpgradeCheckNotifier
                 Assigned = l.AssigneeUserId != null,
                 Recipient = l.AssigneeUserId ?? l.Upgrade!.CreatedByUserId,
                 l.Environment!.Version,
+                l.Environment.Status,
+                l.Environment.BcNextUpdateStatus,
                 l.Upgrade!.TargetVersion,
                 UpgradeName = l.Upgrade.Name,
                 EnvironmentName = l.Environment.Name,
                 SolutionName = l.Project!.Name,
             })
             .ToListAsync(ct);
-        var ready = candidates.Where(c => EnvironmentUpgradeLineState.IsOnTarget(c.Version, c.TargetVersion)).ToList();
+        // The page's rule for Updated: on target and no longer busy. A later sweep picks up
+        // a line still running.
+        var ready = candidates
+            .Where(c => !EnvironmentUpgradeLineState.IsUpdating(c.Status, c.BcNextUpdateStatus)
+                        && EnvironmentUpgradeLineState.IsOnTarget(c.Version, c.TargetVersion))
+            .ToList();
         if (ready.Count == 0) return 0;
 
         var organizationName = await _db.Organizations.AsNoTracking()

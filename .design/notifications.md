@@ -151,6 +151,14 @@ mirrored version has reached the target, by the same Major.Minor rule the page u
 once whichever refresh noticed the new version. A line added after its environment was
 already updated is told on the next sweep, which is still news to its checker.
 
+A line is not told while the environment is still busy (the page shows Running), nor when
+its solution is in the bin or Business Central deleted the environment. Assigning someone
+new, or changing the upgrade's target, clears the stamp so the new checker or the new
+target is announced; reopening a closed upgrade stamps lines already on target, and the
+migration that added the column stamped those already on target then, so neither sends
+old news. A crash between the claim and the send loses that one notice: at most once is
+the better failure for an advisory email than a duplicate.
+
 ## Digests (#1037)
 
 `NotificationDigestScheduler` (a `PolledScheduler`, `DISABLE_NOTIFICATION_DIGEST_SCHEDULER`)

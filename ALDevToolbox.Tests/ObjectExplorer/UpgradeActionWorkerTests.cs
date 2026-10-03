@@ -1,3 +1,4 @@
+using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -339,7 +340,7 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task A_line_already_checked_or_on_a_closed_upgrade_sends_nothing()
+    public async Task A_line_on_a_closed_upgrade_sends_nothing()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
         var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
@@ -353,6 +354,129 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         await _f.Worker().NotifyReadyToCheckAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
 
         _f.Emails.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_line_already_checked_sends_nothing()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeEnvironmentUpgradeLines.Where(l => l.UpgradeId == upgradeId)
+                .ExecuteUpdateAsync(s => s.SetProperty(l => l.CheckedAt, DateTime.UtcNow));
+        }
+
+        await NotifyReadyAsync();
+
+        _f.Emails.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_binned_solution_or_a_deleted_environment_sends_nothing()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeProjectEnvironments.Where(e => e.Id == envId)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.SoftDeletedOn, DateTime.UtcNow));
+        }
+        await NotifyReadyAsync();
+        _f.Emails.Sent.Should().BeEmpty("Business Central deleted the environment");
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeProjectEnvironments.Where(e => e.Id == envId)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.SoftDeletedOn, (DateTime?)null));
+            await ctx.OeProjects.Where(p => p.Id == projectId)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        }
+        await NotifyReadyAsync();
+        _f.Emails.Sent.Should().BeEmpty("the solution is in the bin");
+    }
+
+    [Fact]
+    public async Task An_environment_still_updating_waits_until_it_is_done()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeProjectEnvironments.Where(e => e.Id == envId)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.BcNextUpdateStatus, "Running"));
+        }
+
+        await NotifyReadyAsync();
+        _f.Emails.Sent.Should().BeEmpty("the page still shows it as Running");
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeProjectEnvironments.Where(e => e.Id == envId)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.BcNextUpdateStatus, (string?)null));
+        }
+        await NotifyReadyAsync();
+        _f.Emails.Sent.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Someone_assigned_after_the_notice_hears_too()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: null);
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await NotifyReadyAsync();
+
+        int lineId;
+        await using (var ctx = _f.Db.NewContext())
+        {
+            lineId = await ctx.OeEnvironmentUpgradeLines.Where(l => l.UpgradeId == upgradeId).Select(l => l.Id).SingleAsync();
+        }
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).AssignAsync(lineId, UpgradeActionTestFixture.FlagUserId);
+        }
+        await NotifyReadyAsync();
+
+        _f.Emails.Sent.Select(s => s.To).Should().Equal("owner@example.com", "upgrade@example.com");
+    }
+
+    [Fact]
+    public async Task Changing_the_target_announces_the_new_one()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.0", assignee: UpgradeActionTestFixture.FlagUserId);
+        await NotifyReadyAsync();
+        _f.Emails.Sent.Should().ContainSingle("27.5 is already past the mistyped target");
+
+        await AsOwnerAsync(ctx => _f.Upgrades(ctx).UpdateDetailsAsync(upgradeId, "Spring release", "27.6", null, null));
+        await NotifyReadyAsync();
+        _f.Emails.Sent.Should().ContainSingle("the environment has not reached 27.6 yet");
+
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await NotifyReadyAsync();
+        _f.Emails.Sent.Should().HaveCount(2);
+    }
+
+    private Task<int> NotifyReadyAsync() =>
+        _f.Worker().NotifyReadyToCheckAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+    private async Task AsOwnerAsync(Func<AppDbContext, Task> act)
+    {
+        var before = _f.Db.OrgContext.CurrentUserId;
+        _f.Db.OrgContext.CurrentUserId = UpgradeActionTestFixture.OwnerUserId;
+        try
+        {
+            await using var ctx = _f.Db.NewContext();
+            await act(ctx);
+        }
+        finally
+        {
+            _f.Db.OrgContext.CurrentUserId = before;
+        }
     }
 
     private async Task<int> PlanUpgradeAsync(int projectId, int envId, string target, int? assignee)

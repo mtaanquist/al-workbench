@@ -159,9 +159,12 @@ public static class EnvironmentUpgradeLineState
     /// <c>UpdateWatch.IsUpdating</c>, the watch after Start update (#982); keep the two
     /// in step.
     /// </summary>
-    internal static bool IsUpdating(UpgradeFleetRow row) =>
-        BcEnvironmentStatus.Classify(row.Status) == BcEnvironmentReadiness.Busy
-        || ProjectConnectionService.IsUpdateUnderWay(row.NextUpdateStatus);
+    internal static bool IsUpdating(UpgradeFleetRow row) => IsUpdating(row.Status, row.NextUpdateStatus);
+
+    /// <summary>True while Business Central is busy with the environment or its update is under way.</summary>
+    internal static bool IsUpdating(string? status, string? nextUpdateStatus) =>
+        BcEnvironmentStatus.Classify(status) == BcEnvironmentReadiness.Busy
+        || ProjectConnectionService.IsUpdateUnderWay(nextUpdateStatus);
 
     /// <summary>True when <paramref name="version"/> is at or past the target release, by Major.Minor.</summary>
     internal static bool IsOnTarget(string? version, string targetVersion) =>
