@@ -30,6 +30,8 @@
         {
             <form method="post" action="/notifications/read-all">
                 <AntiforgeryToken />
+                @* Only what this page showed: one that arrives meanwhile stays unread. *@
+                <input type="hidden" name="upToId" value="@_newestId" />
                 <button type="submit" class="btn">
                     <Icon Name="check-check" Width="15" Height="15" />
                     <span>Mark all as read</span>
@@ -45,8 +47,8 @@
         <div class="card">
             <EmptyState Icon="bell" Title="No notifications yet">
                 <Text>
-                    When a build you started or set up fails or works again, or a deployment needs
-                    your approval, finishes or fails, it shows up here.
+                    Builds you started or set up show up here when they fail and when they work again.
+                    Deployments show up when they need your approval, finish or fail.
                 </Text>
                 <Action>
                     <a class="btn" href="@NotificationService.SettingsPath">Choose what you hear about</a>
@@ -91,11 +93,14 @@
 @code {
     private List<InAppNotificationRow>? _rows;
     private int _unread;
+    private int _newestId;
 
     protected override async Task OnInitializedAsync()
     {
         _rows = await Notifications.ListForCurrentUserAsync();
-        _unread = _rows.Count(r => !r.Read);
+        // The same count as the bell, which also covers unread ones older than the page shows.
+        _unread = await Notifications.CountUnreadForCurrentUserAsync();
+        _newestId = _rows.Count > 0 ? _rows.Max(r => r.Id) : 0;
     }
 
     private static string CategoryIcon(NotificationCategory category) => category switch

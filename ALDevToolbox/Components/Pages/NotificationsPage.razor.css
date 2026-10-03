@@ -53,6 +53,9 @@
     white-space: nowrap;
 }
 
+.notif--unread .notif__link { background: var(--primary-weak); }
+.notif--unread .notif__link:hover { background: var(--primary-weak-strong); }
+
 .notif--unread .notif__title {
     color: var(--ink);
     font-weight: var(--fw-semibold);

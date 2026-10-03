@@ -105,20 +105,35 @@ public sealed class InAppNotificationServiceTests : IDisposable
         var alex = await SeedUserAsync("alex@cronus.example");
         var sam = await SeedUserAsync("sam@cronus.example");
         await AddAsync(alex, "One", Monday);
-        await AddAsync(alex, "Two", Monday);
         await AddAsync(alex, "Already read", Monday, readAt: Monday);
+        var newest = await AddAsync(alex, "Two", Monday);
         await AddAsync(sam, "Sam's", Monday);
         _db.OrgContext.CurrentUserId = alex;
 
-        (await Service().MarkAllReadForCurrentUserAsync()).Should().Be(2);
+        (await Service().MarkAllReadForCurrentUserAsync(newest)).Should().Be(2);
 
         (await Service().CountUnreadForCurrentUserAsync()).Should().Be(0);
         _db.OrgContext.CurrentUserId = sam;
         (await Service().CountUnreadForCurrentUserAsync()).Should().Be(1);
     }
 
+    [Fact]
+    public async Task One_that_arrived_after_the_page_loaded_stays_unread()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        var shown = await AddAsync(alex, "Shown", Monday);
+        await AddAsync(alex, "Arrived later", Monday.AddMinutes(1));
+        _db.OrgContext.CurrentUserId = alex;
+
+        (await Service().MarkAllReadForCurrentUserAsync(upToId: shown)).Should().Be(1);
+
+        (await Service().ListForCurrentUserAsync()).Single(r => !r.Read).Title.Should().Be("Arrived later");
+    }
+
     [Theory]
     [InlineData("/pipelines/1?build=7", true)]
+    [InlineData("/pipelines/1\t", false)]
+    [InlineData("/pipelines/1\r\nLocation: x", false)]
     [InlineData("/", true)]
     [InlineData("//evil.example/x", false)]
     [InlineData("/\\evil.example", false)]

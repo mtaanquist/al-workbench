@@ -10,7 +10,6 @@ public sealed record InAppNotificationRow(
     NotificationCategory Category,
     string Title,
     string? Detail,
-    string? SolutionName,
     DateTime CreatedAt,
     bool Read);
 
@@ -69,7 +68,7 @@ public sealed class InAppNotificationService
             .ThenByDescending(n => n.Id)
             .Take(PageSize)
             .Select(n => new InAppNotificationRow(
-                n.Id, n.Category, n.Title, n.Detail, n.SolutionName, n.CreatedAt, n.ReadAt != null))
+                n.Id, n.Category, n.Title, n.Detail, n.CreatedAt, n.ReadAt != null))
             .ToListAsync(ct);
     }
 
@@ -94,14 +93,18 @@ public sealed class InAppNotificationService
         return path;
     }
 
-    /// <summary>Marks every one of the signed-in person's notifications read. Returns how many changed.</summary>
-    public async Task<int> MarkAllReadForCurrentUserAsync(CancellationToken ct = default)
+    /// <summary>
+    /// Marks the signed-in person's notifications read, up to and including id
+    /// <paramref name="upToId"/>: the newest one the page showed, so one that
+    /// arrived after the page loaded stays unread. Returns how many changed.
+    /// </summary>
+    public async Task<int> MarkAllReadForCurrentUserAsync(int upToId, CancellationToken ct = default)
     {
         var userId = RequireUserId();
         var now = _clock.GetUtcNow().UtcDateTime;
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
         var marked = await db.UserNotifications
-            .Where(n => n.UserId == userId && n.ReadAt == null)
+            .Where(n => n.UserId == userId && n.ReadAt == null && n.Id <= upToId)
             .ExecuteUpdateAsync(s => s.SetProperty(n => n.ReadAt, now), ct);
         _logger.LogInformation("User {UserId} marked {Count} notifications read.", userId, marked);
         return marked;

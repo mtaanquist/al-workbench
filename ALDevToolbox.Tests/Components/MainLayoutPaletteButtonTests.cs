@@ -39,6 +39,9 @@ public sealed class MainLayoutPaletteButtonTests : IDisposable
             opts.UseNpgsql(_db.ConnectionString).AddInterceptors(_db.CommandTracker));
         _db.AddStorageServices(_ctx.Services);
         _ctx.Services.AddScoped<OrganizationConfigService>();
+        _ctx.Services.AddSingleton<IDbContextFactory<ALDevToolbox.Data.AppDbContext>>(_db.NewContextFactory());
+        _ctx.Services.AddSingleton(TimeProvider.System);
+        _ctx.Services.AddScoped<ALDevToolbox.Services.Notifications.InAppNotificationService>();
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddSingleton<Microsoft.AspNetCore.Http.IHttpContextAccessor>(
             new Microsoft.AspNetCore.Http.HttpContextAccessor());
@@ -119,5 +122,69 @@ public sealed class MainLayoutPaletteButtonTests : IDisposable
         cut.FindAll(".cmdp-open").Should().BeEmpty(
             "there is nowhere for a signed-out visitor to jump to, which is also why "
             + "the palette itself renders nothing for them");
+    }
+
+    // ---- the notification bell beside it (#1043) ---------------------------
+
+    [Fact]
+    public async Task A_signed_in_person_sees_the_bell_with_their_unread_count()
+    {
+        var userId = await SeedUserWithUnreadAsync(3);
+        _db.OrgContext.CurrentUserId = userId;
+        _auth.SetAuthorized("user@example.com");
+
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var bell = cut.Find(".app__top a.notif-bell");
+            bell.GetAttribute("href").Should().Be("/notifications");
+            bell.GetAttribute("aria-label").Should().Be("Notifications, 3 unread");
+            cut.Find(".notif-bell__count").TextContent.Should().Be("3");
+        });
+    }
+
+    [Fact]
+    public void Nothing_unread_shows_the_bell_without_a_count()
+    {
+        _auth.SetAuthorized("user@example.com");
+
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() => cut.Find(".notif-bell").GetAttribute("aria-label").Should().Be("Notifications"));
+        cut.FindAll(".notif-bell__count").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void An_anonymous_visitor_gets_no_bell()
+    {
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() => cut.Find(".app__top").Should().NotBeNull());
+        cut.FindAll(".notif-bell").Should().BeEmpty();
+    }
+
+    private async Task<int> SeedUserWithUnreadAsync(int unread)
+    {
+        await using var db = _db.NewContext();
+        var user = new ALDevToolbox.Domain.Entities.User
+        {
+            OrganizationId = TestDb.DefaultOrgId, Email = "user@example.com", DisplayName = "Alex Hansen",
+            PasswordHash = "x", Role = ALDevToolbox.Domain.Entities.UserRole.User,
+            Status = ALDevToolbox.Domain.Entities.UserStatus.Active, CreatedAt = DateTime.UtcNow,
+        };
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+        for (var i = 0; i < unread; i++)
+        {
+            db.UserNotifications.Add(new ALDevToolbox.Domain.Entities.UserNotification
+            {
+                UserId = user.Id, OrganizationId = TestDb.DefaultOrgId,
+                Category = ALDevToolbox.Domain.Entities.NotificationCategory.Builds,
+                Title = "Build failed: CRONUS Coffee - Main", Path = "/pipelines/1", CreatedAt = DateTime.UtcNow,
+            });
+        }
+        await db.SaveChangesAsync();
+        return user.Id;
     }
 }

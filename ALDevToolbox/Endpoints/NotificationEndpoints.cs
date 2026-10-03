@@ -29,7 +29,11 @@ internal static class NotificationEndpoints
             HttpContext ctx, InAppNotificationService notifications, IAntiforgery antiforgery, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            await notifications.MarkAllReadForCurrentUserAsync(ct);
+            var form = await ctx.Request.ReadFormAsync(ct);
+            if (int.TryParse(form["upToId"], out var upToId))
+            {
+                await notifications.MarkAllReadForCurrentUserAsync(upToId, ct);
+            }
             ctx.Response.Redirect(PagePath);
         }).RequireAuthorization();
 
@@ -43,5 +47,6 @@ internal static class NotificationEndpoints
     /// </summary>
     internal static bool IsAppPath(string? path) =>
         path is { Length: > 0 } && path[0] == '/'
-        && (path.Length == 1 || (path[1] != '/' && path[1] != '\\'));
+        && (path.Length == 1 || (path[1] != '/' && path[1] != '\\'))
+        && !path.Any(char.IsControl);
 }

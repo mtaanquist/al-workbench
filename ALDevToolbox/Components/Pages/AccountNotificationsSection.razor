@@ -37,8 +37,8 @@
             <div class="card__body">
                 <Alert Tone="AlertTone.Info" Role="status">
                     <span>
-                        This site cannot send notification emails yet, so none are sent whatever you choose here.
-                        Notifications still show in the app. Ask a site administrator to set up email.
+                        Email is not set up on this site yet, so notifications only show on your Notifications page.
+                        Ask a site administrator to set up email.
                     </span>
                 </Alert>
             </div>
@@ -52,14 +52,14 @@
                        switch from the stored choice rather than leaving it flipped. *@
                     <Switch @key="@($"{category}-{_failures}")"
                             Name="@($"{id}-in-app")"
-                            Label="In app"
-                            AriaLabel="@($"Show {Name(category)} in the app")"
+                            Label="On Notifications page"
+                            AriaLabel="@($"Show {Name(category)} on your Notifications page")"
                             Checked="_choices[category].InApp"
                             CheckedChanged="@(v => SaveInAppAsync(category, v))"
                             Disabled="@_saving" />
                     <SelectBox>
                         <select class="select" id="@id" aria-label="@($"{Name(category)} emails")"
-                                disabled="@_saving"
+                                disabled="@(_saving || !_canSend)"
                                 @bind:get="_choices[category].Email"
                                 @bind:set="(NotificationDelivery d) => SaveEmailAsync(category, d)">
                             @foreach (var delivery in Enum.GetValues<NotificationDelivery>())
@@ -68,6 +68,10 @@
                             }
                         </select>
                     </SelectBox>
+                    @if (!_choices[category].InApp && (_choices[category].Email == NotificationDelivery.Off || !_canSend))
+                    {
+                        <span class="field-warn">You will not hear about @Name(category).ToLowerInvariant() anywhere.</span>
+                    }
                     <FeedbackLine Ok="@(_saved == category ? "Saved" : null)"
                                   Error="@(_failed == category ? _error : null)" />
                 </SettingRow>
@@ -147,7 +151,7 @@
     private static string Hint(NotificationCategory category) => category switch
     {
         NotificationCategory.Builds =>
-            "A build pipeline you started or created starts failing, or works again. Also covers the nightly check against upcoming Business Central versions.",
+            "When a build pipeline you started or set up first fails, and again when it works. Also covers the nightly check against upcoming Business Central versions.",
         NotificationCategory.Deployments =>
             "A deployment needs your approval, finishes, or fails. Approval requests are emailed straight away even with a digest chosen.",
         _ => string.Empty,
