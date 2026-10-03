@@ -41,7 +41,7 @@ public sealed class DeliveryWorker : QueueDrainWorker<DeliveryJob>
             // Only when this run claimed it, so a delivery another run already took is
             // never announced twice (#1036). The notifier never throws.
             await scope.ServiceProvider.GetRequiredService<Notifications.DeploymentNotifier>()
-                .FinishedAsync(job.DeliveryId, ct).ConfigureAwait(false);
+                .NotifyAsync(job.DeliveryId, ct).ConfigureAwait(false);
         }
     }
 

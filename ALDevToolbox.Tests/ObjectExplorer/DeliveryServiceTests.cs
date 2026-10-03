@@ -216,7 +216,7 @@ public sealed class DeliveryServiceTests : IDisposable
         var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
 
         await using var runCtx = _db.NewContext();
-        await NewService(runCtx).RunDeliveryAsync(deliveryId);
+        (await NewService(runCtx).RunDeliveryAsync(deliveryId)).Should().BeTrue();
 
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries
@@ -294,7 +294,7 @@ public sealed class DeliveryServiceTests : IDisposable
             .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.Deployed));
 
         await using var runCtx = _db.NewContext();
-        await NewService(runCtx).RunDeliveryAsync(deliveryId);
+        (await NewService(runCtx).RunDeliveryAsync(deliveryId)).Should().BeFalse("this run claimed nothing, so nothing is announced");
 
         _apps.UploadedOrder.Should().BeEmpty(); // the claim CAS found it already taken
         await using var read = _db.NewContext();
@@ -436,7 +436,7 @@ public sealed class DeliveryServiceTests : IDisposable
 
         var failed = await NewService(_db.NewContext()).FailInterruptedDeliveriesAsync();
 
-        failed.Should().Be(1);
+        failed.Should().HaveCount(1);
         await using var read = _db.NewContext();
         var d = await read.OeProjectDeliveries.Include(x => x.Results).SingleAsync(x => x.Id == deliveryId);
         d.Status.Should().Be(ProjectDeliveryStatus.Failed);
@@ -1053,7 +1053,7 @@ public sealed class DeliveryServiceTests : IDisposable
 
         var prepared = await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId);
 
-        prepared.Should().Be(1);
+        prepared.Should().HaveCount(1);
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId);
         delivery.Status.Should().Be(ProjectDeliveryStatus.Proposed);
@@ -1073,7 +1073,7 @@ public sealed class DeliveryServiceTests : IDisposable
 
         var prepared = await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId);
 
-        prepared.Should().Be(0);
+        prepared.Should().BeEmpty();
         (await _db.NewContext().OeProjectDeliveries.AnyAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId)).Should().BeFalse();
     }
 
@@ -1086,7 +1086,7 @@ public sealed class DeliveryServiceTests : IDisposable
         await ctx.OeProjectBuilds.Where(b => b.Id == seed.BuildId)
             .ExecuteUpdateAsync(s => s.SetProperty(b => b.Trigger, ProjectBuildTrigger.PullRequest));
 
-        (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Should().Be(0);
+        (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Should().BeEmpty();
     }
 
     [Fact]
@@ -1097,7 +1097,7 @@ public sealed class DeliveryServiceTests : IDisposable
         await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
         await MakePreviewAsync(ctx, seed.BuildId, ProjectBuildTarget.NextMajor);
 
-        (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Should().Be(0);
+        (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Should().BeEmpty();
         (await _db.NewContext().OeProjectDeliveries.AnyAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId)).Should().BeFalse();
     }
 
@@ -1146,7 +1146,7 @@ public sealed class DeliveryServiceTests : IDisposable
         rows[1].ProjectBuildId.Should().Be(newer);
 
         // Preparing the same build again changes nothing.
-        (await NewService(_db.NewContext()).ProposeReleasesForBuildAsync(newer)).Should().Be(0);
+        (await NewService(_db.NewContext()).ProposeReleasesForBuildAsync(newer)).Should().BeEmpty();
         // And the history row says what became of the replaced one.
         var history = await NewService(_db.NewContext()).ListDeliveryHistoryAsync(seed.ReleasePipelineId);
         var replaced = history.Single(h => h.Id == rows[0].Id);

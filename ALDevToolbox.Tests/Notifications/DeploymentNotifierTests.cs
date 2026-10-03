@@ -42,9 +42,9 @@ public sealed class DeploymentNotifierTests : IDisposable
     public async Task A_deployment_waiting_for_approval_goes_to_the_owner_and_the_pipeline_creator()
     {
         await SeedAsync();
-        await AddDeliveryAsync(ProjectDeliveryStatus.Proposed, triggeredBy: null);
+        var id = await AddDeliveryAsync(ProjectDeliveryStatus.Proposed, triggeredBy: null);
 
-        await Notifier().ProposedAsync(_buildId);
+        await Notifier().ProposedAsync([id]);
 
         _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["owner@cronus.example", "creator@cronus.example"]);
         _email.Sent[0].Subject.Should().Be("Waiting for approval: CRONUS Coffee to Production");
@@ -57,9 +57,9 @@ public sealed class DeploymentNotifierTests : IDisposable
     {
         await SeedAsync();
         await ChooseAsync(_owner, NotificationDelivery.Weekly);
-        await AddDeliveryAsync(ProjectDeliveryStatus.Proposed, triggeredBy: null);
+        var id = await AddDeliveryAsync(ProjectDeliveryStatus.Proposed, triggeredBy: null);
 
-        await Notifier().ProposedAsync(_buildId);
+        await Notifier().ProposedAsync([id]);
 
         _email.Sent.Select(s => s.To).Should().Contain("owner@cronus.example");
         await using var ctx = _db.NewContext();
@@ -75,7 +75,7 @@ public sealed class DeploymentNotifierTests : IDisposable
         await SeedAsync();
         var id = await AddDeliveryAsync(status, triggeredBy: _approver, failure: "Install refused.");
 
-        await Notifier().FinishedAsync(id);
+        await Notifier().NotifyAsync(id);
 
         var sent = _email.Sent.Should().ContainSingle().Subject;
         sent.To.Should().Be("approver@cronus.example");
@@ -90,7 +90,7 @@ public sealed class DeploymentNotifierTests : IDisposable
         await SeedAsync();
         var id = await AddDeliveryAsync(ProjectDeliveryStatus.Deployed, triggeredBy: null);
 
-        await Notifier().FinishedAsync(id);
+        await Notifier().NotifyAsync(id);
 
         _email.Sent.Should().ContainSingle().Which.To.Should().Be("creator@cronus.example");
     }
@@ -104,21 +104,58 @@ public sealed class DeploymentNotifierTests : IDisposable
         await SeedAsync();
         var id = await AddDeliveryAsync(status, triggeredBy: _approver);
 
-        await Notifier().FinishedAsync(id);
+        await Notifier().NotifyAsync(id);
 
         _email.Sent.Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task Off_still_stops_an_approval_request()
+    {
+        await SeedAsync();
+        await ChooseAsync(_owner, NotificationDelivery.Off);
+        var id = await AddDeliveryAsync(ProjectDeliveryStatus.Proposed, triggeredBy: null);
+
+        await Notifier().ProposedAsync([id]);
+
+        _email.Sent.Select(s => s.To).Should().Equal("creator@cronus.example");
+    }
+
+    [Fact]
+    public async Task Without_a_public_base_url_nothing_is_sent()
+    {
+        await SeedAsync();
+        var id = await AddDeliveryAsync(ProjectDeliveryStatus.Failed, triggeredBy: _approver, failure: "Install refused.");
+
+        await Notifier(origin: null).NotifyAsync(id);
+
+        _email.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_digest_keeps_only_the_first_line_of_the_failure()
+    {
+        await SeedAsync();
+        await ChooseAsync(_approver, NotificationDelivery.Daily);
+        var id = await AddDeliveryAsync(ProjectDeliveryStatus.Failed, triggeredBy: _approver,
+            failure: "The delivery failed unexpectedly.\n   at Something.Deep()");
+
+        await Notifier().NotifyAsync(id);
+
+        await using var ctx = _db.NewContext();
+        (await ctx.NotificationDigestItems.SingleAsync()).Detail.Should().Be("The delivery failed unexpectedly.");
+    }
+
     // ---- helpers -----------------------------------------------------------
 
-    private DeploymentNotifier Notifier()
+    private DeploymentNotifier Notifier(string? origin = Origin)
     {
         var ctx = _db.NewContext();
         var preferences = new NotificationPreferenceService(
             ctx, _db.OrgContext, TimeProvider.System, NullLogger<NotificationPreferenceService>.Instance);
         var notifications = new NotificationService(
             ctx, _db.NewContextFactory(), preferences, _email, new EmailRenderer(_services, NullLoggerFactory.Instance),
-            new PublicOrigin(Origin), _db.OrgContext, TimeProvider.System, NullLogger<NotificationService>.Instance);
+            new PublicOrigin(origin), _db.OrgContext, TimeProvider.System, NullLogger<NotificationService>.Instance);
         return new DeploymentNotifier(ctx, notifications, NullLogger<DeploymentNotifier>.Instance);
     }
 

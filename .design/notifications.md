@@ -80,15 +80,19 @@ build is marked ready or failed.
 
 ## Deployments (#1036)
 
-`DeploymentNotifier` has two entry points:
+`DeploymentNotifier` is called from three places:
 
-- `ProposedAsync`, from the release import worker after a build prepared deployments
-  waiting for approval. Goes to the solution's owner and the deployment pipeline's creator,
-  marked urgent, so a digest choice still gets it straight away.
-- `FinishedAsync`, from the delivery worker after a run it claimed ends deployed, accepted
-  by Business Central for a scheduled install, or failed. Goes to the person it ran as (who
-  started it, or who approved a prepared one), or the pipeline's creator when nobody did.
-  A run that found the deployment already claimed sends nothing, so nothing is announced
-  twice. Deployments failed at startup because the app stopped mid-run are not announced.
+- After a build prepared deployments waiting for approval (release import worker), with the
+  ids it prepared. Goes to the solution's owner and the deployment pipeline's creator,
+  marked urgent, so a digest choice still gets it straight away (Off still stops it).
+- After a run the delivery worker claimed ends deployed, accepted by Business Central for a
+  scheduled install, or failed. Goes to the person it ran as (who started it, or who
+  approved a prepared one), or the pipeline's creator when nobody did. A run that found the
+  deployment already claimed sends nothing, so nothing is announced twice.
+- After the delivery scheduler fails deployments a restart cut off, for each one: the
+  person behind it needs to hear about that failure as much as any other.
+
+As with builds, access is not re-checked: a pipeline creator who has lost access to a
+private solution still gets its emails. Accepted for now.
 
 Each deployment is its own event, so there is no "only on change" rule here.

@@ -101,12 +101,10 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
             if (buildId is not { } id) return;
 
             var deliveries = services.GetRequiredService<Delivery.DeliveryService>();
-            if (await deliveries.ProposeReleasesForBuildAsync(id, ct).ConfigureAwait(false) > 0)
-            {
-                // Someone has to approve them before anything is sent (#1036).
-                await services.GetRequiredService<Notifications.DeploymentNotifier>()
-                    .ProposedAsync(id, ct).ConfigureAwait(false);
-            }
+            var prepared = await deliveries.ProposeReleasesForBuildAsync(id, ct).ConfigureAwait(false);
+            // Someone has to approve them before anything is sent (#1036).
+            await services.GetRequiredService<Notifications.DeploymentNotifier>()
+                .ProposedAsync(prepared, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

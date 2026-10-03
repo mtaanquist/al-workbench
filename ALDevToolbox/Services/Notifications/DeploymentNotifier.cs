@@ -36,40 +36,27 @@ public sealed class DeploymentNotifier
     }
 
     /// <summary>
-    /// Notifies about every deployment of build <paramref name="projectBuildId"/>
-    /// that is waiting for approval. Called right after they were prepared, so
-    /// these are the new ones: a build is prepared once per deployment pipeline.
-    /// Never throws, except when <paramref name="ct"/> itself is cancelled.
+    /// Notifies about deployments <paramref name="deliveryIds"/>, just prepared
+    /// and waiting for approval. Never throws, except when <paramref name="ct"/>
+    /// itself is cancelled.
     /// </summary>
-    public async Task ProposedAsync(int projectBuildId, CancellationToken ct = default)
+    public async Task ProposedAsync(IReadOnlyList<int> deliveryIds, CancellationToken ct = default)
     {
-        if (!_notifications.IsEnabled) return;
-        try
-        {
-            var ids = await _db.OeProjectDeliveries.AsNoTracking()
-                .Where(d => d.ProjectBuildId == projectBuildId && d.Status == ProjectDeliveryStatus.Proposed)
-                .OrderBy(d => d.Id)
-                .Select(d => d.Id)
-                .ToListAsync(ct);
-            foreach (var id in ids) await NotifyAsync(id, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-        {
-            _logger.LogWarning(ex, "Could not send approval notifications for build {BuildId}.", projectBuildId);
-        }
+        foreach (var id in deliveryIds) await NotifyAsync(id, ct);
     }
 
     /// <summary>
-    /// Notifies about deployment <paramref name="deliveryId"/> once it has run.
-    /// Does nothing unless it ended deployed, handed off or failed. Never throws
-    /// (except when <paramref name="ct"/> itself is cancelled): the deployment's outcome is already recorded.
+    /// Notifies about deployment <paramref name="deliveryId"/> as it stands:
+    /// waiting for approval, deployed, handed off or failed; anything else sends
+    /// nothing. Never throws, except when <paramref name="ct"/> itself is
+    /// cancelled: the deployment's outcome is already recorded.
     /// </summary>
-    public async Task FinishedAsync(int deliveryId, CancellationToken ct = default)
+    public async Task NotifyAsync(int deliveryId, CancellationToken ct = default)
     {
         if (!_notifications.IsEnabled) return;
         try
         {
-            await NotifyAsync(deliveryId, ct);
+            await SendAsync(deliveryId, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -77,7 +64,7 @@ public sealed class DeploymentNotifier
         }
     }
 
-    private async Task NotifyAsync(int deliveryId, CancellationToken ct)
+    private async Task SendAsync(int deliveryId, CancellationToken ct)
     {
         var delivery = await _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => d.Id == deliveryId)
@@ -114,14 +101,16 @@ public sealed class DeploymentNotifier
             .FirstAsync(ct);
         var pipelineUrl = _notifications.Link($"/pipelines/deployments/{delivery.ReleasePipelineId}")!;
         var settingsUrl = _notifications.Link(NotificationService.SettingsPath)!;
-        var failure = outcome == DeploymentOutcome.Failed ? delivery.FailureMessage : null;
+        var failure = outcome == DeploymentOutcome.Failed && !string.IsNullOrWhiteSpace(delivery.FailureMessage)
+            ? delivery.FailureMessage.Trim()
+            : null;
 
         await _notifications.NotifyAsync(new Notification(
             NotificationCategory.Deployments,
             recipients,
             new NotificationDigestEntry(
                 DeploymentNotificationEmail.SubjectFor(outcome, delivery.SolutionName, delivery.EnvironmentName),
-                failure,
+                failure is null ? null : FirstLine(failure),
                 pipelineUrl,
                 delivery.SolutionName),
             (renderer, recipient, token) => DeploymentNotificationEmail.RenderAsync(
@@ -129,6 +118,12 @@ public sealed class DeploymentNotifier
                 delivery.EnvironmentName, delivery.Apps, failure, pipelineUrl, settingsUrl, token),
             Urgent: waiting),
             ct);
+    }
+
+    private static string FirstLine(string message)
+    {
+        var line = message.Split('\n')[0].Trim();
+        return line.Length > 200 ? line[..200].TrimEnd() + "..." : line;
     }
 
     internal static DeploymentOutcome? OutcomeFor(string status) => status switch
