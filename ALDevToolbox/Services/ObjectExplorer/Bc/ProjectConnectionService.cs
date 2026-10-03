@@ -47,7 +47,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         IDataProtectionProvider protectionProvider,
         BcPanelCache panelCache,
         TimeProvider clock,
-        ILogger<ProjectConnectionService> logger)
+        ILogger<ProjectConnectionService> logger,
+        Notifications.EnvironmentUpdateNotifier? updateNotifier = null)
     {
         _db = db;
         _orgContext = orgContext;
@@ -59,6 +60,38 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         _panelCache = panelCache;
         _clock = clock;
         _logger = logger;
+        _updateNotifier = updateNotifier;
+    }
+
+    /// <summary>
+    /// Tells a solution's followers when a refresh finds its next Business Central update
+    /// scheduled, moved, or close to the latest date it can be postponed to (#1049).
+    /// Optional so the tests that build this service by hand need not wire notifications.
+    /// </summary>
+    private readonly Notifications.EnvironmentUpdateNotifier? _updateNotifier;
+
+    /// <summary>Changes found since the last save, announced once the rows are written.</summary>
+    private readonly List<BcUpdateScheduleChange> _scheduleChanges = new();
+
+    /// <summary>
+    /// Writes the picked update onto a row read from Business Central, remembering what it
+    /// changed. Only the refresh paths use this: a change the app made itself was already
+    /// written by the write path, so the next read finds nothing new to announce.
+    /// </summary>
+    private void ApplyReadNextUpdate(OeProjectEnvironment row, IReadOnlyList<BcEnvironmentUpdate> updates)
+    {
+        var before = BcUpdateScheduleSnapshot.Of(row);
+        ApplyNextUpdate(row, updates);
+        if (before.CompareWith(row, _clock.GetUtcNow().UtcDateTime) is { } change) _scheduleChanges.Add(change);
+    }
+
+    /// <summary>Announces the changes found by the reads just saved. The notifier never throws.</summary>
+    private async Task AnnounceScheduleChangesAsync(CancellationToken ct)
+    {
+        if (_scheduleChanges.Count == 0) return;
+        var changes = _scheduleChanges.ToList();
+        _scheduleChanges.Clear();
+        if (_updateNotifier is not null) await _updateNotifier.NotifyAsync(changes, ct);
     }
 
     /// <summary>
@@ -473,6 +506,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         // onto, and so a failure here can never cost us the environment list itself.
         await MirrorBcEnvironmentDetailsAsync(project, token, ct);
         await _db.SaveChangesAsync(ct);
+        await AnnounceScheduleChangesAsync(ct);
 
         _logger.LogInformation("BC test connection succeeded for project {ProjectId}: {Count} environment(s).", projectId, environments.Count);
         return new BcConnectionTestResult(BcConnectionResult.Success, environments.Count,
@@ -1454,8 +1488,9 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         var now = _clock.GetUtcNow().UtcDateTime;
         ApplyFetched(row, fetched, now);
-        ApplyNextUpdate(row, updates);
+        ApplyReadNextUpdate(row, updates);
         await _db.SaveChangesAsync(ct);
+        await AnnounceScheduleChangesAsync(ct);
 
         // What the panel cached before this read is now older than the row.
         _panelCache.Invalidate(projectId, environmentId);
@@ -2633,7 +2668,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             try
             {
                 var updates = await _adminClient.ListEnvironmentUpdatesAsync(token, row.ApplicationFamily, row.Name, ct);
-                ApplyNextUpdate(row, updates);
+                ApplyReadNextUpdate(row, updates);
             }
             catch (BcApiException ex)
             {

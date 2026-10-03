@@ -11,6 +11,9 @@ public enum NotificationCategory
 
     /// <summary>A deployment waits for approval, is deployed, or fails.</summary>
     Deployments,
+
+    /// <summary>Business Central schedules or moves an update for a solution the person follows.</summary>
+    Solutions,
 }
 
 /// <summary>When a person is emailed about one <see cref="NotificationCategory"/>.</summary>

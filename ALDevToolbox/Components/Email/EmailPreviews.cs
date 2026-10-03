@@ -1,3 +1,4 @@
+using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Email;
 using ALDevToolbox.Services.Notifications;
@@ -107,6 +108,12 @@ public static class EmailPreviews
                 "CRONUS Coffee", "Coffee to Production", "Production", SampleApps,
                 "CRONUS Coffee 1.4.0.0 failed: the extension could not be installed because a newer version is already there.",
                 $"{SampleOrigin}/pipelines/deployments/7", $"{SampleOrigin}{NotificationService.SettingsPath}", ct)),
+        new("update-moved", "Business Central update moved",
+            "To the people who follow a solution, when Business Central moves the date of an environment's next update. A newly scheduled update, and one a week from its latest possible date, send similar emails.",
+            typeof(EnvironmentUpdateEmail),
+            (r, ct) => EnvironmentUpdateEmail.RenderAsync(r, Person, Organization, BcUpdateScheduleChangeKind.Moved,
+                "CRONUS Coffee", "Production", "27.1", "Sat 24 Oct 2026", "Sat 7 Nov 2026", "Sat 17 Oct 2026",
+                $"{SampleOrigin}/environments/4", $"{SampleOrigin}{NotificationService.SettingsPath}", ct)),
         new("digest", "Daily digest",
             "At 06:00 UTC to people who chose a daily digest for some notifications; the weekly one goes out on Mondays.",
             typeof(DigestEmail),

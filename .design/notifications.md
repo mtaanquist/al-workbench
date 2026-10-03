@@ -25,6 +25,7 @@ Agreed with the maintainer on 2026-10-03:
 | --- | --- | --- |
 | Builds | Build failed, build working again (manual builds and nightly checks; pull request builds are left to GitHub) | #1035 |
 | Deployments | Waiting for approval, deployed, failed | #1036 |
+| Solutions | Update scheduled, update moved, latest date a week away, for solutions you follow | #1049 |
 
 Phase 4 adds Upgrades and Solutions.
 
@@ -133,6 +134,20 @@ who can see a solution can follow it from the Follow button in its header, and a
 stop; stopping stores a row that overrides the default. A follower who can no longer see a
 Private solution (taken off its team) is left out of its notifications but keeps the
 choice, so it applies again if access comes back. Disabled accounts are left out.
+
+## Business Central update dates (#1049)
+
+When a refresh (the scheduled environment refresh, Refresh on the solution, or the
+environment page re-reading an update it watches) finds an environment's next update
+changed, the solution's followers hear about it in the Solutions category: a newly
+scheduled update (a version not seen before, or a date where there was none), a moved date,
+or the latest date the update can be postponed to coming within a week. At most one per
+read, in that order. Nothing is said on an environment's first read, which has nothing to
+compare with, and nothing about a date the app moved itself: the write path stores the new
+date straight away, so the next read finds nothing new. The latest-date notice needs no
+stored flag: it fires on the read where the date first comes within the week, which the
+previous read's own time says. Dates are shown in the environment's update-window time
+zone when Business Central reports one, otherwise in UTC, said so.
 
 ## Digests (#1037)
 

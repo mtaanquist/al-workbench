@@ -10,6 +10,7 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.ObjectExplorer;
@@ -1770,6 +1771,114 @@ public sealed class ProjectConnectionServiceTests : IDisposable
 
         await using var verify = _db.NewContext();
         return await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.ProjectId == projectId);
+    }
+
+    // ── Telling followers about update dates (#1049) ─────────────────────
+
+    [Fact]
+    public async Task A_refresh_that_finds_the_update_date_moved_tells_the_solutions_followers()
+    {
+        var id = await SeedProjectAsync("CRONUS Coffee");
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        var first = DateTimeOffset.UtcNow.AddDays(20);
+        var admin = new FakeAdminClient
+        {
+            OnList = () => new[] { new BcEnvironment("Production", "Production") },
+            OnEnvironmentUpdates = _ => new[] { Update("27.6", selected: true, selectedAt: first, latest: first.AddDays(30)) },
+        };
+        var email = new UpdateEmailCapture();
+        await RefreshNotifyingAsync(id, admin, email);
+        email.Subjects.Should().BeEmpty("the first read has nothing to compare with");
+
+        admin.OnEnvironmentUpdates = _ => new[] { Update("27.6", selected: true, selectedAt: first.AddDays(7), latest: first.AddDays(30)) };
+        await RefreshNotifyingAsync(id, admin, email);
+        await RefreshNotifyingAsync(id, admin, email);
+
+        email.Subjects.Should().ContainSingle().Which.Should().StartWith("Update moved: CRONUS Coffee / Production to 27.6, now ");
+        email.To.Should().Equal("owner@example.com");
+    }
+
+    [Fact]
+    public async Task A_new_update_is_announced_and_a_refresh_with_no_change_is_not()
+    {
+        var id = await SeedProjectAsync("CRONUS Coffee");
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        var when = DateTimeOffset.UtcNow.AddDays(20);
+        var admin = new FakeAdminClient
+        {
+            OnList = () => new[] { new BcEnvironment("Production", "Production") },
+            OnEnvironmentUpdates = _ => Array.Empty<BcEnvironmentUpdate>(),
+        };
+        var email = new UpdateEmailCapture();
+        await RefreshNotifyingAsync(id, admin, email);
+
+        admin.OnEnvironmentUpdates = _ => new[] { Update("27.6", selected: true, selectedAt: when) };
+        await RefreshNotifyingAsync(id, admin, email);
+        await RefreshNotifyingAsync(id, admin, email);
+
+        email.Subjects.Should().ContainSingle().Which.Should().StartWith("Update scheduled: CRONUS Coffee / Production to 27.6 on ");
+    }
+
+    [Fact]
+    public async Task Someone_who_stopped_following_is_not_told()
+    {
+        var id = await SeedProjectAsync("CRONUS Coffee");
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+            await Follows(ctx).SetFollowingAsync(id, following: false);
+        }
+        var admin = new FakeAdminClient
+        {
+            OnList = () => new[] { new BcEnvironment("Production", "Production") },
+            OnEnvironmentUpdates = _ => Array.Empty<BcEnvironmentUpdate>(),
+        };
+        var email = new UpdateEmailCapture();
+        await RefreshNotifyingAsync(id, admin, email);
+        admin.OnEnvironmentUpdates = _ => new[] { Update("27.6", selected: true, selectedAt: DateTimeOffset.UtcNow.AddDays(20)) };
+        await RefreshNotifyingAsync(id, admin, email);
+
+        email.Subjects.Should().BeEmpty();
+    }
+
+    private ALDevToolbox.Services.ObjectExplorer.Projects.ProjectFollowService Follows(ALDevToolbox.Data.AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), TimeProvider.System,
+            NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectFollowService>.Instance);
+
+    private async Task RefreshNotifyingAsync(int projectId, FakeAdminClient admin, UpdateEmailCapture email)
+    {
+        using var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider();
+        await using var ctx = _db.NewContext();
+        var preferences = new ALDevToolbox.Services.Notifications.NotificationPreferenceService(
+            ctx, _db.OrgContext, TimeProvider.System, NullLogger<ALDevToolbox.Services.Notifications.NotificationPreferenceService>.Instance);
+        var notifications = new ALDevToolbox.Services.Notifications.NotificationService(
+            ctx, _db.NewContextFactory(), preferences, email,
+            new ALDevToolbox.Services.Email.EmailRenderer(services, NullLoggerFactory.Instance),
+            new ALDevToolbox.Endpoints.PublicOrigin("https://workbench.cronus.example"), _db.OrgContext, TimeProvider.System,
+            NullLogger<ALDevToolbox.Services.Notifications.NotificationService>.Instance);
+        var notifier = new ALDevToolbox.Services.Notifications.EnvironmentUpdateNotifier(
+            ctx, notifications, Follows(ctx), NullLogger<ALDevToolbox.Services.Notifications.EnvironmentUpdateNotifier>.Instance);
+        var svc = new ProjectConnectionService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), TokenOk(),
+            admin, new FakeAppManagementClient(), _db.DataProtectionProvider, _panelCache, _clock,
+            NullLogger<ProjectConnectionService>.Instance, notifier);
+        await svc.RefreshEnvironmentsUnattendedAsync(projectId);
+    }
+
+    private sealed class UpdateEmailCapture : ALDevToolbox.Services.IEmailService
+    {
+        public List<string> Subjects { get; } = [];
+        public List<string> To { get; } = [];
+
+        public Task<bool> IsConfiguredAsync(CancellationToken ct = default) => Task.FromResult(true);
+
+        public Task SendAsync(string toEmail, ALDevToolbox.Services.EmailContent content, EmailPurpose purpose, CancellationToken ct = default)
+        {
+            Subjects.Add(content.Subject);
+            To.Add(toEmail);
+            return Task.CompletedTask;
+        }
     }
 
     [Fact]
