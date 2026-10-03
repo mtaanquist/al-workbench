@@ -110,7 +110,7 @@ public static class EmailPreviews
         new("upgrade-action-failed", "Scheduled change failed",
             "To whoever scheduled a change on an environment, such as an app install or a new update date, when it fails. One that runs sends a similar email.",
             typeof(UpgradeActionEmail),
-            (r, ct) => UpgradeActionEmail.RenderAsync(r, Person, Organization, failed: true, "Install CRONUS Coffee.app",
+            (r, ct) => UpgradeActionEmail.RenderAsync(r, Person, Organization, UpgradeActionResult.Failed, "Install CRONUS Coffee.app",
                 "CRONUS Coffee", "Production",
                 "CRONUS Coffee.app wasn't installed. Reason given at the time: The extension depends on CRONUS Base 2.1.0.0, which isn't installed.",
                 $"{SampleOrigin}/environments/4/history", $"{SampleOrigin}{NotificationService.SettingsPath}", ct)),

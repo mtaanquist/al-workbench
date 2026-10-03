@@ -1,17 +1,22 @@
 @*
-    A change someone scheduled on an environment ran or failed (issue #1046).
-    See .design/notifications.md.
+    A change someone scheduled on an environment ran, failed, or could not be
+    confirmed (issue #1046). See .design/notifications.md.
 *@
+@using ALDevToolbox.Services.Notifications
 <EmailLayout Preheader="@Preheader" OrganizationName="@OrganizationName" Reason="You received this because you scheduled this change." SettingsUrl="@SettingsUrl">
     <EmailParagraph>Hi @DisplayName,</EmailParagraph>
     <EmailParagraph>
-        @if (Failed)
+        @switch (Result)
         {
-            @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> did not go through.
-        }
-        else
-        {
-            @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> has run.
+            case UpgradeActionResult.Failed:
+                @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> did not go through.
+                break;
+            case UpgradeActionResult.Unconfirmed:
+                @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> was sent to Business Central, but we could not confirm that it finished. Check the environment to be sure.
+                break;
+            default:
+                @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> has run.
+                break;
         }
     </EmailParagraph>
     @if (!string.IsNullOrWhiteSpace(Outcome))
@@ -24,7 +29,7 @@
 @code {
     [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
     [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
-    [Parameter, EditorRequired] public bool Failed { get; set; }
+    [Parameter, EditorRequired] public UpgradeActionResult Result { get; set; }
     /// <summary>What was scheduled, short: "Install CRONUS Coffee.app".</summary>
     [Parameter, EditorRequired] public string What { get; set; } = string.Empty;
     [Parameter, EditorRequired] public string SolutionName { get; set; } = string.Empty;
@@ -34,16 +39,20 @@
     [Parameter, EditorRequired] public string EnvironmentUrl { get; set; } = string.Empty;
     [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
 
-    private string Preheader => Outcome ?? SubjectFor(Failed, What, EnvironmentName);
+    private string Preheader => Outcome ?? SubjectFor(Result, What, EnvironmentName);
 
-    public static string SubjectFor(bool failed, string what, string environmentName) =>
-        failed ? $"Failed: {what} on {environmentName}" : $"Done: {what} on {environmentName}";
+    public static string SubjectFor(UpgradeActionResult result, string what, string environmentName) => result switch
+    {
+        UpgradeActionResult.Failed => $"Failed: {what} on {environmentName}",
+        UpgradeActionResult.Unconfirmed => $"Check: {what} on {environmentName}",
+        _ => $"Done: {what} on {environmentName}",
+    };
 
     public static Task<EmailContent> RenderAsync(
         EmailRenderer renderer,
         string displayName,
         string organizationName,
-        bool failed,
+        UpgradeActionResult result,
         string what,
         string solutionName,
         string environmentName,
@@ -52,12 +61,12 @@
         string settingsUrl,
         CancellationToken ct = default)
         => renderer.RenderAsync<UpgradeActionEmail>(
-            SubjectFor(failed, what, environmentName),
+            SubjectFor(result, what, environmentName),
             new Dictionary<string, object?>
             {
                 [nameof(DisplayName)] = displayName,
                 [nameof(OrganizationName)] = organizationName,
-                [nameof(Failed)] = failed,
+                [nameof(Result)] = result,
                 [nameof(What)] = what,
                 [nameof(SolutionName)] = solutionName,
                 [nameof(EnvironmentName)] = environmentName,

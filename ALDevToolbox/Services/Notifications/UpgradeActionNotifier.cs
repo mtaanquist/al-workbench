@@ -6,6 +6,15 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Notifications;
 
+/// <summary>How a scheduled change ended, as its notification tells it.</summary>
+public enum UpgradeActionResult
+{
+    Done,
+    Failed,
+    /// <summary>Sent to Business Central, but nobody saw it finish: the person should check.</summary>
+    Unconfirmed,
+}
+
 /// <summary>
 /// Tells the person who scheduled a change on an environment how it went, once the
 /// worker has run it (issue #1046). Changes made on the spot are not announced: the
@@ -30,11 +39,15 @@ public sealed class UpgradeActionNotifier
     /// again sends nothing; the second look announces it instead. Never throws, except
     /// when <paramref name="ct"/> itself is cancelled: the outcome is already recorded.
     /// </summary>
-    public async Task NotifyAsync(int actionId, CancellationToken ct = default)
+    /// <param name="unconfirmed">
+    /// The worker sent it but could not confirm it finished. The row cannot say so on its
+    /// own (it is recorded as sent), so the worker, which knows, passes it in.
+    /// </param>
+    public async Task NotifyAsync(int actionId, bool unconfirmed = false, CancellationToken ct = default)
     {
         try
         {
-            await SendAsync(actionId, ct);
+            await SendAsync(actionId, unconfirmed, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -42,7 +55,7 @@ public sealed class UpgradeActionNotifier
         }
     }
 
-    private async Task SendAsync(int actionId, CancellationToken ct)
+    private async Task SendAsync(int actionId, bool unconfirmed, CancellationToken ct)
     {
         var action = await _db.OeEnvironmentUpgradeActions.AsNoTracking()
             .Where(a => a.Id == actionId)
@@ -70,7 +83,9 @@ public sealed class UpgradeActionNotifier
             return;
         }
 
-        var failed = action.Status == UpgradeActionStatus.Failed;
+        var result = action.Status == UpgradeActionStatus.Failed ? UpgradeActionResult.Failed
+            : unconfirmed ? UpgradeActionResult.Unconfirmed
+            : UpgradeActionResult.Done;
         var what = Describe(action.Kind, action.TargetVersion, action.PackageFileName ?? action.AppName);
         var organizationName = await _db.Organizations.AsNoTracking()
             .Where(o => o.Id == action.OrganizationId)
@@ -82,12 +97,12 @@ public sealed class UpgradeActionNotifier
             NotificationCategory.Upgrades,
             [recipient],
             new NotificationSummary(
-                UpgradeActionEmail.SubjectFor(failed, what, action.EnvironmentName),
+                UpgradeActionEmail.SubjectFor(result, what, action.EnvironmentName),
                 action.Outcome,
                 path,
                 action.SolutionName),
             (renderer, person, token) => UpgradeActionEmail.RenderAsync(
-                renderer, person.DisplayName, organizationName, failed, what, action.SolutionName, action.EnvironmentName,
+                renderer, person.DisplayName, organizationName, result, what, action.SolutionName, action.EnvironmentName,
                 action.Outcome, _notifications.Link(path)!, _notifications.Link(NotificationService.SettingsPath)!, token)),
             ct);
     }
@@ -98,8 +113,8 @@ public sealed class UpgradeActionNotifier
         UpgradeActionKind.PushDateToLatest => "Move the update to the latest date",
         UpgradeActionKind.RunNow => "Start the update",
         UpgradeActionKind.UploadApp => $"Install {appName ?? "an app"}",
-        UpgradeActionKind.UpdateApp => $"Update {appName ?? "an app"} to {targetVersion}",
-        UpgradeActionKind.SelectVersion => $"Set the next version to {targetVersion}",
+        UpgradeActionKind.UpdateApp => targetVersion is null ? $"Update {appName ?? "an app"}" : $"Update {appName ?? "an app"} to {targetVersion}",
+        UpgradeActionKind.SelectVersion => targetVersion is null ? "Set the next version" : $"Set the next version to {targetVersion}",
         _ => "Scheduled change",
     };
 }

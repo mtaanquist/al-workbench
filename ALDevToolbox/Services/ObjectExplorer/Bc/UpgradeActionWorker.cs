@@ -301,7 +301,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                             $"{action.Label} wasn't installed, because {blocked.PackageFileName} before it in the same upload didn't install."),
                         ct).ConfigureAwait(false);
                 if (skipped == 0) return RunOutcome.Skipped;
-                await NotifyAsync(scope, action.Id, ct).ConfigureAwait(false);
+                await NotifyAsync(scope, action.Id, unconfirmed: false).ConfigureAwait(false);
                 return RunOutcome.Settled;
             }
         }
@@ -461,16 +461,19 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .SetProperty(a => a.ConfirmationDue, a => confirmationDue && a.BcAppId != null && a.BcOperationId != null)
                 .SetProperty(a => a.SentAt, finishedAt), ct).ConfigureAwait(false);
         // One left to be asked about again is announced by that second look instead.
-        await NotifyAsync(scope, action.Id, ct).ConfigureAwait(false);
+        await NotifyAsync(scope, action.Id, confirmationDue).ConfigureAwait(false);
         return RunOutcome.Sent;
     }
 
     /// <summary>
     /// Tells the person who booked <paramref name="actionId"/> how it went (issue #1046),
-    /// in the scope that settled it. The notifier never throws.
+    /// in the scope that settled it. Not cancellable: the outcome is already written, and
+    /// a shutdown in between would otherwise leave it unannounced for good. The notifier
+    /// never throws.
     /// </summary>
-    private static Task NotifyAsync(AsyncServiceScope scope, int actionId, CancellationToken ct) =>
-        scope.ServiceProvider.GetRequiredService<Notifications.UpgradeActionNotifier>().NotifyAsync(actionId, ct);
+    private static Task NotifyAsync(AsyncServiceScope scope, int actionId, bool unconfirmed) =>
+        scope.ServiceProvider.GetRequiredService<Notifications.UpgradeActionNotifier>()
+            .NotifyAsync(actionId, unconfirmed, CancellationToken.None);
 
     /// <summary>
     /// Records the operation Business Central answered an install with on the booking,
@@ -554,7 +557,8 @@ public sealed class UpgradeActionWorker : BackgroundService
         }
         foreach (var id in interrupted)
         {
-            await NotifyAsync(scope, id, ct).ConfigureAwait(false);
+            // A failed one says so on its row; a sent one here was never confirmed.
+            await NotifyAsync(scope, id, unconfirmed: true).ConfigureAwait(false);
         }
 
         // Belt and braces for the packages: every settled write above clears its own, but
@@ -606,6 +610,7 @@ public sealed class UpgradeActionWorker : BackgroundService
 
         UpgradeActionStatus? status = null;
         string? outcome = null;
+        var answered = false;
         if (row.AppId is { } appId && row.OperationId is { } operationId)
         {
             var environmentName = await actionDb.OeProjectEnvironments.AsNoTracking()
@@ -617,6 +622,7 @@ public sealed class UpgradeActionWorker : BackgroundService
                 var actions = actionScope.ServiceProvider.GetRequiredService<UpgradeActionService>();
                 var result = await actions.ConfirmInstallAsync(row.ProjectId, row.EnvironmentId, appId, operationId, ct, _heartbeat.Tick)
                     .ConfigureAwait(false);
+                answered = !result.IsUnconfirmed;
                 (status, outcome) = result.Completed
                     ? (UpgradeActionStatus.Sent, UpgradeActionService.SuccessOutcome(row.Kind, row.TargetVersion, environmentName, label))
                     : result.IsUnconfirmed
@@ -668,7 +674,8 @@ public sealed class UpgradeActionWorker : BackgroundService
         {
             await marked.ExecuteUpdateAsync(s => s.SetProperty(a => a.ConfirmationDue, false), ct).ConfigureAwait(false);
         }
-        await NotifyAsync(actionScope, row.Id, ct).ConfigureAwait(false);
+        // Unconfirmed unless Business Central answered either way.
+        await NotifyAsync(actionScope, row.Id, unconfirmed: !answered).ConfigureAwait(false);
         return true;
     }
 

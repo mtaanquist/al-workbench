@@ -218,6 +218,62 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task An_install_still_unconfirmed_after_the_second_look_asks_the_person_to_check()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app");
+        _f.Apps.PollErrorsBeforeAnswer = 2 * BcAppOperationPoller.MaxConsecutivePollErrors;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
+        sent.Subject.Should().Be("Check: Install Core.app on Production");
+        sent.Html.Should().Contain("could not confirm");
+    }
+
+    [Fact]
+    public async Task An_install_a_restart_interrupted_is_announced_once_after_business_central_is_asked()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app");
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await InterruptMidInstallAsync(ids[0], _f.Apps.Accepted("Core.app"));
+
+        await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        _f.Emails.Sent.Should().BeEmpty("Business Central is still to be asked how it ended");
+
+        await SweepUntilQuietAsync();
+        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Done: Install Core.app on Production");
+    }
+
+    [Fact]
+    public async Task A_cancelled_booking_sends_nothing()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookAsync(projectId, envId, hoursAhead: 12);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeEnvironmentUpgradeActions.Where(a => a.Id == actionId)
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.Status, UpgradeActionStatus.Cancelled));
+        }
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Emails.Sent.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(UpgradeActionKind.PushDateToLatest, null, null, "Move the update to the latest date")]
+    [InlineData(UpgradeActionKind.SelectVersion, "27.1", null, "Set the next version to 27.1")]
+    [InlineData(UpgradeActionKind.UpdateApp, "2.0.0.0", "CRONUS Coffee", "Update CRONUS Coffee to 2.0.0.0")]
+    [InlineData(UpgradeActionKind.UpdateApp, null, "CRONUS Coffee", "Update CRONUS Coffee")]
+    public void Each_kind_of_change_is_named_in_plain_words(UpgradeActionKind kind, string? version, string? app, string expected) =>
+        ALDevToolbox.Services.Notifications.UpgradeActionNotifier.Describe(kind, version, app).Should().Be(expected);
+
+    [Fact]
     public async Task A_change_a_restart_interrupted_is_announced_as_failed()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();

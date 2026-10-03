@@ -12,10 +12,7 @@ public enum NotificationCategory
     /// <summary>A deployment waits for approval, is deployed, or fails.</summary>
     Deployments,
 
-    /// <summary>
-    /// A change someone booked on an environment ran or failed, or an environment
-    /// they are to check after its update has been updated.
-    /// </summary>
+    /// <summary>A change someone scheduled on an environment ran, failed, or could not be confirmed.</summary>
     Upgrades,
 }
 
