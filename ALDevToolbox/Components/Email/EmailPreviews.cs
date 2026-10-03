@@ -108,7 +108,7 @@ public static class EmailPreviews
                 "CRONUS Coffee 1.4.0.0 failed: the extension could not be installed because a newer version is already there.",
                 $"{SampleOrigin}/pipelines/deployments/7", $"{SampleOrigin}{NotificationService.SettingsPath}", ct)),
         new("upgrade-action-failed", "Scheduled change failed",
-            "To whoever scheduled a change on an environment, such as an app install or a new update date, when it fails. One that runs sends a similar email.",
+            "To whoever scheduled a change on an environment, such as an app install or a new update date, when it fails. One that runs, or that could not be confirmed, sends a similar email.",
             typeof(UpgradeActionEmail),
             (r, ct) => UpgradeActionEmail.RenderAsync(r, Person, Organization, UpgradeActionResult.Failed, "Install CRONUS Coffee.app",
                 "CRONUS Coffee", "Production",
