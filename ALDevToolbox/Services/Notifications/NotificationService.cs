@@ -19,7 +19,7 @@ namespace ALDevToolbox.Services.Notifications;
 /// </para>
 ///
 /// <para>
-/// Never throws for a failed send. A notification is a side effect of work
+/// Never throws (cancellation aside). A notification is a side effect of work
 /// that already succeeded (a build finished, a deployment ran), and that work
 /// must not fail because an email could not be queued.
 /// </para>
@@ -30,6 +30,7 @@ public sealed class NotificationService
     public const string SettingsPath = "/account?section=notifications";
 
     private readonly AppDbContext _db;
+    private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly NotificationPreferenceService _preferences;
     private readonly IEmailService _email;
     private readonly EmailRenderer _renderer;
@@ -40,6 +41,7 @@ public sealed class NotificationService
 
     public NotificationService(
         AppDbContext db,
+        IDbContextFactory<AppDbContext> dbFactory,
         NotificationPreferenceService preferences,
         IEmailService email,
         EmailRenderer renderer,
@@ -49,6 +51,7 @@ public sealed class NotificationService
         ILogger<NotificationService> logger)
     {
         _db = db;
+        _dbFactory = dbFactory;
         _preferences = preferences;
         _email = email;
         _renderer = renderer;
@@ -84,6 +87,18 @@ public sealed class NotificationService
         var orgId = _orgContext.CurrentOrganizationId;
         if (orgId is null || notification.RecipientUserIds.Count == 0) return;
 
+        try
+        {
+            await DeliverAsync(notification, orgId.Value, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "{Category} notification could not be delivered.", notification.Category);
+        }
+    }
+
+    private async Task DeliverAsync(Notification notification, int orgId, CancellationToken ct)
+    {
         var recipients = await _db.Users.AsNoTracking()
             .Where(u => notification.RecipientUserIds.Contains(u.Id) && u.Status == UserStatus.Active)
             .Select(u => new NotificationRecipient(u.Id, u.DisplayName, u.Email))
@@ -94,7 +109,8 @@ public sealed class NotificationService
             recipients.Select(r => r.UserId).ToList(), notification.Category, ct);
         var emailReady = await _email.IsConfiguredAsync(ct);
         var now = _clock.GetUtcNow().UtcDateTime;
-        int sent = 0, kept = 0;
+        var digestItems = new List<NotificationDigestItem>();
+        var sent = 0;
 
         foreach (var recipient in recipients)
         {
@@ -109,10 +125,10 @@ public sealed class NotificationService
                     if (await TrySendAsync(notification, recipient, ct)) sent++;
                     break;
                 case NotificationDelivery.Daily or NotificationDelivery.Weekly:
-                    _db.NotificationDigestItems.Add(new NotificationDigestItem
+                    digestItems.Add(new NotificationDigestItem
                     {
                         UserId = recipient.UserId,
-                        OrganizationId = orgId.Value,
+                        OrganizationId = orgId,
                         Category = notification.Category,
                         Delivery = choice,
                         Title = notification.Digest.Title,
@@ -121,27 +137,39 @@ public sealed class NotificationService
                         SolutionName = notification.Digest.SolutionName,
                         CreatedAt = now,
                     });
-                    kept++;
                     break;
             }
         }
 
-        if (kept > 0)
-        {
-            try
-            {
-                await _db.SaveChangesAsync(ct);
-            }
-            catch (DbUpdateException ex)
-            {
-                _logger.LogWarning(ex, "Could not keep {Count} {Category} notifications for the digest.",
-                    kept, notification.Category);
-                kept = 0;
-            }
-        }
+        var kept = await KeepForDigestAsync(digestItems, notification.Category, ct);
         _logger.LogInformation(
             "{Category} notification: {Sent} emailed, {Kept} kept for a digest, of {Recipients} recipients.",
             notification.Category, sent, kept, recipients.Count);
+    }
+
+    /// <summary>
+    /// Stores digest items through a context of their own, never the caller's:
+    /// a worker calling mid-way must not have its pending changes saved here,
+    /// nor be left holding items that failed to save. Same reason as
+    /// <see cref="EmailOutbox"/>.
+    /// </summary>
+    private async Task<int> KeepForDigestAsync(
+        List<NotificationDigestItem> items, NotificationCategory category, CancellationToken ct)
+    {
+        if (items.Count == 0) return 0;
+        try
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            db.NotificationDigestItems.AddRange(items);
+            await db.SaveChangesAsync(ct);
+            return items.Count;
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogWarning(ex, "Could not keep {Count} {Category} notifications for the digest.",
+                items.Count, category);
+            return 0;
+        }
     }
 
     private async Task<bool> TrySendAsync(Notification notification, NotificationRecipient recipient, CancellationToken ct)

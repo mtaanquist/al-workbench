@@ -69,18 +69,18 @@ public sealed class NotificationPreferenceService
         }
 
         var userId = RequireUserId();
-        var orgId = _orgContext.CurrentOrganizationId
-            ?? throw new InvalidOperationException("No organization in scope; service mutation called outside an authenticated request.");
-        var row = await _db.UserNotificationSettings
-            .FirstOrDefaultAsync(s => s.UserId == userId && s.Category == category, ct);
-        if (row is null)
-        {
-            row = new UserNotificationSetting { UserId = userId, OrganizationId = orgId, Category = category };
-            _db.UserNotificationSettings.Add(row);
-        }
-        row.Delivery = delivery;
-        row.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct);
+        var orgId = RequireOrganizationId();
+        var now = _clock.GetUtcNow().UtcDateTime;
+        // One statement, so two quick changes (two tabs, a double click) cannot
+        // both insert and trip the unique (user_id, category) index. Nothing is
+        // tracked either, so a failed save leaves the page's context clean for
+        // the next one.
+        await _db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO user_notification_settings (user_id, organization_id, category, delivery, updated_at)
+            VALUES ({userId}, {orgId}, {category.ToString()}, {delivery.ToString()}, {now})
+            ON CONFLICT (user_id, category)
+            DO UPDATE SET delivery = EXCLUDED.delivery, updated_at = EXCLUDED.updated_at
+            """, ct);
         _logger.LogInformation(
             "User {UserId} set {Category} notifications to {Delivery}.", userId, category, delivery);
     }
@@ -97,6 +97,9 @@ public sealed class NotificationPreferenceService
             .ToDictionaryAsync(s => s.UserId, s => s.Delivery, ct);
         return userIds.Distinct().ToDictionary(id => id, id => stored.GetValueOrDefault(id, DefaultDelivery));
     }
+
+    private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
+        ?? throw new InvalidOperationException("No organization in scope; service mutation called outside an authenticated request.");
 
     private int RequireUserId() => _orgContext.CurrentUserId
         ?? throw new InvalidOperationException("No signed-in user; notification settings belong to one.");

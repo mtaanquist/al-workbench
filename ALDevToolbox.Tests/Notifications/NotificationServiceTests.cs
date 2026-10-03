@@ -76,6 +76,35 @@ public sealed class NotificationServiceTests : IDisposable
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Delivery");
     }
 
+    [Fact]
+    public async Task An_unknown_category_is_refused_with_its_field()
+    {
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("alex@cronus.example");
+        await using var ctx = _db.NewContext();
+
+        var act = () => Preferences(ctx).SetForCurrentUserAsync((NotificationCategory)42, NotificationDelivery.Off);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Category");
+    }
+
+    [Fact]
+    public async Task Two_saves_at_once_for_the_same_choice_both_succeed()
+    {
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("alex@cronus.example");
+        await using var first = _db.NewContext();
+        await using var second = _db.NewContext();
+
+        await Task.WhenAll(
+            Preferences(first).SetForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Daily),
+            Preferences(second).SetForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Weekly));
+
+        await using var read = _db.NewContext();
+        (await read.UserNotificationSettings.CountAsync()).Should().Be(1);
+        // The same page can save again afterwards: nothing failed is left tracked.
+        await Preferences(first).SetForCurrentUserAsync(NotificationCategory.Builds, NotificationDelivery.Off);
+        (await Preferences(read).GetForCurrentUserAsync())[NotificationCategory.Builds].Should().Be(NotificationDelivery.Off);
+    }
+
     // ---- sending -----------------------------------------------------------
 
     [Fact]
@@ -180,6 +209,56 @@ public sealed class NotificationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Without_email_set_up_immediately_sends_nothing_but_digests_still_keep()
+    {
+        var now = await SeedUserAsync("now@cronus.example");
+        var later = await SeedUserAsync("later@cronus.example");
+        await SetChoiceAsync(later, NotificationDelivery.Daily);
+        _email.Configured = false;
+
+        await NotifyAsync(Notification(now, later));
+
+        _email.Sent.Should().BeEmpty();
+        await using var ctx = _db.NewContext();
+        (await ctx.NotificationDigestItems.Select(i => i.UserId).ToListAsync()).Should().Equal(later);
+    }
+
+    [Fact]
+    public async Task The_callers_unsaved_changes_are_left_alone()
+    {
+        var userId = await SeedUserAsync("alex@cronus.example");
+        await SetChoiceAsync(userId, NotificationDelivery.Daily);
+        await using var ctx = _db.NewContext();
+        var pending = await ctx.Users.SingleAsync(u => u.Id == userId);
+        pending.DisplayName = "Not saved yet";
+
+        await NotifyAsync(Notification(userId), ctx: ctx);
+
+        await using var read = _db.NewContext();
+        (await read.Users.SingleAsync(u => u.Id == userId)).DisplayName.Should().Be("Alex Hansen");
+        (await read.NotificationDigestItems.CountAsync()).Should().Be(1);
+        ctx.ChangeTracker.Entries().Should().ContainSingle(e => e.State == EntityState.Modified);
+    }
+
+    [Fact]
+    public async Task A_digest_that_cannot_be_kept_leaves_the_caller_able_to_save()
+    {
+        var userId = await SeedUserAsync("alex@cronus.example");
+        await SetChoiceAsync(userId, NotificationDelivery.Weekly);
+        await using var ctx = _db.NewContext();
+        // PostgreSQL refuses a NUL character in text, so this item fails to save.
+        var unsavable = Notification(userId) with { Digest = new NotificationDigestEntry("Bad\0title", null, Origin, null) };
+
+        await NotifyAsync(unsavable, ctx: ctx);
+
+        (await ctx.Users.SingleAsync(u => u.Id == userId)).DisplayName = "Renamed";
+        await ctx.SaveChangesAsync();
+        await using var read = _db.NewContext();
+        (await read.NotificationDigestItems.CountAsync()).Should().Be(0);
+        (await read.Users.SingleAsync(u => u.Id == userId)).DisplayName.Should().Be("Renamed");
+    }
+
+    [Fact]
     public void Every_category_has_an_outbox_label()
     {
         foreach (var category in Enum.GetValues<NotificationCategory>())
@@ -197,11 +276,13 @@ public sealed class NotificationServiceTests : IDisposable
         new NotificationDigestEntry("Build failed: CRONUS Coffee - Main", "error AL0118", $"{Origin}/pipelines/1", "CRONUS Coffee"),
         (_, recipient, _) => Task.FromResult(new EmailContent($"For {recipient.DisplayName}", "<p>Body</p>", "Body")));
 
-    private async Task NotifyAsync(Notification notification, string? origin = Origin)
+    private async Task NotifyAsync(
+        Notification notification, string? origin = Origin, ALDevToolbox.Data.AppDbContext? ctx = null)
     {
-        await using var ctx = _db.NewContext();
+        await using var owned = ctx is null ? _db.NewContext() : null;
+        ctx ??= owned!;
         var service = new NotificationService(
-            ctx, Preferences(ctx), _email, new EmailRenderer(_services, NullLoggerFactory.Instance),
+            ctx, _db.NewContextFactory(), Preferences(ctx), _email, new EmailRenderer(_services, NullLoggerFactory.Instance),
             new PublicOrigin(origin), _db.OrgContext, TimeProvider.System, NullLogger<NotificationService>.Instance);
         await service.NotifyAsync(notification);
     }
@@ -241,8 +322,9 @@ public sealed class NotificationServiceTests : IDisposable
     {
         public List<(string To, string Subject, EmailPurpose Purpose)> Sent { get; } = [];
         public string? FailFor { get; set; }
+        public bool Configured { get; set; } = true;
 
-        public Task<bool> IsConfiguredAsync(CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> IsConfiguredAsync(CancellationToken ct = default) => Task.FromResult(Configured);
 
         public Task SendAsync(string toEmail, EmailContent content, EmailPurpose purpose, CancellationToken ct = default)
         {

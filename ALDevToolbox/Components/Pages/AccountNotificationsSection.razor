@@ -19,7 +19,7 @@
             <h2 class="card__title">Email notifications</h2>
             <p class="card__sub">
                 Emails about builds and deployments you started or set up. Choose when each kind reaches you;
-                changes save as you make them. Digests go out at 06:00 UTC, the weekly one on Mondays.
+                changes save as you make them.
             </p>
         </div>
     </div>
@@ -48,8 +48,9 @@
                 <SettingRow Name="@Name(category)" Hint="@Hint(category)">
                     <SelectBox>
                         <select class="select" id="@id" aria-label="@($"{Name(category)} emails")"
-                                value="@_choices[category]" disabled="@_saving"
-                                @onchange="e => SaveAsync(category, e)">
+                                disabled="@_saving"
+                                @bind:get="_choices[category]"
+                                @bind:set="(NotificationDelivery d) => SaveAsync(category, d)">
                             @foreach (var delivery in Enum.GetValues<NotificationDelivery>())
                             {
                                 <option value="@delivery">@Label(delivery)</option>
@@ -78,9 +79,13 @@
         _canSend = Notifications.IsEnabled && await Email.IsConfiguredAsync();
     }
 
-    private async Task SaveAsync(NotificationCategory category, ChangeEventArgs e)
+    /// <summary>
+    /// Bound with get/set rather than value plus onchange so a failed save puts
+    /// the dropdown back on the choice that is actually stored.
+    /// </summary>
+    private async Task SaveAsync(NotificationCategory category, NotificationDelivery delivery)
     {
-        if (_choices is null || !Enum.TryParse<NotificationDelivery>(e.Value?.ToString(), out var delivery)) return;
+        if (_choices is null) return;
         _saving = true;
         _saved = null;
         _failed = null;
