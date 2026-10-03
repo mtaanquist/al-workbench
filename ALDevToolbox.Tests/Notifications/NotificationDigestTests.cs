@@ -63,8 +63,8 @@ public sealed class NotificationDigestTests : IDisposable
 
         _email.Sent.Select(s => (s.To, s.Subject)).Should().BeEquivalentTo(new[]
         {
-            ("alex@cronus.example", "Daily summary from AL Workbench: 2 updates"),
-            ("sam@cronus.example", "Weekly summary from AL Workbench: 1 update"),
+            ("alex@cronus.example", "Daily digest from AL Workbench: 2 updates"),
+            ("sam@cronus.example", "Weekly digest from AL Workbench: 1 update"),
         });
         _email.Sent.Should().AllSatisfy(s => s.Purpose.Should().Be(EmailPurpose.NotificationDigest));
         var alexMail = _email.Sent.Single(s => s.To == "alex@cronus.example");
@@ -147,17 +147,76 @@ public sealed class NotificationDigestTests : IDisposable
         await ItemCountShouldBeAsync(0);
     }
 
+    [Fact]
+    public async Task Without_a_public_base_url_items_wait()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        await KeepAsync(alex, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: A", Wednesday0700.AddHours(-5));
+
+        (await SendDueAsync(origin: null)).Should().Be(0);
+
+        _email.Sent.Should().BeEmpty();
+        await ItemCountShouldBeAsync(1);
+    }
+
+    [Fact]
+    public async Task A_shutdown_after_queuing_still_clears_the_items()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        await KeepAsync(alex, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: A", Wednesday0700.AddHours(-5));
+        using var shutdown = new CancellationTokenSource();
+        _email.OnSend = shutdown.Cancel;
+
+        try { await SendDueAsync(ct: shutdown.Token); }
+        catch (OperationCanceledException) { }
+
+        _email.Sent.Should().ContainSingle();
+        await ItemCountShouldBeAsync(0);
+    }
+
+    [Fact]
+    public async Task Another_organisations_items_are_left_alone()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        var other = await SeedUserAsync("other@cronus.example", organizationId: TestDb.OtherOrgId);
+        await KeepAsync(alex, NotificationCategory.Builds, NotificationDelivery.Daily, "Ours", Wednesday0700.AddHours(-5));
+        await KeepAsync(other, NotificationCategory.Builds, NotificationDelivery.Daily, "Theirs", Wednesday0700.AddHours(-5),
+            organizationId: TestDb.OtherOrgId);
+        await KeepAsync(other, NotificationCategory.Builds, NotificationDelivery.Daily, "Theirs, old", Wednesday0700.AddDays(-40),
+            organizationId: TestDb.OtherOrgId);
+
+        await SendDueAsync();
+
+        _email.Sent.Select(s => s.To).Should().Equal("alex@cronus.example");
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        await ItemCountShouldBeAsync(2);
+        _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+    }
+
+    [Fact]
+    public async Task An_item_saved_just_after_the_cutoff_waits_a_few_minutes_for_it()
+    {
+        _clock.Advance(TimeSpan.FromMinutes(-58)); // 06:02, inside the grace
+        var alex = await SeedUserAsync("alex@cronus.example");
+        await KeepAsync(alex, NotificationCategory.Builds, NotificationDelivery.Daily, "Just before", Wednesday0700.AddMinutes(-61));
+        await KeepAsync(alex, NotificationCategory.Builds, NotificationDelivery.Daily, "Earlier", Wednesday0700.AddDays(-1).AddHours(-2));
+
+        (await SendDueAsync()).Should().Be(1);
+
+        _email.Sent.Single().Html.Should().Contain("Earlier").And.NotContain("Just before");
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private static DateTime Utc(string value) => DateTime.SpecifyKind(DateTime.Parse(value), DateTimeKind.Utc);
 
-    private async Task<int> SendDueAsync()
+    private async Task<int> SendDueAsync(string? origin = Origin, CancellationToken ct = default)
     {
         await using var ctx = _db.NewContext();
         var service = new NotificationDigestService(
-            ctx, _email, new EmailRenderer(_services, NullLoggerFactory.Instance), new PublicOrigin(Origin),
+            ctx, _email, new EmailRenderer(_services, NullLoggerFactory.Instance), new PublicOrigin(origin),
             _db.OrgContext, _clock, NullLogger<NotificationDigestService>.Instance);
-        return await service.SendDueAsync();
+        return await service.SendDueAsync(ct);
     }
 
     private async Task ItemCountShouldBeAsync(int count)
@@ -166,12 +225,14 @@ public sealed class NotificationDigestTests : IDisposable
         (await ctx.NotificationDigestItems.CountAsync()).Should().Be(count);
     }
 
-    private async Task KeepAsync(int userId, NotificationCategory category, NotificationDelivery delivery, string title, DateTime createdAt)
+    private async Task KeepAsync(
+        int userId, NotificationCategory category, NotificationDelivery delivery, string title, DateTime createdAt,
+        int organizationId = TestDb.DefaultOrgId)
     {
         await using var ctx = _db.NewContext();
         ctx.NotificationDigestItems.Add(new NotificationDigestItem
         {
-            UserId = userId, OrganizationId = TestDb.DefaultOrgId, Category = category, Delivery = delivery,
+            UserId = userId, OrganizationId = organizationId, Category = category, Delivery = delivery,
             Title = title, Url = $"{Origin}/pipelines/1", SolutionName = "CRONUS Coffee", CreatedAt = createdAt,
         });
         await ctx.SaveChangesAsync();
@@ -186,12 +247,13 @@ public sealed class NotificationDigestTests : IDisposable
         _db.OrgContext.CurrentUserId = null;
     }
 
-    private async Task<int> SeedUserAsync(string email, UserStatus status = UserStatus.Active)
+    private async Task<int> SeedUserAsync(
+        string email, UserStatus status = UserStatus.Active, int organizationId = TestDb.DefaultOrgId)
     {
         await using var ctx = _db.NewContext();
         var user = new User
         {
-            OrganizationId = TestDb.DefaultOrgId, Email = email, DisplayName = "Alex Hansen", PasswordHash = "x",
+            OrganizationId = organizationId, Email = email, DisplayName = "Alex Hansen", PasswordHash = "x",
             Role = UserRole.User, Status = status, CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
         };
         ctx.Users.Add(user);
@@ -204,6 +266,7 @@ public sealed class NotificationDigestTests : IDisposable
         public List<(string To, string Subject, string Html, EmailPurpose Purpose)> Sent { get; } = [];
         public string? FailFor { get; set; }
         public bool Configured { get; set; } = true;
+        public Action? OnSend { get; set; }
 
         public Task<bool> IsConfiguredAsync(CancellationToken ct = default) => Task.FromResult(Configured);
 
@@ -211,6 +274,7 @@ public sealed class NotificationDigestTests : IDisposable
         {
             if (toEmail == FailFor) throw new InvalidOperationException("The outbox said no.");
             Sent.Add((toEmail, content.Subject, content.HtmlBody, purpose));
+            OnSend?.Invoke();
             return Task.CompletedTask;
         }
     }

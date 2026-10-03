@@ -105,10 +105,14 @@ polls every 15 minutes and runs `NotificationDigestService.SendDueAsync` per org
 - **Cut-offs:** daily at 06:00 UTC, weekly on Monday at 06:00 UTC. A run sends every kept
   item created before the latest cut-off for its digest: one email per person and digest,
   grouped by category, oldest first.
-- **No state.** Items are deleted straight after their digest is queued, so any run after a
-  cut-off sends what is due and nothing twice. A restart or a day down only delays it.
+- **No state.** A digest's items are deleted in the same transaction that queues it
+  (delete, queue, commit), so any run after a cut-off sends what is due and nothing twice;
+  only a commit failing after the queue succeeded could repeat one. A restart or a day down
+  only delays a digest. Runs wait five minutes past a cut-off, so an item saved across it
+  does not get a digest of its own.
 - **Current choices win.** Items for a category the person has since turned Off, or for a
   person no longer active, are dropped unsent. A digest that fails to queue keeps its items
   for the next run.
 - **Nothing to send with.** Without `PUBLIC_BASE_URL` or email set up, items wait; any item
-  older than 30 days is dropped on every run, sent or not.
+  older than 30 days is dropped on every run, sent or not. With the scheduler disabled
+  nothing runs, so items wait until it is turned back on.

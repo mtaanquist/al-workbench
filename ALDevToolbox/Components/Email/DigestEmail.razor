@@ -42,9 +42,7 @@
 
     private int Count => Sections.Sum(s => s.Items.Count);
 
-    private string Intro => Weekly
-        ? $"Here is what happened in the past week to work you started or set up ({Updates(Count)})."
-        : $"Here is what happened since yesterday to work you started or set up ({Updates(Count)}).";
+    private string Intro => $"Here is what happened to work you started or set up ({Updates(Count)}).";
 
     private string Preheader => string.Join(", ", Sections.Select(s => $"{s.Heading}: {s.Items.Count}"));
 
@@ -55,7 +53,7 @@
     private static string Updates(int count) => count == 1 ? "1 update" : $"{count} updates";
 
     public static string SubjectFor(bool weekly, int count) =>
-        $"{(weekly ? "Weekly" : "Daily")} summary from AL Workbench: {Updates(count)}";
+        $"{(weekly ? "Weekly" : "Daily")} digest from AL Workbench: {Updates(count)}";
 
     public static Task<EmailContent> RenderAsync(
         EmailRenderer renderer,

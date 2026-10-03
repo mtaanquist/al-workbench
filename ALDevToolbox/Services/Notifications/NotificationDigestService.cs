@@ -31,6 +31,9 @@ public sealed class NotificationDigestService
     /// <summary>How long an item waits for a digest that cannot be sent (email not set up) before it is dropped.</summary>
     public static readonly TimeSpan KeepFor = TimeSpan.FromDays(30);
 
+    /// <summary>How long after a cut-off a run waits before using it.</summary>
+    internal static readonly TimeSpan CutoffGrace = TimeSpan.FromMinutes(5);
+
     private readonly AppDbContext _db;
     private readonly IEmailService _email;
     private readonly EmailRenderer _renderer;
@@ -95,8 +98,10 @@ public sealed class NotificationDigestService
         // nothing can be sent; the items wait, up to KeepFor.
         if (_origin.Configured is not { } origin || !await _email.IsConfiguredAsync(ct)) return 0;
 
-        var daily = DailyCutoff(now);
-        var weekly = WeeklyCutoff(now);
+        // A few minutes' grace, so an item stamped just before a cut-off but
+        // saved just after it is not left for a second digest of its own.
+        var daily = DailyCutoff(now - CutoffGrace);
+        var weekly = WeeklyCutoff(now - CutoffGrace);
         var items = await _db.NotificationDigestItems.AsNoTracking()
             .Where(i => (i.Delivery == NotificationDelivery.Daily && i.CreatedAt < daily)
                 || (i.Delivery == NotificationDelivery.Weekly && i.CreatedAt < weekly))
@@ -140,21 +145,40 @@ public sealed class NotificationDigestService
                     Heading(g.Key),
                     g.Select(i => new NotificationDigestEntry(i.Title, i.Detail, i.Url, i.SolutionName)).ToList()))
                 .ToList();
+            var ids = digest.Select(i => i.Id).ToList();
+            EmailContent content;
             try
             {
-                var content = await DigestEmail.RenderAsync(_renderer, recipient.DisplayName, organizationName,
+                content = await DigestEmail.RenderAsync(_renderer, recipient.DisplayName, organizationName,
                     digest.Key.Delivery == NotificationDelivery.Weekly, sections, settingsUrl, ct);
-                await _email.SendAsync(recipient.Email, content, EmailPurpose.NotificationDigest, ct);
-                // Straight after queuing, so a failure further on cannot send these twice.
-                var ids = digest.Select(i => i.Id).ToList();
-                await _db.NotificationDigestItems.Where(i => ids.Contains(i.Id)).ExecuteDeleteAsync(ct);
-                sent++;
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
+                _logger.LogWarning(ex, "The {Delivery} digest for user {UserId} could not be rendered; it will be tried again.",
+                    digest.Key.Delivery, digest.Key.UserId);
+                continue;
+            }
+
+            // Delete first, inside a transaction, then queue, then commit. A queue
+            // that fails rolls the delete back, so the items wait for the next run;
+            // only a failed commit after a successful queue could send a digest twice.
+            // The commit ignores ct, so a shutdown arriving mid-way cannot open that
+            // window either.
+            await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+            await _db.NotificationDigestItems.Where(i => ids.Contains(i.Id)).ExecuteDeleteAsync(ct);
+            try
+            {
+                await _email.SendAsync(recipient.Email, content, EmailPurpose.NotificationDigest, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
                 _logger.LogWarning(ex, "The {Delivery} digest for user {UserId} could not be queued; it will be tried again.",
                     digest.Key.Delivery, digest.Key.UserId);
+                continue;
             }
+            await transaction.CommitAsync(CancellationToken.None);
+            sent++;
         }
 
         if (dropped.Count > 0)

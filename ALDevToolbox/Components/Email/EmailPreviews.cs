@@ -107,7 +107,7 @@ public static class EmailPreviews
                 "CRONUS Coffee", "Coffee to Production", "Production", SampleApps,
                 "CRONUS Coffee 1.4.0.0 failed: the extension could not be installed because a newer version is already there.",
                 $"{SampleOrigin}/pipelines/deployments/7", $"{SampleOrigin}{NotificationService.SettingsPath}", ct)),
-        new("digest", "Daily summary",
+        new("digest", "Daily digest",
             "At 06:00 UTC to people who chose a daily digest for some notifications; the weekly one goes out on Mondays.",
             typeof(DigestEmail),
             (r, ct) => DigestEmail.RenderAsync(r, Person, Organization, weekly: false,
