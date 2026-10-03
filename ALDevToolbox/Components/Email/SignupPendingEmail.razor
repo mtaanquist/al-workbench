@@ -1,0 +1,24 @@
+@* Tells an organisation's admins that someone asked to join and is waiting for approval. *@
+<EmailLayout Preheader="@($"{RequesterEmail} is waiting for your approval.")" OrganizationName="@OrganizationName" Reason="@($"You received this because you are an administrator of {OrganizationName}.")">
+    <EmailParagraph>Hi @AdminName,</EmailParagraph>
+    <EmailParagraph><strong>@RequesterEmail</strong> has asked to join <strong>@OrganizationName</strong>. They cannot sign in until you approve them.</EmailParagraph>
+    <EmailButton Href="@ReviewUrl" ShowLink="false">Review pending users</EmailButton>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string AdminName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string RequesterEmail { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string ReviewUrl { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer, string adminName, string requesterEmail, string organizationName, string reviewUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<SignupPendingEmail>($"New signup waiting in {organizationName}", new Dictionary<string, object?>
+        {
+            [nameof(AdminName)] = adminName,
+            [nameof(RequesterEmail)] = requesterEmail,
+            [nameof(OrganizationName)] = organizationName,
+            [nameof(ReviewUrl)] = reviewUrl,
+        }, ct);
+}

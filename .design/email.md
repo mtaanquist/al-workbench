@@ -28,8 +28,8 @@ survive that.
 ## How an email is built
 
 - Each email is a Razor component in `Components/Email/` that composes `EmailLayout`,
-  `EmailParagraph` and `EmailButton`, and exposes its subject and a typed `RenderAsync`
-  (`SiteAdminTestEmail` is the shape to copy).
+  `EmailParagraph`, `EmailButton` and, for one-time codes, `EmailCode`, and exposes a typed
+  `RenderAsync` that sets its subject (`PasswordResetEmail` is the shape to copy).
 - `EmailRenderer` renders it with Blazor's `HtmlRenderer`, so every value is HTML-encoded by
   Razor. The subject only has control characters collapsed.
 - Styles are inline and the layout is tables, because email clients drop stylesheets and
@@ -41,7 +41,9 @@ survive that.
   element out (the preheader, the written-out address under a button) and
   `data-email-text="button"` writes a button as its label and its address on two lines. Any
   other link keeps its address in brackets after the text.
-- Links are absolute: an email has no page to be relative to.
+- Links are absolute: an email has no page to be relative to. Build them from `PublicOrigin`
+  (`PUBLIC_BASE_URL`) rather than the request's host, so a forged `Host` header cannot point a
+  link somewhere else. When it is unset, links fall back to the request host and startup warns.
 
 ## Copy
 

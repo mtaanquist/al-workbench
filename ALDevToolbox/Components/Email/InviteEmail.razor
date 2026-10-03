@@ -1,0 +1,32 @@
+@* An admin's invitation to join their organisation, with their optional welcome note. *@
+<EmailLayout Preheader="@($"{InviterName} invited you to join {OrganizationName}.")" OrganizationName="@OrganizationName" Reason="@($"You received this because {InviterName} invited this address to {OrganizationName}.")">
+    <EmailParagraph>Hi,</EmailParagraph>
+    <EmailParagraph><strong>@InviterName</strong> has invited you to join <strong>@OrganizationName</strong> on AL Workbench, with the <strong>@RoleLabel</strong> role.</EmailParagraph>
+    @if (!string.IsNullOrWhiteSpace(WelcomeMessage))
+    {
+        <blockquote style="margin: 0 0 16px; padding: 2px 0 2px 12px; border-left: 3px solid @EmailTheme.Border; color: @EmailTheme.Muted;">@WelcomeMessage</blockquote>
+    }
+    <EmailParagraph>Accept within the next 7 days to set your name and password.</EmailParagraph>
+    <EmailButton Href="@AcceptUrl">Accept invitation</EmailButton>
+    <EmailParagraph>If you were not expecting this invitation, you can ignore this email.</EmailParagraph>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string InviterName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string RoleLabel { get; set; } = string.Empty;
+    [Parameter] public string? WelcomeMessage { get; set; }
+    [Parameter, EditorRequired] public string AcceptUrl { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer, string inviterName, string organizationName, string roleLabel, string? welcomeMessage,
+        string acceptUrl, CancellationToken ct = default)
+        => renderer.RenderAsync<InviteEmail>($"You're invited to {organizationName} on AL Workbench", new Dictionary<string, object?>
+        {
+            [nameof(InviterName)] = inviterName,
+            [nameof(OrganizationName)] = organizationName,
+            [nameof(RoleLabel)] = roleLabel,
+            [nameof(WelcomeMessage)] = welcomeMessage,
+            [nameof(AcceptUrl)] = acceptUrl,
+        }, ct);
+}

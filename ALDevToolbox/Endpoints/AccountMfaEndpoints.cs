@@ -1,9 +1,11 @@
 using System.Security.Claims;
+using ALDevToolbox.Components.Email;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.Email;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -56,6 +58,7 @@ internal static class AccountMfaEndpoints
 
         app.MapPost("/auth/login/challenge/email/issue", async (
             HttpContext ctx, EmailMfaService mfa, IEmailService emailSvc, AppDbContext db,
+            EmailRenderer emailRenderer,
             IDataProtectionProvider protection, TimeProvider clock,
             IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
@@ -83,8 +86,8 @@ internal static class AccountMfaEndpoints
                     .Where(u => u.Id == state.UserId)
                     .Select(u => new { u.Email, u.DisplayName })
                     .FirstAsync(ct);
-                var (subject, body) = EmailTemplates.MfaEmailCode(user.DisplayName, code);
-                await emailSvc.SendAsync(user.Email, subject, body, EmailPurpose.MfaCode, ct);
+                var content = await MfaCodeEmail.RenderAsync(emailRenderer, user.DisplayName, code, ct);
+                await emailSvc.SendAsync(user.Email, content, EmailPurpose.MfaCode, ct);
                 ctx.Response.Redirect($"/login/challenge?method=email&{RouteConstants.OkQuery}=sent");
             }
             catch (Exception ex)
@@ -180,6 +183,7 @@ internal static class AccountMfaEndpoints
 
         app.MapPost("/auth/account/2fa/email/begin", async (
             HttpContext ctx, EmailMfaService mfa, IEmailService emailSvc, AppDbContext db,
+            EmailRenderer emailRenderer,
             IOrganizationContext org, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("EmailMfaSetup");
@@ -203,8 +207,8 @@ internal static class AccountMfaEndpoints
                     .Where(u => u.Id == org.CurrentUserId!.Value)
                     .Select(u => new { u.Email, u.DisplayName })
                     .FirstAsync(ct);
-                var (subject, body) = EmailTemplates.MfaEmailCode(user.DisplayName, code);
-                await emailSvc.SendAsync(user.Email, subject, body, EmailPurpose.MfaCode, ct);
+                var content = await MfaCodeEmail.RenderAsync(emailRenderer, user.DisplayName, code, ct);
+                await emailSvc.SendAsync(user.Email, content, EmailPurpose.MfaCode, ct);
                 ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=email-mfa-sent");
             }
             catch (Exception ex)

@@ -1,0 +1,21 @@
+@* Single-use sign-in link, sent from the sign-in page. *@
+<EmailLayout Preheader="Your sign-in link works for 15 minutes." Reason="You received this because someone asked for a sign-in link for this address.">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>Use this link to sign in to AL Workbench. It works once, within the next 15 minutes.</EmailParagraph>
+    <EmailButton Href="@SignInUrl">Sign in</EmailButton>
+    <EmailParagraph>If you did not ask for this link, you can ignore this email.</EmailParagraph>
+</EmailLayout>
+
+@code {
+    public const string Subject = "Your AL Workbench sign-in link";
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SignInUrl { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(EmailRenderer renderer, string displayName, string signInUrl, CancellationToken ct = default)
+        => renderer.RenderAsync<MagicLinkEmail>(Subject, new Dictionary<string, object?>
+        {
+            [nameof(DisplayName)] = displayName,
+            [nameof(SignInUrl)] = signInUrl,
+        }, ct);
+}
