@@ -145,6 +145,7 @@
     {
         NotificationCategory.Builds => "Builds",
         NotificationCategory.Deployments => "Deployments",
+        NotificationCategory.Upgrades => "Upgrades",
         _ => category.ToString(),
     };
 
@@ -154,6 +155,8 @@
             "When a build pipeline you started or set up first fails, and again when it works. Also covers the nightly check against upcoming Business Central versions.",
         NotificationCategory.Deployments =>
             "A deployment needs your approval, finishes, or fails. Approval requests are emailed straight away even with a digest chosen.",
+        NotificationCategory.Upgrades =>
+            "A change you scheduled on an environment, such as an app install or a new update date, has run or failed.",
         _ => string.Empty,
     };
 

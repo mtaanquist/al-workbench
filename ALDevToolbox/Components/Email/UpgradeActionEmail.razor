@@ -1,0 +1,68 @@
+@*
+    A change someone scheduled on an environment ran or failed (issue #1046).
+    See .design/notifications.md.
+*@
+<EmailLayout Preheader="@Preheader" OrganizationName="@OrganizationName" Reason="You received this because you scheduled this change." SettingsUrl="@SettingsUrl">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>
+        @if (Failed)
+        {
+            @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> did not go through.
+        }
+        else
+        {
+            @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> has run.
+        }
+    </EmailParagraph>
+    @if (!string.IsNullOrWhiteSpace(Outcome))
+    {
+        <blockquote style="margin: 0 0 16px; padding: 8px 12px; border-left: 3px solid @EmailTheme.Border; color: @EmailTheme.Body;">@Outcome</blockquote>
+    }
+    <EmailButton Href="@EnvironmentUrl">Open the environment's history</EmailButton>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public bool Failed { get; set; }
+    /// <summary>What was scheduled, short: "Install CRONUS Coffee.app".</summary>
+    [Parameter, EditorRequired] public string What { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SolutionName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string EnvironmentName { get; set; } = string.Empty;
+    /// <summary>The history line: what happened, or why it did not.</summary>
+    [Parameter] public string? Outcome { get; set; }
+    [Parameter, EditorRequired] public string EnvironmentUrl { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private string Preheader => Outcome ?? SubjectFor(Failed, What, EnvironmentName);
+
+    public static string SubjectFor(bool failed, string what, string environmentName) =>
+        failed ? $"Failed: {what} on {environmentName}" : $"Done: {what} on {environmentName}";
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer,
+        string displayName,
+        string organizationName,
+        bool failed,
+        string what,
+        string solutionName,
+        string environmentName,
+        string? outcome,
+        string environmentUrl,
+        string settingsUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<UpgradeActionEmail>(
+            SubjectFor(failed, what, environmentName),
+            new Dictionary<string, object?>
+            {
+                [nameof(DisplayName)] = displayName,
+                [nameof(OrganizationName)] = organizationName,
+                [nameof(Failed)] = failed,
+                [nameof(What)] = what,
+                [nameof(SolutionName)] = solutionName,
+                [nameof(EnvironmentName)] = environmentName,
+                [nameof(Outcome)] = outcome,
+                [nameof(EnvironmentUrl)] = environmentUrl,
+                [nameof(SettingsUrl)] = settingsUrl,
+            }, ct);
+}

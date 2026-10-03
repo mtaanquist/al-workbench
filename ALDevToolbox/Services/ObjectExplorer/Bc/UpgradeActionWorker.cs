@@ -300,7 +300,9 @@ public sealed class UpgradeActionWorker : BackgroundService
                         .SetProperty(a => a.Outcome,
                             $"{action.Label} wasn't installed, because {blocked.PackageFileName} before it in the same upload didn't install."),
                         ct).ConfigureAwait(false);
-                return skipped > 0 ? RunOutcome.Settled : RunOutcome.Skipped;
+                if (skipped == 0) return RunOutcome.Skipped;
+                await NotifyAsync(scope, action.Id, ct).ConfigureAwait(false);
+                return RunOutcome.Settled;
             }
         }
 
@@ -458,8 +460,17 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .SetProperty(a => a.PackageContent, (byte[]?)null)
                 .SetProperty(a => a.ConfirmationDue, a => confirmationDue && a.BcAppId != null && a.BcOperationId != null)
                 .SetProperty(a => a.SentAt, finishedAt), ct).ConfigureAwait(false);
+        // One left to be asked about again is announced by that second look instead.
+        await NotifyAsync(scope, action.Id, ct).ConfigureAwait(false);
         return RunOutcome.Sent;
     }
+
+    /// <summary>
+    /// Tells the person who booked <paramref name="actionId"/> how it went (issue #1046),
+    /// in the scope that settled it. The notifier never throws.
+    /// </summary>
+    private static Task NotifyAsync(AsyncServiceScope scope, int actionId, CancellationToken ct) =>
+        scope.ServiceProvider.GetRequiredService<Notifications.UpgradeActionNotifier>().NotifyAsync(actionId, ct);
 
     /// <summary>
     /// Records the operation Business Central answered an install with on the booking,
@@ -505,6 +516,12 @@ public sealed class UpgradeActionWorker : BackgroundService
         // install pass asks Business Central how it ended from the stored ids before the
         // rest of its batch goes. The wording below stands only when that cannot happen
         // (no app id was stamped) or until it does.
+        // Read first, so each person hears how their interrupted change was left.
+        var interrupted = await db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt != null)
+            .Select(a => a.Id)
+            .ToListAsync(ct).ConfigureAwait(false);
+
         var unconfirmed = await db.OeEnvironmentUpgradeActions
             .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt != null && a.BcOperationId != null)
             .ExecuteUpdateAsync(s => s
@@ -534,6 +551,10 @@ public sealed class UpgradeActionWorker : BackgroundService
             _logger.LogWarning(
                 "A restart interrupted {Unconfirmed} install(s) Business Central had accepted (recorded as sent, to be checked again) and {Failed} action(s) mid-send (failed) in org {OrgId}.",
                 unconfirmed, failed, orgId);
+        }
+        foreach (var id in interrupted)
+        {
+            await NotifyAsync(scope, id, ct).ConfigureAwait(false);
         }
 
         // Belt and braces for the packages: every settled write above clears its own, but
@@ -647,6 +668,7 @@ public sealed class UpgradeActionWorker : BackgroundService
         {
             await marked.ExecuteUpdateAsync(s => s.SetProperty(a => a.ConfirmationDue, false), ct).ConfigureAwait(false);
         }
+        await NotifyAsync(actionScope, row.Id, ct).ConfigureAwait(false);
         return true;
     }
 

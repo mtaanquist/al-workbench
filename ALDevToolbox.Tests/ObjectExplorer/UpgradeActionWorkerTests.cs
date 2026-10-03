@@ -164,6 +164,90 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Admin.Writes.Should().Be(0, "repeating 'start the update now' on a guess is not a safe default");
     }
 
+    // ── Notifications (#1046) ───────────────────────────────────────────
+    // Whoever booked a change hears how it went, once, when it has settled.
+
+    [Fact]
+    public async Task The_person_who_booked_a_change_is_told_it_ran()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookAsync(projectId, envId, hoursAhead: 12);
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
+        sent.To.Should().Be("upgrade@example.com");
+        sent.Subject.Should().Be("Done: Start the update on Production");
+        sent.Purpose.Should().Be(EmailPurpose.UpgradeNotification);
+        sent.Html.Should().Contain($"/environments/{envId}/history");
+        await using var ctx = _f.Db.NewContext();
+        var listed = await ctx.UserNotifications.SingleAsync();
+        listed.UserId.Should().Be(UpgradeActionTestFixture.FlagUserId);
+        listed.Category.Should().Be(NotificationCategory.Upgrades);
+    }
+
+    [Fact]
+    public async Task The_person_who_booked_a_change_is_told_why_it_failed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookAsync(projectId, envId, hoursAhead: 12);
+
+        _f.Admin.OnUpdates = Array.Empty<BcEnvironmentUpdate>;
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
+        sent.Subject.Should().Be("Failed: Start the update on Production");
+        sent.Html.Should().Contain("No update");
+    }
+
+    [Fact]
+    public async Task An_install_nobody_saw_finish_is_announced_once_after_the_second_look()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app");
+        _f.Apps.PollErrorsBeforeAnswer = BcAppOperationPoller.MaxConsecutivePollErrors;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        _f.Emails.Sent.Should().BeEmpty("the answer is still to come");
+
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Done: Install Core.app on Production");
+    }
+
+    [Fact]
+    public async Task A_change_a_restart_interrupted_is_announced_as_failed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookAsync(projectId, envId, hoursAhead: 12);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var row = await ctx.OeEnvironmentUpgradeActions.SingleAsync(a => a.Id == actionId);
+            row.SentAt = _f.Clock.GetUtcNow().UtcDateTime;
+            await ctx.SaveChangesAsync();
+        }
+
+        await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Failed: Start the update on Production");
+    }
+
+    [Fact]
+    public async Task The_apps_after_a_failed_one_in_a_batch_are_each_announced()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app", "Reports.app");
+        _f.Apps.OnOperationStatus = file => file == "Core.app" ? BcAppOperationStatus.Failed : BcAppOperationStatus.Succeeded;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await SweepUntilQuietAsync();
+
+        _f.Emails.Sent.Select(s => s.Subject).Should().Equal(
+            "Failed: Install Core.app on Production", "Failed: Install Reports.app on Production");
+    }
+
     // ── Booked uploads ──────────────────────────────────────────────────
     // Apps somebody was handed, booked for a picked time or a window: the package waits
     // in the row, the sweep sends it and waits for Business Central to finish, and

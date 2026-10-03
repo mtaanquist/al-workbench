@@ -203,6 +203,7 @@ public sealed class NotificationDigestService
     {
         NotificationCategory.Builds => "Builds",
         NotificationCategory.Deployments => "Deployments",
+        NotificationCategory.Upgrades => "Upgrades",
         _ => category.ToString(),
     };
 }

@@ -44,6 +44,9 @@ public enum EmailPurpose
 
     /// <summary>A daily or weekly digest of notifications. See <c>.design/notifications.md</c>.</summary>
     NotificationDigest,
+
+    /// <summary>An upgrade notification: a booked change ran or failed, or an environment is ready to check.</summary>
+    UpgradeNotification,
 }
 
 /// <summary>Where an outbox row is in its life.</summary>
