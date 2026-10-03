@@ -1,5 +1,6 @@
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Email;
 using Microsoft.AspNetCore.HttpOverrides;
 using ALDevToolbox.Services.Operations;
 
@@ -44,6 +45,8 @@ public static class AppCoreRegistration
             sp.GetRequiredService<SmtpEmailService>(),
             sp.GetRequiredService<EmailOutbox>(),
             sp.GetRequiredService<IOrganizationContext>()));
+        // Renders the email components in Components/Email to HTML and text.
+        services.AddScoped<EmailRenderer>();
         return services;
     }
 

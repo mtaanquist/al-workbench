@@ -105,6 +105,13 @@ public class EmailOutboxMessage
     /// </summary>
     public string? BodyEncrypted { get; set; }
 
+    /// <summary>
+    /// Data-Protection ciphertext of the plain-text alternative, under the same
+    /// purpose as <see cref="BodyEncrypted"/> and dropped at the same moments,
+    /// since it carries the same links. Null for an email built without one.
+    /// </summary>
+    public string? TextBodyEncrypted { get; set; }
+
     public EmailOutboxStatus Status { get; set; } = EmailOutboxStatus.Pending;
 
     /// <summary>Send attempts made so far. Drives the backoff and the give-up point.</summary>

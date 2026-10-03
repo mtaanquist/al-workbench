@@ -125,8 +125,8 @@ public sealed class EmailOutboxScheduler : PolledScheduler
         CancellationToken shutdownToken,
         CancellationToken sendToken)
     {
-        var body = outbox.TryReadBody(message);
-        if (body is null)
+        var content = outbox.TryReadContent(message);
+        if (content is null)
         {
             // Unreadable ciphertext, or a body already dropped. Neither gets
             // better by trying again.
@@ -140,7 +140,7 @@ public sealed class EmailOutboxScheduler : PolledScheduler
 
         try
         {
-            await transport.SendAsync(message.ToEmail, message.Subject, body, message.Purpose, sendToken);
+            await transport.SendAsync(message.ToEmail, content, message.Purpose, sendToken);
             // Not the send token: a shutdown landing in the gap between a
             // delivered message and this update would leave the row pending and
             // send it a second time on the next start. The write is one indexed
