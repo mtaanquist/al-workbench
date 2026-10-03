@@ -63,6 +63,22 @@ Phase 4 adds Upgrades and Solutions.
   which emails you get" link in the footer, pointing at `/account?section=notifications`.
 - Every notification email has an `EmailPreviews` entry like any other email.
 
+## In the app (#1042, #1043)
+
+- Every notification is stored per recipient in `user_notifications` unless they turned
+  In app off for its category. Rows hold a path within the app, not an address.
+- A bell in the top bar links to `/notifications` and shows the unread count (99+ above
+  99). The shell is static, so the count is the one at page load; there is no live push,
+  which would need a held connection on every page.
+- `/notifications` lists the person's own notifications newest first (at most 200; they
+  are pruned after 30 days anyway), unread ones in bold with a dot. Opening one goes
+  through `/notifications/{id}/open`, which marks it read and redirects to its page;
+  "Mark all as read" posts to `/notifications/read-all`. Both redirect, so the count is
+  current on the next page.
+- `InAppNotificationService` names the signed-in user in every query on top of the
+  organisation filter, and reads through the context factory because the count renders
+  in the layout beside the page's own queries.
+
 ## Builds (#1035)
 
 `BuildNotifier.BuildFinishedAsync` runs from the release import worker once a pipeline

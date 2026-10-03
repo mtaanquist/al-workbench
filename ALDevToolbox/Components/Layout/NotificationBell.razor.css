@@ -1,0 +1,21 @@
+.notif-bell {
+    position: relative;
+}
+
+/* The unread count, pinned to the bell's top right like a mail badge. */
+.notif-bell__count {
+    position: absolute;
+    top: 1px;
+    right: -2px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: var(--r-pill);
+    background: var(--primary);
+    color: var(--on-primary);
+    font-size: var(--text-2xs);
+    font-weight: var(--fw-semibold);
+    line-height: 16px;
+    text-align: center;
+    pointer-events: none;
+}
