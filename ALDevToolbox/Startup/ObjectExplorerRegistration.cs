@@ -51,6 +51,7 @@ public static class ObjectExplorerRegistration
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectCustomerInfoService>();
+        services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectFollowService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.CustomerModuleService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.ReleasePipelineService>();

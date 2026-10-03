@@ -213,6 +213,7 @@ public class AppDbContext : DbContext
     // The Customer tab's hand-kept lists. See .design/solution-customer-info.md.
     public DbSet<OeProjectContact> OeProjectContacts => Set<OeProjectContact>();
     public DbSet<OeProjectPerson> OeProjectPeople => Set<OeProjectPerson>();
+    public DbSet<OeProjectFollower> OeProjectFollowers => Set<OeProjectFollower>();
     public DbSet<OeProjectIntegration> OeProjectIntegrations => Set<OeProjectIntegration>();
     // Customer modules: the catalogue, what was typed in, and what environments report.
     public DbSet<CustomerModule> CustomerModules => Set<CustomerModule>();
@@ -351,6 +352,7 @@ public class AppDbContext : DbContext
         ScopeToOrganization<OeProjectTeam>(modelBuilder);
         ScopeToOrganization<OeProjectContact>(modelBuilder);
         ScopeToOrganization<OeProjectPerson>(modelBuilder);
+        ScopeToOrganization<OeProjectFollower>(modelBuilder);
         ScopeToOrganization<OeProjectIntegration>(modelBuilder);
         ScopeToOrganization<CustomerModule>(modelBuilder);
         ScopeToOrganization<OeProjectModule>(modelBuilder);
