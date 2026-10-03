@@ -57,14 +57,23 @@ Phase 3 adds Upgrades and Solutions.
 `BuildNotifier.BuildFinishedAsync` runs from the release import worker once a pipeline
 build is marked ready or failed.
 
-- **What counts as a change.** The build is compared with the previous finished build of the
-  same pipeline, trigger (manual or nightly check) and Business Central target. A failure
+- **What counts as a change.** The build is compared with the build of the same pipeline,
+  trigger (manual or nightly check) and Business Central target that finished last before
+  it (by finish time, since builds can finish out of order after a restart). A failure
   after a success, or as the first build, is news; a success is news only after a failure.
   Keeping the triggers and targets apart means a nightly next-major failure does not hide
   behind a manual current-version success, and the other way round.
+- **What counts as failed.** A failed build, and also a ready build against an upcoming
+  version in which any extension failed: the pipeline page and the dashboard call that a
+  failed check, so the email does too. A ready build against the current version counts as
+  working, as it does on the pipeline page.
 - **Skipped:** pull request builds (GitHub shows the result on the pull request) and builds
   outside a pipeline (GitHub release imports).
-- **Recipients:** a manual build goes to whoever started it, a nightly check to whoever
-  turned the check on; the pipeline's creator gets both.
-- The email shows the first lines of the failure message and links to the build on the
-  pipeline page; the digest entry carries the first line.
+- **Recipients:** the person the build ran as (whoever pressed Build, or whoever had the
+  nightly check on when it was queued) and the pipeline's creator.
+- **Access is not re-checked.** Someone who started a build or created the pipeline keeps
+  getting its emails after losing access to a private solution. Accepted for now; the
+  recipients are people who set the build up.
+- The email shows the failed extensions (or the build's own message when it failed as a
+  whole) and links to the build on the pipeline page; the digest entry carries the first
+  line.

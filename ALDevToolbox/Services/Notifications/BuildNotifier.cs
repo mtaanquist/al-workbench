@@ -27,8 +27,9 @@ public sealed class BuildNotifier
 
     /// <summary>
     /// Notifies about the finished build that produced release
-    /// <paramref name="releaseId"/> when it changed its pipeline's state. Never throws (cancellation aside): the
-    /// build has already finished, and a notification must not undo that.
+    /// <paramref name="releaseId"/> when it changed its pipeline's state. Never
+    /// throws, except when <paramref name="ct"/> itself is cancelled: the build
+    /// has already finished, and a notification must not undo that.
     /// </summary>
     public async Task BuildFinishedAsync(int releaseId, CancellationToken ct = default)
     {
@@ -37,7 +38,11 @@ public sealed class BuildNotifier
         {
             await NotifyAsync(releaseId, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not work out notifications for the build of release {ReleaseId}.", releaseId);
         }
@@ -58,10 +63,10 @@ public sealed class BuildNotifier
                 b.BcVersion,
                 b.FailureMessage,
                 b.StartedByUserId,
+                b.FinishedAt,
                 SolutionName = b.Project!.Name,
                 PipelineName = b.Pipeline!.Name,
                 PipelineCreatedBy = b.Pipeline!.CreatedByUserId,
-                PreviewCheckBy = b.Pipeline!.PreviewCheckByUserId,
             })
             .FirstOrDefaultAsync(ct);
         // A pull request build already reports on the pull request itself, and
@@ -73,20 +78,35 @@ public sealed class BuildNotifier
             return;
         }
 
+        // The finished build of the same kind before this one, by finish time:
+        // after a restart, builds can finish out of the order they started in.
+        var finishedAt = build.FinishedAt ?? DateTime.MaxValue;
         var previous = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId == pipelineId
                 && b.Trigger == build.Trigger
                 && b.BcTarget == build.BcTarget
-                && b.Id < build.Id
+                && b.Id != build.Id
+                && b.FinishedAt != null
+                && (b.FinishedAt < finishedAt || (b.FinishedAt == finishedAt && b.Id < build.Id))
                 && (b.Status == ProjectBuildStatus.Ready || b.Status == ProjectBuildStatus.Failed))
-            .OrderByDescending(b => b.Id)
-            .Select(b => b.Status)
+            .OrderByDescending(b => b.FinishedAt)
+            .ThenByDescending(b => b.Id)
+            .Select(b => new { b.Status, b.ReleaseId })
             .FirstOrDefaultAsync(ct);
-        var failed = build.Status == ProjectBuildStatus.Failed;
-        if (!IsChange(failed, previous)) return;
+
+        var failedApps = await FailedAppsAsync(build.BcTarget, build.Status, releaseId, ct);
+        var failed = build.Status == ProjectBuildStatus.Failed || failedApps.Count > 0;
+        bool? previousFailed = previous is null
+            ? null
+            : previous.Status == ProjectBuildStatus.Failed
+              || (previous.ReleaseId is { } previousRelease
+                  && (await FailedAppsAsync(build.BcTarget, previous.Status, previousRelease, ct)).Count > 0);
+        if (!IsChange(failed, previousFailed)) return;
 
         var nightly = build.Trigger == ProjectBuildTrigger.PreviewCheck;
-        var recipients = new[] { nightly ? build.PreviewCheckBy : build.StartedByUserId, build.PipelineCreatedBy }
+        // StartedByUserId is the person the build ran as: whoever pressed Build,
+        // or whoever had the nightly check on when it was queued.
+        var recipients = new[] { build.StartedByUserId, build.PipelineCreatedBy }
             .OfType<int>()
             .Distinct()
             .ToList();
@@ -100,19 +120,44 @@ public sealed class BuildNotifier
         var buildUrl = _notifications.Link($"/pipelines/{pipelineId}?build={build.Id}")!;
         var settingsUrl = _notifications.Link(NotificationService.SettingsPath)!;
         var subject = BuildNotificationEmail.SubjectFor(failed, nightly, build.SolutionName, build.PipelineName, target);
+        // The extensions that failed say more than the build's summary line,
+        // which for a partly failed build is empty.
+        var failure = !failed ? null
+            : failedApps.Count > 0 ? string.Join("\n", failedApps)
+            : build.FailureMessage;
 
         await _notifications.NotifyAsync(new Notification(
             NotificationCategory.Builds,
             recipients,
             new NotificationDigestEntry(
                 subject,
-                failed && !string.IsNullOrWhiteSpace(build.FailureMessage) ? FirstLine(build.FailureMessage) : null,
+                string.IsNullOrWhiteSpace(failure) ? null : FirstLine(failure),
                 buildUrl,
                 build.SolutionName),
             (renderer, recipient, token) => BuildNotificationEmail.RenderAsync(
                 renderer, recipient.DisplayName, organizationName, build.SolutionName, build.PipelineName,
-                failed, nightly, target, build.BcVersion, build.FailureMessage, buildUrl, settingsUrl, token)),
+                failed, nightly, target, build.BcVersion, failure, buildUrl, settingsUrl, token)),
             ct);
+    }
+
+    /// <summary>
+    /// "Name: message" for each extension that failed in a ready build against
+    /// an upcoming version. Such a build is a failed check everywhere else in
+    /// the product (the pipeline page, the dashboard), so it is one here too.
+    /// A ready build against the current version counts as a success, as it
+    /// does on the pipeline page.
+    /// </summary>
+    private async Task<List<string>> FailedAppsAsync(string bcTarget, string status, int releaseId, CancellationToken ct)
+    {
+        if (!ProjectBuildTarget.IsPreview(bcTarget) || status != ProjectBuildStatus.Ready) return [];
+        var rows = await _db.OeProjectBuildResults.AsNoTracking()
+            .Where(r => r.ReleaseId == releaseId && r.Status == ProjectBuildResultStatus.Failed)
+            .OrderBy(r => r.AppName)
+            .Select(r => new { r.AppName, r.Message })
+            .ToListAsync(ct);
+        return rows
+            .Select(r => string.IsNullOrWhiteSpace(r.Message) ? r.AppName : $"{r.AppName}: {FirstLine(r.Message)}")
+            .ToList();
     }
 
     /// <summary>
@@ -120,9 +165,9 @@ public sealed class BuildNotifier
     /// first build), or a success after a failure. A first build that works is
     /// what people expect, so it is not.
     /// </summary>
-    internal static bool IsChange(bool failed, string? previousStatus) => failed
-        ? previousStatus != ProjectBuildStatus.Failed
-        : previousStatus == ProjectBuildStatus.Failed;
+    internal static bool IsChange(bool failed, bool? previousFailed) => failed
+        ? previousFailed != true
+        : previousFailed == true;
 
     private static string FirstLine(string message)
     {

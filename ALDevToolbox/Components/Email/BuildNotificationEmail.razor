@@ -6,7 +6,7 @@
     <EmailParagraph>Hi @DisplayName,</EmailParagraph>
     @if (Failed)
     {
-        <EmailParagraph>The <strong>@PipelineName</strong> build pipeline for <strong>@SolutionName</strong> failed. @TargetSentence</EmailParagraph>
+        <EmailParagraph>The latest build of the <strong>@PipelineName</strong> pipeline for <strong>@SolutionName</strong> failed. @TargetSentence</EmailParagraph>
         @if (!string.IsNullOrWhiteSpace(FailureMessage))
         {
             <blockquote style="margin: 0 0 16px; padding: 8px 12px; border-left: 3px solid @EmailTheme.Border; font-family: @EmailTheme.Mono; font-size: 13px; line-height: 20px; color: @EmailTheme.Body;">
@@ -22,11 +22,11 @@
             </blockquote>
         }
         <EmailButton Href="@BuildUrl">Open the build</EmailButton>
-        <EmailParagraph>You will not hear about this pipeline again until a build works.</EmailParagraph>
+        <EmailParagraph>You will not hear about failures of these builds again until one works.</EmailParagraph>
     }
     else
     {
-        <EmailParagraph>The <strong>@PipelineName</strong> build pipeline for <strong>@SolutionName</strong> works again: the latest build succeeded after the one before it failed. @TargetSentence</EmailParagraph>
+        <EmailParagraph>The latest build of the <strong>@PipelineName</strong> pipeline for <strong>@SolutionName</strong> worked, after the one before it failed. @TargetSentence</EmailParagraph>
         <EmailButton Href="@BuildUrl">Open the build</EmailButton>
     }
 </EmailLayout>
@@ -67,8 +67,8 @@
         : "You received this because you started this build or created the pipeline.";
 
     /// <summary>
-    /// The first few lines of a failure message, which can be a full compiler
-    /// report. The rest is on the build page the button opens.
+    /// The first few lines of a failure: one per extension that failed, or the
+    /// build's own message. The rest is on the build page the button opens.
     /// </summary>
     public static string Excerpt(string message)
     {

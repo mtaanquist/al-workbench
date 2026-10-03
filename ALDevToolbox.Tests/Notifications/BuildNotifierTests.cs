@@ -133,12 +133,12 @@ public sealed class BuildNotifierTests : IDisposable
 
     [Theory]
     [InlineData(true, null, true)]
-    [InlineData(true, ProjectBuildStatus.Ready, true)]
-    [InlineData(true, ProjectBuildStatus.Failed, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
     [InlineData(false, null, false)]
-    [InlineData(false, ProjectBuildStatus.Ready, false)]
-    [InlineData(false, ProjectBuildStatus.Failed, true)]
-    public void Only_a_change_is_news(bool failed, string? previous, bool expected) =>
+    [InlineData(false, false, false)]
+    [InlineData(false, true, true)]
+    public void Only_a_change_is_news(bool failed, bool? previous, bool expected) =>
         BuildNotifier.IsChange(failed, previous).Should().Be(expected);
 
     [Fact]
@@ -154,12 +154,87 @@ public sealed class BuildNotifierTests : IDisposable
     [Fact]
     public async Task The_failure_keeps_its_lines_in_both_versions()
     {
-        var content = await EmailPreviews.Find("build-failed")!.RenderAsync(
-            new EmailRenderer(_services, NullLoggerFactory.Instance), CancellationToken.None);
+        var content = await BuildNotificationEmail.RenderAsync(
+            new EmailRenderer(_services, NullLoggerFactory.Instance), "Alex Hansen", "CRONUS A/S", "CRONUS Coffee", "Main",
+            failed: true, nightlyCheck: false, target: null, bcVersion: "26.4",
+            failureMessage: "CRONUS Coffee: error AL0118\nCRONUS Coffee Reports: error AL0132",
+            $"{Origin}/pipelines/1?build=2", $"{Origin}{NotificationService.SettingsPath}");
 
-        content.HtmlBody.Should().Contain("Coffee Extension: 2 errors.<br");
-        content.TextBody.Should().Contain("Coffee Extension: 2 errors.\nsrc/Codeunit/CoffeeMgt.Codeunit.al(41,17)");
+        content.HtmlBody.Should().Contain("CRONUS Coffee: error AL0118<br");
+        content.TextBody.Should().Contain("CRONUS Coffee: error AL0118\nCRONUS Coffee Reports: error AL0132");
         content.TextBody.Should().Contain("Change which emails you get");
+    }
+
+    [Fact]
+    public async Task A_nightly_check_with_a_failed_extension_is_a_failure()
+    {
+        await SeedAsync();
+        await FinishAsync(ProjectBuildStatus.Ready, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMinor);
+
+        await FinishAsync(ProjectBuildStatus.Ready, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMinor,
+            failedApps: ["CRONUS Coffee Reports"]);
+
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["nightly@cronus.example", "creator@cronus.example"]);
+        _email.Sent[0].Subject.Should().Be("Nightly check failed: CRONUS Coffee - Main (Next minor)");
+        _email.Sent[0].Html.Should().Contain("CRONUS Coffee Reports: error AL0118");
+    }
+
+    [Fact]
+    public async Task A_nightly_check_still_failing_an_extension_is_not_working_again()
+    {
+        await SeedAsync();
+        await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMinor);
+        _email.Sent.Clear();
+
+        await FinishAsync(ProjectBuildStatus.Ready, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMinor,
+            failedApps: ["CRONUS Coffee Reports"]);
+        _email.Sent.Should().BeEmpty();
+
+        await FinishAsync(ProjectBuildStatus.Ready, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMinor);
+        _email.Sent.Should().NotBeEmpty().And.AllSatisfy(s => s.Subject.Should().StartWith("Nightly check working again"));
+    }
+
+    [Fact]
+    public async Task A_current_build_with_a_failed_extension_counts_as_working_like_the_pipeline_page()
+    {
+        await SeedAsync();
+
+        await FinishAsync(ProjectBuildStatus.Ready, failedApps: ["CRONUS Coffee Reports"]);
+
+        _email.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Another_pipeline_does_not_count_as_the_build_before()
+    {
+        await SeedAsync();
+        await FinishAsync(ProjectBuildStatus.Failed);
+        _email.Sent.Clear();
+        var first = _pipelineId;
+        _pipelineId = await AddPipelineAsync("Release");
+
+        await FinishAsync(ProjectBuildStatus.Failed);
+        _email.Sent.Should().NotBeEmpty("the other pipeline's failure says nothing about this one");
+
+        _email.Sent.Clear();
+        _pipelineId = first;
+        await FinishAsync(ProjectBuildStatus.Failed);
+        _email.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task The_build_before_is_the_one_that_finished_before()
+    {
+        await SeedAsync();
+        // Started second but finished first, as after a restart.
+        await FinishAsync(ProjectBuildStatus.Ready, finishedAfterMinutes: 1);
+        await FinishAsync(ProjectBuildStatus.Failed, finishedAfterMinutes: -90);
+
+        _email.Sent.Should().NotBeEmpty("compared with nothing before it, a failure is news");
+        _email.Sent.Clear();
+        await FinishAsync(ProjectBuildStatus.Ready);
+
+        _email.Sent.Should().BeEmpty("the build that finished last before it worked");
     }
 
     // ---- helpers -----------------------------------------------------------
@@ -194,7 +269,9 @@ public sealed class BuildNotifierTests : IDisposable
         string trigger = ProjectBuildTrigger.Manual,
         string target = ProjectBuildTarget.Current,
         string? bcVersion = "26.4",
-        string? failure = null)
+        string? failure = null,
+        string[]? failedApps = null,
+        int finishedAfterMinutes = 3)
     {
         _clock = _clock.AddHours(1);
         int releaseId;
@@ -211,11 +288,21 @@ public sealed class BuildNotifierTests : IDisposable
             ctx.OeProjectBuilds.Add(new OeProjectBuild
             {
                 OrganizationId = TestDb.DefaultOrgId, ProjectId = _projectId, PipelineId = _pipelineId,
-                ReleaseId = release.Id, StartedByUserId = trigger == ProjectBuildTrigger.Manual ? _starter : null,
+                ReleaseId = release.Id,
+                StartedByUserId = trigger == ProjectBuildTrigger.PreviewCheck ? _nightlyOwner : _starter,
                 Trigger = trigger, BcTarget = target, BcVersion = bcVersion, Status = status,
                 FailureMessage = failure ?? (status == ProjectBuildStatus.Failed ? "Compile failed." : null),
-                StartedAt = _clock, FinishedAt = _clock.AddMinutes(3),
+                StartedAt = _clock, FinishedAt = _clock.AddMinutes(finishedAfterMinutes),
             });
+            foreach (var app in failedApps ?? [])
+            {
+                ctx.OeProjectBuildResults.Add(new OeProjectBuildResult
+                {
+                    OrganizationId = TestDb.DefaultOrgId, ReleaseId = release.Id, AppName = app, AppId = Guid.NewGuid().ToString(),
+                    Status = ProjectBuildResultStatus.Failed, Message = "error AL0118: The name 'Brew' does not exist.",
+                    CreatedAt = _clock,
+                });
+            }
             await ctx.SaveChangesAsync();
             releaseId = release.Id;
         }
@@ -227,6 +314,19 @@ public sealed class BuildNotifierTests : IDisposable
             work, _db.NewContextFactory(), preferences, _email, new EmailRenderer(_services, NullLoggerFactory.Instance),
             new PublicOrigin(Origin), _db.OrgContext, TimeProvider.System, NullLogger<NotificationService>.Instance);
         await new BuildNotifier(work, notifications, NullLogger<BuildNotifier>.Instance).BuildFinishedAsync(releaseId);
+    }
+
+    private async Task<int> AddPipelineAsync(string name)
+    {
+        await using var ctx = _db.NewContext();
+        var pipeline = new OePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = _projectId, Name = name, Branch = "release",
+            CreatedByUserId = _creator, CreatedAt = _clock, UpdatedAt = _clock,
+        };
+        ctx.OePipelines.Add(pipeline);
+        await ctx.SaveChangesAsync();
+        return pipeline.Id;
     }
 
     private async Task<int> SeedUserAsync(string email)
