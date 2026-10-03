@@ -9,8 +9,8 @@ namespace ALDevToolbox.Services.Notifications;
 /// <summary>
 /// Sends a <see cref="Notification"/> to the people it names, each the way
 /// they chose for its category (<see cref="NotificationPreferenceService"/>):
-/// an email on the outbox now, an item kept for their digest, or nothing.
-/// See <c>.design/notifications.md</c>.
+/// listed on their Notifications page, and an email on the outbox now, an item
+/// kept for their digest, or no email. See <c>.design/notifications.md</c>.
 ///
 /// <para>
 /// Called from background workers as well as requests, always inside an
@@ -65,7 +65,9 @@ public sealed class NotificationService
     /// <summary>
     /// False when PUBLIC_BASE_URL is not set. A background sender has no
     /// request to take a host from, and an email whose links point nowhere is
-    /// worse than none, so nothing is sent; startup already warns about it.
+    /// worse than none, so no email is sent or kept for a digest; startup
+    /// already warns about it. Notifications are still listed in the app,
+    /// whose links need no host.
     /// </summary>
     public bool IsEnabled => _origin.IsConfigured;
 
@@ -74,17 +76,12 @@ public sealed class NotificationService
         _origin.Configured is { } origin ? origin + pathAndQuery : null;
 
     /// <summary>
-    /// Emails, keeps for a digest, or drops <paramref name="notification"/> for
-    /// each recipient. Disabled and pending accounts get nothing.
+    /// Lists <paramref name="notification"/> in the app and emails it, keeps it
+    /// for a digest, or does not email it, for each recipient. Disabled and
+    /// pending accounts get nothing.
     /// </summary>
     public async Task NotifyAsync(Notification notification, CancellationToken ct = default)
     {
-        if (!IsEnabled)
-        {
-            _logger.LogDebug("Skipped a {Category} notification: no {EnvVar} configured.",
-                notification.Category, PublicOrigin.EnvVarName);
-            return;
-        }
         var orgId = _orgContext.CurrentOrganizationId;
         if (orgId is null || notification.RecipientUserIds.Count == 0) return;
 
@@ -108,19 +105,43 @@ public sealed class NotificationService
 
         var choices = await _preferences.GetForUsersAsync(
             recipients.Select(r => r.UserId).ToList(), notification.Category, ct);
-        var emailReady = await _email.IsConfiguredAsync(ct);
+        var url = Link(notification.Summary.Path);
+        var emailReady = url is not null && await _email.IsConfiguredAsync(ct);
+        if (url is null)
+        {
+            _logger.LogDebug("No email for a {Category} notification: no {EnvVar} configured.",
+                notification.Category, PublicOrigin.EnvVarName);
+        }
         var now = _clock.GetUtcNow().UtcDateTime;
+        var listed = new List<UserNotification>();
         var digestItems = new List<NotificationDigestItem>();
         var sent = 0;
 
         foreach (var recipient in recipients)
         {
             var choice = choices[recipient.UserId];
-            if (notification.Urgent && choice is NotificationDelivery.Daily or NotificationDelivery.Weekly)
+            if (choice.InApp)
             {
-                choice = NotificationDelivery.Immediately;
+                listed.Add(new UserNotification
+                {
+                    UserId = recipient.UserId,
+                    OrganizationId = orgId,
+                    Category = notification.Category,
+                    Title = notification.Summary.Title,
+                    Detail = notification.Summary.Detail,
+                    Path = notification.Summary.Path,
+                    SolutionName = notification.Summary.SolutionName,
+                    CreatedAt = now,
+                });
             }
-            switch (choice)
+
+            if (url is null) continue;
+            var email = choice.Email;
+            if (notification.Urgent && email is NotificationDelivery.Daily or NotificationDelivery.Weekly)
+            {
+                email = NotificationDelivery.Immediately;
+            }
+            switch (email)
             {
                 case NotificationDelivery.Immediately when emailReady:
                     if (await TrySendAsync(notification, recipient, ct)) sent++;
@@ -131,45 +152,47 @@ public sealed class NotificationService
                         UserId = recipient.UserId,
                         OrganizationId = orgId,
                         Category = notification.Category,
-                        Delivery = choice,
-                        Title = notification.Digest.Title,
-                        Detail = notification.Digest.Detail,
-                        Url = notification.Digest.Url,
-                        SolutionName = notification.Digest.SolutionName,
+                        Delivery = email,
+                        Title = notification.Summary.Title,
+                        Detail = notification.Summary.Detail,
+                        Url = url,
+                        SolutionName = notification.Summary.SolutionName,
                         CreatedAt = now,
                     });
                     break;
             }
         }
 
-        var kept = await KeepForDigestAsync(digestItems, notification.Category, ct);
+        var stored = await StoreAsync(listed, digestItems, notification.Category, ct);
         _logger.LogInformation(
-            "{Category} notification: {Sent} emailed, {Kept} kept for a digest, of {Recipients} recipients.",
-            notification.Category, sent, kept, recipients.Count);
+            "{Category} notification: {Listed} listed in the app, {Sent} emailed, {Kept} kept for a digest, of {Recipients} recipients.",
+            notification.Category, stored ? listed.Count : 0, sent, stored ? digestItems.Count : 0, recipients.Count);
     }
 
     /// <summary>
-    /// Stores digest items through a context of their own, never the caller's:
-    /// a worker calling mid-way must not have its pending changes saved here,
-    /// nor be left holding items that failed to save. Same reason as
-    /// <see cref="EmailOutbox"/>.
+    /// Stores the in-app rows and digest items through a context of their own,
+    /// never the caller's: a worker calling mid-way must not have its pending
+    /// changes saved here, nor be left holding rows that failed to save. Same
+    /// reason as <see cref="EmailOutbox"/>.
     /// </summary>
-    private async Task<int> KeepForDigestAsync(
-        List<NotificationDigestItem> items, NotificationCategory category, CancellationToken ct)
+    private async Task<bool> StoreAsync(
+        List<UserNotification> listed, List<NotificationDigestItem> digestItems,
+        NotificationCategory category, CancellationToken ct)
     {
-        if (items.Count == 0) return 0;
+        if (listed.Count == 0 && digestItems.Count == 0) return true;
         try
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
-            db.NotificationDigestItems.AddRange(items);
+            db.UserNotifications.AddRange(listed);
+            db.NotificationDigestItems.AddRange(digestItems);
             await db.SaveChangesAsync(ct);
-            return items.Count;
+            return true;
         }
         catch (DbUpdateException ex)
         {
-            _logger.LogWarning(ex, "Could not keep {Count} {Category} notifications for the digest.",
-                items.Count, category);
-            return 0;
+            _logger.LogWarning(ex, "Could not store {Listed} in-app and {Kept} digest {Category} notifications.",
+                listed.Count, digestItems.Count, category);
+            return false;
         }
     }
 

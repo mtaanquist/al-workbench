@@ -17,6 +17,7 @@ internal sealed class UserNotificationSettingConfiguration : IEntityTypeConfigur
             .HasColumnName("category").HasConversion<string>().HasMaxLength(32).IsRequired();
         entity.Property(e => e.Delivery)
             .HasColumnName("delivery").HasConversion<string>().HasMaxLength(16).IsRequired();
+        entity.Property(e => e.InApp).HasColumnName("in_app").HasDefaultValue(true).IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
 
         // One choice per person per category: the upsert key, and the lookup

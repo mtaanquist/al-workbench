@@ -33,7 +33,6 @@ public sealed class BuildNotifier
     /// </summary>
     public async Task BuildFinishedAsync(int releaseId, CancellationToken ct = default)
     {
-        if (!_notifications.IsEnabled) return;
         try
         {
             await NotifyAsync(releaseId, ct);
@@ -117,8 +116,7 @@ public sealed class BuildNotifier
             .Select(o => o.Name)
             .FirstAsync(ct);
         var target = ProjectBuildTarget.IsPreview(build.BcTarget) ? ProjectBuildTarget.Label(build.BcTarget) : null;
-        var buildUrl = _notifications.Link($"/pipelines/{pipelineId}?build={build.Id}")!;
-        var settingsUrl = _notifications.Link(NotificationService.SettingsPath)!;
+        var buildPath = $"/pipelines/{pipelineId}?build={build.Id}";
         var subject = BuildNotificationEmail.SubjectFor(failed, nightly, build.SolutionName, build.PipelineName, target);
         // The extensions that failed say more than the build's summary line,
         // which for a partly failed build is empty.
@@ -129,14 +127,15 @@ public sealed class BuildNotifier
         await _notifications.NotifyAsync(new Notification(
             NotificationCategory.Builds,
             recipients,
-            new NotificationDigestEntry(
+            new NotificationSummary(
                 subject,
                 string.IsNullOrWhiteSpace(failure) ? null : FirstLine(failure),
-                buildUrl,
+                buildPath,
                 build.SolutionName),
             (renderer, recipient, token) => BuildNotificationEmail.RenderAsync(
                 renderer, recipient.DisplayName, organizationName, build.SolutionName, build.PipelineName,
-                failed, nightly, target, build.BcVersion, failure, buildUrl, settingsUrl, token)),
+                failed, nightly, target, build.BcVersion, failure,
+                _notifications.Link(buildPath)!, _notifications.Link(NotificationService.SettingsPath)!, token)),
             ct);
     }
 

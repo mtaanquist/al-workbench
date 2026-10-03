@@ -28,7 +28,10 @@ public sealed class NotificationDigestService
     /// <summary>The UTC hour digests go out, ahead of the European working day.</summary>
     public const int DigestHourUtc = 6;
 
-    /// <summary>How long an item waits for a digest that cannot be sent (email not set up) before it is dropped.</summary>
+    /// <summary>
+    /// How long an item waits for a digest that cannot be sent (email not set up)
+    /// before it is dropped, and how long the Notifications page keeps a notification.
+    /// </summary>
     public static readonly TimeSpan KeepFor = TimeSpan.FromDays(30);
 
     /// <summary>How long after a cut-off a run waits before using it.</summary>
@@ -77,7 +80,7 @@ public sealed class NotificationDigestService
 
     /// <summary>
     /// Sends every digest that is due in the current organisation and prunes
-    /// items older than <see cref="KeepFor"/>. Returns how many digests went
+    /// digest items and in-app notifications older than <see cref="KeepFor"/>. Returns how many digests went
     /// on the outbox. A digest that fails to queue keeps its items for the next
     /// run.
     /// </summary>
@@ -92,6 +95,13 @@ public sealed class NotificationDigestService
         if (pruned > 0)
         {
             _logger.LogInformation("Dropped {Count} digest items older than {Days} days.", pruned, KeepFor.Days);
+        }
+        // The Notifications page keeps the same window; this is the one
+        // scheduler that already runs per organisation, so it prunes those too.
+        var prunedListed = await _db.UserNotifications.Where(n => n.CreatedAt < expiry).ExecuteDeleteAsync(ct);
+        if (prunedListed > 0)
+        {
+            _logger.LogInformation("Dropped {Count} in-app notifications older than {Days} days.", prunedListed, KeepFor.Days);
         }
 
         // Without a public address the links go nowhere, and without email

@@ -53,7 +53,6 @@ public sealed class DeploymentNotifier
     /// </summary>
     public async Task NotifyAsync(int deliveryId, CancellationToken ct = default)
     {
-        if (!_notifications.IsEnabled) return;
         try
         {
             await SendAsync(deliveryId, ct);
@@ -99,8 +98,7 @@ public sealed class DeploymentNotifier
             .Where(o => o.Id == delivery.OrganizationId)
             .Select(o => o.Name)
             .FirstAsync(ct);
-        var pipelineUrl = _notifications.Link($"/pipelines/deployments/{delivery.ReleasePipelineId}")!;
-        var settingsUrl = _notifications.Link(NotificationService.SettingsPath)!;
+        var pipelinePath = $"/pipelines/deployments/{delivery.ReleasePipelineId}";
         var failure = outcome == DeploymentOutcome.Failed && !string.IsNullOrWhiteSpace(delivery.FailureMessage)
             ? delivery.FailureMessage.Trim()
             : null;
@@ -108,14 +106,15 @@ public sealed class DeploymentNotifier
         await _notifications.NotifyAsync(new Notification(
             NotificationCategory.Deployments,
             recipients,
-            new NotificationDigestEntry(
+            new NotificationSummary(
                 DeploymentNotificationEmail.SubjectFor(outcome, delivery.SolutionName, delivery.EnvironmentName),
                 failure is null ? null : FirstLine(failure),
-                pipelineUrl,
+                pipelinePath,
                 delivery.SolutionName),
             (renderer, recipient, token) => DeploymentNotificationEmail.RenderAsync(
                 renderer, recipient.DisplayName, organizationName, outcome, delivery.SolutionName, delivery.PipelineName,
-                delivery.EnvironmentName, delivery.Apps, failure, pipelineUrl, settingsUrl, token),
+                delivery.EnvironmentName, delivery.Apps, failure,
+                _notifications.Link(pipelinePath)!, _notifications.Link(NotificationService.SettingsPath)!, token),
             Urgent: waiting),
             ct);
     }

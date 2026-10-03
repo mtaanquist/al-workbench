@@ -136,6 +136,23 @@ public sealed class NotificationDigestTests : IDisposable
     }
 
     [Fact]
+    public async Task In_app_notifications_older_than_30_days_are_dropped_in_this_organisation_only()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        var stranger = await SeedUserAsync("stranger@fabrikam.example", organizationId: TestDb.OtherOrgId);
+        await ListAsync(alex, "Recent", Wednesday0700.AddDays(-29));
+        await ListAsync(alex, "Old", Wednesday0700.AddDays(-31));
+        await ListAsync(stranger, "Theirs", Wednesday0700.AddDays(-31), TestDb.OtherOrgId);
+
+        await SendDueAsync(origin: null);
+
+        await using var ctx = _db.NewContext();
+        (await ctx.UserNotifications.IgnoreQueryFilters()
+                .OrderBy(n => n.Title).Select(n => n.Title).ToListAsync())
+            .Should().Equal("Recent", "Theirs");
+    }
+
+    [Fact]
     public async Task A_disabled_person_gets_nothing_and_their_items_go()
     {
         var alex = await SeedUserAsync("alex@cronus.example", UserStatus.Disabled);
@@ -238,12 +255,23 @@ public sealed class NotificationDigestTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
+    private async Task ListAsync(int userId, string title, DateTime createdAt, int organizationId = TestDb.DefaultOrgId)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.UserNotifications.Add(new UserNotification
+        {
+            UserId = userId, OrganizationId = organizationId, Category = NotificationCategory.Builds,
+            Title = title, Path = "/pipelines/1", CreatedAt = createdAt,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
     private async Task ChooseAsync(int userId, NotificationCategory category, NotificationDelivery delivery)
     {
         _db.OrgContext.CurrentUserId = userId;
         await using var ctx = _db.NewContext();
         await new NotificationPreferenceService(ctx, _db.OrgContext, TimeProvider.System,
-            NullLogger<NotificationPreferenceService>.Instance).SetForCurrentUserAsync(category, delivery);
+            NullLogger<NotificationPreferenceService>.Instance).SetEmailForCurrentUserAsync(category, delivery);
         _db.OrgContext.CurrentUserId = null;
     }
 
