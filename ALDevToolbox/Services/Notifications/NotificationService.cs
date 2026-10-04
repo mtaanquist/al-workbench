@@ -181,7 +181,7 @@ public sealed class NotificationService
                         Detail = notification.Summary.Detail,
                         Url = url,
                         SolutionName = notification.Summary.SolutionName,
-                    ProjectId = notification.ProjectId,
+                        ProjectId = notification.ProjectId,
                         CreatedAt = now,
                     });
                     break;

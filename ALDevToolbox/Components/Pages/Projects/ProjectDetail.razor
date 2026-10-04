@@ -701,6 +701,20 @@
     /// </summary>
     private async Task<string> FollowConfirmationAsync()
     {
+        // The follow is already saved; a failure to word the message must not report it as failed.
+        try
+        {
+            return await DescribeFollowAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.LogWarning(ex, "Could not read the notification settings for the follow confirmation.");
+            return "You're following this solution.";
+        }
+    }
+
+    private async Task<string> DescribeFollowAsync()
+    {
         var choice = (await NotificationPreferences.GetForCurrentUserAsync())[ALDevToolbox.Domain.Entities.NotificationCategory.Solutions];
         var email = choice.Email != ALDevToolbox.Domain.Entities.NotificationDelivery.Off
             && Origin.IsConfigured && await EmailSvc.IsConfiguredAsync();
