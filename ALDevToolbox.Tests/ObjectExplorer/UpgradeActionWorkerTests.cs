@@ -169,6 +169,26 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     // Whoever booked a change hears how it went, once, when it has settled.
 
     [Fact]
+    public async Task Someone_taken_off_a_private_solutions_team_is_not_told()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookAsync(projectId, envId, hoursAhead: 12);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == projectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.Private));
+            await ctx.TeamMembers.Where(m => m.UserId == UpgradeActionTestFixture.FlagUserId).ExecuteDeleteAsync();
+        }
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Emails.Sent.Should().BeEmpty();
+        await using var verify = _f.Db.NewContext();
+        (await verify.UserNotifications.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task The_person_who_booked_a_change_is_told_it_ran()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();

@@ -102,12 +102,22 @@ build is marked ready or failed.
   outside a pipeline (GitHub release imports).
 - **Recipients:** the person the build ran as (whoever pressed Build, or whoever had the
   nightly check on when it was queued) and the pipeline's creator.
-- **Access is not re-checked.** Someone who started a build or created the pipeline keeps
-  getting its emails after losing access to a private solution. Accepted for now; the
-  recipients are people who set the build up.
+- **Access is re-checked** on every notification (see "Who can see it" below).
 - The email shows the failed extensions (or the build's own message when it failed as a
   whole) and links to the build on the pipeline page; the digest entry carries the first
   line.
+
+## Who can see it
+
+Every notification names the solution it is about, and `NotificationService` leaves out any
+recipient who can no longer see that solution, with the same rule as the solution page: the
+owner, an org Admin, a SiteAdmin or a member of one of its teams for a Private solution,
+everyone otherwise. So someone taken off a Private solution's team stops hearing about its
+builds, deployments, environment changes and upgrades, and nothing new is listed on their
+Notifications page either. The check runs when an event is sent: what is already on their
+page, or already waiting for their digest, stays. It also means a change they booked that
+fails because they lost access is not announced to them. Their notification settings are
+untouched, so it applies again if access comes back.
 
 ## Deployments (#1036)
 
@@ -122,9 +132,6 @@ build is marked ready or failed.
   deployment already claimed sends nothing, so nothing is announced twice.
 - After the delivery scheduler fails deployments a restart cut off, for each one: the
   person behind it needs to hear about that failure as much as any other.
-
-As with builds, access is not re-checked: a pipeline creator who has lost access to a
-private solution still gets its emails. Accepted for now.
 
 Each deployment is its own event, so there is no "only on change" rule here.
 

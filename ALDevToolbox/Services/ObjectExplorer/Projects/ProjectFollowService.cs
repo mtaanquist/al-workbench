@@ -91,7 +91,7 @@ public sealed class ProjectFollowService
     {
         var project = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == projectId && p.DeletedAt == null)
-            .Select(p => new { p.CreatedByUserId, p.Visibility })
+            .Select(p => new { p.CreatedByUserId })
             .FirstOrDefaultAsync(ct);
         if (project is null) return [];
 
@@ -110,20 +110,12 @@ public sealed class ProjectFollowService
             .ToList();
         if (candidates.Count == 0) return [];
 
-        var users = _db.Users.AsNoTracking()
-            .Where(u => candidates.Contains(u.Id) && u.Status == UserStatus.Active);
-        if (project.Visibility == ProjectVisibility.Private)
-        {
-            // CanViewAsync for each of them: the owner, an admin, or a member of one of its teams.
-            var members = _db.OeProjectTeams
-                .Where(t => t.ProjectId == projectId)
-                .SelectMany(t => t.Team!.Members.Select(m => m.UserId));
-            users = users.Where(u => u.Id == project.CreatedByUserId
-                                     || u.Role == UserRole.Admin
-                                     || u.IsSiteAdmin
-                                     || members.Contains(u.Id));
-        }
-        return await users.OrderBy(u => u.Id).Select(u => u.Id).ToListAsync(ct);
+        var active = await _db.Users.AsNoTracking()
+            .Where(u => candidates.Contains(u.Id) && u.Status == UserStatus.Active)
+            .Select(u => u.Id)
+            .ToListAsync(ct);
+        var visible = await ProjectAccess.WhoCanViewAsync(_db, projectId, active, ct);
+        return visible.Order().ToList();
     }
 
     private async Task<bool> FollowsByDefaultAsync(int projectId, int userId, CancellationToken ct) =>

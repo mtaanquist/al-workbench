@@ -1,4 +1,5 @@
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
@@ -267,6 +268,39 @@ public sealed class NotificationServiceTests : IDisposable
         _email.Sent.Should().BeEmpty();
         await using var ctx = _db.NewContext();
         (await ctx.UserNotifications.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_private_solution_reaches_only_those_who_can_still_see_it()
+    {
+        var owner = await SeedUserAsync("owner@cronus.example");
+        var member = await SeedUserAsync("member@cronus.example");
+        var admin = await SeedUserAsync("admin@cronus.example");
+        var outsider = await SeedUserAsync("outsider@cronus.example");
+        int projectId;
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.Users.Where(u => u.Id == admin).ExecuteUpdateAsync(u => u.SetProperty(x => x.Role, UserRole.Admin));
+            var project = new OeProject
+            {
+                OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Coffee", CreatedByUserId = owner,
+                Visibility = ProjectVisibility.Private, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            var team = new Team { OrganizationId = TestDb.DefaultOrgId, Name = "Coffee", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+            team.Members.Add(new TeamMember { OrganizationId = TestDb.DefaultOrgId, UserId = member, CreatedAt = DateTime.UtcNow });
+            ctx.OeProjects.Add(project);
+            ctx.Teams.Add(team);
+            await ctx.SaveChangesAsync();
+            ctx.OeProjectTeams.Add(new OeProjectTeam { OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, TeamId = team.Id, CreatedAt = DateTime.UtcNow });
+            await ctx.SaveChangesAsync();
+            projectId = project.Id;
+        }
+
+        await NotifyAsync(Notification(owner, member, admin, outsider) with { ProjectId = projectId });
+
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["owner@cronus.example", "member@cronus.example", "admin@cronus.example"]);
+        await using var verify = _db.NewContext();
+        (await verify.UserNotifications.AnyAsync(n => n.UserId == outsider)).Should().BeFalse();
     }
 
     [Fact]

@@ -55,6 +55,7 @@ public sealed class BuildNotifier
             {
                 b.Id,
                 b.OrganizationId,
+                b.ProjectId,
                 b.PipelineId,
                 b.Trigger,
                 b.BcTarget,
@@ -135,7 +136,8 @@ public sealed class BuildNotifier
             (renderer, recipient, token) => BuildNotificationEmail.RenderAsync(
                 renderer, recipient.DisplayName, organizationName, build.SolutionName, build.PipelineName,
                 failed, nightly, target, build.BcVersion, failure,
-                _notifications.Link(buildPath)!, _notifications.Link(NotificationService.SettingsPath)!, token)),
+                _notifications.Link(buildPath)!, _notifications.Link(NotificationService.SettingsPath)!, token),
+            ProjectId: build.ProjectId),
             ct);
     }
 
