@@ -671,7 +671,7 @@
             _following = target;
             _messageLinksToSettings = true;
             _message = _following
-                ? "You're following this solution. You'll hear when Business Central schedules or moves an update for its environments."
+                ? "You're following this solution. Updates Business Central schedules or moves for its environments will show in your notifications; emails are off until you turn them on."
                 : "You're no longer following this solution. You won't hear when Business Central schedules or moves an update for its environments.";
         }
         catch (Exception ex) when (ex is PlanValidationException or ProjectAccessDeniedException)

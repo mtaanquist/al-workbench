@@ -146,6 +146,7 @@
         NotificationCategory.Builds => "Builds",
         NotificationCategory.Deployments => "Deployments",
         NotificationCategory.Upgrades => "Upgrades",
+        NotificationCategory.Solutions => "Solutions you follow",
         _ => category.ToString(),
     };
 
@@ -157,6 +158,8 @@
             "A deployment needs your approval, finishes, or fails. Approval requests are emailed straight away even with a digest chosen.",
         NotificationCategory.Upgrades =>
             "A change you scheduled on an environment, such as an app install or a new update date, has run, failed, or needs checking. Also when an environment you are to check on a planned upgrade has been updated, or one on an upgrade you planned when nobody is assigned.",
+        NotificationCategory.Solutions =>
+            "Business Central schedules or moves an update for an environment of a solution you follow, or its last possible date is a week away. You follow solutions you own or are listed on, and any you choose to follow. Emails are off until you turn them on.",
         _ => string.Empty,
     };
 

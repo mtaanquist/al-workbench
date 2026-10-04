@@ -1,0 +1,78 @@
+@*
+    Business Central scheduled or moved an update for an environment of a solution
+    the recipient follows, or its latest date is close (issue #1049).
+    See .design/notifications.md.
+*@
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+<EmailLayout Preheader="@Lead" OrganizationName="@OrganizationName" Reason="You received this because you follow this solution." SettingsUrl="@SettingsUrl">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>@Lead</EmailParagraph>
+    @if (Kind != BcUpdateScheduleChangeKind.LatestDateClose && LatestDate is not null)
+    {
+        <EmailParagraph>It can be postponed until @LatestDate at the latest.</EmailParagraph>
+    }
+    <EmailButton Href="@EnvironmentUrl">Open the environment</EmailButton>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public BcUpdateScheduleChangeKind Kind { get; set; }
+    [Parameter, EditorRequired] public string SolutionName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string EnvironmentName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string Version { get; set; } = string.Empty;
+    /// <summary>The dates as the reader should see them: "Sat 17 Oct 2026".</summary>
+    [Parameter, EditorRequired] public string Date { get; set; } = string.Empty;
+    [Parameter] public string? LatestDate { get; set; }
+    [Parameter] public string? PreviousDate { get; set; }
+    [Parameter, EditorRequired] public string EnvironmentUrl { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private string Lead => Kind switch
+    {
+        BcUpdateScheduleChangeKind.Moved =>
+            $"The update of {EnvironmentName} for {SolutionName} to version {Version} moved from {PreviousDate} to {Date}.",
+        BcUpdateScheduleChangeKind.LatestDateClose =>
+            $"The update of {EnvironmentName} for {SolutionName} to version {Version} is set for {Date}, and cannot be postponed past {LatestDate}.",
+        _ =>
+            $"Business Central scheduled the update of {EnvironmentName} for {SolutionName} to version {Version} on {Date}.",
+    };
+
+    public static string SubjectFor(BcUpdateScheduleChangeKind kind, string solutionName, string environmentName, string version, string date, string? latestDate) => kind switch
+    {
+        BcUpdateScheduleChangeKind.Moved => $"Update moved: {solutionName} / {environmentName} to {version}, now {date}",
+        BcUpdateScheduleChangeKind.LatestDateClose => $"Update cannot be postponed past {latestDate}: {solutionName} / {environmentName} to {version}",
+        _ => $"Update scheduled: {solutionName} / {environmentName} to {version} on {date}",
+    };
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer,
+        string displayName,
+        string organizationName,
+        BcUpdateScheduleChangeKind kind,
+        string solutionName,
+        string environmentName,
+        string version,
+        string date,
+        string? latestDate,
+        string? previousDate,
+        string environmentUrl,
+        string settingsUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<EnvironmentUpdateEmail>(
+            SubjectFor(kind, solutionName, environmentName, version, date, latestDate),
+            new Dictionary<string, object?>
+            {
+                [nameof(DisplayName)] = displayName,
+                [nameof(OrganizationName)] = organizationName,
+                [nameof(Kind)] = kind,
+                [nameof(SolutionName)] = solutionName,
+                [nameof(EnvironmentName)] = environmentName,
+                [nameof(Version)] = version,
+                [nameof(Date)] = date,
+                [nameof(LatestDate)] = latestDate,
+                [nameof(PreviousDate)] = previousDate,
+                [nameof(EnvironmentUrl)] = environmentUrl,
+                [nameof(SettingsUrl)] = settingsUrl,
+            }, ct);
+}

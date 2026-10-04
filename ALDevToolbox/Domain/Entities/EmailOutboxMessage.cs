@@ -47,6 +47,8 @@ public enum EmailPurpose
 
     /// <summary>An upgrade notification: a scheduled change on an environment ran, failed, or could not be confirmed.</summary>
     UpgradeNotification,
+    /// <summary>A solution notification: an update was scheduled or moved on a solution the person follows.</summary>
+    SolutionNotification,
 }
 
 /// <summary>Where an outbox row is in its life.</summary>
