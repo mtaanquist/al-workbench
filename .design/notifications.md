@@ -25,8 +25,9 @@ Agreed with the maintainer on 2026-10-03:
 | --- | --- | --- |
 | Builds | Build failed, build working again (manual builds and nightly checks; pull request builds are left to GitHub) | #1035 |
 | Deployments | Waiting for approval, deployed, failed | #1036 |
+| Upgrades | A change someone scheduled on an environment ran or failed | #1046 |
 
-Phase 4 adds Upgrades and Solutions.
+Phase 4 adds the rest of Upgrades and a Solutions category.
 
 ## How it works
 
@@ -123,6 +124,21 @@ As with builds, access is not re-checked: a pipeline creator who has lost access
 private solution still gets its emails. Accepted for now.
 
 Each deployment is its own event, so there is no "only on change" rule here.
+
+## Upgrades (#1046)
+
+`UpgradeActionNotifier` tells the person who scheduled a change on an environment (an app
+install or update, a new update date, a version choice, starting the update) how it went,
+once the upgrade action worker has settled it. It is called wherever the worker writes a
+final state: after a run, for the apps in a batch skipped because an earlier one failed,
+after the second look at an install nobody saw finish, and for the changes a restart cut
+off. An install still waiting for that second look sends nothing yet, so each change is
+announced once. An install Business Central took but nobody saw finish is announced as
+"Not confirmed: ..." rather than "Done": the row records it as sent, so the worker, which knows,
+tells the notifier. Changes made on the spot are not announced; the person saw the result
+on the page. Each app in a batch is its own notification. Failures are not urgent, like
+deployments. The link goes to the environment's history tab. A booking someone else
+cancels is not announced to the person who made it; considered and left out for now.
 
 ## Following a solution (#1048)
 

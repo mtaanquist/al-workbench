@@ -164,6 +164,146 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Admin.Writes.Should().Be(0, "repeating 'start the update now' on a guess is not a safe default");
     }
 
+    // ── Notifications (#1046) ───────────────────────────────────────────
+    // Whoever booked a change hears how it went, once, when it has settled.
+
+    [Fact]
+    public async Task The_person_who_booked_a_change_is_told_it_ran()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookAsync(projectId, envId, hoursAhead: 12);
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
+        sent.To.Should().Be("upgrade@example.com");
+        sent.Subject.Should().Be("Done: Start the update on CRONUS Denmark / Production");
+        sent.Purpose.Should().Be(EmailPurpose.UpgradeNotification);
+        sent.Html.Should().Contain($"/environments/{envId}/history");
+        await using var ctx = _f.Db.NewContext();
+        var listed = await ctx.UserNotifications.SingleAsync();
+        listed.UserId.Should().Be(UpgradeActionTestFixture.FlagUserId);
+        listed.Category.Should().Be(NotificationCategory.Upgrades);
+    }
+
+    [Fact]
+    public async Task The_person_who_booked_a_change_is_told_why_it_failed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookAsync(projectId, envId, hoursAhead: 12);
+
+        _f.Admin.OnUpdates = Array.Empty<BcEnvironmentUpdate>;
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
+        sent.Subject.Should().Be("Failed: Start the update on CRONUS Denmark / Production");
+        sent.Html.Should().Contain("No update");
+    }
+
+    [Fact]
+    public async Task An_install_nobody_saw_finish_is_announced_once_after_the_second_look()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app");
+        _f.Apps.PollErrorsBeforeAnswer = BcAppOperationPoller.MaxConsecutivePollErrors;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        _f.Emails.Sent.Should().BeEmpty("the answer is still to come");
+
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Done: Install Core.app on CRONUS Denmark / Production");
+    }
+
+    [Fact]
+    public async Task An_install_still_unconfirmed_after_the_second_look_asks_the_person_to_check()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app");
+        _f.Apps.PollErrorsBeforeAnswer = 2 * BcAppOperationPoller.MaxConsecutivePollErrors;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        var sent = _f.Emails.Sent.Should().ContainSingle().Subject;
+        sent.Subject.Should().Be("Not confirmed: Install Core.app on CRONUS Denmark / Production");
+        sent.Html.Should().Contain("could not confirm");
+    }
+
+    [Fact]
+    public async Task An_install_a_restart_interrupted_is_announced_once_after_business_central_is_asked()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var ids = await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app");
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await InterruptMidInstallAsync(ids[0], _f.Apps.Accepted("Core.app"));
+
+        await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+        _f.Emails.Sent.Should().BeEmpty("Business Central is still to be asked how it ended");
+
+        await SweepUntilQuietAsync();
+        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Done: Install Core.app on CRONUS Denmark / Production");
+    }
+
+    [Fact]
+    public async Task A_cancelled_booking_sends_nothing()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookAsync(projectId, envId, hoursAhead: 12);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeEnvironmentUpgradeActions.Where(a => a.Id == actionId)
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.Status, UpgradeActionStatus.Cancelled));
+        }
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Emails.Sent.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(UpgradeActionKind.PushDateToLatest, null, null, "Move the update to the latest date")]
+    [InlineData(UpgradeActionKind.SelectVersion, "27.1", null, "Set the next version to 27.1")]
+    [InlineData(UpgradeActionKind.UpdateApp, "2.0.0.0", "CRONUS Coffee", "Update CRONUS Coffee to 2.0.0.0")]
+    [InlineData(UpgradeActionKind.UpdateApp, null, "CRONUS Coffee", "Update CRONUS Coffee")]
+    public void Each_kind_of_change_is_named_in_plain_words(UpgradeActionKind kind, string? version, string? app, string expected) =>
+        ALDevToolbox.Services.Notifications.UpgradeActionNotifier.Describe(kind, version, app).Should().Be(expected);
+
+    [Fact]
+    public async Task A_change_a_restart_interrupted_is_announced_as_failed()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookAsync(projectId, envId, hoursAhead: 12);
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var row = await ctx.OeEnvironmentUpgradeActions.SingleAsync(a => a.Id == actionId);
+            row.SentAt = _f.Clock.GetUtcNow().UtcDateTime;
+            await ctx.SaveChangesAsync();
+        }
+
+        await _f.Worker().FailInterruptedAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Emails.Sent.Should().ContainSingle().Which.Subject.Should().Be("Failed: Start the update on CRONUS Denmark / Production");
+    }
+
+    [Fact]
+    public async Task The_apps_after_a_failed_one_in_a_batch_are_each_announced()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await BookUploadAsync(projectId, envId, hoursAhead: 12, "Core.app", "Reports.app");
+        _f.Apps.OnOperationStatus = file => file == "Core.app" ? BcAppOperationStatus.Failed : BcAppOperationStatus.Succeeded;
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await SweepUntilQuietAsync();
+
+        _f.Emails.Sent.Select(s => s.Subject).Should().Equal(
+            "Failed: Install Core.app on CRONUS Denmark / Production", "Failed: Install Reports.app on CRONUS Denmark / Production");
+    }
+
     // ── Booked uploads ──────────────────────────────────────────────────
     // Apps somebody was handed, booked for a picked time or a window: the package waits
     // in the row, the sweep sends it and waits for Business Central to finish, and

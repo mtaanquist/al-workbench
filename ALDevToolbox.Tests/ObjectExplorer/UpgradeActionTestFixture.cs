@@ -12,6 +12,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Tests.Auth;
 using ALDevToolbox.Services.Workers;
+using ALDevToolbox.Endpoints;
+using ALDevToolbox.Services.Email;
+using ALDevToolbox.Services.Notifications;
 
 namespace ALDevToolbox.Tests.ObjectExplorer;
 
@@ -144,7 +147,27 @@ internal sealed class UpgradeActionTestFixture : IDisposable
             UploadPollTimeout = UploadPollTimeout,
         });
         services.AddScoped<UpgradeActionService>();
+        // The notifications the worker sends once a booking settles (#1046), through
+        // the real services into Emails.
+        services.AddScoped<IDbContextFactory<AppDbContext>>(sp => new ScopedContextFactory(sp));
+        services.AddScoped<NotificationPreferenceService>();
+        services.AddSingleton<IEmailService>(Emails);
+        services.AddSingleton(sp => new EmailRenderer(sp, NullLoggerFactory.Instance));
+        services.AddSingleton(new PublicOrigin("https://workbench.cronus.example"));
+        services.AddScoped<NotificationService>();
+        services.AddScoped<UpgradeActionNotifier>();
         return _provider = services.BuildServiceProvider();
+    }
+
+    /// <summary>The notification emails the worker sent.</summary>
+    public CapturingEmailService Emails { get; } = new();
+
+    /// <summary>Fresh contexts under the scope's own organisation context, as the app's scoped factory hands out.</summary>
+    private sealed class ScopedContextFactory(IServiceProvider services) : IDbContextFactory<AppDbContext>
+    {
+        public AppDbContext CreateDbContext() => new(
+            services.GetRequiredService<DbContextOptions<AppDbContext>>(),
+            services.GetRequiredService<IOrganizationContext>());
     }
 
     public UpgradeActionWorker Worker(WorkerHeartbeatRegistry? heartbeats = null) => new(

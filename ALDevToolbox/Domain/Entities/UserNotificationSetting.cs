@@ -11,6 +11,9 @@ public enum NotificationCategory
 
     /// <summary>A deployment waits for approval, is deployed, or fails.</summary>
     Deployments,
+
+    /// <summary>A change someone scheduled on an environment ran, failed, or could not be confirmed.</summary>
+    Upgrades,
 }
 
 /// <summary>When a person is emailed about one <see cref="NotificationCategory"/>.</summary>
