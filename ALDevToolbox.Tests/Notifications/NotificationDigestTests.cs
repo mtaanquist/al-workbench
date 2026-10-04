@@ -77,6 +77,40 @@ public sealed class NotificationDigestTests : IDisposable
     }
 
     [Fact]
+    public async Task Each_persons_digest_holds_only_their_own_items()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        var sam = await SeedUserAsync("sam@cronus.example");
+        await KeepAsync(alex, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: Coffee app", Wednesday0700.AddHours(-5));
+        await KeepAsync(sam, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: Bikes app", Wednesday0700.AddHours(-5));
+        await KeepAsync(sam, NotificationCategory.Deployments, NotificationDelivery.Daily, "Deployed: Bikes app", Wednesday0700.AddHours(-4));
+
+        (await SendDueAsync()).Should().Be(2);
+
+        _email.Sent.Single(s => s.To == "alex@cronus.example").Html
+            .Should().Contain("Build failed: Coffee app").And.NotContain("Bikes app");
+        _email.Sent.Single(s => s.To == "sam@cronus.example").Html
+            .Should().Contain("Build failed: Bikes app").And.Contain("Deployed: Bikes app").And.NotContain("Coffee app");
+    }
+
+    [Fact]
+    public async Task A_person_with_a_daily_and_a_weekly_item_due_gets_two_emails()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        await KeepAsync(alex, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: daily", Wednesday0700.AddHours(-5));
+        await KeepAsync(alex, NotificationCategory.Deployments, NotificationDelivery.Weekly, "Deployed: weekly", Wednesday0700.AddDays(-3));
+
+        (await SendDueAsync()).Should().Be(2);
+
+        _email.Sent.Should().HaveCount(2).And.AllSatisfy(s => s.To.Should().Be("alex@cronus.example"));
+        var daily = _email.Sent.Single(s => s.Subject.StartsWith("Daily digest"));
+        daily.Html.Should().Contain("Build failed: daily").And.NotContain("Deployed: weekly");
+        var weekly = _email.Sent.Single(s => s.Subject.StartsWith("Weekly digest"));
+        weekly.Html.Should().Contain("Deployed: weekly").And.NotContain("Build failed: daily");
+        await ItemCountShouldBeAsync(0);
+    }
+
+    [Fact]
     public async Task Items_after_the_cutoff_wait_for_the_next_one()
     {
         var alex = await SeedUserAsync("alex@cronus.example");
