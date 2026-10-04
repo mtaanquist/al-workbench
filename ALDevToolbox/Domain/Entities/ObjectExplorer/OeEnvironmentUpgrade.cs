@@ -115,4 +115,11 @@ public class OeEnvironmentUpgradeLine
     public string? Note { get; set; }
 
     public DateTime AddedAt { get; set; }
+
+    /// <summary>
+    /// When the person checking this environment was told it is on the target version
+    /// (UTC, issue #1047); null until then. Stamped so they are told once, whichever
+    /// read noticed the new version.
+    /// </summary>
+    public DateTime? UpdatedNotifiedAt { get; set; }
 }
