@@ -70,7 +70,6 @@ public sealed class DeploymentNotifier
             .Select(d => new
             {
                 d.Id,
-                d.OrganizationId,
                 d.ProjectId,
                 d.Status,
                 d.ReleasePipelineId,
@@ -95,10 +94,6 @@ public sealed class DeploymentNotifier
         var recipients = candidates.OfType<int>().Distinct().ToList();
         if (recipients.Count == 0) return;
 
-        var organizationName = await _db.Organizations.AsNoTracking()
-            .Where(o => o.Id == delivery.OrganizationId)
-            .Select(o => o.Name)
-            .FirstAsync(ct);
         var pipelinePath = $"/pipelines/deployments/{delivery.ReleasePipelineId}";
         var failure = outcome == DeploymentOutcome.Failed && !string.IsNullOrWhiteSpace(delivery.FailureMessage)
             ? delivery.FailureMessage.Trim()
@@ -112,10 +107,10 @@ public sealed class DeploymentNotifier
                 failure is null ? null : FirstLine(failure),
                 pipelinePath,
                 delivery.SolutionName),
-            (renderer, recipient, token) => DeploymentNotificationEmail.RenderAsync(
-                renderer, recipient.DisplayName, organizationName, outcome, delivery.SolutionName, delivery.PipelineName,
-                delivery.EnvironmentName, delivery.Apps, failure,
-                _notifications.Link(pipelinePath)!, _notifications.Link(NotificationService.SettingsPath)!, token),
+            (email, token) => DeploymentNotificationEmail.RenderAsync(
+                email.Renderer, email.Recipient.DisplayName, email.OrganizationName, outcome, delivery.SolutionName,
+                delivery.PipelineName, delivery.EnvironmentName, delivery.Apps, failure,
+                email.ItemUrl, email.SettingsUrl, token),
             Urgent: waiting,
             ProjectId: delivery.ProjectId),
             ct);

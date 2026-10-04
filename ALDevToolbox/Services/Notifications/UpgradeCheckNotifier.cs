@@ -61,7 +61,6 @@ public sealed class UpgradeCheckNotifier
                 l.Id,
                 l.ProjectId,
                 l.UpgradeId,
-                l.OrganizationId,
                 Assigned = l.AssigneeUserId != null,
                 Recipient = l.AssigneeUserId ?? l.Upgrade!.CreatedByUserId,
                 l.Environment!.Version,
@@ -81,10 +80,6 @@ public sealed class UpgradeCheckNotifier
             .ToList();
         if (ready.Count == 0) return 0;
 
-        var organizationName = await _db.Organizations.AsNoTracking()
-            .Where(o => o.Id == ready[0].OrganizationId)
-            .Select(o => o.Name)
-            .FirstAsync(ct);
         var sent = 0;
         foreach (var line in ready)
         {
@@ -104,10 +99,10 @@ public sealed class UpgradeCheckNotifier
                     line.UpgradeName,
                     path,
                     line.SolutionName),
-                (renderer, person, token) => EnvironmentReadyToCheckEmail.RenderAsync(
-                    renderer, person.DisplayName, organizationName, line.SolutionName, line.EnvironmentName, line.Version!,
-                    line.UpgradeName, line.Assigned, _notifications.Link(path)!,
-                    _notifications.Link(NotificationService.SettingsPath)!, token),
+                (email, token) => EnvironmentReadyToCheckEmail.RenderAsync(
+                    email.Renderer, email.Recipient.DisplayName, email.OrganizationName, line.SolutionName,
+                    line.EnvironmentName, line.Version!, line.UpgradeName, line.Assigned, email.ItemUrl, email.SettingsUrl,
+                    token),
                 ProjectId: line.ProjectId),
                 ct);
             sent++;

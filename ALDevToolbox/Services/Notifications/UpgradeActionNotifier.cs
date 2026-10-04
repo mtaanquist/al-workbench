@@ -61,7 +61,6 @@ public sealed class UpgradeActionNotifier
             .Where(a => a.Id == actionId)
             .Select(a => new
             {
-                a.OrganizationId,
                 a.ProjectId,
                 a.EnvironmentId,
                 a.Kind,
@@ -88,10 +87,6 @@ public sealed class UpgradeActionNotifier
             : unconfirmed ? UpgradeActionResult.Unconfirmed
             : UpgradeActionResult.Done;
         var what = Describe(action.Kind, action.TargetVersion, action.PackageFileName ?? action.AppName);
-        var organizationName = await _db.Organizations.AsNoTracking()
-            .Where(o => o.Id == action.OrganizationId)
-            .Select(o => o.Name)
-            .FirstAsync(ct);
         var path = $"/environments/{action.EnvironmentId}/history";
 
         await _notifications.NotifyAsync(new Notification(
@@ -102,9 +97,9 @@ public sealed class UpgradeActionNotifier
                 action.Outcome,
                 path,
                 action.SolutionName),
-            (renderer, person, token) => UpgradeActionEmail.RenderAsync(
-                renderer, person.DisplayName, organizationName, result, what, action.SolutionName, action.EnvironmentName,
-                action.Outcome, _notifications.Link(path)!, _notifications.Link(NotificationService.SettingsPath)!, token),
+            (email, token) => UpgradeActionEmail.RenderAsync(
+                email.Renderer, email.Recipient.DisplayName, email.OrganizationName, result, what, action.SolutionName,
+                action.EnvironmentName, action.Outcome, email.ItemUrl, email.SettingsUrl, token),
             ProjectId: action.ProjectId),
             ct);
     }

@@ -54,7 +54,6 @@ public sealed class BuildNotifier
             .Select(b => new
             {
                 b.Id,
-                b.OrganizationId,
                 b.ProjectId,
                 b.PipelineId,
                 b.Trigger,
@@ -112,10 +111,6 @@ public sealed class BuildNotifier
             .ToList();
         if (recipients.Count == 0) return;
 
-        var organizationName = await _db.Organizations.AsNoTracking()
-            .Where(o => o.Id == build.OrganizationId)
-            .Select(o => o.Name)
-            .FirstAsync(ct);
         var target = ProjectBuildTarget.IsPreview(build.BcTarget) ? ProjectBuildTarget.Label(build.BcTarget) : null;
         var buildPath = $"/pipelines/{pipelineId}?build={build.Id}";
         var subject = BuildNotificationEmail.SubjectFor(failed, nightly, build.SolutionName, build.PipelineName, target);
@@ -133,10 +128,9 @@ public sealed class BuildNotifier
                 string.IsNullOrWhiteSpace(failure) ? null : FirstLine(failure),
                 buildPath,
                 build.SolutionName),
-            (renderer, recipient, token) => BuildNotificationEmail.RenderAsync(
-                renderer, recipient.DisplayName, organizationName, build.SolutionName, build.PipelineName,
-                failed, nightly, target, build.BcVersion, failure,
-                _notifications.Link(buildPath)!, _notifications.Link(NotificationService.SettingsPath)!, token),
+            (email, token) => BuildNotificationEmail.RenderAsync(
+                email.Renderer, email.Recipient.DisplayName, email.OrganizationName, build.SolutionName, build.PipelineName,
+                failed, nightly, target, build.BcVersion, failure, email.ItemUrl, email.SettingsUrl, token),
             ProjectId: build.ProjectId),
             ct);
     }

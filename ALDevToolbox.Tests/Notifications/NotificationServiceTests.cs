@@ -431,7 +431,7 @@ public sealed class NotificationServiceTests : IDisposable
         NotificationCategory.Builds,
         recipients,
         new NotificationSummary("Build failed: CRONUS Coffee - Main", "error AL0118", "/pipelines/1", "CRONUS Coffee"),
-        (_, recipient, _) => Task.FromResult(new EmailContent($"For {recipient.DisplayName}", "<p>Body</p>", "Body")));
+        (email, _) => Task.FromResult(new EmailContent($"For {email.Recipient.DisplayName}", "<p>Body</p>", "Body")));
 
     private async Task NotifyAsync(
         Notification notification, string? origin = Origin, ALDevToolbox.Data.AppDbContext? ctx = null)

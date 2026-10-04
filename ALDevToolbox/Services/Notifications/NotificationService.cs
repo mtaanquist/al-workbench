@@ -72,9 +72,18 @@ public sealed class NotificationService
     /// </summary>
     public bool IsEnabled => _origin.IsConfigured;
 
-    /// <summary>An absolute link to <paramref name="pathAndQuery"/>, or null when <see cref="IsEnabled"/> is false.</summary>
-    public string? Link(string pathAndQuery) =>
-        _origin.Configured is { } origin ? origin + pathAndQuery : null;
+    /// <summary>
+    /// The absolute link to <see cref="SettingsPath"/> under <paramref name="origin"/>
+    /// (the PUBLIC_BASE_URL), for a notification or digest email's footer.
+    /// </summary>
+    internal static string SettingsUrl(string origin) => origin + SettingsPath;
+
+    /// <summary>The name of organisation <paramref name="organizationId"/>, as a notification email shows it.</summary>
+    internal static Task<string> OrganizationNameAsync(AppDbContext db, int organizationId, CancellationToken ct) =>
+        db.Organizations.AsNoTracking()
+            .Where(o => o.Id == organizationId)
+            .Select(o => o.Name)
+            .FirstAsync(ct);
 
     /// <summary>
     /// Lists <paramref name="notification"/> in the app and emails it, keeps it
@@ -112,9 +121,11 @@ public sealed class NotificationService
 
         var choices = await _preferences.GetForUsersAsync(
             recipients.Select(r => r.UserId).ToList(), notification.Category, ct);
-        var url = Link(notification.Summary.Path);
-        var emailReady = url is not null && await _email.IsConfiguredAsync(ct);
-        if (url is null)
+        var origin = _origin.Configured;
+        var url = origin is null ? null : origin + notification.Summary.Path;
+        var settingsUrl = origin is null ? null : SettingsUrl(origin);
+        var emailReady = origin is not null && await _email.IsConfiguredAsync(ct);
+        if (origin is null)
         {
             _logger.LogDebug("No email for a {Category} notification: no {EnvVar} configured.",
                 notification.Category, PublicOrigin.EnvVarName);
@@ -123,6 +134,9 @@ public sealed class NotificationService
         var listed = new List<UserNotification>();
         var digestItems = new List<NotificationDigestItem>();
         var sent = 0;
+        // Looked up when the first email is rendered, so a notification that is
+        // only listed or kept for a digest costs no query for it.
+        string? organizationName = null;
 
         foreach (var recipient in recipients)
         {
@@ -142,7 +156,7 @@ public sealed class NotificationService
                 });
             }
 
-            if (url is null) continue;
+            if (url is null || settingsUrl is null) continue;
             var email = choice.Email;
             if (notification.Urgent && email is NotificationDelivery.Daily or NotificationDelivery.Weekly)
             {
@@ -151,7 +165,9 @@ public sealed class NotificationService
             switch (email)
             {
                 case NotificationDelivery.Immediately when emailReady:
-                    if (await TrySendAsync(notification, recipient, ct)) sent++;
+                    organizationName ??= await OrganizationNameAsync(_db, orgId, ct);
+                    var context = new NotificationRenderContext(_renderer, recipient, organizationName, url, settingsUrl);
+                    if (await TrySendAsync(notification, context, ct)) sent++;
                     break;
                 case NotificationDelivery.Daily or NotificationDelivery.Weekly:
                     digestItems.Add(new NotificationDigestItem
@@ -204,11 +220,12 @@ public sealed class NotificationService
         }
     }
 
-    private async Task<bool> TrySendAsync(Notification notification, NotificationRecipient recipient, CancellationToken ct)
+    private async Task<bool> TrySendAsync(Notification notification, NotificationRenderContext context, CancellationToken ct)
     {
+        var recipient = context.Recipient;
         try
         {
-            var content = await notification.RenderAsync(_renderer, recipient, ct);
+            var content = await notification.RenderAsync(context, ct);
             await _email.SendAsync(recipient.Email, content, PurposeFor(notification.Category), ct);
             return true;
         }

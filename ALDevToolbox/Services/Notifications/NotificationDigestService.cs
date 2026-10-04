@@ -131,11 +131,8 @@ public sealed class NotificationDigestService
                 .ToListAsync(ct))
             .Select(s => (s.UserId, s.Category))
             .ToHashSet();
-        var organizationName = await _db.Organizations.AsNoTracking()
-            .Where(o => o.Id == orgId)
-            .Select(o => o.Name)
-            .FirstAsync(ct);
-        var settingsUrl = origin + NotificationService.SettingsPath;
+        var organizationName = await NotificationService.OrganizationNameAsync(_db, orgId, ct);
+        var settingsUrl = NotificationService.SettingsUrl(origin);
 
         var sent = 0;
         var dropped = new List<int>();
