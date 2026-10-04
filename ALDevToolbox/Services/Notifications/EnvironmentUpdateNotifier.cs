@@ -15,6 +15,9 @@ namespace ALDevToolbox.Services.Notifications;
 /// </summary>
 public sealed class EnvironmentUpdateNotifier
 {
+    /// <summary>How an update date reads in the notification, e.g. "Tue 14 Apr 2026".</summary>
+    private const string DateFormat = "ddd d MMM yyyy";
+
     private readonly AppDbContext _db;
     private readonly NotificationService _notifications;
     private readonly ProjectFollowService _follows;
@@ -99,13 +102,13 @@ public sealed class EnvironmentUpdateNotifier
             try
             {
                 var local = TimeZoneInfo.ConvertTimeFromUtc(when, TimeZoneInfo.FindSystemTimeZoneById(ianaZone));
-                return local.ToString("ddd d MMM yyyy", CultureInfo.InvariantCulture);
+                return local.ToString(DateFormat, CultureInfo.InvariantCulture);
             }
             catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
             {
                 // Falls through to UTC.
             }
         }
-        return when.ToString("ddd d MMM yyyy", CultureInfo.InvariantCulture) + " (UTC)";
+        return when.ToString(DateFormat, CultureInfo.InvariantCulture) + " (UTC)";
     }
 }
