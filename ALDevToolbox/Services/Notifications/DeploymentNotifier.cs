@@ -104,7 +104,7 @@ public sealed class DeploymentNotifier
             recipients,
             new NotificationSummary(
                 DeploymentNotificationEmail.SubjectFor(outcome, delivery.SolutionName, delivery.EnvironmentName),
-                failure is null ? null : FirstLine(failure),
+                failure is null ? null : NotificationText.FirstLine(failure),
                 pipelinePath,
                 delivery.SolutionName),
             (email, token) => DeploymentNotificationEmail.RenderAsync(
@@ -114,12 +114,6 @@ public sealed class DeploymentNotifier
             Urgent: waiting,
             ProjectId: delivery.ProjectId),
             ct);
-    }
-
-    private static string FirstLine(string message)
-    {
-        var line = message.Split('\n')[0].Trim();
-        return line.Length > 200 ? line[..200].TrimEnd() + "..." : line;
     }
 
     internal static DeploymentOutcome? OutcomeFor(string status) => status switch

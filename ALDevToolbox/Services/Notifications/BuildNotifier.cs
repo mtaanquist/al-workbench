@@ -125,7 +125,7 @@ public sealed class BuildNotifier
             recipients,
             new NotificationSummary(
                 subject,
-                string.IsNullOrWhiteSpace(failure) ? null : FirstLine(failure),
+                string.IsNullOrWhiteSpace(failure) ? null : NotificationText.FirstLine(failure),
                 buildPath,
                 build.SolutionName),
             (email, token) => BuildNotificationEmail.RenderAsync(
@@ -151,7 +151,7 @@ public sealed class BuildNotifier
             .Select(r => new { r.AppName, r.Message })
             .ToListAsync(ct);
         return rows
-            .Select(r => string.IsNullOrWhiteSpace(r.Message) ? r.AppName : $"{r.AppName}: {FirstLine(r.Message)}")
+            .Select(r => string.IsNullOrWhiteSpace(r.Message) ? r.AppName : $"{r.AppName}: {NotificationText.FirstLine(r.Message)}")
             .ToList();
     }
 
@@ -163,10 +163,4 @@ public sealed class BuildNotifier
     internal static bool IsChange(bool failed, bool? previousFailed) => failed
         ? previousFailed != true
         : previousFailed == true;
-
-    private static string FirstLine(string message)
-    {
-        var line = message.Trim().Split('\n')[0].Trim();
-        return line.Length > 200 ? line[..200].TrimEnd() + "..." : line;
-    }
 }
