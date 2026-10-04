@@ -159,6 +159,16 @@ migration that added the column stamped those already on target then, so neither
 old news. A crash between the claim and the send loses that one notice: at most once is
 the better failure for an advisory email than a duplicate.
 
+## Following a solution (#1048)
+
+A solution's own events (Business Central update dates, #1049) go to its followers. The
+owner and the people on the solution's People list follow by default, without a stored
+row, so someone added to the list later starts following with nothing to backfill. Anyone
+who can see a solution can follow it from the Follow button in its header, and anyone can
+stop; stopping stores a row that overrides the default. A follower who can no longer see a
+Private solution (taken off its team) is left out of its notifications but keeps the
+choice, so it applies again if access comes back. Disabled accounts are left out.
+
 ## Digests (#1037)
 
 `NotificationDigestScheduler` (a `PolledScheduler`, `DISABLE_NOTIFICATION_DIGEST_SCHEDULER`)
