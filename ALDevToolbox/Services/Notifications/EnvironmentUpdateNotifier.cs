@@ -15,6 +15,9 @@ namespace ALDevToolbox.Services.Notifications;
 /// </summary>
 public sealed class EnvironmentUpdateNotifier
 {
+    /// <summary>How an update date reads in the notification, e.g. "Tue 14 Apr 2026".</summary>
+    private const string DateFormat = "ddd d MMM yyyy";
+
     private readonly AppDbContext _db;
     private readonly NotificationService _notifications;
     private readonly ProjectFollowService _follows;
@@ -61,17 +64,12 @@ public sealed class EnvironmentUpdateNotifier
             .Select(e => new
             {
                 e.Name,
-                e.OrganizationId,
                 e.BcUpdateWindowTimeZoneIana,
                 SolutionName = e.Project!.Name,
             })
             .FirstOrDefaultAsync(ct);
         if (env is null) return;
 
-        var organizationName = await _db.Organizations.AsNoTracking()
-            .Where(o => o.Id == env.OrganizationId)
-            .Select(o => o.Name)
-            .FirstAsync(ct);
         var date = FormatDate(change.Date, env.BcUpdateWindowTimeZoneIana);
         var latest = change.LatestDate is { } l ? FormatDate(l, env.BcUpdateWindowTimeZoneIana) : null;
         var previous = change.PreviousDate is { } p ? FormatDate(p, env.BcUpdateWindowTimeZoneIana) : null;
@@ -85,9 +83,9 @@ public sealed class EnvironmentUpdateNotifier
                 null,
                 path,
                 env.SolutionName),
-            (renderer, person, token) => EnvironmentUpdateEmail.RenderAsync(
-                renderer, person.DisplayName, organizationName, change.Kind, env.SolutionName, env.Name, change.Version,
-                date, latest, previous, _notifications.Link(path)!, _notifications.Link(NotificationService.SettingsPath)!, token),
+            (email, token) => EnvironmentUpdateEmail.RenderAsync(
+                email.Renderer, email.Recipient.DisplayName, email.OrganizationName, change.Kind, env.SolutionName, env.Name,
+                change.Version, date, latest, previous, email.ItemUrl, email.SettingsUrl, token),
             ProjectId: change.ProjectId),
             ct);
     }
@@ -104,13 +102,13 @@ public sealed class EnvironmentUpdateNotifier
             try
             {
                 var local = TimeZoneInfo.ConvertTimeFromUtc(when, TimeZoneInfo.FindSystemTimeZoneById(ianaZone));
-                return local.ToString("ddd d MMM yyyy", CultureInfo.InvariantCulture);
+                return local.ToString(DateFormat, CultureInfo.InvariantCulture);
             }
             catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
             {
                 // Falls through to UTC.
             }
         }
-        return when.ToString("ddd d MMM yyyy", CultureInfo.InvariantCulture) + " (UTC)";
+        return when.ToString(DateFormat, CultureInfo.InvariantCulture) + " (UTC)";
     }
 }

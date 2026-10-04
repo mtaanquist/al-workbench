@@ -7,6 +7,22 @@ namespace ALDevToolbox.Services.Notifications;
 public sealed record NotificationRecipient(int UserId, string DisplayName, string Email);
 
 /// <summary>
+/// What a notification email is rendered with beyond what its notifier knows,
+/// filled by the <see cref="NotificationService"/>: the organisation name is
+/// looked up once per notification, and only when an email is rendered.
+/// </summary>
+/// <param name="Recipient">Who the email is addressed to, for its greeting.</param>
+/// <param name="OrganizationName">The organisation the notification was sent in.</param>
+/// <param name="ItemUrl">The absolute link to the notification's <see cref="NotificationSummary.Path"/>.</param>
+/// <param name="SettingsUrl">The absolute link to <see cref="NotificationService.SettingsPath"/>, for the footer.</param>
+public sealed record NotificationRenderContext(
+    EmailRenderer Renderer,
+    NotificationRecipient Recipient,
+    string OrganizationName,
+    string ItemUrl,
+    string SettingsUrl);
+
+/// <summary>
 /// The one-line form of a notification in a daily or weekly digest email.
 /// </summary>
 public sealed record NotificationDigestEntry(string Title, string? Detail, string Url, string? SolutionName);
@@ -27,7 +43,7 @@ public sealed record NotificationSummary(string Title, string? Detail, string Pa
 /// </summary>
 /// <param name="RenderAsync">
 /// Renders the email for one recipient, so it can greet them by name. Only
-/// called when PUBLIC_BASE_URL is set, so links in it may assume one.
+/// called when PUBLIC_BASE_URL is set, so the context's links are absolute.
 /// </param>
 /// <param name="Urgent">
 /// Someone is waiting on the recipient (a deployment waiting for approval), so
@@ -41,6 +57,6 @@ public sealed record Notification(
     NotificationCategory Category,
     IReadOnlyCollection<int> RecipientUserIds,
     NotificationSummary Summary,
-    Func<EmailRenderer, NotificationRecipient, CancellationToken, Task<EmailContent>> RenderAsync,
+    Func<NotificationRenderContext, CancellationToken, Task<EmailContent>> RenderAsync,
     bool Urgent = false,
     int? ProjectId = null);
