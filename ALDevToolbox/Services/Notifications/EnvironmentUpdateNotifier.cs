@@ -87,7 +87,8 @@ public sealed class EnvironmentUpdateNotifier
                 env.SolutionName),
             (renderer, person, token) => EnvironmentUpdateEmail.RenderAsync(
                 renderer, person.DisplayName, organizationName, change.Kind, env.SolutionName, env.Name, change.Version,
-                date, latest, previous, _notifications.Link(path)!, _notifications.Link(NotificationService.SettingsPath)!, token)),
+                date, latest, previous, _notifications.Link(path)!, _notifications.Link(NotificationService.SettingsPath)!, token),
+            ProjectId: change.ProjectId),
             ct);
     }
 

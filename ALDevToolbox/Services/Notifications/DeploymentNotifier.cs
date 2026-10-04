@@ -71,6 +71,7 @@ public sealed class DeploymentNotifier
             {
                 d.Id,
                 d.OrganizationId,
+                d.ProjectId,
                 d.Status,
                 d.ReleasePipelineId,
                 d.EnvironmentName,
@@ -115,7 +116,8 @@ public sealed class DeploymentNotifier
                 renderer, recipient.DisplayName, organizationName, outcome, delivery.SolutionName, delivery.PipelineName,
                 delivery.EnvironmentName, delivery.Apps, failure,
                 _notifications.Link(pipelinePath)!, _notifications.Link(NotificationService.SettingsPath)!, token),
-            Urgent: waiting),
+            Urgent: waiting,
+            ProjectId: delivery.ProjectId),
             ct);
     }
 

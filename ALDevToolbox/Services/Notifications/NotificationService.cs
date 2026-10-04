@@ -1,3 +1,4 @@
+using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Endpoints;
@@ -101,6 +102,12 @@ public sealed class NotificationService
             .Where(u => notification.RecipientUserIds.Contains(u.Id) && u.Status == UserStatus.Active)
             .Select(u => new NotificationRecipient(u.Id, u.DisplayName, u.Email))
             .ToListAsync(ct);
+        if (notification.ProjectId is { } projectId && recipients.Count > 0)
+        {
+            var visible = (await ProjectAccess.WhoCanViewAsync(
+                _db, projectId, recipients.Select(r => r.UserId).ToList(), ct)).ToHashSet();
+            recipients = recipients.Where(r => visible.Contains(r.UserId)).ToList();
+        }
         if (recipients.Count == 0) return;
 
         var choices = await _preferences.GetForUsersAsync(

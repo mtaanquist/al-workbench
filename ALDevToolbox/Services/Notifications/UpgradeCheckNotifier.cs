@@ -59,6 +59,7 @@ public sealed class UpgradeCheckNotifier
             .Select(l => new
             {
                 l.Id,
+                l.ProjectId,
                 l.UpgradeId,
                 l.OrganizationId,
                 Assigned = l.AssigneeUserId != null,
@@ -106,7 +107,8 @@ public sealed class UpgradeCheckNotifier
                 (renderer, person, token) => EnvironmentReadyToCheckEmail.RenderAsync(
                     renderer, person.DisplayName, organizationName, line.SolutionName, line.EnvironmentName, line.Version!,
                     line.UpgradeName, line.Assigned, _notifications.Link(path)!,
-                    _notifications.Link(NotificationService.SettingsPath)!, token)),
+                    _notifications.Link(NotificationService.SettingsPath)!, token),
+                ProjectId: line.ProjectId),
                 ct);
             sent++;
         }

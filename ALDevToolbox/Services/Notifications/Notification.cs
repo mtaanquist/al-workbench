@@ -33,9 +33,14 @@ public sealed record NotificationSummary(string Title, string? Detail, string Pa
 /// Someone is waiting on the recipient (a deployment waiting for approval), so
 /// a digest choice is treated as Immediately; only Off stops the email.
 /// </param>
+/// <param name="ProjectId">
+/// The solution it is about. A recipient who can no longer see it (taken off a
+/// Private solution's team) is left out, so its name and events stay private.
+/// </param>
 public sealed record Notification(
     NotificationCategory Category,
     IReadOnlyCollection<int> RecipientUserIds,
     NotificationSummary Summary,
     Func<EmailRenderer, NotificationRecipient, CancellationToken, Task<EmailContent>> RenderAsync,
-    bool Urgent = false);
+    bool Urgent = false,
+    int? ProjectId = null);

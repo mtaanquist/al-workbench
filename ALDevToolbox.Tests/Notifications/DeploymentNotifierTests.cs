@@ -53,6 +53,23 @@ public sealed class DeploymentNotifierTests : IDisposable
     }
 
     [Fact]
+    public async Task Someone_who_can_no_longer_see_a_private_solution_is_left_out()
+    {
+        await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == _projectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.Private));
+        }
+        var id = await AddDeliveryAsync(ProjectDeliveryStatus.Proposed, triggeredBy: null);
+
+        await Notifier().ProposedAsync([id]);
+
+        _email.Sent.Select(s => s.To).Should().Equal(["owner@cronus.example"],
+            "the pipeline's creator is on no team of the now private solution");
+    }
+
+    [Fact]
     public async Task An_approval_request_skips_a_digest_choice()
     {
         await SeedAsync();

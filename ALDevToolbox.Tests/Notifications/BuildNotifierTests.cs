@@ -57,6 +57,21 @@ public sealed class BuildNotifierTests : IDisposable
     }
 
     [Fact]
+    public async Task Someone_who_can_no_longer_see_a_private_solution_is_left_out()
+    {
+        await SeedAsync();
+        await MakePrivateAsync(_projectId);
+
+        await FinishAsync(ProjectBuildStatus.Ready);
+        await FinishAsync(ProjectBuildStatus.Failed, failure: "error AL0118: The name 'Brew' does not exist.");
+
+        _email.Sent.Select(s => s.To).Should().Equal(["creator@cronus.example"],
+            "the person who started it is on no team of the now private solution; its owner still sees it");
+        await using var ctx = _db.NewContext();
+        (await ctx.UserNotifications.Select(n => n.UserId).ToListAsync()).Should().Equal(_creator);
+    }
+
+    [Fact]
     public async Task Repeated_failures_send_once_and_the_fix_sends_once()
     {
         await SeedAsync();
@@ -238,6 +253,13 @@ public sealed class BuildNotifierTests : IDisposable
     }
 
     // ---- helpers -----------------------------------------------------------
+
+    private async Task MakePrivateAsync(int projectId)
+    {
+        await using var ctx = _db.NewContext();
+        await ctx.OeProjects.Where(p => p.Id == projectId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.Private));
+    }
 
     private async Task SeedAsync()
     {

@@ -62,6 +62,7 @@ public sealed class UpgradeActionNotifier
             .Select(a => new
             {
                 a.OrganizationId,
+                a.ProjectId,
                 a.EnvironmentId,
                 a.Kind,
                 a.Status,
@@ -103,7 +104,8 @@ public sealed class UpgradeActionNotifier
                 action.SolutionName),
             (renderer, person, token) => UpgradeActionEmail.RenderAsync(
                 renderer, person.DisplayName, organizationName, result, what, action.SolutionName, action.EnvironmentName,
-                action.Outcome, _notifications.Link(path)!, _notifications.Link(NotificationService.SettingsPath)!, token)),
+                action.Outcome, _notifications.Link(path)!, _notifications.Link(NotificationService.SettingsPath)!, token),
+            ProjectId: action.ProjectId),
             ct);
     }
 
