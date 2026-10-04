@@ -219,6 +219,7 @@ public sealed class NotificationService
         NotificationCategory.Builds => EmailPurpose.BuildNotification,
         NotificationCategory.Deployments => EmailPurpose.DeploymentNotification,
         NotificationCategory.Upgrades => EmailPurpose.UpgradeNotification,
+        NotificationCategory.Solutions => EmailPurpose.SolutionNotification,
         _ => throw new ArgumentOutOfRangeException(nameof(category), category, null),
     };
 }

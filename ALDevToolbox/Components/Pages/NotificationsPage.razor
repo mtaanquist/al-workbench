@@ -49,7 +49,8 @@
                 <Text>
                     Builds you started or set up show up here when they fail and when they work again.
                     Deployments show up when they need your approval, finish or fail, and changes
-                    you schedule on an environment when they have run or failed.
+                    you schedule on an environment when they have run or failed. Solutions you follow
+                    show up when Business Central schedules or moves an update for their environments.
                 </Text>
                 <Action>
                     <a class="btn" href="@NotificationService.SettingsPath">Choose what you hear about</a>
@@ -109,6 +110,7 @@
         NotificationCategory.Builds => "workflow",
         NotificationCategory.Deployments => "rocket",
         NotificationCategory.Upgrades => "calendar-clock",
+        NotificationCategory.Solutions => "calendar",
         _ => "bell",
     };
 }

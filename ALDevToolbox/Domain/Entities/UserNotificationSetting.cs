@@ -14,6 +14,8 @@ public enum NotificationCategory
 
     /// <summary>A change someone scheduled on an environment ran, failed, or could not be confirmed.</summary>
     Upgrades,
+    /// <summary>Business Central schedules or moves an update for a solution the person follows.</summary>
+    Solutions,
 }
 
 /// <summary>When a person is emailed about one <see cref="NotificationCategory"/>.</summary>
@@ -27,9 +29,9 @@ public enum NotificationDelivery
 
 /// <summary>
 /// One person's choice for one category. A missing row means
-/// <see cref="Services.Notifications.NotificationPreferenceService.DefaultDelivery"/>
-/// and shown in the app, so a category added later starts on for everyone
-/// without a backfill.
+/// <see cref="Services.Notifications.NotificationPreferenceService.DefaultDeliveryFor"/>
+/// and shown in the app, so a category added later starts at its default for
+/// everyone without a backfill.
 /// </summary>
 public class UserNotificationSetting
 {
