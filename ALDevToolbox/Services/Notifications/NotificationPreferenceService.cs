@@ -20,14 +20,17 @@ public sealed record NotificationChoice(bool InApp, NotificationDelivery Email);
 public sealed class NotificationPreferenceService
 {
     /// <summary>
-    /// What a person gets before they choose. On, because every notification
-    /// goes to someone who caused or owns the thing it is about, and the email
-    /// links to the place to turn it off.
+    /// When a person is emailed before they choose. Immediately, because those
+    /// notifications go to someone who caused or owns the thing they are about,
+    /// and the email links to the place to turn it off. Followed solutions are
+    /// the exception: everyone on a solution's People list follows it without
+    /// asking, so their email is opt-in and they hear in the app only.
     /// </summary>
-    public const NotificationDelivery DefaultDelivery = NotificationDelivery.Immediately;
+    public static NotificationDelivery DefaultDeliveryFor(NotificationCategory category) =>
+        category == NotificationCategory.Solutions ? NotificationDelivery.Off : NotificationDelivery.Immediately;
 
-    /// <summary>The choice of someone who has not made one: shown in the app, emailed immediately.</summary>
-    public static readonly NotificationChoice Default = new(InApp: true, DefaultDelivery);
+    /// <summary>The choice of someone who has not made one: shown in the app, emailed as <see cref="DefaultDeliveryFor"/> says.</summary>
+    public static NotificationChoice DefaultFor(NotificationCategory category) => new(InApp: true, DefaultDeliveryFor(category));
 
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
@@ -54,7 +57,7 @@ public sealed class NotificationPreferenceService
             .Where(s => s.UserId == userId)
             .ToDictionaryAsync(s => s.Category, s => new NotificationChoice(s.InApp, s.Delivery), ct);
         return Enum.GetValues<NotificationCategory>()
-            .ToDictionary(c => c, c => stored.GetValueOrDefault(c, Default));
+            .ToDictionary(c => c, c => stored.GetValueOrDefault(c, DefaultFor(c)));
     }
 
     /// <summary>Saves when the signed-in person is emailed about one category.</summary>
@@ -79,7 +82,7 @@ public sealed class NotificationPreferenceService
         // the next one.
         await _db.Database.ExecuteSqlInterpolatedAsync($"""
             INSERT INTO user_notification_settings (user_id, organization_id, category, delivery, in_app, updated_at)
-            VALUES ({userId}, {orgId}, {category.ToString()}, {delivery.ToString()}, {Default.InApp}, {now})
+            VALUES ({userId}, {orgId}, {category.ToString()}, {delivery.ToString()}, {true}, {now})
             ON CONFLICT (user_id, category)
             DO UPDATE SET delivery = EXCLUDED.delivery, updated_at = EXCLUDED.updated_at
             """, ct);
@@ -98,7 +101,7 @@ public sealed class NotificationPreferenceService
         // The same single-statement upsert as the email choice, leaving that alone.
         await _db.Database.ExecuteSqlInterpolatedAsync($"""
             INSERT INTO user_notification_settings (user_id, organization_id, category, delivery, in_app, updated_at)
-            VALUES ({userId}, {orgId}, {category.ToString()}, {DefaultDelivery.ToString()}, {inApp}, {now})
+            VALUES ({userId}, {orgId}, {category.ToString()}, {DefaultDeliveryFor(category).ToString()}, {inApp}, {now})
             ON CONFLICT (user_id, category)
             DO UPDATE SET in_app = EXCLUDED.in_app, updated_at = EXCLUDED.updated_at
             """, ct);
@@ -116,7 +119,7 @@ public sealed class NotificationPreferenceService
         var stored = await _db.UserNotificationSettings.AsNoTracking()
             .Where(s => s.Category == category && userIds.Contains(s.UserId))
             .ToDictionaryAsync(s => s.UserId, s => new NotificationChoice(s.InApp, s.Delivery), ct);
-        return userIds.Distinct().ToDictionary(id => id, id => stored.GetValueOrDefault(id, Default));
+        return userIds.Distinct().ToDictionary(id => id, id => stored.GetValueOrDefault(id, DefaultFor(category)));
     }
 
     private static void RequireKnown(NotificationCategory category)

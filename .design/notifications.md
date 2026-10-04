@@ -16,7 +16,9 @@ Agreed with the maintainer on 2026-10-03:
 - **Each person chooses per category**, like GitHub: whether it shows in the app (on or
   off), and when it is emailed (Immediately, Daily digest, Weekly digest or Off). A category
   with no stored choice is in the app and Immediately, so a category added later starts on
-  for everyone without a backfill.
+  for everyone without a backfill. Solutions is the exception: its email starts Off. People
+  follow a solution without asking (the owner and its People list), so its email is opt-in
+  to avoid suddenly mailing a whole team (Mads, 2026-10-03); it still shows in the app.
 - **Customer-facing email is out of scope.** These emails go to colleagues only.
 
 ## Categories
@@ -26,6 +28,7 @@ Agreed with the maintainer on 2026-10-03:
 | Builds | Build failed, build working again (manual builds and nightly checks; pull request builds are left to GitHub) | #1035 |
 | Deployments | Waiting for approval, deployed, failed | #1036 |
 | Upgrades | A change someone scheduled on an environment ran or failed | #1046 |
+| Solutions | Update scheduled, update moved, latest date a week away, for solutions you follow | #1049 |
 
 Phase 4 adds the rest of Upgrades and a Solutions category.
 
@@ -149,6 +152,27 @@ who can see a solution can follow it from the Follow button in its header, and a
 stop; stopping stores a row that overrides the default. A follower who can no longer see a
 Private solution (taken off its team) is left out of its notifications but keeps the
 choice, so it applies again if access comes back. Disabled accounts are left out.
+
+## Business Central update dates (#1049)
+
+When a refresh (the scheduled environment refresh, Refresh or Test connection on the
+solution, the refresh after recovering or copying an environment, or the environment page
+re-reading an update it watches) finds an environment's next update
+changed, the solution's followers hear about it in the Solutions category: a newly
+scheduled update (a version not seen before, or a date where there was none), a moved date,
+or the latest date the update can be postponed to coming within a week. At most one per
+read, in that order; when a new or moved date and the latest date coming close land on the
+same read, the latest-date notice is not sent separately, but the email names the latest
+date anyway. A move counts only when the day changes in the environment's update-window time
+zone, since the notice names days. Nothing is said while an update is under way or once its
+date has come. Nothing is said on an environment's first read, which has nothing to
+compare with, and nothing about a date the app moved itself: the write path stores the new
+date straight away, so the next read finds nothing new. Two known gaps, accepted: when the
+re-read after the app's own change fails, the next refresh announces that change as news;
+and two refreshes of the same environment overlapping can both announce one change. The latest-date notice needs no
+stored flag: it fires on the read where the date first comes within the week, which the
+previous read's own time says. Dates are shown in the environment's update-window time
+zone when Business Central reports one, otherwise in UTC, said so.
 
 ## Digests (#1037)
 

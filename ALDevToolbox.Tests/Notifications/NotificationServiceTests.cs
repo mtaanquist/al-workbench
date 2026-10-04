@@ -34,7 +34,7 @@ public sealed class NotificationServiceTests : IDisposable
     // ---- preferences -------------------------------------------------------
 
     [Fact]
-    public async Task Every_category_starts_in_app_and_emailed_immediately()
+    public async Task Every_category_starts_in_app_and_emailed_immediately_except_followed_solutions()
     {
         var userId = await SeedUserAsync("alex@cronus.example");
         _db.OrgContext.CurrentUserId = userId;
@@ -43,7 +43,26 @@ public sealed class NotificationServiceTests : IDisposable
         var choices = await Preferences(ctx).GetForCurrentUserAsync();
 
         choices.Should().HaveCount(Enum.GetValues<NotificationCategory>().Length);
-        choices.Values.Should().AllSatisfy(c => c.Should().Be(new NotificationChoice(true, NotificationDelivery.Immediately)));
+        choices.Where(c => c.Key != NotificationCategory.Solutions).Select(c => c.Value)
+            .Should().AllSatisfy(c => c.Should().Be(new NotificationChoice(true, NotificationDelivery.Immediately)));
+        choices[NotificationCategory.Solutions].Should().Be(new NotificationChoice(true, NotificationDelivery.Off),
+            "following is automatic, so its email is opt-in");
+    }
+
+    [Fact]
+    public async Task Turning_followed_solutions_off_in_the_app_leaves_their_email_off()
+    {
+        var userId = await SeedUserAsync("alex@cronus.example");
+        _db.OrgContext.CurrentUserId = userId;
+        await using (var ctx = _db.NewContext())
+        {
+            await Preferences(ctx).SetInAppForCurrentUserAsync(NotificationCategory.Solutions, false);
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            (await Preferences(ctx).GetForCurrentUserAsync())[NotificationCategory.Solutions]
+                .Should().Be(new NotificationChoice(false, NotificationDelivery.Off));
+        }
     }
 
     [Fact]
