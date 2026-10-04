@@ -30,6 +30,13 @@ public class UserNotification
     /// </summary>
     public string Path { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The solution it is about, rechecked when it is listed or counted: someone taken off a
+    /// Private solution's team stops seeing its events. Null when it belongs to none.
+    /// </summary>
+    public int? ProjectId { get; set; }
+    public ObjectExplorer.OeProject? Project { get; set; }
+
     /// <summary>The solution the notification belongs to. Null when it belongs to none.</summary>
     public string? SolutionName { get; set; }
 

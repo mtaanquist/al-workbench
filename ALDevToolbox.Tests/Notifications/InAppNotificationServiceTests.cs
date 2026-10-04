@@ -1,4 +1,5 @@
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Tests.Infrastructure;
@@ -130,6 +131,38 @@ public sealed class InAppNotificationServiceTests : IDisposable
         (await Service().ListForCurrentUserAsync()).Single(r => !r.Read).Title.Should().Be("Arrived later");
     }
 
+    [Fact]
+    public async Task A_private_solution_the_person_can_no_longer_see_drops_out_of_the_list_count_and_open()
+    {
+        var owner = await SeedUserAsync("owner@cronus.example");
+        var member = await SeedUserAsync("member@cronus.example");
+        var removed = await SeedUserAsync("removed@cronus.example");
+        var admin = await SeedUserAsync("admin@cronus.example", role: UserRole.Admin);
+        var projectId = await SeedPrivateProjectAsync(owner, member);
+        foreach (var userId in new[] { owner, member, removed, admin })
+        {
+            await AddAsync(userId, "Secret", Monday, projectId: projectId);
+            await AddAsync(userId, "Open", Monday);
+        }
+
+        _db.OrgContext.CurrentUserId = removed;
+        int hiddenId;
+        await using (var ctx = _db.NewContext())
+        {
+            hiddenId = (await ctx.UserNotifications.SingleAsync(n => n.UserId == removed && n.ProjectId == projectId)).Id;
+        }
+        (await Service().ListForCurrentUserAsync()).Select(r => r.Title).Should().Equal("Open");
+        (await Service().CountUnreadForCurrentUserAsync()).Should().Be(1);
+        (await Service().OpenForCurrentUserAsync(hiddenId)).Should().BeNull();
+
+        foreach (var userId in new[] { owner, member, admin })
+        {
+            _db.OrgContext.CurrentUserId = userId;
+            (await Service().ListForCurrentUserAsync()).Select(r => r.Title).Should().BeEquivalentTo(["Secret", "Open"]);
+            (await Service().CountUnreadForCurrentUserAsync()).Should().Be(2);
+        }
+    }
+
     [Theory]
     [InlineData("/pipelines/1?build=7", true)]
     [InlineData("/pipelines/1\t", false)]
@@ -149,26 +182,46 @@ public sealed class InAppNotificationServiceTests : IDisposable
         _db.NewContextFactory(), _db.OrgContext, TimeProvider.System, NullLogger<InAppNotificationService>.Instance);
 
     private async Task<int> AddAsync(
-        int userId, string title, DateTime createdAt, int organizationId = TestDb.DefaultOrgId, DateTime? readAt = null)
+        int userId, string title, DateTime createdAt, int organizationId = TestDb.DefaultOrgId, DateTime? readAt = null,
+        int? projectId = null)
     {
         await using var ctx = _db.NewContext();
         var row = new UserNotification
         {
             UserId = userId, OrganizationId = organizationId, Category = NotificationCategory.Builds,
             Title = title, Path = "/pipelines/1?build=7", CreatedAt = createdAt, ReadAt = readAt,
+            ProjectId = projectId,
         };
         ctx.UserNotifications.Add(row);
         await ctx.SaveChangesAsync();
         return row.Id;
     }
 
-    private async Task<int> SeedUserAsync(string email, int organizationId = TestDb.DefaultOrgId)
+    private async Task<int> SeedPrivateProjectAsync(int ownerId, int memberId)
+    {
+        await using var ctx = _db.NewContext();
+        var project = new OeProject
+        {
+            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Secret", CreatedByUserId = ownerId,
+            Visibility = ProjectVisibility.Private, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        var team = new Team { OrganizationId = TestDb.DefaultOrgId, Name = "Secret", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        team.Members.Add(new TeamMember { OrganizationId = TestDb.DefaultOrgId, UserId = memberId, CreatedAt = DateTime.UtcNow });
+        ctx.OeProjects.Add(project);
+        ctx.Teams.Add(team);
+        await ctx.SaveChangesAsync();
+        ctx.OeProjectTeams.Add(new OeProjectTeam { OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, TeamId = team.Id, CreatedAt = DateTime.UtcNow });
+        await ctx.SaveChangesAsync();
+        return project.Id;
+    }
+
+    private async Task<int> SeedUserAsync(string email, int organizationId = TestDb.DefaultOrgId, UserRole role = UserRole.User)
     {
         await using var ctx = _db.NewContext();
         var user = new User
         {
             OrganizationId = organizationId, Email = email, DisplayName = "Alex Hansen", PasswordHash = "x",
-            Role = UserRole.User, Status = UserStatus.Active, CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+            Role = role, Status = UserStatus.Active, CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
         };
         ctx.Users.Add(user);
         await ctx.SaveChangesAsync();

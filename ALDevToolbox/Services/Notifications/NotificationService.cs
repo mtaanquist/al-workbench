@@ -152,6 +152,7 @@ public sealed class NotificationService
                     Detail = notification.Summary.Detail,
                     Path = notification.Summary.Path,
                     SolutionName = notification.Summary.SolutionName,
+                    ProjectId = notification.ProjectId,
                     CreatedAt = now,
                 });
             }
@@ -180,6 +181,7 @@ public sealed class NotificationService
                         Detail = notification.Summary.Detail,
                         Url = url,
                         SolutionName = notification.Summary.SolutionName,
+                    ProjectId = notification.ProjectId,
                         CreatedAt = now,
                     });
                     break;

@@ -113,8 +113,11 @@ recipient who can no longer see that solution, with the same rule as the solutio
 owner, an org Admin, a SiteAdmin or a member of one of its teams for a Private solution,
 everyone otherwise. So someone taken off a Private solution's team stops hearing about its
 builds, deployments, environment changes and upgrades, and nothing new is listed on their
-Notifications page either. The check runs when an event is sent: what is already on their
-page, or already waiting for their digest, stays. It also means a change they booked that
+Notifications page either. The check runs when an event is sent and again later: in-app
+notifications and digest items store the solution, so the Notifications page and the header
+count leave out the ones about a solution the person can no longer see, and the digest drops
+them before it is sent (Mads, 2026-10-04). Rows written before the solution was stored carry
+none and stay until they expire. It also means a change they booked that
 fails because they lost access is not announced to them. Their notification settings are
 untouched, so it applies again if access comes back.
 

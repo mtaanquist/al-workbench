@@ -1,5 +1,6 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Services.ObjectExplorer;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Notifications;
@@ -53,8 +54,8 @@ public sealed class InAppNotificationService
     {
         if (_orgContext.CurrentUserId is not { } userId) return 0;
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        return await db.UserNotifications.AsNoTracking()
-            .CountAsync(n => n.UserId == userId && n.ReadAt == null, ct);
+        return await (await VisibleAsync(db, userId, ct))
+            .CountAsync(n => n.ReadAt == null, ct);
     }
 
     /// <summary>The signed-in person's notifications, newest first, at most <see cref="PageSize"/>.</summary>
@@ -62,8 +63,7 @@ public sealed class InAppNotificationService
     {
         var userId = RequireUserId();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        return await db.UserNotifications.AsNoTracking()
-            .Where(n => n.UserId == userId)
+        return await (await VisibleAsync(db, userId, ct))
             .OrderByDescending(n => n.CreatedAt)
             .ThenByDescending(n => n.Id)
             .Take(PageSize)
@@ -80,8 +80,8 @@ public sealed class InAppNotificationService
     {
         var userId = RequireUserId();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        var path = await db.UserNotifications.AsNoTracking()
-            .Where(n => n.Id == id && n.UserId == userId)
+        var path = await (await VisibleAsync(db, userId, ct))
+            .Where(n => n.Id == id)
             .Select(n => n.Path)
             .FirstOrDefaultAsync(ct);
         if (path is null) return null;
@@ -108,6 +108,25 @@ public sealed class InAppNotificationService
             .ExecuteUpdateAsync(s => s.SetProperty(n => n.ReadAt, now), ct);
         _logger.LogInformation("User {UserId} marked {Count} notifications read.", userId, marked);
         return marked;
+    }
+
+    /// <summary>
+    /// The person's own notifications, less those about a Private solution they can
+    /// no longer see (taken off its team since): access is rechecked on every read,
+    /// not only when the notification was written. An org Admin or SiteAdmin sees
+    /// every solution, so nothing is left out for them.
+    /// </summary>
+    private static async Task<IQueryable<UserNotification>> VisibleAsync(
+        AppDbContext db, int userId, CancellationToken ct)
+    {
+        var mine = db.UserNotifications.AsNoTracking().Where(n => n.UserId == userId);
+        var seesEverything = await db.Users.AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => u.Role == UserRole.Admin || u.IsSiteAdmin)
+            .FirstOrDefaultAsync(ct);
+        if (seesEverything) return mine;
+        var visible = db.OeProjects.Where(ProjectAccess.VisibleToUserPredicate(userId));
+        return mine.Where(n => n.ProjectId == null || visible.Any(p => p.Id == n.ProjectId));
     }
 
     private int RequireUserId() => _orgContext.CurrentUserId

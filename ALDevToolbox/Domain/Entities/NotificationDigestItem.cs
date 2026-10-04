@@ -29,6 +29,13 @@ public class NotificationDigestItem
     /// <summary>Absolute link to the page the item is about.</summary>
     public string Url { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The solution it is about, rechecked when it is sent: someone taken off a
+    /// Private solution's team stops seeing its events. Null when it belongs to none.
+    /// </summary>
+    public int? ProjectId { get; set; }
+    public ObjectExplorer.OeProject? Project { get; set; }
+
     /// <summary>The solution the item belongs to, for grouping in the digest. Null when it belongs to none.</summary>
     public string? SolutionName { get; set; }
 

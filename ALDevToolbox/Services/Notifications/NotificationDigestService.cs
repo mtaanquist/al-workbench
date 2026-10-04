@@ -3,6 +3,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services.Email;
+using ALDevToolbox.Services.ObjectExplorer;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Notifications;
@@ -134,11 +135,21 @@ public sealed class NotificationDigestService
         var organizationName = await NotificationService.OrganizationNameAsync(_db, orgId, ct);
         var settingsUrl = NotificationService.SettingsUrl(origin);
 
+        // Someone taken off a Private solution's team since an item was kept no
+        // longer hears about it; one visibility read per solution in the batch.
+        var hidden = new HashSet<int>();
+        foreach (var bySolution in items.Where(i => i.ProjectId is not null).GroupBy(i => i.ProjectId!.Value))
+        {
+            var allowed = (await ProjectAccess.WhoCanViewAsync(
+                _db, bySolution.Key, bySolution.Select(i => i.UserId).Distinct().ToList(), ct)).ToHashSet();
+            hidden.UnionWith(bySolution.Where(i => !allowed.Contains(i.UserId)).Select(i => i.Id));
+        }
+
         var sent = 0;
         var dropped = new List<int>();
         foreach (var digest in items.GroupBy(i => (i.UserId, i.Delivery)))
         {
-            var wanted = digest.Where(i => !off.Contains((i.UserId, i.Category))).ToList();
+            var wanted = digest.Where(i => !off.Contains((i.UserId, i.Category)) && !hidden.Contains(i.Id)).ToList();
             if (!users.TryGetValue(digest.Key.UserId, out var recipient) || wanted.Count == 0)
             {
                 dropped.AddRange(digest.Select(i => i.Id));

@@ -18,6 +18,7 @@ internal sealed class UserNotificationConfiguration : IEntityTypeConfiguration<U
         entity.Property(e => e.Title).HasColumnName("title").IsRequired();
         entity.Property(e => e.Detail).HasColumnName("detail");
         entity.Property(e => e.Path).HasColumnName("path").IsRequired();
+        entity.Property(e => e.ProjectId).HasColumnName("project_id");
         entity.Property(e => e.SolutionName).HasColumnName("solution_name");
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.ReadAt).HasColumnName("read_at");
@@ -38,6 +39,12 @@ internal sealed class UserNotificationConfiguration : IEntityTypeConfiguration<U
         entity.HasOne(e => e.Organization)
             .WithMany()
             .HasForeignKey(e => e.OrganizationId)
+            .OnDelete(DeleteBehavior.Cascade);
+        // A solution deleted for good takes its notices with it; covered for the cascade.
+        entity.HasIndex(e => e.ProjectId);
+        entity.HasOne(e => e.Project)
+            .WithMany()
+            .HasForeignKey(e => e.ProjectId)
             .OnDelete(DeleteBehavior.Cascade);
 
         // Query filter installed in AppDbContext.OnModelCreating via
