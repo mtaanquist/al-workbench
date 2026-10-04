@@ -19,7 +19,7 @@
         <div>
             <h2 class="card__title">Notifications</h2>
             <p class="card__sub">
-                About builds and deployments you started or set up. Choose whether each kind shows on your
+                About builds, deployments and environment changes you started or set up. Choose whether each kind shows on your
                 <a href="/notifications">Notifications page</a> and when it is emailed; changes save as you make them.
                 Digests arrive at 06:00 UTC, the weekly one on Mondays.
             </p>
@@ -145,6 +145,7 @@
     {
         NotificationCategory.Builds => "Builds",
         NotificationCategory.Deployments => "Deployments",
+        NotificationCategory.Upgrades => "Upgrades",
         _ => category.ToString(),
     };
 
@@ -154,6 +155,8 @@
             "When a build pipeline you started or set up first fails, and again when it works. Also covers the nightly check against upcoming Business Central versions.",
         NotificationCategory.Deployments =>
             "A deployment needs your approval, finishes, or fails. Approval requests are emailed straight away even with a digest chosen.",
+        NotificationCategory.Upgrades =>
+            "A change you scheduled on an environment, such as an app install or a new update date, has run, failed, or needs checking.",
         _ => string.Empty,
     };
 
