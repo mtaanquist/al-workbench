@@ -300,7 +300,8 @@ public sealed class NotificationServiceTests : IDisposable
 
         _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["owner@cronus.example", "member@cronus.example", "admin@cronus.example"]);
         await using var verify = _db.NewContext();
-        (await verify.UserNotifications.AnyAsync(n => n.UserId == outsider)).Should().BeFalse();
+        (await verify.UserNotifications.AnyAsync(n => n.UserId == outsider)).Should().BeFalse();        (await verify.UserNotifications.Where(n => n.UserId == owner).Select(n => n.ProjectId).SingleAsync())
+            .Should().Be(projectId, "the solution is stored so access is checked again when it is listed");
     }
 
     [Fact]
@@ -431,7 +432,7 @@ public sealed class NotificationServiceTests : IDisposable
         NotificationCategory.Builds,
         recipients,
         new NotificationSummary("Build failed: CRONUS Coffee - Main", "error AL0118", "/pipelines/1", "CRONUS Coffee"),
-        (_, recipient, _) => Task.FromResult(new EmailContent($"For {recipient.DisplayName}", "<p>Body</p>", "Body")));
+        (email, _) => Task.FromResult(new EmailContent($"For {email.Recipient.DisplayName}", "<p>Body</p>", "Body")));
 
     private async Task NotifyAsync(
         Notification notification, string? origin = Origin, ALDevToolbox.Data.AppDbContext? ctx = null)

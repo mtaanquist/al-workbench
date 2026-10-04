@@ -1,4 +1,5 @@
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
@@ -74,6 +75,40 @@ public sealed class NotificationDigestTests : IDisposable
         _email.Sent.Clear();
         (await SendDueAsync()).Should().Be(0, "a second run, as after a restart, finds nothing left to send");
         _email.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Each_persons_digest_holds_only_their_own_items()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        var sam = await SeedUserAsync("sam@cronus.example");
+        await KeepAsync(alex, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: Coffee app", Wednesday0700.AddHours(-5));
+        await KeepAsync(sam, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: Bikes app", Wednesday0700.AddHours(-5));
+        await KeepAsync(sam, NotificationCategory.Deployments, NotificationDelivery.Daily, "Deployed: Bikes app", Wednesday0700.AddHours(-4));
+
+        (await SendDueAsync()).Should().Be(2);
+
+        _email.Sent.Single(s => s.To == "alex@cronus.example").Html
+            .Should().Contain("Build failed: Coffee app").And.NotContain("Bikes app");
+        _email.Sent.Single(s => s.To == "sam@cronus.example").Html
+            .Should().Contain("Build failed: Bikes app").And.Contain("Deployed: Bikes app").And.NotContain("Coffee app");
+    }
+
+    [Fact]
+    public async Task A_person_with_a_daily_and_a_weekly_item_due_gets_two_emails()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        await KeepAsync(alex, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: daily", Wednesday0700.AddHours(-5));
+        await KeepAsync(alex, NotificationCategory.Deployments, NotificationDelivery.Weekly, "Deployed: weekly", Wednesday0700.AddDays(-3));
+
+        (await SendDueAsync()).Should().Be(2);
+
+        _email.Sent.Should().HaveCount(2).And.AllSatisfy(s => s.To.Should().Be("alex@cronus.example"));
+        var daily = _email.Sent.Single(s => s.Subject.StartsWith("Daily digest"));
+        daily.Html.Should().Contain("Build failed: daily").And.NotContain("Deployed: weekly");
+        var weekly = _email.Sent.Single(s => s.Subject.StartsWith("Weekly digest"));
+        weekly.Html.Should().Contain("Deployed: weekly").And.NotContain("Build failed: daily");
+        await ItemCountShouldBeAsync(0);
     }
 
     [Fact]
@@ -223,6 +258,38 @@ public sealed class NotificationDigestTests : IDisposable
         _email.Sent.Single().Html.Should().Contain("Earlier").And.NotContain("Just before");
     }
 
+    [Fact]
+    public async Task Items_about_a_private_solution_someone_can_no_longer_see_are_left_out()
+    {
+        var owner = await SeedUserAsync("owner@cronus.example");
+        var removed = await SeedUserAsync("removed@cronus.example");
+        var projectId = await SeedPrivateProjectAsync(owner);
+        await KeepAsync(owner, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: Secret", Wednesday0700.AddHours(-5), projectId: projectId);
+        await KeepAsync(removed, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: Secret", Wednesday0700.AddHours(-5), projectId: projectId);
+        await KeepAsync(removed, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: Open", Wednesday0700.AddHours(-4));
+
+        (await SendDueAsync()).Should().Be(2);
+
+        _email.Sent.Single(s => s.To == "owner@cronus.example").Html.Should().Contain("Build failed: Secret");
+        _email.Sent.Single(s => s.To == "removed@cronus.example").Html
+            .Should().Contain("Build failed: Open").And.NotContain("Secret");
+        await ItemCountShouldBeAsync(0);
+    }
+
+    [Fact]
+    public async Task A_digest_of_only_hidden_items_is_not_sent_and_its_items_go()
+    {
+        var owner = await SeedUserAsync("owner@cronus.example");
+        var removed = await SeedUserAsync("removed@cronus.example");
+        var projectId = await SeedPrivateProjectAsync(owner);
+        await KeepAsync(removed, NotificationCategory.Builds, NotificationDelivery.Daily, "Build failed: Secret", Wednesday0700.AddHours(-5), projectId: projectId);
+
+        (await SendDueAsync()).Should().Be(0);
+
+        _email.Sent.Should().BeEmpty();
+        await ItemCountShouldBeAsync(0);
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private static DateTime Utc(string value) => DateTime.SpecifyKind(DateTime.Parse(value), DateTimeKind.Utc);
@@ -244,15 +311,28 @@ public sealed class NotificationDigestTests : IDisposable
 
     private async Task KeepAsync(
         int userId, NotificationCategory category, NotificationDelivery delivery, string title, DateTime createdAt,
-        int organizationId = TestDb.DefaultOrgId)
+        int organizationId = TestDb.DefaultOrgId, int? projectId = null)
     {
         await using var ctx = _db.NewContext();
         ctx.NotificationDigestItems.Add(new NotificationDigestItem
         {
-            UserId = userId, OrganizationId = organizationId, Category = category, Delivery = delivery,
+            UserId = userId, OrganizationId = organizationId, Category = category, Delivery = delivery, ProjectId = projectId,
             Title = title, Url = $"{Origin}/pipelines/1", SolutionName = "CRONUS Coffee", CreatedAt = createdAt,
         });
         await ctx.SaveChangesAsync();
+    }
+
+    private async Task<int> SeedPrivateProjectAsync(int ownerId)
+    {
+        await using var ctx = _db.NewContext();
+        var project = new OeProject
+        {
+            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Secret", CreatedByUserId = ownerId,
+            Visibility = ProjectVisibility.Private, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        ctx.OeProjects.Add(project);
+        await ctx.SaveChangesAsync();
+        return project.Id;
     }
 
     private async Task ListAsync(int userId, string title, DateTime createdAt, int organizationId = TestDb.DefaultOrgId)

@@ -1,0 +1,27 @@
+@*
+    A quoted message set apart from the copy around it: why a deployment or a
+    scheduled change failed, or the first lines of a build failure (Mono).
+    One <br> per line rather than white-space: pre-wrap, which Outlook ignores
+    and the plain-text version would flatten.
+*@
+<blockquote style="@Style">
+    @foreach (var (line, i) in Text.Replace("\r\n", "\n").Split('\n').Select((l, i) => (l, i)))
+    {
+        @if (i > 0)
+        {
+            <br />
+        }
+        @line
+    }
+</blockquote>
+
+@code {
+    [Parameter, EditorRequired] public string Text { get; set; } = string.Empty;
+
+    /// <summary>Set in the code font, for compiler and build output.</summary>
+    [Parameter] public bool Mono { get; set; }
+
+    private string Style => Mono
+        ? $"margin: 0 0 16px; padding: 8px 12px; border-left: 3px solid {EmailTheme.Border}; font-family: {EmailTheme.Mono}; font-size: 13px; line-height: 20px; color: {EmailTheme.Body};"
+        : $"margin: 0 0 16px; padding: 8px 12px; border-left: 3px solid {EmailTheme.Border}; color: {EmailTheme.Body};";
+}

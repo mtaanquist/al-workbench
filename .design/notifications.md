@@ -3,14 +3,15 @@
 Notifications tell people something happened to work they started or look after: a build
 pipeline broke, a deployment waits for approval. They are listed in the app and emailed.
 Phase 2 of the email work (milestone "E-mail notifications") added the emails, phase 3 the
-in-app list; the message design is `email.md`.
+in-app list, phase 4 the ready-to-check notice, following a solution and Business Central
+update dates; the message design is `email.md`.
 
 ## Decisions
 
 Agreed with the maintainer on 2026-10-03:
 
-- **Recipients** are the person who triggered or owns the thing. Phase 4 adds people who
-  follow a solution. No organisation-wide broadcasts.
+- **Recipients** are the person who triggered or owns the thing, and for a solution's own
+  events the people who follow it. No organisation-wide broadcasts.
 - **State changes only.** A pipeline that fails every night sends one email when it starts
   failing and one when it works again, not one per night.
 - **Each person chooses per category**, like GitHub: whether it shows in the app (on or
@@ -27,10 +28,8 @@ Agreed with the maintainer on 2026-10-03:
 | --- | --- | --- |
 | Builds | Build failed, build working again (manual builds and nightly checks; pull request builds are left to GitHub) | #1035 |
 | Deployments | Waiting for approval, deployed, failed | #1036 |
-| Upgrades | A change someone scheduled on an environment ran or failed | #1046 |
+| Upgrades | A change someone scheduled on an environment ran, failed or could not be confirmed; an environment someone is to check on a planned upgrade reached the target version (ready to check) | #1046, #1047 |
 | Solutions | Update scheduled, update moved, latest date a week away, for solutions you follow | #1049 |
-
-Phase 4 adds the rest of Upgrades and a Solutions category.
 
 ## How it works
 
@@ -114,8 +113,11 @@ recipient who can no longer see that solution, with the same rule as the solutio
 owner, an org Admin, a SiteAdmin or a member of one of its teams for a Private solution,
 everyone otherwise. So someone taken off a Private solution's team stops hearing about its
 builds, deployments, environment changes and upgrades, and nothing new is listed on their
-Notifications page either. The check runs when an event is sent: what is already on their
-page, or already waiting for their digest, stays. It also means a change they booked that
+Notifications page either. The check runs when an event is sent and again later: in-app
+notifications and digest items store the solution, so the Notifications page and the header
+count leave out the ones about a solution the person can no longer see, and the digest drops
+them before it is sent (Mads, 2026-10-04). Rows written before the solution was stored carry
+none and stay until they expire. It also means a change they booked that
 fails because they lost access is not announced to them. Their notification settings are
 untouched, so it applies again if access comes back.
 
@@ -219,3 +221,7 @@ polls every 15 minutes and runs `NotificationDigestService.SendDueAsync` per org
 - **Nothing to send with.** Without `PUBLIC_BASE_URL` or email set up, items wait; any item
   older than 30 days is dropped on every run, sent or not. With the scheduler disabled
   nothing runs, so items wait until it is turned back on.
+- **It is also the cleanup.** The same run prunes in-app notifications older than 30 days,
+  so `DISABLE_NOTIFICATION_DIGEST_SCHEDULER` stops that too: with it set, neither digest
+  items nor in-app notifications are ever deleted, and the Notifications page keeps
+  showing its newest 200 whatever their age.

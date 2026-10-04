@@ -330,9 +330,14 @@ public sealed class EnvironmentUpgradeService
         var details = ValidateDetails(name, targetVersion, note);
         var upgrade = await LoadOpenAsync(upgradeId, ct).ConfigureAwait(false);
 
+        // A new target is a new "ready to check" to send, even if the old one went out.
+        // Cleared in one transaction with the new target: cleared first and committed
+        // alone, a sweep in between would announce the old target again and stamp it
+        // for the new one. A set-based update, because lines this page already tracks
+        // may hold a stale value the change tracker would not see as a change.
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
         if (upgrade.TargetVersion != details.TargetVersion)
         {
-            // A new target is a new "ready to check" to send, even if the old one went out.
             await _db.OeEnvironmentUpgradeLines
                 .Where(l => l.UpgradeId == upgradeId && l.CheckedAt == null)
                 .ExecuteUpdateAsync(s => s.SetProperty(l => l.UpdatedNotifiedAt, (DateTime?)null), ct)
@@ -344,6 +349,7 @@ public sealed class EnvironmentUpgradeService
         upgrade.Note = details.Note;
         upgrade.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
 
         _logger.LogInformation(
             "User {UserId} updated planned upgrade {UpgradeId} ({UpgradeName}, target {TargetVersion}).",

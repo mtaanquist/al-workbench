@@ -3,6 +3,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services.Email;
+using ALDevToolbox.Services.ObjectExplorer;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Notifications;
@@ -131,17 +132,24 @@ public sealed class NotificationDigestService
                 .ToListAsync(ct))
             .Select(s => (s.UserId, s.Category))
             .ToHashSet();
-        var organizationName = await _db.Organizations.AsNoTracking()
-            .Where(o => o.Id == orgId)
-            .Select(o => o.Name)
-            .FirstAsync(ct);
-        var settingsUrl = origin + NotificationService.SettingsPath;
+        var organizationName = await NotificationService.OrganizationNameAsync(_db, orgId, ct);
+        var settingsUrl = NotificationService.SettingsUrl(origin);
+
+        // Someone taken off a Private solution's team since an item was kept no
+        // longer hears about it; one visibility read per solution in the batch.
+        var hidden = new HashSet<int>();
+        foreach (var bySolution in items.Where(i => i.ProjectId is not null).GroupBy(i => i.ProjectId!.Value))
+        {
+            var allowed = (await ProjectAccess.WhoCanViewAsync(
+                _db, bySolution.Key, bySolution.Select(i => i.UserId).Distinct().ToList(), ct)).ToHashSet();
+            hidden.UnionWith(bySolution.Where(i => !allowed.Contains(i.UserId)).Select(i => i.Id));
+        }
 
         var sent = 0;
         var dropped = new List<int>();
         foreach (var digest in items.GroupBy(i => (i.UserId, i.Delivery)))
         {
-            var wanted = digest.Where(i => !off.Contains((i.UserId, i.Category))).ToList();
+            var wanted = digest.Where(i => !off.Contains((i.UserId, i.Category)) && !hidden.Contains(i.Id)).ToList();
             if (!users.TryGetValue(digest.Key.UserId, out var recipient) || wanted.Count == 0)
             {
                 dropped.AddRange(digest.Select(i => i.Id));
@@ -152,7 +160,7 @@ public sealed class NotificationDigestService
                 .GroupBy(i => i.Category)
                 .OrderBy(g => g.Key)
                 .Select(g => new DigestSection(
-                    Heading(g.Key),
+                    NotificationCategories.Label(g.Key),
                     g.Select(i => new NotificationDigestEntry(i.Title, i.Detail, i.Url, i.SolutionName)).ToList()))
                 .ToList();
             var ids = digest.Select(i => i.Id).ToList();
@@ -175,7 +183,16 @@ public sealed class NotificationDigestService
             // The commit ignores ct, so a shutdown arriving mid-way cannot open that
             // window either.
             await using var transaction = await _db.Database.BeginTransactionAsync(ct);
-            await _db.NotificationDigestItems.Where(i => ids.Contains(i.Id)).ExecuteDeleteAsync(ct);
+            var claimed = await _db.NotificationDigestItems.Where(i => ids.Contains(i.Id)).ExecuteDeleteAsync(ct);
+            if (claimed < ids.Count)
+            {
+                // Another run (an overlapping instance during a deploy) already took
+                // some of these and sent them; sending again would be a duplicate.
+                await transaction.RollbackAsync(CancellationToken.None);
+                _logger.LogInformation("The {Delivery} digest for user {UserId} was already sent by another run.",
+                    digest.Key.Delivery, digest.Key.UserId);
+                continue;
+            }
             try
             {
                 await _email.SendAsync(recipient.Email, content, EmailPurpose.NotificationDigest, ct);
@@ -198,13 +215,4 @@ public sealed class NotificationDigestService
         _logger.LogInformation("Sent {Sent} notification digests; dropped {Dropped} items nobody wants now.", sent, dropped.Count);
         return sent;
     }
-
-    private static string Heading(NotificationCategory category) => category switch
-    {
-        NotificationCategory.Builds => "Builds",
-        NotificationCategory.Deployments => "Deployments",
-        NotificationCategory.Upgrades => "Upgrades",
-        NotificationCategory.Solutions => "Solutions you follow",
-        _ => category.ToString(),
-    };
 }

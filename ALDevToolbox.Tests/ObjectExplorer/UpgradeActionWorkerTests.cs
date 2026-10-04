@@ -360,6 +360,26 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_checker_who_cannot_see_a_private_solution_is_not_told_it_is_ready()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == projectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.Private));
+            await ctx.TeamMembers.Where(m => m.UserId == UpgradeActionTestFixture.FlagUserId).ExecuteDeleteAsync();
+        }
+
+        await NotifyReadyAsync();
+
+        _f.Emails.Sent.Should().BeEmpty();
+        await using var verify = _f.Db.NewContext();
+        (await verify.UserNotifications.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task A_line_on_a_closed_upgrade_sends_nothing()
     {
         var (projectId, envId) = await _f.SeedCustomerAsync();
@@ -479,6 +499,51 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         await SetVersionAsync(envId, "27.6.40000.0");
         await NotifyReadyAsync();
         _f.Emails.Sent.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task A_line_that_reached_the_target_while_the_upgrade_was_done_is_not_announced_on_reopen()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await AsUpgradeManagerAsync(ctx => _f.Upgrades(ctx).CloseAsync(upgradeId));
+        await SetVersionAsync(envId, "27.6.40000.0");
+
+        await AsUpgradeManagerAsync(ctx => _f.Upgrades(ctx).ReopenAsync(upgradeId));
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var line = await ctx.OeEnvironmentUpgradeLines.AsNoTracking().SingleAsync(l => l.UpgradeId == upgradeId);
+            line.IsOpen.Should().BeTrue();
+            line.UpdatedNotifiedAt.Should().NotBeNull("reaching the target while closed is old news");
+        }
+        (await NotifyReadyAsync()).Should().Be(0);
+        _f.Emails.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_line_still_short_of_the_target_on_reopen_is_announced_when_it_gets_there()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await AsUpgradeManagerAsync(ctx => _f.Upgrades(ctx).CloseAsync(upgradeId));
+        await AsUpgradeManagerAsync(ctx => _f.Upgrades(ctx).ReopenAsync(upgradeId));
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            (await ctx.OeEnvironmentUpgradeLines.AsNoTracking().SingleAsync(l => l.UpgradeId == upgradeId))
+                .UpdatedNotifiedAt.Should().BeNull("the environment is still on 27.5");
+        }
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await NotifyReadyAsync();
+        _f.Emails.Sent.Should().ContainSingle().Which.To.Should().Be("upgrade@example.com");
+    }
+
+    /// <summary>The fixture's default user, who holds the environment-updates grant on the team.</summary>
+    private async Task AsUpgradeManagerAsync(Func<AppDbContext, Task> act)
+    {
+        await using var ctx = _f.Db.NewContext();
+        await act(ctx);
     }
 
     private Task<int> NotifyReadyAsync() =>

@@ -1,5 +1,6 @@
 @using ALDevToolbox.Services.Notifications
 @inject InAppNotificationService Notifications
+@inject ILogger<NotificationBell> Logger
 
 @*
     The bell in the top bar: a link to the Notifications page with the number
@@ -28,6 +29,14 @@
 
     protected override async Task OnInitializedAsync()
     {
-        _unread = await Notifications.CountUnreadForCurrentUserAsync();
+        // The bell is on every page; a count that cannot be read must not take the page with it.
+        try
+        {
+            _unread = await Notifications.CountUnreadForCurrentUserAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not count unread notifications for the bell.");
+        }
     }
 }

@@ -395,6 +395,18 @@ public sealed class ProjectAccess
     }
 
     /// <summary>
+    /// The projects user <paramref name="userId"/> can see, for a query that runs
+    /// without that user's <see cref="AccessSnapshot"/> (a short-lived context of its
+    /// own). Same rule as <see cref="WhoCanViewAsync"/>: anything not Private, or
+    /// owned by them, or assigned to a team they are on. An org Admin or SiteAdmin
+    /// sees everything; the caller checks that separately, as the snapshot does.
+    /// </summary>
+    public static Expression<Func<OeProject, bool>> VisibleToUserPredicate(int userId) =>
+        p => p.Visibility != ProjectVisibility.Private
+             || p.CreatedByUserId == userId
+             || p.Teams.Any(t => t.Team!.Members.Any(m => m.UserId == userId));
+
+    /// <summary>
     /// The complement of <see cref="VisibleProjectPredicate"/>: the projects that
     /// appear in <c>/projects</c> as a locked, name-only row. Written out longhand
     /// rather than negated at the call site so both halves of the split read the
