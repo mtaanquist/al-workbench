@@ -9,19 +9,19 @@
         @switch (Result)
         {
             case UpgradeActionResult.Failed:
-                @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> did not go through. Fix the cause, then schedule it again from the environment.
+                @:<strong>@What</strong>, which you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong>, did not go through. @(HasOutcome ? "Fix the cause shown below, then schedule it again from the environment." : "Schedule it again from the environment once the cause is fixed.")
                 break;
             case UpgradeActionResult.Unconfirmed:
-                @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> was sent to Business Central, but we could not confirm that it finished. Check the environment to be sure.
+                @:<strong>@What</strong>, which you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong>, was sent to Business Central, but AL Workbench could not confirm that it finished. Check the environment to be sure.
                 break;
             default:
-                @:The change you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong> has run.
+                @:<strong>@What</strong>, which you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong>, has run.
                 break;
         }
     </EmailParagraph>
-    @if (!string.IsNullOrWhiteSpace(Outcome))
+    @if (HasOutcome)
     {
-        <blockquote style="margin: 0 0 16px; padding: 8px 12px; border-left: 3px solid @EmailTheme.Border; color: @EmailTheme.Body;">@Outcome</blockquote>
+        <EmailQuote Text="@(Outcome!)" />
     }
     <EmailButton Href="@EnvironmentUrl">Open the environment's history</EmailButton>
 </EmailLayout>
@@ -38,6 +38,8 @@
     [Parameter] public string? Outcome { get; set; }
     [Parameter, EditorRequired] public string EnvironmentUrl { get; set; } = string.Empty;
     [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private bool HasOutcome => !string.IsNullOrWhiteSpace(Outcome);
 
     private string Preheader => Outcome ?? SubjectFor(Result, What, SolutionName, EnvironmentName);
 

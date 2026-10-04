@@ -21,7 +21,7 @@
     }
     @if (Outcome == DeploymentOutcome.Failed && !string.IsNullOrWhiteSpace(FailureMessage))
     {
-        <blockquote style="margin: 0 0 16px; padding: 8px 12px; border-left: 3px solid @EmailTheme.Border; color: @EmailTheme.Body;">@FailureMessage</blockquote>
+        <EmailQuote Text="@FailureMessage" />
     }
     <EmailButton Href="@PipelineUrl">@ButtonLabel</EmailButton>
 </EmailLayout>
@@ -44,13 +44,13 @@
     private string Lead => Outcome switch
     {
         DeploymentOutcome.WaitingForApproval =>
-            $"A new build of {SolutionName} is ready to deploy to {EnvironmentName} through the {PipelineName} deployment pipeline. Nothing is sent until someone approves it.",
+            $"A new build of {SolutionName} is ready to deploy to {EnvironmentName} through the {PipelineName} deployment pipeline. Nothing is installed until someone approves it.",
         DeploymentOutcome.Deployed =>
-            $"The deployment of {SolutionName} to {EnvironmentName} through the {PipelineName} deployment pipeline finished.",
+            $"The {PipelineName} deployment pipeline has deployed {SolutionName} to {EnvironmentName}.",
         DeploymentOutcome.HandedOff =>
-            $"Business Central accepted the deployment of {SolutionName} to {EnvironmentName} through the {PipelineName} deployment pipeline, and will install it on its own schedule.",
+            $"Business Central accepted {SolutionName} for {EnvironmentName} from the {PipelineName} deployment pipeline, and will install it on its own schedule.",
         _ =>
-            $"The deployment of {SolutionName} to {EnvironmentName} through the {PipelineName} deployment pipeline failed.",
+            $"The {PipelineName} deployment pipeline could not deploy {SolutionName} to {EnvironmentName}.",
     };
 
     private string ButtonLabel => Outcome == DeploymentOutcome.WaitingForApproval ? "Review the deployment" : "Open the deployment pipeline";

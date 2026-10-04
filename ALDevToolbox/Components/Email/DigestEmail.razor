@@ -42,7 +42,7 @@
 
     private int Count => Sections.Sum(s => s.Items.Count);
 
-    private string Intro => $"Here is what happened to work you started or set up ({Updates(Count)}).";
+    private string Intro => $"Here is what happened since your last digest ({Updates(Count)}).";
 
     private string Preheader => string.Join(", ", Sections.Select(s => $"{s.Heading}: {s.Items.Count}"));
 

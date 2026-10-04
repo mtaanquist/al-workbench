@@ -5,6 +5,9 @@
 @rendermode InteractiveServer
 @inject ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService Projects
 @inject ALDevToolbox.Services.ObjectExplorer.Projects.ProjectFollowService Follows
+@inject ALDevToolbox.Services.Notifications.NotificationPreferenceService NotificationPreferences
+@inject ALDevToolbox.Endpoints.PublicOrigin Origin
+@inject IEmailService EmailSvc
 @inject ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService PipelinesSvc
 @inject ALDevToolbox.Services.ObjectExplorer.Delivery.ReleasePipelineService ReleasePipelinesSvc
 @inject ALDevToolbox.Services.ObjectExplorer.Projects.ArtifactService Artifacts
@@ -120,7 +123,7 @@
         @if (Id is not null && _loadedProject is not null)
         {
             <button type="button" class="btn" @onclick="ToggleFollowAsync" disabled="@_followSaving" data-follow
-                    title="@(_following ? "You're told when Business Central schedules or moves an update for this solution's environments. You follow solutions you own or are listed on. Click to stop." : "Get notified when Business Central schedules or moves an update for this solution's environments")">
+                    title="@(_following ? "You hear when Business Central schedules or moves an update for this solution" : "Hear when Business Central schedules or moves an update for this solution")">
                 <Icon Name="@(_following ? "check" : "bell")" Width="15" Height="15" />
                 <span>@(_following ? "Following" : "Follow")</span>
             </button>
@@ -669,10 +672,10 @@
             // Moved to another solution meanwhile: that page has loaded its own state.
             if (Id != id) return;
             _following = target;
-            _messageLinksToSettings = true;
+            _messageLinksToSettings = _following;
             _message = _following
-                ? "You're following this solution. Updates Business Central schedules or moves for its environments will show in your notifications; emails are off until you turn them on."
-                : "You're no longer following this solution. You won't hear when Business Central schedules or moves an update for its environments.";
+                ? await FollowConfirmationAsync()
+                : "You're no longer following this solution. You won't hear when Business Central schedules or moves an update for it.";
         }
         catch (Exception ex) when (ex is PlanValidationException or ProjectAccessDeniedException)
         {
@@ -690,6 +693,34 @@
             _followSaving = false;
         }
     }
+
+    /// <summary>
+    /// What following means for this person, from their own Solutions choice: the
+    /// default is in the app only, but they may already have turned email on or the
+    /// list off.
+    /// </summary>
+    private async Task<string> FollowConfirmationAsync()
+    {
+        var choice = (await NotificationPreferences.GetForCurrentUserAsync())[ALDevToolbox.Domain.Entities.NotificationCategory.Solutions];
+        var email = choice.Email != ALDevToolbox.Domain.Entities.NotificationDelivery.Off
+            && Origin.IsConfigured && await EmailSvc.IsConfiguredAsync();
+        const string Following = "You're following this solution.";
+        const string When = "When Business Central schedules or moves an update for it,";
+        return (choice.InApp, email) switch
+        {
+            (true, true) => $"{Following} {When} it will show on your Notifications page and you will get {EmailPhrase(choice.Email)}.",
+            (true, false) => $"{Following} {When} it will show on your Notifications page; you get no email about it.",
+            (false, true) => $"{Following} {When} you will get {EmailPhrase(choice.Email)}.",
+            (false, false) => $"{Following} Your settings turn these notifications off, so you will not hear about it yet.",
+        };
+    }
+
+    private static string EmailPhrase(ALDevToolbox.Domain.Entities.NotificationDelivery delivery) => delivery switch
+    {
+        ALDevToolbox.Domain.Entities.NotificationDelivery.Daily => "it in a daily email digest",
+        ALDevToolbox.Domain.Entities.NotificationDelivery.Weekly => "it in a weekly email digest",
+        _ => "an email straight away",
+    };
 
     /// <summary>Deployments prepared from a new build and waiting for someone to approve them (#934).</summary>
     private List<ALDevToolbox.Services.ObjectExplorer.Delivery.ReleaseWaitingForApproval> _waitingForApproval = new();

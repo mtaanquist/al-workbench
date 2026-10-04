@@ -9,17 +9,7 @@
         <EmailParagraph>The latest build of the <strong>@PipelineName</strong> pipeline for <strong>@SolutionName</strong> failed. @TargetSentence</EmailParagraph>
         @if (!string.IsNullOrWhiteSpace(FailureMessage))
         {
-            <blockquote style="margin: 0 0 16px; padding: 8px 12px; border-left: 3px solid @EmailTheme.Border; font-family: @EmailTheme.Mono; font-size: 13px; line-height: 20px; color: @EmailTheme.Body;">
-                @* One <br> per line rather than white-space: pre-wrap, which Outlook ignores and the plain-text version would flatten. *@
-                @foreach (var (line, i) in Excerpt(FailureMessage).Split('\n').Select((l, i) => (l, i)))
-                {
-                    @if (i > 0)
-                    {
-                        <br />
-                    }
-                    @line
-                }
-            </blockquote>
+            <EmailQuote Text="@Excerpt(FailureMessage)" Mono="true" />
         }
         <EmailButton Href="@BuildUrl">Open the build</EmailButton>
         <EmailParagraph>You will not hear about failures of these builds again until one works.</EmailParagraph>

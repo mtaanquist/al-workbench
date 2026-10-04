@@ -21,6 +21,23 @@ public enum NotificationCategory
     Solutions,
 }
 
+/// <summary>
+/// The one place a <see cref="NotificationCategory"/> gets its visible name, so the
+/// account page and the digest email headings cannot drift apart.
+/// </summary>
+public static class NotificationCategories
+{
+    /// <summary>The category's name as people read it: a settings row, a digest heading.</summary>
+    public static string Label(NotificationCategory category) => category switch
+    {
+        NotificationCategory.Builds => "Builds",
+        NotificationCategory.Deployments => "Deployments",
+        NotificationCategory.Upgrades => "Upgrades",
+        NotificationCategory.Solutions => "Solutions you follow",
+        _ => category.ToString(),
+    };
+}
+
 /// <summary>When a person is emailed about one <see cref="NotificationCategory"/>.</summary>
 public enum NotificationDelivery
 {

@@ -10,8 +10,9 @@ namespace ALDevToolbox.Services.Notifications;
 /// <see cref="NotificationDigestService"/> send whatever is past its cut-off,
 /// org by org inside each org's <see cref="AmbientOrganizationScope"/>; the
 /// service keeps no state, so a restart or a missed hour only delays a digest.
-/// Opt out with <c>DISABLE_NOTIFICATION_DIGEST_SCHEDULER=1</c>. See
-/// <c>.design/notifications.md</c>.
+/// Opt out with <c>DISABLE_NOTIFICATION_DIGEST_SCHEDULER=1</c>, which also stops
+/// the 30-day cleanup of in-app notifications and digest items: the same run does
+/// both. See <c>.design/notifications.md</c>.
 /// </summary>
 public sealed class NotificationDigestScheduler : PolledScheduler
 {

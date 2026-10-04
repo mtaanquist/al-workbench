@@ -19,9 +19,9 @@
         <div>
             <h2 class="card__title">Notifications</h2>
             <p class="card__sub">
-                About builds, deployments and environment changes you started or set up. Choose whether each kind shows on your
-                <a href="/notifications">Notifications page</a> and when it is emailed; changes save as you make them.
-                Digests arrive at 06:00 UTC, the weekly one on Mondays.
+                About builds, deployments and environment changes you started or set up, and updates to solutions you follow.
+                Choose whether each kind shows on your <a href="/notifications">Notifications page</a> and when it is emailed;
+                changes save as you make them. Digests arrive at @DigestTime UTC, the weekly one on Mondays.
             </p>
         </div>
     </div>
@@ -58,15 +58,26 @@
                             CheckedChanged="@(v => SaveInAppAsync(category, v))"
                             Disabled="@_saving" />
                     <SelectBox>
-                        <select class="select" id="@id" aria-label="@($"{Name(category)} emails")"
-                                disabled="@(_saving || !_canSend)"
-                                @bind:get="_choices[category].Email"
-                                @bind:set="(NotificationDelivery d) => SaveEmailAsync(category, d)">
-                            @foreach (var delivery in Enum.GetValues<NotificationDelivery>())
-                            {
-                                <option value="@delivery">@Label(delivery)</option>
-                            }
-                        </select>
+                        @if (_canSend)
+                        {
+                            <select class="select" id="@id" aria-label="@($"{Name(category)} emails")"
+                                    disabled="@_saving"
+                                    @bind:get="_choices[category].Email"
+                                    @bind:set="(NotificationDelivery d) => SaveEmailAsync(category, d)">
+                                @foreach (var delivery in Enum.GetValues<NotificationDelivery>())
+                                {
+                                    <option value="@delivery">@Label(delivery)</option>
+                                }
+                            </select>
+                        }
+                        else
+                        {
+                            @* The stored choice stays as it is for when email is set up; until
+                               then the only true answer is that nothing is emailed. *@
+                            <select class="select" id="@id" aria-label="@($"{Name(category)} emails")" disabled>
+                                <option selected>No email (not set up on this site)</option>
+                            </select>
+                        }
                     </SelectBox>
                     @if (!_choices[category].InApp && (_choices[category].Email == NotificationDelivery.Off || !_canSend))
                     {
@@ -141,14 +152,10 @@
         }
     }
 
-    private static string Name(NotificationCategory category) => category switch
-    {
-        NotificationCategory.Builds => "Builds",
-        NotificationCategory.Deployments => "Deployments",
-        NotificationCategory.Upgrades => "Upgrades",
-        NotificationCategory.Solutions => "Solutions you follow",
-        _ => category.ToString(),
-    };
+    private static string Name(NotificationCategory category) => NotificationCategories.Label(category);
+
+    /// <summary>"06:00": when the digest runs, as the scheduler has it.</summary>
+    private static string DigestTime => $"{NotificationDigestService.DigestHourUtc:00}:00";
 
     private static string Hint(NotificationCategory category) => category switch
     {
@@ -157,9 +164,9 @@
         NotificationCategory.Deployments =>
             "A deployment needs your approval, finishes, or fails. Approval requests are emailed straight away even with a digest chosen.",
         NotificationCategory.Upgrades =>
-            "A change you scheduled on an environment, such as an app install or a new update date, has run, failed, or needs checking. Also when an environment you are to check on a planned upgrade has been updated, or one on an upgrade you planned when nobody is assigned.",
+            "A change you scheduled on an environment (an app install, a new update date) has run, failed or needs checking. Also when an environment you are assigned to check during a planned upgrade has been updated; if nobody is assigned, the person who planned the upgrade hears instead.",
         NotificationCategory.Solutions =>
-            "Business Central schedules or moves an update for an environment of a solution you follow, or its last possible date is a week away. You follow solutions you own or are listed on, and any you choose to follow. Emails are off until you turn them on.",
+            "Business Central schedules or moves an update for a solution you follow, or its last possible date is a week away. Solutions you own or are listed on under Who knows this customer are followed for you; follow or stop following any solution from its page.",
         _ => string.Empty,
     };
 
