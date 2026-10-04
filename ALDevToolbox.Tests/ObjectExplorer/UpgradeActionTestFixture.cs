@@ -156,6 +156,7 @@ internal sealed class UpgradeActionTestFixture : IDisposable
         services.AddSingleton(new PublicOrigin("https://workbench.cronus.example"));
         services.AddScoped<NotificationService>();
         services.AddScoped<UpgradeActionNotifier>();
+        services.AddScoped<UpgradeCheckNotifier>();
         return _provider = services.BuildServiceProvider();
     }
 

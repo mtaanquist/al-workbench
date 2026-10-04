@@ -97,6 +97,9 @@ public sealed class UpgradeActionWorker : BackgroundService
                     // installs never run at once: that can deadlock on Business Central's
                     // own bookkeeping table.
                     await ForEachOrgAsync((org, sys, ct) => RunDueActionsAsync(org, sys, ct, SweepPass.PlatformUpdates), stoppingToken).ConfigureAwait(false);
+                    // Whoever checks an environment after its update hears when it is on
+                    // the target version (#1047). A read, cheap when nothing is new.
+                    await ForEachOrgAsync(NotifyReadyToCheckAsync, stoppingToken).ConfigureAwait(false);
                     var uploadSent = false;
                     await ForEachOrgAsync(async (org, sys, ct) =>
                     {
@@ -236,6 +239,19 @@ public sealed class UpgradeActionWorker : BackgroundService
             _logger.LogInformation("UpgradeActionWorker ran {Count} scheduled upgrade action(s) for org {OrgId}.", sent, orgId);
         }
         return sent;
+    }
+
+    /// <summary>
+    /// Tells the people checking environments on this org's planned upgrades which ones
+    /// are now on the target version (#1047). Internal so a test can drive one pass.
+    /// </summary>
+    internal async Task<int> NotifyReadyToCheckAsync(int orgId, bool isSystem, CancellationToken ct)
+    {
+        using var ambient = AmbientOrganizationScope.Enter(
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem));
+        await using var scope = _services.CreateAsyncScope();
+        return await scope.ServiceProvider.GetRequiredService<Notifications.UpgradeCheckNotifier>()
+            .NotifyReadyToCheckAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>What one due row came to: left alone, settled without a send, or sent.</summary>

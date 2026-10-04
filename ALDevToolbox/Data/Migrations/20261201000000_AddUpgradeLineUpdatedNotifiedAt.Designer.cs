@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -13,9 +14,11 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261201000000_AddUpgradeLineUpdatedNotifiedAt")]
+    partial class AddUpgradeLineUpdatedNotifiedAt
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3544,47 +3547,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasDatabaseName("ix_oe_project_environments_project_name");
 
                     b.ToTable("oe_project_environments", (string)null);
-                });
-
-            modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectFollower", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasColumnName("id");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<bool>("Following")
-                        .HasColumnType("boolean")
-                        .HasColumnName("following");
-
-                    b.Property<int>("OrganizationId")
-                        .HasColumnType("integer")
-                        .HasColumnName("organization_id");
-
-                    b.Property<int>("ProjectId")
-                        .HasColumnType("integer")
-                        .HasColumnName("project_id");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at");
-
-                    b.Property<int>("UserId")
-                        .HasColumnType("integer")
-                        .HasColumnName("user_id");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("OrganizationId");
-
-                    b.HasIndex("UserId");
-
-                    b.HasIndex("ProjectId", "UserId")
-                        .IsUnique();
-
-                    b.ToTable("oe_project_followers", (string)null);
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectIntegration", b =>
@@ -7903,33 +7865,6 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("Organization");
 
                     b.Navigation("Project");
-                });
-
-            modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectFollower", b =>
-                {
-                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
-                        .WithMany()
-                        .HasForeignKey("OrganizationId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject", "Project")
-                        .WithMany()
-                        .HasForeignKey("ProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("ALDevToolbox.Domain.Entities.User", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Organization");
-
-                    b.Navigation("Project");
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectIntegration", b =>
