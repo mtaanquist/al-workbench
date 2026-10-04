@@ -149,7 +149,7 @@ public sealed class NotificationDigestService
                 .GroupBy(i => i.Category)
                 .OrderBy(g => g.Key)
                 .Select(g => new DigestSection(
-                    Heading(g.Key),
+                    NotificationCategories.Label(g.Key),
                     g.Select(i => new NotificationDigestEntry(i.Title, i.Detail, i.Url, i.SolutionName)).ToList()))
                 .ToList();
             var ids = digest.Select(i => i.Id).ToList();
@@ -204,13 +204,4 @@ public sealed class NotificationDigestService
         _logger.LogInformation("Sent {Sent} notification digests; dropped {Dropped} items nobody wants now.", sent, dropped.Count);
         return sent;
     }
-
-    private static string Heading(NotificationCategory category) => category switch
-    {
-        NotificationCategory.Builds => "Builds",
-        NotificationCategory.Deployments => "Deployments",
-        NotificationCategory.Upgrades => "Upgrades",
-        NotificationCategory.Solutions => "Solutions you follow",
-        _ => category.ToString(),
-    };
 }

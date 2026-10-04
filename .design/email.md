@@ -28,7 +28,9 @@ survive that.
 ## How an email is built
 
 - Each email is a Razor component in `Components/Email/` that composes `EmailLayout`,
-  `EmailParagraph`, `EmailButton` and, for one-time codes, `EmailCode`, and exposes a typed
+  `EmailParagraph`, `EmailButton`, for one-time codes `EmailCode`, and for a quoted message
+  such as a failure reason `EmailQuote` (`Mono` for build output; one line break per line of
+  the text), and exposes a typed
   `RenderAsync` that sets its subject (`PasswordResetEmail` is the shape to copy).
 - `EmailRenderer` renders it with Blazor's `HtmlRenderer`, so every value is HTML-encoded by
   Razor. The subject only has control characters collapsed.
