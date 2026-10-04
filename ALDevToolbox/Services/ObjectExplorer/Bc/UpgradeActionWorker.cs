@@ -678,9 +678,10 @@ public sealed class UpgradeActionWorker : BackgroundService
         // Only a row still marked is settled, and the mark goes in the same write. A row
         // with nothing to ask about keeps what it says and just loses the mark.
         var marked = actionDb.OeEnvironmentUpgradeActions.Where(a => a.Id == row.Id && a.ConfirmationDue);
+        int settled;
         if (status is { } settledStatus && outcome is not null)
         {
-            await marked.ExecuteUpdateAsync(s => s
+            settled = await marked.ExecuteUpdateAsync(s => s
                 .SetProperty(a => a.ConfirmationDue, false)
                 .SetProperty(a => a.Status, settledStatus)
                 .SetProperty(a => a.Outcome, outcome), ct).ConfigureAwait(false);
@@ -688,10 +689,14 @@ public sealed class UpgradeActionWorker : BackgroundService
         }
         else
         {
-            await marked.ExecuteUpdateAsync(s => s.SetProperty(a => a.ConfirmationDue, false), ct).ConfigureAwait(false);
+            settled = await marked.ExecuteUpdateAsync(s => s.SetProperty(a => a.ConfirmationDue, false), ct).ConfigureAwait(false);
         }
-        // Unconfirmed unless Business Central answered either way.
-        await NotifyAsync(actionScope, row.Id, unconfirmed: !answered).ConfigureAwait(false);
+        // Unconfirmed unless Business Central answered either way. Only the pass that
+        // cleared the mark tells anyone, so a row settled elsewhere is not announced twice.
+        if (settled > 0)
+        {
+            await NotifyAsync(actionScope, row.Id, unconfirmed: !answered).ConfigureAwait(false);
+        }
         return true;
     }
 

@@ -197,7 +197,7 @@ public sealed class NotificationService
             await db.SaveChangesAsync(ct);
             return count;
         }
-        catch (DbUpdateException ex)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "Could not store {Count} {Kind} {Category} notifications.", count, kind, category);
             return 0;

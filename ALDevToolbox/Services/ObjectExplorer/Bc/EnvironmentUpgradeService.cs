@@ -333,10 +333,13 @@ public sealed class EnvironmentUpgradeService
         if (upgrade.TargetVersion != details.TargetVersion)
         {
             // A new target is a new "ready to check" to send, even if the old one went out.
-            await _db.OeEnvironmentUpgradeLines
-                .Where(l => l.UpgradeId == upgradeId && l.CheckedAt == null)
-                .ExecuteUpdateAsync(s => s.SetProperty(l => l.UpdatedNotifiedAt, (DateTime?)null), ct)
+            // Cleared in the same save as the new target: cleared earlier, a sweep in
+            // between would announce the old target again and stamp it for the new one.
+            var pending = await _db.OeEnvironmentUpgradeLines
+                .Where(l => l.UpgradeId == upgradeId && l.CheckedAt == null && l.UpdatedNotifiedAt != null)
+                .ToListAsync(ct)
                 .ConfigureAwait(false);
+            foreach (var line in pending) line.UpdatedNotifiedAt = null;
         }
         upgrade.Name = details.Name;
         upgrade.TargetVersion = details.TargetVersion;

@@ -175,7 +175,16 @@ public sealed class NotificationDigestService
             // The commit ignores ct, so a shutdown arriving mid-way cannot open that
             // window either.
             await using var transaction = await _db.Database.BeginTransactionAsync(ct);
-            await _db.NotificationDigestItems.Where(i => ids.Contains(i.Id)).ExecuteDeleteAsync(ct);
+            var claimed = await _db.NotificationDigestItems.Where(i => ids.Contains(i.Id)).ExecuteDeleteAsync(ct);
+            if (claimed < ids.Count)
+            {
+                // Another run (an overlapping instance during a deploy) already took
+                // some of these and sent them; sending again would be a duplicate.
+                await transaction.RollbackAsync(CancellationToken.None);
+                _logger.LogInformation("The {Delivery} digest for user {UserId} was already sent by another run.",
+                    digest.Key.Delivery, digest.Key.UserId);
+                continue;
+            }
             try
             {
                 await _email.SendAsync(recipient.Email, content, EmailPurpose.NotificationDigest, ct);
