@@ -1,3 +1,4 @@
+@using ALDevToolbox.Endpoints
 @using ALDevToolbox.Services.Notifications
 @inject InAppNotificationService Notifications
 @inject NavigationManager Nav
@@ -30,8 +31,10 @@
 
 <div id="notif-flyout" popover class="notif-flyout" role="dialog" aria-labelledby="notif-flyout-title">
     <div class="notif-flyout__head">
-        <h2 id="notif-flyout-title" class="notif-flyout__title">Notifications</h2>
-        @if (_unread > 0 && _rows is { Count: > 0 })
+        <h2 id="notif-flyout-title" class="notif-flyout__title" tabindex="-1">Notifications</h2>
+        <span class="notif-flyout__status" role="status"></span>
+        @* Not on the Notifications page, whose own button also brings its list up to date. *@
+        @if (_unread > 0 && _rows is { Count: > 0 } && !OnNotificationsPage)
         {
             <form method="post" action="/notifications/read-all">
                 <AntiforgeryToken />
@@ -84,6 +87,9 @@
         _ => $"Notifications, {_unread} unread",
     };
 
+    private bool OnNotificationsPage => ReturnUrl.Split('?', '#')[0].TrimEnd('/')
+        .Equals(NotificationEndpoints.PagePath, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The page the flyout is open on, so "Mark all as read" comes back to it.</summary>
     private string ReturnUrl => "/" + Nav.ToBaseRelativePath(Nav.Uri);
 
@@ -92,8 +98,7 @@
         // The bell is on every page; notifications that cannot be read must not take the page with it.
         try
         {
-            _unread = await Notifications.CountUnreadForCurrentUserAsync();
-            _rows = await Notifications.ListForCurrentUserAsync(InAppNotificationService.FlyoutSize);
+            (_unread, _rows) = await Notifications.GetBellForCurrentUserAsync();
         }
         catch (Exception ex)
         {

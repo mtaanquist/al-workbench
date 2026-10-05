@@ -62,23 +62,38 @@ public sealed class InAppNotificationService
     }
 
     /// <summary>
-    /// The signed-in person's notifications, newest first, at most <paramref name="take"/>:
-    /// <see cref="PageSize"/> for the Notifications page, <see cref="FlyoutSize"/> for the
-    /// bell's flyout.
+    /// What the header bell shows on every page: the unread count and the newest
+    /// <see cref="FlyoutSize"/> for its flyout, read through one context and one
+    /// access check. Nothing when nobody is signed in, like the count.
     /// </summary>
-    public async Task<List<InAppNotificationRow>> ListForCurrentUserAsync(
-        int take = PageSize, CancellationToken ct = default)
+    public async Task<(int Unread, List<InAppNotificationRow> Rows)> GetBellForCurrentUserAsync(
+        CancellationToken ct = default)
+    {
+        if (_orgContext.CurrentUserId is not { } userId) return (0, []);
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        var visible = await VisibleAsync(db, userId, ct);
+        var unread = await visible.CountAsync(n => n.ReadAt == null, ct);
+        var rows = await Newest(visible, FlyoutSize).ToListAsync(ct);
+        return (unread, rows);
+    }
+
+    /// <summary>The signed-in person's notifications, newest first, at most <see cref="PageSize"/>.</summary>
+    public async Task<List<InAppNotificationRow>> ListForCurrentUserAsync(CancellationToken ct = default)
     {
         var userId = RequireUserId();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        return await (await VisibleAsync(db, userId, ct))
+        return await Newest(await VisibleAsync(db, userId, ct), PageSize).ToListAsync(ct);
+    }
+
+    /// <summary>The newest <paramref name="take"/> of a person's visible notifications, as rows.</summary>
+
+    private static IQueryable<InAppNotificationRow> Newest(IQueryable<UserNotification> visible, int take) =>
+        visible
             .OrderByDescending(n => n.CreatedAt)
             .ThenByDescending(n => n.Id)
-            .Take(Math.Clamp(take, 1, PageSize))
+            .Take(take)
             .Select(n => new InAppNotificationRow(
-                n.Id, n.Category, n.Title, n.Detail, n.CreatedAt, n.ReadAt != null))
-            .ToListAsync(ct);
-    }
+                n.Id, n.Category, n.Title, n.Detail, n.CreatedAt, n.ReadAt != null));
 
     /// <summary>
     /// Marks one of the signed-in person's notifications read and returns the

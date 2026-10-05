@@ -149,6 +149,8 @@ public sealed class MainLayoutPaletteButtonTests : IDisposable
     [Fact]
     public async Task The_bell_opens_a_flyout_with_the_newest_and_a_way_to_the_full_list()
     {
+        _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>()
+            .NavigateTo("/solutions?tab=mine");
         var userId = await SeedUserWithUnreadAsync(InAppNotificationService.FlyoutSize + 1);
         _db.OrgContext.CurrentUserId = userId;
         _auth.SetAuthorized("user@example.com");
@@ -162,9 +164,23 @@ public sealed class MainLayoutPaletteButtonTests : IDisposable
             flyout.QuerySelectorAll(".notif").Should().HaveCount(InAppNotificationService.FlyoutSize);
             flyout.QuerySelectorAll(".notif--unread").Should().HaveCount(InAppNotificationService.FlyoutSize);
             flyout.QuerySelector("form[action='/notifications/read-all'] input[name='returnUrl']")!
-                .GetAttribute("value").Should().StartWith("/");
+                .GetAttribute("value").Should().Be("/solutions?tab=mine");
             flyout.QuerySelectorAll("a[href='/notifications']").Should().ContainSingle();
         });
+    }
+
+    [Fact]
+    public async Task On_the_notifications_page_the_flyout_leaves_mark_all_to_the_page()
+    {
+        _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>()
+            .NavigateTo("/notifications");
+        _db.OrgContext.CurrentUserId = await SeedUserWithUnreadAsync(2);
+        _auth.SetAuthorized("user@example.com");
+
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() => cut.FindAll("#notif-flyout .notif").Should().HaveCount(2));
+        cut.FindAll("#notif-flyout form").Should().BeEmpty();
     }
 
     [Fact]

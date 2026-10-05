@@ -62,6 +62,18 @@
 
 .notif-flyout__head form { margin: 0; }
 
+/* Where the script says how "Mark all as read" went; empty until then. */
+.notif-flyout__status {
+    flex: 1;
+    text-align: right;
+    color: var(--ink-3);
+    font-size: var(--text-sm);
+}
+
+.notif-flyout__status:empty { display: none; }
+
+.notif-flyout__title:focus { outline: none; }
+
 /* A quiet text button: the flyout is a glance, not a page with actions. */
 .notif-flyout__action {
     display: inline-flex;
