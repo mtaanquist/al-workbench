@@ -111,3 +111,14 @@
     background: var(--surface-sunken);
     color: var(--primary-ink);
 }
+
+/* On a touch screen the flyout's text actions need a finger-sized target. */
+@media (pointer: coarse) {
+    .notif-flyout__action,
+    .notif-flyout__foot a {
+        display: inline-flex;
+        align-items: center;
+        min-height: 40px;
+    }
+    .notif-flyout__foot { padding-block: var(--space-1); }
+}

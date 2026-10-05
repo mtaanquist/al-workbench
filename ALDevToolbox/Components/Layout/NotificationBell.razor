@@ -11,14 +11,15 @@
 
     The shell is static, so the flyout is a native popover: the browser opens it,
     closes it on Escape or a click outside, and returns focus to the bell, with
-    no circuit and no script. notification-flyout.js only closes it when a link
-    in it navigates, which an enhanced navigation would otherwise leave open
-    over the next page. The number and the list are the ones at page load;
-    opening a notification or marking them read redirects, which is when they
-    change. See .design/notifications.md.
+    no circuit and no script. notification-flyout.js closes it when a link in
+    it navigates, which an enhanced navigation would otherwise leave open over
+    the next page, and sends "Mark all as read" in the background so a half
+    filled form on the page underneath survives it; without the script the
+    form posts and comes back to the same page. The number and the list are
+    the ones at page load. See .design/notifications.md.
 *@
 
-<button type="button" class="nav-link-btn notif-bell" popovertarget="notif-flyout"
+<button type="button" class="nav-link-btn notif-bell" popovertarget="notif-flyout" aria-haspopup="dialog"
         title="@Label" aria-label="@Label">
     <Icon Name="bell" Width="15" Height="15" />
     @if (_unread > 0)
@@ -47,7 +48,7 @@
     <div class="notif-flyout__body">
         @if (_failed)
         {
-            <p class="notif-flyout__note">Your notifications could not be loaded. Try the Notifications page.</p>
+            <p class="notif-flyout__note">Your notifications could not be loaded. Reload the page, or open See all notifications below.</p>
         }
         else if (_rows is null)
         {

@@ -75,7 +75,8 @@ Agreed with the maintainer on 2026-10-03:
   where you are (Mads, 2026-10-05). The flyout has "Mark all as read", which comes back to
   the page it was on, and links to the full list and to the settings. It is a native
   popover, so the browser handles opening, Escape, clicking outside and focus without a
-  circuit; a small shell script closes it when a link in it navigates. The shell is static,
+  circuit; a small shell script closes it when a link in it navigates, and sends "Mark all
+  as read" in the background so a half-filled form on the page underneath is not lost. The shell is static,
   so the count and the flyout are the ones at page load; there is no live push, which would
   need a held connection on every page.
 - `/notifications` lists the person's own notifications newest first (at most 200; they
