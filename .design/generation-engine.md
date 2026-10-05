@@ -252,7 +252,7 @@ Available variables (canonical names are snake_case to match the TOML schema):
 | `{{namespace}}`         | The current folder's path, dot-separated, e.g. `src/codeunits` → `src.codeunits`. Used for AL `namespace` declarations. |
 | `{{guid}}`              | A freshly generated GUID per substitution call. Use sparingly — prefer hand-authored GUIDs in example files. |
 | `{{tenant_id}}`         | Tenant GUID captured on the New Workspace form (empty for standalone extensions). Persisted in `workspace.aldt.toml` so regeneration is reproducible. |
-| `{{application_version}}` | The extension's resolved `application` version, e.g. "28.2.0.0". |
+| `{{application_version}}` | The extension's resolved `application` version, e.g. "28.2.0.0". Per-extension files only; empty in workspace-root files and extension names. |
 | `{{application_version_major}}` | The first part of `{{application_version}}`, e.g. "28". Empty when the version is empty. |
 | `{{application_version_minor}}` | The second part of `{{application_version}}`, e.g. "2" (`0` when the version has only a major part). Lets `app.json` start its `version` with the targeted Business Central release: `"version": "{{application_version_major}}.{{application_version_minor}}.0.0"`. |
 
