@@ -1,0 +1,51 @@
+@using ALDevToolbox.Domain.Entities
+@using ALDevToolbox.Services.Notifications
+
+@*
+    One line per notification, unread ones marked by weight and a dot, the whole
+    row a link that marks it read and goes to the page it is about. Shared by the
+    Notifications page and the bell's flyout, so the two read the same. See
+    .design/notifications.md.
+*@
+
+<ul class="notif-list">
+    @foreach (var row in Rows)
+    {
+        <li class="@(row.Read ? "notif" : "notif notif--unread")" @key="row.Id">
+            <a class="notif__link" href="@($"/notifications/{row.Id}/open")">
+                <span class="notif__icon" aria-hidden="true">
+                    <Icon Name="@CategoryIcon(row.Category)" Width="15" Height="15" />
+                </span>
+                <span class="notif__body">
+                    <span class="notif__title">
+                        @if (!row.Read)
+                        {
+                            <span class="u-sr">Unread: </span>
+                        }
+                        @row.Title
+                    </span>
+                    @if (!string.IsNullOrWhiteSpace(row.Detail))
+                    {
+                        <span class="notif__detail">@row.Detail</span>
+                    }
+                </span>
+                <span class="notif__when">
+                    <Timestamp Value="@row.CreatedAt" Relative="true" />
+                </span>
+            </a>
+        </li>
+    }
+</ul>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<InAppNotificationRow> Rows { get; set; } = [];
+
+    private static string CategoryIcon(NotificationCategory category) => category switch
+    {
+        NotificationCategory.Builds => "workflow",
+        NotificationCategory.Deployments => "rocket",
+        NotificationCategory.Upgrades => "calendar-clock",
+        NotificationCategory.Solutions => "calendar",
+        _ => "bell",
+    };
+}
