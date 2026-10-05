@@ -61,8 +61,9 @@ public sealed class ProjectBuildImporter
     /// selection — copied onto the <see cref="OeProjectBuild"/> row as a run-time
     /// snapshot, so the worker (and a restart-resumed job) compile the same subset
     /// even if the pipeline is later edited. Throws <see cref="PlanValidationException"/>
-    /// when the pipeline/project is gone (or the project has no repositories) so the
-    /// trigger UI can show the reason inline.
+    /// when the pipeline/project is gone, the project has no repositories, or the
+    /// person has nothing to clone one of its repositories with, so the trigger UI
+    /// can show the reason inline before any build exists.
     /// </summary>
     public Task<int> StartBuildAsync(int pipelineId, CancellationToken ct = default) =>
         StartPipelineBuildAsync(pipelineId, ProjectBuildTarget.Current, ProjectBuildTrigger.Manual, ct);
@@ -121,15 +122,21 @@ public sealed class ProjectBuildImporter
         // refusal here would pause the check rather than report one bad night.
         if (trigger == ProjectBuildTrigger.Manual)
         {
-            foreach (var provider in pipeline.Providers)
+            // Every missing host at once, so fixing one doesn't reveal the next.
+            var missing = new List<string>();
+            foreach (var provider in pipeline.Providers.OrderBy(p => p))
             {
                 if ((await _credentials.ResolveAsync(provider, ct).ConfigureAwait(false)).Count == 0)
                 {
-                    throw new PlanValidationException(new Dictionary<string, string>
-                    {
-                        ["Pipeline"] = CloneCredentialResolver.NothingToCloneWith(provider),
-                    });
+                    missing.Add(CloneCredentialResolver.NothingToCloneWith(provider));
                 }
+            }
+            if (missing.Count > 0)
+            {
+                throw new PlanValidationException(new Dictionary<string, string>
+                {
+                    ["Pipeline"] = string.Join(" ", missing),
+                });
             }
         }
 

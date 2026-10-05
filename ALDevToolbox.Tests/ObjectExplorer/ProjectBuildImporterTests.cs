@@ -314,6 +314,30 @@ public sealed class ProjectBuildImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task StartBuildAsync_names_every_repository_host_the_person_cannot_reach()
+    {
+        await using var ctx = _db.NewContext();
+        await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, null, clear: true);
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        ctx.OeProjectRepositories.Add(new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            Provider = RepositoryProvider.AzureDevOps,
+            Url = "https://dev.azure.com/cronus/core/_git/reports",
+            DisplayName = "reports",
+        });
+        await ctx.SaveChangesAsync();
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
+            .Should().Contain(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.GitHub))
+            .And.Contain(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.AzureDevOps));
+    }
+
+    [Fact]
     public async Task A_preview_check_is_not_refused_up_front_when_there_is_nothing_to_clone_with()
     {
         // It runs unattended; its build reports the reason instead of pausing the check.
