@@ -82,9 +82,15 @@ public sealed class ApplicationVersionService
     /// or null when the catalogue is empty. Drives the "Latest" sentinel
     /// resolution on the template editor and the form endpoints.
     /// </summary>
-    public Task<ApplicationVersion?> GetLatestAsync(CancellationToken ct = default)
+    public Task<ApplicationVersion?> GetLatestAsync(CancellationToken ct = default) => FindLatestAsync(_db, ct);
+
+    /// <summary>
+    /// The query behind <see cref="GetLatestAsync"/>, for the generator, which
+    /// holds its own context and resolves the sentinel for callers that did not.
+    /// </summary>
+    internal static Task<ApplicationVersion?> FindLatestAsync(AppDbContext db, CancellationToken ct)
     {
-        return _db.ApplicationVersions
+        return db.ApplicationVersions
             .AsNoTracking()
             .Where(a => a.DeletedAt == null && !a.Deprecated)
             .OrderBy(a => a.Ordering)

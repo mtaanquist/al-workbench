@@ -18,6 +18,7 @@ public sealed record ProjectPlanInput(
     string ExtensionPrefix,
     string Brief,
     string Description,
+    [property: Description("A four-part application version, e.g. 28.2.0.0, or \"latest\" for the newest one in your organisation's catalogue.")]
     string ApplicationVersion,
     string RuntimeVersion,
     int CoreIdRangeFrom,
@@ -52,6 +53,7 @@ public sealed record StandaloneExtensionPlanInput(
     string ExtensionName,
     string Brief,
     string Description,
+    [property: Description("A four-part application version, e.g. 28.2.0.0, or \"latest\" for the newest one in your organisation's catalogue.")]
     string ApplicationVersion,
     string RuntimeVersion,
     int IdRangeFrom,

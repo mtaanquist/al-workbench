@@ -655,6 +655,43 @@ public sealed class WorkspaceGenerationTests : IDisposable
         ReadEntry(zip.GetEntry("AcmeCustomer/Core/version.txt")!).Should().Be("28.2.0.0");
     }
 
+    [Fact]
+    public async Task Latest_application_version_resolves_before_the_version_parts_render()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.ApplicationVersions.Add(new ApplicationVersion
+            {
+                OrganizationId = TemplateBuilder.DefaultOrganizationId,
+                Key = "bc-latest",
+                Name = "Latest test version",
+                Application = "28.2.0.0",
+                Runtime = "16.0",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            ctx.OrganizationFiles.Add(new OrganizationFile
+            {
+                OrganizationId = TemplateBuilder.DefaultOrganizationId,
+                Path = "version.txt",
+                Content = "{{application_version_major}}.{{application_version_minor}}.0.0",
+                MustacheEnabled = true,
+                Scope = OrganizationFileScope.EveryExtension,
+                Ordering = 2000,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        await SeedTemplateAsync(TemplateBuilder.Default());
+
+        using var zip = await GenerateAsync(
+            PlanBuilder.WorkspacePlan() with { ApplicationVersion = ApplicationVersionService.LatestSentinel });
+
+        ReadEntry(zip.GetEntry("AcmeCustomer/Core/version.txt")!).Should().Be("28.2.0.0");
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("AcmeCustomer/Core/app.json")!));
+        appJson.RootElement.GetProperty("application").GetString().Should().Be("28.2.0.0");
+    }
+
     private async Task SeedTemplateAsync(RuntimeTemplate template, params Module[] modules)
     {
         await using var ctx = _db.NewContext();

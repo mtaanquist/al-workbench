@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text.Json;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Tests.Builders;
 using ALDevToolbox.Tests.Infrastructure;
@@ -45,6 +46,42 @@ public sealed class StandaloneExtensionGenerationTests : IDisposable
         var appJson = JsonDocument.Parse(ReadEntry(appJsonEntry!));
         appJson.RootElement.GetProperty("name").GetString().Should().Be("My Custom Feature",
             "app.json is where spaces are wanted (issue #520)");
+    }
+
+    [Fact]
+    public async Task Latest_application_version_resolves_to_the_newest_catalogue_entry()
+    {
+        // The web forms resolve "Latest" before building a plan; an MCP caller
+        // can pass it straight through, so the generator resolves it too.
+        await SeedTemplateAsync(TemplateBuilder.Default());
+        await SeedApplicationVersionAsync("28.2.0.0", "16.0");
+
+        using var zip = await GenerateExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "My Custom Feature") with
+            {
+                ApplicationVersion = ApplicationVersionService.LatestSentinel,
+                RuntimeVersion = ApplicationVersionService.LatestSentinel,
+            });
+
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("MyCustomFeature/app.json")!));
+        appJson.RootElement.GetProperty("application").GetString().Should().Be("28.2.0.0");
+        appJson.RootElement.GetProperty("runtime").GetString().Should().Be("16.0");
+    }
+
+    [Fact]
+    public async Task Latest_application_version_is_refused_when_the_catalogue_is_empty()
+    {
+        await SeedTemplateAsync(TemplateBuilder.Default());
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.ApplicationVersions.AnyAsync()).Should().BeFalse("the fixture starts with an empty catalogue");
+        }
+
+        var plan = PlanBuilder.ExtensionPlan() with { ApplicationVersion = ApplicationVersionService.LatestSentinel };
+        var act = () => GenerateExtensionAsync(plan);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("ApplicationVersion");
     }
 
     [Fact]
@@ -246,6 +283,22 @@ public sealed class StandaloneExtensionGenerationTests : IDisposable
     /// per-extension <c>app.json</c> is emitted — same shape as
     /// <c>WorkspaceGenerationTests.SeedTemplateAsync</c>.
     /// </summary>
+    private async Task SeedApplicationVersionAsync(string application, string runtime)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.ApplicationVersions.Add(new ApplicationVersion
+        {
+            OrganizationId = TemplateBuilder.DefaultOrganizationId,
+            Key = "bc-latest",
+            Name = "Latest test version",
+            Application = application,
+            Runtime = runtime,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
     private async Task SeedTemplateAsync(RuntimeTemplate template)
     {
         await using var ctx = _db.NewContext();
