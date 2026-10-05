@@ -4,6 +4,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
+using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using Microsoft.EntityFrameworkCore;
 
@@ -493,6 +494,9 @@ public sealed class DeliveryService
                         .SetProperty(d => d.UpdatedAt, now), ct);
                 await MarkAppsNotSentAsync(old.Id, $"Not sent: build #{build.Id} replaced this deployment.", ct);
             }
+            // The newer build's request replaces theirs; the old one has nothing left to approve.
+            await NotificationSubject.MarkDoneAsync(
+                _db, waiting.Select(w => NotificationSubject.Delivery(w.Id)).ToList(), DateTime.UtcNow, _logger, ct);
 
             var delivery = await WriteDeliveryAsync(orgId, plan, plan.RuleTime(DateTime.UtcNow), forceSyncOnce: false, proposed: true, ct);
             prepared.Add(delivery.Id);
@@ -553,6 +557,8 @@ public sealed class DeliveryService
             throw Validation("Delivery", NoLongerWaiting);
         }
 
+        await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.Delivery(deliveryId)], now, _logger, ct);
+
         if (when <= now)
         {
             await _queue.EnqueueAsync(new DeliveryJob(deliveryId, AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "capturing identity for a delivery")), ct);
@@ -605,6 +611,7 @@ public sealed class DeliveryService
             throw Validation("Delivery", NoLongerWaiting);
         }
         await MarkAppsNotSentAsync(deliveryId, "Not sent: the deployment was dismissed.", ct);
+        await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.Delivery(deliveryId)], now, _logger, ct);
         _logger.LogInformation("Dismissed prepared delivery {DeliveryId}.", deliveryId);
     }
 

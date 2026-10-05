@@ -22,10 +22,15 @@ internal sealed class NotificationDigestItemConfiguration : IEntityTypeConfigura
         entity.Property(e => e.Url).HasColumnName("url").IsRequired();
         entity.Property(e => e.ProjectId).HasColumnName("project_id");
         entity.Property(e => e.SolutionName).HasColumnName("solution_name");
+        entity.Property(e => e.Subject).HasColumnName("subject").HasMaxLength(64);
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
 
         // The digest sender's read: one person's items for one delivery, oldest first.
         entity.HasIndex(e => new { e.UserId, e.Delivery, e.CreatedAt });
+        // Dropping items whose request was settled before the digest went out.
+        entity.HasIndex(e => e.Subject)
+            .HasFilter("subject IS NOT NULL")
+            .HasDatabaseName("ix_notification_digest_items_subject");
         // The 30-day prune.
         entity.HasIndex(e => e.CreatedAt);
 

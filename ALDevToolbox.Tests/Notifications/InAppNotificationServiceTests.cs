@@ -152,6 +152,107 @@ public sealed class InAppNotificationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Visiting_the_page_a_notification_is_about_marks_only_the_visitors_copy_read()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        var sam = await SeedUserAsync("sam@cronus.example");
+        var here = await AddAsync(alex, "Build failed", Monday);
+        var elsewhere = await AddAsync(alex, "Another build", Monday, path: "/pipelines/1?build=8");
+        var samsCopy = await AddAsync(sam, "Build failed", Monday);
+        _db.OrgContext.CurrentUserId = alex;
+
+        (await Service().MarkPageReadForCurrentUserAsync("/pipelines/1?build=7")).Should().Be(1);
+
+        await using var ctx = _db.NewContext();
+        var readAt = await ctx.UserNotifications.AsNoTracking().ToDictionaryAsync(n => n.Id, n => n.ReadAt);
+        readAt[here].Should().NotBeNull();
+        readAt[elsewhere].Should().BeNull("only the exact page counts");
+        readAt[samsCopy].Should().BeNull("Sam has not seen it");
+    }
+
+    [Fact]
+    public async Task Visiting_the_page_leaves_a_request_unread_until_it_is_done()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        await AddAsync(alex, "Waiting for approval", Monday, subject: NotificationSubject.Delivery(4));
+        _db.OrgContext.CurrentUserId = alex;
+
+        (await Service().MarkPageReadForCurrentUserAsync("/pipelines/1?build=7")).Should().Be(0);
+        (await Service().CountUnreadForCurrentUserAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Visiting_a_page_signed_out_changes_nothing()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        await AddAsync(alex, "Build failed", Monday);
+
+        (await Service().MarkPageReadForCurrentUserAsync("/pipelines/1?build=7")).Should().Be(0);
+        _db.OrgContext.CurrentUserId = alex;
+        (await Service().CountUnreadForCurrentUserAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Settling_what_a_notification_asks_marks_every_recipients_copy_read()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        var sam = await SeedUserAsync("sam@cronus.example");
+        var alexs = await AddAsync(alex, "Waiting for approval", Monday, subject: NotificationSubject.Delivery(4));
+        var sams = await AddAsync(sam, "Waiting for approval", Monday, subject: NotificationSubject.Delivery(4));
+        var stillWaiting = await AddAsync(alex, "Waiting for approval", Monday, subject: NotificationSubject.Delivery(5));
+        var tellsOnly = await AddAsync(alex, "Build failed", Monday);
+        await using (var ctx = _db.NewContext())
+        {
+            foreach (var (userId, subject) in new (int, string?)[]
+                     { (alex, NotificationSubject.Delivery(4)), (sam, NotificationSubject.Delivery(5)), (sam, null) })
+            {
+                ctx.NotificationDigestItems.Add(new NotificationDigestItem
+                {
+                    UserId = userId, OrganizationId = TestDb.DefaultOrgId, Category = NotificationCategory.Deployments,
+                    Delivery = NotificationDelivery.Daily, Title = subject ?? "Deployed", Url = "https://x.example/",
+                    Subject = subject, CreatedAt = Monday,
+                });
+            }
+            await ctx.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NotificationSubject.MarkDoneAsync(
+                ctx, [NotificationSubject.Delivery(4)], Monday.AddHours(1), NullLogger.Instance, CancellationToken.None))
+                .Should().Be(2);
+        }
+
+        await using var read = _db.NewContext();
+        var readAt = await read.UserNotifications.AsNoTracking().ToDictionaryAsync(n => n.Id, n => n.ReadAt);
+        readAt[alexs].Should().Be(Monday.AddHours(1));
+        readAt[sams].Should().Be(Monday.AddHours(1));
+        readAt[stillWaiting].Should().BeNull();
+        readAt[tellsOnly].Should().BeNull();
+        (await read.NotificationDigestItems.AsNoTracking().Select(i => i.Title).ToListAsync())
+            .Should().BeEquivalentTo([NotificationSubject.Delivery(5), "Deployed"],
+                "a digest not yet sent drops the settled request and keeps the rest");
+    }
+
+    [Fact]
+    public async Task Settling_never_reaches_another_organisations_notifications()
+    {
+        var stranger = await SeedUserAsync("stranger@fabrikam.example", TestDb.OtherOrgId);
+        var theirs = await AddAsync(stranger, "Waiting for approval", Monday, TestDb.OtherOrgId,
+            subject: NotificationSubject.Delivery(4));
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NotificationSubject.MarkDoneAsync(
+                ctx, [NotificationSubject.Delivery(4)], Monday, NullLogger.Instance, CancellationToken.None))
+                .Should().Be(0);
+        }
+
+        await using var read = _db.NewContext();
+        (await read.UserNotifications.IgnoreQueryFilters().SingleAsync(n => n.Id == theirs)).ReadAt.Should().BeNull();
+    }
+
+    [Fact]
     public async Task One_that_arrived_after_the_page_loaded_stays_unread()
     {
         var alex = await SeedUserAsync("alex@cronus.example");
@@ -216,14 +317,14 @@ public sealed class InAppNotificationServiceTests : IDisposable
 
     private async Task<int> AddAsync(
         int userId, string title, DateTime createdAt, int organizationId = TestDb.DefaultOrgId, DateTime? readAt = null,
-        int? projectId = null)
+        int? projectId = null, string path = "/pipelines/1?build=7", string? subject = null)
     {
         await using var ctx = _db.NewContext();
         var row = new UserNotification
         {
             UserId = userId, OrganizationId = organizationId, Category = NotificationCategory.Builds,
-            Title = title, Path = "/pipelines/1?build=7", CreatedAt = createdAt, ReadAt = readAt,
-            ProjectId = projectId,
+            Title = title, Path = path, CreatedAt = createdAt, ReadAt = readAt,
+            ProjectId = projectId, Subject = subject,
         };
         ctx.UserNotifications.Add(row);
         await ctx.SaveChangesAsync();

@@ -84,6 +84,20 @@ Agreed with the maintainer on 2026-10-03:
   through `/notifications/{id}/open`, which marks it read and redirects to its page;
   "Mark all as read" posts to `/notifications/read-all`. Both redirect, so the count is
   current on the next page.
+- A notification also counts as opened when the person is on the page it is about, most
+  often having followed the link in its email: the bell, which renders on every page,
+  marks their unread ones whose stored path matches the page's path and query exactly.
+  It only writes when something is unread. Requests (below) are left alone: several share
+  a page, and looking at it is not doing it.
+- A notification that asks for something (a deployment waiting for approval, an
+  environment ready to check) carries a `subject` naming it (`delivery:12`,
+  `upgrade-line:34`). Once that is done, by anyone and by any route, every recipient's
+  copy is marked read: approving or dismissing the deployment, a newer build replacing
+  it, or its deployment pipeline being deleted; ticking the environment's check, assigning
+  it to someone else (the new checker is told afresh), taking it off the upgrade, or
+  marking the upgrade done or deleting it. Unticking a check, or reopening the upgrade,
+  does not bring the notice back. Digest items carry the same subject and are deleted
+  then, so a digest sent later does not ask for something already done.
 - `InAppNotificationService` names the signed-in user in every query on top of the
   organisation filter, and reads through the context factory because the count renders
   in the layout beside the page's own queries.

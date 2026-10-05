@@ -17,7 +17,9 @@
     the next page, and sends "Mark all as read" in the background so a half
     filled form on the page underneath survives it; without the script the
     form posts and comes back to the same page. The number and the list are
-    the ones at page load. See .design/notifications.md.
+    the ones at page load. Being on the page a notification is about counts as
+    opening it, so following the link in its email clears it too. See
+    .design/notifications.md.
 *@
 
 <button type="button" class="nav-link-btn notif-bell" popovertarget="notif-flyout" aria-haspopup="dialog"
@@ -87,11 +89,11 @@
         _ => $"Notifications, {_unread} unread",
     };
 
-    private bool OnNotificationsPage => ReturnUrl.Split('?', '#')[0].TrimEnd('/')
+    private bool OnNotificationsPage => ReturnUrl.Split('?')[0].TrimEnd('/')
         .Equals(NotificationEndpoints.PagePath, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The page the flyout is open on, so "Mark all as read" comes back to it.</summary>
-    private string ReturnUrl => "/" + Nav.ToBaseRelativePath(Nav.Uri);
+    private string ReturnUrl => CurrentPath();
 
     protected override async Task OnInitializedAsync()
     {
@@ -99,11 +101,24 @@
         try
         {
             (_unread, _rows) = await Notifications.GetBellForCurrentUserAsync();
+            // Only worth a write when something is unread.
+            if (_unread > 0 && await Notifications.MarkPageReadForCurrentUserAsync(CurrentPath()) > 0)
+            {
+                (_unread, _rows) = await Notifications.GetBellForCurrentUserAsync();
+            }
         }
         catch (Exception ex)
         {
             _failed = true;
             Logger.LogWarning(ex, "Could not load notifications for the bell.");
         }
+    }
+
+    /// <summary>This page's path and query, the shape a notification stores: <c>/pipelines/4?build=12</c>.</summary>
+    private string CurrentPath()
+    {
+        var relative = Nav.ToBaseRelativePath(Nav.Uri);
+        var hash = relative.IndexOf('#');
+        return "/" + (hash < 0 ? relative : relative[..hash]);
     }
 }

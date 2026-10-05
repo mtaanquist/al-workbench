@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Services.Notifications;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -379,6 +380,10 @@ public sealed class EnvironmentUpgradeService
         upgrade.UpdatedAt = now;
         foreach (var line in upgrade.Lines) line.IsOpen = false;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        // Done means nothing is left to check on it.
+        await NotificationSubject.MarkDoneAsync(
+            _db, upgrade.Lines.Select(l => NotificationSubject.UpgradeLine(l.Id)).ToList(), now, _logger, ct)
+            .ConfigureAwait(false);
 
         var uncheckedCount = upgrade.Lines.Count(l => l.CheckedAt is null);
         _logger.LogInformation(
@@ -526,8 +531,12 @@ public sealed class EnvironmentUpgradeService
         }
         await EnsureCanManageAllAsync(upgrade.Lines, ct).ConfigureAwait(false);
 
+        var lineSubjects = upgrade.Lines.Select(l => NotificationSubject.UpgradeLine(l.Id)).ToList();
         _db.OeEnvironmentUpgrades.Remove(upgrade);
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        // Nothing is left to check, and the page the notices link to is gone.
+        await NotificationSubject.MarkDoneAsync(_db, lineSubjects, _clock.GetUtcNow().UtcDateTime, _logger, ct)
+            .ConfigureAwait(false);
 
         _logger.LogInformation(
             "User {UserId} deleted planned upgrade {UpgradeId} ({UpgradeName}, {LineCount} environments).",
@@ -656,9 +665,12 @@ public sealed class EnvironmentUpgradeService
                 "Something has already been done to this environment from this upgrade, so it stays on it.");
         }
 
+        var now = _clock.GetUtcNow().UtcDateTime;
         _db.OeEnvironmentUpgradeLines.Remove(line);
-        line.Upgrade!.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
+        line.Upgrade!.UpdatedAt = now;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
+            .ConfigureAwait(false);
 
         _logger.LogInformation(
             "User {UserId} took environment {EnvironmentId} off planned upgrade {UpgradeId}.",
@@ -676,13 +688,21 @@ public sealed class EnvironmentUpgradeService
         }
         var line = await LoadLineForWriteAsync(lineId, ct).ConfigureAwait(false);
 
+        var now = _clock.GetUtcNow().UtcDateTime;
+        if (line.AssigneeUserId != userId && line.CheckedAt is null)
+        {
+            // The previous checker is no longer asked. Before the save, so a sweep straight
+            // after it cannot have told the new one yet.
+            await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
+                .ConfigureAwait(false);
+        }
         if (userId is not null && line.AssigneeUserId != userId && line.CheckedAt is null)
         {
             // The new checker has not been told, so the next sweep tells them if it is ready.
             line.UpdatedNotifiedAt = null;
         }
         line.AssigneeUserId = userId;
-        line.Upgrade!.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
+        line.Upgrade!.UpdatedAt = now;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
 
         _logger.LogInformation(
@@ -732,7 +752,8 @@ public sealed class EnvironmentUpgradeService
 
         var now = _clock.GetUtcNow().UtcDateTime;
         // A line already ticked keeps its stamp: ticking it again is not a second check.
-        if (isChecked == true && line.CheckedAt is null)
+        var newlyChecked = isChecked == true && line.CheckedAt is null;
+        if (newlyChecked)
         {
             line.CheckedAt = now;
             line.CheckedByUserId = _orgContext.CurrentUserId;
@@ -747,6 +768,11 @@ public sealed class EnvironmentUpgradeService
         if (setNote) line.Note = trimmedNote;
         line.Upgrade!.UpdatedAt = now;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        if (newlyChecked)
+        {
+            await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
+                .ConfigureAwait(false);
+        }
 
         _logger.LogInformation(
             "User {UserId} set the check on environment {EnvironmentId} on planned upgrade {UpgradeId} ({CheckState}, note {NoteChange}).",
