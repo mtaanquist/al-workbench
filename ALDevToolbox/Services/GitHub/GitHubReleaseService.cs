@@ -336,7 +336,6 @@ public sealed class GitHubReleaseService
         await _db.SaveChangesAsync(ct);
     }
 
-    /// <summary>The Release body: which apps this build produced, and where the build itself is.</summary>
     /// <summary>
     /// The tag a build is published under: <c>v&lt;version&gt;</c> when every app has the
     /// same version, else <c>build-&lt;number&gt;</c>. Apps that each keep their own
@@ -349,6 +348,7 @@ public sealed class GitHubReleaseService
         return versions.Count == 1 ? $"v{versions[0]}" : $"build-{projectBuildId}";
     }
 
+    /// <summary>The Release body: which apps this build produced, and where the build itself is.</summary>
     private string ReleaseBody(IReadOnlyList<(string Name, string Version)> apps, int projectBuildId)
     {
         var lines = new List<string> { "Published by AL Workbench.", string.Empty };

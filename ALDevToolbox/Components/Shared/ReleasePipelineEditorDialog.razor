@@ -192,7 +192,7 @@
                             <div class="field">
                                 <label class="field__label" for="rpe-allowed-branch">Branch</label>
                                 <input id="rpe-allowed-branch" type="text" class="input" maxlength="@GitBranchName.MaxLength"
-                                       pattern="@GitBranchName.HtmlPattern" @bind="_allowedBranch" @bind:after="() => _branchRuleTouched = true"
+                                       pattern="@GitBranchName.HtmlPattern" @bind="_allowedBranch" @bind:after="() => _branchTextEdited = true"
                                        disabled="@_saving" placeholder="e.g. main" spellcheck="false" autocomplete="off" />
                                 <small class="field__hint">Filled in with the branch the build pipeline builds. Leave empty to allow each repository's default branch.</small>
                             </div>
@@ -334,9 +334,12 @@
     // The branch rule: only builds from _allowedBranch (blank = the default branch).
     private bool _restrictBranch;
     private string _allowedBranch = string.Empty;
-    // Set once the person changes the rule, so picking another environment or build
-    // pipeline no longer refills it.
+    // Set once the person ticks or unticks the rule, so picking another environment no
+    // longer turns it on or off for them.
     private bool _branchRuleTouched;
+    // Set once the person types a branch, so picking another build pipeline no longer
+    // refills it.
+    private bool _branchTextEdited;
 
     private bool _loading;
     private bool _saving;
@@ -483,6 +486,7 @@
         _restrictBranch = false;
         _allowedBranch = string.Empty;
         _branchRuleTouched = false;
+        _branchTextEdited = false;
         _saveError = null;
         _buildPipelines = null;
         _environments = null;
@@ -521,15 +525,31 @@
     /// </summary>
     private void SuggestBranchRule()
     {
-        if (_editing || _branchRuleTouched) return;
-        _restrictBranch = ChosenEnvironment is { } env && BcEnvironmentTypes.IsProduction(env.Type);
-        _allowedBranch = _buildPipelines?.FirstOrDefault(p => p.Id == _buildPipelineId)?.Branch ?? string.Empty;
+        if (_editing) return;
+        if (!_branchRuleTouched)
+        {
+            _restrictBranch = ChosenEnvironment is { } env && BcEnvironmentTypes.IsProduction(env.Type);
+        }
+        if (!_branchTextEdited) _allowedBranch = BuildPipelineBranch;
     }
 
+    /// <summary>The branch the chosen build pipeline builds; blank for each repository's default branch.</summary>
+    private string BuildPipelineBranch =>
+        _buildPipelines?.FirstOrDefault(p => p.Id == _buildPipelineId)?.Branch ?? string.Empty;
+
+    /// <summary>
+    /// Turning the rule on fills in the build pipeline's branch unless a branch was typed,
+    /// so an editor ticking it on an existing pipeline doesn't save "default branch only"
+    /// for a pipeline that builds another one.
+    /// </summary>
     private void OnRestrictBranchChanged(ChangeEventArgs e)
     {
         _restrictBranch = (bool)(e.Value ?? false);
         _branchRuleTouched = true;
+        if (_restrictBranch && !_branchTextEdited && string.IsNullOrWhiteSpace(_allowedBranch))
+        {
+            _allowedBranch = BuildPipelineBranch;
+        }
     }
 
     /// <summary>

@@ -815,6 +815,23 @@ public sealed class DeliveryServiceTests : IDisposable
         _apps.UploadedOrder.Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task RunDeliveryAsync_does_not_take_another_publishers_newer_app_with_the_same_name_as_this_one()
+    {
+        // An artifact retained before app ids were stamped can only be matched by name,
+        // and a name can belong to another publisher's app: that is no reason to refuse.
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        _apps.Installed.Add(InstalledApp("CRONUS Core") with { Version = "9.0.0.0" });
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status.Should().Be(ProjectDeliveryStatus.Deployed);
+        _apps.UploadedOrder.Should().Equal("CRONUS Core");
+    }
+
     // ── The branch rule ───────────────────────────────────────────────────────
 
     [Theory]

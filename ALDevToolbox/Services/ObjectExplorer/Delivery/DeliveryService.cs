@@ -941,6 +941,29 @@ public sealed class DeliveryService
             }
         }
 
+        // Business Central never replaces an app with an older version. Caught when the
+        // deployment was made if the environment's app list said so; this is the live list,
+        // which also catches an install that happened since. Checked for every app before
+        // the first upload, so a refusal never leaves the build half installed.
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            // Matched on the app id only: a name could be another publisher's app.
+            if (appIds[i] is null
+                || InstalledMatch(i)?.Version is not { Length: > 0 } newerOn
+                || ProjectConnectionService.CompareVersions(newerOn, ordered[i].AppVersion) <= 0)
+            {
+                continue;
+            }
+            var olderRefusal = $"{ordered[i].AppName} {ordered[i].AppVersion} is older than {newerOn}, which is already installed in {delivery.EnvironmentName}. "
+                + "Business Central won't replace an app with an older version. " + RaiseVersionAdvice;
+            ordered[i].Status = ProjectDeliveryResultStatus.Failed;
+            ordered[i].FinishedAt = DateTime.UtcNow;
+            ordered[i].UpdatedAt = ordered[i].FinishedAt!.Value;
+            ordered[i].Message = olderRefusal;
+            await FailAsync(delivery, log, olderRefusal, ct);
+            return;
+        }
+
         // Business Central holds one version of an app per schedule, and answers a second
         // upload of a version it is already holding with a bare 400. Read what is waiting
         // once, so that case can be refused below with a sentence that says what to do.
@@ -1004,23 +1027,6 @@ public sealed class DeliveryService
                 Append(log, $"Skipped {label}: {delivery.EnvironmentName} already has this version.");
                 await SaveResultAsync(delivery, log, ct);
                 continue;
-            }
-
-            // Business Central never replaces an app with an older version. Caught when the
-            // deployment was made if the environment's app list said so; this is the live
-            // list, which also catches an install that happened since.
-            if (InstalledMatch(i)?.Version is { Length: > 0 } newerOn
-                && ProjectConnectionService.CompareVersions(newerOn, result.AppVersion) > 0)
-            {
-                failedIndex = i;
-                refusal = $"{label} is older than {newerOn}, which is already installed in {delivery.EnvironmentName}. "
-                    + "Business Central won't replace an app with an older version. " + RaiseVersionAdvice;
-                result.Status = ProjectDeliveryResultStatus.Failed;
-                result.FinishedAt = DateTime.UtcNow;
-                result.UpdatedAt = result.FinishedAt.Value;
-                result.Message = refusal;
-                Append(log, refusal);
-                break;
             }
 
             if (AlreadyWaiting(waiting, appIds[i], result, delivery) is { } waitingRefusal)

@@ -101,6 +101,28 @@ public sealed class BuildVersionStampTests
         logs.Single().Content.Should().Contain("Odd: kept 1.0.0.beta");
     }
 
+    [Fact]
+    public void A_linked_app_json_is_only_read_never_written_through()
+    {
+        // A repository could commit app.json as a link to any file the server can write.
+        using var temp = new TempDir();
+        var outside = Path.Combine(temp.Path, "outside.json");
+        var json = $$"""{ "id": "{{Guid.NewGuid()}}", "name": "Linked", "publisher": "CRONUS", "version": "1.0.0.0" }""";
+        File.WriteAllText(outside, json);
+        var clone = Path.Combine(temp.Path, "clone");
+        Directory.CreateDirectory(clone);
+        File.CreateSymbolicLink(Path.Combine(clone, "app.json"), outside);
+        var app = new DiscoveredApp(clone, ProjectBuildService.ParseManifest(json)!,
+            new ClonedRepo(clone, "https://example.test/repo", null, null));
+        var logs = new List<ProjectBuildService.PendingLog>();
+
+        var stamped = ProjectBuildService.StampBuildNumber([app], 12, logs);
+
+        stamped.Single().Manifest.Version.Should().Be("1.0.0.0");
+        File.ReadAllText(outside).Should().Be(json);
+        logs.Single().Content.Should().Contain("Linked: kept 1.0.0.0, because its app.json couldn't be updated.");
+    }
+
     private static DiscoveredApp WriteApp(string root, string name, string version)
     {
         var dir = Path.Combine(root, name);

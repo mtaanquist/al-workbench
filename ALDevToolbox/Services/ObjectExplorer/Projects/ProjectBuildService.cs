@@ -444,30 +444,58 @@ public sealed class ProjectBuildService
         var stamped = new List<DiscoveredApp>(apps.Count);
         foreach (var app in apps)
         {
-            var path = Path.Combine(app.ProjectDir, "app.json");
             var version = BuildVersionStamp.Compute(app.Manifest.Version, buildNumber);
-            string? rewritten = null;
-            if (version is not null)
+            if (version is null)
             {
-                try { rewritten = BuildVersionStamp.WriteVersion(File.ReadAllText(path), version); }
-                catch (IOException) { rewritten = null; }
-            }
-            if (version is null || rewritten is null)
-            {
-                lines.Add(version is null
-                    ? $"{app.Manifest.Name}: kept {app.Manifest.Version}, because that version isn't made of whole numbers."
-                    : $"{app.Manifest.Name}: kept {app.Manifest.Version}, because its app.json couldn't be updated.");
+                lines.Add($"{app.Manifest.Name}: kept {app.Manifest.Version}, because that version isn't made of whole numbers.");
                 stamped.Add(app);
                 continue;
             }
-
-            File.WriteAllText(path, rewritten);
+            if (!TryWriteVersion(app, version))
+            {
+                lines.Add($"{app.Manifest.Name}: kept {app.Manifest.Version}, because its app.json couldn't be updated.");
+                stamped.Add(app);
+                continue;
+            }
             lines.Add($"{app.Manifest.Name}: {app.Manifest.Version} in app.json is built as {version}.");
             stamped.Add(app with { Manifest = app.Manifest with { Version = version } });
         }
         logs.Add(new PendingLog(null, "Version",
             $"Build #{buildNumber} adds its build number to the third part of each app's version. The app.json files in the repositories are not changed.\n" + string.Join("\n", lines)));
         return stamped;
+    }
+
+    /// <summary>
+    /// Writes <paramref name="version"/> into the app's <c>app.json</c> in the clone.
+    /// False, leaving the file alone, when it can't be done safely: the file is a link
+    /// (a repository could point one anywhere the server can write, so it is only ever
+    /// read through), it doesn't sit inside the clone, or reading or writing it fails.
+    /// </summary>
+    private static bool TryWriteVersion(DiscoveredApp app, string version)
+    {
+        try
+        {
+            var path = Path.GetFullPath(Path.Combine(app.ProjectDir, "app.json"));
+            var root = Path.GetFullPath(app.Repo.Dir) + Path.DirectorySeparatorChar;
+            if (!path.StartsWith(root, StringComparison.Ordinal)) return false;
+            // Every folder between the clone and the file as well, since a linked folder
+            // would carry the write out of the clone just the same.
+            FileSystemInfo? info = new FileInfo(path);
+            while (info is not null && info.FullName.Length >= root.Length)
+            {
+                if (info.LinkTarget is not null) return false;
+                info = info is FileInfo file ? file.Directory : ((DirectoryInfo)info).Parent;
+            }
+
+            var rewritten = BuildVersionStamp.WriteVersion(File.ReadAllText(path), version);
+            if (rewritten is null) return false;
+            File.WriteAllText(path, rewritten);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return false;
+        }
     }
 
     // ── Extension discovery (the pipeline editor's checklist cache) ─────────
