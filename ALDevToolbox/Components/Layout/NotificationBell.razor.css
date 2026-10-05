@@ -19,3 +19,118 @@
     text-align: center;
     pointer-events: none;
 }
+
+/* The flyout the bell opens: a native popover, so it sits in the top layer
+   above the page and the drawer. It hangs under the top bar at its right edge,
+   where the bell is, rather than anchored to the bell itself, which not every
+   browser can do yet; on a phone it spans the width less the gutters. */
+.notif-flyout {
+    position: fixed;
+    inset: auto;
+    top: calc(var(--top-h) - var(--space-2));
+    right: var(--space-4);
+    width: min(400px, calc(100vw - 2 * var(--space-4)));
+    max-height: min(560px, calc(100vh - var(--top-h) - var(--space-5)));
+    margin: 0;
+    padding: 0;
+    flex-direction: column;
+    background: var(--surface);
+    color: var(--ink-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+}
+
+.notif-flyout:popover-open { display: flex; }
+
+.notif-flyout__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+}
+
+.notif-flyout__title {
+    margin: 0;
+    font-size: var(--text-md);
+    font-weight: var(--fw-semibold);
+    color: var(--ink);
+}
+
+.notif-flyout__head form { margin: 0; }
+
+/* Where the script says how "Mark all as read" went; empty until then. */
+.notif-flyout__status {
+    flex: 1;
+    text-align: right;
+    color: var(--ink-3);
+    font-size: var(--text-sm);
+}
+
+.notif-flyout__status:empty { display: none; }
+
+.notif-flyout__title:focus { outline: none; }
+
+/* A quiet text button: the flyout is a glance, not a page with actions. */
+.notif-flyout__action {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px var(--space-1);
+    background: none;
+    border: 0;
+    border-radius: var(--r-control);
+    color: var(--primary-ink);
+    font: inherit;
+    font-size: var(--text-sm);
+    cursor: pointer;
+}
+
+.notif-flyout__action:hover { background: var(--surface-sunken); }
+.notif-flyout__action:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
+
+/* Only the list scrolls; the heading and the links stay put. */
+.notif-flyout__body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.notif-flyout__note {
+    margin: 0;
+    padding: var(--space-4);
+    color: var(--ink-3);
+    font-size: var(--text-sm);
+}
+
+.notif-flyout__foot {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-top: 1px solid var(--border);
+    font-size: var(--text-sm);
+}
+
+.notif-flyout__foot a { color: var(--primary-ink); text-decoration: none; }
+.notif-flyout__foot a:hover { text-decoration: underline; }
+
+/* The bell reads as pressed while its flyout is open. */
+.notif-bell:has(+ .notif-flyout:popover-open) {
+    background: var(--surface-sunken);
+    color: var(--primary-ink);
+}
+
+/* On a touch screen the flyout's text actions need a finger-sized target. */
+@media (pointer: coarse) {
+    .notif-flyout__action,
+    .notif-flyout__foot a {
+        display: inline-flex;
+        align-items: center;
+        min-height: 40px;
+    }
+    .notif-flyout__foot { padding-block: var(--space-1); }
+}

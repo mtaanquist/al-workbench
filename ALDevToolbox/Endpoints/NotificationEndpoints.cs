@@ -13,6 +13,9 @@ internal static class NotificationEndpoints
 {
     public const string PagePath = "/notifications";
 
+    /// <summary>Set by notification-flyout.js on its background "Mark all as read".</summary>
+    public const string BackgroundHeader = "X-Notifications-Background";
+
     public static IEndpointRouteBuilder MapNotificationEndpoints(this IEndpointRouteBuilder app)
     {
         // Opening a notification marks it read and goes to the page it is
@@ -34,16 +37,26 @@ internal static class NotificationEndpoints
             {
                 await notifications.MarkAllReadForCurrentUserAsync(upToId, ct);
             }
-            ctx.Response.Redirect(PagePath);
+            // The flyout's script posts in the background and only needs to know it
+            // worked; a 204 is what it takes for success, so a redirect to the login
+            // page (an expired session) reads as the failure it is.
+            if (ctx.Request.Headers[BackgroundHeader] == "1")
+            {
+                ctx.Response.StatusCode = StatusCodes.Status204NoContent;
+                return;
+            }
+            // Without the script the flyout posts from whatever page it is open on and goes back there.
+            string? returnUrl = form["returnUrl"];
+            ctx.Response.Redirect(IsAppPath(returnUrl) ? returnUrl! : PagePath);
         }).RequireAuthorization();
 
         return app;
     }
 
     /// <summary>
-    /// A path within this app. The stored paths are written by the notifiers,
-    /// never typed by anyone, but a redirect is still checked before it is
-    /// followed.
+    /// A path within this app, never another site: the stored paths are written
+    /// by the notifiers, but the flyout's return path comes from the form, so
+    /// both are checked before a redirect follows them.
     /// </summary>
     internal static bool IsAppPath(string? path) =>
         path is { Length: > 0 } && path[0] == '/'

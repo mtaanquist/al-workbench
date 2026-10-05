@@ -1,5 +1,6 @@
-/* The Notifications page: one line per event, unread ones marked by weight and
-   a dot, the whole row a link to the page it is about. */
+/* A list of notifications, on the Notifications page and in the bell's flyout:
+   one line per event, unread ones marked by weight and a dot, the whole row a
+   link to the page it is about. */
 
 .notif-list {
     list-style: none;

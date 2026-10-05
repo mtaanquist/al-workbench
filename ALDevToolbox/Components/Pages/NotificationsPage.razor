@@ -1,7 +1,6 @@
 @page "/notifications"
 @attribute [Authorize]
 @using ALDevToolbox.Components.Shared
-@using ALDevToolbox.Domain.Entities
 @using ALDevToolbox.Services.Notifications
 @inject InAppNotificationService Notifications
 
@@ -58,34 +57,7 @@
     </Empty>
     <ChildContent>
         <div class="card card--flush">
-            <ul class="notif-list">
-                @foreach (var row in _rows!)
-                {
-                    <li class="@(row.Read ? "notif" : "notif notif--unread")" @key="row.Id">
-                        <a class="notif__link" href="@($"/notifications/{row.Id}/open")">
-                            <span class="notif__icon" aria-hidden="true">
-                                <Icon Name="@CategoryIcon(row.Category)" Width="15" Height="15" />
-                            </span>
-                            <span class="notif__body">
-                                <span class="notif__title">
-                                    @if (!row.Read)
-                                    {
-                                        <span class="u-sr">Unread: </span>
-                                    }
-                                    @row.Title
-                                </span>
-                                @if (!string.IsNullOrWhiteSpace(row.Detail))
-                                {
-                                    <span class="notif__detail">@row.Detail</span>
-                                }
-                            </span>
-                            <span class="notif__when">
-                                <Timestamp Value="@row.CreatedAt" Relative="true" />
-                            </span>
-                        </a>
-                    </li>
-                }
-            </ul>
+            <NotificationList Rows="_rows!" />
         </div>
     </ChildContent>
 </ListPage>
@@ -102,13 +74,4 @@
         _unread = await Notifications.CountUnreadForCurrentUserAsync();
         _newestId = _rows.Count > 0 ? _rows.Max(r => r.Id) : 0;
     }
-
-    private static string CategoryIcon(NotificationCategory category) => category switch
-    {
-        NotificationCategory.Builds => "workflow",
-        NotificationCategory.Deployments => "rocket",
-        NotificationCategory.Upgrades => "calendar-clock",
-        NotificationCategory.Solutions => "calendar",
-        _ => "bell",
-    };
 }
