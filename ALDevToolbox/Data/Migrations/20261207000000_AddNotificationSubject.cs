@@ -17,11 +17,24 @@ namespace ALDevToolbox.Data.Migrations
                 maxLength: 64,
                 nullable: true);
 
+            migrationBuilder.AddColumn<string>(
+                name: "subject",
+                table: "notification_digest_items",
+                type: "character varying(64)",
+                maxLength: 64,
+                nullable: true);
+
             migrationBuilder.CreateIndex(
                 name: "ix_user_notifications_subject_unread",
                 table: "user_notifications",
                 column: "subject",
                 filter: "subject IS NOT NULL AND read_at IS NULL");
+
+            migrationBuilder.CreateIndex(
+                name: "ix_notification_digest_items_subject",
+                table: "notification_digest_items",
+                column: "subject",
+                filter: "subject IS NOT NULL");
         }
 
         /// <inheritdoc />
@@ -31,9 +44,17 @@ namespace ALDevToolbox.Data.Migrations
                 name: "ix_user_notifications_subject_unread",
                 table: "user_notifications");
 
+            migrationBuilder.DropIndex(
+                name: "ix_notification_digest_items_subject",
+                table: "notification_digest_items");
+
             migrationBuilder.DropColumn(
                 name: "subject",
                 table: "user_notifications");
+
+            migrationBuilder.DropColumn(
+                name: "subject",
+                table: "notification_digest_items");
         }
     }
 }

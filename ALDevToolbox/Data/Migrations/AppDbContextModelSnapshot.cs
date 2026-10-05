@@ -1011,6 +1011,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("solution_name");
 
+                    b.Property<string>("Subject")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("subject");
+
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasColumnType("text")
@@ -1032,6 +1037,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("OrganizationId");
 
                     b.HasIndex("ProjectId");
+
+                    b.HasIndex("Subject")
+                        .HasDatabaseName("ix_notification_digest_items_subject")
+                        .HasFilter("subject IS NOT NULL");
 
                     b.HasIndex("UserId", "Delivery", "CreatedAt");
 

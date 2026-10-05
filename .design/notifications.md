@@ -90,8 +90,8 @@ Agreed with the maintainer on 2026-10-03:
   it, or its deployment pipeline being deleted; ticking the environment's check, assigning
   it to someone else (the new checker is told afresh), taking it off the upgrade, or
   marking the upgrade done or deleting it. Unticking a check, or reopening the upgrade,
-  does not bring the notice back. Digest items are not touched; a digest still lists what
-  happened.
+  does not bring the notice back. Digest items carry the same subject and are deleted
+  then, so a digest sent later does not ask for something already done.
 - `InAppNotificationService` names the signed-in user in every query on top of the
   organisation filter, and reads through the context factory because the count renders
   in the layout beside the page's own queries.

@@ -19,8 +19,8 @@ public static class NotificationSubject
     public static string UpgradeLine(int lineId) => $"upgrade-line:{lineId}";
 
     /// <summary>
-    /// Marks every recipient's unread notification about <paramref name="subjects"/> read
-    /// and returns how many changed. Runs through the caller's context, so it stays
+    /// Marks every recipient's unread notification about <paramref name="subjects"/> read,
+    /// drops those still held for a digest, and returns how many in-app ones changed. Runs through the caller's context, so it stays
     /// behind the organisation filter. Never throws, except
     /// when <paramref name="ct"/> itself is cancelled: the approval or check already
     /// happened, and a notification left unread must not report it as failed. Not for use
@@ -33,9 +33,14 @@ public static class NotificationSubject
         if (subjects.Count == 0) return 0;
         try
         {
-            return await db.UserNotifications
+            var marked = await db.UserNotifications
                 .Where(n => n.Subject != null && subjects.Contains(n.Subject) && n.ReadAt == null)
                 .ExecuteUpdateAsync(s => s.SetProperty(n => n.ReadAt, now), ct);
+            // A digest lists what happened, but not a request that no longer asks anything.
+            await db.NotificationDigestItems
+                .Where(i => i.Subject != null && subjects.Contains(i.Subject))
+                .ExecuteDeleteAsync(ct);
+            return marked;
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {

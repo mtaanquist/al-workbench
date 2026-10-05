@@ -168,6 +168,20 @@ public sealed class InAppNotificationServiceTests : IDisposable
         var sams = await AddAsync(sam, "Waiting for approval", Monday, subject: NotificationSubject.Delivery(4));
         var stillWaiting = await AddAsync(alex, "Waiting for approval", Monday, subject: NotificationSubject.Delivery(5));
         var tellsOnly = await AddAsync(alex, "Build failed", Monday);
+        await using (var ctx = _db.NewContext())
+        {
+            foreach (var (userId, subject) in new (int, string?)[]
+                     { (alex, NotificationSubject.Delivery(4)), (sam, NotificationSubject.Delivery(5)), (sam, null) })
+            {
+                ctx.NotificationDigestItems.Add(new NotificationDigestItem
+                {
+                    UserId = userId, OrganizationId = TestDb.DefaultOrgId, Category = NotificationCategory.Deployments,
+                    Delivery = NotificationDelivery.Daily, Title = subject ?? "Deployed", Url = "https://x.example/",
+                    Subject = subject, CreatedAt = Monday,
+                });
+            }
+            await ctx.SaveChangesAsync();
+        }
 
         await using (var ctx = _db.NewContext())
         {
@@ -182,6 +196,9 @@ public sealed class InAppNotificationServiceTests : IDisposable
         readAt[sams].Should().Be(Monday.AddHours(1));
         readAt[stillWaiting].Should().BeNull();
         readAt[tellsOnly].Should().BeNull();
+        (await read.NotificationDigestItems.AsNoTracking().Select(i => i.Title).ToListAsync())
+            .Should().BeEquivalentTo([NotificationSubject.Delivery(5), "Deployed"],
+                "a digest not yet sent drops the settled request and keeps the rest");
     }
 
     [Fact]

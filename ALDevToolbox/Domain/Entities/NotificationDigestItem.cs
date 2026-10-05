@@ -39,5 +39,12 @@ public class NotificationDigestItem
     /// <summary>The solution the item belongs to, for grouping in the digest. Null when it belongs to none.</summary>
     public string? SolutionName { get; set; }
 
+    /// <summary>
+    /// What the notification asks its recipient to do, as on
+    /// <see cref="UserNotification.Subject"/>. Once that is done the item is deleted, so a
+    /// digest sent later does not ask for something already settled. Null for one that only tells.
+    /// </summary>
+    public string? Subject { get; set; }
+
     public DateTime CreatedAt { get; set; }
 }
