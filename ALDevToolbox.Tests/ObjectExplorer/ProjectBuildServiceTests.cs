@@ -2,6 +2,7 @@ using System.Text;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using AwesomeAssertions;
 
 namespace ALDevToolbox.Tests.ObjectExplorer;
@@ -209,6 +210,43 @@ public sealed class ProjectBuildServiceTests
 
     private static readonly CloneCredential Linked = new("ghu_linked", CloneCredentialResolver.ConnectedAccountSource);
     private static readonly CloneCredential Pat = new("ghp_pasted", CloneCredentialResolver.BuildTokenSource);
+
+    [Fact]
+    public void DescribeNothingToBuild_keeps_the_no_extensions_message_when_every_repository_was_checked_out()
+    {
+        ProjectBuildService.DescribeNothingToBuild([])
+            .Should().StartWith("No buildable extensions were found.");
+    }
+
+    [Fact]
+    public void DescribeNothingToBuild_names_the_reason_once_when_every_repository_failed_the_same_way()
+    {
+        var reason = CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.GitHub) + " Then rebuild.";
+        var failures = new List<BuildAppResult>
+        {
+            new("cronus/core", string.Empty, ProjectBuildResultStatus.Failed, reason),
+            new("cronus/reports", string.Empty, ProjectBuildResultStatus.Failed, reason),
+        };
+
+        var message = ProjectBuildService.DescribeNothingToBuild(failures);
+
+        message.Should().Be("Nothing was built. " + reason)
+            .And.NotContain("No buildable extensions", "the repositories were never checked out, so whether they hold extensions is unknown");
+    }
+
+    [Fact]
+    public void DescribeNothingToBuild_names_each_repository_when_the_reasons_differ()
+    {
+        var failures = new List<BuildAppResult>
+        {
+            new("cronus/core", string.Empty, ProjectBuildResultStatus.Failed, "git clone failed: Repository not found."),
+            new("cronus/devops", string.Empty, ProjectBuildResultStatus.Failed, "You don't have a build token for Azure DevOps."),
+        };
+
+        ProjectBuildService.DescribeNothingToBuild(failures).Should().Be(
+            "Nothing was built. cronus/core: git clone failed: Repository not found. "
+            + "cronus/devops: You don't have a build token for Azure DevOps.");
+    }
 
     [Fact]
     public void DescribeCloneFailures_reads_as_git_error_for_a_single_attempt()

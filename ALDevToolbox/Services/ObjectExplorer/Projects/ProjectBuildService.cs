@@ -194,8 +194,7 @@ public sealed class ProjectBuildService
             }
             if (discovered.Count == 0)
             {
-                throw new InvalidOperationException(
-                    "No buildable extensions were found. Check the repositories contain an app.json outside test folders.");
+                throw new InvalidOperationException(DescribeNothingToBuild(results));
             }
 
             // 2b. Narrow to the extensions the user picked in the "New build"
@@ -1140,6 +1139,25 @@ public sealed class ProjectBuildService
             }
         }
         return (result, used, DescribeCloneFailures(attempts, credentials));
+    }
+
+    /// <summary>
+    /// The whole-build error when nothing was found to compile. The per-repository
+    /// reasons are the only record of why, and a thrown build keeps only this
+    /// message, so a repository that could not be checked out (no credential for
+    /// the person who started the build, a failed clone) is named here rather than
+    /// reported as a repository without extensions.
+    /// </summary>
+    internal static string DescribeNothingToBuild(IReadOnlyList<BuildAppResult> failures)
+    {
+        if (failures.Count == 0)
+        {
+            return "No buildable extensions were found. Check the repositories contain an app.json outside test folders.";
+        }
+        var reasons = failures.Select(f => f.Message).Distinct(StringComparer.Ordinal).ToList();
+        return reasons.Count == 1
+            ? $"Nothing was built. {reasons[0]}"
+            : "Nothing was built. " + string.Join(" ", failures.Select(f => $"{f.AppName}: {f.Message}"));
     }
 
     /// <summary>
