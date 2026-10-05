@@ -531,8 +531,12 @@ public sealed class EnvironmentUpgradeService
         }
         await EnsureCanManageAllAsync(upgrade.Lines, ct).ConfigureAwait(false);
 
+        var lineSubjects = upgrade.Lines.Select(l => NotificationSubject.UpgradeLine(l.Id)).ToList();
         _db.OeEnvironmentUpgrades.Remove(upgrade);
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        // Nothing is left to check, and the page the notices link to is gone.
+        await NotificationSubject.MarkDoneAsync(_db, lineSubjects, _clock.GetUtcNow().UtcDateTime, _logger, ct)
+            .ConfigureAwait(false);
 
         _logger.LogInformation(
             "User {UserId} deleted planned upgrade {UpgradeId} ({UpgradeName}, {LineCount} environments).",
@@ -661,9 +665,12 @@ public sealed class EnvironmentUpgradeService
                 "Something has already been done to this environment from this upgrade, so it stays on it.");
         }
 
+        var now = _clock.GetUtcNow().UtcDateTime;
         _db.OeEnvironmentUpgradeLines.Remove(line);
-        line.Upgrade!.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
+        line.Upgrade!.UpdatedAt = now;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
+            .ConfigureAwait(false);
 
         _logger.LogInformation(
             "User {UserId} took environment {EnvironmentId} off planned upgrade {UpgradeId}.",
@@ -681,13 +688,21 @@ public sealed class EnvironmentUpgradeService
         }
         var line = await LoadLineForWriteAsync(lineId, ct).ConfigureAwait(false);
 
+        var now = _clock.GetUtcNow().UtcDateTime;
+        if (line.AssigneeUserId != userId && line.CheckedAt is null)
+        {
+            // The previous checker is no longer asked. Before the save, so a sweep straight
+            // after it cannot have told the new one yet.
+            await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
+                .ConfigureAwait(false);
+        }
         if (userId is not null && line.AssigneeUserId != userId && line.CheckedAt is null)
         {
             // The new checker has not been told, so the next sweep tells them if it is ready.
             line.UpdatedNotifiedAt = null;
         }
         line.AssigneeUserId = userId;
-        line.Upgrade!.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
+        line.Upgrade!.UpdatedAt = now;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
 
         _logger.LogInformation(

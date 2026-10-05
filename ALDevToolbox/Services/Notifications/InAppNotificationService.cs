@@ -97,7 +97,9 @@ public sealed class InAppNotificationService
     /// Marks the signed-in person's unread notifications about <paramref name="path"/> read,
     /// as if they had opened them from the list: they are looking at the page each is about,
     /// most often having followed the link in its email. <paramref name="path"/> is the
-    /// page's path and query, compared exactly with the stored one. Returns how many
+    /// page's path and query, compared exactly with the stored one. One that asks for
+    /// something (<see cref="NotificationSubject"/>) is left alone: several share a page, and
+    /// looking at it is not doing it, so it stays unread until it is done. Returns how many
     /// changed; 0 when nobody is signed in.
     /// </summary>
     public async Task<int> MarkPageReadForCurrentUserAsync(string path, CancellationToken ct = default)
@@ -106,7 +108,7 @@ public sealed class InAppNotificationService
         var now = _clock.GetUtcNow().UtcDateTime;
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
         return await db.UserNotifications
-            .Where(n => n.UserId == userId && n.ReadAt == null && n.Path == path)
+            .Where(n => n.UserId == userId && n.ReadAt == null && n.Subject == null && n.Path == path)
             .ExecuteUpdateAsync(s => s.SetProperty(n => n.ReadAt, now), ct);
     }
 

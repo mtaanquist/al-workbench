@@ -434,6 +434,33 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         (await verify.UserNotifications.AsNoTracking().SingleAsync()).ReadAt.Should().NotBeNull();
     }
 
+    [Theory]
+    [InlineData("reassign")]
+    [InlineData("take off")]
+    [InlineData("delete")]
+    public async Task A_line_nobody_is_asked_to_check_any_more_marks_its_notice_read(string how)
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await NotifyReadyAsync();
+        var lineId = await ReadyNoticeLineAsync(upgradeId);
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var upgrades = _f.Upgrades(ctx);
+            await (how switch
+            {
+                "reassign" => upgrades.AssignAsync(lineId, UpgradeActionTestFixture.PlainTeamUserId),
+                "take off" => upgrades.RemoveLineAsync(lineId),
+                _ => upgrades.DeleteAsync(upgradeId),
+            });
+        }
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.UserNotifications.AsNoTracking().SingleAsync()).ReadAt.Should().NotBeNull();
+    }
+
     /// <summary>The one line's id, after checking its unread notice names it.</summary>
     private async Task<int> ReadyNoticeLineAsync(int upgradeId)
     {

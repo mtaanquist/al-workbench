@@ -1364,6 +1364,7 @@ public sealed class DeliveryServiceTests : IDisposable
     [InlineData("approve")]
     [InlineData("dismiss")]
     [InlineData("replace")]
+    [InlineData("delete the pipeline")]
     public async Task Settling_a_prepared_deployment_marks_everyones_approval_request_read(string how)
     {
         await using var ctx = _db.NewContext();
@@ -1387,6 +1388,13 @@ public sealed class DeliveryServiceTests : IDisposable
                 break;
             case "dismiss":
                 await NewService(_db.NewContext()).DismissProposalAsync(id, null);
+                break;
+            case "delete the pipeline":
+                await using (var del = _db.NewContext())
+                {
+                    await new ReleasePipelineService(del, _db.OrgContext, new ProjectAccess(del, _db.OrgContext),
+                        NullLogger<ReleasePipelineService>.Instance).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+                }
                 break;
             default:
                 var newer = await SeedBuildAsync(ctx, seed.ProjectId, seed.BuildPipelineId, ProjectBuildStatus.Ready, new[] { "CRONUS Core" });

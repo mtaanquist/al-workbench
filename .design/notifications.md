@@ -81,13 +81,16 @@ Agreed with the maintainer on 2026-10-03:
 - A notification also counts as opened when the person is on the page it is about, most
   often having followed the link in its email: the bell, which renders on every page,
   marks their unread ones whose stored path matches the page's path and query exactly.
-  It only writes when something is unread.
+  It only writes when something is unread. Requests (below) are left alone: several share
+  a page, and looking at it is not doing it.
 - A notification that asks for something (a deployment waiting for approval, an
   environment ready to check) carries a `subject` naming it (`delivery:12`,
   `upgrade-line:34`). Once that is done, by anyone and by any route, every recipient's
-  copy is marked read: approving or dismissing the deployment, or a newer build replacing
-  it; ticking the environment's check, or marking the upgrade done. Unticking a check does
-  not bring the notice back. Digest items are not touched; a digest still lists what
+  copy is marked read: approving or dismissing the deployment, a newer build replacing
+  it, or its deployment pipeline being deleted; ticking the environment's check, assigning
+  it to someone else (the new checker is told afresh), taking it off the upgrade, or
+  marking the upgrade done or deleting it. Unticking a check, or reopening the upgrade,
+  does not bring the notice back. Digest items are not touched; a digest still lists what
   happened.
 - `InAppNotificationService` names the signed-in user in every query on top of the
   organisation filter, and reads through the context factory because the count renders

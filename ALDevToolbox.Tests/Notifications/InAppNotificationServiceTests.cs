@@ -138,6 +138,17 @@ public sealed class InAppNotificationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Visiting_the_page_leaves_a_request_unread_until_it_is_done()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        await AddAsync(alex, "Waiting for approval", Monday, subject: NotificationSubject.Delivery(4));
+        _db.OrgContext.CurrentUserId = alex;
+
+        (await Service().MarkPageReadForCurrentUserAsync("/pipelines/1?build=7")).Should().Be(0);
+        (await Service().CountUnreadForCurrentUserAsync()).Should().Be(1);
+    }
+
+    [Fact]
     public async Task Visiting_a_page_signed_out_changes_nothing()
     {
         var alex = await SeedUserAsync("alex@cronus.example");

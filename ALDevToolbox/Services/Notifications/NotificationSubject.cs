@@ -20,10 +20,12 @@ public static class NotificationSubject
 
     /// <summary>
     /// Marks every recipient's unread notification about <paramref name="subjects"/> read
-    /// and returns how many changed. Called after the work itself is saved, through the
-    /// caller's context, so it stays behind the organisation filter. Never throws, except
+    /// and returns how many changed. Runs through the caller's context, so it stays
+    /// behind the organisation filter. Never throws, except
     /// when <paramref name="ct"/> itself is cancelled: the approval or check already
-    /// happened, and a notification left unread must not report it as failed.
+    /// happened, and a notification left unread must not report it as failed. Not for use
+    /// inside an open transaction: a failed statement there aborts the transaction even
+    /// though the error is caught here.
     /// </summary>
     public static async Task<int> MarkDoneAsync(
         AppDbContext db, IReadOnlyCollection<string> subjects, DateTime now, ILogger logger, CancellationToken ct)
