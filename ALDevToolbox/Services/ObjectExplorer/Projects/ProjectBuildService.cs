@@ -1154,10 +1154,13 @@ public sealed class ProjectBuildService
         {
             return "No buildable extensions were found. Check the repositories contain an app.json outside test folders.";
         }
-        var reasons = failures.Select(f => f.Message).Distinct(StringComparer.Ordinal).ToList();
-        return reasons.Count == 1
+        // git's own error can run over several lines; this becomes a headline, a
+        // notification's first line and a check-run summary, so keep it on one.
+        static string OneLine(string? text) => Regex.Replace(text ?? string.Empty, @"\s+", " ").Trim();
+        var reasons = failures.Select(f => OneLine(f.Message)).Distinct(StringComparer.Ordinal).ToList();
+        return failures.Count > 1 && reasons.Count == 1
             ? $"Nothing was built. {reasons[0]}"
-            : "Nothing was built. " + string.Join(" ", failures.Select(f => $"{f.AppName}: {f.Message}"));
+            : "Nothing was built. " + string.Join(" ", failures.Select(f => $"{f.AppName}: {OneLine(f.Message)}"));
     }
 
     /// <summary>

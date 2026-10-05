@@ -1,8 +1,8 @@
 using System.Text;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
-using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using AwesomeAssertions;
 
 namespace ALDevToolbox.Tests.ObjectExplorer;
@@ -232,6 +232,21 @@ public sealed class ProjectBuildServiceTests
 
         message.Should().Be("Nothing was built. " + reason)
             .And.NotContain("No buildable extensions", "the repositories were never checked out, so whether they hold extensions is unknown");
+    }
+
+    [Fact]
+    public void DescribeNothingToBuild_names_the_folder_or_repository_of_a_single_failure_on_one_line()
+    {
+        var failures = new List<BuildAppResult>
+        {
+            new("Core App", string.Empty, ProjectBuildResultStatus.Failed, "Could not read app.json in this folder."),
+        };
+
+        ProjectBuildService.DescribeNothingToBuild(failures)
+            .Should().Be("Nothing was built. Core App: Could not read app.json in this folder.");
+        ProjectBuildService.DescribeNothingToBuild(
+            [new("cronus/core", string.Empty, ProjectBuildResultStatus.Failed, "git clone failed: fatal: one\nfatal: two")])
+            .Should().Be("Nothing was built. cronus/core: git clone failed: fatal: one fatal: two");
     }
 
     [Fact]
