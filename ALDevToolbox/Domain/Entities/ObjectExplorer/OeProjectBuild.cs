@@ -63,6 +63,15 @@ public class OeProjectBuild
     public string? Branch { get; set; }
 
     /// <summary>
+    /// The branch the repositories were actually on when <see cref="Branch"/> is null,
+    /// read from each clone, so a build of the default branch can still say which one
+    /// that was. Several names, comma-separated, when repositories differ. Null for a
+    /// pull-request build, a build that named its branch, and builds made before this
+    /// was recorded. Display only: the deployment branch rule reads <see cref="Branch"/>.
+    /// </summary>
+    public string? DefaultBranch { get; set; }
+
+    /// <summary>
     /// What asked for this build: <c>manual</c> (a person pressed Build) or
     /// <c>pull_request</c> (GitHub told us a pull request moved). See
     /// <see cref="ProjectBuildTrigger"/>. Existing rows are <c>manual</c>, which

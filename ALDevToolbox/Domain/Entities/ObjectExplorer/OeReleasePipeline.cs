@@ -34,8 +34,17 @@ public class OeReleasePipeline
     public int? CreatedByUserId { get; set; }
     public User? CreatedByUser { get; set; }
 
-    /// <summary>Display name, unique per project among active rows (e.g. <c>Contoso App → Production</c>).</summary>
+    /// <summary>
+    /// Display name, unique per project among active rows. Generated from the
+    /// pipeline's setup by <c>PipelineNames</c> (e.g. <c>main to Production</c>) unless
+    /// <see cref="NameIsCustom"/>.
+    /// </summary>
     public string Name { get; set; } = string.Empty;
+    /// <summary>
+    /// True when a person typed the name because the generated one was already taken
+    /// in the solution. Such a name is kept on later saves until they clear it.
+    /// </summary>
+    public bool NameIsCustom { get; set; }
 
     /// <summary>
     /// Where the artifacts come from: <see cref="ReleaseArtifactSource.Build"/> (this

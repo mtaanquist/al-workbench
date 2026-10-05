@@ -100,10 +100,15 @@ public sealed class ProjectDetailBcTests : IDisposable
 
         var cut = _ctx.Render<ProjectDetailBc>(p => p.Add(c => c.Id, id));
 
-        cut.WaitForAssertion(() => cut.FindAll("input[name=bc-reg]").Should().HaveCount(2));
-        cut.FindAll("#bc-tenant").Should().HaveCount(1);
-        cut.FindAll("#bc-client, #bc-secret, #bc-expiry").Should().BeEmpty();
-        cut.Markup.Should().Contain(OrgClientId, "it is what the customer has to authorise in their admin centre");
+        // All inside one wait: the choice can render a moment before the page settles on
+        // the organisation's registration, and on a slow machine the fields are still there.
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("input[name=bc-reg]").Should().HaveCount(2);
+            cut.FindAll("#bc-tenant").Should().HaveCount(1);
+            cut.FindAll("#bc-client, #bc-secret, #bc-expiry").Should().BeEmpty();
+            cut.Markup.Should().Contain(OrgClientId, "it is what the customer has to authorise in their admin centre");
+        });
     }
 
     [Fact]

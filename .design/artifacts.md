@@ -50,6 +50,32 @@ project-wide). The earlier per-*build* extension picker is superseded by this pe
 selection. The delivery target — publishing a build to a BC environment via the Admin Center API —
 has since shipped; see `saas-delivery.md`. Details inline below.
 
+## Pipeline names
+
+People named pipelines freely and every solution ended up reading differently, so since 2026-10 a
+pipeline's name is generated from its setup (`PipelineNames`) and is not edited. The name holds only
+what tells two pipelines in one solution apart; settings that can be switched on and off (preview
+check, version numbering, schedule, approval, branch rule) stay out, so changing one never renames
+anything. The solution is not in the name either: every surface that shows a pipeline name, emails
+included, shows the solution beside it.
+
+- **Build pipeline:** `{branch}`, or `Default branch` when none is set, plus the extensions in
+  brackets when it builds only some: the extension's name when it is one, otherwise how many.
+  `main`, `release/25.0 (CRONUS Sales)`, `main (3 extensions)`.
+- **Deployment pipeline:** `{source} to {environment}`, where the source is the build pipeline's name
+  or `{repository} releases`. `main to Production`, `cronus-apps releases to UAT`. The environment's
+  type is not added, since environment names usually carry it; lists show it beside the name.
+
+Names stay unique per solution. Two pipelines set up the same way are expected to be rare, so a clash
+is refused with a message and the editor then offers a name field; a typed name is stored with
+`name_is_custom` and kept on later saves until it is cleared. Renaming a build pipeline renames the
+deployment pipelines named after it, except typed ones and any whose new name is taken. Nothing else renames a pipeline on its own: an environment, repository or extension renamed
+elsewhere shows in the name the next time the pipeline is saved. When a deployment pipeline's name is
+too long, the source is shortened so the environment stays. Migration
+`GeneratePipelineNames` renamed every existing active pipeline the same way; one whose generated name
+was already taken kept its old name, marked as typed. That rename runs in SQL, outside the audit log,
+so the old names are not kept.
+
 ## Why
 
 The compile-from-source pipeline shipped inside the Object Explorer admin surface: a single

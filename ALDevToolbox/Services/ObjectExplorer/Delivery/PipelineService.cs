@@ -2,6 +2,7 @@ using System.Text.Json;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using Microsoft.EntityFrameworkCore;
 
@@ -86,7 +87,7 @@ public sealed class PipelineService
     public async Task<int> CreatePipelineAsync(PipelineInput input, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var (name, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input, existingId: null, ct);
+        var (name, nameIsCustom, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input, existingId: null, ct);
 
         var now = DateTime.UtcNow;
         var pipeline = new OePipeline
@@ -95,6 +96,7 @@ public sealed class PipelineService
             ProjectId = input.ProjectId,
             CreatedByUserId = _orgContext.CurrentUserId,
             Name = name,
+            NameIsCustom = nameIsCustom,
             RequestedAppIdsJson = selectionJson,
             GithubReleaseRepositoryId = releaseRepositoryId,
             Branch = branch,
@@ -113,10 +115,11 @@ public sealed class PipelineService
     }
 
     /// <summary>
-    /// Updates a pipeline's name, extension selection, publishing target, branch and
-    /// nightly preview check. Turning the check on makes the caller the person it runs
-    /// as; so does saving while it is paused (its person gone or refused), which is
-    /// how someone with access takes it over.
+    /// Updates a pipeline's extension selection, publishing target, branch and nightly
+    /// preview check, and the name that follows from them. Turning the check on makes
+    /// the caller the person it runs as; so does saving while it is paused (its person
+    /// gone or refused), which is how someone with access takes it over. A new name
+    /// carries through to the deployment pipelines named after this one.
     /// </summary>
     public async Task UpdatePipelineAsync(int id, PipelineInput input, CancellationToken ct = default)
     {
@@ -127,9 +130,11 @@ public sealed class PipelineService
 
         // Validate against the pipeline's own project (input.ProjectId is ignored on
         // update — a pipeline can't move between projects).
-        var (name, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
+        var (name, nameIsCustom, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
 
+        var oldName = pipeline.Name;
         pipeline.Name = name;
+        pipeline.NameIsCustom = nameIsCustom;
         pipeline.RequestedAppIdsJson = selectionJson;
         pipeline.GithubReleaseRepositoryId = releaseRepositoryId;
         pipeline.Branch = branch;
@@ -146,6 +151,10 @@ public sealed class PipelineService
         pipeline.PreviewCheck = input.PreviewCheck;
         pipeline.AutoVersion = input.AutoVersion;
         pipeline.UpdatedAt = DateTime.UtcNow;
+        if (!string.Equals(oldName, name, StringComparison.Ordinal))
+        {
+            await RenameDeploymentPipelinesAsync(pipeline, ct);
+        }
         await SaveTranslatingNameClashAsync(ct);
         _logger.LogInformation("Updated pipeline {PipelineId} ({Name}).", pipeline.Id, name);
     }
@@ -197,11 +206,12 @@ public sealed class PipelineService
 
     /// <summary>
     /// Validates the input against its project (which must exist and be manageable)
-    /// and the per-project name uniqueness rule. Returns the normalised name and the
-    /// selection serialised to JSON (null = build everything). Throws
-    /// <see cref="PlanValidationException"/> with field-keyed errors otherwise.
+    /// and the per-project name uniqueness rule. Returns the name (generated from the
+    /// branch and selection, unless the person typed one) and the selection serialised
+    /// to JSON (null = build everything). Throws <see cref="PlanValidationException"/>
+    /// with field-keyed errors otherwise.
     /// </summary>
-    private async Task<(string Name, string? SelectionJson, int? GithubReleaseRepositoryId, string? Branch)> ValidateAsync(
+    private async Task<(string Name, bool NameIsCustom, string? SelectionJson, int? GithubReleaseRepositoryId, string? Branch)> ValidateAsync(
         PipelineInput input, int? existingId, CancellationToken ct)
     {
         var errors = new Dictionary<string, string>();
@@ -209,37 +219,13 @@ public sealed class PipelineService
         // The parent project must exist in this org and be manageable by the user.
         var owner = await _db.OeProjects.AsNoTracking()
             .Where(c => c.Id == input.ProjectId && c.DeletedAt == null)
-            .Select(c => new { c.CreatedByUserId })
+            .Select(c => new { c.CreatedByUserId, c.DiscoveredExtensionsJson })
             .FirstOrDefaultAsync(ct);
         if (owner is null)
         {
             throw Validation("Project", "Choose a project for this pipeline.");
         }
         await _access.EnsureCanManageAsync(input.ProjectId, owner.CreatedByUserId, ct);
-
-        var name = (input.Name ?? string.Empty).Trim();
-        if (name.Length == 0)
-        {
-            errors["Name"] = "Give the pipeline a name.";
-        }
-        else if (name.Length > 200)
-        {
-            errors["Name"] = "Keep the name under 200 characters.";
-        }
-        else
-        {
-            // Per-project name uniqueness among active rows (the DB enforces it via a
-            // case-insensitive lower(name) index too); pre-check for a friendly error.
-            var clash = await _db.OePipelines.AsNoTracking()
-                .AnyAsync(p => p.DeletedAt == null
-                               && p.ProjectId == input.ProjectId
-                               && p.Id != (existingId ?? 0)
-                               && p.Name.ToLower() == name.ToLower(), ct);
-            if (clash)
-            {
-                errors["Name"] = "Another pipeline in this project already uses this name.";
-            }
-        }
 
         // Publishing target: a repository of this very project, so a pipeline can
         // never be pointed at another customer's repository by editing a form value.
@@ -270,13 +256,98 @@ public sealed class PipelineService
             errors["Branch"] = "That isn't a valid branch name. Type it exactly as GitHub shows it, e.g. main or release/25.0 - no spaces or '..'.";
         }
 
+        // The name follows from the branch and the selection. A typed name is only
+        // needed when that one is taken; typing the generated name is not a custom one.
+        var generated = PipelineNames.ForBuildPipeline(
+            branch, input.SelectedAppIds, ExtensionNames(owner.DiscoveredExtensionsJson));
+        var custom = string.IsNullOrWhiteSpace(input.CustomName) ? null : input.CustomName.Trim();
+        if (custom is not null && string.Equals(custom, generated, StringComparison.Ordinal)) custom = null;
+        var name = custom ?? generated;
+        if (name.Length > PipelineNames.MaxLength)
+        {
+            errors["Name"] = "Keep the name under 200 characters.";
+        }
+        else if (!errors.ContainsKey("Branch"))
+        {
+            // Per-project name uniqueness among active rows (the DB enforces it via a
+            // case-insensitive lower(name) index too); pre-check for a friendly error.
+            var clash = await _db.OePipelines.AsNoTracking()
+                .AnyAsync(p => p.DeletedAt == null
+                               && p.ProjectId == input.ProjectId
+                               && p.Id != (existingId ?? 0)
+                               && p.Name.ToLower() == name.ToLower(), ct);
+            if (clash) errors["Name"] = NameTakenMessage(name);
+        }
+
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
         // null/empty selection = build everything (the default), stored as a null column.
         var selectionJson = input.SelectedAppIds is { Count: > 0 }
             ? JsonSerializer.Serialize(input.SelectedAppIds)
             : null;
-        return (name, selectionJson, releaseRepositoryId, branch);
+        return (name, custom is not null, selectionJson, releaseRepositoryId, branch);
+    }
+
+    /// <summary>
+    /// The extension names a build pipeline's name can use, by normalised app id, from
+    /// the solution's discovered-extensions cache. Empty when nothing is discovered yet,
+    /// in which case a one-extension pipeline is called "1 extension".
+    /// </summary>
+    internal static Dictionary<string, string> ExtensionNames(string? discoveredExtensionsJson)
+    {
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(discoveredExtensionsJson)) return names;
+        try
+        {
+            foreach (var extension in JsonSerializer.Deserialize<List<DiscoveredExtension>>(discoveredExtensionsJson) ?? [])
+            {
+                names.TryAdd(ProjectBuildService.NormalizeAppId(extension.AppId), extension.Name);
+            }
+        }
+        catch (JsonException)
+        {
+            // A cache we can't read only costs the extension's name in the pipeline's.
+        }
+        return names;
+    }
+
+    /// <summary>
+    /// Gives the deployment pipelines named after this build pipeline its new name.
+    /// One a person named themselves keeps its name, and so does one whose new name
+    /// another deployment pipeline already has: it is left for the next save of it to
+    /// sort out, rather than failing this one.
+    /// </summary>
+    private async Task RenameDeploymentPipelinesAsync(OePipeline buildPipeline, CancellationToken ct)
+    {
+        var siblings = await _db.OeReleasePipelines
+            .Where(r => r.ProjectId == buildPipeline.ProjectId && r.DeletedAt == null)
+            .Include(r => r.ProjectEnvironment)
+            .ToListAsync(ct);
+        var taken = siblings.Select(r => r.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var deployment in siblings)
+        {
+            if (deployment.BuildPipelineId != buildPipeline.Id
+                || deployment.ArtifactSource != ReleaseArtifactSource.Build
+                || deployment.NameIsCustom
+                || deployment.ProjectEnvironment is null)
+            {
+                continue;
+            }
+            var renamed = PipelineNames.ForDeploymentFromBuild(buildPipeline.Name, deployment.ProjectEnvironment.Name);
+            if (string.Equals(renamed, deployment.Name, StringComparison.Ordinal)) continue;
+            if (!string.Equals(renamed, deployment.Name, StringComparison.OrdinalIgnoreCase) && taken.Contains(renamed))
+            {
+                _logger.LogWarning(
+                    "Deployment pipeline {ReleasePipelineId} keeps its name {Name}: {NewName} is taken in project {ProjectId}.",
+                    deployment.Id, deployment.Name, renamed, deployment.ProjectId);
+                continue;
+            }
+            // The old name stays in the set on purpose: freeing it for a sibling would make
+            // this save depend on the order EF writes the rows against the unique index.
+            taken.Add(renamed);
+            deployment.Name = renamed;
+            deployment.UpdatedAt = buildPipeline.UpdatedAt;
+        }
     }
 
     /// <summary>
@@ -307,18 +378,26 @@ public sealed class PipelineService
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {
-            throw Validation("Name", "Another pipeline in this project already uses this name.");
+            throw Validation("Name", "Another pipeline in this solution already has this name. Type a different name for this one.");
         }
     }
+
+    /// <summary>The clash message; the dialog shows a name field when it sees it.</summary>
+    internal static string NameTakenMessage(string name) =>
+        $"Another pipeline in this solution is already called '{name}'. Type a different name for this one.";
 
     private static PlanValidationException Validation(string field, string message) =>
         new(new Dictionary<string, string> { [field] = message });
 }
 
-/// <summary>Form-post shape for a pipeline: its project, name, and the extensions it compiles (null/empty = all).</summary>
+/// <summary>Form-post shape for a pipeline: its project, the extensions it compiles (null/empty = all), and its settings.</summary>
 public sealed record PipelineInput(
     int ProjectId,
-    string Name,
+    /// <summary>
+    /// A name the person typed, for when the generated one is already taken in the
+    /// solution. Null or blank means the generated name (<see cref="PipelineNames"/>).
+    /// </summary>
+    string? CustomName,
     IReadOnlyList<string>? SelectedAppIds,
     /// <summary>
     /// The solution repository each successful build is published to as a GitHub

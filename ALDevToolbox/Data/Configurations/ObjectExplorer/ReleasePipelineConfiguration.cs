@@ -15,6 +15,7 @@ internal sealed class ReleasePipelineConfiguration : IEntityTypeConfiguration<Oe
         entity.Property(e => e.ProjectId).HasColumnName("project_id").IsRequired();
         entity.Property(e => e.CreatedByUserId).HasColumnName("created_by_user_id");
         entity.Property(e => e.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
+        entity.Property(e => e.NameIsCustom).HasColumnName("name_is_custom").IsRequired();
         entity.Property(e => e.ArtifactSource).HasColumnName("artifact_source").HasMaxLength(30).IsRequired();
         entity.Property(e => e.BuildPipelineId).HasColumnName("build_pipeline_id");
         entity.Property(e => e.GithubReleaseRepositoryId).HasColumnName("github_release_repository_id");

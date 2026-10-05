@@ -234,10 +234,8 @@
                                             <Icon Name="git-commit-vertical" Width="11" Height="11" />@b.CommitShort
                                         </span>
                                     }
-                                    @if (!string.IsNullOrEmpty(b.Branch))
-                                    {
-                                        <span class="pl-branch"><Icon Name="git-branch" Width="12" Height="12" />@b.Branch</span>
-                                    }
+                                    @* A build of the default branch shows which branch that was. *@
+                                    <span class="pl-branch"><Icon Name="git-branch" Width="12" Height="12" />@b.ShownBranch</span>
                                     <span class="u-muted">@(string.IsNullOrEmpty(b.BcVersion) ? "BC —" : $"BC {b.BcVersion}")</span>
                                 </span>
                             }

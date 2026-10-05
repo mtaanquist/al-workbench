@@ -58,10 +58,10 @@ surface bound to `companies({id})`, and it was dropped when publishing moved.
 1. **One-time per customer (Project):** enter the BC connection — tenant id, the customer's Entra app
    (client id + secret + expiry), timezone — and **Test connection**, which fetches the environments
    (flagging a missing GDAP). Owner/Admin only.
-2. **One-time per target (Deployment pipeline):** create a deployment pipeline — name it (e.g.
-   `Contoso → Production`), choose the **source Build pipeline**, the **target environment**, version
+2. **One-time per target (Deployment pipeline):** create a deployment pipeline — choose the **source Build pipeline**, the **target environment**, version
    mode, sync mode, and a default publish time. (Can be created inline the first time you deploy to a
-   new environment.)
+   new environment.) Its name is generated, e.g. `main to Production`; see `artifacts.md`, "Pipeline
+   names".
 3. **Build:** from the Build pipeline, trigger a build — it clones latest `HEAD`, so "from a new
    commit" just means running it again. Clone → compile → ingest, tracked live as today.
 4. **Deploy:** once a build is **successful**, "Deploy" (on the deployment pipeline) or "Deploy to…"
