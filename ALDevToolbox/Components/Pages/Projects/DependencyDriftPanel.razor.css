@@ -2,10 +2,15 @@
    design system - .card, .btn, .alert - so what is local is the row geometry and
    the small type of the change list, neither of which those carry. */
 
+/* The padding is the panel's own, as on the untracked-repositories panel above it:
+   .card is only a shell, and its usual padding comes from .card__head and
+   .card__body, which this flat panel does not use. Without it the heading and the
+   buttons sat flush against the border. */
 .drift {
     display: grid;
     gap: var(--space-3);
     margin-bottom: var(--space-4);
+    padding: var(--space-4);
 }
 
 .drift__head {
