@@ -202,7 +202,7 @@ public sealed class GitHubReleaseService
         GitHubReleasePublishResult result;
         try
         {
-            result = await TryPublishAsync(projectBuildId, build.RepositoryProvider, build.RepositoryUrl, ct);
+            result = await TryPublishAsync(projectBuildId, build.RepositoryId.Value, build.RepositoryProvider, build.RepositoryUrl, ct);
         }
         catch (GitHubApiException ex)
         {
@@ -228,7 +228,7 @@ public sealed class GitHubReleaseService
     }
 
     private async Task<GitHubReleasePublishResult> TryPublishAsync(
-        int projectBuildId, RepositoryProvider? provider, string repositoryUrl, CancellationToken ct)
+        int projectBuildId, int repositoryId, RepositoryProvider? provider, string repositoryUrl, CancellationToken ct)
     {
         if (provider != RepositoryProvider.GitHub || !TryParseRepository(repositoryUrl, out var owner, out var name))
         {
@@ -264,7 +264,12 @@ public sealed class GitHubReleaseService
         GitHubRelease release;
         if (existing is null)
         {
-            release = await _github.CreateReleaseAsync(token, owner, name, tag, tag, body, ct);
+            // The tag goes on the commit this build compiled from that repository.
+            var builtCommit = await _db.OeProjectBuildRepoCommits.AsNoTracking()
+                .Where(c => c.ProjectBuildId == projectBuildId && c.ProjectRepositoryId == repositoryId)
+                .Select(c => c.CommitHash)
+                .FirstOrDefaultAsync(ct);
+            release = await _github.CreateReleaseAsync(token, owner, name, tag, tag, body, builtCommit, ct);
         }
         else
         {

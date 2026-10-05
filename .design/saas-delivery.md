@@ -383,8 +383,8 @@ anything higher than what it has, so a "test" pattern in a version would not sto
   what gets refused.
 - **Older than installed.** Separately, `ResolveReleaseAsync` refuses an app whose version is lower
   than the environment's mirrored app list says is installed (Business Central never replaces an app
-  with an older version), and the run checks the live list again before each upload and fails the
-  app with the same sentence. Versions are compared part by part as numbers.
+  with an older version), and the run checks every app against the live list once more before its
+  first upload, so a refusal never leaves a build half installed. Versions are compared part by part as numbers.
 
 ### 4. Delivery = one run of a deployment pipeline (the analogue of `OeProjectBuild`)
 

@@ -222,7 +222,9 @@ public sealed class ProjectBuildService
             // 2c. Number the apps: the build's number goes into the third part of each
             //     version, in this build's own copy of the repository only. Before the
             //     compile so the .app, its file name and every record of it agree.
-            if (build is not null && await NumbersAppsAsync(build, options, ct).ConfigureAwait(false))
+            if (build is not null
+                && MayNumberApps(build.PipelineId, build.Trigger, options.Target)
+                && await PipelineNumbersAppsAsync(_db, build.PipelineId!.Value, ct).ConfigureAwait(false))
             {
                 discovered = StampBuildNumber(discovered, build.Id, logs);
             }
@@ -414,21 +416,20 @@ public sealed class ProjectBuildService
     // ── Build numbers in app versions ───────────────────────────────────
 
     /// <summary>
-    /// Whether this build adds its number to its apps' versions: a pipeline build against
-    /// the current Business Central version, on a pipeline that has numbering on. A
-    /// pull-request check and a preview check are never deployed or published, so they
-    /// compile the manifests as they are. See <see cref="BuildVersionStamp"/>.
+    /// Whether the pipeline has numbering on. Read at build time, so a build queued
+    /// before the setting changed follows it. See <see cref="BuildVersionStamp"/>.
     /// </summary>
-    private async Task<bool> NumbersAppsAsync(OeProjectBuild build, ProjectBuildOptions options, CancellationToken ct)
-    {
-        if (!MayNumberApps(build.PipelineId, build.Trigger, options.Target)) return false;
-        return await _db.OePipelines.AsNoTracking()
-            .Where(p => p.Id == build.PipelineId)
+    internal static async Task<bool> PipelineNumbersAppsAsync(AppDbContext db, int pipelineId, CancellationToken ct) =>
+        await db.OePipelines.AsNoTracking()
+            .Where(p => p.Id == pipelineId)
             .Select(p => p.AutoVersion)
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-    }
 
-    /// <summary>The kinds of build that can number their apps: a pipeline's own build against the current version.</summary>
+    /// <summary>
+    /// The kinds of build that can number their apps: a pipeline's own build against the
+    /// current version. A pull-request check and a preview check are never deployed or
+    /// published, so they compile the manifests as they are.
+    /// </summary>
     internal static bool MayNumberApps(int? pipelineId, string trigger, BcBuildTarget target) =>
         pipelineId is not null && trigger != ProjectBuildTrigger.PullRequest && target == BcBuildTarget.Current;
 
@@ -476,7 +477,7 @@ public sealed class ProjectBuildService
         try
         {
             var path = Path.GetFullPath(Path.Combine(app.ProjectDir, "app.json"));
-            var root = Path.GetFullPath(app.Repo.Dir) + Path.DirectorySeparatorChar;
+            var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(app.Repo.Dir)) + Path.DirectorySeparatorChar;
             if (!path.StartsWith(root, StringComparison.Ordinal)) return false;
             // Every folder between the clone and the file as well, since a linked folder
             // would carry the write out of the clone just the same.
@@ -492,7 +493,10 @@ public sealed class ProjectBuildService
             File.WriteAllText(path, rewritten);
             return true;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        // ArgumentException and JsonException: a manifest the whole-document fallback
+        // can't hold (duplicate keys, say) keeps its version rather than failing the build.
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException
+                                       or ArgumentException or JsonException)
         {
             return false;
         }

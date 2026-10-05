@@ -4,6 +4,7 @@ using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -151,12 +152,15 @@ public sealed class PipelineServiceTests : IDisposable
         await using (var read = _db.NewContext())
         {
             (await read.OePipelines.SingleAsync(p => p.Id == id)).AutoVersion.Should().BeTrue();
+            (await ProjectBuildService.PipelineNumbersAppsAsync(read, id, CancellationToken.None)).Should().BeTrue();
         }
 
         await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production", null, AutoVersion: false));
         await using (var read = _db.NewContext())
         {
             (await read.OePipelines.SingleAsync(p => p.Id == id)).AutoVersion.Should().BeFalse();
+            // What the build reads when it decides whether to number its apps.
+            (await ProjectBuildService.PipelineNumbersAppsAsync(read, id, CancellationToken.None)).Should().BeFalse();
         }
     }
 

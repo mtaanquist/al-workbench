@@ -123,6 +123,27 @@ public sealed class BuildVersionStampTests
         logs.Single().Content.Should().Contain("Linked: kept 1.0.0.0, because its app.json couldn't be updated.");
     }
 
+    [Fact]
+    public void An_app_json_inside_a_linked_folder_is_not_written_either()
+    {
+        using var temp = new TempDir();
+        var outside = Path.Combine(temp.Path, "outside");
+        var json = $$"""{ "id": "{{Guid.NewGuid()}}", "name": "Linked", "publisher": "CRONUS", "version": "1.0.0.0" }""";
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(Path.Combine(outside, "app.json"), json);
+        var clone = Path.Combine(temp.Path, "clone");
+        Directory.CreateDirectory(clone);
+        var linked = Path.Combine(clone, "App");
+        Directory.CreateSymbolicLink(linked, outside);
+        var app = new DiscoveredApp(linked, ProjectBuildService.ParseManifest(json)!,
+            new ClonedRepo(clone, "https://example.test/repo", null, null));
+
+        var stamped = ProjectBuildService.StampBuildNumber([app], 12, []);
+
+        stamped.Single().Manifest.Version.Should().Be("1.0.0.0");
+        File.ReadAllText(Path.Combine(outside, "app.json")).Should().Be(json);
+    }
+
     private static DiscoveredApp WriteApp(string root, string name, string version)
     {
         var dir = Path.Combine(root, name);

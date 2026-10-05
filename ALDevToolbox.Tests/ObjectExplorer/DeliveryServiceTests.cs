@@ -796,23 +796,24 @@ public sealed class DeliveryServiceTests : IDisposable
     {
         await using var ctx = _db.NewContext();
         var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales" });
-        var coreId = Guid.NewGuid();
-        await ctx.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == seed.BuildId && a.AppName == "CRONUS Core")
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.AppId, coreId.ToString()));
+        var salesId = Guid.NewGuid();
+        await ctx.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == seed.BuildId && a.AppName == "CRONUS Sales")
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.AppId, salesId.ToString()));
         var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
-        // Installed since the deployment was made: Business Central would refuse 1.0.0.0.
-        _apps.Installed.Add(InstalledApp("CRONUS Core") with { AppId = coreId, Version = "1.0.5.0" });
+        // Installed since the deployment was made: Business Central would refuse Sales 1.0.1.0.
+        // It is the second app, so a check made app by app would already have sent Core.
+        _apps.Installed.Add(InstalledApp("CRONUS Sales") with { AppId = salesId, Version = "1.0.5.0" });
 
         await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
 
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
         delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
-        delivery.FailureMessage.Should().StartWith("CRONUS Core 1.0.0.0 is older than 1.0.5.0, which is already installed in Production.");
+        delivery.FailureMessage.Should().StartWith("CRONUS Sales 1.0.1.0 is older than 1.0.5.0, which is already installed in Production.");
         var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
-        results[0].Status.Should().Be(ProjectDeliveryResultStatus.Failed);
-        results[1].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
-        _apps.UploadedOrder.Should().BeEmpty();
+        results[0].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
+        results[1].Status.Should().Be(ProjectDeliveryResultStatus.Failed);
+        _apps.UploadedOrder.Should().BeEmpty("nothing is sent once any app would be refused");
     }
 
     [Fact]
