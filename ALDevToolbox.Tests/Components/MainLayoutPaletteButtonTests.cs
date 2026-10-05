@@ -1,6 +1,7 @@
 using ALDevToolbox.Components.Layout;
 using ALDevToolbox.Domain.Tools;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.Organizations;
 using ALDevToolbox.Services.SingleTenant;
@@ -42,6 +43,7 @@ public sealed class MainLayoutPaletteButtonTests : IDisposable
         _ctx.Services.AddSingleton<IDbContextFactory<ALDevToolbox.Data.AppDbContext>>(_db.NewContextFactory());
         _ctx.Services.AddSingleton(TimeProvider.System);
         _ctx.Services.AddScoped<ALDevToolbox.Services.Notifications.InAppNotificationService>();
+        _ctx.Services.AddScoped<DisplayTimeZone>();
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddSingleton<Microsoft.AspNetCore.Http.IHttpContextAccessor>(
             new Microsoft.AspNetCore.Http.HttpContextAccessor());
@@ -137,11 +139,46 @@ public sealed class MainLayoutPaletteButtonTests : IDisposable
 
         cut.WaitForAssertion(() =>
         {
-            var bell = cut.Find(".app__top a.notif-bell");
-            bell.GetAttribute("href").Should().Be("/notifications");
+            var bell = cut.Find(".app__top button.notif-bell");
+            bell.GetAttribute("popovertarget").Should().Be("notif-flyout");
             bell.GetAttribute("aria-label").Should().Be("Notifications, 3 unread");
             cut.Find(".notif-bell__count").TextContent.Should().Be("3");
         });
+    }
+
+    [Fact]
+    public async Task The_bell_opens_a_flyout_with_the_newest_and_a_way_to_the_full_list()
+    {
+        var userId = await SeedUserWithUnreadAsync(InAppNotificationService.FlyoutSize + 1);
+        _db.OrgContext.CurrentUserId = userId;
+        _auth.SetAuthorized("user@example.com");
+
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var flyout = cut.Find("#notif-flyout");
+            flyout.HasAttribute("popover").Should().BeTrue();
+            flyout.QuerySelectorAll(".notif").Should().HaveCount(InAppNotificationService.FlyoutSize);
+            flyout.QuerySelectorAll(".notif--unread").Should().HaveCount(InAppNotificationService.FlyoutSize);
+            flyout.QuerySelector("form[action='/notifications/read-all'] input[name='returnUrl']")!
+                .GetAttribute("value").Should().StartWith("/");
+            flyout.QuerySelectorAll("a[href='/notifications']").Should().ContainSingle();
+        });
+    }
+
+    [Fact]
+    public async Task An_empty_flyout_says_what_will_show_up_and_offers_no_mark_all()
+    {
+        _db.OrgContext.CurrentUserId = await SeedUserWithUnreadAsync(0);
+        _auth.SetAuthorized("user@example.com");
+
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() =>
+            cut.Find("#notif-flyout .notif-flyout__note").TextContent.Should().Contain("Nothing yet"));
+        cut.FindAll("#notif-flyout form").Should().BeEmpty();
+        cut.FindAll("#notif-flyout a[href='/notifications']").Should().ContainSingle();
     }
 
     [Fact]

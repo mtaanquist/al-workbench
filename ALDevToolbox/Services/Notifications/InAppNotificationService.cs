@@ -32,6 +32,9 @@ public sealed class InAppNotificationService
     /// <summary>The most the page lists. Older ones are pruned after 30 days anyway.</summary>
     public const int PageSize = 200;
 
+    /// <summary>The most the bell's flyout lists; the page has the rest.</summary>
+    public const int FlyoutSize = 8;
+
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly IOrganizationContext _orgContext;
     private readonly TimeProvider _clock;
@@ -58,15 +61,20 @@ public sealed class InAppNotificationService
             .CountAsync(n => n.ReadAt == null, ct);
     }
 
-    /// <summary>The signed-in person's notifications, newest first, at most <see cref="PageSize"/>.</summary>
-    public async Task<List<InAppNotificationRow>> ListForCurrentUserAsync(CancellationToken ct = default)
+    /// <summary>
+    /// The signed-in person's notifications, newest first, at most <paramref name="take"/>:
+    /// <see cref="PageSize"/> for the Notifications page, <see cref="FlyoutSize"/> for the
+    /// bell's flyout.
+    /// </summary>
+    public async Task<List<InAppNotificationRow>> ListForCurrentUserAsync(
+        int take = PageSize, CancellationToken ct = default)
     {
         var userId = RequireUserId();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
         return await (await VisibleAsync(db, userId, ct))
             .OrderByDescending(n => n.CreatedAt)
             .ThenByDescending(n => n.Id)
-            .Take(PageSize)
+            .Take(Math.Clamp(take, 1, PageSize))
             .Select(n => new InAppNotificationRow(
                 n.Id, n.Category, n.Title, n.Detail, n.CreatedAt, n.ReadAt != null))
             .ToListAsync(ct);

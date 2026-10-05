@@ -142,6 +142,27 @@ public sealed class NotificationEndpointTests : IDisposable
         (await ReadAtAsync(samsId)).Should().BeNull();
     }
 
+    [Theory]
+    [InlineData("/pipelines/1?tab=builds", "/pipelines/1?tab=builds")]
+    [InlineData("//evil.example/path", "/notifications")]
+    [InlineData("https://evil.example/", "/notifications")]
+    public async Task Read_all_from_the_flyout_goes_back_to_the_page_it_was_on_and_nowhere_else(
+        string returnUrl, string expected)
+    {
+        var alex = await SeedUserAsync(AlexEmail, Password);
+        var id = await AddAsync(alex, "/pipelines/1?build=7");
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory, AlexEmail);
+        var token = await TokenFromAsync(client, "/notifications");
+
+        using var response = await client.PostAsync("/notifications/read-all", Form(
+            ("upToId", id.ToString()), ("returnUrl", returnUrl), ("__RequestVerificationToken", token)));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        response.Headers.Location!.OriginalString.Should().Be(expected);
+        (await ReadAtAsync(id)).Should().NotBeNull();
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private static FormUrlEncodedContent Form(params (string Key, string Value)[] fields) =>

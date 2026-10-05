@@ -38,6 +38,23 @@ public sealed class InAppNotificationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task The_flyout_list_is_the_newest_few()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        for (var i = 0; i < InAppNotificationService.FlyoutSize + 2; i++)
+        {
+            await AddAsync(alex, $"Event {i}", Monday.AddMinutes(i));
+        }
+        _db.OrgContext.CurrentUserId = alex;
+
+        var rows = await Service().ListForCurrentUserAsync(InAppNotificationService.FlyoutSize);
+
+        rows.Should().HaveCount(InAppNotificationService.FlyoutSize);
+        rows[0].Title.Should().Be($"Event {InAppNotificationService.FlyoutSize + 1}");
+        rows[^1].Title.Should().Be("Event 2");
+    }
+
+    [Fact]
     public async Task The_count_is_the_signed_in_persons_unread_only()
     {
         var alex = await SeedUserAsync("alex@cronus.example");

@@ -1,24 +1,80 @@
 @using ALDevToolbox.Services.Notifications
 @inject InAppNotificationService Notifications
+@inject NavigationManager Nav
 @inject ILogger<NotificationBell> Logger
 
 @*
-    The bell in the top bar: a link to the Notifications page with the number
-    of unread ones on it (issue #1043). The shell is static, so the number is
-    the one at page load; opening a notification or marking them read
-    redirects, which is when it changes. See .design/notifications.md.
+    The bell in the top bar, with the number of unread notifications on it
+    (issue #1043). It opens a flyout over the current page with the newest few,
+    so checking them does not mean leaving where you are; the Notifications page
+    keeps the full history.
+
+    The shell is static, so the flyout is a native popover: the browser opens it,
+    closes it on Escape or a click outside, and returns focus to the bell, with
+    no circuit and no script. notification-flyout.js only closes it when a link
+    in it navigates, which an enhanced navigation would otherwise leave open
+    over the next page. The number and the list are the ones at page load;
+    opening a notification or marking them read redirects, which is when they
+    change. See .design/notifications.md.
 *@
 
-<a href="/notifications" class="nav-link-btn notif-bell" title="@Label" aria-label="@Label">
+<button type="button" class="nav-link-btn notif-bell" popovertarget="notif-flyout"
+        title="@Label" aria-label="@Label">
     <Icon Name="bell" Width="15" Height="15" />
     @if (_unread > 0)
     {
         <span class="notif-bell__count" aria-hidden="true">@(_unread > 99 ? "99+" : _unread.ToString())</span>
     }
-</a>
+</button>
+
+<div id="notif-flyout" popover class="notif-flyout" role="dialog" aria-labelledby="notif-flyout-title">
+    <div class="notif-flyout__head">
+        <h2 id="notif-flyout-title" class="notif-flyout__title">Notifications</h2>
+        @if (_unread > 0 && _rows is { Count: > 0 })
+        {
+            <form method="post" action="/notifications/read-all">
+                <AntiforgeryToken />
+                @* Only what the flyout showed and older: one that arrives meanwhile stays unread. *@
+                <input type="hidden" name="upToId" value="@_rows.Max(r => r.Id)" />
+                <input type="hidden" name="returnUrl" value="@ReturnUrl" />
+                <button type="submit" class="notif-flyout__action">
+                    <Icon Name="check-check" Width="14" Height="14" />
+                    <span>Mark all as read</span>
+                </button>
+            </form>
+        }
+    </div>
+    <div class="notif-flyout__body">
+        @if (_failed)
+        {
+            <p class="notif-flyout__note">Your notifications could not be loaded. Try the Notifications page.</p>
+        }
+        else if (_rows is null)
+        {
+            <p class="notif-flyout__note">Loading...</p>
+        }
+        else if (_rows.Count == 0)
+        {
+            <p class="notif-flyout__note">
+                Nothing yet. Your builds, deployments and scheduled environment changes show up here
+                when they fail, finish or need you, along with new update dates for solutions you follow.
+            </p>
+        }
+        else
+        {
+            <NotificationList Rows="_rows" />
+        }
+    </div>
+    <div class="notif-flyout__foot">
+        <a href="/notifications">See all notifications</a>
+        <a href="@NotificationService.SettingsPath">Notification settings</a>
+    </div>
+</div>
 
 @code {
     private int _unread;
+    private List<InAppNotificationRow>? _rows;
+    private bool _failed;
 
     private string Label => _unread switch
     {
@@ -27,16 +83,21 @@
         _ => $"Notifications, {_unread} unread",
     };
 
+    /// <summary>The page the flyout is open on, so "Mark all as read" comes back to it.</summary>
+    private string ReturnUrl => "/" + Nav.ToBaseRelativePath(Nav.Uri);
+
     protected override async Task OnInitializedAsync()
     {
-        // The bell is on every page; a count that cannot be read must not take the page with it.
+        // The bell is on every page; notifications that cannot be read must not take the page with it.
         try
         {
             _unread = await Notifications.CountUnreadForCurrentUserAsync();
+            _rows = await Notifications.ListForCurrentUserAsync(InAppNotificationService.FlyoutSize);
         }
         catch (Exception ex)
         {
-            Logger.LogWarning(ex, "Could not count unread notifications for the bell.");
+            _failed = true;
+            Logger.LogWarning(ex, "Could not load notifications for the bell.");
         }
     }
 }

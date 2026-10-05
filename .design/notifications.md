@@ -70,9 +70,14 @@ Agreed with the maintainer on 2026-10-03:
 
 - Every notification is stored per recipient in `user_notifications` unless they turned
   In app off for its category. Rows hold a path within the app, not an address.
-- A bell in the top bar links to `/notifications` and shows the unread count (99+ above
-  99). The shell is static, so the count is the one at page load; there is no live push,
-  which would need a held connection on every page.
+- A bell in the top bar shows the unread count (99+ above 99) and opens a flyout over the
+  current page with the newest 8, read and unread, so checking them does not mean leaving
+  where you are (Mads, 2026-10-05). The flyout has "Mark all as read", which comes back to
+  the page it was on, and links to the full list and to the settings. It is a native
+  popover, so the browser handles opening, Escape, clicking outside and focus without a
+  circuit; a small shell script closes it when a link in it navigates. The shell is static,
+  so the count and the flyout are the ones at page load; there is no live push, which would
+  need a held connection on every page.
 - `/notifications` lists the person's own notifications newest first (at most 200; they
   are pruned after 30 days anyway), unread ones in bold with a dot. Opening one goes
   through `/notifications/{id}/open`, which marks it read and redirects to its page;
