@@ -1,6 +1,7 @@
 using ALDevToolbox.Components.Layout;
 using ALDevToolbox.Domain.Tools;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.Organizations;
 using ALDevToolbox.Services.SingleTenant;
@@ -9,6 +10,7 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Bunit;
 using Bunit.TestDoubles;
+using Microsoft.AspNetCore.Components;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -42,6 +44,7 @@ public sealed class MainLayoutPaletteButtonTests : IDisposable
         _ctx.Services.AddSingleton<IDbContextFactory<ALDevToolbox.Data.AppDbContext>>(_db.NewContextFactory());
         _ctx.Services.AddSingleton(TimeProvider.System);
         _ctx.Services.AddScoped<ALDevToolbox.Services.Notifications.InAppNotificationService>();
+        _ctx.Services.AddScoped<DisplayTimeZone>();
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddSingleton<Microsoft.AspNetCore.Http.IHttpContextAccessor>(
             new Microsoft.AspNetCore.Http.HttpContextAccessor());
@@ -137,11 +140,90 @@ public sealed class MainLayoutPaletteButtonTests : IDisposable
 
         cut.WaitForAssertion(() =>
         {
-            var bell = cut.Find(".app__top a.notif-bell");
-            bell.GetAttribute("href").Should().Be("/notifications");
+            var bell = cut.Find(".app__top button.notif-bell");
+            bell.GetAttribute("popovertarget").Should().Be("notif-flyout");
             bell.GetAttribute("aria-label").Should().Be("Notifications, 3 unread");
             cut.Find(".notif-bell__count").TextContent.Should().Be("3");
         });
+    }
+
+    [Fact]
+    public async Task The_bell_opens_a_flyout_with_the_newest_and_a_way_to_the_full_list()
+    {
+        _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>()
+            .NavigateTo("/solutions?tab=mine");
+        var userId = await SeedUserWithUnreadAsync(InAppNotificationService.FlyoutSize + 1);
+        _db.OrgContext.CurrentUserId = userId;
+        _auth.SetAuthorized("user@example.com");
+
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var flyout = cut.Find("#notif-flyout");
+            flyout.HasAttribute("popover").Should().BeTrue();
+            flyout.QuerySelectorAll(".notif").Should().HaveCount(InAppNotificationService.FlyoutSize);
+            flyout.QuerySelectorAll(".notif--unread").Should().HaveCount(InAppNotificationService.FlyoutSize);
+            flyout.QuerySelector("form[action='/notifications/read-all'] input[name='returnUrl']")!
+                .GetAttribute("value").Should().Be("/solutions?tab=mine");
+            flyout.QuerySelectorAll("a[href='/notifications']").Should().ContainSingle();
+        });
+    }
+
+    [Fact]
+    public async Task On_the_notifications_page_the_flyout_leaves_mark_all_to_the_page()
+    {
+        _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>()
+            .NavigateTo("/notifications");
+        _db.OrgContext.CurrentUserId = await SeedUserWithUnreadAsync(2);
+        _auth.SetAuthorized("user@example.com");
+
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() => cut.FindAll("#notif-flyout .notif").Should().HaveCount(2));
+        cut.FindAll("#notif-flyout form").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task An_empty_flyout_says_what_will_show_up_and_offers_no_mark_all()
+    {
+        _db.OrgContext.CurrentUserId = await SeedUserWithUnreadAsync(0);
+        _auth.SetAuthorized("user@example.com");
+
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() =>
+            cut.Find("#notif-flyout .notif-flyout__note").TextContent.Should().Contain("Nothing yet"));
+        cut.FindAll("#notif-flyout form").Should().BeEmpty();
+        cut.FindAll("#notif-flyout a[href='/notifications']").Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Being_on_the_page_a_notification_is_about_marks_it_read()
+    {
+        var userId = await SeedUserWithUnreadAsync(2);
+        await using (var db = _db.NewContext())
+        {
+            db.UserNotifications.Add(new ALDevToolbox.Domain.Entities.UserNotification
+            {
+                UserId = userId, OrganizationId = TestDb.DefaultOrgId,
+                Category = ALDevToolbox.Domain.Entities.NotificationCategory.Builds,
+                Title = "Build failed: CRONUS Coffee - Release", Path = "/pipelines/2", CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentUserId = userId;
+        _auth.SetAuthorized("user@example.com");
+        // As if they followed the link in the email.
+        _ctx.Services.GetRequiredService<NavigationManager>().NavigateTo("/pipelines/1#latest");
+
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() =>
+            cut.Find(".app__top button.notif-bell").GetAttribute("aria-label").Should().Be("Notifications, 1 unread"));
+        await using var read = _db.NewContext();
+        (await read.UserNotifications.Where(n => n.ReadAt == null).Select(n => n.Path).ToListAsync())
+            .Should().Equal("/pipelines/2");
     }
 
     [Fact]

@@ -70,14 +70,34 @@ Agreed with the maintainer on 2026-10-03:
 
 - Every notification is stored per recipient in `user_notifications` unless they turned
   In app off for its category. Rows hold a path within the app, not an address.
-- A bell in the top bar links to `/notifications` and shows the unread count (99+ above
-  99). The shell is static, so the count is the one at page load; there is no live push,
-  which would need a held connection on every page.
+- A bell in the top bar shows the unread count (99+ above 99) and opens a flyout over the
+  current page with the newest 8, read and unread, so checking them does not mean leaving
+  where you are (Mads, 2026-10-05). The flyout has "Mark all as read", which comes back to
+  the page it was on, and links to the full list and to the settings. It is a native
+  popover, so the browser handles opening, Escape, clicking outside and focus without a
+  circuit; a small shell script closes it when a link in it navigates, and sends "Mark all
+  as read" in the background so a half-filled form on the page underneath is not lost. The shell is static,
+  so the count and the flyout are the ones at page load; there is no live push, which would
+  need a held connection on every page.
 - `/notifications` lists the person's own notifications newest first (at most 200; they
   are pruned after 30 days anyway), unread ones in bold with a dot. Opening one goes
   through `/notifications/{id}/open`, which marks it read and redirects to its page;
   "Mark all as read" posts to `/notifications/read-all`. Both redirect, so the count is
   current on the next page.
+- A notification also counts as opened when the person is on the page it is about, most
+  often having followed the link in its email: the bell, which renders on every page,
+  marks their unread ones whose stored path matches the page's path and query exactly.
+  It only writes when something is unread. Requests (below) are left alone: several share
+  a page, and looking at it is not doing it.
+- A notification that asks for something (a deployment waiting for approval, an
+  environment ready to check) carries a `subject` naming it (`delivery:12`,
+  `upgrade-line:34`). Once that is done, by anyone and by any route, every recipient's
+  copy is marked read: approving or dismissing the deployment, a newer build replacing
+  it, or its deployment pipeline being deleted; ticking the environment's check, assigning
+  it to someone else (the new checker is told afresh), taking it off the upgrade, or
+  marking the upgrade done or deleting it. Unticking a check, or reopening the upgrade,
+  does not bring the notice back. Digest items carry the same subject and are deleted
+  then, so a digest sent later does not ask for something already done.
 - `InAppNotificationService` names the signed-in user in every query on top of the
   organisation filter, and reads through the context factory because the count renders
   in the layout beside the page's own queries.

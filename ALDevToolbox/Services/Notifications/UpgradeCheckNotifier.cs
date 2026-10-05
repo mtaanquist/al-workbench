@@ -103,7 +103,8 @@ public sealed class UpgradeCheckNotifier
                     email.Renderer, email.Recipient.DisplayName, email.OrganizationName, line.SolutionName,
                     line.EnvironmentName, line.Version!, line.UpgradeName, line.Assigned, email.ItemUrl, email.SettingsUrl,
                     token),
-                ProjectId: line.ProjectId),
+                ProjectId: line.ProjectId,
+                Subject: NotificationSubject.UpgradeLine(line.Id)),
                 ct);
             sent++;
         }

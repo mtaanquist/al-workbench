@@ -32,6 +32,9 @@ public sealed class InAppNotificationService
     /// <summary>The most the page lists. Older ones are pruned after 30 days anyway.</summary>
     public const int PageSize = 200;
 
+    /// <summary>The most the bell's flyout lists; the page has the rest.</summary>
+    public const int FlyoutSize = 8;
+
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly IOrganizationContext _orgContext;
     private readonly TimeProvider _clock;
@@ -58,19 +61,39 @@ public sealed class InAppNotificationService
             .CountAsync(n => n.ReadAt == null, ct);
     }
 
+    /// <summary>
+    /// What the header bell shows on every page: the unread count and the newest
+    /// <see cref="FlyoutSize"/> for its flyout, read through one context and one
+    /// access check. Nothing when nobody is signed in, like the count.
+    /// </summary>
+    public async Task<(int Unread, List<InAppNotificationRow> Rows)> GetBellForCurrentUserAsync(
+        CancellationToken ct = default)
+    {
+        if (_orgContext.CurrentUserId is not { } userId) return (0, []);
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        var visible = await VisibleAsync(db, userId, ct);
+        var unread = await visible.CountAsync(n => n.ReadAt == null, ct);
+        var rows = await Newest(visible, FlyoutSize).ToListAsync(ct);
+        return (unread, rows);
+    }
+
     /// <summary>The signed-in person's notifications, newest first, at most <see cref="PageSize"/>.</summary>
     public async Task<List<InAppNotificationRow>> ListForCurrentUserAsync(CancellationToken ct = default)
     {
         var userId = RequireUserId();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        return await (await VisibleAsync(db, userId, ct))
+        return await Newest(await VisibleAsync(db, userId, ct), PageSize).ToListAsync(ct);
+    }
+
+    /// <summary>The newest <paramref name="take"/> of a person's visible notifications, as rows.</summary>
+
+    private static IQueryable<InAppNotificationRow> Newest(IQueryable<UserNotification> visible, int take) =>
+        visible
             .OrderByDescending(n => n.CreatedAt)
             .ThenByDescending(n => n.Id)
-            .Take(PageSize)
+            .Take(take)
             .Select(n => new InAppNotificationRow(
-                n.Id, n.Category, n.Title, n.Detail, n.CreatedAt, n.ReadAt != null))
-            .ToListAsync(ct);
-    }
+                n.Id, n.Category, n.Title, n.Detail, n.CreatedAt, n.ReadAt != null));
 
     /// <summary>
     /// Marks one of the signed-in person's notifications read and returns the
@@ -91,6 +114,25 @@ public sealed class InAppNotificationService
             .Where(n => n.Id == id && n.UserId == userId && n.ReadAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(n => n.ReadAt, now), ct);
         return path;
+    }
+
+    /// <summary>
+    /// Marks the signed-in person's unread notifications about <paramref name="path"/> read,
+    /// as if they had opened them from the list: they are looking at the page each is about,
+    /// most often having followed the link in its email. <paramref name="path"/> is the
+    /// page's path and query, compared exactly with the stored one. One that asks for
+    /// something (<see cref="NotificationSubject"/>) is left alone: several share a page, and
+    /// looking at it is not doing it, so it stays unread until it is done. Returns how many
+    /// changed; 0 when nobody is signed in.
+    /// </summary>
+    public async Task<int> MarkPageReadForCurrentUserAsync(string path, CancellationToken ct = default)
+    {
+        if (_orgContext.CurrentUserId is not { } userId) return 0;
+        var now = _clock.GetUtcNow().UtcDateTime;
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        return await db.UserNotifications
+            .Where(n => n.UserId == userId && n.ReadAt == null && n.Subject == null && n.Path == path)
+            .ExecuteUpdateAsync(s => s.SetProperty(n => n.ReadAt, now), ct);
     }
 
     /// <summary>

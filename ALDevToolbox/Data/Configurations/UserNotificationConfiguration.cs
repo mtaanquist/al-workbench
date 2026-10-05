@@ -20,6 +20,7 @@ internal sealed class UserNotificationConfiguration : IEntityTypeConfiguration<U
         entity.Property(e => e.Path).HasColumnName("path").IsRequired();
         entity.Property(e => e.ProjectId).HasColumnName("project_id");
         entity.Property(e => e.SolutionName).HasColumnName("solution_name");
+        entity.Property(e => e.Subject).HasColumnName("subject").HasMaxLength(64);
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.ReadAt).HasColumnName("read_at");
 
@@ -29,6 +30,10 @@ internal sealed class UserNotificationConfiguration : IEntityTypeConfiguration<U
         entity.HasIndex(e => e.UserId)
             .HasFilter("read_at IS NULL")
             .HasDatabaseName("ix_user_notifications_user_id_unread");
+        // Marking everyone's copy read once what it asked for is done: only unread ones that ask.
+        entity.HasIndex(e => e.Subject)
+            .HasFilter("subject IS NOT NULL AND read_at IS NULL")
+            .HasDatabaseName("ix_user_notifications_subject_unread");
         // The 30-day prune.
         entity.HasIndex(e => e.CreatedAt);
 

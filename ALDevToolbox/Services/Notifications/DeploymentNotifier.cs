@@ -112,7 +112,9 @@ public sealed class DeploymentNotifier
                 delivery.PipelineName, delivery.EnvironmentName, delivery.Apps, failure,
                 email.ItemUrl, email.SettingsUrl, token),
             Urgent: waiting,
-            ProjectId: delivery.ProjectId),
+            ProjectId: delivery.ProjectId,
+            // Only the request asks for anything; once approved or dismissed it is done.
+            Subject: waiting ? NotificationSubject.Delivery(delivery.Id) : null),
             ct);
     }
 

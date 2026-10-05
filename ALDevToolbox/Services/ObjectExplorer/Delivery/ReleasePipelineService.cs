@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol;
 
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
+using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 
@@ -354,6 +355,13 @@ public sealed class ReleasePipelineService
         pipeline.DeletedAt = DateTime.UtcNow;
         pipeline.UpdatedAt = pipeline.DeletedAt.Value;
         await _db.SaveChangesAsync(ct);
+        // A deployment waiting on a deleted pipeline can no longer be approved from anywhere.
+        var waiting = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.Proposed)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        await NotificationSubject.MarkDoneAsync(
+            _db, waiting.Select(NotificationSubject.Delivery).ToList(), pipeline.UpdatedAt, _logger, ct);
         _logger.LogInformation("Soft-deleted deployment pipeline {ReleasePipelineId}.", id);
     }
 

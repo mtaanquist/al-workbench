@@ -53,6 +53,23 @@ public sealed class DeploymentNotifierTests : IDisposable
     }
 
     [Fact]
+    public async Task Only_an_approval_request_names_the_deployment_it_waits_on()
+    {
+        await SeedAsync();
+        var waiting = await AddDeliveryAsync(ProjectDeliveryStatus.Proposed, triggeredBy: null);
+        var deployed = await AddDeliveryAsync(ProjectDeliveryStatus.Deployed, triggeredBy: _approver);
+
+        await Notifier().ProposedAsync([waiting]);
+        await Notifier().NotifyAsync(deployed);
+
+        await using var ctx = _db.NewContext();
+        var rows = await ctx.UserNotifications.AsNoTracking().ToListAsync();
+        rows.Where(r => r.UserId != _approver).Should().HaveCount(2)
+            .And.OnlyContain(r => r.Subject == NotificationSubject.Delivery(waiting));
+        rows.Single(r => r.UserId == _approver).Subject.Should().BeNull("a finished deployment asks nothing of anyone");
+    }
+
+    [Fact]
     public async Task Someone_who_can_no_longer_see_a_private_solution_is_left_out()
     {
         await SeedAsync();
