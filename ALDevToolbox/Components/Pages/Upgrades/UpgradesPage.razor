@@ -1134,7 +1134,10 @@
                 if (changed) ApplyFilters();
                 StateHasChanged();
                 return Task.CompletedTask;
-            });
+            },
+            // The page's clicks read on the circuit's context without a gate, so a tick
+            // landing while one is awaiting must not use it too.
+            scopes: ScopeFactory);
     }
 
     /// <summary>The environments being watched. For tests, which drive the tick by hand.</summary>
@@ -1203,8 +1206,8 @@
 
     /// <summary>
     /// Reads one environment's history on a DI scope of its own. Opening it is a click
-    /// that can land while the update watch or another click is still awaiting a query
-    /// on the circuit's AppDbContext, and one context takes one command at a time; the
+    /// that can land while another click is still awaiting a query on the circuit's
+    /// AppDbContext, and one context takes one command at a time; the
     /// history only reads, so it needs nothing the page's own context holds. Same as
     /// the pipeline pages (#679). Two reads can now be out at once, so an answer only
     /// lands if its environment's history is still the one open.

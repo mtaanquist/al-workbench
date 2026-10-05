@@ -12,6 +12,7 @@
 @inject ILogger<EnvironmentDetail> Log
 @inject NavigationManager Nav
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@inject IServiceScopeFactory ScopeFactory
 @using System.Globalization
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
@@ -1327,6 +1328,19 @@
     /// reading out to a customer with an error card, so it keeps the list and says quietly
     /// that it couldn't be updated. A first read that fails has nothing to keep.
     /// </summary>
+    /// <summary>
+    /// Who is signed in, read on a DI scope of its own. The live timer comes through here,
+    /// and its tick goes through InvokeAsync, which only keeps it apart from a click between
+    /// awaits: a tab switch or a save already awaiting a query on the circuit's one
+    /// AppDbContext would meet the tick's query there. Same as the pipeline pages (#679).
+    /// </summary>
+    private async Task<List<BcSession>> ListSessionsOnOwnScopeAsync(CancellationToken ct)
+    {
+        await using var scope = ScopeFactory.CreateAsyncScope();
+        return await scope.ServiceProvider.GetRequiredService<ProjectConnectionService>()
+            .ListEnvironmentSessionsAsync(Row.ProjectId, Id, ct);
+    }
+
     private async Task LoadSessionsAsync(bool automatic = false)
     {
         if (_sessionsLoading) return;
@@ -1339,7 +1353,7 @@
         StateHasChanged();
         try
         {
-            _sessions = await Read(ct => Connection.ListEnvironmentSessionsAsync(Row.ProjectId, Id, ct));
+            _sessions = await Read(ListSessionsOnOwnScopeAsync);
             _sessionsFetchedAt = DateTime.UtcNow;
             _sessionsError = null;
             _sessionsStaleNote = null;

@@ -6,6 +6,7 @@
 @implements IDisposable
 @inject RecipeService Recipes
 @inject NavigationManager Nav
+@inject IServiceScopeFactory ScopeFactory
 @using ALDevToolbox.Domain.Entities
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Services.Cookbook
@@ -225,11 +226,29 @@
         });
     }
 
+    /// <summary>
+    /// Runs the search on a DI scope of its own. The debounced reload, the deprecated
+    /// checkbox and Clear filters can each start one while another is still awaiting, and
+    /// the circuit's one AppDbContext takes one command at a time; InvokeAsync only keeps
+    /// them apart between awaits. Same as the pipeline pages (#679). With several out at
+    /// once, only the latest one's answer lands.
+    /// </summary>
     private async Task ReloadAsync()
     {
-        _results = await Recipes.SearchAsync(_query, _includeDeprecated);
+        var search = ++_searches;
+        List<Recipe> results;
+        await using (var scope = ScopeFactory.CreateAsyncScope())
+        {
+            results = await scope.ServiceProvider.GetRequiredService<RecipeService>()
+                .SearchAsync(_query, _includeDeprecated);
+        }
+        if (search != _searches) return;
+        _results = results;
         StateHasChanged();
     }
+
+    /// <summary>Counts the searches started, so an earlier one finishing late doesn't overwrite a later one.</summary>
+    private int _searches;
 
     private void SetTypeFilter(RecipeType? value)
     {

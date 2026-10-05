@@ -252,10 +252,10 @@ public sealed class UpgradesPageTests : IDisposable
     }
 
     /// <summary>
-    /// Opening the history is a click, and a click can land while the update watch or
-    /// another click is still awaiting a query on the page's own database context, which
-    /// takes one command at a time. The history reads on a context of its own, so it opens
-    /// whatever the page's context is doing. Before that, the history test above failed CI
+    /// Opening the history is a click, and a click can land while another one is still
+    /// awaiting a query on the page's own database context, which takes one command at a
+    /// time. The history reads on a context of its own, so it opens whatever the page's
+    /// context is doing. Before that, the history test above failed CI
     /// intermittently with "A second operation was started on this context instance".
     /// </summary>
     [Fact]
