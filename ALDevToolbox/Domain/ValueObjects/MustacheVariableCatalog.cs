@@ -46,6 +46,8 @@ public static class MustacheVariableCatalog
         new("logo_path", "Workspace-relative path to the embedded org logo (e.g. ../.assets/images/logo.png).", AvailableInAdminContent: true),
         new("platform_version", "Platform version from the template defaults.", AvailableInAdminContent: true),
         new("application_version", "Application version resolved for the current extension (after \"Latest\" substitution).", AvailableInAdminContent: true),
+        new("application_version_major", "Major part of the application version (e.g. \"28\" for 28.2.0.0). Use with {{application_version_minor}} to start an app version, e.g. \"{{application_version_major}}.{{application_version_minor}}.0.0\".", AvailableInAdminContent: true),
+        new("application_version_minor", "Minor part of the application version (e.g. \"2\" for 28.2.0.0).", AvailableInAdminContent: true),
         new("runtime", "AL runtime version resolved for the current extension.", AvailableInAdminContent: true),
         new("dependencies_array", "Raw JSON array of resolved dependency objects, e.g. [{\"id\":\"...\",\"name\":\"...\"}]. Embed verbatim where a JSON array is expected.", AvailableInAdminContent: true),
         new("id_ranges_array", "Raw JSON array of resolved id range objects, e.g. [{\"from\":50000,\"to\":50099}].", AvailableInAdminContent: true),

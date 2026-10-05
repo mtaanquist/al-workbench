@@ -629,6 +629,32 @@ public sealed class WorkspaceGenerationTests : IDisposable
         zip.Entries.Should().NotContain(e => e.FullName.EndsWith("/.alpackages/.gitkeep", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task Application_version_parts_substitute_into_every_extension_file()
+    {
+        // A per-extension org file stands in for the canonical app.json so
+        // the assertion reads one value rather than parsing the whole file.
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OrganizationFiles.Add(new OrganizationFile
+            {
+                OrganizationId = TemplateBuilder.DefaultOrganizationId,
+                Path = "version.txt",
+                Content = "{{application_version_major}}.{{application_version_minor}}.0.0",
+                MustacheEnabled = true,
+                Scope = OrganizationFileScope.EveryExtension,
+                Ordering = 2000,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        await SeedTemplateAsync(TemplateBuilder.Default());
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan() with { ApplicationVersion = "28.2.0.0" });
+
+        ReadEntry(zip.GetEntry("AcmeCustomer/Core/version.txt")!).Should().Be("28.2.0.0");
+    }
+
     private async Task SeedTemplateAsync(RuntimeTemplate template, params Module[] modules)
     {
         await using var ctx = _db.NewContext();
