@@ -17,6 +17,7 @@ internal sealed class ProjectBuildConfiguration : IEntityTypeConfiguration<OePro
         entity.Property(e => e.StartedByUserId).HasColumnName("started_by_user_id");
         entity.Property(e => e.ReleaseId).HasColumnName("release_id");
         entity.Property(e => e.Branch).HasColumnName("branch").HasMaxLength(250);
+        entity.Property(e => e.DefaultBranch).HasColumnName("default_branch").HasMaxLength(250);
         entity.Property(e => e.Trigger).HasColumnName("trigger").HasMaxLength(20)
             .HasDefaultValue(ProjectBuildTrigger.Manual).IsRequired();
         entity.Property(e => e.PullRequestNumber).HasColumnName("pull_request_number");

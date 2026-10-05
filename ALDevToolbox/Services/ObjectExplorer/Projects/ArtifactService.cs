@@ -79,7 +79,7 @@ public sealed class ArtifactService
             .Where(b => projectIds.Contains(b.ProjectId) && b.PipelineId != null && b.BcTarget == ProjectBuildTarget.Current)
             .Select(b => new
             {
-                b.Id, b.ProjectId, b.Status, b.BcVersion, b.Branch, b.StartedAt, b.FinishedAt,
+                b.Id, b.ProjectId, b.Status, b.BcVersion, b.Branch, b.DefaultBranch, b.StartedAt, b.FinishedAt,
                 ArtifactCount = b.Artifacts.Count,
             })
             .ToListAsync(ct);
@@ -127,6 +127,8 @@ public sealed class ArtifactService
             .ToDictionary(d => d.ProjectId, d => new DeliverySummary(
                 d.FinishedAt, d.ProjectBuildId, d.ReleasePipelineId, d.Status, d.ReleasePipelineRemoved));
 
+        var knownDefaults = await KnownDefaultBranchesAsync(projectIds, ct);
+
         var rows = new List<ProjectArtifactsRow>(projects.Count);
         foreach (var p in projects)
         {
@@ -139,7 +141,8 @@ public sealed class ArtifactService
             rows.Add(new ProjectArtifactsRow(
                 p.Id, p.Name, p.ShortName, p.OwnerName, p.RepoCount,
                 Latest: latest is null ? null : new BuildSummary(
-                    latest.Id, latest.Status, latest.BcVersion, latest.Branch, commitShort, latest.StartedAt, latest.FinishedAt, latest.ArtifactCount),
+                    latest.Id, latest.Status, latest.BcVersion, latest.Branch, commitShort, latest.StartedAt, latest.FinishedAt, latest.ArtifactCount,
+                    latest.DefaultBranch ?? knownDefaults.GetValueOrDefault(p.Id)),
                 LatestSuccessfulBuildId: latestSuccessful?.Id,
                 RepoNames: p.RepoNames)
             {
@@ -240,7 +243,7 @@ public sealed class ArtifactService
                         && b.BcTarget == ProjectBuildTarget.Current)
             .Select(b => new
             {
-                b.Id, PipelineId = b.PipelineId!.Value, b.Status, b.BcVersion, b.Branch, b.StartedAt, b.FinishedAt,
+                b.Id, PipelineId = b.PipelineId!.Value, b.ProjectId, b.Status, b.BcVersion, b.Branch, b.DefaultBranch, b.StartedAt, b.FinishedAt,
                 ArtifactCount = b.Artifacts.Count,
             })
             .ToListAsync(ct);
@@ -254,6 +257,8 @@ public sealed class ArtifactService
                 .ToListAsync(ct))
             .GroupBy(c => c.ProjectBuildId)
             .ToDictionary(g => g.Key, g => g.First().CommitHash);
+
+        var knownDefaults = await KnownDefaultBranchesAsync(pipelines.Select(p => p.ProjectId).Distinct().ToList(), ct);
 
         var previewChecks = await LatestPreviewChecksAsync(
             pipelines.Where(p => p.PreviewCheck).Select(p => p.Id).ToList(), ct);
@@ -270,7 +275,8 @@ public sealed class ArtifactService
             rows.Add(new PipelineArtifactsRow(
                 p.Id, p.Name, p.ProjectId, p.ProjectName, p.OwnerName,
                 Latest: latest is null ? null : new BuildSummary(
-                    latest.Id, latest.Status, latest.BcVersion, latest.Branch, commitShort, latest.StartedAt, latest.FinishedAt, latest.ArtifactCount),
+                    latest.Id, latest.Status, latest.BcVersion, latest.Branch, commitShort, latest.StartedAt, latest.FinishedAt, latest.ArtifactCount,
+                    latest.DefaultBranch ?? knownDefaults.GetValueOrDefault(p.ProjectId)),
                 LatestSuccessfulBuildId: latestSuccessful?.Id,
                 PreviewCheck: p.PreviewCheck,
                 PreviewChecks: previewChecks.GetValueOrDefault(p.Id, []),
@@ -424,7 +430,7 @@ public sealed class ArtifactService
             .OrderByDescending(b => b.StartedAt)
             .Select(b => new
             {
-                b.Id, b.ReleaseId, b.Status, b.BcVersion, b.Branch,
+                b.Id, b.ProjectId, b.ReleaseId, b.Status, b.BcVersion, b.Branch, b.DefaultBranch, b.Trigger,
                 b.StartedAt, b.FinishedAt, b.FailureMessage,
                 b.GithubReleaseTag, b.GithubReleaseUrl, b.GithubReleaseError,
                 b.BcTarget, b.BcArtifactVersion,
@@ -434,6 +440,7 @@ public sealed class ArtifactService
             .ToListAsync(ct);
 
         var buildIds = builds.Select(b => b.Id).ToList();
+        var knownDefaults = await KnownDefaultBranchesAsync(builds.Select(b => b.ProjectId).Distinct().ToList(), ct);
 
         // The changelog ("what changed since the last successful build") names each
         // row and its size drives the "+N more" hint. A first build / a build with
@@ -490,8 +497,30 @@ public sealed class ArtifactService
                 GitHubReleaseUrl: b.GithubReleaseUrl,
                 GitHubReleaseError: b.GithubReleaseError,
                 BcTarget: b.BcTarget,
-                BcArtifactVersion: b.BcArtifactVersion);
+                BcArtifactVersion: b.BcArtifactVersion,
+                // Older builds of the default branch didn't record which branch that
+                // was; the repositories' default branch as known now stands in.
+                DefaultBranch: b.Branch is not null || b.Trigger == ProjectBuildTrigger.PullRequest
+                    ? null
+                    : b.DefaultBranch ?? knownDefaults.GetValueOrDefault(b.ProjectId));
         }).ToList();
+    }
+
+    /// <summary>
+    /// Each solution's default branch as GitHub last reported it on a push, for builds
+    /// made before a build recorded its own. Several names, comma-separated, when the
+    /// solution's repositories differ; a solution nobody has pushed to since is absent.
+    /// </summary>
+    private async Task<Dictionary<int, string>> KnownDefaultBranchesAsync(IReadOnlyCollection<int> projectIds, CancellationToken ct)
+    {
+        if (projectIds.Count == 0) return new();
+        var heads = await _db.OeRepositoryBranchHeads.AsNoTracking()
+            .Where(h => h.IsDefaultBranch && h.DeletedAt == null && projectIds.Contains(h.ProjectRepository!.ProjectId))
+            .Select(h => new { h.ProjectRepository!.ProjectId, h.Branch })
+            .ToListAsync(ct);
+        return heads
+            .GroupBy(h => h.ProjectId)
+            .ToDictionary(g => g.Key, g => string.Join(", ", g.Select(h => h.Branch).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)));
     }
 
     /// <summary>True while any of the pipeline's builds is still queued or building — drives the live status poll.</summary>
@@ -761,7 +790,18 @@ public sealed record DeliverySummary(
     [property: System.Text.Json.Serialization.JsonPropertyName("deploymentPipelineRemoved")] bool ReleasePipelineRemoved = false);
 
 /// <summary>A compact summary of one build for a directory chip.</summary>
-public sealed record BuildSummary(int BuildId, string Status, string? BcVersion, string? Branch, string? CommitShort, DateTime StartedAt, DateTime? FinishedAt, int ArtifactCount);
+/// <param name="DefaultBranch">
+/// When <paramref name="Branch"/> is null, the default branch the build was made from
+/// (recorded on the build, or for an older build the repositories' default branch as
+/// known now). Display only.
+/// </param>
+public sealed record BuildSummary(int BuildId, string Status, string? BcVersion, string? Branch, string? CommitShort, DateTime StartedAt, DateTime? FinishedAt, int ArtifactCount,
+    string? DefaultBranch = null)
+{
+    /// <summary>The branch to show: the one built, its default branch's name, or a plain "(default branch)".</summary>
+    [JsonIgnore]
+    public string ShownBranch => Branch ?? DefaultBranch ?? "(default branch)";
+}
 
 /// <summary>A project's header for the Artifacts builds page.</summary>
 public sealed record ProjectHeader(int Id, string Name, string? OwnerName, int? OwnerUserId);
@@ -859,8 +899,14 @@ public sealed record BuildRow(
     /// <summary>Which Business Central version the build compiled against: <c>current</c>, <c>next_minor</c> or <c>next_major</c>.</summary>
     string BcTarget = ProjectBuildTarget.Current,
     /// <summary>The exact Business Central build the symbols came from (e.g. <c>29.0.52914.0</c>). Null for builds made before it was recorded.</summary>
-    string? BcArtifactVersion = null)
+    string? BcArtifactVersion = null,
+    /// <summary>When <see cref="Branch"/> is null, the default branch the build was made from, as best known. Display only.</summary>
+    string? DefaultBranch = null)
 {
+    /// <summary>The branch to show: the one built, its default branch's name, or a plain "(default branch)".</summary>
+    [JsonIgnore]
+    public string ShownBranch => Branch ?? DefaultBranch ?? "(default branch)";
+
     /// <summary>True for a build against a preview version: check-only, never deployable or published.</summary>
     public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);
 }

@@ -152,6 +152,31 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     }
 
     [Fact]
+    public async Task A_build_of_the_default_branch_records_which_branch_that_was()
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+
+        await BuildAsync(projectId, releaseId);
+
+        await using var read = _db.NewContext();
+        var build = await read.OeProjectBuilds.SingleAsync(b => b.Id == buildId);
+        build.Branch.Should().BeNull("the branch rule still reads a null as the default branch");
+        build.DefaultBranch.Should().Be("main");
+    }
+
+    [Fact]
+    public async Task A_build_of_a_named_branch_records_no_default_branch()
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        await SetBuildAsync(buildId, branch: "release/29", trigger: ProjectBuildTrigger.Manual);
+
+        await BuildAsync(projectId, releaseId);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.SingleAsync(b => b.Id == buildId)).DefaultBranch.Should().BeNull();
+    }
+
+    [Fact]
     public async Task A_pull_request_build_ignores_the_branch_and_keeps_its_own_head()
     {
         // Its Branch is the head ref, a provenance label; the other repositories
@@ -884,6 +909,11 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                     }));
                 }
                 return Task.FromResult(new ProcessRunResult(0, string.Empty, string.Empty));
+            }
+            // The branch a clone without --branch landed on: its default branch.
+            if (request.Arguments.Contains("symbolic-ref"))
+            {
+                return Task.FromResult(new ProcessRunResult(0, "main\n", string.Empty));
             }
             // `git show` for provenance: not needed here.
             return Task.FromResult(new ProcessRunResult(1, string.Empty, "not a real repository"));

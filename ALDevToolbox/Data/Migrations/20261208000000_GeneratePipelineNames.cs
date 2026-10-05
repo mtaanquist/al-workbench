@@ -17,6 +17,13 @@ namespace ALDevToolbox.Data.Migrations
                 nullable: false,
                 defaultValue: false);
 
+            migrationBuilder.AddColumn<string>(
+                name: "default_branch",
+                table: "oe_project_builds",
+                type: "character varying(250)",
+                maxLength: 250,
+                nullable: true);
+
             migrationBuilder.AddColumn<bool>(
                 name: "name_is_custom",
                 table: "oe_pipelines",
@@ -161,6 +168,10 @@ namespace ALDevToolbox.Data.Migrations
             migrationBuilder.DropColumn(
                 name: "name_is_custom",
                 table: "oe_release_pipelines");
+
+            migrationBuilder.DropColumn(
+                name: "default_branch",
+                table: "oe_project_builds");
 
             migrationBuilder.DropColumn(
                 name: "name_is_custom",

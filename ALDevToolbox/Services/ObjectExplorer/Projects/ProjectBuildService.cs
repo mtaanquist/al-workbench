@@ -167,6 +167,14 @@ public sealed class ProjectBuildService
             var branch = build is not null && build.Trigger != ProjectBuildTrigger.PullRequest ? build.Branch : null;
             var clones = await CloneRepositoriesAsync(project, buildRoot, results, logs, options, branch, ct).ConfigureAwait(false);
 
+            // A build of the default branch records which branch that was, so the
+            // pipeline can name it. A pull-request build is labelled by its head ref.
+            if (build is not null && build.Branch is null && build.Trigger != ProjectBuildTrigger.PullRequest)
+            {
+                var names = clones.Select(c => c.Branch).OfType<string>().Distinct(StringComparer.Ordinal).ToList();
+                build.DefaultBranch = names.Count == 0 ? null : Truncate(string.Join(", ", names), 250);
+            }
+
             // Record the per-repo commit set + changelog while the clones are still
             // on disk (the changelog runs `git log` against them). Best-effort: a
             // provenance failure never sinks the build.
@@ -1087,7 +1095,8 @@ public sealed class ProjectBuildService
                 }
 
                 var (sha, date) = await CaptureCommitAsync(gitPath, dest, ct).ConfigureAwait(false);
-                clones.Add(new ClonedRepo(dest, repo.Url, sha, date, repo.Id, repo.DisplayName));
+                var clonedBranch = branch is null ? await CaptureBranchAsync(gitPath, dest, ct).ConfigureAwait(false) : branch;
+                clones.Add(new ClonedRepo(dest, repo.Url, sha, date, repo.Id, repo.DisplayName, clonedBranch));
                 logs.Add(new PendingLog(repo.Id, repo.DisplayName,
                     $"Cloned {repo.Url} at {(sha is null ? "(unknown commit)" : sha)} using {used.Source}.{(cloneLog.Length > 0 ? "\n" + cloneLog : "")}"));
             }
@@ -1254,6 +1263,27 @@ public sealed class ProjectBuildService
         {
             _logger.LogWarning(ex, "Could not read the commit for {CloneDir}; build provenance will be incomplete.", cloneDir);
             return (null, null);
+        }
+    }
+
+    /// <summary>
+    /// The branch a clone is on: the repository's default branch for a clone that
+    /// named none. Null when HEAD is detached (a pull request's head commit) or git
+    /// can't say; best-effort, like <see cref="CaptureCommitAsync"/>.
+    /// </summary>
+    private async Task<string?> CaptureBranchAsync(string gitPath, string cloneDir, CancellationToken ct)
+    {
+        try
+        {
+            var r = await _processRunner.RunAsync(new ProcessRunRequest(
+                gitPath, new[] { "-C", cloneDir, "symbolic-ref", "--short", "-q", "HEAD" }, cloneDir), ct).ConfigureAwait(false);
+            var name = r.Succeeded ? r.StdOut.Trim() : string.Empty;
+            return name.Length > 0 && GitBranchName.IsValid(name) ? name : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not read the branch for {CloneDir}.", cloneDir);
+            return null;
         }
     }
 
@@ -2053,7 +2083,7 @@ public sealed record DiscoveredExtension(
 /// <see cref="RepositoryId"/> / <see cref="DisplayName"/> identify the source
 /// <see cref="OeProjectRepository"/> so the per-repo changelog and build record link back.
 /// </summary>
-public sealed record ClonedRepo(string Dir, string Url, string? CommitSha, DateTime? CommitDate, int? RepositoryId = null, string DisplayName = "");
+public sealed record ClonedRepo(string Dir, string Url, string? CommitSha, DateTime? CommitDate, int? RepositoryId = null, string DisplayName = "", string? Branch = null);
 
 /// <summary>One extension's outcome from a build, before it's persisted as a <see cref="OeProjectBuildResult"/> row. Carries the source provenance (repo + commit) when known.</summary>
 public sealed record BuildAppResult(

@@ -2637,6 +2637,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("check_run_id");
 
+                    b.Property<string>("DefaultBranch")
+                        .HasMaxLength(250)
+                        .HasColumnType("character varying(250)")
+                        .HasColumnName("default_branch");
+
                     b.Property<string>("FailureMessage")
                         .HasColumnType("text")
                         .HasColumnName("failure_message");
