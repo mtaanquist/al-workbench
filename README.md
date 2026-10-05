@@ -309,7 +309,7 @@ See [`.design/architecture.md`](./.design/architecture.md) for what belongs wher
 ## Contributing
 
 - One coherent slice per PR. What's shipped is recorded in [`.design/completed-milestones.md`](./.design/completed-milestones.md); uncommitted ideas live in [`.design/roadmap.md`](./.design/roadmap.md).
-- The GitHub Actions build runs on every push; it's the floor for "compiles, starts, and tests pass."
+- The GitHub Actions build runs on every pull request and on every push to `main` and `staging/*`; it's the floor for "compiles, starts, and tests pass."
 - Manual smoke test the end-user flows after any change to shared services. Bring the app up under Docker before merging anything that touches startup, env vars, or volumes.
 - Contributions are accepted under the project's licence and may be relicensed by the maintainer; see [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
