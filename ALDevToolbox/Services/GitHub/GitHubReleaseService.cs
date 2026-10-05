@@ -58,7 +58,8 @@ public sealed record GitHubReleaseOption(
 /// <list type="bullet">
 /// <item><description><strong>Out.</strong> A build pipeline can name one of its
 /// solution's GitHub repositories, and every successful build is then published
-/// there as a Release tagged <c>v&lt;version&gt;</c> with its <c>.app</c> files
+/// there as a Release tagged <c>v&lt;version&gt;</c> (or <c>build-&lt;number&gt;</c> when
+/// its apps have different versions) with its <c>.app</c> files
 /// attached.</description></item>
 /// <item><description><strong>In.</strong> A release pipeline can draw from a
 /// repository's Releases instead of from a build pipeline. Choosing a tag downloads
@@ -164,12 +165,12 @@ public sealed class GitHubReleaseService
     ///
     /// <para><strong>This never fails a build.</strong> The <c>.app</c> files exist and
     /// download whatever GitHub says, so every refusal - a tag rule, a missing grant, an
-    /// unreachable GitHub, apps at different versions - comes back as
+    /// unreachable GitHub - comes back as
     /// <see cref="GitHubReleasePublishResult.Error"/> on a build that stays
     /// <c>ready</c>.</para>
     ///
-    /// <para>Re-running a build at the same version replaces the Release's assets and
-    /// rewrites its body. The tag is never moved: a version that has shipped points at
+    /// <para>Publishing again under a tag that already exists replaces the Release's
+    /// assets and rewrites its body. The tag is never moved: a version that has shipped points at
     /// the commit it shipped from.</para>
     /// </summary>
     public async Task<GitHubReleasePublishResult> PublishBuildAsync(int projectBuildId, CancellationToken ct = default)
@@ -201,7 +202,7 @@ public sealed class GitHubReleaseService
         GitHubReleasePublishResult result;
         try
         {
-            result = await TryPublishAsync(projectBuildId, build.RepositoryProvider, build.RepositoryUrl, ct);
+            result = await TryPublishAsync(projectBuildId, build.RepositoryId.Value, build.RepositoryProvider, build.RepositoryUrl, ct);
         }
         catch (GitHubApiException ex)
         {
@@ -227,7 +228,7 @@ public sealed class GitHubReleaseService
     }
 
     private async Task<GitHubReleasePublishResult> TryPublishAsync(
-        int projectBuildId, RepositoryProvider? provider, string repositoryUrl, CancellationToken ct)
+        int projectBuildId, int repositoryId, RepositoryProvider? provider, string repositoryUrl, CancellationToken ct)
     {
         if (provider != RepositoryProvider.GitHub || !TryParseRepository(repositoryUrl, out var owner, out var name))
         {
@@ -255,15 +256,7 @@ public sealed class GitHubReleaseService
             return NotPublished("This build produced no app files to publish.");
         }
 
-        var versions = artifacts.Select(a => a.AppVersion).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        if (versions.Count != 1)
-        {
-            // A Release is one version by definition, and picking one of several
-            // would put a name on the page that half its files disagree with.
-            return NotPublished("Not published: the apps have different versions.");
-        }
-
-        var tag = $"v{versions[0]}";
+        var tag = ReleaseTag(artifacts.Select(a => a.AppVersion).ToList(), projectBuildId);
         var token = await _github.GetInstallationTokenAsync(installationId, ct);
         var body = ReleaseBody(artifacts.Select(a => (a.AppName, a.AppVersion)).ToList(), projectBuildId);
 
@@ -271,7 +264,12 @@ public sealed class GitHubReleaseService
         GitHubRelease release;
         if (existing is null)
         {
-            release = await _github.CreateReleaseAsync(token, owner, name, tag, tag, body, ct);
+            // The tag goes on the commit this build compiled from that repository.
+            var builtCommit = await _db.OeProjectBuildRepoCommits.AsNoTracking()
+                .Where(c => c.ProjectBuildId == projectBuildId && c.ProjectRepositoryId == repositoryId)
+                .Select(c => c.CommitHash)
+                .FirstOrDefaultAsync(ct);
+            release = await _github.CreateReleaseAsync(token, owner, name, tag, tag, body, builtCommit, ct);
         }
         else
         {
@@ -341,6 +339,18 @@ public sealed class GitHubReleaseService
             CreatedAt = _clock.GetUtcNow().UtcDateTime,
         });
         await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// The tag a build is published under: <c>v&lt;version&gt;</c> when every app has the
+    /// same version, else <c>build-&lt;number&gt;</c>. Apps that each keep their own
+    /// Major.Minor share only the build number, and naming the Release after one app's
+    /// version would put a name on the page that the other files disagree with.
+    /// </summary>
+    internal static string ReleaseTag(IReadOnlyCollection<string> appVersions, int projectBuildId)
+    {
+        var versions = appVersions.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return versions.Count == 1 ? $"v{versions[0]}" : $"build-{projectBuildId}";
     }
 
     /// <summary>The Release body: which apps this build produced, and where the build itself is.</summary>

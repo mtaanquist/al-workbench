@@ -74,8 +74,11 @@ public sealed partial class GitHubAppClient
     }
 
     /// <summary>
-    /// Creates a Release at <paramref name="tag"/>, pointing the tag at the
-    /// repository's default branch.
+    /// Creates a Release at <paramref name="tag"/>, pointing the tag at
+    /// <paramref name="targetCommit"/> - the commit that was built - or, when that is
+    /// not known, at the repository's default branch. A tag on the default branch's
+    /// head would name a commit the build never saw whenever it built another branch
+    /// or GitHub has moved on since.
     ///
     /// <para><c>generate_release_notes</c> is off: the body says which apps this
     /// build produced and links back to the build, which is the thing a
@@ -85,13 +88,15 @@ public sealed partial class GitHubAppClient
     /// <exception cref="GitHubApiException">GitHub refused - typically a rule that restricts tag creation.</exception>
     public async Task<GitHubRelease> CreateReleaseAsync(
         string credential, string owner, string repo, string tag, string name, string body,
-        CancellationToken ct = default)
+        string? targetCommit = null, CancellationToken ct = default)
     {
         using var request = NewJsonRequest(
             HttpMethod.Post, $"{RepoPath(owner, repo)}/releases", credential,
             new
             {
                 tag_name = tag,
+                // Left out when null, which makes GitHub use the default branch.
+                target_commitish = string.IsNullOrWhiteSpace(targetCommit) ? null : targetCommit,
                 name,
                 body,
                 draft = false,

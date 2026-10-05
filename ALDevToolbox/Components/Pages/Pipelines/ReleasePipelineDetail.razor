@@ -948,7 +948,11 @@
             _rp.ProjectEnvironment?.MissingSince != null,
             _rp.DeploymentSchedule, _rp.SchemaSyncMode,
             _rp.ArtifactSource, _rp.GithubReleaseRepositoryId, _rp.GithubReleaseRepository?.DisplayName,
-            _rp.ProjectEnvironment?.Status, _rp.PrepareReleaseOnNewBuild);
+            _rp.ProjectEnvironment?.Status, _rp.PrepareReleaseOnNewBuild)
+        {
+            RestrictBranch = _rp.RestrictBranch,
+            AllowedBranch = _rp.AllowedBranch,
+        };
         await _editor.OpenForEditAsync(row);
     }
 

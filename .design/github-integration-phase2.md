@@ -351,10 +351,11 @@ Releases page, and who sometimes has to redeploy a version the workbench did not
   means "publish every successful build there". The editor offers the solution's GitHub
   repositories inside the connected organisation, so a solution with several
   repositories says which one gets the Release.
-- **The tag is `v<version>`** where the version is the built app's `app.json` version. A
-  build with several artifacts publishes when they all carry the same version and is
-  otherwise recorded as "not published: the apps have different versions" - the build
-  itself still succeeds. A publish failure of any kind is a build log section and a note
+- **The tag is `v<version>`** where the version is the built app's version. A build with
+  several artifacts at different versions is tagged `build-<number>` instead (it used to be
+  recorded as "not published: the apps have different versions"): once builds add their
+  number to each app's version, apps that keep their own Major.Minor share only the build
+  number (`.design/object-explorer-project-builds.md`, "Build numbers in app versions"). A publish failure of any kind is a build log section and a note
   on the build page, never a failed build: the `.app` exists and downloads regardless.
 - **Idempotent on re-run.** An existing Release at the tag has its assets replaced
   (delete then upload) and its body updated; the tag is never moved. Installation token

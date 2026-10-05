@@ -219,6 +219,16 @@ public sealed class ProjectBuildService
                 discovered = kept;
             }
 
+            // 2c. Number the apps: the build's number goes into the third part of each
+            //     version, in this build's own copy of the repository only. Before the
+            //     compile so the .app, its file name and every record of it agree.
+            if (build is not null
+                && MayNumberApps(build.PipelineId, build.Trigger, options.Target)
+                && await PipelineNumbersAppsAsync(_db, build.PipelineId!.Value, ct).ConfigureAwait(false))
+            {
+                discovered = StampBuildNumber(discovered, build.Id, logs);
+            }
+
             // 3. Resolve the target BC version + country, download Microsoft symbols.
             var country = ResolveCountry(project.DefaultArtifactCountry);
             var majorMinor = SelectTargetMajorMinor(discovered.Select(d => d.Manifest));
@@ -400,6 +410,95 @@ public sealed class ProjectBuildService
                 catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist build diagnostics for release {ReleaseId}.", releaseId); }
             }
             TryDeleteDirectory(buildRoot);
+        }
+    }
+
+    // ── Build numbers in app versions ───────────────────────────────────
+
+    /// <summary>
+    /// Whether the pipeline has numbering on. Read at build time, so a build queued
+    /// before the setting changed follows it. See <see cref="BuildVersionStamp"/>.
+    /// </summary>
+    internal static async Task<bool> PipelineNumbersAppsAsync(AppDbContext db, int pipelineId, CancellationToken ct) =>
+        await db.OePipelines.AsNoTracking()
+            .Where(p => p.Id == pipelineId)
+            .Select(p => p.AutoVersion)
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// The kinds of build that can number their apps: a pipeline's own build against the
+    /// current version. A pull-request check and a preview check are never deployed or
+    /// published, so they compile the manifests as they are.
+    /// </summary>
+    internal static bool MayNumberApps(int? pipelineId, string trigger, BcBuildTarget target) =>
+        pipelineId is not null && trigger != ProjectBuildTrigger.PullRequest && target == BcBuildTarget.Current;
+
+    /// <summary>
+    /// Writes each app's numbered version into its <c>app.json</c> in the clone and
+    /// returns the apps with their manifests saying the same, plus one build-log section
+    /// listing what each became. An app whose version can't be read or written keeps
+    /// its own and says so in the log; it still compiles.
+    /// </summary>
+    internal static List<DiscoveredApp> StampBuildNumber(List<DiscoveredApp> apps, int buildNumber, List<PendingLog> logs)
+    {
+        var lines = new List<string>();
+        var stamped = new List<DiscoveredApp>(apps.Count);
+        foreach (var app in apps)
+        {
+            var version = BuildVersionStamp.Compute(app.Manifest.Version, buildNumber);
+            if (version is null)
+            {
+                lines.Add($"{app.Manifest.Name}: kept {app.Manifest.Version}, because that version isn't made of whole numbers.");
+                stamped.Add(app);
+                continue;
+            }
+            if (!TryWriteVersion(app, version))
+            {
+                lines.Add($"{app.Manifest.Name}: kept {app.Manifest.Version}, because its app.json couldn't be updated.");
+                stamped.Add(app);
+                continue;
+            }
+            lines.Add($"{app.Manifest.Name}: {app.Manifest.Version} in app.json is built as {version}.");
+            stamped.Add(app with { Manifest = app.Manifest with { Version = version } });
+        }
+        logs.Add(new PendingLog(null, "Version",
+            $"Build #{buildNumber} adds its build number to the third part of each app's version. The app.json files in the repositories are not changed.\n" + string.Join("\n", lines)));
+        return stamped;
+    }
+
+    /// <summary>
+    /// Writes <paramref name="version"/> into the app's <c>app.json</c> in the clone.
+    /// False, leaving the file alone, when it can't be done safely: the file is a link
+    /// (a repository could point one anywhere the server can write, so it is only ever
+    /// read through), it doesn't sit inside the clone, or reading or writing it fails.
+    /// </summary>
+    private static bool TryWriteVersion(DiscoveredApp app, string version)
+    {
+        try
+        {
+            var path = Path.GetFullPath(Path.Combine(app.ProjectDir, "app.json"));
+            var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(app.Repo.Dir)) + Path.DirectorySeparatorChar;
+            if (!path.StartsWith(root, StringComparison.Ordinal)) return false;
+            // Every folder between the clone and the file as well, since a linked folder
+            // would carry the write out of the clone just the same.
+            FileSystemInfo? info = new FileInfo(path);
+            while (info is not null && info.FullName.Length >= root.Length)
+            {
+                if (info.LinkTarget is not null) return false;
+                info = info is FileInfo file ? file.Directory : ((DirectoryInfo)info).Parent;
+            }
+
+            var rewritten = BuildVersionStamp.WriteVersion(File.ReadAllText(path), version);
+            if (rewritten is null) return false;
+            File.WriteAllText(path, rewritten);
+            return true;
+        }
+        // ArgumentException and JsonException: a manifest the whole-document fallback
+        // can't hold (duplicate keys, say) keeps its version rather than failing the build.
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException
+                                       or ArgumentException or JsonException)
+        {
+            return false;
         }
     }
 
@@ -1898,7 +1997,7 @@ public sealed class ProjectBuildService
     private sealed record SupplementalSymbol(string FileName, byte[] Content);
 
     /// <summary>A captured log section accumulated during a build, before it's persisted as a <see cref="OeProjectBuildLog"/>.</summary>
-    private sealed record PendingLog(int? RepoId, string Section, string Content);
+    internal sealed record PendingLog(int? RepoId, string Section, string Content);
 
     /// <summary>A compiled deliverable held in memory, before it's persisted as a <see cref="OeProjectBuildArtifact"/>.</summary>
     private sealed record PendingArtifact(string FileName, string? AppId, string AppName, string AppVersion, string? Runtime, byte[] Content);

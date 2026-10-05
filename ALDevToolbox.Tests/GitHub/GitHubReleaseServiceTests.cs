@@ -85,6 +85,8 @@ public sealed class GitHubReleaseServiceTests : IDisposable
 
         var created = CreateReleaseBody(api);
         created.Should().Contain("\"tag_name\":\"v1.2.3.0\"");
+        // The tag goes on the commit that was built, not on the default branch's head.
+        created.Should().Contain($"\"target_commitish\":\"{BuiltCommit}\"");
         created.Should().Contain("CRONUS Core 1.2.3.0");
         // Generated notes would describe commits nobody chose; the body names the apps.
         created.Should().Contain("\"generate_release_notes\":false");
@@ -128,22 +130,32 @@ public sealed class GitHubReleaseServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Apps_at_different_versions_are_recorded_as_not_published_and_the_build_still_succeeds()
+    public async Task Apps_at_different_versions_are_published_under_the_build_number()
     {
+        // Apps that each keep their own Major.Minor share only the build number, so the
+        // Release is named after the build rather than after one app's version.
         await ConnectOrganisationAsync();
         var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0"), ("CRONUS Sales", "2.0.0.0")]);
-        var api = PublishableApi(existingRelease: false);
+        var tag = $"build-{seed.BuildId}";
+        var api = PublishableApi(existingRelease: false, tag: tag);
 
         await using (var ctx = _db.NewContext())
         {
             var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
-            result.Published.Should().BeFalse();
-            result.Error.Should().Be("Not published: the apps have different versions.");
+            result.Published.Should().BeTrue();
+            result.Tag.Should().Be(tag);
         }
 
-        api.Calls.Should().NotContain(c => c.Contains("/releases"));
-        await AssertBuildStillReadyAsync(seed.BuildId, expectError: "different versions");
+        CreateReleaseBody(api).Should().Contain($"\"tag_name\":\"{tag}\"");
+        api.Calls.Where(c => c.Contains("uploads.github.com")).Should().HaveCount(2);
     }
+
+    [Theory]
+    [InlineData(new[] { "28.2.4812.0" }, "v28.2.4812.0")]
+    [InlineData(new[] { "28.2.4812.0", "28.2.4812.0" }, "v28.2.4812.0")]
+    [InlineData(new[] { "28.2.4812.0", "1.3.4812.0" }, "build-4812")]
+    public void The_tag_is_the_shared_version_or_else_the_build_number(string[] versions, string expected) =>
+        GitHubReleaseService.ReleaseTag(versions, 4812).Should().Be(expected);
 
     [Fact]
     public async Task A_refusal_from_github_lands_on_the_build_rather_than_failing_it()
@@ -524,6 +536,9 @@ public sealed class GitHubReleaseServiceTests : IDisposable
     /// releases to it), an environment, a release pipeline (optionally drawing from the
     /// repository's releases), and one successful build with the named apps.
     /// </summary>
+    /// <summary>The commit every seeded build compiled from its repository.</summary>
+    private const string BuiltCommit = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
     private async Task<Seed> SeedAsync(
         bool publishTo, (string Name, string Version)[] apps, string? repoUrl = null, bool releaseSourced = false)
     {
@@ -592,6 +607,12 @@ public sealed class GitHubReleaseServiceTests : IDisposable
                 SizeBytes = 3, Content = [1, 2, 3], CreatedAt = now,
             });
         }
+        // The commit the build compiled from the repository it publishes to.
+        ctx.OeProjectBuildRepoCommits.Add(new OeProjectBuildRepoCommit
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = build.Id, ProjectRepositoryId = repository.Id,
+            RepoUrl = repository.Url, RepoDisplayName = RepoName, CommitHash = BuiltCommit,
+        });
         await ctx.SaveChangesAsync();
 
         return new Seed(project.Id, pipeline.Id, releasePipeline.Id, build.Id);

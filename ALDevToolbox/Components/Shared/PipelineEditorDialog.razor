@@ -83,6 +83,15 @@
                         </label>
                         <small class="field__hint">Builds against Microsoft's previews of the next minor and next major Business Central versions, to catch breaking changes before they reach your customers. These preview builds can't be deployed; their results show beside the pipeline in the pipelines list.</small>
                     </div>
+                    <div class="field">
+                        <label class="@(_autoVersion ? "check is-checked" : "check")">
+                            <input id="pe-auto-version" type="checkbox" checked="@_autoVersion" disabled="@_saving"
+                                   @onchange="e => _autoVersion = (bool)(e.Value ?? false)" />
+                            <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                            <span>Add the build number to each app's version</span>
+                        </label>
+                        <small class="field__hint">The build number is added to the third part of the version: 28.2.0.0 in app.json becomes 28.2.4812.0 in build #4812. Business Central only installs a higher version over an installed app, so this lets every build be deployed without raising the version by hand. Your app.json files aren't changed.</small>
+                    </div>
                 }
 
                 @if (_pickProject && _projectId == 0)
@@ -252,6 +261,8 @@
     private string _branch = string.Empty;
     // The nightly preview check against the next minor and next major (#994).
     private bool _previewCheck;
+    // Whether builds add their build number to each app's version.
+    private bool _autoVersion = true;
     // The solution's GitHub repositories inside the connected organisation. Empty
     // (and the whole field hidden) when there is no GitHub connection - an
     // organisation on Azure DevOps is shown no GitHub machinery at all.
@@ -312,7 +323,7 @@
 
     /// <summary>Opens the dialog to edit an existing pipeline. <paramref name="requestedAppIdsJson"/> is the stored selection (null = all).</summary>
     public async Task OpenForEditAsync(int pipelineId, int projectId, string projectName, string name, string? requestedAppIdsJson,
-        int? githubReleaseRepositoryId = null, string? branch = null, bool previewCheck = false)
+        int? githubReleaseRepositoryId = null, string? branch = null, bool previewCheck = false, bool autoVersion = true)
     {
         ResetForCreate();
         _editing = true;
@@ -327,6 +338,7 @@
         _releaseRepositoryId = githubReleaseRepositoryId ?? 0;
         _branch = branch ?? string.Empty;
         _previewCheck = previewCheck;
+        _autoVersion = autoVersion;
         _open = true;
         _focusPending = true;
         await LoadReleaseRepositoriesAsync();
@@ -341,6 +353,7 @@
         _name = string.Empty;
         _branch = string.Empty;
         _previewCheck = false;
+        _autoVersion = true;
         _initialSelection = null;
         _initialIsAll = true; // new pipelines default to "build everything"
         _selectionSeeded = false;
@@ -652,7 +665,8 @@
                 _projectId, _name.Trim(), selection,
                 _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
                 string.IsNullOrWhiteSpace(_branch) ? null : _branch.Trim(),
-                _previewCheck);
+                _previewCheck,
+                _autoVersion);
 
             int id;
             if (_editing && _pipelineId is { } pid)

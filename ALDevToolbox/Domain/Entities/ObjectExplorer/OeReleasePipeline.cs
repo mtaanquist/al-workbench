@@ -92,6 +92,22 @@ public class OeReleasePipeline
     /// </summary>
     public bool PrepareReleaseOnNewBuild { get; set; }
 
+    /// <summary>
+    /// When true, this pipeline only deploys builds made from <see cref="AllowedBranch"/>,
+    /// so a build of a test branch cannot reach the environment by way of a build pipeline
+    /// whose branch was changed. On by default for a Production environment. Only builds
+    /// of a build pipeline carry a branch; a pipeline that installs GitHub releases ignores
+    /// it. See <c>.design/saas-delivery.md</c>, "Which branch may reach an environment".
+    /// </summary>
+    public bool RestrictBranch { get; set; }
+
+    /// <summary>
+    /// The branch <see cref="RestrictBranch"/> allows, compared with
+    /// <see cref="OeProjectBuild.Branch"/>. Null means the repositories' default branch,
+    /// which is what a build pipeline with no branch builds.
+    /// </summary>
+    public string? AllowedBranch { get; set; }
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 

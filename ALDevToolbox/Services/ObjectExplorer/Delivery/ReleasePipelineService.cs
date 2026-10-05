@@ -6,6 +6,7 @@ using ModelContextProtocol;
 
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 
@@ -90,7 +91,11 @@ public sealed class ReleasePipelineService
                 r.GithubReleaseRepositoryId,
                 r.GithubReleaseRepository != null ? r.GithubReleaseRepository.DisplayName : null,
                 r.ProjectEnvironment.Status,
-                r.PrepareReleaseOnNewBuild))
+                r.PrepareReleaseOnNewBuild)
+            {
+                RestrictBranch = r.RestrictBranch,
+                AllowedBranch = r.AllowedBranch,
+            })
             .ToListAsync(ct);
     }
 
@@ -293,6 +298,8 @@ public sealed class ReleasePipelineService
             DeploymentSchedule = v.DeploymentSchedule,
             SchemaSyncMode = v.SchemaSyncMode,
             PrepareReleaseOnNewBuild = v.PrepareReleaseOnNewBuild,
+            RestrictBranch = v.RestrictBranch,
+            AllowedBranch = v.AllowedBranch,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -323,6 +330,8 @@ public sealed class ReleasePipelineService
         pipeline.DeploymentSchedule = v.DeploymentSchedule;
         pipeline.SchemaSyncMode = v.SchemaSyncMode;
         pipeline.PrepareReleaseOnNewBuild = v.PrepareReleaseOnNewBuild;
+        pipeline.RestrictBranch = v.RestrictBranch;
+        pipeline.AllowedBranch = v.AllowedBranch;
         pipeline.UpdatedAt = DateTime.UtcNow;
         await SaveTranslatingNameClashAsync(ct);
         _logger.LogInformation("Updated deployment pipeline {ReleasePipelineId} ({Name}).", pipeline.Id, v.Name);
@@ -486,13 +495,23 @@ public sealed class ReleasePipelineService
             errors["SchemaSyncMode"] = "Choose a schema sync setting.";
         }
 
+        // The branch rule only means something for a build pipeline's builds; blank is
+        // the repositories' default branch, so only a typed name needs checking.
+        var restrictBranch = input.RestrictBranch && artifactSource == ReleaseArtifactSource.Build;
+        var allowedBranch = restrictBranch ? DeploymentBranchRule.Normalize(input.AllowedBranch) : null;
+        if (allowedBranch is not null && !GitBranchName.IsValid(allowedBranch))
+        {
+            errors["AllowedBranch"] = "That isn't a valid branch name. Type it exactly as GitHub shows it, e.g. main or release/25.0 - no spaces or '..'.";
+        }
+
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
         // Preparing a deployment follows a build pipeline's builds; a pipeline that installs
         // GitHub releases has no build to follow, so the setting means nothing there.
         return new ValidatedReleasePipeline(
             name, deploymentSchedule, schemaSyncMode, artifactSource, buildPipelineId, releaseRepositoryId,
-            input.PrepareReleaseOnNewBuild && artifactSource == ReleaseArtifactSource.Build);
+            input.PrepareReleaseOnNewBuild && artifactSource == ReleaseArtifactSource.Build,
+            restrictBranch, allowedBranch);
     }
 
     /// <summary>The normalised values a validated deployment-pipeline input settles on.</summary>
@@ -503,7 +522,9 @@ public sealed class ReleasePipelineService
         string ArtifactSource,
         int? BuildPipelineId,
         int? GithubReleaseRepositoryId,
-        bool PrepareReleaseOnNewBuild);
+        bool PrepareReleaseOnNewBuild,
+        bool RestrictBranch,
+        string? AllowedBranch);
 
     /// <summary>
     /// Gates a deployment-pipeline-keyed read on its project's visibility. One that
@@ -583,7 +604,15 @@ public sealed record ReleasePipelineInput(
     /// Prepare a deployment, for a person to approve, whenever the build pipeline has a new
     /// successful build (#934). Ignored for a pipeline that installs GitHub releases.
     /// </summary>
-    bool PrepareReleaseOnNewBuild = false);
+    bool PrepareReleaseOnNewBuild = false,
+    /// <summary>
+    /// Only deploy builds made from <see cref="AllowedBranch"/>. Ignored for a pipeline
+    /// that installs GitHub releases. See <c>.design/saas-delivery.md</c>, "Which branch
+    /// may reach an environment".
+    /// </summary>
+    bool RestrictBranch = false,
+    /// <summary>The branch <see cref="RestrictBranch"/> allows; blank is the repositories' default branch.</summary>
+    string? AllowedBranch = null);
 
 /// <summary>List-row projection of a deployment pipeline with its source and target resolved for display.</summary>
 public sealed record ReleasePipelineRow(
@@ -620,6 +649,12 @@ public sealed record ReleasePipelineRow(
     [property: System.Text.Json.Serialization.JsonPropertyName("prepareDeploymentOnNewBuild")]
     bool PrepareReleaseOnNewBuild = false)
 {
+    /// <summary>True when this pipeline only deploys builds made from <see cref="AllowedBranch"/>.</summary>
+    public bool RestrictBranch { get; init; }
+
+    /// <summary>The branch it then allows; null is the repositories' default branch.</summary>
+    public string? AllowedBranch { get; init; }
+
     // ── The delivery summary: filled by ListReleasePipelineOverviewAsync only ──
     //
     // Not serialised: list_deployment_pipelines hands this record to agents as it is,

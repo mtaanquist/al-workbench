@@ -6,6 +6,7 @@
 @inject ILogger<ReleasePipelineEditorDialog> Log
 @using ALDevToolbox.Services.ObjectExplorer.Delivery
 @using ALDevToolbox.Services.ObjectExplorer.Bc
+@using ALDevToolbox.Services.ObjectExplorer.Projects
 @using ALDevToolbox.Services.GitHub
 @using ALDevToolbox.Domain.Entities.ObjectExplorer
 @using ALDevToolbox.Domain.ValueObjects
@@ -136,7 +137,7 @@
                         <div class="field">
                             <label class="field__label" for="rpe-build">Build pipeline to deploy from</label>
                             <SelectBox>
-                                <select id="rpe-build" class="select" @bind="_buildPipelineId" @bind:after="SuggestName" disabled="@_saving">
+                                <select id="rpe-build" class="select" @bind="_buildPipelineId" @bind:after="SuggestDefaults" disabled="@_saving">
                                     <option value="0">Choose a build pipeline...</option>
                                     @foreach (var bp in _buildPipelines)
                                     {
@@ -161,7 +162,7 @@
                     <div class="field">
                         <label class="field__label" for="rpe-env">Target environment</label>
                         <SelectBox>
-                            <select id="rpe-env" class="select" @bind="_environmentId" @bind:after="SuggestName" disabled="@_saving">
+                            <select id="rpe-env" class="select" @bind="_environmentId" @bind:after="SuggestDefaults" disabled="@_saving">
                                 <option value="0">Choose an environment...</option>
                                 @foreach (var env in _environments)
                                 {
@@ -174,6 +175,29 @@
                         </SelectBox>
                         <small class="field__hint">Where the apps are installed — every app in the build goes to this one. Each environment's status is shown: you can pick one that's busy, but deployments to it are refused until Business Central reports it ready.</small>
                     </div>
+
+                    @if (_artifactSource == ReleaseArtifactSource.Build)
+                    {
+                        <div class="field">
+                            <label class="@(_restrictBranch ? "check is-checked" : "check")">
+                                <input id="rpe-restrict-branch" type="checkbox" checked="@_restrictBranch" disabled="@_saving"
+                                       @onchange="OnRestrictBranchChanged" />
+                                <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                <span>Only deploy builds from one branch</span>
+                            </label>
+                            <small class="field__hint">Deploying a build from any other branch is refused, so a test build can't reach this environment by mistake. On by default when the target is a Production environment.</small>
+                        </div>
+                        @if (_restrictBranch)
+                        {
+                            <div class="field">
+                                <label class="field__label" for="rpe-allowed-branch">Branch</label>
+                                <input id="rpe-allowed-branch" type="text" class="input" maxlength="@GitBranchName.MaxLength"
+                                       pattern="@GitBranchName.HtmlPattern" @bind="_allowedBranch" @bind:after="() => _branchTextEdited = true"
+                                       disabled="@_saving" placeholder="e.g. main" spellcheck="false" autocomplete="off" />
+                                <small class="field__hint">Filled in with the branch the build pipeline builds. Leave empty to allow each repository's default branch.</small>
+                            </div>
+                        }
+                    }
 
                     <div class="field">
                         <label class="field__label" for="rpe-schedule">When a deployment installs</label>
@@ -307,6 +331,15 @@
     private string _schemaSyncMode = BcSyncMode.Add;
     private bool _forceSyncAck;
     private bool _prepareOnNewBuild;
+    // The branch rule: only builds from _allowedBranch (blank = the default branch).
+    private bool _restrictBranch;
+    private string _allowedBranch = string.Empty;
+    // Set once the person ticks or unticks the rule, so picking another environment no
+    // longer turns it on or off for them.
+    private bool _branchRuleTouched;
+    // Set once the person types a branch, so picking another build pipeline no longer
+    // refills it.
+    private bool _branchTextEdited;
 
     private bool _loading;
     private bool _saving;
@@ -429,6 +462,8 @@
         _schemaSyncMode = row.SchemaSyncMode;
         _forceSyncAck = row.SchemaSyncMode == BcSyncMode.ForceSync; // already-saved choice is pre-acknowledged
         _prepareOnNewBuild = row.PrepareReleaseOnNewBuild;
+        _restrictBranch = row.RestrictBranch;
+        _allowedBranch = row.AllowedBranch ?? string.Empty;
         _open = true;
         _focusPending = true;
         await LoadProjectAsync();
@@ -448,6 +483,10 @@
         _schemaSyncMode = BcSyncMode.Add;
         _forceSyncAck = false;
         _prepareOnNewBuild = false;
+        _restrictBranch = false;
+        _allowedBranch = string.Empty;
+        _branchRuleTouched = false;
+        _branchTextEdited = false;
         _saveError = null;
         _buildPipelines = null;
         _environments = null;
@@ -468,8 +507,49 @@
         _artifactSource = ReleaseArtifactSource.Build;
         _buildPipelineId = 0;
         _environmentId = 0;
-        SuggestName();
+        SuggestDefaults();
         if (_projectId != 0) await LoadProjectAsync();
+    }
+
+    /// <summary>What follows choosing a source or a target: the suggested name and branch rule.</summary>
+    private void SuggestDefaults()
+    {
+        SuggestName();
+        SuggestBranchRule();
+    }
+
+    /// <summary>
+    /// On create, turns the branch rule on for a production environment, allowing the
+    /// branch the chosen build pipeline builds, until the person changes it themselves.
+    /// An existing pipeline's rule is never changed for them.
+    /// </summary>
+    private void SuggestBranchRule()
+    {
+        if (_editing) return;
+        if (!_branchRuleTouched)
+        {
+            _restrictBranch = ChosenEnvironment is { } env && BcEnvironmentTypes.IsProduction(env.Type);
+        }
+        if (!_branchTextEdited) _allowedBranch = BuildPipelineBranch;
+    }
+
+    /// <summary>The branch the chosen build pipeline builds; blank for each repository's default branch.</summary>
+    private string BuildPipelineBranch =>
+        _buildPipelines?.FirstOrDefault(p => p.Id == _buildPipelineId)?.Branch ?? string.Empty;
+
+    /// <summary>
+    /// Turning the rule on fills in the build pipeline's branch unless a branch was typed,
+    /// so an editor ticking it on an existing pipeline doesn't save "default branch only"
+    /// for a pipeline that builds another one.
+    /// </summary>
+    private void OnRestrictBranchChanged(ChangeEventArgs e)
+    {
+        _restrictBranch = (bool)(e.Value ?? false);
+        _branchRuleTouched = true;
+        if (_restrictBranch && !_branchTextEdited && string.IsNullOrWhiteSpace(_allowedBranch))
+        {
+            _allowedBranch = BuildPipelineBranch;
+        }
     }
 
     /// <summary>
@@ -589,7 +669,9 @@
                 _projectId, _name.Trim(), _buildPipelineId, _environmentId, _deploymentSchedule, _schemaSyncMode,
                 _artifactSource,
                 _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
-                _prepareOnNewBuild && _artifactSource == ReleaseArtifactSource.Build);
+                _prepareOnNewBuild && _artifactSource == ReleaseArtifactSource.Build,
+                _restrictBranch && _artifactSource == ReleaseArtifactSource.Build,
+                string.IsNullOrWhiteSpace(_allowedBranch) ? null : _allowedBranch.Trim());
 
             int id;
             if (_editing && _releasePipelineId is { } rid)

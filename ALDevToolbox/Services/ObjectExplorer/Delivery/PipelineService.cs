@@ -100,6 +100,7 @@ public sealed class PipelineService
             Branch = branch,
             PreviewCheck = input.PreviewCheck,
             PreviewCheckByUserId = input.PreviewCheck ? _orgContext.CurrentUserId : null,
+            AutoVersion = input.AutoVersion,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -143,6 +144,7 @@ public sealed class PipelineService
             pipeline.PreviewCheckBlocked = null;
         }
         pipeline.PreviewCheck = input.PreviewCheck;
+        pipeline.AutoVersion = input.AutoVersion;
         pipeline.UpdatedAt = DateTime.UtcNow;
         await SaveTranslatingNameClashAsync(ct);
         _logger.LogInformation("Updated pipeline {PipelineId} ({Name}).", pipeline.Id, name);
@@ -335,7 +337,13 @@ public sealed record PipelineInput(
     /// minor and next major versions. See
     /// <c>.design/object-explorer-project-builds.md</c>, "The nightly preview check".
     /// </summary>
-    bool PreviewCheck = false);
+    bool PreviewCheck = false,
+    /// <summary>
+    /// Whether builds add their build number to each app's version. On unless the
+    /// person turns it off. See <c>.design/object-explorer-project-builds.md</c>,
+    /// "Build numbers in app versions".
+    /// </summary>
+    bool AutoVersion = true);
 
 /// <summary>A project choice for the "New pipeline" dialog's project picker.</summary>
 public sealed record PipelineProjectOption(int Id, string Name);

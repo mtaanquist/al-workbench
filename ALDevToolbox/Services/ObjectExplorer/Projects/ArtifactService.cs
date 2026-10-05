@@ -225,7 +225,7 @@ public sealed class ArtifactService
             .Where(p => _db.OeProjects.Where(visible).Any(v => v.Id == p.ProjectId))
             .Select(p => new
             {
-                p.Id, p.Name, p.ProjectId, p.PreviewCheck, p.PreviewCheckBlocked,
+                p.Id, p.Name, p.ProjectId, p.PreviewCheck, p.PreviewCheckBlocked, p.AutoVersion,
                 ProjectName = p.Project!.Name,
                 OwnerName = p.Project.CreatedByUser != null ? p.Project.CreatedByUser.DisplayName : null,
             })
@@ -274,7 +274,8 @@ public sealed class ArtifactService
                 LatestSuccessfulBuildId: latestSuccessful?.Id,
                 PreviewCheck: p.PreviewCheck,
                 PreviewChecks: previewChecks.GetValueOrDefault(p.Id, []),
-                PreviewCheckBlocked: p.PreviewCheck ? p.PreviewCheckBlocked : null));
+                PreviewCheckBlocked: p.PreviewCheck ? p.PreviewCheckBlocked : null,
+                AutoVersion: p.AutoVersion));
         }
 
         if (!string.IsNullOrWhiteSpace(search))
@@ -779,7 +780,9 @@ public sealed record PipelineArtifactsRow(
     /// <summary>The check's newest result per preview target; empty until the first night.</summary>
     IReadOnlyList<PreviewCheckResult>? PreviewChecks = null,
     /// <summary>Why the check could not start last night, when it couldn't.</summary>
-    string? PreviewCheckBlocked = null);
+    string? PreviewCheckBlocked = null,
+    /// <summary>Whether the pipeline's builds add their build number to each app's version.</summary>
+    bool AutoVersion = true);
 
 /// <summary>
 /// A pipeline's header for the pipeline detail page (its project + owner drive the
