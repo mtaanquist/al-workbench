@@ -89,6 +89,15 @@ public static class AuthenticationRegistration
                 options.ClientId = "00000000-0000-0000-0000-000000000000";
                 options.CallbackPath = ALDevToolbox.Endpoints.EntraAuthEndpoints.CallbackPath;
                 options.ResponseType = Microsoft.IdentityModel.Protocols.OpenIdConnect.OpenIdConnectResponseType.Code;
+                // Microsoft returns to the callback with a top-level GET, not
+                // the handler's default form_post. A cross-site POST from
+                // login.microsoftonline.com does not carry our SameSite=Lax
+                // auth cookie, so the step-up and "connect account" callbacks,
+                // which must see who is signed in, found nobody and refused
+                // every attempt as a mismatch. A GET navigation carries it.
+                // The code in the query is single-use and bound by PKCE and
+                // the client secret, and the callback redirects straight away.
+                options.ResponseMode = Microsoft.IdentityModel.Protocols.OpenIdConnect.OpenIdConnectResponseMode.Query;
                 options.SignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
                 options.Scope.Clear();
                 options.Scope.Add("openid");
