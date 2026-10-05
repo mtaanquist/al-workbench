@@ -1323,12 +1323,6 @@
     // ── Sessions: reading, keeping current, and ending one ──────────────
 
     /// <summary>
-    /// Reads who is signed in. <paramref name="automatic"/> marks a read the loop asked
-    /// for rather than a person: one of those failing must not replace a list somebody is
-    /// reading out to a customer with an error card, so it keeps the list and says quietly
-    /// that it couldn't be updated. A first read that fails has nothing to keep.
-    /// </summary>
-    /// <summary>
     /// Who is signed in, read on a DI scope of its own. The live timer comes through here,
     /// and its tick goes through InvokeAsync, which only keeps it apart from a click between
     /// awaits: a tab switch or a save already awaiting a query on the circuit's one
@@ -1341,6 +1335,12 @@
             .ListEnvironmentSessionsAsync(Row.ProjectId, Id, ct);
     }
 
+    /// <summary>
+    /// Reads who is signed in. <paramref name="automatic"/> marks a read the loop asked
+    /// for rather than a person: one of those failing must not replace a list somebody is
+    /// reading out to a customer with an error card, so it keeps the list and says quietly
+    /// that it couldn't be updated. A first read that fails has nothing to keep.
+    /// </summary>
     private async Task LoadSessionsAsync(bool automatic = false)
     {
         if (_sessionsLoading) return;

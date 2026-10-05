@@ -1,7 +1,6 @@
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace ALDevToolbox.Components.Pages.Upgrades;
 
@@ -150,7 +149,9 @@ public sealed class UpdateWatch : IDisposable
 
     /// <summary>
     /// True while a tick is reading or its host is re-reading after it: the host's controls
-    /// wait, so a click cannot start a second query on the same context.
+    /// wait, so a click cannot start a second query on the same context. A host that passes
+    /// a scope factory reads on a context of its own, so for it this only keeps the clicks
+    /// from acting on rows that are about to change.
     /// </summary>
     public bool IsTicking => _busy;
 

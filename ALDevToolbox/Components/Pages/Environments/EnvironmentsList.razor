@@ -588,14 +588,23 @@
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
 
+    /// <summary>Counts the listings started, so an earlier one finishing late doesn't overwrite a later one.</summary>
+    private int _loads;
+
     /// <param name="ownScope">True for the poll, whose tick can land while a click is still awaiting the circuit's context.</param>
     private async Task LoadAsync(bool ownScope = false)
     {
+        // The poll and a click's reload can now be in flight together; only the one that
+        // started last may set the rows, or a poll read from before a Recover would put
+        // the old state back.
+        var load = ++_loads;
         try
         {
-            _rows = ownScope
+            var rows = ownScope
                 ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true))
                 : await Fleet.ListFleetAsync(includeSoftDeleted: true);
+            if (load != _loads) return;
+            _rows = rows;
             _error = null;
             _loadFailed = false;
             _selection.Prune(Selectable(_rows).Select(r => r.EnvironmentId));
@@ -603,6 +612,7 @@
         catch (Exception ex)
         {
             Log.LogError(ex, "Failed to list environments.");
+            if (load != _loads) return;
             _rows = new List<UpgradeFleetRow>();
             _loadFailed = true;
         }

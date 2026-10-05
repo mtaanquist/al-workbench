@@ -890,6 +890,9 @@ public sealed class EnvironmentsListTests : IDisposable
         await AutoBox(cut).ChangeAsync(new Microsoft.AspNetCore.Components.ChangeEventArgs { Value = true });
         cut.WaitForAssertion(() =>
             cut.Find(".note--info .note__body").TextContent.Should().StartWith("Already up to date"));
+        // The read goes stale before the next tick, so that tick has to ask, which needs
+        // the database; the note changing shows it did.
+        await StampEnvironmentsReadAsync(id, now.AddMinutes(-10));
 
         var pageContext = _ctx.Services.GetRequiredService<ALDevToolbox.Data.AppDbContext>();
         var busy = pageContext.Database.ExecuteSqlRawAsync("SELECT pg_sleep(2)");
@@ -900,7 +903,8 @@ public sealed class EnvironmentsListTests : IDisposable
             cut.Render();
             cut.Markup.Should().NotContain("ask Business Central for a refresh. Try again",
                 "the tick must not have failed on the busy context");
-            cut.Find(".note--info .note__body").TextContent.Should().StartWith("Already up to date");
+            cut.Find(".note--info .note__body").TextContent.Should().Contain("Asking Business Central about 1 solution");
+            _ctx.Services.GetRequiredService<EnvironmentRefreshQueue>().IsInFlight(id).Should().BeTrue();
         }
         finally
         {

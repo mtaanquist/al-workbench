@@ -169,6 +169,9 @@
     private Dictionary<int, int> _fileCounts = new();
     private CancellationTokenSource? _debounce;
 
+    /// <summary>Counts the searches started, so an earlier one finishing late doesn't overwrite a later one.</summary>
+    private int _searches;
+
     private readonly (string Label, RecipeType? Value)[] _typeOptions =
     {
         ("All", (RecipeType?)null),
@@ -246,9 +249,6 @@
         _results = results;
         StateHasChanged();
     }
-
-    /// <summary>Counts the searches started, so an earlier one finishing late doesn't overwrite a later one.</summary>
-    private int _searches;
 
     private void SetTypeFilter(RecipeType? value)
     {
