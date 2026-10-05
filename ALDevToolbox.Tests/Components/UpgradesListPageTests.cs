@@ -564,19 +564,23 @@ public sealed class UpgradesListPageTests : IDisposable
         var target = await SeedUpgradeAsync("28.5 in November", projectId, [], plannedAt: DateTime.UtcNow.AddDays(20));
 
         var cut = Render("fleet");
-        cut.WaitForAssertion(() => cut.FindAll(".upg-scroll .data-table tbody tr").Should().HaveCount(2));
-        cut.WaitForAssertion(() => cut.Find("thead .data-table__col-check input").Change(true));
-        cut.WaitForAssertion(() => cut.FindAll(".cmdbar button").Single(b => b.TextContent.Trim() == "Add to upgrade...")
-            .HasAttribute("disabled").Should().BeFalse());
+        // The Fleet view draws its rows, then reads the planned upgrades for the tabs and
+        // redraws; tick only once all three counts are in, so no handler is retired under us
+        // and the dialog's own read does not overlap the tabs' read on the page's context.
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab__count").Should().HaveCount(3));
+        cut.Find("thead .data-table__col-check input").Change(true);
+        cut.WaitForAssertion(() => cut.FindAll(".upg-scroll tbody tr.is-selected").Should().HaveCount(2));
+        // Once, not inside the wait: a retried click opens the dialog twice, and the second
+        // open can land on a handler the first one's redraw retired.
         cut.FindAll(".cmdbar button").Single(b => b.TextContent.Trim() == "Add to upgrade...").Click();
 
         cut.WaitForAssertion(() => cut.Find("#atu-title").TextContent.Should().Be("Add 2 environments to an upgrade"));
-        cut.FindAll(".atu-choice__name").Select(n => n.TextContent.Trim()).Should()
-            .Equal("28.5 in October", "28.5 in November", "New upgrade");
+        cut.WaitForAssertion(() => cut.FindAll(".atu-choice__name").Select(n => n.TextContent.Trim()).Should()
+            .Equal("28.5 in October", "28.5 in November", "New upgrade"));
 
+        PickUpgrade(cut, "28.5 in November");
         cut.WaitForAssertion(() =>
         {
-            cut.FindAll(".atu-choice").Single(c => c.TextContent.Contains("28.5 in November")).QuerySelector("input")!.Change(true);
             var left = cut.FindAll(".atu-env--out");
             left.Should().ContainSingle();
             left[0].TextContent.Should().Contain("CRONUS Denmark - Production").And.Contain("On 28.5 in October. Left out.");
@@ -633,8 +637,11 @@ public sealed class UpgradesListPageTests : IDisposable
         var tonight = await SeedUpgradeAsync("Tonight", projectId, [envs[0]], plannedAt: DateTime.UtcNow.AddHours(3));
 
         var cut = Render("fleet");
-        cut.WaitForAssertion(() => cut.FindAll(".upg-scroll .data-table tbody tr").Should().HaveCount(2));
-        cut.WaitForAssertion(() => cut.Find("thead .data-table__col-check input").Change(true));
+        // The Fleet view draws its rows, then reads the planned upgrades for the tabs and
+        // redraws; tick only once all three counts are in, so no handler is retired under us.
+        cut.WaitForAssertion(() => cut.FindAll(".pill-tab__count").Should().HaveCount(3));
+        cut.Find("thead .data-table__col-check input").Change(true);
+        cut.WaitForAssertion(() => cut.FindAll(".upg-scroll tbody tr.is-selected").Should().HaveCount(2));
         // Once, not inside the wait: a retried click opens the dialog twice, and the second
         // open can land on a handler the first one's redraw retired.
         cut.FindAll(".cmdbar button").Single(b => b.TextContent.Trim() == "Add to upgrade...").Click();
