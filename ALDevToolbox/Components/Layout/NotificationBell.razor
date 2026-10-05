@@ -1,12 +1,15 @@
 @using ALDevToolbox.Services.Notifications
 @inject InAppNotificationService Notifications
+@inject NavigationManager Navigation
 @inject ILogger<NotificationBell> Logger
 
 @*
     The bell in the top bar: a link to the Notifications page with the number
     of unread ones on it (issue #1043). The shell is static, so the number is
     the one at page load; opening a notification or marking them read
-    redirects, which is when it changes. See .design/notifications.md.
+    redirects, which is when it changes. Being on the page a notification is
+    about counts as opening it, so following the link in its email clears it
+    too. See .design/notifications.md.
 *@
 
 <a href="/notifications" class="nav-link-btn notif-bell" title="@Label" aria-label="@Label">
@@ -33,10 +36,23 @@
         try
         {
             _unread = await Notifications.CountUnreadForCurrentUserAsync();
+            // Only worth a write when something is unread.
+            if (_unread > 0 && await Notifications.MarkPageReadForCurrentUserAsync(CurrentPath()) > 0)
+            {
+                _unread = await Notifications.CountUnreadForCurrentUserAsync();
+            }
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Could not count unread notifications for the bell.");
         }
+    }
+
+    /// <summary>This page's path and query, the shape a notification stores: <c>/pipelines/4?build=12</c>.</summary>
+    private string CurrentPath()
+    {
+        var relative = Navigation.ToBaseRelativePath(Navigation.Uri);
+        var hash = relative.IndexOf('#');
+        return "/" + (hash < 0 ? relative : relative[..hash]);
     }
 }

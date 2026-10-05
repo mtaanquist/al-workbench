@@ -9,6 +9,7 @@ using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Bunit;
 using Bunit.TestDoubles;
+using Microsoft.AspNetCore.Components;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -142,6 +143,34 @@ public sealed class MainLayoutPaletteButtonTests : IDisposable
             bell.GetAttribute("aria-label").Should().Be("Notifications, 3 unread");
             cut.Find(".notif-bell__count").TextContent.Should().Be("3");
         });
+    }
+
+    [Fact]
+    public async Task Being_on_the_page_a_notification_is_about_marks_it_read()
+    {
+        var userId = await SeedUserWithUnreadAsync(2);
+        await using (var db = _db.NewContext())
+        {
+            db.UserNotifications.Add(new ALDevToolbox.Domain.Entities.UserNotification
+            {
+                UserId = userId, OrganizationId = TestDb.DefaultOrgId,
+                Category = ALDevToolbox.Domain.Entities.NotificationCategory.Builds,
+                Title = "Build failed: CRONUS Coffee - Release", Path = "/pipelines/2", CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentUserId = userId;
+        _auth.SetAuthorized("user@example.com");
+        // As if they followed the link in the email.
+        _ctx.Services.GetRequiredService<NavigationManager>().NavigateTo("/pipelines/1#latest");
+
+        var cut = _ctx.Render<MainLayout>();
+
+        cut.WaitForAssertion(() =>
+            cut.Find(".app__top a.notif-bell").GetAttribute("aria-label").Should().Be("Notifications, 1 unread"));
+        await using var read = _db.NewContext();
+        (await read.UserNotifications.Where(n => n.ReadAt == null).Select(n => n.Path).ToListAsync())
+            .Should().Equal("/pipelines/2");
     }
 
     [Fact]

@@ -40,6 +40,15 @@ public class UserNotification
     /// <summary>The solution the notification belongs to. Null when it belongs to none.</summary>
     public string? SolutionName { get; set; }
 
+    /// <summary>
+    /// What the notification asks its recipients to do, when it asks for anything:
+    /// <c>delivery:12</c> for a deployment waiting for approval, <c>upgrade-line:34</c> for an
+    /// environment ready to check (<see cref="Services.Notifications.NotificationSubject"/>).
+    /// Once that is done, by anyone and by any route, every recipient's copy is marked read.
+    /// Null for one that only tells.
+    /// </summary>
+    public string? Subject { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     /// <summary>When the person opened it or marked it read. Null while unread.</summary>

@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Services.Notifications;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -379,6 +380,10 @@ public sealed class EnvironmentUpgradeService
         upgrade.UpdatedAt = now;
         foreach (var line in upgrade.Lines) line.IsOpen = false;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        // Done means nothing is left to check on it.
+        await NotificationSubject.MarkDoneAsync(
+            _db, upgrade.Lines.Select(l => NotificationSubject.UpgradeLine(l.Id)).ToList(), now, _logger, ct)
+            .ConfigureAwait(false);
 
         var uncheckedCount = upgrade.Lines.Count(l => l.CheckedAt is null);
         _logger.LogInformation(
@@ -732,7 +737,8 @@ public sealed class EnvironmentUpgradeService
 
         var now = _clock.GetUtcNow().UtcDateTime;
         // A line already ticked keeps its stamp: ticking it again is not a second check.
-        if (isChecked == true && line.CheckedAt is null)
+        var newlyChecked = isChecked == true && line.CheckedAt is null;
+        if (newlyChecked)
         {
             line.CheckedAt = now;
             line.CheckedByUserId = _orgContext.CurrentUserId;
@@ -747,6 +753,11 @@ public sealed class EnvironmentUpgradeService
         if (setNote) line.Note = trimmedNote;
         line.Upgrade!.UpdatedAt = now;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        if (newlyChecked)
+        {
+            await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
+                .ConfigureAwait(false);
+        }
 
         _logger.LogInformation(
             "User {UserId} set the check on environment {EnvironmentId} on planned upgrade {UpgradeId} ({CheckState}, note {NoteChange}).",
