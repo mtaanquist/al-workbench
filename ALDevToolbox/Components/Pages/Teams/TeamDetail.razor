@@ -128,23 +128,25 @@
                 }
                 else
                 {
-                    <div class="u-row">
-                        <SelectBox>
-                            <select class="select" aria-label="Person to add" @bind="_selectedUserId">
-                                <option value="0">Pick somebody...</option>
-                                @foreach (var candidate in _candidates)
-                                {
-                                    <option value="@candidate.UserId">@candidate.DisplayName (@candidate.Email)</option>
-                                }
-                            </select>
-                        </SelectBox>
-                        <button type="button" class="btn btn--primary" @onclick="AddMemberAsync" disabled="@(_busy || _selectedUserId == 0)">
-                            <Icon Name="user-plus" Width="14" Height="14" />
-                            <span>Add to team</span>
-                        </button>
-                        <button type="button" class="btn" @onclick="() => _adding = false" disabled="@_busy">Cancel</button>
+                    <div class="card__body">
+                        <div class="u-row">
+                            <SelectBox>
+                                <select class="select" aria-label="Person to add" @bind="_selectedUserId">
+                                    <option value="0">Pick somebody...</option>
+                                    @foreach (var candidate in _candidates)
+                                    {
+                                        <option value="@candidate.UserId">@candidate.DisplayName (@candidate.Email)</option>
+                                    }
+                                </select>
+                            </SelectBox>
+                            <button type="button" class="btn btn--primary" @onclick="AddMemberAsync" disabled="@(_busy || _selectedUserId == 0)">
+                                <Icon Name="user-plus" Width="14" Height="14" />
+                                <span>Add to team</span>
+                            </button>
+                            <button type="button" class="btn" @onclick="() => _adding = false" disabled="@_busy">Cancel</button>
+                        </div>
+                        <FieldError Field="UserId" Errors="@_addErrors" />
                     </div>
-                    <FieldError Field="UserId" Errors="@_addErrors" />
                 }
             </section>
         }
