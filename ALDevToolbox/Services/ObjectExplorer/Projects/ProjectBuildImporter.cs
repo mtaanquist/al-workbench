@@ -29,6 +29,7 @@ public sealed class ProjectBuildImporter
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
+    private readonly CloneCredentialResolver _credentials;
     private readonly TimeProvider _clock;
     private readonly ILogger<ProjectBuildImporter> _logger;
 
@@ -39,6 +40,7 @@ public sealed class ProjectBuildImporter
         AppDbContext db,
         IOrganizationContext orgContext,
         ProjectAccess access,
+        CloneCredentialResolver credentials,
         TimeProvider clock,
         ILogger<ProjectBuildImporter> logger)
     {
@@ -48,6 +50,7 @@ public sealed class ProjectBuildImporter
         _db = db;
         _orgContext = orgContext;
         _access = access;
+        _credentials = credentials;
         _clock = clock;
         _logger = logger;
     }
@@ -92,6 +95,7 @@ public sealed class ProjectBuildImporter
                 ProjectName = p.Project!.Name,
                 OwnerId = p.Project.CreatedByUserId,
                 RepoCount = p.Project.Repositories.Count,
+                Providers = p.Project.Repositories.Select(r => r.Provider).Distinct().ToList(),
             })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false)
             ?? throw new PlanValidationException(new Dictionary<string, string>
@@ -108,6 +112,25 @@ public sealed class ProjectBuildImporter
             {
                 ["Pipeline"] = "Add at least one repository to this project before building.",
             });
+        }
+
+        // A manual build clones as the person who pressed Build. Without a credential
+        // for one of the repositories it would be skipped and the build would fail
+        // with nothing to compile, so refuse before a build exists and say what to set
+        // up. The preview check is left to fail its build: it runs unattended, and a
+        // refusal here would pause the check rather than report one bad night.
+        if (trigger == ProjectBuildTrigger.Manual)
+        {
+            foreach (var provider in pipeline.Providers)
+            {
+                if ((await _credentials.ResolveAsync(provider, ct).ConfigureAwait(false)).Count == 0)
+                {
+                    throw new PlanValidationException(new Dictionary<string, string>
+                    {
+                        ["Pipeline"] = CloneCredentialResolver.NothingToCloneWith(provider),
+                    });
+                }
+            }
         }
 
         // Clean provisional label — just the project name. The build state shows
