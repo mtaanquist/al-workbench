@@ -142,6 +142,70 @@ public sealed class NotificationEndpointTests : IDisposable
         (await ReadAtAsync(samsId)).Should().BeNull();
     }
 
+    [Theory]
+    [InlineData("/pipelines/1?tab=builds", "/pipelines/1?tab=builds")]
+    [InlineData("//evil.example/path", "/notifications")]
+    [InlineData("https://evil.example/", "/notifications")]
+    [InlineData("/\\evil.example", "/notifications")]
+    [InlineData("", "/notifications")]
+    [InlineData("/pipelines\n/1", "/notifications")]
+    public async Task Read_all_from_the_flyout_goes_back_to_the_page_it_was_on_and_nowhere_else(
+        string returnUrl, string expected)
+    {
+        var alex = await SeedUserAsync(AlexEmail, Password);
+        var id = await AddAsync(alex, "/pipelines/1?build=7");
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory, AlexEmail);
+        var token = await TokenFromAsync(client, "/notifications");
+
+        using var response = await client.PostAsync("/notifications/read-all", Form(
+            ("upToId", id.ToString()), ("returnUrl", returnUrl), ("__RequestVerificationToken", token)));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        response.Headers.Location!.OriginalString.Should().Be(expected);
+        (await ReadAtAsync(id)).Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Read_all_in_the_background_answers_no_content_and_marks_them_read()
+    {
+        var alex = await SeedUserAsync(AlexEmail, Password);
+        var id = await AddAsync(alex, "/pipelines/1?build=7");
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory, AlexEmail);
+        var token = await TokenFromAsync(client, "/notifications");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/notifications/read-all")
+        {
+            Content = Form(("upToId", id.ToString()), ("returnUrl", "/pipelines"), ("__RequestVerificationToken", token)),
+        };
+        request.Headers.Add(ALDevToolbox.Endpoints.NotificationEndpoints.BackgroundHeader, "1");
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        (await ReadAtAsync(id)).Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Read_all_in_the_background_when_signed_out_is_not_a_success()
+    {
+        var alex = await SeedUserAsync(AlexEmail);
+        var id = await AddAsync(alex, "/pipelines/1?build=7");
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/notifications/read-all")
+        {
+            Content = Form(("upToId", id.ToString())),
+        };
+        request.Headers.Add(ALDevToolbox.Endpoints.NotificationEndpoints.BackgroundHeader, "1");
+
+        using var response = await client.SendAsync(request);
+
+        // The flyout's script takes only a 204 as done.
+        response.StatusCode.Should().NotBe(HttpStatusCode.NoContent);
+        (await ReadAtAsync(id)).Should().BeNull();
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private static FormUrlEncodedContent Form(params (string Key, string Value)[] fields) =>

@@ -38,6 +38,39 @@ public sealed class InAppNotificationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task The_bell_has_the_unread_count_and_the_newest_few()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        var sam = await SeedUserAsync("sam@cronus.example");
+        for (var i = 0; i < InAppNotificationService.FlyoutSize + 2; i++)
+        {
+            await AddAsync(alex, $"Event {i}", Monday.AddMinutes(i));
+        }
+        await AddAsync(alex, "Read", Monday.AddMinutes(-1), readAt: Monday);
+        await AddAsync(sam, "Sam's", Monday.AddHours(1));
+        _db.OrgContext.CurrentUserId = alex;
+
+        var (unread, rows) = await Service().GetBellForCurrentUserAsync();
+
+        unread.Should().Be(InAppNotificationService.FlyoutSize + 2);
+        rows.Should().HaveCount(InAppNotificationService.FlyoutSize);
+        rows[0].Title.Should().Be($"Event {InAppNotificationService.FlyoutSize + 1}");
+        rows[^1].Title.Should().Be("Event 2");
+    }
+
+    [Fact]
+    public async Task The_bell_is_empty_when_nobody_is_signed_in()
+    {
+        var alex = await SeedUserAsync("alex@cronus.example");
+        await AddAsync(alex, "Unread", Monday);
+
+        var (unread, rows) = await Service().GetBellForCurrentUserAsync();
+
+        unread.Should().Be(0);
+        rows.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task The_count_is_the_signed_in_persons_unread_only()
     {
         var alex = await SeedUserAsync("alex@cronus.example");
