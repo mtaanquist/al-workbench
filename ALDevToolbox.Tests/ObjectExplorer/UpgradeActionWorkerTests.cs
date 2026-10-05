@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.Workers;
 using ALDevToolbox.Tests.Infrastructure;
@@ -394,6 +395,81 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         await _f.Worker().NotifyReadyToCheckAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
 
         _f.Emails.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Checking_the_environment_marks_its_ready_to_check_notice_read()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await NotifyReadyAsync();
+        var lineId = await ReadyNoticeLineAsync(upgradeId);
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).SetCheckedAsync(lineId, true);
+        }
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.UserNotifications.AsNoTracking().SingleAsync()).ReadAt.Should().NotBeNull(
+            "the check it asked for is done, whoever did it and from wherever");
+    }
+
+    [Fact]
+    public async Task Marking_the_upgrade_done_marks_its_ready_to_check_notices_read()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await NotifyReadyAsync();
+        await ReadyNoticeLineAsync(upgradeId);
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await _f.Upgrades(ctx).CloseAsync(upgradeId);
+        }
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.UserNotifications.AsNoTracking().SingleAsync()).ReadAt.Should().NotBeNull();
+    }
+
+    [Theory]
+    [InlineData("reassign")]
+    [InlineData("take off")]
+    [InlineData("delete")]
+    public async Task A_line_nobody_is_asked_to_check_any_more_marks_its_notice_read(string how)
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var upgradeId = await PlanUpgradeAsync(projectId, envId, "27.6", assignee: UpgradeActionTestFixture.FlagUserId);
+        await SetVersionAsync(envId, "27.6.40000.0");
+        await NotifyReadyAsync();
+        var lineId = await ReadyNoticeLineAsync(upgradeId);
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var upgrades = _f.Upgrades(ctx);
+            await (how switch
+            {
+                "reassign" => upgrades.AssignAsync(lineId, UpgradeActionTestFixture.PlainTeamUserId),
+                "take off" => upgrades.RemoveLineAsync(lineId),
+                _ => upgrades.DeleteAsync(upgradeId),
+            });
+        }
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.UserNotifications.AsNoTracking().SingleAsync()).ReadAt.Should().NotBeNull();
+    }
+
+    /// <summary>The one line's id, after checking its unread notice names it.</summary>
+    private async Task<int> ReadyNoticeLineAsync(int upgradeId)
+    {
+        await using var ctx = _f.Db.NewContext();
+        var lineId = await ctx.OeEnvironmentUpgradeLines.Where(l => l.UpgradeId == upgradeId).Select(l => l.Id).SingleAsync();
+        var notice = await ctx.UserNotifications.AsNoTracking().SingleAsync();
+        notice.Subject.Should().Be(NotificationSubject.UpgradeLine(lineId));
+        notice.ReadAt.Should().BeNull();
+        return lineId;
     }
 
     [Fact]

@@ -53,10 +53,15 @@ public sealed record NotificationSummary(string Title, string? Detail, string Pa
 /// The solution it is about. A recipient who can no longer see it (taken off a
 /// Private solution's team) is left out, so its name and events stay private.
 /// </param>
+/// <param name="Subject">
+/// What it asks the recipients to do (<see cref="NotificationSubject"/>), so their copies
+/// can be marked read once it is done. Null for one that only tells.
+/// </param>
 public sealed record Notification(
     NotificationCategory Category,
     IReadOnlyCollection<int> RecipientUserIds,
     NotificationSummary Summary,
     Func<NotificationRenderContext, CancellationToken, Task<EmailContent>> RenderAsync,
     bool Urgent = false,
-    int? ProjectId = null);
+    int? ProjectId = null,
+    string? Subject = null);

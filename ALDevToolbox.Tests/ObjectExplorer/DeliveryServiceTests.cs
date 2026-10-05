@@ -2,6 +2,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
+using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -1359,6 +1360,56 @@ public sealed class DeliveryServiceTests : IDisposable
         history.Single().DismissReason.Should().BeNull();
     }
 
+    [Theory]
+    [InlineData("approve")]
+    [InlineData("dismiss")]
+    [InlineData("replace")]
+    [InlineData("delete the pipeline")]
+    public async Task Settling_a_prepared_deployment_marks_everyones_approval_request_read(string how)
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId);
+        var id = await ctx.OeProjectDeliveries.Where(d => d.ReleasePipelineId == seed.ReleasePipelineId).Select(d => d.Id).SingleAsync();
+        var owner = await SeedUserAsync("Owner");
+        var creator = await SeedUserAsync("Creator");
+        var mine = await AddNotificationAsync(owner, NotificationSubject.Delivery(id));
+        var theirs = await AddNotificationAsync(creator, NotificationSubject.Delivery(id));
+        var other = await AddNotificationAsync(owner, NotificationSubject.Delivery(id + 1000));
+        var tellsOnly = await AddNotificationAsync(owner, subject: null);
+        _db.OrgContext.CurrentUserId = owner;
+        _apps.StatusByApp["CRONUS Core"] = "succeeded";
+
+        switch (how)
+        {
+            case "approve":
+                await NewService(_db.NewContext()).ApproveProposalAsync(id);
+                break;
+            case "dismiss":
+                await NewService(_db.NewContext()).DismissProposalAsync(id, null);
+                break;
+            case "delete the pipeline":
+                await using (var del = _db.NewContext())
+                {
+                    await new ReleasePipelineService(del, _db.OrgContext, new ProjectAccess(del, _db.OrgContext),
+                        NullLogger<ReleasePipelineService>.Instance).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+                }
+                break;
+            default:
+                var newer = await SeedBuildAsync(ctx, seed.ProjectId, seed.BuildPipelineId, ProjectBuildStatus.Ready, new[] { "CRONUS Core" });
+                await NewService(_db.NewContext()).ProposeReleasesForBuildAsync(newer);
+                break;
+        }
+
+        await using var read = _db.NewContext();
+        var readAt = await read.UserNotifications.AsNoTracking().ToDictionaryAsync(n => n.Id, n => n.ReadAt);
+        readAt[mine].Should().NotBeNull();
+        readAt[theirs].Should().NotBeNull("the other person asked to approve it has nothing left to do either");
+        readAt[other].Should().BeNull("a different deployment is still waiting");
+        readAt[tellsOnly].Should().BeNull();
+    }
+
     [Fact]
     public async Task ApproveProposalAsync_refuses_one_that_was_replaced()
     {
@@ -1483,6 +1534,21 @@ public sealed class DeliveryServiceTests : IDisposable
         ctx.Users.Add(user);
         await ctx.SaveChangesAsync();
         return user.Id;
+    }
+
+    private async Task<int> AddNotificationAsync(int userId, string? subject)
+    {
+        await using var ctx = _db.NewContext();
+        var row = new ALDevToolbox.Domain.Entities.UserNotification
+        {
+            UserId = userId, OrganizationId = TestDb.DefaultOrgId,
+            Category = ALDevToolbox.Domain.Entities.NotificationCategory.Deployments,
+            Title = "Waiting for approval", Path = "/pipelines/deployments/1", Subject = subject,
+            CreatedAt = DateTime.UtcNow,
+        };
+        ctx.UserNotifications.Add(row);
+        await ctx.SaveChangesAsync();
+        return row.Id;
     }
 
     private void DrainQueue()

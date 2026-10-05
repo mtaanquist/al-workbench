@@ -186,6 +186,19 @@ public sealed class NotificationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_request_keeps_its_subject_in_the_app_and_in_the_digest()
+    {
+        var weekly = await SeedUserAsync("alex@cronus.example");
+        await SetChoiceAsync(weekly, NotificationDelivery.Weekly);
+
+        await NotifyAsync(Notification(weekly) with { Subject = NotificationSubject.UpgradeLine(7) });
+
+        await using var ctx = _db.NewContext();
+        (await ctx.UserNotifications.SingleAsync()).Subject.Should().Be("upgrade-line:7");
+        (await ctx.NotificationDigestItems.SingleAsync()).Subject.Should().Be("upgrade-line:7");
+    }
+
+    [Fact]
     public async Task An_urgent_notification_skips_the_digest_but_not_off()
     {
         var weekly = await SeedUserAsync("alex@cronus.example");
