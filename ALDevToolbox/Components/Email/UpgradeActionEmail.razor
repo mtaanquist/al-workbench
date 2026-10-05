@@ -1,0 +1,80 @@
+@*
+    A change someone scheduled on an environment ran, failed, or could not be
+    confirmed (issue #1046). See .design/notifications.md.
+*@
+@using ALDevToolbox.Services.Notifications
+<EmailLayout Preheader="@Preheader" OrganizationName="@OrganizationName" Reason="You received this because you scheduled this change." SettingsUrl="@SettingsUrl">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>
+        @switch (Result)
+        {
+            case UpgradeActionResult.Failed:
+                @:<strong>@What</strong>, which you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong>, did not go through. @(HasOutcome ? "Fix the cause shown below, then schedule it again from the environment." : "Schedule it again from the environment once the cause is fixed.")
+                break;
+            case UpgradeActionResult.Unconfirmed:
+                @:<strong>@What</strong>, which you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong>, was sent to Business Central, but AL Workbench could not confirm that it finished. Check the environment to be sure.
+                break;
+            default:
+                @:<strong>@What</strong>, which you scheduled on <strong>@EnvironmentName</strong> for <strong>@SolutionName</strong>, has run.
+                break;
+        }
+    </EmailParagraph>
+    @if (HasOutcome)
+    {
+        <EmailQuote Text="@(Outcome!)" />
+    }
+    <EmailButton Href="@EnvironmentUrl">Open the environment's history</EmailButton>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public UpgradeActionResult Result { get; set; }
+    /// <summary>What was scheduled, short: "Install CRONUS Coffee.app".</summary>
+    [Parameter, EditorRequired] public string What { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SolutionName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string EnvironmentName { get; set; } = string.Empty;
+    /// <summary>The history line: what happened, or why it did not.</summary>
+    [Parameter] public string? Outcome { get; set; }
+    [Parameter, EditorRequired] public string EnvironmentUrl { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private bool HasOutcome => !string.IsNullOrWhiteSpace(Outcome);
+
+    private string Preheader => Outcome ?? SubjectFor(Result, What, SolutionName, EnvironmentName);
+
+    /// <summary>Names the solution too: every customer has a Production.</summary>
+    public static string SubjectFor(UpgradeActionResult result, string what, string solutionName, string environmentName) => result switch
+    {
+        UpgradeActionResult.Failed => $"Failed: {what} on {solutionName} / {environmentName}",
+        UpgradeActionResult.Unconfirmed => $"Not confirmed: {what} on {solutionName} / {environmentName}",
+        _ => $"Done: {what} on {solutionName} / {environmentName}",
+    };
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer,
+        string displayName,
+        string organizationName,
+        UpgradeActionResult result,
+        string what,
+        string solutionName,
+        string environmentName,
+        string? outcome,
+        string environmentUrl,
+        string settingsUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<UpgradeActionEmail>(
+            SubjectFor(result, what, solutionName, environmentName),
+            new Dictionary<string, object?>
+            {
+                [nameof(DisplayName)] = displayName,
+                [nameof(OrganizationName)] = organizationName,
+                [nameof(Result)] = result,
+                [nameof(What)] = what,
+                [nameof(SolutionName)] = solutionName,
+                [nameof(EnvironmentName)] = environmentName,
+                [nameof(Outcome)] = outcome,
+                [nameof(EnvironmentUrl)] = environmentUrl,
+                [nameof(SettingsUrl)] = settingsUrl,
+            }, ct);
+}

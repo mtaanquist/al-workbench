@@ -106,6 +106,7 @@
                                 : roles.FirstOrDefault();
                             var name = context.User.Identity?.Name;
                         }
+                        <NotificationBell />
                         <span class="top-sep" aria-hidden="true"></span>
                         <a href="/account" class="user-btn" title="Manage your account">
                             <span class="user-btn__avatar" aria-hidden="true">@Initials(name)</span>

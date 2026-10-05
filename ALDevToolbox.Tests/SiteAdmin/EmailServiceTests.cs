@@ -51,7 +51,7 @@ public sealed class EmailServiceTests : IDisposable
         await ctx.SaveChangesAsync();
 
         var email = NewService();
-        var act = () => email.SendAsync("user@example.com", "Subject", "<p>Body</p>", EmailPurpose.PasswordReset);
+        var act = () => email.SendAsync("user@example.com", new EmailContent("Subject", "<p>Body</p>"), EmailPurpose.PasswordReset);
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not configured*");
     }
@@ -63,21 +63,6 @@ public sealed class EmailServiceTests : IDisposable
 
         var email = NewService();
         (await email.IsConfiguredAsync()).Should().BeTrue();
-    }
-
-    [Fact]
-    public async Task EmailTemplates_render_with_html_encoded_user_input()
-    {
-        // Display names and URLs flow through HtmlEncode so a hostile value
-        // can't sneak markup into the email body.
-        var (subject, body) = EmailTemplates.ForgotPassword(
-            displayName: "<script>",
-            resetUrl: "https://example.com/reset?token=abc&utm_source=email");
-
-        subject.Should().Be("Reset your password");
-        body.Should().NotContain("<script>");
-        body.Should().Contain("&lt;script&gt;");
-        body.Should().Contain("token=abc&amp;utm_source=email");
     }
 
     private SmtpEmailService NewService()

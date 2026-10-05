@@ -42,7 +42,7 @@ public sealed class OutboxEmailServiceTests : IDisposable
     [InlineData(EmailPurpose.EmailChangeConfirmation)]
     public async Task Most_messages_are_queued_rather_than_sent_on_the_request_thread(EmailPurpose purpose)
     {
-        await NewService().SendAsync("user@cronus.com", "Subject", "<p>Body</p>", purpose);
+        await NewService().SendAsync("user@cronus.com", new EmailContent("Subject", "<p>Body</p>"), purpose);
 
         _inner.Sent.Should().BeEmpty();
         var queued = await QueuedAsync();
@@ -56,7 +56,7 @@ public sealed class OutboxEmailServiceTests : IDisposable
     [InlineData(EmailPurpose.SiteAdminTest)]
     public async Task A_message_someone_is_waiting_on_still_goes_out_inline(EmailPurpose purpose)
     {
-        await NewService().SendAsync("user@cronus.com", "Subject", "<p>Body</p>", purpose);
+        await NewService().SendAsync("user@cronus.com", new EmailContent("Subject", "<p>Body</p>"), purpose);
 
         // Both of these report the outcome to the person who triggered them, so
         // a poll interval of delay would be the wrong trade.
@@ -74,7 +74,7 @@ public sealed class OutboxEmailServiceTests : IDisposable
             var inlineBefore = _inner.Sent.Count;
             var queuedBefore = (await QueuedAsync()).Count;
 
-            await NewService().SendAsync("user@cronus.com", "Subject", "<p>Body</p>", purpose);
+            await NewService().SendAsync("user@cronus.com", new EmailContent("Subject", "<p>Body</p>"), purpose);
 
             var inlineAfter = _inner.Sent.Count;
             var queuedAfter = (await QueuedAsync()).Count;
@@ -87,7 +87,7 @@ public sealed class OutboxEmailServiceTests : IDisposable
     [Fact]
     public async Task A_queued_message_records_the_organisation_the_request_acted_for()
     {
-        await NewService().SendAsync("user@cronus.com", "Subject", "<p>Body</p>", EmailPurpose.Invite);
+        await NewService().SendAsync("user@cronus.com", new EmailContent("Subject", "<p>Body</p>"), EmailPurpose.Invite);
 
         (await QueuedAsync())[0].OrganizationId.Should().Be(TestDb.DefaultOrgId);
     }
@@ -98,7 +98,7 @@ public sealed class OutboxEmailServiceTests : IDisposable
         _db.OrgContext.CurrentOrganizationId = null;
         try
         {
-            await NewService().SendAsync("user@cronus.com", "Subject", "<p>Body</p>", EmailPurpose.PasswordReset);
+            await NewService().SendAsync("user@cronus.com", new EmailContent("Subject", "<p>Body</p>"), EmailPurpose.PasswordReset);
             (await QueuedAsync())[0].OrganizationId.Should().BeNull();
         }
         finally
@@ -128,9 +128,9 @@ public sealed class OutboxEmailServiceTests : IDisposable
         public Task<bool> IsConfiguredAsync(CancellationToken ct = default) => Task.FromResult(Configured);
 
         public Task SendAsync(
-            string toEmail, string subject, string htmlBody, EmailPurpose purpose, CancellationToken ct = default)
+            string toEmail, EmailContent content, EmailPurpose purpose, CancellationToken ct = default)
         {
-            Sent.Add((toEmail, subject, htmlBody, purpose));
+            Sent.Add((toEmail, content.Subject, content.HtmlBody, purpose));
             return Task.CompletedTask;
         }
     }

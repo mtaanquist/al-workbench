@@ -1,8 +1,10 @@
+using ALDevToolbox.Components.Email;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.Email;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
@@ -23,7 +25,8 @@ internal static class AdminUserEndpoints
     public static IEndpointRouteBuilder MapAdminUserEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapPost("/admin/users/{id:int}/approve", async (
-            int id, HttpContext ctx, UserAdministrationService users, AppDbContext db, IEmailService email,
+            int id, HttpContext ctx, UserAdministrationService users, AppDbContext db,
+            IEmailService email, EmailRenderer emailRenderer, PublicOrigin publicOrigin,
             IOrganizationContext org, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("AdminUsers");
@@ -40,10 +43,10 @@ internal static class AdminUserEndpoints
                         .FirstAsync(r => r.Id == id, ct);
                     if (req.User is not null && req.Organization is not null)
                     {
-                        var loginUrl = $"{ctx.Request.Scheme}://{ctx.Request.Host}{RouteConstants.Login}";
-                        var (subject, body) = EmailTemplates.SignupDecided(
-                            req.User.DisplayName, req.Organization.Name, approved: true, loginUrl);
-                        await email.SendAsync(req.User.Email, subject, body, EmailPurpose.SignupDecision, ct);
+                        var loginUrl = $"{publicOrigin.For(ctx)}{RouteConstants.Login}";
+                        var content = await SignupApprovedEmail.RenderAsync(
+                            emailRenderer, req.User.DisplayName, req.Organization.Name, loginUrl, ct);
+                        await email.SendAsync(req.User.Email, content, EmailPurpose.SignupDecision, ct);
                     }
                 }
                 catch (Exception ex)
@@ -55,7 +58,8 @@ internal static class AdminUserEndpoints
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.AdminRole));
 
         app.MapPost("/admin/users/{id:int}/reject", async (
-            int id, HttpContext ctx, UserAdministrationService users, AppDbContext db, IEmailService email,
+            int id, HttpContext ctx, UserAdministrationService users, AppDbContext db,
+            IEmailService email, EmailRenderer emailRenderer,
             IOrganizationContext org, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("AdminUsers");
@@ -75,9 +79,8 @@ internal static class AdminUserEndpoints
             {
                 try
                 {
-                    var loginUrl = $"{ctx.Request.Scheme}://{ctx.Request.Host}{RouteConstants.Login}";
-                    var (subject, body) = EmailTemplates.SignupDecided(requesterDisplay, orgName, approved: false, loginUrl);
-                    await email.SendAsync(requesterEmail, subject, body, EmailPurpose.SignupDecision, ct);
+                    var content = await SignupDeclinedEmail.RenderAsync(emailRenderer, requesterDisplay, orgName, ct);
+                    await email.SendAsync(requesterEmail, content, EmailPurpose.SignupDecision, ct);
                 }
                 catch (Exception ex)
                 {
@@ -114,6 +117,7 @@ internal static class AdminUserEndpoints
             InviteService invites,
             AppDbContext db,
             IEmailService email,
+            EmailRenderer emailRenderer,
             IOrganizationContext orgCtx,
             IAntiforgery antiforgery,
             PublicOrigin publicOrigin,
@@ -143,10 +147,11 @@ internal static class AdminUserEndpoints
                     .FirstAsync(u => u.Id == orgCtx.CurrentUserId!.Value, ct);
                 var orgName = inviter.Organization?.Name ?? "your organisation";
                 var roleLabel = FormatRoleLabel(role);
-                var (subject, body) = EmailTemplates.Invite(inviter.DisplayName, orgName, roleLabel, message, url);
                 try
                 {
-                    await email.SendAsync(emailAddr.Trim(), subject, body, EmailPurpose.Invite, ct);
+                    var content = await InviteEmail.RenderAsync(
+                        emailRenderer, inviter.DisplayName, orgName, roleLabel, message, url, ct);
+                    await email.SendAsync(emailAddr.Trim(), content, EmailPurpose.Invite, ct);
                 }
                 catch (Exception ex)
                 {
@@ -193,6 +198,7 @@ internal static class AdminUserEndpoints
             InviteService invites,
             AppDbContext db,
             IEmailService email,
+            EmailRenderer emailRenderer,
             IOrganizationContext orgCtx,
             IDataProtectionProvider protection,
             IAntiforgery antiforgery,
@@ -223,8 +229,8 @@ internal static class AdminUserEndpoints
                             .FirstAsync(u => u.Id == orgCtx.CurrentUserId!.Value, ct);
                         var orgName = inviter.Organization?.Name ?? "your organisation";
                         var roleLabel = FormatRoleLabel(role);
-                        var (subject, body) = EmailTemplates.Invite(inviter.DisplayName, orgName, roleLabel, message, url);
-                        await email.SendAsync(emailAddr.Trim(), subject, body, EmailPurpose.Invite, ct);
+                        var content = await InviteEmail.RenderAsync(emailRenderer, inviter.DisplayName, orgName, roleLabel, message, url, ct);
+                        await email.SendAsync(emailAddr.Trim(), content, EmailPurpose.Invite, ct);
                     }
                     catch (Exception ex)
                     {
@@ -259,6 +265,7 @@ internal static class AdminUserEndpoints
             UserAdministrationService userAdmin,
             AppDbContext db,
             IEmailService email,
+            EmailRenderer emailRenderer,
             IOrganizationContext orgCtx,
             IDataProtectionProvider protection,
             IAntiforgery antiforgery,
@@ -283,8 +290,8 @@ internal static class AdminUserEndpoints
                         // already refused any user outside the admin's own org.
                         var user = await db.Users.IgnoreQueryFilters().AsNoTracking()
                             .FirstAsync(u => u.Id == id, ct);
-                        var (subject, body) = EmailTemplates.EmailChangeConfirm(user.DisplayName, url);
-                        await email.SendAsync(newEmail.Trim().ToLowerInvariant(), subject, body, EmailPurpose.EmailChangeConfirmation, ct);
+                        var content = await EmailChangeConfirmEmail.RenderAsync(emailRenderer, user.DisplayName, url, ct);
+                        await email.SendAsync(newEmail.Trim().ToLowerInvariant(), content, EmailPurpose.EmailChangeConfirmation, ct);
                     }
                     catch (Exception ex)
                     {

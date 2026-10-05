@@ -95,8 +95,7 @@ public sealed class EmailOutbox
     /// </summary>
     public async Task EnqueueAsync(
         string toEmail,
-        string subject,
-        string htmlBody,
+        EmailContent content,
         EmailPurpose purpose,
         int? organizationId,
         CancellationToken ct = default)
@@ -106,8 +105,9 @@ public sealed class EmailOutbox
         db.EmailOutboxMessages.Add(new EmailOutboxMessage
         {
             ToEmail = toEmail,
-            Subject = subject,
-            BodyEncrypted = _protector.Protect(htmlBody),
+            Subject = content.Subject,
+            BodyEncrypted = _protector.Protect(content.HtmlBody),
+            TextBodyEncrypted = content.TextBody is null ? null : _protector.Protect(content.TextBody),
             Purpose = purpose,
             Status = EmailOutboxStatus.Pending,
             CreatedAt = now,
@@ -148,17 +148,20 @@ public sealed class EmailOutbox
     }
 
     /// <summary>
-    /// Decrypts a queued body, or returns null when the ciphertext can't be read
-    /// — a key ring restored without <c>app-keys</c>, say. Null means the message
-    /// is unsendable rather than temporarily stuck, so the drain gives up on it
-    /// instead of retrying seven more times.
+    /// Decrypts a queued message's bodies, or returns null when the ciphertext
+    /// can't be read — a key ring restored without <c>app-keys</c>, say. Null
+    /// means the message is unsendable rather than temporarily stuck, so the
+    /// drain gives up on it instead of retrying seven more times. A row queued
+    /// without a plain-text part comes back with <see cref="EmailContent.TextBody"/> null.
     /// </summary>
-    public string? TryReadBody(EmailOutboxMessage message)
+    public EmailContent? TryReadContent(EmailOutboxMessage message)
     {
         if (string.IsNullOrEmpty(message.BodyEncrypted)) return null;
         try
         {
-            return _protector.Unprotect(message.BodyEncrypted);
+            var html = _protector.Unprotect(message.BodyEncrypted);
+            var text = message.TextBodyEncrypted is null ? null : _protector.Unprotect(message.TextBodyEncrypted);
+            return new EmailContent(message.Subject, html, text);
         }
         catch (Exception ex)
         {
@@ -183,7 +186,8 @@ public sealed class EmailOutbox
                 .SetProperty(m => m.AttemptCount, m => m.AttemptCount + 1)
                 // The mail is out; keeping a copy of the token it carried is
                 // exposure with nothing left to gain.
-                .SetProperty(m => m.BodyEncrypted, (string?)null),
+                .SetProperty(m => m.BodyEncrypted, (string?)null)
+                .SetProperty(m => m.TextBodyEncrypted, (string?)null),
                 ct);
     }
 
@@ -205,6 +209,7 @@ public sealed class EmailOutbox
         {
             message.Status = EmailOutboxStatus.Failed;
             message.BodyEncrypted = null;
+            message.TextBodyEncrypted = null;
             _logger.LogError(
                 "Giving up on the {Purpose} email to {To} after {Attempts} attempt(s): {Error}",
                 message.Purpose, message.ToEmail, message.AttemptCount, message.LastError);
@@ -234,6 +239,7 @@ public sealed class EmailOutbox
             .ExecuteUpdateAsync(s => s
                 .SetProperty(m => m.Status, EmailOutboxStatus.Failed)
                 .SetProperty(m => m.BodyEncrypted, (string?)null)
+                .SetProperty(m => m.TextBodyEncrypted, (string?)null)
                 .SetProperty(m => m.LastError,
                     "Never sent: this sat in the queue for more than a day, by which time the link it carried had expired. Sending was probably switched off or the site was down."),
                 ct);

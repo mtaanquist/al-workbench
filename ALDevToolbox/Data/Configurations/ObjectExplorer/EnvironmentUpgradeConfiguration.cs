@@ -71,6 +71,7 @@ internal sealed class EnvironmentUpgradeLineConfiguration : IEntityTypeConfigura
         entity.Property(e => e.CheckedByUserId).HasColumnName("checked_by_user_id");
         entity.Property(e => e.CheckedBy).HasColumnName("checked_by").HasMaxLength(320);
         entity.Property(e => e.Note).HasColumnName("note").HasMaxLength(500);
+        entity.Property(e => e.UpdatedNotifiedAt).HasColumnName("updated_notified_at");
         entity.Property(e => e.AddedAt).HasColumnName("added_at").IsRequired();
 
         entity.HasOne(e => e.Organization)

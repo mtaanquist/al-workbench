@@ -49,6 +49,11 @@ public sealed class ProjectDetailAccessTests : IDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped<ProjectFollowService>();
+        // The follow confirmation reads the person's own Solutions choice.
+        _ctx.Services.AddScoped<ALDevToolbox.Services.Notifications.NotificationPreferenceService>();
+        _ctx.Services.AddSingleton(new ALDevToolbox.Endpoints.PublicOrigin("https://workbench.example"));
+        _ctx.Services.AddSingleton<ALDevToolbox.Services.IEmailService, ALDevToolbox.Tests.Infrastructure.CapturingEmailService>();
         _ctx.Services.AddScoped<ProjectCustomerInfoService>();
         _ctx.Services.AddScoped<CustomerModuleService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
@@ -429,6 +434,50 @@ public sealed class ProjectDetailAccessTests : IDisposable
 
         cut.FindAll(".detail-head__title-row .status-pill").Should().BeEmpty();
     }
+
+    [Fact]
+    public async Task The_owner_follows_by_default_and_can_stop()
+    {
+        var (projectId, _) = await SeedAsync();
+
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
+        cut.WaitForAssertion(() => FollowButton(cut).TextContent.Should().Contain("Following"));
+
+        await cut.InvokeAsync(() => FollowButton(cut).Click());
+
+        cut.WaitForAssertion(() => FollowButton(cut).TextContent.Trim().Should().Be("Follow"));
+        FollowButton(cut).ClassList.Should().NotContain("btn--primary", "Save stays the only primary button");
+        cut.Markup.Should().Contain("no longer following");
+        cut.Markup.Should().NotContain("Choose how you hear about it", "there is nothing to hear about after stopping");
+    }
+
+    [Fact]
+    public async Task Following_again_says_how_the_person_will_hear_from_their_own_choice()
+    {
+        var (projectId, _) = await SeedAsync();
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
+        cut.WaitForAssertion(() => FollowButton(cut).TextContent.Should().Contain("Following"));
+        await cut.InvokeAsync(() => FollowButton(cut).Click());
+        cut.WaitForAssertion(() => FollowButton(cut).TextContent.Trim().Should().Be("Follow"));
+
+        // Default for followed solutions: listed in the app, no email.
+        await cut.InvokeAsync(() => FollowButton(cut).Click());
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("you get no email about it"));
+        cut.Markup.Should().Contain("Choose how you hear about it");
+
+        await using (var scope = _ctx.Services.CreateAsyncScope())
+        {
+            await scope.ServiceProvider.GetRequiredService<ALDevToolbox.Services.Notifications.NotificationPreferenceService>()
+                .SetEmailForCurrentUserAsync(NotificationCategory.Solutions, NotificationDelivery.Weekly);
+        }
+        await cut.InvokeAsync(() => FollowButton(cut).Click());
+        cut.WaitForAssertion(() => FollowButton(cut).TextContent.Trim().Should().Be("Follow"));
+        await cut.InvokeAsync(() => FollowButton(cut).Click());
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("in a weekly email digest"));
+    }
+
+    private static IElement FollowButton(IRenderedComponent<ProjectDetail> cut) =>
+        cut.Find("button[data-follow]");
 
     private static IElement SaveButton(IRenderedComponent<ProjectDetail> cut) =>
         cut.FindAll("button").First(b => b.TextContent.Contains("Save access"));

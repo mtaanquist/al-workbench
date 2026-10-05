@@ -14,6 +14,8 @@ Living specification for the AL Workbench. The code in `ALDevToolbox/` is the im
 | `auth-and-audit.md` | Email/password accounts, organisations, signup approval, audit interceptor. |
 | `teams-and-visibility.md` | Teams and their membership; the per-project visibility model they will grant. |
 | `ui-design.md` | Page layout, copy, components in `Components/Shared/`. |
+| `email.md` | How emails look and are built: the shared layout, inline styles, the plain-text part. |
+| `notifications.md` | Notification emails: who gets them, the per-person choice (immediately, digest, off), and how a worker sends one. |
 | `deployment.md` | Docker, env vars, health checks, backups. |
 | `object-explorer.md` | `.app` symbol-package ingest, Release/Module model, cross-module reference resolution. |
 | `bcquality.md` | Mirroring Microsoft's BCQuality knowledge base into Postgres, and the MCP tools over it. |

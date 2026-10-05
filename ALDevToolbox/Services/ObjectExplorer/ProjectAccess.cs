@@ -330,6 +330,38 @@ public sealed class ProjectAccess
     }
 
     /// <summary>
+    /// Which of <paramref name="userIds"/> may see project <paramref name="projectId"/>:
+    /// <see cref="CanViewAsync"/> asked for each of them rather than the signed-in user,
+    /// so a notifier can leave out someone taken off a Private solution's team. Everyone
+    /// for a project that isn't Private, or isn't in this org (the caller's own reads
+    /// come back empty for it). Reads no signed-in user, so a background job can call it
+    /// inside the organisation's scope.
+    /// </summary>
+    public static async Task<List<int>> WhoCanViewAsync(
+        AppDbContext db, int projectId, IReadOnlyCollection<int> userIds, CancellationToken ct = default)
+    {
+        if (userIds.Count == 0) return [];
+        var project = await db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == projectId)
+            .Select(p => new { p.Visibility, p.CreatedByUserId })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (project is null || project.Visibility != ProjectVisibility.Private) return userIds.Distinct().ToList();
+
+        // The owner, an org Admin, a SiteAdmin, or a member of one of its teams.
+        var members = db.OeProjectTeams
+            .Where(t => t.ProjectId == projectId)
+            .SelectMany(t => t.Team!.Members.Select(m => m.UserId));
+        return await db.Users.AsNoTracking()
+            .Where(u => userIds.Contains(u.Id)
+                        && (u.Id == project.CreatedByUserId
+                            || u.Role == UserRole.Admin
+                            || u.IsSiteAdmin
+                            || members.Contains(u.Id)))
+            .Select(u => u.Id)
+            .ToListAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Throws <see cref="ProjectAccessDeniedException"/> when the current user may
     /// not see project <paramref name="projectId"/>. Callers that render a page
     /// should map this onto their not-found state — a Private project must not be
@@ -361,6 +393,18 @@ public sealed class ProjectAccess
                     || (userId != null && p.CreatedByUserId == userId)
                     || p.Teams.Any(t => teamIds.Contains(t.TeamId));
     }
+
+    /// <summary>
+    /// The projects user <paramref name="userId"/> can see, for a query that runs
+    /// without that user's <see cref="AccessSnapshot"/> (a short-lived context of its
+    /// own). Same rule as <see cref="WhoCanViewAsync"/>: anything not Private, or
+    /// owned by them, or assigned to a team they are on. An org Admin or SiteAdmin
+    /// sees everything; the caller checks that separately, as the snapshot does.
+    /// </summary>
+    public static Expression<Func<OeProject, bool>> VisibleToUserPredicate(int userId) =>
+        p => p.Visibility != ProjectVisibility.Private
+             || p.CreatedByUserId == userId
+             || p.Teams.Any(t => t.Team!.Members.Any(m => m.UserId == userId));
 
     /// <summary>
     /// The complement of <see cref="VisibleProjectPredicate"/>: the projects that

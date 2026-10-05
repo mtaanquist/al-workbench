@@ -1,5 +1,7 @@
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Email;
+using ALDevToolbox.Services.Notifications;
 using Microsoft.AspNetCore.HttpOverrides;
 using ALDevToolbox.Services.Operations;
 
@@ -44,6 +46,18 @@ public static class AppCoreRegistration
             sp.GetRequiredService<SmtpEmailService>(),
             sp.GetRequiredService<EmailOutbox>(),
             sp.GetRequiredService<IOrganizationContext>()));
+        // Renders the email components in Components/Email to HTML and text.
+        services.AddScoped<EmailRenderer>();
+        // Who gets which notification, and how. See .design/notifications.md.
+        services.AddScoped<NotificationPreferenceService>();
+        services.AddScoped<NotificationService>();
+        services.AddScoped<InAppNotificationService>();
+        services.AddScoped<BuildNotifier>();
+        services.AddScoped<DeploymentNotifier>();
+        services.AddScoped<UpgradeActionNotifier>();
+        services.AddScoped<UpgradeCheckNotifier>();
+        services.AddScoped<EnvironmentUpdateNotifier>();
+        services.AddScoped<NotificationDigestService>();
         return services;
     }
 

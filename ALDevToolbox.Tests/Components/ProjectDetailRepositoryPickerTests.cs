@@ -57,6 +57,11 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _ctx.Services.AddScoped<ProjectFollowService>();
+        // The follow confirmation reads the person's own Solutions choice.
+        _ctx.Services.AddScoped<ALDevToolbox.Services.Notifications.NotificationPreferenceService>();
+        _ctx.Services.AddSingleton(new ALDevToolbox.Endpoints.PublicOrigin("https://workbench.example"));
+        _ctx.Services.AddSingleton<ALDevToolbox.Services.IEmailService, ALDevToolbox.Tests.Infrastructure.CapturingEmailService>();
         _ctx.Services.AddScoped<ProjectCustomerInfoService>();
         _ctx.Services.AddScoped<CustomerModuleService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();

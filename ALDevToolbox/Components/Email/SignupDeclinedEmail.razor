@@ -1,0 +1,18 @@
+@* Tells someone who asked to join an organisation that an admin declined. *@
+<EmailLayout Preheader="Your signup request was declined." OrganizationName="@OrganizationName" Reason="@($"You received this because you asked to join {OrganizationName}.")">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>Your request to join <strong>@OrganizationName</strong> on AL Workbench has been declined. If you think this is a mistake, contact the organisation's administrator directly.</EmailParagraph>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer, string displayName, string organizationName, CancellationToken ct = default)
+        => renderer.RenderAsync<SignupDeclinedEmail>($"Signup declined: {organizationName}", new Dictionary<string, object?>
+        {
+            [nameof(DisplayName)] = displayName,
+            [nameof(OrganizationName)] = organizationName,
+        }, ct);
+}

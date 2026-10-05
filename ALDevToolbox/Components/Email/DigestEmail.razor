@@ -1,0 +1,76 @@
+@*
+    The daily or weekly digest: every notification someone chose to get in a
+    summary rather than straight away, grouped by kind (issue #1037).
+    See .design/notifications.md.
+*@
+@using ALDevToolbox.Services.Notifications
+<EmailLayout Preheader="@Preheader" OrganizationName="@OrganizationName" Reason="@Reason" SettingsUrl="@SettingsUrl">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>@Intro</EmailParagraph>
+    @foreach (var section in Sections)
+    {
+        <p style="margin: 8px 0 8px; font-weight: 600; color: @EmailTheme.Ink;">@section.Heading</p>
+        <ul style="margin: 0 0 16px; padding-left: 20px;">
+            @foreach (var item in section.Items.Take(MaxPerSection))
+            {
+                <li style="margin: 0 0 8px;">
+                    <a href="@item.Url" target="_blank" style="color: @EmailTheme.Link;">@item.Title</a>
+                    @if (!string.IsNullOrWhiteSpace(item.Detail))
+                    {
+                        <br />
+                        <span style="font-size: 13px; color: @EmailTheme.Muted;">@item.Detail</span>
+                    }
+                </li>
+            }
+            @if (section.Items.Count > MaxPerSection)
+            {
+                <li style="margin: 0 0 8px; color: @EmailTheme.Muted;">and @(section.Items.Count - MaxPerSection) more</li>
+            }
+        </ul>
+    }
+</EmailLayout>
+
+@code {
+    /// <summary>The most items listed per kind; a week of a busy solution should not become a wall of links.</summary>
+    internal const int MaxPerSection = 25;
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public bool Weekly { get; set; }
+    [Parameter, EditorRequired] public IReadOnlyList<DigestSection> Sections { get; set; } = [];
+    [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private int Count => Sections.Sum(s => s.Items.Count);
+
+    private string Intro => $"Here is what happened since your last digest ({Updates(Count)}).";
+
+    private string Preheader => string.Join(", ", Sections.Select(s => $"{s.Heading}: {s.Items.Count}"));
+
+    private string Reason => Weekly
+        ? "You received this because you chose a weekly digest for these emails."
+        : "You received this because you chose a daily digest for these emails.";
+
+    private static string Updates(int count) => count == 1 ? "1 update" : $"{count} updates";
+
+    public static string SubjectFor(bool weekly, int count) =>
+        $"{(weekly ? "Weekly" : "Daily")} digest from AL Workbench: {Updates(count)}";
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer,
+        string displayName,
+        string organizationName,
+        bool weekly,
+        IReadOnlyList<DigestSection> sections,
+        string settingsUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<DigestEmail>(
+            SubjectFor(weekly, sections.Sum(s => s.Items.Count)),
+            new Dictionary<string, object?>
+            {
+                [nameof(DisplayName)] = displayName,
+                [nameof(OrganizationName)] = organizationName,
+                [nameof(Weekly)] = weekly,
+                [nameof(Sections)] = sections,
+                [nameof(SettingsUrl)] = settingsUrl,
+            }, ct);
+}

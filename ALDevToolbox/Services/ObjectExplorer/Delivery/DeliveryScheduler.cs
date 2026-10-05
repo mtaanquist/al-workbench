@@ -90,7 +90,14 @@ public sealed class DeliveryScheduler : PolledScheduler
 
                 if (reconcileThisSweep)
                 {
-                    await deliveries.FailInterruptedDeliveriesAsync(ct).ConfigureAwait(false);
+                    var interrupted = await deliveries.FailInterruptedDeliveriesAsync(ct).ConfigureAwait(false);
+                    // A deployment cut off by a restart failed, and the person behind it
+                    // needs to hear that as much as any other failure (#1036).
+                    var notifier = scope.ServiceProvider.GetRequiredService<Notifications.DeploymentNotifier>();
+                    foreach (var id in interrupted)
+                    {
+                        await notifier.NotifyAsync(id, ct).ConfigureAwait(false);
+                    }
                 }
 
                 var enqueued = await deliveries.EnqueueDueDeliveriesAsync(nowUtc, ct).ConfigureAwait(false);

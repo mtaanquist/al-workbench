@@ -32,7 +32,7 @@ public interface IEmailService
     /// send fails.
     /// </param>
     Task SendAsync(
-        string toEmail, string subject, string htmlBody, EmailPurpose purpose, CancellationToken ct = default);
+        string toEmail, EmailContent content, EmailPurpose purpose, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -86,7 +86,7 @@ public sealed class SmtpEmailService : IEmailService
         await ResolveOnceAsync(ct) is not null;
 
     public async Task SendAsync(
-        string toEmail, string subject, string htmlBody, EmailPurpose purpose, CancellationToken ct = default)
+        string toEmail, EmailContent content, EmailPurpose purpose, CancellationToken ct = default)
     {
         var resolved = await ResolveOnceAsync(ct);
         if (resolved is null)
@@ -95,7 +95,7 @@ public sealed class SmtpEmailService : IEmailService
                 "Email is not configured. Set SMTP via /site-admin/settings or the SMTP_* env vars before triggering email-driven flows.");
         }
 
-        var message = BuildMessage(resolved, toEmail, subject, htmlBody);
+        var message = BuildMessage(resolved, toEmail, content);
 
         using var client = new SmtpClient
         {
@@ -127,7 +127,7 @@ public sealed class SmtpEmailService : IEmailService
             _logger.LogWarning(ex, "Disconnecting from the mail server failed after the message was accepted.");
         }
 
-        _logger.LogInformation("Sent {Purpose} email to {To} subject {Subject}.", purpose, toEmail, subject);
+        _logger.LogInformation("Sent {Purpose} email to {To} subject {Subject}.", purpose, toEmail, content.Subject);
     }
 
     /// <summary>
@@ -138,8 +138,7 @@ public sealed class SmtpEmailService : IEmailService
     /// Transport (connect, authenticate, send) stays in <see cref="SendAsync"/>
     /// and is still only exercised against a real server.
     /// </summary>
-    internal static MimeMessage BuildMessage(
-        ResolvedSmtpSettings resolved, string toEmail, string subject, string htmlBody)
+    internal static MimeMessage BuildMessage(ResolvedSmtpSettings resolved, string toEmail, EmailContent content)
     {
         var message = new MimeMessage();
         var fromAddress = MailboxAddress.Parse(resolved.From);
@@ -152,8 +151,13 @@ public sealed class SmtpEmailService : IEmailService
         }
         message.From.Add(fromAddress);
         message.To.Add(MailboxAddress.Parse(toEmail));
-        message.Subject = subject;
-        message.Body = new TextPart("html") { Text = htmlBody };
+        message.Subject = content.Subject;
+        // With a plain-text part the body is multipart/alternative, text first:
+        // RFC 2046 orders the parts from least to most preferred, so a client
+        // that can show HTML picks the last one.
+        message.Body = content.TextBody is null
+            ? new TextPart("html") { Text = content.HtmlBody }
+            : new BodyBuilder { TextBody = content.TextBody, HtmlBody = content.HtmlBody }.ToMessageBody();
         return message;
     }
 
@@ -163,113 +167,5 @@ public sealed class SmtpEmailService : IEmailService
         _cached = await _settings.ResolveSmtpAsync(ct);
         _resolved = true;
         return _cached;
-    }
-}
-
-/// <summary>
-/// Renders the three transactional email bodies. Bodies are simple HTML
-/// strings — Razor partials are an option once the templates need real
-/// design, but the M13 contract is "send a working link", not "look pretty".
-/// </summary>
-public static class EmailTemplates
-{
-    public static (string Subject, string HtmlBody) ForgotPassword(string displayName, string resetUrl)
-        => ("Reset your password",
-            $"<p>Hi {Html(displayName)},</p>"
-            + "<p>Someone (hopefully you) asked to reset your AL Workbench password. "
-            + $"Use this link within the next hour to choose a new one:</p>"
-            + $"<p><a href=\"{Html(resetUrl)}\">{Html(resetUrl)}</a></p>"
-            + "<p>If you didn't request this, you can ignore this message and your password stays unchanged.</p>");
-
-    public static (string Subject, string HtmlBody) SignupPending(string adminName, string requesterEmail, string orgName, string adminUsersUrl)
-        => ($"New signup pending in {Subject(orgName)}",
-            $"<p>Hi {Html(adminName)},</p>"
-            + $"<p><strong>{Html(requesterEmail)}</strong> has asked to join <strong>{Html(orgName)}</strong>. "
-            + "They can't sign in until you approve.</p>"
-            + $"<p><a href=\"{Html(adminUsersUrl)}\">Review pending users</a></p>");
-
-    public static (string Subject, string HtmlBody) SignupDecided(string displayName, string orgName, bool approved, string loginUrl)
-        => approved
-            ? ($"You're in: {Subject(orgName)}",
-                $"<p>Hi {Html(displayName)},</p>"
-                + $"<p>Your signup for <strong>{Html(orgName)}</strong> has been approved. You can now sign in:</p>"
-                + $"<p><a href=\"{Html(loginUrl)}\">{Html(loginUrl)}</a></p>")
-            : ($"Signup declined: {Subject(orgName)}",
-                $"<p>Hi {Html(displayName)},</p>"
-                + $"<p>Your signup request for <strong>{Html(orgName)}</strong> has been declined. "
-                + "If you think this is a mistake, please reach out to the organisation's administrator directly.</p>");
-
-    public static (string Subject, string HtmlBody) Invite(
-        string invitingAdminName, string orgName, string roleLabel, string? welcomeMessage, string acceptUrl)
-    {
-        var welcomeBlock = string.IsNullOrWhiteSpace(welcomeMessage)
-            ? string.Empty
-            : $"<blockquote style=\"border-left: 3px solid #ccc; padding-left: 0.75em; margin: 1em 0; color: #444;\">{Html(welcomeMessage)}</blockquote>";
-        return ($"You're invited to {Subject(orgName)} on AL Workbench",
-            $"<p>Hi,</p>"
-            + $"<p><strong>{Html(invitingAdminName)}</strong> has invited you to join "
-            + $"<strong>{Html(orgName)}</strong> on AL Workbench as a <strong>{Html(roleLabel)}</strong>.</p>"
-            + welcomeBlock
-            + $"<p>Use this link within the next 7 days to set a full name and password:</p>"
-            + $"<p><a href=\"{Html(acceptUrl)}\">{Html(acceptUrl)}</a></p>"
-            + $"<p>If you weren't expecting this invitation, you can ignore this message.</p>");
-    }
-
-    public static (string Subject, string HtmlBody) SignupVerification(string verifyUrl, string code)
-        => ("Verify your email for AL Workbench",
-            // No display name is known yet — the account doesn't exist.
-            "<p>Hi,</p>"
-            + "<p>Someone (hopefully you) started signing up for AL Workbench with this email "
-            + "address. Confirm it's yours to continue — this link and code are valid for the next "
-            + "30 minutes:</p>"
-            + $"<p><a href=\"{Html(verifyUrl)}\">{Html(verifyUrl)}</a></p>"
-            + "<p>Or enter this code on the signup page: "
-            + $"<strong style=\"font-size: 1.5em; letter-spacing: 0.15em;\">{Html(code)}</strong></p>"
-            + "<p>If you didn't start a signup, you can ignore this message — no account is created until "
-            + "the address is confirmed.</p>");
-
-    public static (string Subject, string HtmlBody) MagicLink(string displayName, string magicUrl)
-        => ("Your AL Workbench sign-in link",
-            $"<p>Hi {Html(displayName)},</p>"
-            + "<p>Use this single-use link to sign in to AL Workbench. "
-            + "It's valid for the next 15 minutes:</p>"
-            + $"<p><a href=\"{Html(magicUrl)}\">{Html(magicUrl)}</a></p>"
-            + "<p>If you didn't request this link, you can ignore this email.</p>");
-
-    public static (string Subject, string HtmlBody) MfaEmailCode(string displayName, string code)
-        => ("Your AL Workbench sign-in code",
-            $"<p>Hi {Html(displayName)},</p>"
-            + $"<p>Your verification code is <strong style=\"font-size: 1.5em; letter-spacing: 0.15em;\">{Html(code)}</strong></p>"
-            + "<p>It expires in 10 minutes. If you didn't request it, ignore this email and change your password.</p>");
-
-    public static (string Subject, string HtmlBody) EmailChangeConfirm(string displayName, string confirmUrl)
-        => ("Confirm your new AL Workbench email",
-            $"<p>Hi {Html(displayName)},</p>"
-            + "<p>An administrator changed the email address on your AL Workbench account to this one. "
-            + "Click below within 24 hours to confirm. Until then, sign-in still uses your old address.</p>"
-            + $"<p><a href=\"{Html(confirmUrl)}\">{Html(confirmUrl)}</a></p>"
-            + "<p>If you weren't expecting this, ignore the message — the change won't take effect.</p>");
-
-    public static (string Subject, string HtmlBody) SiteAdminTest(string displayName)
-        => ("AL Workbench SMTP test",
-            $"<p>Hi {Html(displayName)},</p>"
-            + "<p>This is a test from /site-admin/settings. If you're reading it, the SMTP configuration is working.</p>");
-
-    private static string Html(string value)
-        => System.Net.WebUtility.HtmlEncode(value ?? string.Empty);
-
-    /// <summary>
-    /// Sanitises a free-text value before it's interpolated into a mail
-    /// Subject. MimeKit already strips CR/LF on the Subject setter so this is
-    /// not the header-injection guard — it's the same defensive pass the
-    /// HTML bodies get via <see cref="Html"/>, so the one place a value reaches
-    /// the Subject isn't the lone unsanitised surface. Collapses control
-    /// characters (newlines, tabs) to spaces and trims. #417
-    /// </summary>
-    private static string Subject(string value)
-    {
-        if (string.IsNullOrEmpty(value)) return string.Empty;
-        var chars = value.Select(c => char.IsControl(c) ? ' ' : c).ToArray();
-        return new string(chars).Trim();
     }
 }

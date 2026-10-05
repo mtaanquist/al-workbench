@@ -330,12 +330,26 @@ public sealed class EnvironmentUpgradeService
         var details = ValidateDetails(name, targetVersion, note);
         var upgrade = await LoadOpenAsync(upgradeId, ct).ConfigureAwait(false);
 
+        // A new target is a new "ready to check" to send, even if the old one went out.
+        // Cleared in one transaction with the new target: cleared first and committed
+        // alone, a sweep in between would announce the old target again and stamp it
+        // for the new one. A set-based update, because lines this page already tracks
+        // may hold a stale value the change tracker would not see as a change.
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+        if (upgrade.TargetVersion != details.TargetVersion)
+        {
+            await _db.OeEnvironmentUpgradeLines
+                .Where(l => l.UpgradeId == upgradeId && l.CheckedAt == null)
+                .ExecuteUpdateAsync(s => s.SetProperty(l => l.UpdatedNotifiedAt, (DateTime?)null), ct)
+                .ConfigureAwait(false);
+        }
         upgrade.Name = details.Name;
         upgrade.TargetVersion = details.TargetVersion;
         upgrade.PlannedAt = plannedAt?.UtcDateTime;
         upgrade.Note = details.Note;
         upgrade.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
 
         _logger.LogInformation(
             "User {UserId} updated planned upgrade {UpgradeId} ({UpgradeName}, target {TargetVersion}).",
@@ -400,7 +414,21 @@ public sealed class EnvironmentUpgradeService
         upgrade.ClosedByUserId = null;
         upgrade.ClosedBy = null;
         upgrade.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
-        foreach (var line in upgrade.Lines) line.IsOpen = true;
+        // A line that reached the target while the upgrade was closed is old news, not a
+        // "ready to check" to send now.
+        var versions = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => environmentIds.Contains(e.Id))
+            .ToDictionaryAsync(e => e.Id, e => e.Version, ct).ConfigureAwait(false);
+        var now = _clock.GetUtcNow().UtcDateTime;
+        foreach (var line in upgrade.Lines)
+        {
+            line.IsOpen = true;
+            if (line.UpdatedNotifiedAt is null
+                && EnvironmentUpgradeLineState.IsOnTarget(versions.GetValueOrDefault(line.EnvironmentId), upgrade.TargetVersion))
+            {
+                line.UpdatedNotifiedAt = now;
+            }
+        }
         await SaveGuardingOpenIndexAsync(ct).ConfigureAwait(false);
 
         _logger.LogInformation(
@@ -648,6 +676,11 @@ public sealed class EnvironmentUpgradeService
         }
         var line = await LoadLineForWriteAsync(lineId, ct).ConfigureAwait(false);
 
+        if (userId is not null && line.AssigneeUserId != userId && line.CheckedAt is null)
+        {
+            // The new checker has not been told, so the next sweep tells them if it is ready.
+            line.UpdatedNotifiedAt = null;
+        }
         line.AssigneeUserId = userId;
         line.Upgrade!.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);

@@ -146,6 +146,9 @@ public class AppDbContext : DbContext
     public DbSet<UserPasskey> UserPasskeys => Set<UserPasskey>();
     public DbSet<PersonalAccessToken> PersonalAccessTokens => Set<PersonalAccessToken>();
     public DbSet<UserRepositoryToken> UserRepositoryTokens => Set<UserRepositoryToken>();
+    public DbSet<UserNotificationSetting> UserNotificationSettings => Set<UserNotificationSetting>();
+    public DbSet<NotificationDigestItem> NotificationDigestItems => Set<NotificationDigestItem>();
+    public DbSet<UserNotification> UserNotifications => Set<UserNotification>();
     public DbSet<UserExternalLogin> UserExternalLogins => Set<UserExternalLogin>();
 
     // Teams and their membership — see .design/teams-and-visibility.md.
@@ -210,6 +213,7 @@ public class AppDbContext : DbContext
     // The Customer tab's hand-kept lists. See .design/solution-customer-info.md.
     public DbSet<OeProjectContact> OeProjectContacts => Set<OeProjectContact>();
     public DbSet<OeProjectPerson> OeProjectPeople => Set<OeProjectPerson>();
+    public DbSet<OeProjectFollower> OeProjectFollowers => Set<OeProjectFollower>();
     public DbSet<OeProjectIntegration> OeProjectIntegrations => Set<OeProjectIntegration>();
     // Customer modules: the catalogue, what was typed in, and what environments report.
     public DbSet<CustomerModule> CustomerModules => Set<CustomerModule>();
@@ -348,6 +352,7 @@ public class AppDbContext : DbContext
         ScopeToOrganization<OeProjectTeam>(modelBuilder);
         ScopeToOrganization<OeProjectContact>(modelBuilder);
         ScopeToOrganization<OeProjectPerson>(modelBuilder);
+        ScopeToOrganization<OeProjectFollower>(modelBuilder);
         ScopeToOrganization<OeProjectIntegration>(modelBuilder);
         ScopeToOrganization<CustomerModule>(modelBuilder);
         ScopeToOrganization<OeProjectModule>(modelBuilder);
@@ -392,6 +397,9 @@ public class AppDbContext : DbContext
         ScopeToOrganization<RecipeSuggestionFile>(modelBuilder);
         ScopeToOrganization<PersonalAccessToken>(modelBuilder);
         ScopeToOrganization<UserRepositoryToken>(modelBuilder);
+        ScopeToOrganization<UserNotificationSetting>(modelBuilder);
+        ScopeToOrganization<NotificationDigestItem>(modelBuilder);
+        ScopeToOrganization<UserNotification>(modelBuilder);
         ScopeToOrganization<OAuthConsent>(modelBuilder);
         // AuditLogEntry carries a *nullable* organization_id: startup seed and
         // bootstrap-admin inserts happen before any org context exists. The

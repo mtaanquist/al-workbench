@@ -35,6 +35,20 @@ public enum EmailPurpose
 
     /// <summary>The "does SMTP work" probe on the SiteAdmin email settings. Sent inline.</summary>
     SiteAdminTest,
+
+    /// <summary>A build notification: a build pipeline failed or recovered. See <c>.design/notifications.md</c>.</summary>
+    BuildNotification,
+
+    /// <summary>A deployment notification: waiting for approval, deployed or failed.</summary>
+    DeploymentNotification,
+
+    /// <summary>A daily or weekly digest of notifications. See <c>.design/notifications.md</c>.</summary>
+    NotificationDigest,
+
+    /// <summary>An upgrade notification: a scheduled change on an environment ran, failed, or could not be confirmed.</summary>
+    UpgradeNotification,
+    /// <summary>A solution notification: an update was scheduled or moved on a solution the person follows.</summary>
+    SolutionNotification,
 }
 
 /// <summary>Where an outbox row is in its life.</summary>
@@ -104,6 +118,13 @@ public class EmailOutboxMessage
     /// then, so keeping it is exposure without value.
     /// </summary>
     public string? BodyEncrypted { get; set; }
+
+    /// <summary>
+    /// Data-Protection ciphertext of the plain-text alternative, under the same
+    /// purpose as <see cref="BodyEncrypted"/> and dropped at the same moments,
+    /// since it carries the same links. Null for an email built without one.
+    /// </summary>
+    public string? TextBodyEncrypted { get; set; }
 
     public EmailOutboxStatus Status { get; set; } = EmailOutboxStatus.Pending;
 

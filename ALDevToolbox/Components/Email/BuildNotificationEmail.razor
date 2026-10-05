@@ -1,0 +1,109 @@
+@*
+    A build pipeline started failing, or works again after failing (issue #1035).
+    Sent once per change, never once per build: see .design/notifications.md.
+*@
+<EmailLayout Preheader="@Preheader" OrganizationName="@OrganizationName" Reason="@Reason" SettingsUrl="@SettingsUrl">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    @if (Failed)
+    {
+        <EmailParagraph>The latest build of the <strong>@PipelineName</strong> pipeline for <strong>@SolutionName</strong> failed. @TargetSentence</EmailParagraph>
+        @if (!string.IsNullOrWhiteSpace(FailureMessage))
+        {
+            <EmailQuote Text="@Excerpt(FailureMessage)" Mono="true" />
+        }
+        <EmailButton Href="@BuildUrl">Open the build</EmailButton>
+        <EmailParagraph>You will not hear about failures of these builds again until one works.</EmailParagraph>
+    }
+    else
+    {
+        <EmailParagraph>The latest build of the <strong>@PipelineName</strong> pipeline for <strong>@SolutionName</strong> worked, after the one before it failed. @TargetSentence</EmailParagraph>
+        <EmailButton Href="@BuildUrl">Open the build</EmailButton>
+    }
+</EmailLayout>
+
+@code {
+    private const int ExcerptLines = 6;
+    private const int ExcerptChars = 600;
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SolutionName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string PipelineName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public bool Failed { get; set; }
+    /// <summary>True when the nightly check queued the build rather than a person.</summary>
+    [Parameter] public bool NightlyCheck { get; set; }
+    /// <summary>"Next minor" or "Next major" for a build against an upcoming version; null for the current one.</summary>
+    [Parameter] public string? Target { get; set; }
+    [Parameter] public string? BcVersion { get; set; }
+    [Parameter] public string? FailureMessage { get; set; }
+    [Parameter, EditorRequired] public string BuildUrl { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private string TargetSentence => (NightlyCheck, Target) switch
+    {
+        (_, null) => string.Empty,
+        (true, _) => $"This was the nightly check against the {Target.ToLowerInvariant()} Business Central version{VersionSuffix}.",
+        (false, _) => $"This build was against the {Target.ToLowerInvariant()} Business Central version{VersionSuffix}.",
+    };
+
+    private string VersionSuffix => string.IsNullOrWhiteSpace(BcVersion) ? "" : $" ({BcVersion})";
+
+    private string Preheader => Failed
+        ? $"{PipelineName} for {SolutionName} failed."
+        : $"{PipelineName} for {SolutionName} works again.";
+
+    private string Reason => NightlyCheck
+        ? "You received this because you turned on the nightly check or created the pipeline."
+        : "You received this because you started this build or created the pipeline.";
+
+    /// <summary>
+    /// The first few lines of a failure: one per extension that failed, or the
+    /// build's own message. The rest is on the build page the button opens.
+    /// </summary>
+    public static string Excerpt(string message)
+    {
+        var lines = message.Replace("\r\n", "\n").Trim().Split('\n');
+        var text = string.Join("\n", lines.Take(ExcerptLines)).TrimEnd();
+        if (text.Length > ExcerptChars) return text[..ExcerptChars].TrimEnd() + "...";
+        return lines.Length > ExcerptLines ? text + "\n..." : text;
+    }
+
+    public static string SubjectFor(bool failed, bool nightlyCheck, string solutionName, string pipelineName, string? target)
+    {
+        var what = nightlyCheck ? "Nightly check" : "Build";
+        var state = failed ? "failed" : "working again";
+        var suffix = target is null ? "" : $" ({target})";
+        return $"{what} {state}: {solutionName} - {pipelineName}{suffix}";
+    }
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer,
+        string displayName,
+        string organizationName,
+        string solutionName,
+        string pipelineName,
+        bool failed,
+        bool nightlyCheck,
+        string? target,
+        string? bcVersion,
+        string? failureMessage,
+        string buildUrl,
+        string settingsUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<BuildNotificationEmail>(
+            SubjectFor(failed, nightlyCheck, solutionName, pipelineName, target),
+            new Dictionary<string, object?>
+            {
+                [nameof(DisplayName)] = displayName,
+                [nameof(OrganizationName)] = organizationName,
+                [nameof(SolutionName)] = solutionName,
+                [nameof(PipelineName)] = pipelineName,
+                [nameof(Failed)] = failed,
+                [nameof(NightlyCheck)] = nightlyCheck,
+                [nameof(Target)] = target,
+                [nameof(BcVersion)] = bcVersion,
+                [nameof(FailureMessage)] = failureMessage,
+                [nameof(BuildUrl)] = buildUrl,
+                [nameof(SettingsUrl)] = settingsUrl,
+            }, ct);
+}

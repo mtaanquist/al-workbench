@@ -27,229 +27,227 @@
 
 <PageTitle>Email delivery · Site administration · AL Workbench</PageTitle>
 
-<div class="page">
-    <PageHead Title="Email delivery"
-              Trail='@([new("Site administration", "/site-admin"), new("Email delivery")])'>
-        <SubtitleContent>
-            @if (_snapshot is null)
-            {
-                <span>Reset links, invites and sign-in links are sent in the background.</span>
-            }
-            else if (_snapshot.SentLastDay > 0)
-            {
-                <span>
-                    <strong>@_snapshot.SentLastDay email@(_snapshot.SentLastDay == 1 ? "" : "s")</strong>
-                    went out in the last 24 hours. Anything that never got through is listed below.
-                </span>
-            }
-            else
-            {
-                <span>No email has gone out in the last 24 hours.</span>
-            }
-        </SubtitleContent>
-        <Actions>
-            <a class="btn btn--sm" href="/site-admin/email">
-                <Icon Name="refresh-cw" Width="14" Height="14" />
-                <span>Refresh</span>
-            </a>
-            <a class="btn btn--sm" href="/site-admin/settings/smtp">
-                <Icon Name="server-cog" Width="14" Height="14" />
-                <span>Email settings</span>
-            </a>
-        </Actions>
-    </PageHead>
-
-    @if (_loadError is not null)
-    {
-        <section class="card">
-            <div class="error-block">
-                <span class="error-block__icon"><Icon Name="circle-alert" Width="21" Height="21" /></span>
-                <span class="error-block__title">Could not read the email history</span>
-                <span class="error-block__text">The database did not answer. Try again in a moment.</span>
-                <span class="error-block__detail">@_loadError</span>
-            </div>
-        </section>
-    }
-    else if (_snapshot is null)
-    {
-        <section class="card">
-            <div class="loading-block">
-                <span class="spinner"></span><span>Loading...</span>
-            </div>
-        </section>
-    }
-    else
-    {
-        @if (_snapshot.SentLastDay == 0 && NothingIsGettingThrough)
+<SiteAdminEmailHeader ActiveTab="SiteAdminEmailHeader.Tab.Delivery">
+    <Sub>
+        @if (_snapshot is null)
         {
-            @* Nothing out and something stuck: the email server is the problem,
-               and saying "that can be normal" here would be wrong. *@
-            <Alert Tone="AlertTone.Danger">
-                <span>
-                    Nothing has gone out in the last 24 hours and email is not getting through.
-                    Check <a href="/site-admin/settings/smtp">Email settings</a> and send yourself
-                    a test email.
-                </span>
-            </Alert>
+            <span>Reset links, invites and sign-in links are sent in the background.</span>
         }
-        else if (_snapshot.SentLastDay == 0)
+        else if (_snapshot.SentLastDay > 0)
         {
-            @* The one state the two lists below cannot show: they are empty
-               because nothing is being sent at all, which looks identical to a
-               healthy site until someone says they never got their email. *@
-            <Alert Tone="AlertTone.Warn">
-                <span>
-                    Nothing has been sent in the last 24 hours. On a quiet site that is normal.
-                    If someone was expecting an email, send yourself a test from
-                    <a href="/site-admin/settings/smtp">Email settings</a> to check the connection.
-                </span>
-            </Alert>
+            <span>
+                <strong>@_snapshot.SentLastDay email@(_snapshot.SentLastDay == 1 ? "" : "s")</strong>
+                went out in the last 24 hours. Anything that never got through is listed below.
+            </span>
         }
+        else
+        {
+            <span>No email has gone out in the last 24 hours.</span>
+        }
+    </Sub>
+    <Actions>
+        <a class="btn btn--sm" href="/site-admin/email">
+            <Icon Name="refresh-cw" Width="14" Height="14" />
+            <span>Refresh</span>
+        </a>
+        <a class="btn btn--sm" href="/site-admin/settings/smtp">
+            <Icon Name="server-cog" Width="14" Height="14" />
+            <span>Email settings</span>
+        </a>
+    </Actions>
+    <ChildContent>
+        @if (_loadError is not null)
+        {
+            <section class="card">
+                <div class="error-block">
+                    <span class="error-block__icon"><Icon Name="circle-alert" Width="21" Height="21" /></span>
+                    <span class="error-block__title">Could not read the email history</span>
+                    <span class="error-block__text">The database did not answer. Try again in a moment.</span>
+                    <span class="error-block__detail">@_loadError</span>
+                </div>
+            </section>
+        }
+        else if (_snapshot is null)
+        {
+            <section class="card">
+                <div class="loading-block">
+                    <span class="spinner"></span><span>Loading...</span>
+                </div>
+            </section>
+        }
+        else
+        {
+            @if (_snapshot.SentLastDay == 0 && NothingIsGettingThrough)
+            {
+                @* Nothing out and something stuck: the email server is the problem,
+                   and saying "that can be normal" here would be wrong. *@
+                <Alert Tone="AlertTone.Danger">
+                    <span>
+                        Nothing has gone out in the last 24 hours and email is not getting through.
+                        Check <a href="/site-admin/settings/smtp">Email settings</a> and send yourself
+                        a test email.
+                    </span>
+                </Alert>
+            }
+            else if (_snapshot.SentLastDay == 0)
+            {
+                @* The one state the two lists below cannot show: they are empty
+                   because nothing is being sent at all, which looks identical to a
+                   healthy site until someone says they never got their email. *@
+                <Alert Tone="AlertTone.Warn">
+                    <span>
+                        Nothing has been sent in the last 24 hours. On a quiet site that is normal.
+                        If someone was expecting an email, send yourself a test from
+                        <a href="/site-admin/settings/smtp">Email settings</a> to check the connection.
+                    </span>
+                </Alert>
+            }
 
-        <section class="card">
-            <div class="card__head">
-                <div>
-                    <h2 class="card__title">Never got through</h2>
-                    <p class="card__sub">
-                        Tried several times over a few hours, then stopped. Nobody was warned - not the
-                        person waiting for the email, and not you. These cannot be sent again from here:
-                        once the cause is fixed, ask the person to request the email again.
-                    </p>
-                    @if (_snapshot.FailedTotal > _snapshot.Failed.Count)
-                    {
+            <section class="card">
+                <div class="card__head">
+                    <div>
+                        <h2 class="card__title">Never got through</h2>
                         <p class="card__sub">
-                            Showing the @_snapshot.Failed.Count most recent of @_snapshot.FailedTotal.
+                            Tried several times over a few hours, then stopped. Nobody was warned - not the
+                            person waiting for the email, and not you. These cannot be sent again from here:
+                            once the cause is fixed, ask the person to request the email again.
                         </p>
-                    }
+                        @if (_snapshot.FailedTotal > _snapshot.Failed.Count)
+                        {
+                            <p class="card__sub">
+                                Showing the @_snapshot.Failed.Count most recent of @_snapshot.FailedTotal.
+                            </p>
+                        }
+                    </div>
                 </div>
-            </div>
 
-            @if (_snapshot.Failed.Count == 0)
-            {
-                <div class="empty-state">
-                    <span class="empty-state__icon"><Icon Name="circle-check" Width="21" Height="21" /></span>
-                    <span class="empty-state__title">Nothing has failed</span>
-                    <span class="empty-state__text">
-                        Nothing has been given up on in the last 30 days. If someone is missing an email,
-                        ask them to check their spam folder and request it again. If it keeps happening,
-                        check the email settings.
-                    </span>
-                    <span class="empty-state__action">
-                        <a class="btn btn--sm" href="/site-admin/settings/smtp">Email settings</a>
-                    </span>
-                </div>
-            }
-            else
-            {
-                <table class="data-table data-table--edge">
-                    <thead>
-                        <tr>
-                            <th class="data-table__col-state"><span class="u-sr">Status</span></th>
-                            <th>Who it was for</th>
-                            <th>What it was</th>
-                            <th>Tried</th>
-                            <th>First tried</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                    @foreach (var row in _snapshot.Failed)
-                    {
-                        <tr class="@RowStateIcon.RowClass("failed")">
-                            <td class="data-table__col-state">
-                                <RowStateIcon State="failed" Label="Never got through" />
-                            </td>
-                            <td>
-                                @row.ToEmail
-                                @if (row.OrganizationName is not null)
-                                {
-                                    <div class="u-muted">@row.OrganizationName</div>
-                                }
-                            </td>
-                            <td>@Describe(row.Purpose)</td>
-                            <td class="u-muted">@row.AttemptCount time@(row.AttemptCount == 1 ? "" : "s")</td>
-                            <td class="u-muted"><Timestamp Value="@row.CreatedAt" /></td>
-                        </tr>
-                        @if (Reason(row.LastError) is { } reason)
+                @if (_snapshot.Failed.Count == 0)
+                {
+                    <div class="empty-state">
+                        <span class="empty-state__icon"><Icon Name="circle-check" Width="21" Height="21" /></span>
+                        <span class="empty-state__title">Nothing has failed</span>
+                        <span class="empty-state__text">
+                            Nothing has been given up on in the last 30 days. If someone is missing an email,
+                            ask them to check their spam folder and request it again. If it keeps happening,
+                            check the email settings.
+                        </span>
+                        <span class="empty-state__action">
+                            <a class="btn btn--sm" href="/site-admin/settings/smtp">Email settings</a>
+                        </span>
+                    </div>
+                }
+                else
+                {
+                    <table class="data-table data-table--edge">
+                        <thead>
+                            <tr>
+                                <th class="data-table__col-state"><span class="u-sr">Status</span></th>
+                                <th>Who it was for</th>
+                                <th>What it was</th>
+                                <th>Tried</th>
+                                <th>First tried</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        @foreach (var row in _snapshot.Failed)
                         {
                             <tr class="@RowStateIcon.RowClass("failed")">
-                                <td></td>
-                                <td colspan="4">
-                                    <div class="code-block">
-                                        <div class="code-block__bar">
-                                            <span class="code-block__name">What the email server said</span>
-                                        </div>
-                                        <pre>@reason</pre>
-                                    </div>
+                                <td class="data-table__col-state">
+                                    <RowStateIcon State="failed" Label="Never got through" />
                                 </td>
+                                <td>
+                                    @row.ToEmail
+                                    @if (row.OrganizationName is not null)
+                                    {
+                                        <div class="u-muted">@row.OrganizationName</div>
+                                    }
+                                </td>
+                                <td>@Describe(row.Purpose)</td>
+                                <td class="u-muted">@row.AttemptCount time@(row.AttemptCount == 1 ? "" : "s")</td>
+                                <td class="u-muted"><Timestamp Value="@row.CreatedAt" /></td>
+                            </tr>
+                            @if (Reason(row.LastError) is { } reason)
+                            {
+                                <tr class="@RowStateIcon.RowClass("failed")">
+                                    <td></td>
+                                    <td colspan="4">
+                                        <div class="code-block">
+                                            <div class="code-block__bar">
+                                                <span class="code-block__name">What the email server said</span>
+                                            </div>
+                                            <pre>@reason</pre>
+                                        </div>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                        </tbody>
+                    </table>
+                }
+            </section>
+
+            <section class="card">
+                <div class="card__head">
+                    <div>
+                        <h2 class="card__title">Still waiting</h2>
+                        <p class="card__sub">Sent within a minute or so, and tried again for a few hours if it does not get through.</p>
+                        @if (_snapshot.WaitingTotal > _snapshot.Waiting.Count)
+                        {
+                            <p class="card__sub">
+                                Showing the @_snapshot.Waiting.Count most recent of @_snapshot.WaitingTotal.
+                            </p>
+                        }
+                    </div>
+                </div>
+
+                @if (_snapshot.Waiting.Count == 0)
+                {
+                    <div class="empty-state empty-state--quiet">
+                        <span class="empty-state__title">Nothing waiting</span>
+                    </div>
+                }
+                else
+                {
+                    <table class="data-table data-table--edge">
+                        <thead>
+                            <tr>
+                                <th class="data-table__col-state"><span class="u-sr">Status</span></th>
+                                <th>Who it is for</th>
+                                <th>What it is</th>
+                                <th>Tried</th>
+                                <th>Next try</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        @foreach (var row in _snapshot.Waiting)
+                        {
+                            <tr class="@RowStateIcon.RowClass("pending")">
+                                <td class="data-table__col-state">
+                                    <RowStateIcon State="pending" Label="Waiting to send" />
+                                </td>
+                                <td>
+                                    @row.ToEmail
+                                    @if (row.OrganizationName is not null)
+                                    {
+                                        <div class="u-muted">@row.OrganizationName</div>
+                                    }
+                                </td>
+                                <td>@Describe(row.Purpose)</td>
+                                <td class="u-muted">
+                                    @(row.AttemptCount == 0 ? "Not yet" : $"{row.AttemptCount} time{(row.AttemptCount == 1 ? "" : "s")}")
+                                </td>
+                                <td class="u-muted"><Timestamp Value="@row.NextAttemptAt" /></td>
                             </tr>
                         }
-                    }
-                    </tbody>
-                </table>
-            }
-        </section>
+                        </tbody>
+                    </table>
+                }
+            </section>
 
-        <section class="card">
-            <div class="card__head">
-                <div>
-                    <h2 class="card__title">Still waiting</h2>
-                    <p class="card__sub">Sent within a minute or so, and tried again for a few hours if it does not get through.</p>
-                    @if (_snapshot.WaitingTotal > _snapshot.Waiting.Count)
-                    {
-                        <p class="card__sub">
-                            Showing the @_snapshot.Waiting.Count most recent of @_snapshot.WaitingTotal.
-                        </p>
-                    }
-                </div>
-            </div>
-
-            @if (_snapshot.Waiting.Count == 0)
-            {
-                <div class="empty-state empty-state--quiet">
-                    <span class="empty-state__title">Nothing waiting</span>
-                </div>
-            }
-            else
-            {
-                <table class="data-table data-table--edge">
-                    <thead>
-                        <tr>
-                            <th class="data-table__col-state"><span class="u-sr">Status</span></th>
-                            <th>Who it is for</th>
-                            <th>What it is</th>
-                            <th>Tried</th>
-                            <th>Next try</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                    @foreach (var row in _snapshot.Waiting)
-                    {
-                        <tr class="@RowStateIcon.RowClass("pending")">
-                            <td class="data-table__col-state">
-                                <RowStateIcon State="pending" Label="Waiting to send" />
-                            </td>
-                            <td>
-                                @row.ToEmail
-                                @if (row.OrganizationName is not null)
-                                {
-                                    <div class="u-muted">@row.OrganizationName</div>
-                                }
-                            </td>
-                            <td>@Describe(row.Purpose)</td>
-                            <td class="u-muted">
-                                @(row.AttemptCount == 0 ? "Not yet" : $"{row.AttemptCount} time{(row.AttemptCount == 1 ? "" : "s")}")
-                            </td>
-                            <td class="u-muted"><Timestamp Value="@row.NextAttemptAt" /></td>
-                        </tr>
-                    }
-                    </tbody>
-                </table>
-            }
-        </section>
-
-        <p class="u-muted">As of <Timestamp Value="@_loadedAt" />.</p>
-    }
-</div>
+            <p class="u-muted">As of <Timestamp Value="@_loadedAt" />.</p>
+        }
+    </ChildContent>
+</SiteAdminEmailHeader>
 
 @code {
     private EmailOutboxSnapshot? _snapshot;
@@ -295,6 +293,11 @@
         EmailPurpose.EmailChangeConfirmation => "New email address confirmation",
         EmailPurpose.MfaCode => "Two-factor code",
         EmailPurpose.SiteAdminTest => "Test email",
+        EmailPurpose.BuildNotification => "Build notification",
+        EmailPurpose.DeploymentNotification => "Deployment notification",
+        EmailPurpose.UpgradeNotification => "Upgrade notification",
+        EmailPurpose.SolutionNotification => "Solution notification",
+        EmailPurpose.NotificationDigest => "Daily or weekly digest",
         _ => "Other email",
     };
 

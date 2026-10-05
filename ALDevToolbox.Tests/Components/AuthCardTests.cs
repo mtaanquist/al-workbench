@@ -59,7 +59,7 @@ public sealed class AuthCardTests : IDisposable
         public bool Configured { get; set; }
         public Task<bool> IsConfiguredAsync(CancellationToken ct = default) => Task.FromResult(Configured);
         public Task SendAsync(
-            string to, string subject, string body, EmailPurpose purpose, CancellationToken ct = default)
+            string to, EmailContent content, EmailPurpose purpose, CancellationToken ct = default)
             => Task.CompletedTask;
     }
 

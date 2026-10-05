@@ -359,7 +359,9 @@ public sealed class EnvironmentsListTests : IDisposable
         var id = await SeedSolutionAsync("CRONUS Denmark");
         var now = DateTime.UtcNow;
         await SeedEnvironmentAsync(id, "JLE-260911110359", "Sandbox", "Active", now, now);
-        await SoftDeleteAsync("JLE-260911110359", new DateTime(2026, 10, 4, 9, 0, 0, DateTimeKind.Utc));
+        // Relative to today: a fixed date turns into "past the date" once the calendar passes it.
+        var goneForGood = now.Date.AddDays(10).AddHours(9);
+        await SoftDeleteAsync("JLE-260911110359", goneForGood);
 
         var cut = _ctx.Render<EnvironmentsList>();
 
@@ -372,7 +374,7 @@ public sealed class EnvironmentsListTests : IDisposable
             row.TextContent.Should().Contain("JLE-260911110359");
             // The deadline takes the bold line, not the grey one under a dash.
             row.QuerySelectorAll(".cell-stack__main").Last().TextContent
-                .Should().Be("Gone for good on 04 Oct 2026");
+                .Should().Be($"Gone for good on {goneForGood.ToString("dd MMM yyyy", System.Globalization.CultureInfo.InvariantCulture)}");
             row.QuerySelectorAll(".cell-stack__sub").Last().TextContent
                 .Should().EndWith("to bring it back", "a date alone leaves the reader doing the arithmetic");
         });

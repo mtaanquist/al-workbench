@@ -1,0 +1,106 @@
+@*
+    A deployment is waiting for approval, has been deployed, or failed (issue #1036).
+    See .design/notifications.md.
+*@
+@using ALDevToolbox.Services.Notifications
+<EmailLayout Preheader="@Preheader" OrganizationName="@OrganizationName" Reason="@Reason" SettingsUrl="@SettingsUrl">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>@Lead</EmailParagraph>
+    @if (Apps.Count > 0)
+    {
+        <ul style="margin: 0 0 16px; padding-left: 20px;">
+            @foreach (var app in Apps.Take(MaxApps))
+            {
+                <li>@app</li>
+            }
+            @if (Apps.Count > MaxApps)
+            {
+                <li>and @(Apps.Count - MaxApps) more</li>
+            }
+        </ul>
+    }
+    @if (Outcome == DeploymentOutcome.Failed && !string.IsNullOrWhiteSpace(FailureMessage))
+    {
+        <EmailQuote Text="@FailureMessage" />
+    }
+    <EmailButton Href="@PipelineUrl">@ButtonLabel</EmailButton>
+</EmailLayout>
+
+@code {
+    private const int MaxApps = 10;
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public DeploymentOutcome Outcome { get; set; }
+    [Parameter, EditorRequired] public string SolutionName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string PipelineName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string EnvironmentName { get; set; } = string.Empty;
+    /// <summary>"CRONUS Coffee 1.4.0.0", one per app in the deployment.</summary>
+    [Parameter] public IReadOnlyList<string> Apps { get; set; } = [];
+    [Parameter] public string? FailureMessage { get; set; }
+    [Parameter, EditorRequired] public string PipelineUrl { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private string Lead => Outcome switch
+    {
+        DeploymentOutcome.WaitingForApproval =>
+            $"A new build of {SolutionName} is ready to deploy to {EnvironmentName} through the {PipelineName} deployment pipeline. Nothing is installed until someone approves it.",
+        DeploymentOutcome.Deployed =>
+            $"The {PipelineName} deployment pipeline has deployed {SolutionName} to {EnvironmentName}.",
+        DeploymentOutcome.HandedOff =>
+            $"Business Central accepted {SolutionName} for {EnvironmentName} from the {PipelineName} deployment pipeline, and will install it on its own schedule.",
+        _ =>
+            $"The {PipelineName} deployment pipeline could not deploy {SolutionName} to {EnvironmentName}.",
+    };
+
+    private string ButtonLabel => Outcome == DeploymentOutcome.WaitingForApproval ? "Review the deployment" : "Open the deployment pipeline";
+
+    private string Preheader => Outcome switch
+    {
+        DeploymentOutcome.WaitingForApproval => $"{SolutionName} to {EnvironmentName} is waiting for approval.",
+        DeploymentOutcome.Deployed => $"{SolutionName} is deployed to {EnvironmentName}.",
+        DeploymentOutcome.HandedOff => $"Business Central will install {SolutionName} in {EnvironmentName}.",
+        _ => $"{SolutionName} could not be deployed to {EnvironmentName}.",
+    };
+
+    private string Reason => Outcome == DeploymentOutcome.WaitingForApproval
+        ? "You received this because you own this solution or created the deployment pipeline."
+        : "You received this because you started or approved this deployment.";
+
+    public static string SubjectFor(DeploymentOutcome outcome, string solutionName, string environmentName) => outcome switch
+    {
+        DeploymentOutcome.WaitingForApproval => $"Waiting for approval: {solutionName} to {environmentName}",
+        DeploymentOutcome.Deployed => $"Deployed: {solutionName} to {environmentName}",
+        DeploymentOutcome.HandedOff => $"Accepted by Business Central: {solutionName} to {environmentName}",
+        _ => $"Deployment failed: {solutionName} to {environmentName}",
+    };
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer,
+        string displayName,
+        string organizationName,
+        DeploymentOutcome outcome,
+        string solutionName,
+        string pipelineName,
+        string environmentName,
+        IReadOnlyList<string> apps,
+        string? failureMessage,
+        string pipelineUrl,
+        string settingsUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<DeploymentNotificationEmail>(
+            SubjectFor(outcome, solutionName, environmentName),
+            new Dictionary<string, object?>
+            {
+                [nameof(DisplayName)] = displayName,
+                [nameof(OrganizationName)] = organizationName,
+                [nameof(Outcome)] = outcome,
+                [nameof(SolutionName)] = solutionName,
+                [nameof(PipelineName)] = pipelineName,
+                [nameof(EnvironmentName)] = environmentName,
+                [nameof(Apps)] = apps,
+                [nameof(FailureMessage)] = failureMessage,
+                [nameof(PipelineUrl)] = pipelineUrl,
+                [nameof(SettingsUrl)] = settingsUrl,
+            }, ct);
+}

@@ -1,0 +1,42 @@
+@using ALDevToolbox.Services.Notifications
+@inject InAppNotificationService Notifications
+@inject ILogger<NotificationBell> Logger
+
+@*
+    The bell in the top bar: a link to the Notifications page with the number
+    of unread ones on it (issue #1043). The shell is static, so the number is
+    the one at page load; opening a notification or marking them read
+    redirects, which is when it changes. See .design/notifications.md.
+*@
+
+<a href="/notifications" class="nav-link-btn notif-bell" title="@Label" aria-label="@Label">
+    <Icon Name="bell" Width="15" Height="15" />
+    @if (_unread > 0)
+    {
+        <span class="notif-bell__count" aria-hidden="true">@(_unread > 99 ? "99+" : _unread.ToString())</span>
+    }
+</a>
+
+@code {
+    private int _unread;
+
+    private string Label => _unread switch
+    {
+        0 => "Notifications",
+        1 => "Notifications, 1 unread",
+        _ => $"Notifications, {_unread} unread",
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        // The bell is on every page; a count that cannot be read must not take the page with it.
+        try
+        {
+            _unread = await Notifications.CountUnreadForCurrentUserAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not count unread notifications for the bell.");
+        }
+    }
+}

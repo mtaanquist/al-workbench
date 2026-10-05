@@ -464,6 +464,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("subject");
 
+                    b.Property<string>("TextBodyEncrypted")
+                        .HasColumnType("text")
+                        .HasColumnName("text_body_encrypted");
+
                     b.Property<string>("ToEmail")
                         .IsRequired()
                         .HasColumnType("text")
@@ -966,6 +970,74 @@ namespace ALDevToolbox.Data.Migrations
                     b.ToTable("module_extension_folders", (string)null);
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.NotificationDigestItem", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("category");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Delivery")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("delivery");
+
+                    b.Property<string>("Detail")
+                        .HasColumnType("text")
+                        .HasColumnName("detail");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<int?>("ProjectId")
+                        .HasColumnType("integer")
+                        .HasColumnName("project_id");
+
+                    b.Property<string>("SolutionName")
+                        .HasColumnType("text")
+                        .HasColumnName("solution_name");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("title");
+
+                    b.Property<string>("Url")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("url");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("ProjectId");
+
+                    b.HasIndex("UserId", "Delivery", "CreatedAt");
+
+                    b.ToTable("notification_digest_items", (string)null);
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.OAuthConsent", b =>
                 {
                     b.Property<int>("Id")
@@ -1429,6 +1501,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<int>("ProjectId")
                         .HasColumnType("integer")
                         .HasColumnName("project_id");
+
+                    b.Property<DateTime?>("UpdatedNotifiedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_notified_at");
 
                     b.Property<int>("UpgradeId")
                         .HasColumnType("integer")
@@ -3474,6 +3550,47 @@ namespace ALDevToolbox.Data.Migrations
                         .HasDatabaseName("ix_oe_project_environments_project_name");
 
                     b.ToTable("oe_project_environments", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectFollower", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<bool>("Following")
+                        .HasColumnType("boolean")
+                        .HasColumnName("following");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<int>("ProjectId")
+                        .HasColumnType("integer")
+                        .HasColumnName("project_id");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("ProjectId", "UserId")
+                        .IsUnique();
+
+                    b.ToTable("oe_project_followers", (string)null);
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectIntegration", b =>
@@ -6010,6 +6127,125 @@ namespace ALDevToolbox.Data.Migrations
                     b.ToTable("user_external_logins", (string)null);
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.UserNotification", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("category");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Detail")
+                        .HasColumnType("text")
+                        .HasColumnName("detail");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<string>("Path")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("path");
+
+                    b.Property<int?>("ProjectId")
+                        .HasColumnType("integer")
+                        .HasColumnName("project_id");
+
+                    b.Property<DateTime?>("ReadAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("read_at");
+
+                    b.Property<string>("SolutionName")
+                        .HasColumnType("text")
+                        .HasColumnName("solution_name");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("title");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("ProjectId");
+
+                    b.HasIndex("UserId")
+                        .HasDatabaseName("ix_user_notifications_user_id_unread")
+                        .HasFilter("read_at IS NULL");
+
+                    b.HasIndex("UserId", "CreatedAt");
+
+                    b.ToTable("user_notifications", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.UserNotificationSetting", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("category");
+
+                    b.Property<string>("Delivery")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("delivery");
+
+                    b.Property<bool>("InApp")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("in_app");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("UserId", "Category")
+                        .IsUnique();
+
+                    b.ToTable("user_notification_settings", (string)null);
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.UserPasskey", b =>
                 {
                     b.Property<int>("Id")
@@ -6869,6 +7105,32 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("ParentFolder");
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.NotificationDigestItem", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
+
+                    b.Navigation("Project");
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.OAuthConsent", b =>
                 {
                     b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
@@ -7662,6 +7924,33 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("Project");
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectFollower", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
+
+                    b.Navigation("Project");
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectIntegration", b =>
                 {
                     b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
@@ -8367,6 +8656,51 @@ namespace ALDevToolbox.Data.Migrations
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.UserNotification", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject", "Project")
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
+
+                    b.Navigation("Project");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.UserNotificationSetting", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Organization");
 
                     b.Navigation("User");
                 });

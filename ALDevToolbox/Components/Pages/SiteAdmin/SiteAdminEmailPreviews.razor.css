@@ -1,0 +1,21 @@
+/* Email list beside the selected preview; the two parts of an email side by
+   side once there is room for the 560px email next to its text. */
+.email-previews { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+@container (max-width: 900px) { .email-previews { grid-template-columns: minmax(0, 1fr); } }
+
+.email-previews__list { display: flex; flex-direction: column; padding: var(--space-2); gap: 2px; }
+.email-previews__item { display: flex; flex-direction: column; gap: 2px; padding: var(--space-2) var(--space-3); border-left: 2px solid transparent; border-radius: var(--r-control); color: var(--ink-2); text-decoration: none; }
+.email-previews__item:hover { background: var(--surface-2); }
+.email-previews__item.is-active { border-left-color: var(--primary); background: var(--primary-weak); color: var(--primary-ink); }
+.email-previews__name { font-size: var(--text-sm); font-weight: var(--fw-medium); }
+.email-previews__when { font-size: var(--text-xs); color: var(--ink-3); }
+
+.email-previews__view > :not(.card__head) { margin: var(--space-4); }
+.email-previews__subject { display: flex; gap: var(--space-3); font-size: var(--text-sm); }
+.email-previews__subject dt { color: var(--ink-3); }
+.email-previews__subject dd { margin: 0; font-weight: var(--fw-medium); color: var(--ink); }
+
+.email-previews__parts { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+@container (min-width: 1400px) { .email-previews__parts { grid-template-columns: minmax(600px, 1.3fr) minmax(0, 1fr); } }
+.email-previews__frame { display: block; width: 100%; height: 640px; border: 0; border-radius: 0 0 var(--r) var(--r); background: var(--surface); }
+.email-previews__text { white-space: pre-wrap; overflow-wrap: anywhere; }
