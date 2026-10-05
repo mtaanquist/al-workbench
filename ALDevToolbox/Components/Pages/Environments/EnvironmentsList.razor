@@ -6,6 +6,7 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject ILogger<EnvironmentsList> Log
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@inject IServiceScopeFactory ScopeFactory
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Services.ObjectExplorer.Bc
@@ -587,11 +588,23 @@
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
 
-    private async Task LoadAsync()
+    /// <summary>Counts the listings started, so an earlier one finishing late doesn't overwrite a later one.</summary>
+    private int _loads;
+
+    /// <param name="ownScope">True for the poll, whose tick can land while a click is still awaiting the circuit's context.</param>
+    private async Task LoadAsync(bool ownScope = false)
     {
+        // The poll and a click's reload can now be in flight together; only the one that
+        // started last may set the rows, or a poll read from before a Recover would put
+        // the old state back.
+        var load = ++_loads;
         try
         {
-            _rows = await Fleet.ListFleetAsync(includeSoftDeleted: true);
+            var rows = ownScope
+                ? await OnOwnScopeAsync(fleet => fleet.ListFleetAsync(includeSoftDeleted: true))
+                : await Fleet.ListFleetAsync(includeSoftDeleted: true);
+            if (load != _loads) return;
+            _rows = rows;
             _error = null;
             _loadFailed = false;
             _selection.Prune(Selectable(_rows).Select(r => r.EnvironmentId));
@@ -599,6 +612,7 @@
         catch (Exception ex)
         {
             Log.LogError(ex, "Failed to list environments.");
+            if (load != _loads) return;
             _rows = new List<UpgradeFleetRow>();
             _loadFailed = true;
         }
@@ -634,7 +648,9 @@
         try
         {
             var projectIds = _rows.Select(r => r.ProjectId).Distinct().ToList();
-            var result = await Fleet.RequestRefreshAsync(projectIds, force);
+            // On a scope of its own: the auto-refresh timer comes through here too, and
+            // its tick can land while a click is still awaiting the circuit's context.
+            var result = await OnOwnScopeAsync(fleet => fleet.RequestRefreshAsync(projectIds, force));
             // Skipped rows are solutions this person may see but not act on. Saying
             // "asking about 3 customers" when 3 were asked and 5 were skipped is the
             // honest count, and it explains a table that only partly moves.
@@ -654,6 +670,19 @@
             _refreshing = false;
             _error = "Couldn't ask Business Central for a refresh. Try again in a moment.";
         }
+    }
+
+    /// <summary>
+    /// Runs a fleet call on a DI scope of its own, for the work the timers start. A timer
+    /// tick goes through InvokeAsync, but that only keeps it apart from a click between
+    /// awaits; a click already awaiting a query on the circuit's one AppDbContext would
+    /// meet the tick's query there, and a context takes one command at a time. Same as
+    /// the pipeline pages (#679).
+    /// </summary>
+    private async Task<T> OnOwnScopeAsync<T>(Func<UpgradeFleetService, Task<T>> call)
+    {
+        await using var scope = ScopeFactory.CreateAsyncScope();
+        return await call(scope.ServiceProvider.GetRequiredService<UpgradeFleetService>());
     }
 
     /// <summary>What a refresh request did, in the reader's words.</summary>
@@ -697,14 +726,14 @@
 
     private async Task PollTickAsync()
     {
-        // On the renderer's context: a tick and a click must not touch the circuit's
-        // one AppDbContext at the same time.
+        // On the renderer's context, so the rows land between a click's steps; the read
+        // itself is on a scope of its own (see OnOwnScopeAsync).
         await InvokeAsync(async () =>
         {
-            // The dialog and the page share one database context; a re-read waits for
-            // the next tick rather than running beside the dialog's own query.
+            // A re-read waits for the next tick rather than moving the rows under the
+            // dialog while it works.
             if (_bulkWindowDialog?.IsWorking == true) return;
-            await LoadAsync();
+            await LoadAsync(ownScope: true);
             if (DateTime.UtcNow >= _pollUntilUtc)
             {
                 _poll?.Dispose();
@@ -808,8 +837,8 @@
             _refreshNote = "Stopped refreshing every 5 minutes after two hours. Tick the box again to carry on.";
             return;
         }
-        // Never beside a Refresh or its re-reads, and never beside the dialog: the
-        // dialog and the page share one database context.
+        // Never beside a Refresh or its re-reads, and never while the dialog works on
+        // the rows.
         if (_refreshing || _bulkWindowDialog?.IsWorking == true) return;
         try
         {

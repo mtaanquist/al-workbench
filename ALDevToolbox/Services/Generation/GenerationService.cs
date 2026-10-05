@@ -142,6 +142,7 @@ public class GenerationService
         CancellationToken ct = default)
     {
         ValidateExtensionPlan(plan);
+        plan = await ResolveLatestVersionAsync(plan, ct);
 
         var stopwatch = Stopwatch.StartNew();
         var template = await LoadTemplateAsync(plan.TemplateKey, ct);
@@ -197,6 +198,8 @@ public class GenerationService
         PrepareWorkspaceAsync(ProjectPlan plan, CancellationToken ct)
     {
         ValidateWorkspacePlan(plan);
+        var (application, runtime) = await ResolveLatestVersionAsync(plan.ApplicationVersion, plan.RuntimeVersion, ct);
+        plan = plan with { ApplicationVersion = application, RuntimeVersion = runtime };
 
         var template = await LoadTemplateAsync(plan.TemplateKey, ct);
         ValidateCoreRangeAgainstTemplate(plan, template);
@@ -255,6 +258,7 @@ public class GenerationService
         try
         {
             ValidateExtensionPlan(plan);
+            await ResolveLatestVersionAsync(plan, ct);
             await LoadTemplateAsync(plan.TemplateKey, ct);
             return NoErrors;
         }
@@ -266,6 +270,37 @@ public class GenerationService
 
     private static readonly IReadOnlyDictionary<string, string> NoErrors =
         new Dictionary<string, string>();
+
+    private async Task<StandaloneExtensionPlan> ResolveLatestVersionAsync(
+        StandaloneExtensionPlan plan, CancellationToken ct)
+    {
+        var (application, runtime) = await ResolveLatestVersionAsync(plan.ApplicationVersion, plan.RuntimeVersion, ct);
+        return plan with { ApplicationVersion = application, RuntimeVersion = runtime };
+    }
+
+    /// <summary>
+    /// Swaps the "Latest" choice for the newest application version in the
+    /// catalogue. The web forms do this before they build a plan, but an MCP
+    /// caller can pass the sentinel straight through, and without this it
+    /// landed in app.json as <c>"application": "latest"</c>. Both values swap
+    /// together, as the forms do, so app.json stays consistent.
+    /// </summary>
+    private async Task<(string Application, string Runtime)> ResolveLatestVersionAsync(
+        string application, string runtime, CancellationToken ct)
+    {
+        if (!IsLatest(application) && !IsLatest(runtime)) return (application, runtime);
+
+        var latest = await ApplicationVersionService.FindLatestAsync(_db, ct)
+            ?? throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["ApplicationVersion"] = "\"Latest\" needs at least one application version to pick from, "
+                    + "and none have been added yet. Choose a specific version, or ask an admin to add one.",
+            });
+        return (latest.Application, latest.Runtime);
+
+        static bool IsLatest(string value) =>
+            string.Equals(value?.Trim(), ApplicationVersionService.LatestSentinel, StringComparison.OrdinalIgnoreCase);
+    }
 
     // ===== Loading =====
 
