@@ -66,7 +66,7 @@
             <div class="card__head"><h2 class="card__title">Create a team</h2></div>
             @* A real <form> so Enter submits: typing a name and pressing Enter is
                what anyone does in a one-field form, and a bare div swallowed it. *@
-            <form @onsubmit="CreateAsync" @onsubmit:preventDefault>
+            <form class="card__body" @onsubmit="CreateAsync" @onsubmit:preventDefault>
                 <div class="field">
                     <label class="field__label" for="team-name">Team name</label>
                     <div class="u-row">

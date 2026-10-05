@@ -122,15 +122,17 @@
                 </p>
                 @if (_offsiteError is not null)
                 {
-                    <Alert Tone="AlertTone.Danger"><span>@_offsiteError</span></Alert>
+                    <div class="card__body">
+                        <Alert Tone="AlertTone.Danger"><span>@_offsiteError</span></Alert>
+                    </div>
                 }
                 else if (_offsite is null)
                 {
-                    <p class="u-muted">Loading...</p>
+                    <p class="card__body u-muted">Loading...</p>
                 }
                 else if (_offsite.Count == 0)
                 {
-                    <p class="u-muted">No dump-shaped objects under the prefix yet. They appear after the next scheduled backup uploads.</p>
+                    <p class="card__body u-muted">No backups in off-site storage yet. They appear after the next scheduled backup uploads.</p>
                 }
                 else
                 {
@@ -200,7 +202,7 @@
 
         @if (_rows is null)
         {
-            <div class="loading-block loading-block--under-table">
+            <div class="loading-block">
                 <span class="spinner"></span><span>Loading...</span>
             </div>
         }

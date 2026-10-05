@@ -28,9 +28,17 @@ on:
   # release.yml's `require-green-build` is unaffected either way: it looks up
   # build.yml runs by `head_sha`, and the branch-push run carries the same SHA
   # the tag points at.
+  #
+  # Only the branches PRs merge into. With "**" every push to a PR branch ran
+  # the whole pipeline twice, once per event, for the same commit. The
+  # `pull_request` run is the one that gates a PR; the push run here covers the
+  # merge commit that lands on main (which release.yml waits for) and on a
+  # milestone staging branch. A branch without a PR yet can still be built by
+  # hand with workflow_dispatch.
   push:
     branches:
-      - "**"
+      - main
+      - "staging/**"
   pull_request:
   workflow_dispatch:
 
