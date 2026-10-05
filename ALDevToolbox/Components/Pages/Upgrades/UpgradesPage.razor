@@ -11,6 +11,7 @@
 @inject IJSRuntime JS
 @inject ILogger<UpgradesPage> Log
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@inject IServiceScopeFactory ScopeFactory
 @using ALDevToolbox.Components.Shared
 @using static ALDevToolbox.Components.Shared.FleetRowState
 @using ALDevToolbox.Domain.ValueObjects
@@ -830,12 +831,29 @@
         Nav.NavigateTo("/upgrades?" + string.Join("&", parts));
     }
 
-    private async Task LoadAsync()
+    private async Task LoadAsync() =>
+        ShowLoaded(await Fleet.ListFleetAsync(), await Actions.ListPendingAsync());
+
+    /// <summary>
+    /// The same read as <see cref="LoadAsync"/>, on a DI scope of its own, for the poll:
+    /// its tick can land while a click is still awaiting a query on the circuit's
+    /// context, and one context takes one command at a time. Same as the pipeline
+    /// pages (#679).
+    /// </summary>
+    private async Task LoadOnOwnScopeAsync()
     {
-        _all = await Fleet.ListFleetAsync();
+        await using var scope = ScopeFactory.CreateAsyncScope();
+        var fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync();
+        var pending = await scope.ServiceProvider.GetRequiredService<UpgradeActionService>().ListPendingAsync();
+        ShowLoaded(fleet, pending);
+    }
+
+    private void ShowLoaded(List<UpgradeFleetRow> all, List<UpgradeActionRow> pending)
+    {
+        _all = all;
         _fleetCount = _all.Count;
         _offeredVersions = OfferedVersionNames(_all);
-        _pending = await Actions.ListPendingAsync();
+        _pending = pending;
         // Against the whole fleet, not the rows on screen: a tick the search has
         // hidden is still wanted. A row that has gone, or that is no longer this
         // person's to change, is not.
@@ -1012,10 +1030,12 @@
     //
     // The answers arrive in the background worker's own time, so the page collects
     // them itself rather than telling the reader to reload. Every tick goes through
-    // InvokeAsync, which puts the query on the renderer's sync context - the same
-    // thing that keeps it from colliding with a click handler on this circuit's one
-    // AppDbContext. It gives up after a few minutes: a refresh that hasn't answered
-    // by then isn't going to, and a page left open overnight must not poll forever.
+    // InvokeAsync, so its rows land on the renderer's sync context, but that only
+    // holds until the first await: a click handler already awaiting a query on the
+    // circuit's AppDbContext would meet the tick's query there. So the tick reads on
+    // a scope of its own. It gives up after a few minutes: a refresh that hasn't
+    // answered by then isn't going to, and a page left open overnight must not poll
+    // forever.
 
     private System.Threading.Timer? _poll;
     private DateTime _pollUntilUtc;
@@ -1052,7 +1072,7 @@
             {
                 // Never while a batch is mid-flight: that run owns the table.
                 if (Running || _denied || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true) return;
-                await ReloadNowAsync();
+                await LoadOnOwnScopeAsync();
                 StateHasChanged();
             });
         }
@@ -1161,7 +1181,21 @@
         _feedEnvId = row.EnvironmentId;
         _feed = null;
         StateHasChanged();
-        _feed = await Actions.ListEnvironmentActivityAsync(row.ProjectId, row.EnvironmentId);
+        _feed = await ReadFeedAsync(row.ProjectId, row.EnvironmentId);
+    }
+
+    /// <summary>
+    /// One environment's history, read on a DI scope of its own. Opening it is a click
+    /// that can land while the poll or the watch is still awaiting a query on the
+    /// circuit's AppDbContext, and one context takes one command at a time; the feed
+    /// only reads, so it needs nothing the page's own context holds. Same as the
+    /// pipeline pages (#679).
+    /// </summary>
+    private async Task<List<UpgradeActionRow>> ReadFeedAsync(int projectId, int environmentId)
+    {
+        await using var scope = ScopeFactory.CreateAsyncScope();
+        return await scope.ServiceProvider.GetRequiredService<UpgradeActionService>()
+            .ListEnvironmentActivityAsync(projectId, environmentId);
     }
 
     /// <summary>
@@ -1191,7 +1225,7 @@
         await ReloadNowAsync();
         if (_feedEnvId is { } envId && _all.FirstOrDefault(r => r.EnvironmentId == envId) is { } row)
         {
-            _feed = await Actions.ListEnvironmentActivityAsync(row.ProjectId, envId);
+            _feed = await ReadFeedAsync(row.ProjectId, envId);
         }
     }
 

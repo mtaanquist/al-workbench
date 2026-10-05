@@ -251,6 +251,34 @@ public sealed class UpgradesPageTests : IDisposable
             .Should().Be("Update history - CRONUS Denmark, Production"));
     }
 
+    /// <summary>
+    /// Opening the history is a click, and a click can land while the refresh poll or the
+    /// update watch is still awaiting a query on the page's own database context, which
+    /// takes one command at a time. The history reads on a context of its own, so it opens
+    /// whatever the page's context is doing. This test failed CI intermittently for days
+    /// with "A second operation was started on this context instance".
+    /// </summary>
+    [Fact]
+    public async Task History_opens_while_the_pages_own_database_context_is_busy()
+    {
+        await SeedOneEnvironmentAsync();
+        var cut = RenderWithOneRow();
+
+        // The page's scoped context, held by a query that is still running.
+        var pageContext = _ctx.Services.GetRequiredService<ALDevToolbox.Data.AppDbContext>();
+        var busy = pageContext.Database.ExecuteSqlRawAsync("SELECT pg_sleep(2)");
+        try
+        {
+            cut.FindAll(".data-table tbody tr td").Last().QuerySelector(".menu__item")!.Click();
+            cut.WaitForAssertion(() => cut.Find("tr.is-subrow .upg-feed__title").TextContent
+                .Should().Be("Update history - CRONUS Denmark, Production"));
+        }
+        finally
+        {
+            await busy;
+        }
+    }
+
     [Fact]
     public async Task Commands_that_need_a_selection_are_disabled_until_a_row_is_ticked()
     {
