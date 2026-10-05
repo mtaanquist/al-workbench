@@ -718,6 +718,7 @@
 
     public void Dispose()
     {
+        _gone.Cancel();
         StopPolling();
         _searchDebounce.Dispose();
         _watch.Dispose();
@@ -838,15 +839,24 @@
     /// The same read as <see cref="LoadAsync"/>, on a DI scope of its own, for the poll:
     /// its tick can land while a click is still awaiting a query on the circuit's
     /// context, and one context takes one command at a time. Same as the pipeline
-    /// pages (#679).
+    /// pages (#679). The rows are laid down only if nothing that owns them started
+    /// while the read was out.
     /// </summary>
     private async Task LoadOnOwnScopeAsync()
     {
-        await using var scope = ScopeFactory.CreateAsyncScope();
-        var fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync();
-        var pending = await scope.ServiceProvider.GetRequiredService<UpgradeActionService>().ListPendingAsync();
+        List<UpgradeFleetRow> fleet;
+        List<UpgradeActionRow> pending;
+        await using (var scope = ScopeFactory.CreateAsyncScope())
+        {
+            fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: _gone.Token);
+            pending = await scope.ServiceProvider.GetRequiredService<UpgradeActionService>().ListPendingAsync(_gone.Token);
+        }
+        if (_gone.IsCancellationRequested || PollPaused) return;
         ShowLoaded(fleet, pending);
     }
+
+    /// <summary>Cancelled when the page goes, so a read on a scope of its own stops with it.</summary>
+    private readonly CancellationTokenSource _gone = new();
 
     private void ShowLoaded(List<UpgradeFleetRow> all, List<UpgradeActionRow> pending)
     {
@@ -1058,6 +1068,10 @@
         _poll = null;
     }
 
+    /// <summary>Never while a batch is mid-flight or a dialog is open: those own the table.</summary>
+    private bool PollPaused =>
+        Running || _denied || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true;
+
     private async Task PollTickAsync()
     {
         if (DateTime.UtcNow > _pollUntilUtc)
@@ -1070,13 +1084,16 @@
         {
             await InvokeAsync(async () =>
             {
-                // Never while a batch is mid-flight: that run owns the table.
-                if (Running || _denied || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true) return;
+                if (PollPaused) return;
                 await LoadOnOwnScopeAsync();
                 StateHasChanged();
             });
         }
         catch (ObjectDisposedException)
+        {
+            StopPolling();
+        }
+        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
         {
             StopPolling();
         }
@@ -1181,21 +1198,31 @@
         _feedEnvId = row.EnvironmentId;
         _feed = null;
         StateHasChanged();
-        _feed = await ReadFeedAsync(row.ProjectId, row.EnvironmentId);
+        await ShowFeedAsync(row.ProjectId, row.EnvironmentId);
     }
 
     /// <summary>
-    /// One environment's history, read on a DI scope of its own. Opening it is a click
-    /// that can land while the poll or the watch is still awaiting a query on the
-    /// circuit's AppDbContext, and one context takes one command at a time; the feed
-    /// only reads, so it needs nothing the page's own context holds. Same as the
-    /// pipeline pages (#679).
+    /// Reads one environment's history on a DI scope of its own. Opening it is a click
+    /// that can land while the update watch or another click is still awaiting a query
+    /// on the circuit's AppDbContext, and one context takes one command at a time; the
+    /// history only reads, so it needs nothing the page's own context holds. Same as
+    /// the pipeline pages (#679). Two reads can now be out at once, so an answer only
+    /// lands if its environment's history is still the one open.
     /// </summary>
-    private async Task<List<UpgradeActionRow>> ReadFeedAsync(int projectId, int environmentId)
+    private async Task ShowFeedAsync(int projectId, int environmentId)
     {
-        await using var scope = ScopeFactory.CreateAsyncScope();
-        return await scope.ServiceProvider.GetRequiredService<UpgradeActionService>()
-            .ListEnvironmentActivityAsync(projectId, environmentId);
+        List<UpgradeActionRow> feed;
+        try
+        {
+            await using var scope = ScopeFactory.CreateAsyncScope();
+            feed = await scope.ServiceProvider.GetRequiredService<UpgradeActionService>()
+                .ListEnvironmentActivityAsync(projectId, environmentId, _gone.Token);
+        }
+        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        {
+            return; // the page went while the read was out
+        }
+        if (_feedEnvId == environmentId) _feed = feed;
     }
 
     /// <summary>
@@ -1225,7 +1252,7 @@
         await ReloadNowAsync();
         if (_feedEnvId is { } envId && _all.FirstOrDefault(r => r.EnvironmentId == envId) is { } row)
         {
-            _feed = await ReadFeedAsync(row.ProjectId, envId);
+            await ShowFeedAsync(row.ProjectId, envId);
         }
     }
 
