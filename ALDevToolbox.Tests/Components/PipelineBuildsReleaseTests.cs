@@ -59,7 +59,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         _ctx.Services.AddScoped(sp => new ProjectBuildImporter(
             null!, new ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportQueue(), null!,
             sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>(), _db.OrgContext,
-            sp.GetRequiredService<ProjectAccess>(), TimeProvider.System,
+            sp.GetRequiredService<ProjectAccess>(), null!, TimeProvider.System,
             NullLogger<ProjectBuildImporter>.Instance));
         // The release dialog and the release pipeline editor, and the Business Central
         // connection they read the secret expiry and environments from. The clients are

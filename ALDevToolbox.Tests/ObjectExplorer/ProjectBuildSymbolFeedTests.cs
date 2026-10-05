@@ -197,7 +197,8 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
 
         var act = () => BuildAsync(projectId, releaseId);
 
-        await act.Should().ThrowAsync<InvalidOperationException>("nothing was cloned, so nothing was found to build");
+        (await act.Should().ThrowAsync<InvalidOperationException>("nothing was cloned, so nothing was found to build"))
+            .WithMessage("*branch name is not one git accepts*", "the build says why nothing was cloned, not that the repository has no extensions");
         _tools.Clones.Should().BeEmpty();
     }
 

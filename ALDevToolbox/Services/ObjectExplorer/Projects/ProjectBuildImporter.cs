@@ -29,6 +29,7 @@ public sealed class ProjectBuildImporter
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
+    private readonly CloneCredentialResolver _credentials;
     private readonly TimeProvider _clock;
     private readonly ILogger<ProjectBuildImporter> _logger;
 
@@ -39,6 +40,7 @@ public sealed class ProjectBuildImporter
         AppDbContext db,
         IOrganizationContext orgContext,
         ProjectAccess access,
+        CloneCredentialResolver credentials,
         TimeProvider clock,
         ILogger<ProjectBuildImporter> logger)
     {
@@ -48,6 +50,7 @@ public sealed class ProjectBuildImporter
         _db = db;
         _orgContext = orgContext;
         _access = access;
+        _credentials = credentials;
         _clock = clock;
         _logger = logger;
     }
@@ -58,8 +61,9 @@ public sealed class ProjectBuildImporter
     /// selection — copied onto the <see cref="OeProjectBuild"/> row as a run-time
     /// snapshot, so the worker (and a restart-resumed job) compile the same subset
     /// even if the pipeline is later edited. Throws <see cref="PlanValidationException"/>
-    /// when the pipeline/project is gone (or the project has no repositories) so the
-    /// trigger UI can show the reason inline.
+    /// when the pipeline/project is gone, the project has no repositories, or the
+    /// person has nothing to clone one of its repositories with, so the trigger UI
+    /// can show the reason inline before any build exists.
     /// </summary>
     public Task<int> StartBuildAsync(int pipelineId, CancellationToken ct = default) =>
         StartPipelineBuildAsync(pipelineId, ProjectBuildTarget.Current, ProjectBuildTrigger.Manual, ct);
@@ -92,6 +96,7 @@ public sealed class ProjectBuildImporter
                 ProjectName = p.Project!.Name,
                 OwnerId = p.Project.CreatedByUserId,
                 RepoCount = p.Project.Repositories.Count,
+                Providers = p.Project.Repositories.Select(r => r.Provider).Distinct().ToList(),
             })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false)
             ?? throw new PlanValidationException(new Dictionary<string, string>
@@ -108,6 +113,31 @@ public sealed class ProjectBuildImporter
             {
                 ["Pipeline"] = "Add at least one repository to this project before building.",
             });
+        }
+
+        // A manual build clones as the person who pressed Build. Without a credential
+        // for one of the repositories it would be skipped and the build would fail
+        // with nothing to compile, so refuse before a build exists and say what to set
+        // up. The preview check is left to fail its build: it runs unattended, and a
+        // refusal here would pause the check rather than report one bad night.
+        if (trigger == ProjectBuildTrigger.Manual)
+        {
+            // Every missing host at once, so fixing one doesn't reveal the next.
+            var missing = new List<string>();
+            foreach (var provider in pipeline.Providers.OrderBy(p => p))
+            {
+                if ((await _credentials.ResolveAsync(provider, ct).ConfigureAwait(false)).Count == 0)
+                {
+                    missing.Add(CloneCredentialResolver.NothingToCloneWith(provider));
+                }
+            }
+            if (missing.Count > 0)
+            {
+                throw new PlanValidationException(new Dictionary<string, string>
+                {
+                    ["Pipeline"] = string.Join(" ", missing),
+                });
+            }
         }
 
         // Clean provisional label — just the project name. The build state shows

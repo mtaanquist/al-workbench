@@ -91,6 +91,8 @@ public sealed class MustacheRenderer
                 "logo_path" => ctx.LogoPath,
                 "platform_version" => ctx.PlatformVersion,
                 "application_version" => ctx.ApplicationVersion,
+                "application_version_major" => ctx.ApplicationVersionMajor,
+                "application_version_minor" => ctx.ApplicationVersionMinor,
                 "runtime" => ctx.Runtime,
                 "dependencies_array" => ctx.DependenciesArrayJson,
                 "id_ranges_array" => ctx.IdRangesArrayJson,
@@ -170,4 +172,27 @@ public record MustacheContext(
     /// <see cref="CustomerNaming"/> and <c>.design/customer-naming.md</c>.
     /// </summary>
     public string WorkspaceFolder => CustomerNaming.Apply(WorkspaceName, FolderStyle);
+
+    /// <summary>
+    /// First part of <see cref="ApplicationVersion"/> (<c>28</c> for
+    /// <c>28.2.0.0</c>). Teams that version their apps after the Business
+    /// Central release they target start <c>app.json</c>'s <c>version</c> with
+    /// this and <see cref="ApplicationVersionMinor"/>; build versioning then
+    /// fills in the build number. Empty when the version is empty.
+    /// </summary>
+    public string ApplicationVersionMajor => VersionPart(ApplicationVersion, 0);
+
+    /// <summary>
+    /// Second part of <see cref="ApplicationVersion"/> (<c>2</c> for
+    /// <c>28.2.0.0</c>), or <c>0</c> when the version names only a major.
+    /// Empty when the version is empty.
+    /// </summary>
+    public string ApplicationVersionMinor => VersionPart(ApplicationVersion, 1);
+
+    private static string VersionPart(string version, int index)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return string.Empty;
+        var parts = version.Trim().Split('.');
+        return index < parts.Length && parts[index].Length > 0 ? parts[index] : "0";
+    }
 }

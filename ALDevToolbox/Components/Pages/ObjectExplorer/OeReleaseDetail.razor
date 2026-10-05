@@ -691,8 +691,18 @@
     /// inherited chain when the toggle is on.</summary>
     private async Task ReloadFilterOptionsAsync()
     {
-        _kinds = await Search.ListObjectKindsInReleaseAsync(ReleaseId, _includeInherited);
-        _namespaces = await Search.ListNamespacesInReleaseAsync(ReleaseId, _includeInherited);
+        // Under the reload gate: the toggle that calls this can land while a debounced
+        // search is still awaiting the page's context.
+        await _reloadGate.WaitAsync();
+        try
+        {
+            _kinds = await Search.ListObjectKindsInReleaseAsync(ReleaseId, _includeInherited);
+            _namespaces = await Search.ListNamespacesInReleaseAsync(ReleaseId, _includeInherited);
+        }
+        finally
+        {
+            _reloadGate.Release();
+        }
     }
 
     /// <summary>Toggling "include inherited" rebuilds the filter dropdowns (the
@@ -889,8 +899,18 @@
         if (chosen is not { } releaseId) return;
 
         var picked = _otherReleases.FirstOrDefault(r => r.Id == releaseId);
-        var otherFileId = await Comparison.FindObjectFileInReleaseAsync(
-            releaseId, row.Kind, row.ObjectId, row.Name);
+        // Under the reload gate: a debounced search may still be awaiting the page's context.
+        long? otherFileId;
+        await _reloadGate.WaitAsync();
+        try
+        {
+            otherFileId = await Comparison.FindObjectFileInReleaseAsync(
+                releaseId, row.Kind, row.ObjectId, row.Name);
+        }
+        finally
+        {
+            _reloadGate.Release();
+        }
         if (otherFileId is null)
         {
             var otherLabel = picked?.Label ?? "That release";
