@@ -519,6 +519,8 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         services.AddScoped<PersistedImportJobs>();
         services.AddScoped<ProjectAccess>();
         services.AddScoped<ProjectBuildImporter>();
+        // The importer's credential check is for manual builds; a pull-request build never consults it.
+        services.AddScoped<CloneCredentialResolver>(_ => null!);
         services.AddScoped<GitHubBranchActivityService>();
 
         var provider = services.BuildServiceProvider();

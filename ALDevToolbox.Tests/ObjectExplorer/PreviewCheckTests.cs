@@ -325,6 +325,8 @@ public sealed class PreviewCheckTests : IDisposable
         services.AddScoped<BcArtifactService>();
         services.AddScoped<PreviewCheckService>();
         services.AddScoped<ProjectBuildImporter>();
+        // The importer's credential check, which a preview check never consults.
+        services.AddScoped<CloneCredentialResolver>(_ => null!);
 
         return new PreviewCheckScheduler(
             services.BuildServiceProvider(),

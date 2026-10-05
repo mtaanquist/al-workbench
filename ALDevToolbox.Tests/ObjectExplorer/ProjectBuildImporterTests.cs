@@ -1,9 +1,12 @@
 using System.Text.Json;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Tests.GitHub;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -22,11 +25,29 @@ public sealed class ProjectBuildImporterTests : IDisposable
 {
     private readonly TestDb _db = new();
 
+    private const int UserId = 1066;
+
     public ProjectBuildImporterTests()
     {
         // A build trigger requires owner/Admin rights; act as a SiteAdmin so the
-        // access gate passes without seeding a user (StartedByUserId stays null).
+        // access gate passes. A manual build also needs something to clone with,
+        // so the acting user has a GitHub build token unless a test removes it.
         _db.OrgContext.IsSiteAdmin = true;
+        using var ctx = _db.NewContext();
+        ctx.Users.Add(new User
+        {
+            Id = UserId,
+            OrganizationId = TestDb.DefaultOrgId,
+            Email = "builder@cronus.example",
+            DisplayName = "Builder",
+            PasswordHash = "x",
+            Role = UserRole.Admin,
+            Status = UserStatus.Active,
+            CreatedAt = DateTime.UtcNow,
+        });
+        ctx.SaveChanges();
+        _db.OrgContext.CurrentUserId = UserId;
+        NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, "ghp_pasted", clear: false).GetAwaiter().GetResult();
     }
 
     public void Dispose() => _db.Dispose();
@@ -252,6 +273,88 @@ public sealed class ProjectBuildImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task StartBuildAsync_refuses_a_person_with_nothing_to_clone_with_before_a_build_exists()
+    {
+        await using var ctx = _db.NewContext();
+        await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, null, clear: true);
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var queue = new ReleaseImportQueue();
+
+        var act = () => NewImporter(ctx, queue).StartBuildAsync(pipelineId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
+            .Should().Be(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.GitHub));
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.AnyAsync()).Should().BeFalse("the person is warned instead of getting a build that fails");
+        (await read.OeReleases.AnyAsync(r => r.Kind == "project")).Should().BeFalse();
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task StartBuildAsync_refuses_when_one_repository_has_a_provider_the_person_cannot_reach()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        ctx.OeProjectRepositories.Add(new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            Provider = RepositoryProvider.AzureDevOps,
+            Url = "https://dev.azure.com/cronus/core/_git/reports",
+            DisplayName = "reports",
+        });
+        await ctx.SaveChangesAsync();
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
+            .Should().Be(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.AzureDevOps));
+    }
+
+    [Fact]
+    public async Task StartBuildAsync_names_every_repository_host_the_person_cannot_reach()
+    {
+        await using var ctx = _db.NewContext();
+        await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, null, clear: true);
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        ctx.OeProjectRepositories.Add(new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            Provider = RepositoryProvider.AzureDevOps,
+            Url = "https://dev.azure.com/cronus/core/_git/reports",
+            DisplayName = "reports",
+        });
+        await ctx.SaveChangesAsync();
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
+            .Should().Contain(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.GitHub))
+            .And.Contain(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.AzureDevOps));
+    }
+
+    [Fact]
+    public async Task A_preview_check_is_not_refused_up_front_when_there_is_nothing_to_clone_with()
+    {
+        // It runs unattended; its build reports the reason instead of pausing the check.
+        await using var ctx = _db.NewContext();
+        await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, null, clear: true);
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+
+        var releaseId = await NewImporter(ctx, new ReleaseImportQueue())
+            .StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.NextMinor);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId)).Trigger
+            .Should().Be(ProjectBuildTrigger.PreviewCheck);
+    }
+
+    [Fact]
     public async Task A_manual_build_is_still_stamped_manual()
     {
         await using var ctx = _db.NewContext();
@@ -280,10 +383,17 @@ public sealed class ProjectBuildImporterTests : IDisposable
             NullLogger<ReleaseImportService>.Instance);
         var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
         var access = new ProjectAccess(ctx, _db.OrgContext);
+        var credentials = new CloneCredentialResolver(
+            NewTokens(ctx),
+            _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new FakeGitHubApi())),
+            _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance);
         return new ProjectBuildImporter(
-            importer, queue, persistedJobs, ctx, _db.OrgContext, access, TimeProvider.System,
+            importer, queue, persistedJobs, ctx, _db.OrgContext, access, credentials, TimeProvider.System,
             NullLogger<ProjectBuildImporter>.Instance);
     }
+
+    private UserRepositoryTokenService NewTokens(Data.AppDbContext ctx) => new(
+        ctx, _db.OrgContext, NullLogger<UserRepositoryTokenService>.Instance, _db.DataProtectionProvider);
 
     private static async Task<int> SeedProjectAsync(Data.AppDbContext ctx)
     {
