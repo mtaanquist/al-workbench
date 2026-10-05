@@ -48,15 +48,15 @@
     <!-- S3-compatible client for the off-site backup target. Works against
          AWS S3 as well as MinIO / Cloudflare R2 / Backblaze B2 (set
          OffsiteForcePathStyle=true for the non-AWS providers). -->
-    <PackageReference Include="AWSSDK.S3" Version="4.0.103.4" />
+    <PackageReference Include="AWSSDK.S3" Version="4.0.104.1" />
     <!-- Azure Blob Storage off-site backup target, selectable alongside the
          S3-compatible client above (system_settings.offsite_provider). -->
-    <PackageReference Include="Azure.Storage.Blobs" Version="12.29.2" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.30.0" />
     <PackageReference Include="BCrypt.Net-Next" Version="4.2.0" />
     <PackageReference Include="DiffPlex" Version="1.9.0" />
     <!-- Fido2NetLib (passkeys / WebAuthn). The .AspNet meta package pulls in
          the core types and the ASP.NET Core integration helpers. -->
-    <PackageReference Include="Fido2.AspNet" Version="4.1.0" />
+    <PackageReference Include="Fido2.AspNet" Version="4.2.0" />
     <!-- 4.* floats over CVE-patched releases (GHSA-9j88-vvj5-vhgr, GHSA-g7hc-96xr-gvvx). -->
     <PackageReference Include="MailKit" Version="4.18.1" />
     <!-- Markdown renderer for recipe authoring instructions. CommonMark + GFM
