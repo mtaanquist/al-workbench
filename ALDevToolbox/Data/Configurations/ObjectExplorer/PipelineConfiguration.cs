@@ -15,6 +15,7 @@ internal sealed class PipelineConfiguration : IEntityTypeConfiguration<OePipelin
         entity.Property(e => e.ProjectId).HasColumnName("project_id").IsRequired();
         entity.Property(e => e.CreatedByUserId).HasColumnName("created_by_user_id");
         entity.Property(e => e.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
+        entity.Property(e => e.NameIsCustom).HasColumnName("name_is_custom").IsRequired();
         entity.Property(e => e.RequestedAppIdsJson).HasColumnName("requested_app_ids_json");
         entity.Property(e => e.GithubReleaseRepositoryId).HasColumnName("github_release_repository_id");
         entity.Property(e => e.Branch).HasColumnName("branch").HasMaxLength(255);

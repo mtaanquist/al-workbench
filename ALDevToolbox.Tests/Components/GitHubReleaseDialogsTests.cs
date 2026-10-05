@@ -211,14 +211,14 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         cut.FindAll("#rpe-build").Should().ContainSingle();
     }
 
-    // ── The suggested name (issue #933) ─────────────────────────────────────
+    // ── The generated name ───────────────────────────────────────────────────
     //
-    // Named user: a consultant setting up their first release pipeline, who should not
-    // have to invent a name for something the form already knows - what it releases,
-    // and where to.
+    // Named user: a consultant setting up their first deployment pipeline, who should
+    // not have to invent a name for something the form already knows - what it
+    // deploys, and where to. See .design/artifacts.md, "Pipeline names".
 
     [Fact]
-    public async Task The_name_is_suggested_once_the_source_and_the_environment_are_both_chosen()
+    public async Task The_name_is_shown_once_the_source_and_the_environment_are_both_chosen()
     {
         var seed = await SeedAsync();
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
@@ -231,17 +231,18 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.Find("#rpe-build").Change(seed.PipelineId.ToString());
-            cut.Find("#rpe-name").GetAttribute("value").Should().BeNullOrEmpty();
+            cut.Find("#rpe-generated-name").TextContent.Should().Be("-");
         });
         cut.WaitForAssertion(() =>
         {
             cut.Find("#rpe-env").Change(production.ToString());
-            cut.Find("#rpe-name").GetAttribute("value").Should().Be("Nightly to Production");
+            cut.Find("#rpe-generated-name").TextContent.Should().Be("Nightly to Production");
         });
+        cut.FindAll("#rpe-name").Should().BeEmpty("the name is not typed unless it is taken");
     }
 
     [Fact]
-    public async Task Changing_the_environment_updates_a_suggested_name()
+    public async Task Changing_the_environment_changes_the_name()
     {
         var seed = await SeedAsync();
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
@@ -255,22 +256,31 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         {
             cut.Find("#rpe-build").Change(seed.PipelineId.ToString());
             cut.Find("#rpe-env").Change(production.ToString());
-            cut.Find("#rpe-name").GetAttribute("value").Should().Be("Nightly to Production");
+            cut.Find("#rpe-generated-name").TextContent.Should().Be("Nightly to Production");
         });
         cut.WaitForAssertion(() =>
         {
             cut.Find("#rpe-env").Change(test.ToString());
-            cut.Find("#rpe-name").GetAttribute("value").Should().Be("Nightly to Test");
+            cut.Find("#rpe-generated-name").TextContent.Should().Be("Nightly to Test");
         });
     }
 
     [Fact]
-    public async Task A_name_the_person_typed_survives_a_change_of_environment()
+    public async Task A_taken_name_opens_a_name_field_and_the_name_typed_there_is_saved()
     {
         var seed = await SeedAsync();
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
         var production = await EnvironmentIdAsync("Production");
-        var test = await EnvironmentIdAsync("Test");
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeReleasePipelines.Add(new OeReleasePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "Nightly to Production",
+                BuildPipelineId = seed.PipelineId, ProjectEnvironmentId = production,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
 
         var cut = _ctx.Render<ReleasePipelineEditorDialog>();
         await cut.InvokeAsync(() => cut.Instance.OpenForCreateAsync(seed.ProjectId, "CRONUS A/S"));
@@ -279,14 +289,22 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         {
             cut.Find("#rpe-build").Change(seed.PipelineId.ToString());
             cut.Find("#rpe-env").Change(production.ToString());
-            cut.Find("#rpe-name").Change("CRONUS go-live");
-            cut.Find("#rpe-name").GetAttribute("value").Should().Be("CRONUS go-live");
+            cut.Find("#rpe-generated-name").TextContent.Should().Be("Nightly to Production");
         });
+        cut.Find(".confirm-dialog__actions .btn--primary").Click();
         cut.WaitForAssertion(() =>
         {
-            cut.Find("#rpe-env").Change(test.ToString());
-            cut.Find("#rpe-name").GetAttribute("value").Should().Be("CRONUS go-live");
+            cut.Find("#rpe-name");
+            cut.Find(".field-error").TextContent.Should().Contain("already called 'Nightly to Production'");
         });
+
+        cut.Find("#rpe-name").Change("CRONUS go-live");
+        cut.Find(".confirm-dialog__actions .btn--primary").Click();
+        cut.WaitForAssertion(() => cut.FindAll("#rpe-title").Should().BeEmpty());
+
+        await using var read = _db.NewContext();
+        var typed = await read.OeReleasePipelines.AsNoTracking().SingleAsync(r => r.Name == "CRONUS go-live");
+        typed.NameIsCustom.Should().BeTrue();
     }
 
     [Fact]
@@ -306,12 +324,12 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
             var repoId = cut.FindAll("#rpe-repo option").Last().GetAttribute("value")!;
             cut.Find("#rpe-repo").Change(repoId);
             cut.Find("#rpe-env").Change(production.ToString());
-            cut.Find("#rpe-name").GetAttribute("value").Should().Be("cronus-customer to Production");
+            cut.Find("#rpe-generated-name").TextContent.Should().Be("cronus-customer releases to Production");
         });
     }
 
     [Fact]
-    public async Task Editing_an_existing_pipeline_never_replaces_its_name()
+    public async Task Editing_a_pipeline_with_a_typed_name_shows_that_name_for_editing()
     {
         var seed = await SeedAsync();
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
@@ -321,7 +339,7 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         {
             ctx.OeReleasePipelines.Add(new OeReleasePipeline
             {
-                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "Go-live",
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "Go-live", NameIsCustom = true,
                 BuildPipelineId = seed.PipelineId, ProjectEnvironmentId = production,
                 CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
             });

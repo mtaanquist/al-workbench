@@ -364,10 +364,7 @@
                                 {
                                     <span class="commit-chip"><Icon Name="git-commit-vertical" Width="11" Height="11" />@heroCommit</span>
                                 }
-                                @if (!string.IsNullOrEmpty(_latest.Branch))
-                                {
-                                    <span class="commit-chip"><Icon Name="git-branch" Width="11" Height="11" />@_latest.Branch</span>
-                                }
+                                <span class="commit-chip"><Icon Name="git-branch" Width="11" Height="11" />@(string.IsNullOrEmpty(_latest.Branch) ? "(default branch)" : _latest.Branch)</span>
                                 @if (BcShown(_latest) is { Length: > 0 } builtOn)
                                 {
                                     <span class="pb-topline__meta">on BC @builtOn</span>
@@ -612,7 +609,7 @@
                                                 <span class="pb-more">on BC @rowBc</span>
                                             }
                                         </td>
-                                        <td>@(string.IsNullOrEmpty(b.Branch) ? "—" : b.Branch)</td>
+                                        <td>@(string.IsNullOrEmpty(b.Branch) ? "(default branch)" : b.Branch)</td>
                                         <td><Timestamp Value="@(b.FinishedAt ?? b.StartedAt)" Relative="true" /></td>
                                         <td class="data-table__num">@(Duration(b) is { Length: > 0 } d ? d : "—")</td>
                                         <td class="data-table__num">@(b.ArtifactCount > 0 ? b.ArtifactCount.ToString() : "—")</td>
@@ -1243,7 +1240,7 @@
         await _editor.OpenForEditAsync(
             pipeline.Id, pipeline.ProjectId, pipeline.Project?.Name ?? _header?.ProjectName ?? "",
             pipeline.Name, pipeline.RequestedAppIdsJson, pipeline.GithubReleaseRepositoryId, pipeline.Branch, pipeline.PreviewCheck,
-            pipeline.AutoVersion);
+            pipeline.AutoVersion, pipeline.NameIsCustom);
     }
 
     private async Task OnPipelineSavedAsync(int _)

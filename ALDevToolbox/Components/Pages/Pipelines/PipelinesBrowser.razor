@@ -234,7 +234,12 @@
                                             <Icon Name="git-commit-vertical" Width="11" Height="11" />@b.CommitShort
                                         </span>
                                     }
-                                    @if (!string.IsNullOrEmpty(b.Branch))
+                                    @* No branch on a build means each repository's default branch; say so rather than leave a gap. *@
+                                    @if (string.IsNullOrEmpty(b.Branch))
+                                    {
+                                        <span class="pl-branch u-muted"><Icon Name="git-branch" Width="12" Height="12" />(default branch)</span>
+                                    }
+                                    else
                                     {
                                         <span class="pl-branch"><Icon Name="git-branch" Width="12" Height="12" />@b.Branch</span>
                                     }

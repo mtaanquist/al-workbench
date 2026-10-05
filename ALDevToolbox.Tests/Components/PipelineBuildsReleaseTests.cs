@@ -303,7 +303,6 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         ActThen(cut,
             () =>
             {
-                cut.Find("#rpe-name").Change("CRONUS App → UAT");
                 cut.Find("#rpe-env").Change(seed.SandboxEnvId.ToString());
                 cut.Find(".confirm-dialog__actions .btn--primary").Click();
             },
@@ -315,7 +314,9 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         });
 
         await using var ctx = _db.NewContext();
-        (await ctx.OeReleasePipelines.AsNoTracking().SingleAsync()).BuildPipelineId.Should().Be(seed.PipelineId);
+        var created = await ctx.OeReleasePipelines.AsNoTracking().SingleAsync();
+        created.BuildPipelineId.Should().Be(seed.PipelineId);
+        created.Name.Should().Be("CRONUS App to UAT");
     }
 
     /// <summary>

@@ -73,17 +73,59 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateReleasePipelineAsync_requires_a_name()
+    public async Task A_deployment_pipeline_is_named_after_its_build_pipeline_and_environment()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
-        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
-        var envId = await SeedEnvironmentAsync(ctx, projectId);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId, "main");
+        var envId = await SeedEnvironmentAsync(ctx, projectId, "Production");
 
-        var act = () => NewService(ctx).CreateReleasePipelineAsync(
+        var id = await NewService(ctx).CreateReleasePipelineAsync(
             new ReleasePipelineInput(projectId, "  ", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
 
-        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Name");
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.Name.Should().Be("main to Production");
+        rp.NameIsCustom.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_deployment_pipeline_from_github_releases_is_named_after_the_repository()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var repoId = await SeedRepositoryAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, "Production");
+
+        var id = await NewService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
+            projectId, null, 0, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            ReleaseArtifactSource.GithubRelease, repoId));
+
+        await using var read = _db.NewContext();
+        (await read.OeReleasePipelines.SingleAsync(r => r.Id == id)).Name.Should().Be("cronus-customer releases to Production");
+    }
+
+    [Fact]
+    public async Task A_taken_generated_name_asks_for_a_name_of_its_own_and_keeps_the_one_typed()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId, "main");
+        var envId = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var svc = NewService(ctx);
+        await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, null, buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        var act = () => svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, null, buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Name")
+            .WhoseValue.Should().Contain("main to Production");
+
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, "main to Production - hotfix", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+        await svc.UpdateReleasePipelineAsync(id, new ReleasePipelineInput(projectId, "main to Production - hotfix", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.ForceSync));
+
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.Name.Should().Be("main to Production - hotfix");
+        rp.NameIsCustom.Should().BeTrue();
     }
 
     [Fact]

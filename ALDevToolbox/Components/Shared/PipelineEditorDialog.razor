@@ -13,8 +13,9 @@
 @using ALDevToolbox.Domain.ValueObjects
 
 @*
-    Create / edit a pipeline: name it and pick which of the solution's extensions it
-    compiles. The checklist is served from the solution's discovered-extensions cache
+    Create / edit a pipeline: pick its branch and which of the solution's extensions it
+    compiles. The name follows from those (PipelineNames); a name field only appears
+    when that name is taken, or the pipeline already has a name someone typed. The checklist is served from the solution's discovered-extensions cache
     (warmed in the background when repos change), so it appears instantly; a Refresh
     re-discovers on demand. Shared by the Pipelines landing (New pipeline), the
     solution detail page (New pipeline), and the pipeline detail page (Edit pipeline).
@@ -62,15 +63,9 @@
                 @if (!_pickProject || _projectId != 0)
                 {
                     <div class="field">
-                        <label class="field__label" for="pe-name">Name</label>
-                        <input id="pe-name" type="text" class="input" maxlength="200" @bind="_name"
-                               disabled="@_saving" placeholder="e.g. Production or Test environment" />
-                        <small class="field__hint">A solution can have several pipelines, each compiling a different set of extensions - name this one for its environment.</small>
-                    </div>
-                    <div class="field">
                         <label class="field__label" for="pe-branch">Branch (optional)</label>
                         <input id="pe-branch" type="text" class="input" maxlength="@GitBranchName.MaxLength"
-                               pattern="@GitBranchName.HtmlPattern" @bind="_branch"
+                               pattern="@GitBranchName.HtmlPattern" @bind="_branch" @bind:event="oninput"
                                disabled="@_saving" placeholder="e.g. main or release/25.0" spellcheck="false" autocomplete="off" />
                         <small class="field__hint">Builds check out this branch. Leave empty for each repository's default branch.</small>
                     </div>
@@ -202,21 +197,48 @@
                     </div>
                 }
 
+                @if (!_pickProject || _projectId != 0)
+                {
+                    @if (_showCustomName)
+                    {
+                        <div class="field">
+                            <label class="field__label" for="pe-name">Name</label>
+                            <input id="pe-name" type="text" class="input" maxlength="@PipelineNames.MaxLength" @bind="_customName"
+                                   disabled="@_saving" placeholder="e.g. @GeneratedName - nightly" @ref="_nameInput" />
+                            @if (_nameError is not null)
+                            {
+                                <FieldError Message="@_nameError" />
+                            }
+                            else
+                            {
+                                <small class="field__hint">Clear it to name the pipeline after its branch and extensions.</small>
+                            }
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="field">
+                            <span class="field__label">Will be named</span>
+                            <span class="field__value" id="pe-generated-name">@(IsDiscovering ? "-" : GeneratedName)</span>
+                            <small class="field__hint">Pipelines are named after their branch and the extensions they build.</small>
+                        </div>
+                    }
+                }
+
                 @if (_saveError is { } se)
                 {
                     <Alert Tone="AlertTone.Danger"><span>@se</span></Alert>
                 }
 
-                @if (_extensions is { Count: > 0 } && !IsDiscovering && !_saving
-                     && (string.IsNullOrWhiteSpace(_name) || _selected.Count == 0))
+                @if (_extensions is { Count: > 0 } && !IsDiscovering && !_saving && _selected.Count == 0)
                 {
-                    <p class="field__hint pe-hint">Name your pipeline and select at least one extension to continue.</p>
+                    <p class="field__hint pe-hint">Select at least one extension to continue.</p>
                 }
             </div>
             <div class="confirm-dialog__actions">
                 <button type="button" class="btn" @onclick="Cancel" disabled="@_saving">Cancel</button>
                 <button type="button" class="btn btn--primary" @onclick="SaveAsync"
-                        disabled="@(IsDiscovering || _saving || _extensions is not { Count: > 0 } || _selected.Count == 0 || string.IsNullOrWhiteSpace(_name))">
+                        disabled="@(IsDiscovering || _saving || _extensions is not { Count: > 0 } || _selected.Count == 0)">
                     <Icon Name="@(_editing ? "save" : "plus")" Width="14" Height="14" />
                     <span>@(_saving ? "Saving..." : _editing ? "Save pipeline" : "Create pipeline")</span>
                 </button>
@@ -245,6 +267,12 @@
             try { await _root.FocusAsync(); }
             catch { /* element already detached */ }
         }
+        if (_focusName && _showCustomName)
+        {
+            _focusName = false;
+            try { await _nameInput.FocusAsync(); }
+            catch { /* element already detached */ }
+        }
     }
 
     private bool _open;
@@ -256,7 +284,14 @@
     private int _projectId;
     private string? _projectName;
     private int? _pipelineId;
-    private string _name = string.Empty;
+    // A name the person typed, shown only when the generated one is taken (or the
+    // pipeline already carries a typed name). Blank means the generated name.
+    private string _customName = string.Empty;
+    private bool _showCustomName;
+    // Why the name field is showing: the name it would get is taken. Shown under the field.
+    private string? _nameError;
+    private ElementReference _nameInput;
+    private bool _focusName;
     // The branch the pipeline builds; blank = each repository's default branch (#963).
     private string _branch = string.Empty;
     // The nightly preview check against the next minor and next major (#994).
@@ -323,7 +358,8 @@
 
     /// <summary>Opens the dialog to edit an existing pipeline. <paramref name="requestedAppIdsJson"/> is the stored selection (null = all).</summary>
     public async Task OpenForEditAsync(int pipelineId, int projectId, string projectName, string name, string? requestedAppIdsJson,
-        int? githubReleaseRepositoryId = null, string? branch = null, bool previewCheck = false, bool autoVersion = true)
+        int? githubReleaseRepositoryId = null, string? branch = null, bool previewCheck = false, bool autoVersion = true,
+        bool nameIsCustom = false)
     {
         ResetForCreate();
         _editing = true;
@@ -331,7 +367,8 @@
         _projectId = projectId;
         _projectName = projectName;
         _pipelineId = pipelineId;
-        _name = name;
+        _customName = nameIsCustom ? name : string.Empty;
+        _showCustomName = nameIsCustom;
         var parsed = ProjectBuildService.ParseSelectedAppIds(requestedAppIdsJson);
         _initialSelection = parsed;
         _initialIsAll = parsed is null;
@@ -350,7 +387,9 @@
         StopPoll();
         _editing = false;
         _pipelineId = null;
-        _name = string.Empty;
+        _customName = string.Empty;
+        _showCustomName = false;
+        _nameError = null;
         _branch = string.Empty;
         _previewCheck = false;
         _autoVersion = true;
@@ -618,6 +657,25 @@
 
     private void SelectNone() => _selected = new(StringComparer.Ordinal);
 
+    /// <summary>The extensions as they will be saved: null when every one is picked (build everything).</summary>
+    private List<string>? PickedSelection()
+    {
+        if (_extensions is null) return null;
+        var picked = _extensions
+            .Where(e => _selected.Contains(ProjectBuildService.NormalizeAppId(e.AppId)))
+            .Select(e => e.AppId)
+            .ToList();
+        // All selected == build everything: store null so apps added later are included.
+        return picked.Count == _extensions.Count ? null : picked;
+    }
+
+    /// <summary>The name the service will give the pipeline, shown as the person picks.</summary>
+    private string GeneratedName => PipelineNames.ForBuildPipeline(
+        _branch,
+        PickedSelection(),
+        (_extensions ?? []).GroupBy(e => ProjectBuildService.NormalizeAppId(e.AppId))
+            .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.Ordinal));
+
     private static string Meta(DiscoveredExtension e)
     {
         var pub = string.IsNullOrWhiteSpace(e.Publisher) ? "" : $"{e.Publisher} · ";
@@ -650,19 +708,15 @@
 
     private async Task SaveAsync()
     {
-        if (_saving || _projectId == 0 || _extensions is not { Count: > 0 } || _selected.Count == 0 || string.IsNullOrWhiteSpace(_name)) return;
+        if (_saving || _projectId == 0 || _extensions is not { Count: > 0 } || _selected.Count == 0) return;
         _saving = true;
         _saveError = null;
+        _nameError = null;
         try
         {
-            var picked = _extensions
-                .Where(e => _selected.Contains(ProjectBuildService.NormalizeAppId(e.AppId)))
-                .Select(e => e.AppId)
-                .ToList();
-            // All selected == build everything: store null so apps added later are included.
-            var selection = picked.Count == _extensions.Count ? null : picked;
             var input = new PipelineInput(
-                _projectId, _name.Trim(), selection,
+                _projectId, _showCustomName && !string.IsNullOrWhiteSpace(_customName) ? _customName.Trim() : null,
+                PickedSelection(),
                 _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
                 string.IsNullOrWhiteSpace(_branch) ? null : _branch.Trim(),
                 _previewCheck,
@@ -684,7 +738,17 @@
         }
         catch (PlanValidationException ex)
         {
-            _saveError = ex.Errors.Values.FirstOrDefault() ?? "Couldn't save the pipeline.";
+            // The name is taken: let the person give this one a name of their own, and
+            // say so beside the field rather than in the alert below it.
+            if (ex.Errors.TryGetValue("Name", out var nameError))
+            {
+                _showCustomName = true;
+                _nameError = nameError;
+                _focusName = true;
+            }
+            // Anything else wrong with the form still shows in the alert.
+            _saveError = ex.Errors.Where(e => e.Key != "Name").Select(e => e.Value).FirstOrDefault()
+                ?? (_nameError is null ? "Couldn't save the pipeline." : null);
         }
         catch (ProjectAccessDeniedException)
         {

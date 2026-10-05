@@ -96,6 +96,7 @@ public sealed class ReleasePipelineService
             {
                 RestrictBranch = r.RestrictBranch,
                 AllowedBranch = r.AllowedBranch,
+                NameIsCustom = r.NameIsCustom,
             })
             .ToListAsync(ct);
     }
@@ -292,6 +293,7 @@ public sealed class ReleasePipelineService
             ProjectId = input.ProjectId,
             CreatedByUserId = _orgContext.CurrentUserId,
             Name = v.Name,
+            NameIsCustom = v.NameIsCustom,
             ArtifactSource = v.ArtifactSource,
             BuildPipelineId = v.BuildPipelineId,
             GithubReleaseRepositoryId = v.GithubReleaseRepositoryId,
@@ -312,7 +314,7 @@ public sealed class ReleasePipelineService
         return pipeline.Id;
     }
 
-    /// <summary>Updates a deployment pipeline's name, source, target, and modes.</summary>
+    /// <summary>Updates a deployment pipeline's source, target and modes, and the name that follows from them.</summary>
     public async Task UpdateReleasePipelineAsync(int id, ReleasePipelineInput input, CancellationToken ct = default)
     {
         RequireOrganizationId();
@@ -324,6 +326,7 @@ public sealed class ReleasePipelineService
         var v = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
 
         pipeline.Name = v.Name;
+        pipeline.NameIsCustom = v.NameIsCustom;
         pipeline.ArtifactSource = v.ArtifactSource;
         pipeline.BuildPipelineId = v.BuildPipelineId;
         pipeline.GithubReleaseRepositoryId = v.GithubReleaseRepositoryId;
@@ -388,28 +391,6 @@ public sealed class ReleasePipelineService
 
         var errors = new Dictionary<string, string>();
 
-        var name = (input.Name ?? string.Empty).Trim();
-        if (name.Length == 0)
-        {
-            errors["Name"] = "Give the deployment pipeline a name.";
-        }
-        else if (name.Length > 200)
-        {
-            errors["Name"] = "Keep the name under 200 characters.";
-        }
-        else
-        {
-            var clash = await _db.OeReleasePipelines.AsNoTracking()
-                .AnyAsync(r => r.DeletedAt == null
-                               && r.ProjectId == input.ProjectId
-                               && r.Id != (existingId ?? 0)
-                               && r.Name.ToLower() == name.ToLower(), ct);
-            if (clash)
-            {
-                errors["Name"] = "Another deployment pipeline in this solution already uses this name.";
-            }
-        }
-
         // The artifact source: exactly one of the two, and the one named must belong
         // to this project. A pipeline that named both would leave "what does this
         // deployment install" with two answers.
@@ -418,6 +399,9 @@ public sealed class ReleasePipelineService
             : input.ArtifactSource;
         int? buildPipelineId = null;
         int? releaseRepositoryId = null;
+        // What the generated name says the apps come from: the build pipeline's name or
+        // "{repository} releases". Null while the source is not valid.
+        string? sourceName = null;
         if (!ReleaseArtifactSource.IsValid(artifactSource))
         {
             errors["ArtifactSource"] = "Choose where this pipeline's apps come from.";
@@ -425,33 +409,39 @@ public sealed class ReleasePipelineService
         else if (artifactSource == ReleaseArtifactSource.Build)
         {
             // Source build pipeline: must be an active pipeline in the same project.
-            var buildPipelineOk = input.BuildPipelineId != 0 && await _db.OePipelines.AsNoTracking()
-                .AnyAsync(p => p.Id == input.BuildPipelineId
-                               && p.DeletedAt == null
-                               && p.ProjectId == input.ProjectId, ct);
-            if (!buildPipelineOk)
+            var buildPipelineName = input.BuildPipelineId == 0 ? null : await _db.OePipelines.AsNoTracking()
+                .Where(p => p.Id == input.BuildPipelineId
+                            && p.DeletedAt == null
+                            && p.ProjectId == input.ProjectId)
+                .Select(p => p.Name)
+                .FirstOrDefaultAsync(ct);
+            if (buildPipelineName is null)
             {
                 errors["BuildPipelineId"] = "Choose a build pipeline to deploy from.";
             }
             else
             {
                 buildPipelineId = input.BuildPipelineId;
+                sourceName = buildPipelineName;
             }
         }
         else
         {
-            var repositoryOk = input.GithubReleaseRepositoryId is { } repoId && repoId != 0
-                && await _db.OeProjectRepositories.AsNoTracking()
-                    .AnyAsync(r => r.Id == repoId
-                                   && r.ProjectId == input.ProjectId
-                                   && r.Provider == RepositoryProvider.GitHub, ct);
-            if (!repositoryOk)
+            var repositoryName = input.GithubReleaseRepositoryId is not { } repoId || repoId == 0 ? null
+                : await _db.OeProjectRepositories.AsNoTracking()
+                    .Where(r => r.Id == repoId
+                                && r.ProjectId == input.ProjectId
+                                && r.Provider == RepositoryProvider.GitHub)
+                    .Select(r => r.DisplayName)
+                    .FirstOrDefaultAsync(ct);
+            if (repositoryName is null)
             {
                 errors["GithubReleaseRepositoryId"] = "Choose one of this solution's GitHub repositories to deploy from.";
             }
             else
             {
                 releaseRepositoryId = input.GithubReleaseRepositoryId;
+                sourceName = repositoryName;
             }
         }
 
@@ -512,12 +502,45 @@ public sealed class ReleasePipelineService
             errors["AllowedBranch"] = "That isn't a valid branch name. Type it exactly as GitHub shows it, e.g. main or release/25.0 - no spaces or '..'.";
         }
 
+        // The name follows from the source and the environment. A typed name is only
+        // needed when that one is taken; typing the generated name is not a custom one.
+        var custom = string.IsNullOrWhiteSpace(input.CustomName) ? null : input.CustomName.Trim();
+        string? name = null;
+        if (sourceName is not null && environment is not null)
+        {
+            var generated = artifactSource == ReleaseArtifactSource.Build
+                ? PipelineNames.ForDeploymentFromBuild(sourceName, environment.Name)
+                : PipelineNames.ForDeploymentFromReleases(sourceName, environment.Name);
+            if (custom is not null && string.Equals(custom, generated, StringComparison.Ordinal)) custom = null;
+            name = custom ?? generated;
+        }
+        if (name is null)
+        {
+            // The source or target is missing, and that already has its own message.
+        }
+        else if (name.Length > PipelineNames.MaxLength)
+        {
+            errors["Name"] = "Keep the name under 200 characters.";
+        }
+        else
+        {
+            var clash = await _db.OeReleasePipelines.AsNoTracking()
+                .AnyAsync(r => r.DeletedAt == null
+                               && r.ProjectId == input.ProjectId
+                               && r.Id != (existingId ?? 0)
+                               && r.Name.ToLower() == name.ToLower(), ct);
+            if (clash)
+            {
+                errors["Name"] = $"Another deployment pipeline in this solution is already called '{name}'. Type a different name for this one.";
+            }
+        }
+
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
         // Preparing a deployment follows a build pipeline's builds; a pipeline that installs
         // GitHub releases has no build to follow, so the setting means nothing there.
         return new ValidatedReleasePipeline(
-            name, deploymentSchedule, schemaSyncMode, artifactSource, buildPipelineId, releaseRepositoryId,
+            name!, custom is not null, deploymentSchedule, schemaSyncMode, artifactSource, buildPipelineId, releaseRepositoryId,
             input.PrepareReleaseOnNewBuild && artifactSource == ReleaseArtifactSource.Build,
             restrictBranch, allowedBranch);
     }
@@ -525,6 +548,7 @@ public sealed class ReleasePipelineService
     /// <summary>The normalised values a validated deployment-pipeline input settles on.</summary>
     private sealed record ValidatedReleasePipeline(
         string Name,
+        bool NameIsCustom,
         string DeploymentSchedule,
         string SchemaSyncMode,
         string ArtifactSource,
@@ -561,7 +585,7 @@ public sealed class ReleasePipelineService
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {
-            throw Validation("Name", "Another deployment pipeline in this solution already uses this name.");
+            throw Validation("Name", "Another deployment pipeline in this solution already has this name. Type a different name for this one.");
         }
     }
 
@@ -592,10 +616,14 @@ public sealed class ReleasePipelineService
 
 }
 
-/// <summary>Form-post shape for a deployment pipeline: project, name, source build pipeline, target environment, and modes.</summary>
+/// <summary>Form-post shape for a deployment pipeline: project, source build pipeline, target environment, and modes.</summary>
 public sealed record ReleasePipelineInput(
     int ProjectId,
-    string Name,
+    /// <summary>
+    /// A name the person typed, for when the generated one is already taken in the
+    /// solution. Null or blank means the generated name (<see cref="PipelineNames"/>).
+    /// </summary>
+    string? CustomName,
     int BuildPipelineId,
     int ProjectEnvironmentId,
     string DeploymentSchedule,
@@ -662,6 +690,10 @@ public sealed record ReleasePipelineRow(
 
     /// <summary>The branch it then allows; null is the repositories' default branch.</summary>
     public string? AllowedBranch { get; init; }
+
+    /// <summary>True when a person typed the name because the generated one was taken; the editor shows it for editing.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool NameIsCustom { get; init; }
 
     // ── The delivery summary: filled by ListReleasePipelineOverviewAsync only ──
     //

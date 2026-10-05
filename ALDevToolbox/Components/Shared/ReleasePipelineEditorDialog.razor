@@ -95,19 +95,12 @@
                 }
                 else if (_buildPipelines is not null && _environments is not null)
                 {
-                    <div class="field">
-                        <label class="field__label" for="rpe-name">Name</label>
-                        <input id="rpe-name" type="text" class="input" maxlength="200" @bind="_name"
-                               disabled="@_saving" placeholder="e.g. CRONUS App to Production" />
-                        <small class="field__hint">Name it for what it publishes and where, so a colleague can tell your deployment pipelines apart.</small>
-                    </div>
-
                     @if (_releaseRepositories is { Count: > 0 })
                     {
                         <div class="field">
                             <label class="field__label" for="rpe-source">Where the apps come from</label>
                             <SelectBox>
-                                <select id="rpe-source" class="select" @bind="_artifactSource" @bind:after="SuggestName" disabled="@_saving">
+                                <select id="rpe-source" class="select" @bind="_artifactSource" disabled="@_saving">
                                     <option value="@ReleaseArtifactSource.Build">Builds from a build pipeline</option>
                                     <option value="@ReleaseArtifactSource.GithubRelease">Releases published on a GitHub repository</option>
                                 </select>
@@ -121,7 +114,7 @@
                         <div class="field">
                             <label class="field__label" for="rpe-repo">Repository to deploy from</label>
                             <SelectBox>
-                                <select id="rpe-repo" class="select" @bind="_releaseRepositoryId" @bind:after="SuggestName" disabled="@_saving">
+                                <select id="rpe-repo" class="select" @bind="_releaseRepositoryId" disabled="@_saving">
                                     <option value="0">Choose a repository...</option>
                                     @foreach (var repo in _releaseRepositories ?? [])
                                     {
@@ -283,6 +276,35 @@
                     }
                 }
 
+                @if (!_loading && _projectId != 0 && _buildPipelines is not null && _environments is { Count: > 0 }
+                     && (_buildPipelines.Count > 0 || _releaseRepositories is { Count: > 0 }))
+                {
+                    @if (_showCustomName)
+                    {
+                        <div class="field">
+                            <label class="field__label" for="rpe-name">Name</label>
+                            <input id="rpe-name" type="text" class="input" maxlength="@PipelineNames.MaxLength" @bind="_customName"
+                                   disabled="@_saving" placeholder="@($"e.g. {GeneratedName ?? "main to Production"} - hotfix")" @ref="_nameInput" />
+                            @if (_nameError is not null)
+                            {
+                                <FieldError Message="@_nameError" />
+                            }
+                            else
+                            {
+                                <small class="field__hint">Clear it to name the pipeline after where its apps come from and where they go.</small>
+                            }
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="field">
+                            <span class="field__label">Will be named</span>
+                            <span class="field__value" id="rpe-generated-name">@(GeneratedName ?? "-")</span>
+                            <small class="field__hint">Deployment pipelines are named after where the apps come from and the environment they go to.</small>
+                        </div>
+                    }
+                }
+
                 @if (_saveError is { } se)
                 {
                     <Alert Tone="AlertTone.Danger"><span>@se</span></Alert>
@@ -314,15 +336,14 @@
     private int? _releasePipelineId;
     private string? _nextStep;
 
-    private string _name = string.Empty;
-
-    /// <summary>
-    /// The name this dialog last filled in by itself, or null when the Name holds
-    /// nothing it wrote. While the Name still equals it (or is empty) the person
-    /// hasn't typed one, so a new source or environment may replace it; anything
-    /// else is theirs and is never overwritten (issue #933).
-    /// </summary>
-    private string? _suggestedName;
+    // A name the person typed, shown only when the generated one is taken (or the
+    // pipeline already carries a typed name). Blank means the generated name.
+    private string _customName = string.Empty;
+    private bool _showCustomName;
+    // Why the name field is showing: the name it would get is taken. Shown under the field.
+    private string? _nameError;
+    private ElementReference _nameInput;
+    private bool _focusName;
     private string _artifactSource = ReleaseArtifactSource.Build;
     private int _buildPipelineId;
     private int _releaseRepositoryId;
@@ -394,7 +415,6 @@
     private bool CanSave =>
         !_saving && !_loading
         && _environments is { Count: > 0 }
-        && !string.IsNullOrWhiteSpace(_name)
         && (_artifactSource == ReleaseArtifactSource.GithubRelease
             ? _releaseRepositoryId != 0 && !_repositoriesFailed
             : _buildPipelines is { Count: > 0 } && _buildPipelineId != 0)
@@ -408,6 +428,12 @@
         {
             _focusPending = false;
             try { await _root.FocusAsync(); }
+            catch { /* element already detached */ }
+        }
+        if (_focusName && _showCustomName)
+        {
+            _focusName = false;
+            try { await _nameInput.FocusAsync(); }
             catch { /* element already detached */ }
         }
     }
@@ -453,7 +479,8 @@
         _pickProject = false;
         _projectId = row.ProjectId;
         _releasePipelineId = row.Id;
-        _name = row.Name;
+        _customName = row.NameIsCustom ? row.Name : string.Empty;
+        _showCustomName = row.NameIsCustom;
         _artifactSource = ReleaseArtifactSource.IsValid(row.ArtifactSource) ? row.ArtifactSource : ReleaseArtifactSource.Build;
         _buildPipelineId = row.BuildPipelineId ?? 0;
         _releaseRepositoryId = row.GithubReleaseRepositoryId ?? 0;
@@ -473,8 +500,9 @@
     {
         _editing = false;
         _releasePipelineId = null;
-        _name = string.Empty;
-        _suggestedName = null;
+        _customName = string.Empty;
+        _showCustomName = false;
+        _nameError = null;
         _artifactSource = ReleaseArtifactSource.Build;
         _buildPipelineId = 0;
         _releaseRepositoryId = 0;
@@ -511,12 +539,8 @@
         if (_projectId != 0) await LoadProjectAsync();
     }
 
-    /// <summary>What follows choosing a source or a target: the suggested name and branch rule.</summary>
-    private void SuggestDefaults()
-    {
-        SuggestName();
-        SuggestBranchRule();
-    }
+    /// <summary>What follows choosing a source or a target: the suggested branch rule.</summary>
+    private void SuggestDefaults() => SuggestBranchRule();
 
     /// <summary>
     /// On create, turns the branch rule on for a production environment, allowing the
@@ -553,38 +577,24 @@
     }
 
     /// <summary>
-    /// On create, names the pipeline "{source} to {environment}" once both are chosen,
-    /// so nobody has to invent a name for something the form already knows. Only a
-    /// name this dialog suggested is replaced - one the person typed is kept - and
-    /// an existing pipeline's name is never touched. A clash with another pipeline's
-    /// name is still caught by the save.
+    /// The name the service will give the pipeline, "{source} to {environment}",
+    /// shown as the person picks. Null until both are chosen.
     /// </summary>
-    private void SuggestName()
+    private string? GeneratedName
     {
-        if (_editing) return;
-        if (!string.IsNullOrWhiteSpace(_name) && _name != _suggestedName) return;
-
-        var source = _artifactSource == ReleaseArtifactSource.GithubRelease
-            ? _releaseRepositories?.FirstOrDefault(r => r.Id == _releaseRepositoryId)?.DisplayName
-            : _buildPipelines?.FirstOrDefault(p => p.Id == _buildPipelineId)?.Name;
-        var environment = _environments?.FirstOrDefault(e => e.Id == _environmentId)?.Name;
-
-        if (string.IsNullOrWhiteSpace(source) || string.IsNullOrWhiteSpace(environment))
+        get
         {
-            // A half-made choice leaves no stale suggestion behind.
-            _name = string.Empty;
-            _suggestedName = null;
-            return;
+            var environment = _environments?.FirstOrDefault(e => e.Id == _environmentId)?.Name;
+            if (string.IsNullOrWhiteSpace(environment)) return null;
+            if (_artifactSource == ReleaseArtifactSource.GithubRelease)
+            {
+                var repository = _releaseRepositories?.FirstOrDefault(r => r.Id == _releaseRepositoryId)?.DisplayName;
+                return string.IsNullOrWhiteSpace(repository) ? null : PipelineNames.ForDeploymentFromReleases(repository, environment);
+            }
+            var buildPipeline = _buildPipelines?.FirstOrDefault(p => p.Id == _buildPipelineId)?.Name;
+            return string.IsNullOrWhiteSpace(buildPipeline) ? null : PipelineNames.ForDeploymentFromBuild(buildPipeline, environment);
         }
-
-        var suggestion = $"{source.Trim()} to {environment.Trim()}";
-        if (suggestion.Length > NameMaxLength) suggestion = suggestion[..NameMaxLength].TrimEnd();
-        _name = suggestion;
-        _suggestedName = suggestion;
     }
-
-    /// <summary>Mirrors the Name input's <c>maxlength</c>.</summary>
-    private const int NameMaxLength = 200;
 
     /// <summary>
     /// Loads the chosen solution's active build pipelines and the environments still
@@ -663,10 +673,11 @@
         if (!CanSave) return;
         _saving = true;
         _saveError = null;
+        _nameError = null;
         try
         {
             var input = new ReleasePipelineInput(
-                _projectId, _name.Trim(), _buildPipelineId, _environmentId, _deploymentSchedule, _schemaSyncMode,
+                _projectId, _showCustomName && !string.IsNullOrWhiteSpace(_customName) ? _customName.Trim() : null, _buildPipelineId, _environmentId, _deploymentSchedule, _schemaSyncMode,
                 _artifactSource,
                 _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
                 _prepareOnNewBuild && _artifactSource == ReleaseArtifactSource.Build,
@@ -688,7 +699,17 @@
         }
         catch (PlanValidationException ex)
         {
-            _saveError = ex.Errors.Values.FirstOrDefault() ?? "Couldn't save the deployment pipeline.";
+            // The name is taken: let the person give this one a name of their own, and
+            // say so beside the field rather than in the alert below it.
+            if (ex.Errors.TryGetValue("Name", out var nameError))
+            {
+                _showCustomName = true;
+                _nameError = nameError;
+                _focusName = true;
+            }
+            // Anything else wrong with the form still shows in the alert.
+            _saveError = ex.Errors.Where(e => e.Key != "Name").Select(e => e.Value).FirstOrDefault()
+                ?? (_nameError is null ? "Couldn't save the deployment pipeline." : null);
         }
         catch (ProjectAccessDeniedException)
         {
