@@ -476,6 +476,69 @@ public sealed class ReleasePipelineServiceTests : IDisposable
 
     // ── Artifact source (#632) ───────────────────────────────────────────────
 
+    // --- The branch rule -------------------------------------------------------
+
+    [Fact]
+    public async Task A_pipeline_saves_and_lists_its_branch_rule()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId);
+        var svc = NewService(ctx);
+
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(
+            projectId, "Rel", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            RestrictBranch: true, AllowedBranch: " release/28.2 "));
+
+        var row = (await svc.ListReleasePipelinesAsync(projectId)).Single(r => r.Id == id);
+        row.RestrictBranch.Should().BeTrue();
+        row.AllowedBranch.Should().Be("release/28.2");
+
+        // Blank is the repositories' default branch.
+        await svc.UpdateReleasePipelineAsync(id, new ReleasePipelineInput(
+            projectId, "Rel", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            RestrictBranch: true, AllowedBranch: "  "));
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.RestrictBranch.Should().BeTrue();
+        rp.AllowedBranch.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_branch_rule_with_an_invalid_branch_name_is_refused()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId);
+
+        var act = () => NewService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
+            projectId, "Rel", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            RestrictBranch: true, AllowedBranch: "main..test"));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("AllowedBranch");
+    }
+
+    [Fact]
+    public async Task A_pipeline_that_installs_github_releases_keeps_no_branch_rule()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var repositoryId = await SeedRepositoryAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId);
+
+        var id = await NewService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
+            projectId, "Rel", 0, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            ReleaseArtifactSource.GithubRelease, repositoryId,
+            RestrictBranch: true, AllowedBranch: "main"));
+
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.RestrictBranch.Should().BeFalse();
+        rp.AllowedBranch.Should().BeNull();
+    }
+
     [Fact]
     public async Task A_release_pipeline_can_draw_from_a_repositorys_github_releases_instead_of_a_build_pipeline()
     {

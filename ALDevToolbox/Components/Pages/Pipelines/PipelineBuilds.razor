@@ -1242,7 +1242,8 @@
         if (pipeline is null || _editor is null) return;
         await _editor.OpenForEditAsync(
             pipeline.Id, pipeline.ProjectId, pipeline.Project?.Name ?? _header?.ProjectName ?? "",
-            pipeline.Name, pipeline.RequestedAppIdsJson, pipeline.GithubReleaseRepositoryId, pipeline.Branch, pipeline.PreviewCheck);
+            pipeline.Name, pipeline.RequestedAppIdsJson, pipeline.GithubReleaseRepositoryId, pipeline.Branch, pipeline.PreviewCheck,
+            pipeline.AutoVersion);
     }
 
     private async Task OnPipelineSavedAsync(int _)

@@ -21,6 +21,7 @@ internal sealed class PipelineConfiguration : IEntityTypeConfiguration<OePipelin
         entity.Property(e => e.PreviewCheck).HasColumnName("preview_check").HasDefaultValue(false).IsRequired();
         entity.Property(e => e.PreviewCheckByUserId).HasColumnName("preview_check_by_user_id");
         entity.Property(e => e.PreviewCheckBlocked).HasColumnName("preview_check_blocked").HasMaxLength(500);
+        entity.Property(e => e.AutoVersion).HasColumnName("auto_version").IsRequired();
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
         entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");

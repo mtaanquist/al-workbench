@@ -219,6 +219,14 @@ public sealed class ProjectBuildService
                 discovered = kept;
             }
 
+            // 2c. Number the apps: the build's number goes into the third part of each
+            //     version, in this build's own copy of the repository only. Before the
+            //     compile so the .app, its file name and every record of it agree.
+            if (build is not null && await NumbersAppsAsync(build, options, ct).ConfigureAwait(false))
+            {
+                discovered = StampBuildNumber(discovered, build.Id, logs);
+            }
+
             // 3. Resolve the target BC version + country, download Microsoft symbols.
             var country = ResolveCountry(project.DefaultArtifactCountry);
             var majorMinor = SelectTargetMajorMinor(discovered.Select(d => d.Manifest));
@@ -401,6 +409,65 @@ public sealed class ProjectBuildService
             }
             TryDeleteDirectory(buildRoot);
         }
+    }
+
+    // ── Build numbers in app versions ───────────────────────────────────
+
+    /// <summary>
+    /// Whether this build adds its number to its apps' versions: a pipeline build against
+    /// the current Business Central version, on a pipeline that has numbering on. A
+    /// pull-request check and a preview check are never deployed or published, so they
+    /// compile the manifests as they are. See <see cref="BuildVersionStamp"/>.
+    /// </summary>
+    private async Task<bool> NumbersAppsAsync(OeProjectBuild build, ProjectBuildOptions options, CancellationToken ct)
+    {
+        if (!MayNumberApps(build.PipelineId, build.Trigger, options.Target)) return false;
+        return await _db.OePipelines.AsNoTracking()
+            .Where(p => p.Id == build.PipelineId)
+            .Select(p => p.AutoVersion)
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>The kinds of build that can number their apps: a pipeline's own build against the current version.</summary>
+    internal static bool MayNumberApps(int? pipelineId, string trigger, BcBuildTarget target) =>
+        pipelineId is not null && trigger != ProjectBuildTrigger.PullRequest && target == BcBuildTarget.Current;
+
+    /// <summary>
+    /// Writes each app's numbered version into its <c>app.json</c> in the clone and
+    /// returns the apps with their manifests saying the same, plus one build-log section
+    /// listing what each became. An app whose version can't be read or written keeps
+    /// its own and says so in the log; it still compiles.
+    /// </summary>
+    internal static List<DiscoveredApp> StampBuildNumber(List<DiscoveredApp> apps, int buildNumber, List<PendingLog> logs)
+    {
+        var lines = new List<string>();
+        var stamped = new List<DiscoveredApp>(apps.Count);
+        foreach (var app in apps)
+        {
+            var path = Path.Combine(app.ProjectDir, "app.json");
+            var version = BuildVersionStamp.Compute(app.Manifest.Version, buildNumber);
+            string? rewritten = null;
+            if (version is not null)
+            {
+                try { rewritten = BuildVersionStamp.WriteVersion(File.ReadAllText(path), version); }
+                catch (IOException) { rewritten = null; }
+            }
+            if (version is null || rewritten is null)
+            {
+                lines.Add(version is null
+                    ? $"{app.Manifest.Name}: kept {app.Manifest.Version}, because that version isn't made of whole numbers."
+                    : $"{app.Manifest.Name}: kept {app.Manifest.Version}, because its app.json couldn't be updated.");
+                stamped.Add(app);
+                continue;
+            }
+
+            File.WriteAllText(path, rewritten);
+            lines.Add($"{app.Manifest.Name}: {app.Manifest.Version} in app.json is built as {version}.");
+            stamped.Add(app with { Manifest = app.Manifest with { Version = version } });
+        }
+        logs.Add(new PendingLog(null, "Version",
+            $"Build #{buildNumber} adds its build number to the third part of each app's version. The app.json files in the repositories are not changed.\n" + string.Join("\n", lines)));
+        return stamped;
     }
 
     // ── Extension discovery (the pipeline editor's checklist cache) ─────────
@@ -1898,7 +1965,7 @@ public sealed class ProjectBuildService
     private sealed record SupplementalSymbol(string FileName, byte[] Content);
 
     /// <summary>A captured log section accumulated during a build, before it's persisted as a <see cref="OeProjectBuildLog"/>.</summary>
-    private sealed record PendingLog(int? RepoId, string Section, string Content);
+    internal sealed record PendingLog(int? RepoId, string Section, string Content);
 
     /// <summary>A compiled deliverable held in memory, before it's persisted as a <see cref="OeProjectBuildArtifact"/>.</summary>
     private sealed record PendingArtifact(string FileName, string? AppId, string AppName, string AppVersion, string? Runtime, byte[] Content);

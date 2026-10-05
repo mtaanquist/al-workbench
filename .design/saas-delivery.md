@@ -361,7 +361,30 @@ the naming suggested.
 | `deployment_schedule` | `text` | App Management `deploymentSchedule` — **when** BC installs the upload: `Immediate` (default) / `UpdateWindow` / `NextMinorUpdate` / `NextMajorUpdate` — or our own `OurDeliveryWindow` (#928), which is never sent and becomes `Immediate` at the wire. **Renamed from `version_mode`** when publishing moved off the retired upload API: the old column held a *version target* (`Current version` / `Next minor version` / `Next major version`) and the new field genuinely means a time, so the values were migrated as well as the name. Four are offered in the picker — see *Deployment schedules* below. |
 | `schema_sync_mode` | `text` | App Management `syncMode`: `Add` (default, safe) or `ForceSync` (can drop columns — gate behind a confirm). Note the missing space: the retired API spelled it `Force Sync`, so stored values were migrated too. |
 | `prepare_release_on_new_build` | `bool` | #934. Off by default. When on, a new successful build of the source build pipeline **prepares** a release through this pipeline - a `proposed` delivery - and a person approves or dismisses it (see *Prepared releases* below). Nothing is ever approved on its own. Ignored (saved as false) for a pipeline that installs GitHub releases. |
+| `restrict_branch` / `allowed_branch` | `bool` / `text?` | Only deploy builds made from `allowed_branch` (null is the repositories' default branch). See *Which branch may reach an environment* below. Ignored (saved off) for a pipeline that installs GitHub releases. |
 | `default_publish_time` | `time?` | **Superseded by the target environment's update window** (§1 → *Update window*) as the schedule prefill, and likely droppable. Keep only as a per-pipeline override when one deployment pipeline must default to a different time than its environment's window. The execution model is unchanged: the real schedule is always a concrete date+time per delivery (`OeProjectDelivery.scheduled_for`, §4) — the window/`default_publish_time` only seed the picker. **As built (CRUD slice):** the column was *not* added — there is no scheduling in the CRUD slice to prefill, and the per-environment update window (phase 3) is the intended source. Add it back only if a per-pipeline override turns out to be needed. |
+
+#### Which branch may reach an environment
+
+A deployment pipeline draws from one build pipeline, and each build records the branch it was
+made from (`OeProjectBuild.Branch`, the build pipeline's branch at the time; null for the
+repositories' default branch). So a test branch's build reaches production only if someone points
+the build pipeline at that branch, or points the production deployment pipeline at the wrong build
+pipeline. The branch rule closes that: with `restrict_branch` on, `DeliveryService.ResolveReleaseAsync`
+(which every deployment passes through: the dialog, an approval, a prepared deployment,
+`deploy_build`) refuses a build whose branch is not `allowed_branch`, compared exactly
+(`DeploymentBranchRule`). The version number is deliberately not the guard: Business Central installs
+anything higher than what it has, so a "test" pattern in a version would not stop it.
+
+- **On for production.** The editor turns the rule on when the target is a Production environment,
+  allowing the branch the chosen build pipeline builds, until the person changes it. The migration
+  gave every existing deployment pipeline into a Production environment the rule with its build
+  pipeline's branch at the time, so today's builds keep deploying and a later branch change is
+  what gets refused.
+- **Older than installed.** Separately, `ResolveReleaseAsync` refuses an app whose version is lower
+  than the environment's mirrored app list says is installed (Business Central never replaces an app
+  with an older version), and the run checks the live list again before each upload and fails the
+  app with the same sentence. Versions are compared part by part as numbers.
 
 ### 4. Delivery = one run of a deployment pipeline (the analogue of `OeProjectBuild`)
 

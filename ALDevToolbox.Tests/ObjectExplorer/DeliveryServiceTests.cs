@@ -744,6 +744,136 @@ public sealed class DeliveryServiceTests : IDisposable
         _apps.UploadedOrder.Should().Equal(new[] { "CRONUS Core" }, "the refused version never reaches Business Central");
     }
 
+    // ── Older than what is installed ──────────────────────────────────────────
+
+    [Fact]
+    public async Task ReleaseBuildNowAsync_refuses_a_build_older_than_the_environment_has()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var appId = Guid.NewGuid();
+        await ctx.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == seed.BuildId)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.AppId, appId.ToString()));
+        // The environment's app list as last read: Core is already at a newer version.
+        ctx.OeEnvironmentApps.Add(new OeEnvironmentApp
+        {
+            OrganizationId = TestDb.DefaultOrgId, EnvironmentId = seed.EnvironmentId, AppId = appId,
+            Name = "CRONUS Core", Publisher = "CRONUS A/S", Version = "1.0.10.0", FetchedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+
+        var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Build"].Should()
+            .StartWith($"CRONUS Core 1.0.0.0 in build #{seed.BuildId} is older than 1.0.10.0, which is already installed in Production.");
+    }
+
+    [Fact]
+    public async Task ReleaseBuildNowAsync_compares_versions_by_number_not_as_text()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var appId = Guid.NewGuid();
+        await ctx.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == seed.BuildId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.AppId, appId.ToString())
+                .SetProperty(a => a.AppVersion, "1.0.10.0"));
+        // "1.0.9.0" sorts after "1.0.10.0" as text, but it is the older version.
+        ctx.OeEnvironmentApps.Add(new OeEnvironmentApp
+        {
+            OrganizationId = TestDb.DefaultOrgId, EnvironmentId = seed.EnvironmentId, AppId = appId,
+            Name = "CRONUS Core", Publisher = "CRONUS A/S", Version = "1.0.9.0", FetchedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        deliveryId.Should().BePositive();
+    }
+
+    [Fact]
+    public async Task RunDeliveryAsync_refuses_an_app_older_than_the_live_environment_has_and_skips_the_rest()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales" });
+        var coreId = Guid.NewGuid();
+        await ctx.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == seed.BuildId && a.AppName == "CRONUS Core")
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.AppId, coreId.ToString()));
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        // Installed since the deployment was made: Business Central would refuse 1.0.0.0.
+        _apps.Installed.Add(InstalledApp("CRONUS Core") with { AppId = coreId, Version = "1.0.5.0" });
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        delivery.FailureMessage.Should().StartWith("CRONUS Core 1.0.0.0 is older than 1.0.5.0, which is already installed in Production.");
+        var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
+        results[0].Status.Should().Be(ProjectDeliveryResultStatus.Failed);
+        results[1].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
+        _apps.UploadedOrder.Should().BeEmpty();
+    }
+
+    // ── The branch rule ───────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("main", "main", true)]
+    [InlineData(null, null, true)]
+    [InlineData("main", "test/new-posting", false)]
+    [InlineData(null, "test/new-posting", false)]
+    [InlineData("main", null, false)]
+    public async Task A_pipeline_with_a_branch_rule_only_deploys_builds_from_that_branch(
+        string? allowed, string? built, bool accepted)
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RestrictBranch, true).SetProperty(r => r.AllowedBranch, allowed));
+        await ctx.OeProjectBuilds.Where(b => b.Id == seed.BuildId)
+            .ExecuteUpdateAsync(s => s.SetProperty(b => b.Branch, built));
+
+        var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        if (accepted)
+        {
+            await act.Should().NotThrowAsync();
+        }
+        else
+        {
+            (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Build"].Should()
+                .Contain($"Build #{seed.BuildId} was built from").And.Contain("this deployment pipeline only deploys builds from");
+        }
+    }
+
+    [Fact]
+    public async Task Without_the_branch_rule_a_build_from_any_branch_deploys()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await ctx.OeProjectBuilds.Where(b => b.Id == seed.BuildId)
+            .ExecuteUpdateAsync(s => s.SetProperty(b => b.Branch, "test/new-posting"));
+
+        var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        await act.Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task The_branch_rule_does_not_apply_to_a_pipeline_that_installs_github_releases()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await MakeReleaseSourcedAsync(ctx, seed.ReleasePipelineId);
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RestrictBranch, true).SetProperty(r => r.AllowedBranch, "main"));
+        var stagedId = await SeedStagedBuildAsync(ctx, seed.ProjectId, "v1.0.0.0", new[] { "CRONUS Core" });
+
+        var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, stagedId);
+
+        await act.Should().NotThrowAsync();
+    }
+
     [Fact]
     public async Task RunDeliveryAsync_does_not_refuse_a_version_waiting_for_a_different_schedule()
     {

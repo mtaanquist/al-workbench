@@ -218,6 +218,9 @@ public sealed class DeliveryService
                 r.ArtifactSource,
                 r.DeploymentSchedule,
                 r.SchemaSyncMode,
+                r.RestrictBranch,
+                r.AllowedBranch,
+                r.ProjectEnvironmentId,
                 OwnerId = r.Project!.CreatedByUserId,
                 TimeZone = r.Project.BcTimeZone,
                 EnvName = r.ProjectEnvironment!.Name,
@@ -251,7 +254,7 @@ public sealed class DeliveryService
 
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.Id == projectBuildId)
-            .Select(b => new { b.Id, b.ProjectId, b.PipelineId, b.Status, b.GithubReleaseTag, b.BcTarget })
+            .Select(b => new { b.Id, b.ProjectId, b.PipelineId, b.Status, b.GithubReleaseTag, b.BcTarget, b.Branch })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("Build", "That build no longer exists.");
 
@@ -287,14 +290,39 @@ public sealed class DeliveryService
             throw Validation("Build", "Only a successful build can be deployed.");
         }
 
+        // The branch rule: a test branch's build can't reach the environment by way of a
+        // build pipeline whose branch was changed. Only a build pipeline's builds carry a
+        // branch; a pipeline that installs GitHub releases has none to compare. See
+        // .design/saas-delivery.md, "Which branch may reach an environment".
+        if (rp.ArtifactSource == ReleaseArtifactSource.Build
+            && rp.RestrictBranch
+            && !DeploymentBranchRule.Allows(rp.AllowedBranch, build.Branch))
+        {
+            throw Validation("Build",
+                $"Build #{build.Id} was built from {DeploymentBranchRule.Describe(build.Branch)}, but this deployment pipeline only deploys builds from "
+                + $"{DeploymentBranchRule.Describe(rp.AllowedBranch)}. Deploy a build made from that branch, or edit this deployment pipeline to allow {DeploymentBranchRule.Describe(build.Branch)}.");
+        }
+
         var artifacts = await _db.OeProjectBuildArtifacts.AsNoTracking()
             .Where(a => a.ProjectBuildId == build.Id)
             .OrderBy(a => a.Id)
-            .Select(a => new ReleaseApp(a.AppName, a.AppVersion))
+            .Select(a => new ReleaseApp(a.AppName, a.AppVersion, a.AppId))
             .ToListAsync(ct);
         if (artifacts.Count == 0)
         {
             throw Validation("Build", "That build has no deliverable apps to publish.");
+        }
+
+        // Business Central never installs an older version of an app over a newer one.
+        // The environment's app list as last read says whether that would happen, so the
+        // refusal comes now, in words, rather than from the upload hours later. The run
+        // checks again against the live list before anything is sent.
+        if (await OlderThanInstalledAsync(rp.ProjectEnvironmentId, artifacts, ct) is { } older)
+        {
+            throw Validation("Build",
+                $"{older.App.AppName} {older.App.AppVersion} in build #{build.Id} is older than {older.Installed}, which is already installed in {rp.EnvName}. "
+                + "Business Central won't replace an app with an older version. " + RaiseVersionAdvice
+                + $" If {rp.EnvName} has changed recently, refresh the environments on the solution's Business Central page and try again.");
         }
 
         // A deployment pipeline saved before the move to the App Management API stores the
@@ -330,8 +358,37 @@ public sealed class DeliveryService
             UpdateWindow.ResolveTimeZone(rp.TimeZone), rp.WindowStart, rp.WindowEnd, build.Id, artifacts);
     }
 
+    /// <summary>What to do about an app older than the installed one, for both refusals.</summary>
+    private const string RaiseVersionAdvice =
+        "Raise the version in app.json, or turn on \"Add the build number to each app's version\" on the build pipeline, then deploy a new build.";
+
     /// <summary>One app a deployment will install, in the build's order.</summary>
-    private sealed record ReleaseApp(string AppName, string AppVersion);
+    private sealed record ReleaseApp(string AppName, string AppVersion, string? AppId = null);
+
+    /// <summary>
+    /// The first app of <paramref name="apps"/> that the environment's mirrored app list
+    /// says is installed at a higher version, with that version; null when none is.
+    /// An app with no id (an artifact retained before ids were stamped) can't be matched
+    /// and is left to the run's live check.
+    /// </summary>
+    private async Task<(ReleaseApp App, string Installed)?> OlderThanInstalledAsync(
+        int environmentId, IReadOnlyList<ReleaseApp> apps, CancellationToken ct)
+    {
+        var installed = await _db.OeEnvironmentApps.AsNoTracking()
+            .Where(a => a.EnvironmentId == environmentId)
+            .Select(a => new { a.AppId, a.Version })
+            .ToListAsync(ct);
+        foreach (var app in apps)
+        {
+            if (!Guid.TryParse(app.AppId, out var id)) continue;
+            var on = installed.FirstOrDefault(a => a.AppId == id)?.Version;
+            if (!string.IsNullOrWhiteSpace(on) && ProjectConnectionService.CompareVersions(on, app.AppVersion) > 0)
+            {
+                return (app, on);
+            }
+        }
+        return null;
+    }
 
     /// <summary>A deployment checked and ready to be written: see <see cref="ResolveReleaseAsync"/>.</summary>
     private sealed record ReleasePlan(
@@ -947,6 +1004,23 @@ public sealed class DeliveryService
                 Append(log, $"Skipped {label}: {delivery.EnvironmentName} already has this version.");
                 await SaveResultAsync(delivery, log, ct);
                 continue;
+            }
+
+            // Business Central never replaces an app with an older version. Caught when the
+            // deployment was made if the environment's app list said so; this is the live
+            // list, which also catches an install that happened since.
+            if (InstalledMatch(i)?.Version is { Length: > 0 } newerOn
+                && ProjectConnectionService.CompareVersions(newerOn, result.AppVersion) > 0)
+            {
+                failedIndex = i;
+                refusal = $"{label} is older than {newerOn}, which is already installed in {delivery.EnvironmentName}. "
+                    + "Business Central won't replace an app with an older version. " + RaiseVersionAdvice;
+                result.Status = ProjectDeliveryResultStatus.Failed;
+                result.FinishedAt = DateTime.UtcNow;
+                result.UpdatedAt = result.FinishedAt.Value;
+                result.Message = refusal;
+                Append(log, refusal);
+                break;
             }
 
             if (AlreadyWaiting(waiting, appIds[i], result, delivery) is { } waitingRefusal)

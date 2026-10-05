@@ -89,6 +89,16 @@ public class OePipeline
     /// </summary>
     public string? PreviewCheckBlocked { get; set; }
 
+    /// <summary>
+    /// Whether this pipeline's builds number their apps: the build's number is added to
+    /// the third part (Build) of each <c>app.json</c> version in the build's own copy of
+    /// the repository, so <c>28.2.0.0</c> built as build #4812 compiles as
+    /// <c>28.2.4812.0</c>. Nothing is written back to the repository. On by default; the
+    /// pull-request check and the nightly preview check never number their apps. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "Build numbers in app versions".
+    /// </summary>
+    public bool AutoVersion { get; set; } = true;
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 

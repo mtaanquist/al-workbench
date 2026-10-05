@@ -128,22 +128,32 @@ public sealed class GitHubReleaseServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Apps_at_different_versions_are_recorded_as_not_published_and_the_build_still_succeeds()
+    public async Task Apps_at_different_versions_are_published_under_the_build_number()
     {
+        // Apps that each keep their own Major.Minor share only the build number, so the
+        // Release is named after the build rather than after one app's version.
         await ConnectOrganisationAsync();
         var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0"), ("CRONUS Sales", "2.0.0.0")]);
-        var api = PublishableApi(existingRelease: false);
+        var tag = $"build-{seed.BuildId}";
+        var api = PublishableApi(existingRelease: false, tag: tag);
 
         await using (var ctx = _db.NewContext())
         {
             var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
-            result.Published.Should().BeFalse();
-            result.Error.Should().Be("Not published: the apps have different versions.");
+            result.Published.Should().BeTrue();
+            result.Tag.Should().Be(tag);
         }
 
-        api.Calls.Should().NotContain(c => c.Contains("/releases"));
-        await AssertBuildStillReadyAsync(seed.BuildId, expectError: "different versions");
+        CreateReleaseBody(api).Should().Contain($"\"tag_name\":\"{tag}\"");
+        api.Calls.Where(c => c.Contains("uploads.github.com")).Should().HaveCount(2);
     }
+
+    [Theory]
+    [InlineData(new[] { "28.2.4812.0" }, "v28.2.4812.0")]
+    [InlineData(new[] { "28.2.4812.0", "28.2.4812.0" }, "v28.2.4812.0")]
+    [InlineData(new[] { "28.2.4812.0", "1.3.4812.0" }, "build-4812")]
+    public void The_tag_is_the_shared_version_or_else_the_build_number(string[] versions, string expected) =>
+        GitHubReleaseService.ReleaseTag(versions, 4812).Should().Be(expected);
 
     [Fact]
     public async Task A_refusal_from_github_lands_on_the_build_rather_than_failing_it()

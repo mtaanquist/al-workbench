@@ -138,6 +138,28 @@ public sealed class PipelineServiceTests : IDisposable
         (await read.OePipelines.IgnoreQueryFilters().SingleAsync(p => p.Id == id)).DeletedAt.Should().NotBeNull();
     }
 
+    // --- Build numbers in app versions --------------------------------------
+
+    [Fact]
+    public async Task A_new_pipeline_numbers_its_builds_unless_turned_off()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
+        await using (var read = _db.NewContext())
+        {
+            (await read.OePipelines.SingleAsync(p => p.Id == id)).AutoVersion.Should().BeTrue();
+        }
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production", null, AutoVersion: false));
+        await using (var read = _db.NewContext())
+        {
+            (await read.OePipelines.SingleAsync(p => p.Id == id)).AutoVersion.Should().BeFalse();
+        }
+    }
+
     // --- Nightly preview check (#994) ---------------------------------------
 
     [Fact]
