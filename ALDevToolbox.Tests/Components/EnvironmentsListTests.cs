@@ -871,6 +871,47 @@ public sealed class EnvironmentsListTests : IDisposable
             "another open page, or the sweep, read it a minute ago");
     }
 
+    /// <summary>
+    /// The auto-refresh timer's tick can land while a click is still awaiting a query on
+    /// the page's database context, which takes one command at a time. The tick asks on a
+    /// context of its own, so it goes through whatever the page's context is doing.
+    /// </summary>
+    [Fact]
+    public async Task A_tick_goes_through_while_the_pages_own_database_context_is_busy()
+    {
+        await MakeOwnerAnAdminAsync();
+        var id = await SeedSolutionAsync("CRONUS Denmark");
+        var now = DateTime.UtcNow;
+        await SeedEnvironmentAsync(id, "Production", "Production", "Active", now, now);
+        await StampEnvironmentsReadAsync(id, now.AddMinutes(-1));
+
+        var cut = _ctx.Render<EnvironmentsList>();
+        cut.WaitForAssertion(() => AutoBox(cut));
+        await AutoBox(cut).ChangeAsync(new Microsoft.AspNetCore.Components.ChangeEventArgs { Value = true });
+        cut.WaitForAssertion(() =>
+            cut.Find(".note--info .note__body").TextContent.Should().StartWith("Already up to date"));
+        // The read goes stale before the next tick, so that tick has to ask, which needs
+        // the database; the note changing shows it did.
+        await StampEnvironmentsReadAsync(id, now.AddMinutes(-10));
+
+        var pageContext = _ctx.Services.GetRequiredService<ALDevToolbox.Data.AppDbContext>();
+        var busy = pageContext.Database.ExecuteSqlRawAsync("SELECT pg_sleep(2)");
+        try
+        {
+            await cut.InvokeAsync(() => cut.Instance.AutoRefreshTickAsync());
+            // The timer redraws after a tick; a test driving the tick by hand does it here.
+            cut.Render();
+            cut.Markup.Should().NotContain("ask Business Central for a refresh. Try again",
+                "the tick must not have failed on the busy context");
+            cut.Find(".note--info .note__body").TextContent.Should().Contain("Asking Business Central about 1 solution");
+            _ctx.Services.GetRequiredService<EnvironmentRefreshQueue>().IsInFlight(id).Should().BeTrue();
+        }
+        finally
+        {
+            await busy;
+        }
+    }
+
     [Fact]
     public async Task A_tick_does_nothing_while_the_switch_is_off()
     {

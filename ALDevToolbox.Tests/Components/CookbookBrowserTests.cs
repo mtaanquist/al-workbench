@@ -116,6 +116,37 @@ public sealed class CookbookBrowserTests : IDisposable
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("Generic table proxy"));
     }
 
+    /// <summary>
+    /// A search can start while another call is still awaiting the page's database
+    /// context (the debounced reload, the deprecated checkbox and Clear filters all start
+    /// one), and a context takes one command at a time. The search runs on a context of
+    /// its own, so it lands whatever the page's context is doing.
+    /// </summary>
+    [Fact]
+    public async Task A_search_lands_while_the_pages_own_database_context_is_busy()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            seed.Recipes.Add(RecipeBuilder.Default("Generic table proxy"));
+            await seed.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<CookbookBrowser>();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Generic table proxy"));
+
+        var pageContext = _ctx.Services.GetRequiredService<ALDevToolbox.Data.AppDbContext>();
+        var busy = pageContext.Database.ExecuteSqlRawAsync("SELECT pg_sleep(2)");
+        try
+        {
+            await cut.InvokeAsync(() => cut.Find("input[type=search]").Input("zzzz"));
+            cut.WaitForAssertion(() => cut.Markup.Should().Contain("No recipes match"));
+        }
+        finally
+        {
+            await busy;
+        }
+    }
+
     [Fact]
     public async Task A_card_shows_its_type_and_carries_no_edge_state_because_it_is_not_a_row()
     {

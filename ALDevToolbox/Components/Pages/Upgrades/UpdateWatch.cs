@@ -88,6 +88,7 @@ public sealed class UpdateWatch : IDisposable
     private readonly Func<bool, Task> _afterTick;
     private readonly string _restartHint;
     private readonly SemaphoreSlim? _gate;
+    private readonly IServiceScopeFactory? _scopes;
 
     private readonly Dictionary<int, Watched> _watched = new();
     private readonly Dictionary<int, Ending> _ended = new();
@@ -114,6 +115,11 @@ public sealed class UpdateWatch : IDisposable
     /// <paramref name="afterTick"/>, so the host's re-read after a tick cannot meet a write
     /// either. Null for a host whose ticks and commands never overlap on the context.
     /// </param>
+    /// <param name="scopes">
+    /// For a host with no gate whose commands can be awaiting the circuit's context when a
+    /// tick lands (the fleet page): each re-read then runs on a DI scope of its own instead
+    /// of through <paramref name="connection"/>, as the pipeline pages' polls do (#679).
+    /// </param>
     public UpdateWatch(
         ProjectConnectionService connection,
         ILogger log,
@@ -123,10 +129,12 @@ public sealed class UpdateWatch : IDisposable
         Action<UpgradeFleetRow> replace,
         Func<bool, Task> afterTick,
         string restartHint = "Refresh to start again.",
-        SemaphoreSlim? gate = null)
+        SemaphoreSlim? gate = null,
+        IServiceScopeFactory? scopes = null)
     {
         _restartHint = restartHint;
         _gate = gate;
+        _scopes = scopes;
         _connection = connection;
         _log = log;
         _invoke = invoke;
@@ -141,7 +149,9 @@ public sealed class UpdateWatch : IDisposable
 
     /// <summary>
     /// True while a tick is reading or its host is re-reading after it: the host's controls
-    /// wait, so a click cannot start a second query on the same context.
+    /// wait, so a click cannot start a second query on the same context. A host that passes
+    /// a scope factory reads on a context of its own, so for it this only keeps the clicks
+    /// from acting on rows that are about to change.
     /// </summary>
     public bool IsTicking => _busy;
 
@@ -350,6 +360,14 @@ public sealed class UpdateWatch : IDisposable
         }
     }
 
+    private async Task<BcEnvironmentReading> RefreshAsync(int projectId, int environmentId)
+    {
+        if (_scopes is null) return await _connection.RefreshEnvironmentAsync(projectId, environmentId, _cts.Token);
+        await using var scope = _scopes.CreateAsyncScope();
+        return await scope.ServiceProvider.GetRequiredService<ProjectConnectionService>()
+            .RefreshEnvironmentAsync(projectId, environmentId, _cts.Token);
+    }
+
     /// <summary>
     /// Reads one watched environment. True when its row changed; a watch that stops without
     /// an answer changes no row, so it says false and the host only redraws.
@@ -359,7 +377,7 @@ public sealed class UpdateWatch : IDisposable
         BcEnvironmentReading reading;
         try
         {
-            reading = await _connection.RefreshEnvironmentAsync(watch.ProjectId, environmentId, _cts.Token);
+            reading = await RefreshAsync(watch.ProjectId, environmentId);
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested)
         {
