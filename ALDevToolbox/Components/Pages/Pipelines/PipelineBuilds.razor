@@ -91,9 +91,12 @@
     <Actions>
         @if (_canManage)
         {
-            <button type="button" class="btn btn--primary" @onclick="RunBuildAsync" disabled="@_starting">
+            @* One build at a time per pipeline: while one is queued or building the
+               button says so instead of queuing a second. The status poll clears
+               _inFlight when it finishes; StartBuildAsync refuses a stale click. *@
+            <button type="button" class="btn btn--primary" @onclick="RunBuildAsync" disabled="@(_starting || _inFlight)">
                 <Icon Name="hammer" Width="15" Height="15" />
-                <span>@(_starting ? "Starting..." : "Build")</span>
+                <span>@(_starting ? "Starting..." : _inFlight ? "Build running" : "Build")</span>
             </button>
             <button type="button" class="btn" @onclick="EditPipelineAsync">
                 <Icon Name="settings" Width="15" Height="15" />
@@ -1030,7 +1033,7 @@
     /// </summary>
     private async Task RunBuildAsync()
     {
-        if (_starting) return;
+        if (_starting || _inFlight) return;
         _starting = true;
         _buildError = null;
         try

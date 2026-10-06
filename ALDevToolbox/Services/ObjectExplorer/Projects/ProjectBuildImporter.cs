@@ -62,7 +62,8 @@ public sealed class ProjectBuildImporter
     /// snapshot, so the worker (and a restart-resumed job) compile the same subset
     /// even if the pipeline is later edited. Throws <see cref="PlanValidationException"/>
     /// when the pipeline/project is gone, the project has no repositories, or the
-    /// person has nothing to clone one of its repositories with, so the trigger UI
+    /// person has nothing to clone one of its repositories with, or a build of the
+    /// pipeline is already queued or building, so the trigger UI
     /// can show the reason inline before any build exists.
     /// </summary>
     public Task<int> StartBuildAsync(int pipelineId, CancellationToken ct = default) =>
@@ -112,6 +113,23 @@ public sealed class ProjectBuildImporter
             throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Pipeline"] = "Add at least one repository to this project before building.",
+            });
+        }
+
+        // One manual build at a time per pipeline. The page disables Build while one
+        // is queued or building, but its state can be stale (another tab, another
+        // person, the list page), so the refusal lives here too. The preview check
+        // is left alone: it skips a target whose last check is still running, and it
+        // starts its two targets back to back on purpose.
+        if (trigger == ProjectBuildTrigger.Manual
+            && await _db.OeProjectBuilds.AsNoTracking()
+                .AnyAsync(b => b.PipelineId == pipelineId
+                               && (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building), ct)
+                .ConfigureAwait(false))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Pipeline"] = "A build of this pipeline is already running. Wait for it to finish before starting another.",
             });
         }
 
