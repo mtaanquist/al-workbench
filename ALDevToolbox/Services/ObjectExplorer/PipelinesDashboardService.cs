@@ -264,8 +264,9 @@ public sealed class PipelinesDashboardService
             // The nightly preview check runs as a person, but nobody pressed anything:
             // the pipeline is the actor, and its name says which check it was.
             var previewCheck = ProjectBuildTarget.IsPreview(b.BcTarget);
+            // A build on push likewise: the push started it, not the person it runs as.
             var actor = b.Trigger == ProjectBuildTrigger.PullRequest ? PipelinesActor.PullRequest
-                : previewCheck ? PipelinesActor.Pipeline
+                : previewCheck || b.Trigger == ProjectBuildTrigger.Push ? PipelinesActor.Pipeline
                 : b.StartedBy is not null ? PipelinesActor.Person
                 : PipelinesActor.Unknown;
             activity.Add(new PipelinesActivityItem(

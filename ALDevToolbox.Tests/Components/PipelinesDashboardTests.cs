@@ -219,7 +219,7 @@ public sealed class PipelinesDashboardTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.Find(".empty-state__title").TextContent.Trim().Should().Be("No pipelines yet");
-            cut.Find(".empty-state__text").TextContent.Should().Contain("when you press Build, or for")
+            cut.Find(".empty-state__text").TextContent.Should().Contain("when you press Build, when new")
                 .And.NotContain("every push");
             cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Should().Contain("New build pipeline");
             cut.FindAll(".empty-state__action button").Select(b => b.TextContent.Trim())

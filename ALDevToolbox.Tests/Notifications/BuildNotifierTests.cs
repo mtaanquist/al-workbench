@@ -88,6 +88,19 @@ public sealed class BuildNotifierTests : IDisposable
     }
 
     [Fact]
+    public async Task A_build_on_push_and_a_manual_build_count_as_the_same_kind()
+    {
+        await SeedAsync();
+        await FinishAsync(ProjectBuildStatus.Failed);
+        await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.Push);
+        _email.Sent.Should().HaveCount(2, "the push build failing again is not news");
+
+        _email.Sent.Clear();
+        await FinishAsync(ProjectBuildStatus.Ready, ProjectBuildTrigger.Push);
+        _email.Sent.Select(s => s.Subject).Should().AllBe("Build working again: CRONUS Coffee - Main");
+    }
+
+    [Fact]
     public async Task Nightly_checks_and_targets_are_tracked_apart_from_manual_builds()
     {
         await SeedAsync();

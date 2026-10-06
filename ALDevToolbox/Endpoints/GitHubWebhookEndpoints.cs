@@ -428,9 +428,9 @@ public static class GitHubWebhookEndpoints
                 return null;
             }
 
-            // Stored and compared rather than handed to git, but held to the same
-            // shape as everything else from a webhook: a full object id, and a
-            // branch name the pipeline editor would also accept.
+            // Stored and compared, and handed to git by a build on push (#1079),
+            // so held to the same shape as everything else from a webhook: a full
+            // object id, and a branch name the pipeline editor would also accept.
             if (!FullShaRegex.IsMatch(headSha) || !GitBranchName.IsValid(branch))
             {
                 log.LogWarning(
