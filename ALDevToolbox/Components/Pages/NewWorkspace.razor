@@ -461,6 +461,25 @@
                                     </text>
                                 }
                             </span>
+                            @* The working branches and their build
+                               pipelines, so the consultant knows where
+                               to start and where the builds are. *@
+                            @if (_createdRepo.Branches is { Count: > 0 } branches)
+                            {
+                                <span>
+                                    Also created the @CodeList(branches) @(branches.Count == 1 ? "branch" : "branches") from
+                                    <code class="code">@_createdRepo.Repository.DefaultBranch</code>.
+                                </span>
+                            }
+                            @if (_createdRepo.PipelineNames is { Count: > 0 } pipelines
+                                 && _createdRepo.SolutionId is { } pipelineSolutionId)
+                            {
+                                <span>
+                                    @(pipelines.Count == 1 ? "The build pipeline for" : "Build pipelines for")
+                                    @CodeList(pipelines) @(pipelines.Count == 1 ? "is" : "are") on the solution's
+                                    <a href="@($"/solutions/{pipelineSolutionId}?tab=pipelines")">Pipelines tab</a>.
+                                </span>
+                            }
                             @* The things a consultant does next, side by
                                side. All outline buttons - Download ZIP is
                                still the page's one primary action (#812). *@
@@ -518,6 +537,24 @@
                            only the customer's solution is missing. *@
                         <Alert Tone="AlertTone.Warn">
                             <span>@_createdRepo.SolutionWarning</span>
+                        </Alert>
+                    }
+                    @if (!string.IsNullOrEmpty(_createdRepo.BranchesWarning))
+                    {
+                        <Alert Tone="AlertTone.Warn">
+                            <span>@_createdRepo.BranchesWarning</span>
+                        </Alert>
+                    }
+                    @if (!string.IsNullOrEmpty(_createdRepo.PipelinesWarning))
+                    {
+                        <Alert Tone="AlertTone.Warn">
+                            <span>
+                                @_createdRepo.PipelinesWarning
+                                @if (_createdRepo.SolutionId is { } warnSolutionId)
+                                {
+                                    <a href="@($"/solutions/{warnSolutionId}?tab=pipelines")">Open the Pipelines tab</a>
+                                }
+                            </span>
                         </Alert>
                     }
                     @if (!string.IsNullOrEmpty(_createdRepo.StandardsWarning))
@@ -1120,6 +1157,19 @@
             _repoBusy = false;
         }
     }
+
+    /// <summary>Branch names as code, joined the way a sentence lists them: "a, b and c".</summary>
+    private static RenderFragment CodeList(IReadOnlyList<string> items) => builder =>
+    {
+        for (var i = 0; i < items.Count; i++)
+        {
+            if (i > 0) builder.AddContent(0, i == items.Count - 1 ? " and " : ", ");
+            builder.OpenElement(1, "code");
+            builder.AddAttribute(2, "class", "code");
+            builder.AddContent(3, items[i]);
+            builder.CloseElement();
+        }
+    };
 
     /// <summary>
     /// The name the user typed. Once they have touched the field the workspace

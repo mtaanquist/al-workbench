@@ -177,6 +177,16 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         });
         cut.WaitForAssertion(() => cut.Find(".check--ack input").Change(true));
         cut.WaitForAssertion(() => cut.Find(".confirm-dialog__actions .btn--primary").Click());
+        // No Business Central connection here, so who is online can't be checked; the
+        // dialog says so and the second press goes ahead.
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".confirm-dialog__body [role=status]").TextContent.Trim().Should()
+                .StartWith("Couldn't check who is signed in to Test.")
+                .And.EndWith("Are you sure you want to deploy the build?");
+            cut.Find(".confirm-dialog__actions .btn--primary").TextContent.Should().Contain("Deploy anyway");
+        });
+        cut.Find(".confirm-dialog__actions .btn--primary").Click();
 
         cut.WaitForAssertion(() =>
         {
@@ -522,9 +532,10 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         var id = await AddProposalAsync(seed);
 
         var cut = Render(seed.ReleasePipelineId);
+        // Clicked once: the confirmation opens after asking who is online.
+        cut.WaitForAssertion(() => cut.FindAll(".rp-approval__acts button")[0].Click());
         cut.WaitForAssertion(() =>
         {
-            cut.FindAll(".rp-approval__acts button")[0].Click();
             cut.Find(".confirm-dialog__title").TextContent.Should().Be("Approve deployment 1?");
             cut.Find(".confirm-dialog__body").TextContent.Should()
                 .Contain($"This installs build #{seed.BuildId}, 3 apps (CRONUS Base, CRONUS Warehouse, CRONUS Reports), into the Sandbox environment \"Test\" right away. You can still cancel it on this page until it starts.");
@@ -545,15 +556,61 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Approving_a_release_that_installs_right_away_says_who_is_online_first()
+    {
+        _ctx.Services.AddSingleton<IDeliveryTokenSource>(new FixedTokenSource());
+        _ctx.Services.AddSingleton<IBcAdminClient>(new SessionsAdminClient(
+            ("ola@cronus.com", "WebClient"), ("anna@cronus.com", "Tablet"), ("anna@cronus.com", "WebClient"),
+            ("USER_E5EE0099AFAB445E8B604FE18E05FC1A", "WebClient"), ("nas@cronus.com", "Background")));
+        var seed = await SeedAsync();
+        var id = await AddProposalAsync(seed);
+
+        var cut = Render(seed.ReleasePipelineId);
+        cut.WaitForAssertion(() => cut.FindAll(".rp-approval__acts button")[0].Click());
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".confirm-dialog__body").TextContent.Should().Contain(
+                "You can still cancel it on this page until it starts. There are 2 end-users online and 1 delegated user online in Test. Are you sure you want to deploy the build?");
+            cut.Find(".confirm-dialog__actions .btn--primary").TextContent.Should().Contain("Approve anyway");
+        });
+        cut.WaitForAssertion(() =>
+        {
+            if (cut.FindAll(".confirm-dialog__actions .btn--primary") is { Count: 1 } confirm) confirm[0].Click();
+            cut.FindAll(".rp-approval").Should().BeEmpty();
+        });
+
+        (await _db.NewContext().OeProjectDeliveries.AsNoTracking().SingleAsync(d => d.Id == id)).Status
+            .Should().Be(ProjectDeliveryStatus.Scheduled);
+    }
+
+    private sealed class FixedTokenSource : IDeliveryTokenSource
+    {
+        public Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, CancellationToken ct = default) =>
+            Task.FromResult(new BcDeliveryContext("token", Guid.Empty));
+    }
+
+    private sealed class SessionsAdminClient : UnreachableAdminClient
+    {
+        private readonly (string User, string ClientType)[] _sessions;
+
+        public SessionsAdminClient(params (string User, string ClientType)[] sessions) => _sessions = sessions;
+
+        public override Task<IReadOnlyList<BcSession>> ListSessionsAsync(string accessToken, string? applicationFamily, string environmentName, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<BcSession>>(_sessions
+                .Select((s, i) => new BcSession(i + 1, s.User, s.ClientType, null, "", "", "", "", "", null, "", null))
+                .ToList());
+    }
+
+    [Fact]
     public async Task Approving_into_Production_needs_the_acknowledgement()
     {
         var seed = await SeedAsync(production: true);
         var id = await AddProposalAsync(seed);
 
         var cut = Render(seed.ReleasePipelineId);
+        cut.WaitForAssertion(() => cut.FindAll(".rp-approval__acts button")[0].Click());
         cut.WaitForAssertion(() =>
         {
-            cut.FindAll(".rp-approval__acts button")[0].Click();
             cut.Find(".confirm-dialog__actions .btn--primary").HasAttribute("disabled").Should().BeTrue();
             cut.Find(".confirm-dialog .check--ack").TextContent.Should().Contain("CRONUS Denmark's live Production environment");
         });

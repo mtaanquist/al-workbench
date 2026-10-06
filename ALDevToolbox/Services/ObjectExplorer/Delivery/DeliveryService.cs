@@ -120,6 +120,84 @@ public sealed class DeliveryService
         return await CreateDeliveryAsync(failed.ReleasePipelineId, failed.ProjectBuildId, DateTime.UtcNow, forceSyncOnce, ct);
     }
 
+    /// <summary>
+    /// Asks Business Central who is signed in to the deployment pipeline's target
+    /// environment, for the "are you sure" a person sees before a build that installs
+    /// right away. Gated like deploying itself (owner or org Admin), since only someone who
+    /// may deploy is asked. Read live, never cached and never stored.
+    /// <para>
+    /// Business Central failing to answer is not a reason to stop somebody deploying, so
+    /// it comes back as <see cref="OpenSessionsCheck.Failure"/> for the page to show rather
+    /// than as an exception. A pipeline that no longer exists throws
+    /// <see cref="PlanValidationException"/>; not being allowed to deploy throws
+    /// <see cref="ProjectAccessDeniedException"/>.
+    /// </para>
+    /// </summary>
+    public async Task<OpenSessionsCheck> CheckOpenSessionsAsync(int releasePipelineId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var rp = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.Id == releasePipelineId && r.DeletedAt == null)
+            .Select(r => new
+            {
+                r.ProjectId,
+                OwnerId = r.Project!.CreatedByUserId,
+                EnvName = r.ProjectEnvironment!.Name,
+                r.ProjectEnvironment.ApplicationFamily,
+            })
+            .FirstOrDefaultAsync(ct)
+            ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
+        await _access.EnsureCanManageAsync(rp.ProjectId, rp.OwnerId, ct);
+
+        // The person is waiting in a dialog for this answer, so it gets a short leash rather
+        // than the HTTP client's own timeout.
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(OpenSessionsTimeout);
+
+        BcDeliveryContext bc;
+        try
+        {
+            bc = await _tokens.AcquireDeliveryContextAsync(rp.ProjectId, timeout.Token);
+        }
+        catch (BcApiException ex)
+        {
+            // The connection's own sentence (not set up, secret expired) says what to fix.
+            _logger.LogWarning("Couldn't sign in to check the sessions on {Env} before deploying through pipeline {ReleasePipelineId}: {Message}",
+                rp.EnvName, releasePipelineId, ex.Message);
+            return OpenSessionsCheck.Unknown(rp.EnvName, ex.Message);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return TookTooLong();
+        }
+
+        try
+        {
+            var sessions = await _admin.ListSessionsAsync(bc.AccessToken, rp.ApplicationFamily, rp.EnvName, timeout.Token);
+            return OpenSessionsCheck.From(rp.EnvName, sessions);
+        }
+        catch (BcApiException ex)
+        {
+            _logger.LogWarning("Couldn't read the sessions on {Env} before deploying through pipeline {ReleasePipelineId}: {Message}",
+                rp.EnvName, releasePipelineId, ex.Message);
+            return OpenSessionsCheck.Unknown(rp.EnvName, "Business Central didn't answer.");
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return TookTooLong();
+        }
+
+        OpenSessionsCheck TookTooLong()
+        {
+            _logger.LogWarning("Reading the sessions on {Env} before deploying through pipeline {ReleasePipelineId} timed out.",
+                rp.EnvName, releasePipelineId);
+            return OpenSessionsCheck.Unknown(rp.EnvName, "Business Central took too long to answer.");
+        }
+    }
+
+    /// <summary>How long <see cref="CheckOpenSessionsAsync"/> waits for Business Central. Shortened by tests.</summary>
+    internal TimeSpan OpenSessionsTimeout { get; set; } = TimeSpan.FromSeconds(15);
+
     private async Task<int> CreateDeliveryAsync(int releasePipelineId, int projectBuildId, DateTime scheduledForUtc, bool forceSyncOnce, CancellationToken ct)
     {
         var orgId = RequireOrganizationId();
