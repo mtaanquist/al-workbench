@@ -13,7 +13,7 @@ public class ApplicationVersionSeedFile
 /// <summary>The <c>[version]</c> table in an application-version seed file.</summary>
 public class ApplicationVersionSeed
 {
-    /// <summary>URL-safe unique key (e.g. <c>bc-2026-w1</c>).</summary>
+    /// <summary>URL-safe unique key (e.g. <c>bc-2026-rw1</c>).</summary>
     public string Key { get; set; } = string.Empty;
 
     /// <summary>Friendly label shown in the user-facing select.</summary>
