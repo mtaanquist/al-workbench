@@ -340,6 +340,38 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     }
 
     [Fact]
+    public async Task Build_is_disabled_and_says_so_while_a_build_is_running()
+    {
+        var seed = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var release = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS", BcVersion = "",
+                DedupKey = Guid.NewGuid().ToString(), Kind = "project", Status = "ingesting",
+                ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow,
+            };
+            ctx.OeReleases.Add(release);
+            await ctx.SaveChangesAsync();
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, PipelineId = seed.PipelineId,
+                ReleaseId = release.Id, Status = ProjectBuildStatus.Building, StartedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<PipelineBuilds>(p => p.Add(c => c.PipelineId, seed.PipelineId));
+
+        cut.WaitForAssertion(() =>
+        {
+            var build = cut.Find(".page.pb-page > .detail-head > .page-head__actions").Children[0];
+            build.TextContent.Trim().Should().Be("Build running");
+            build.HasAttribute("disabled").Should().BeTrue();
+        });
+    }
+
+    [Fact]
     public async Task Someone_who_cannot_manage_the_solution_gets_no_release_action()
     {
         var seed = await SeedAsync(ProjectVisibility.ReadOnly);

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Net;
 using System.Text.Json;
@@ -72,7 +73,8 @@ public sealed class AlSymbolFeedResolver
     private readonly ILogger<AlSymbolFeedResolver> _logger;
     private readonly AlSymbolFeedOptions _options;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly Dictionary<string, FeedEndpoints> _endpoints = new(StringComparer.OrdinalIgnoreCase);
+    // Concurrent: the version listing reads it without the build gate, which a build holds for its whole walk.
+    private readonly ConcurrentDictionary<string, FeedEndpoints> _endpoints = new(StringComparer.OrdinalIgnoreCase);
 
     public AlSymbolFeedResolver(
         IHttpClientFactory httpFactory,
@@ -173,6 +175,30 @@ public sealed class AlSymbolFeedResolver
         }
 
         return new SymbolFeedOutcome(resolved, unresolved);
+    }
+
+    /// <summary>The Microsoft feed's package for the Application app, whose versions are the shipped Business Central versions.</summary>
+    internal const string MicrosoftApplicationPackageId = "Microsoft.Application.symbols";
+
+    /// <summary>
+    /// Every version of Business Central the Microsoft symbol feed has published
+    /// symbols for, read from the version index of its Application package
+    /// (e.g. <c>29.0.54011.55644</c>). Only shipped builds reach that feed, so the
+    /// list carries no previews. Unlike <see cref="ResolveAsync"/> this throws when
+    /// the feed cannot be read: the caller is a sweep that logs and tries again.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ListMicrosoftApplicationVersionsAsync(CancellationToken ct = default)
+    {
+        // Deliberately not behind the build gate: a build holds it for its whole
+        // dependency walk, and this read needs nothing a build writes.
+        var http = _httpFactory.CreateClient(HttpClientName);
+        var endpoints = await GetEndpointsAsync(http, _options.MicrosoftFeedUrl, ct).ConfigureAwait(false);
+
+        var lowerId = MicrosoftApplicationPackageId.ToLowerInvariant();
+        using var indexDoc = await GetJsonAsync(http, $"{endpoints.PackageBase}{lowerId}/index.json", ct).ConfigureAwait(false);
+        return indexDoc.RootElement.TryGetProperty("versions", out var v) && v.ValueKind == JsonValueKind.Array
+            ? v.EnumerateArray().Select(e => e.GetString()).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s!).ToList()
+            : [];
     }
 
     // ── One app ─────────────────────────────────────────────────────────

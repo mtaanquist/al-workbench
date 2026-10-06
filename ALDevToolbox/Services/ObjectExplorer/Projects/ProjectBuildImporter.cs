@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
@@ -62,7 +63,8 @@ public sealed class ProjectBuildImporter
     /// snapshot, so the worker (and a restart-resumed job) compile the same subset
     /// even if the pipeline is later edited. Throws <see cref="PlanValidationException"/>
     /// when the pipeline/project is gone, the project has no repositories, or the
-    /// person has nothing to clone one of its repositories with, so the trigger UI
+    /// person has nothing to clone one of its repositories with, or a build of the
+    /// pipeline is already queued or building, so the trigger UI
     /// can show the reason inline before any build exists.
     /// </summary>
     public Task<int> StartBuildAsync(int pipelineId, CancellationToken ct = default) =>
@@ -83,6 +85,21 @@ public sealed class ProjectBuildImporter
         }
         return StartPipelineBuildAsync(pipelineId, bcTarget, ProjectBuildTrigger.PreviewCheck, ct);
     }
+
+    /// <summary>
+    /// A build that keeps the pipeline's next manual build from starting: queued or
+    /// building, against the current version, and its release still ingesting.
+    /// <para>The nightly preview check is left out both ways: it does not hold up a
+    /// manual build, and it is not held up by one (it starts its two targets back to
+    /// back and skips a target whose last check is still running). The release has to
+    /// be live because nothing resets a build row whose job was lost (a crash before
+    /// it was queued, a release deleted mid-build), while the startup sweep already
+    /// fails such a release; trusting the row alone would lock Build for good.</para>
+    /// </summary>
+    internal static readonly Expression<Func<OeProjectBuild, bool>> BlocksManualBuild = b =>
+        (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building)
+        && b.BcTarget == ProjectBuildTarget.Current
+        && b.Release != null && b.Release.Status == "ingesting";
 
     private async Task<int> StartPipelineBuildAsync(int pipelineId, string bcTarget, string trigger, CancellationToken ct)
     {
@@ -112,6 +129,21 @@ public sealed class ProjectBuildImporter
             throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Pipeline"] = "Add at least one repository to this project before building.",
+            });
+        }
+
+        // One manual build at a time per pipeline. The page disables Build while one
+        // is running, but its state can be stale (another tab, another person, the
+        // list page), so the refusal lives here too.
+        if (trigger == ProjectBuildTrigger.Manual
+            && await _db.OeProjectBuilds.AsNoTracking()
+                .Where(b => b.PipelineId == pipelineId)
+                .AnyAsync(BlocksManualBuild, ct)
+                .ConfigureAwait(false))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Pipeline"] = "A build of this pipeline is already running. Wait for it to finish before starting another.",
             });
         }
 

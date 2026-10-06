@@ -15,7 +15,7 @@ public class ApplicationVersion
     public int OrganizationId { get; set; }
     public Organization? Organization { get; set; }
 
-    /// <summary>URL-safe unique key (e.g. <c>bc-2026-w1</c>). Stable across renames.</summary>
+    /// <summary>URL-safe unique key (e.g. <c>bc-2026-rw1</c>). Stable across renames.</summary>
     public string Key { get; set; } = string.Empty;
 
     /// <summary>Friendly label (e.g. <c>Business Central 2026 Release Wave 1</c>).</summary>

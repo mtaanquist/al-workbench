@@ -533,6 +533,19 @@ public sealed class ArtifactService
     }
 
     /// <summary>
+    /// True while a build would refuse the pipeline's next manual build (see
+    /// <see cref="ProjectBuildImporter.BlocksManualBuild"/>) - drives "Build running".
+    /// Narrower than <see cref="HasBuildInFlightAsync"/>, which keeps the poll going.
+    /// </summary>
+    public async Task<bool> IsBuildRunningAsync(int pipelineId, CancellationToken ct = default)
+    {
+        await EnsureCanViewPipelineAsync(pipelineId, ct);
+        return await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.PipelineId == pipelineId)
+            .AnyAsync(ProjectBuildImporter.BlocksManualBuild, ct);
+    }
+
+    /// <summary>
     /// One build's full detail: the per-repo commit set, the changelog grouped by
     /// repo, the deliverables (metadata only — no bytes), and the log sections.
     /// Null when the build isn't in the acting org.
