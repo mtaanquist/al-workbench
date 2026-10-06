@@ -422,7 +422,7 @@
                                     }
                                     @if (d.IsScheduled && _canManage)
                                     {
-                                        <button type="button" class="btn btn--sm" @onclick="() => OpenReschedule(d)" @onclick:stopPropagation="true">Reschedule</button>
+                                        <button type="button" class="btn btn--sm" @onclick="() => OpenRescheduleAsync(d)" @onclick:stopPropagation="true">Reschedule</button>
                                         <button type="button" class="btn btn--sm btn--ghost" @onclick="() => CancelAsync(d)" @onclick:stopPropagation="true">Cancel</button>
                                     }
                                 </span>
@@ -575,7 +575,7 @@
                                         @* The phone layout's actions: the row's own cell is hidden
                                            there, and a 44px full-width pair takes its place. *@
                                         <div class="rp-rel__phone-acts">
-                                            <button type="button" class="btn" @onclick="() => OpenReschedule(d)">Reschedule</button>
+                                            <button type="button" class="btn" @onclick="() => OpenRescheduleAsync(d)">Reschedule</button>
                                             <button type="button" class="btn btn--ghost" @onclick="() => CancelAsync(d)">Cancel</button>
                                         </div>
                                     }
@@ -636,41 +636,7 @@
     </div>
 </ConfirmDialog>
 
-@if (_rescheduleId is not null)
-{
-    <div class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="rs-title" tabindex="-1">
-        <div class="modal-backdrop" @onclick="CloseReschedule" aria-hidden="true"></div>
-        <div class="confirm-dialog" @onclick:stopPropagation>
-            <div class="confirm-dialog__head">
-                <span class="confirm-dialog__icon" aria-hidden="true">
-                    <Icon Name="calendar" Width="17" Height="17" />
-                </span>
-                <h2 id="rs-title" class="confirm-dialog__title">Reschedule deployment</h2>
-            </div>
-            <div class="confirm-dialog__body">
-            <div class="field">
-                <label class="field__label" for="rs-when">New time</label>
-                <input id="rs-when" type="datetime-local" class="input" @bind="_rescheduleLocal" @bind:event="oninput" disabled="@_rescheduling" />
-                <small class="field__hint">Time is in the customer's timezone (@_tzLabel).</small>
-                @if (RescheduleSecretWarning is { } secretWarn)
-                {
-                    <span class="field-warn"><Icon Name="triangle-alert" Width="13" Height="13" />@secretWarn</span>
-                }
-            </div>
-            @if (_rescheduleError is { } err)
-            {
-                <Alert Tone="AlertTone.Danger"><span>@err</span></Alert>
-            }
-            </div>
-            <div class="confirm-dialog__actions">
-                <button type="button" class="btn" @onclick="CloseReschedule" disabled="@_rescheduling">Cancel</button>
-                <button type="button" class="btn btn--primary" @onclick="SaveRescheduleAsync" disabled="@_rescheduling">
-                    <Icon Name="save" Width="14" Height="14" /><span>@(_rescheduling ? "Saving..." : "Reschedule")</span>
-                </button>
-            </div>
-        </div>
-    </div>
-}
+<RescheduleDeploymentDialog @ref="_rescheduleDialog" OnRescheduled="OnRescheduledAsync" />
 
 @code {
     [Parameter] public int Id { get; set; }
@@ -724,14 +690,9 @@
     private string? _approvalError;
 
     private TimeZoneInfo _tz = TimeZoneInfo.Utc;
-    private string _tzLabel = "UTC";
     private string _tzCity = "UTC";
 
-    // Reschedule modal state.
-    private int? _rescheduleId;
-    private DateTime _rescheduleLocal;
-    private bool _rescheduling;
-    private string? _rescheduleError;
+    private RescheduleDeploymentDialog? _rescheduleDialog;
 
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
     private PeriodicTimer? _poll;
@@ -818,7 +779,6 @@
         _isProduction = string.Equals(_rp.ProjectEnvironment?.Type, "Production", StringComparison.OrdinalIgnoreCase);
         _tz = UpdateWindow.ResolveTimeZone(_rp.Project?.BcTimeZone);
         var tzId = _rp.Project?.BcTimeZone;
-        _tzLabel = string.IsNullOrWhiteSpace(tzId) ? "UTC" : tzId!;
         _tzCity = string.IsNullOrWhiteSpace(tzId) ? "UTC" : tzId![(tzId!.LastIndexOf('/') + 1)..].Replace('_', ' ');
         _canManage = await Releases.CanManageAsync(Id);
 
@@ -1233,73 +1193,28 @@
         }
     }
 
-    private void OpenReschedule(DeliveryHistoryRow d)
+    private async Task OpenRescheduleAsync(DeliveryHistoryRow d)
     {
-        _rescheduleId = d.Id;
-        _rescheduleError = null;
-        _rescheduling = false;
-        // Prefill to the deployment's current time in the customer's tz: the picker is a
-        // wall clock in the solution's zone, like the deployment dialog's.
-        var local = TimeZoneInfo.ConvertTimeFromUtc(ALDevToolbox.Services.Organizations.DisplayTimeZone.AsUtc(d.ScheduledFor), _tz);
-        _rescheduleLocal = new DateTime(local.Year, local.Month, local.Day, local.Hour, local.Minute, 0, DateTimeKind.Unspecified);
-    }
-
-    private void CloseReschedule()
-    {
-        if (_rescheduling) return;
-        _rescheduleId = null;
-    }
-
-    /// <summary>
-    /// Warn-but-allow, mirroring the deployment dialog: flag when the new time falls after the
-    /// BC client secret expires (the run would hard-fail). See .design/saas-delivery.md.
-    /// </summary>
-    private string? RescheduleSecretWarning
-    {
-        get
-        {
-            if (_secretExpiresAt is not { } expiry) return null;
-            if (expiry <= DateTime.UtcNow)
-            {
-                return "The Business Central client secret has expired. Rotate it in Entra and re-enter it before this can install.";
-            }
-            var utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(_rescheduleLocal, DateTimeKind.Unspecified), _tz);
-            if (utc > expiry)
-            {
-                // A calendar date the consultant typed, stored at midnight UTC: printed as
-                // that date, never converted into a zone that could move it a day.
-                return $"The Business Central client secret expires {expiry:yyyy-MM-dd}. This time is after that and will fail unless the secret is rotated first.";
-            }
-            return null;
-        }
-    }
-
-    private async Task SaveRescheduleAsync()
-    {
-        if (_rescheduleId is not { } id) return;
-        _rescheduling = true;
-        _rescheduleError = null;
+        if (_rescheduleDialog is null) return;
         try
         {
-            var utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(_rescheduleLocal, DateTimeKind.Unspecified), _tz);
-            await Deliveries.RescheduleDeliveryAsync(id, utc);
-            _rescheduleId = null;
-            await ReloadAsync();
-            EnsurePolling();
-        }
-        catch (PlanValidationException ex)
-        {
-            _rescheduleError = ex.Errors.Values.FirstOrDefault() ?? "Couldn't reschedule the deployment.";
+            if (!await _rescheduleDialog.OpenAsync(d.Id, _secretExpiresAt))
+            {
+                // It started (or went) since the list was read: show what it is now.
+                await ReloadAsync();
+                EnsurePolling();
+            }
         }
         catch (Exception ex)
         {
-            Log.LogError(ex, "Failed to reschedule delivery {DeliveryId}.", id);
-            _rescheduleError = "Couldn't reschedule the deployment.";
+            Log.LogError(ex, "Failed to open the reschedule dialog for delivery {DeliveryId}.", d.Id);
         }
-        finally
-        {
-            _rescheduling = false;
-        }
+    }
+
+    private async Task OnRescheduledAsync(int deliveryId)
+    {
+        await ReloadAsync();
+        EnsurePolling();
     }
 
     // ── Live polling of in-flight deployments ────────────────────────────────────

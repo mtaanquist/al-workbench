@@ -59,6 +59,12 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService>();
         _ctx.Services.AddSingleton(TimeProvider.System);
+        // The Reschedule dialog the list hosts deploys through the delivery service.
+        _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Bc.IDeliveryTokenSource>(
+            sp => sp.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService>());
+        _ctx.Services.AddScoped<DeliveryService>();
+        _ctx.Services.AddSingleton(new DeliveryQueue());
+        TestDb.AddToolServices(_ctx.Services);
         _db.AddStorageServices(_ctx.Services);
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
@@ -127,6 +133,33 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
             cut.FindAll("table.rp-list__wide tbody tr").Select(r => r.GetAttribute("data-pipeline"))
                 .Should().Equal(s.Blocked.ToString(), s.Failed.ToString());
         });
+    }
+
+    [Fact]
+    public async Task A_scheduled_deployment_can_be_rescheduled_from_the_row_menu()
+    {
+        var s = await SeedFleetAsync();
+        await using (var db = _db.NewContext())
+        {
+            var buildId = await db.OeProjectBuilds.Select(b => b.Id).FirstAsync();
+            var waiting = Delivery(s.ProjectId, s.Quiet, buildId, ProjectDeliveryStatus.Scheduled, DateTime.UtcNow.AddDays(1), null);
+            waiting.EnvironmentName = "Production";
+            waiting.StartedAt = null;
+            db.OeProjectDeliveries.Add(waiting);
+            await db.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<ReleasePipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var row = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']");
+            row.QuerySelectorAll(".menu__item").Select(i => i.TextContent.Trim()).Should().Contain("Reschedule next deployment");
+            cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Failed}']").QuerySelectorAll(".menu__item")
+                .Select(i => i.TextContent.Trim()).Should().NotContain("Reschedule next deployment", "nothing is waiting there");
+        });
+        cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}'] .menu__item").Click();
+        cut.WaitForAssertion(() => cut.Find("#rs-title").TextContent.Should().Be("Reschedule deployment"));
     }
 
     [Fact]

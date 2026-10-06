@@ -413,7 +413,7 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         cut.WaitForAssertion(() =>
         {
             cut.Find("#rs-when").Input(picked);
-            cut.Find(".field__hint").TextContent.Should().Contain("Europe/Copenhagen");
+            cut.Find(".rs-when").TextContent.Should().Contain("At a time I pick (Copenhagen time)");
         });
         cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions .btn--primary").Single().Click());
 
@@ -422,6 +422,35 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
             using var ctx = _db.NewContext();
             var stored = ctx.OeProjectDeliveries.AsNoTracking().Single().ScheduledFor;
             stored.Should().Be(new DateTime(2027, 3, int.Parse(picked[8..10]), utcHour, 0, 0));
+        });
+    }
+
+    [Fact]
+    public async Task Rescheduling_to_now_asks_who_is_online_first_and_then_runs_it()
+    {
+        var seed = await SeedAsync();
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Scheduled, DateTime.UtcNow.AddDays(2));
+
+        var cut = Render(seed.ReleasePipelineId);
+        cut.WaitForAssertion(() => cut.FindAll(".rp-rel__acts button").Single(b => b.TextContent == "Reschedule").Click());
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".rs-when__opt input").Single(i => i.ParentElement!.TextContent.Trim().StartsWith("Now")).Change(true);
+            // The build's app isn't in the environment yet, so Business Central can't hold it back.
+            cut.FindAll(".rs-when__opt input").Where(i => i.ParentElement!.TextContent.Contains("Business Central update"))
+                .Should().OnlyContain(i => i.HasAttribute("disabled"));
+        });
+
+        // Business Central can't be reached here, so the check comes back unknown and asks.
+        cut.WaitForAssertion(() => cut.Find(".confirm-dialog__actions .btn--primary").Click());
+        cut.WaitForAssertion(() => cut.Find(".confirm-dialog__actions .btn--primary").TextContent.Should().Contain("Deploy anyway"));
+        cut.Find(".confirm-dialog__actions .btn--primary").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            using var ctx = _db.NewContext();
+            ctx.OeProjectDeliveries.AsNoTracking().Single().ScheduledFor
+                .Should().BeCloseTo(DateTime.UtcNow, TimeSpan.FromMinutes(1));
         });
     }
 
