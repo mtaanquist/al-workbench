@@ -762,10 +762,23 @@ public sealed class DeliveryService
             ? UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, DateTime.UtcNow)
             : null;
         var current = CurrentTiming(info.DeploymentSchedule, info.ScheduledByDeliveryWindow, info.ScheduledOutsideWindow, hasWindow);
+        var update = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == info.EnvironmentId)
+            .Select(e => new { e.BcNextUpdateVersion, e.BcNextUpdateType, e.BcNextUpdateDate })
+            .FirstOrDefaultAsync(ct);
+        var syncMode = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.Id == deliveryId).Select(d => d.SchemaSyncMode).FirstOrDefaultAsync(ct);
         return new RescheduleOptions(
             deliveryId, info.ReleasePipelineId, info.EnvironmentName, info.ScheduledFor, current,
             info.TimeZone, info.WindowStart, info.WindowEnd, nextOpening,
-            await WhyNotLaterUpdateAsync(info, ct));
+            await WhyNotLaterUpdateAsync(info, ct))
+        {
+            BuildId = info.ProjectBuildId,
+            NextUpdateVersion = update?.BcNextUpdateVersion,
+            NextUpdateType = update?.BcNextUpdateType,
+            NextUpdateDate = update?.BcNextUpdateDate,
+            ForceSync = BcSyncMode.Normalize(syncMode) == BcSyncMode.ForceSync,
+        };
     }
 
     /// <summary>
@@ -784,6 +797,9 @@ public sealed class DeliveryService
         var info = await RescheduleInfoAsync(deliveryId, ct)
             ?? throw Validation("Delivery", "That delivery no longer exists.");
         await _access.EnsureCanManageAsync(info.ProjectId, info.OwnerId, ct);
+        // Rescheduling decides when the customer's Business Central credential is spent,
+        // as deploying does, so it takes the same step-up rule.
+        await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
 
         var tz = UpdateWindow.ResolveTimeZone(info.TimeZone);
         var hasWindow = UpdateWindow.IsConfigured(info.WindowStart, info.WindowEnd);
@@ -871,27 +887,37 @@ public sealed class DeliveryService
         string DeploymentSchedule, bool ScheduledByDeliveryWindow, bool ScheduledOutsideWindow,
         string? TimeZone, TimeOnly? WindowStart, TimeOnly? WindowEnd);
 
-    private Task<RescheduleInfo?> RescheduleInfoAsync(int deliveryId, CancellationToken ct) =>
-        _db.OeProjectDeliveries.AsNoTracking()
+    private async Task<RescheduleInfo?> RescheduleInfoAsync(int deliveryId, CancellationToken ct)
+    {
+        var d = await _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => d.Id == deliveryId)
-            .Select(d => new RescheduleInfo(
-                d.OrganizationId,
-                d.TriggeredByUserId,
-                d.ProjectId,
-                d.ReleasePipeline!.Project!.CreatedByUserId,
-                d.ReleasePipelineId,
-                d.ProjectBuildId,
-                d.ReleasePipeline.ProjectEnvironmentId,
-                d.EnvironmentName,
-                d.Status,
-                d.ScheduledFor,
-                d.DeploymentSchedule,
-                d.ScheduledByDeliveryWindow,
-                d.ScheduledOutsideWindow,
-                d.ReleasePipeline.Project.BcTimeZone,
-                d.ReleasePipeline.ProjectEnvironment!.UpdateWindowStart,
-                d.ReleasePipeline.ProjectEnvironment.UpdateWindowEnd))
+            .Select(d => new
+            {
+                d.OrganizationId, d.TriggeredByUserId, d.ProjectId,
+                OwnerId = d.ReleasePipeline!.Project!.CreatedByUserId,
+                d.ReleasePipelineId, d.ProjectBuildId,
+                PipelineEnvironmentId = d.ReleasePipeline.ProjectEnvironmentId,
+                d.EnvironmentName, d.Status, d.ScheduledFor, d.DeploymentSchedule,
+                d.ScheduledByDeliveryWindow, d.ScheduledOutsideWindow,
+                TimeZone = d.ReleasePipeline.Project.BcTimeZone,
+            })
             .FirstOrDefaultAsync(ct);
+        if (d is null) return null;
+
+        // The environment the delivery installs to is its snapshot name, as the run resolves
+        // it - not whatever the pipeline was pointed at since.
+        var env = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.ProjectId == d.ProjectId && e.Name == d.EnvironmentName)
+            .OrderBy(e => e.Id == d.PipelineEnvironmentId ? 0 : 1)
+            .Select(e => new { e.Id, e.UpdateWindowStart, e.UpdateWindowEnd })
+            .FirstOrDefaultAsync(ct);
+
+        return new RescheduleInfo(
+            d.OrganizationId, d.TriggeredByUserId, d.ProjectId, d.OwnerId, d.ReleasePipelineId,
+            d.ProjectBuildId, env?.Id ?? d.PipelineEnvironmentId, d.EnvironmentName, d.Status, d.ScheduledFor,
+            d.DeploymentSchedule, d.ScheduledByDeliveryWindow, d.ScheduledOutsideWindow,
+            d.TimeZone, env?.UpdateWindowStart, env?.UpdateWindowEnd);
+    }
 
     /// <summary>
     /// Why the build can't wait for Business Central's next minor or major update, or null
@@ -911,10 +937,13 @@ public sealed class DeliveryService
         }
         var installed = await _db.OeEnvironmentApps.AsNoTracking()
             .Where(a => a.EnvironmentId == info.EnvironmentId)
-            .Select(a => a.AppId)
+            .Select(a => new { a.AppId, a.Name })
             .ToListAsync(ct);
+        // An artifact kept from before app ids were recorded is matched by name, as the run does.
         var missing = apps
-            .Where(a => !Guid.TryParse(a.AppId, out var id) || !installed.Contains(id))
+            .Where(a => Guid.TryParse(a.AppId, out var id)
+                ? installed.All(i => i.AppId != id)
+                : installed.All(i => !string.Equals(i.Name, a.AppName, StringComparison.OrdinalIgnoreCase)))
             .Select(a => a.AppName)
             .ToList();
         return missing.Count > 0
@@ -996,24 +1025,30 @@ public sealed class DeliveryService
 
     // ── Run (worker entry) ────────────────────────────────────────────────────
 
+    /// <summary>How early the worker may take a delivery: enough for the scheduler's poll and clock drift, far less than any reschedule.</summary>
+    private static readonly TimeSpan ClaimEarlySlack = TimeSpan.FromMinutes(1);
+
     /// <summary>
     /// Claims the delivery (atomic <c>scheduled → claimed</c>) and runs the publish.
-    /// Returns false if the row was already taken or cancelled, true once this call ran
-    /// it. All failures are recorded on the row; this method does not throw on a publish
+    /// Returns false if the row was already taken or cancelled, or is not due yet - a job
+    /// still waiting in the queue for a delivery that was since rescheduled to later must
+    /// not run it; the scheduler queues it again when it is due - and true once this call
+    /// ran it. All failures are recorded on the row; this method does not throw on a publish
     /// failure.
     /// </summary>
     public async Task<bool> RunDeliveryAsync(int deliveryId, CancellationToken ct = default)
     {
         var claimedAt = DateTime.UtcNow;
+        var dueBy = claimedAt + ClaimEarlySlack;
         var claimed = await _db.OeProjectDeliveries
-            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled)
+            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.Status, ProjectDeliveryStatus.Claimed)
                 .SetProperty(d => d.ClaimedAt, claimedAt)
                 .SetProperty(d => d.UpdatedAt, claimedAt), ct);
         if (claimed == 0)
         {
-            _logger.LogInformation("Delivery {DeliveryId} was already claimed or cancelled; skipping.", deliveryId);
+            _logger.LogInformation("Delivery {DeliveryId} was already claimed, cancelled or moved to later; skipping.", deliveryId);
             return false;
         }
 
@@ -1815,7 +1850,19 @@ public sealed record RescheduleOptions(
     TimeOnly? WindowStart,
     TimeOnly? WindowEnd,
     DateTime? NextWindowOpeningUtc,
-    string? LaterUpdateUnavailable);
+    string? LaterUpdateUnavailable)
+{
+    /// <summary>The build the deployment installs.</summary>
+    public int BuildId { get; init; }
+
+    /// <summary>The environment's next Business Central update as last read: its version, "major"/"minor" as Microsoft spells it, and its date when one is set.</summary>
+    public string? NextUpdateVersion { get; init; }
+    public string? NextUpdateType { get; init; }
+    public DateTime? NextUpdateDate { get; init; }
+
+    /// <summary>True when the deployment installs with Force sync, which can drop data.</summary>
+    public bool ForceSync { get; init; }
+}
 
 /// <summary>A delivery for the history list, with its per-app rows resolved for display.</summary>
 public sealed record DeliveryHistoryRow(

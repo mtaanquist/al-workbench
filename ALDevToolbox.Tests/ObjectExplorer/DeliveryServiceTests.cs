@@ -625,6 +625,59 @@ public sealed class DeliveryServiceTests : IDisposable
         options.LaterUpdateUnavailable.Should().Contain("isn't installed");
     }
 
+    [Fact]
+    public async Task RunDeliveryAsync_leaves_a_queued_delivery_alone_once_it_was_moved_to_later()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        // Due now, so it is queued; then moved to tomorrow before the worker gets to it.
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddDays(1)));
+
+        var ran = await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId);
+
+        ran.Should().BeFalse("the stale queue entry must not install a deployment booked for tomorrow");
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        _apps.UploadedOrder.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RescheduleDeliveryAsync_back_from_a_later_update_to_a_time_sends_it_immediate_again()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" }, schemaSyncMode: BcSyncMode.ForceSync);
+        await MirrorInstalledAsync(ctx, seed, "CRONUS Core");
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(4));
+        await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.DeploymentSchedule, BcDeploymentSchedule.NextMajorUpdate));
+
+        (await NewService(_db.NewContext()).GetRescheduleOptionsAsync(deliveryId))!.CurrentTiming
+            .Should().Be(RescheduleTiming.NextMajorUpdate);
+        await NewService(_db.NewContext()).RescheduleDeliveryAsync(deliveryId, RescheduleTiming.AtTime, DateTime.UtcNow.AddHours(6));
+
+        await using var read = _db.NewContext();
+        var d = await read.OeProjectDeliveries.SingleAsync(x => x.Id == deliveryId);
+        d.DeploymentSchedule.Should().Be(BcDeploymentSchedule.Immediate);
+        d.SchemaSyncMode.Should().Be(BcSyncMode.ForceSync, "a reschedule changes when, not how");
+    }
+
+    [Fact]
+    public async Task RescheduleDeliveryAsync_to_an_open_delivery_window_queues_it_now()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var now = TimeOnly.FromDateTime(DateTime.UtcNow);
+        await SetWindowAsync(ctx, seed.EnvironmentId, now.AddHours(-1), now.AddHours(1));
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(5));
+
+        await NewService(_db.NewContext()).RescheduleDeliveryAsync(deliveryId, RescheduleTiming.DeliveryWindow);
+
+        _queue.Reader.TryRead(out var job).Should().BeTrue("the window is open, so it goes now");
+        job!.DeliveryId.Should().Be(deliveryId);
+    }
+
     /// <summary>Gives the build's apps ids and puts them in the environment's app list as last read.</summary>
     private static async Task MirrorInstalledAsync(AppDbContext ctx, Seed seed, params string[] appNames)
     {

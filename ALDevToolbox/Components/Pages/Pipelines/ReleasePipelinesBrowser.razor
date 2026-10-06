@@ -10,6 +10,7 @@
 @using ALDevToolbox.Services.ObjectExplorer.Bc
 @using ALDevToolbox.Domain.Entities.ObjectExplorer
 @using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
+@using ALDevToolbox.Domain.ValueObjects
 
 @*
     The Deployment pipelines landing: every deployment pipeline across the org's solutions, and what
@@ -428,6 +429,8 @@
     </Footer>
 </ListPage>
 
+<RescheduleDeploymentDialog @ref="_rescheduleDialog" OnRescheduled="_ => ReloadAsync()" />
+
 <ConfirmDialog @ref="_deleteConfirm" Title="Delete deployment pipeline?"
                ConfirmLabel="Delete deployment pipeline" ConfirmButtonClass="btn--danger" ConfirmIcon="trash-2" />
 
@@ -746,6 +749,13 @@
                 <Icon Name="ellipsis-vertical" Width="17" Height="17" />
             </button>
             <div class="ra__menu menu" role="menu">
+                @if (r.NextDelivery is { } nextDelivery)
+                {
+                    <button type="button" class="menu__item" @onclick="() => OpenRescheduleAsync(nextDelivery.DeliveryId)" role="menuitem">
+                        <Icon Name="calendar" Width="15" Height="15" />
+                        <span>Reschedule next deployment</span>
+                    </button>
+                }
                 <a class="menu__item" href="@($"/pipelines/deployments/{r.Id}/edit?returnUrl={ListPath}")" role="menuitem">
                     <Icon Name="pencil" Width="15" Height="15" />
                     <span>Edit</span>
@@ -776,6 +786,32 @@
     private const string ListPath = "%2Fpipelines%2Fdeployments";
 
     private const string NewPipelineHref = "/pipelines/deployments/new?returnUrl=" + ListPath;
+
+    private RescheduleDeploymentDialog? _rescheduleDialog;
+
+    /// <summary>
+    /// Reschedule from the list: the same dialog as the pipeline page's. A deployment that
+    /// started since the list was read can't be moved any more, so the list is reloaded to show it.
+    /// </summary>
+    private async Task OpenRescheduleAsync(int deliveryId)
+    {
+        if (_rescheduleDialog is null) return;
+        try
+        {
+            if (!await _rescheduleDialog.OpenAsync(deliveryId, secretExpiresAt: null))
+            {
+                await ReloadAsync();
+            }
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            // Not this person's to move: the dialog never opens, as Edit's page would refuse.
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Failed to open the reschedule dialog for delivery {DeliveryId}.", deliveryId);
+        }
+    }
 
     private async Task DeleteAsync(ReleasePipelineRow row)
     {
