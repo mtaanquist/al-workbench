@@ -485,6 +485,37 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task RescheduleDeliveryAsync_asks_for_a_time_when_none_was_picked()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(deliveryId, RescheduleTiming.AtTime, atUtc: null);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ScheduledFor");
+    }
+
+    [Fact]
+    public async Task RescheduleDeliveryAsync_is_refused_without_manage_rights()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var when = DateTime.UtcNow.AddHours(1);
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, when);
+        await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.Visibility, ProjectVisibility.ReadOnly));
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("Someone else");
+
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(deliveryId, RescheduleTiming.AtTime, DateTime.UtcNow.AddHours(8));
+
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).ScheduledFor
+            .Should().BeCloseTo(when, TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
     public async Task RescheduleDeliveryAsync_refuses_a_picked_time_that_has_gone()
     {
         await using var ctx = _db.NewContext();
@@ -1728,6 +1759,30 @@ public sealed class DeliveryServiceTests : IDisposable
         var check = await NewService(ctx).CheckOpenSessionsAsync(seed.ReleasePipelineId);
 
         check.Should().Be(new OpenSessionsCheck("Production", EndUsers: 2, DelegatedUsers: 1));
+        _admin.Requested.Should().Equal("Production");
+    }
+
+    [Fact]
+    public async Task CheckOpenSessionsForDeliveryAsync_asks_the_environment_the_deployment_installs_to()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+        // The pipeline is pointed at another environment after the deployment was made.
+        var sandbox = new OeProjectEnvironment
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "Sandbox", Type = "Sandbox",
+            FetchedAt = DateTime.UtcNow,
+        };
+        ctx.OeProjectEnvironments.Add(sandbox);
+        await ctx.SaveChangesAsync();
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.ProjectEnvironmentId, sandbox.Id));
+        _admin.Sessions = [Session(1, "ola@cronus.com")];
+
+        var check = await NewService(_db.NewContext()).CheckOpenSessionsForDeliveryAsync(deliveryId);
+
+        check.Should().Be(new OpenSessionsCheck("Production", EndUsers: 1, DelegatedUsers: 0));
         _admin.Requested.Should().Equal("Production");
     }
 

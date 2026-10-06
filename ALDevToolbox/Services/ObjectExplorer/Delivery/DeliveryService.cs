@@ -148,7 +148,43 @@ public sealed class DeliveryService
             })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
-        await _access.EnsureCanManageAsync(rp.ProjectId, rp.OwnerId, ct);
+        return await CheckOpenSessionsOnAsync(rp.ProjectId, rp.OwnerId, rp.EnvName, rp.ApplicationFamily, releasePipelineId, ct);
+    }
+
+    /// <summary>
+    /// <see cref="CheckOpenSessionsAsync"/> for a deployment already made, asked about the
+    /// environment that deployment installs to (its own snapshot), not whatever its
+    /// pipeline has been pointed at since. Used when a waiting deployment is moved to now.
+    /// </summary>
+    public async Task<OpenSessionsCheck> CheckOpenSessionsForDeliveryAsync(int deliveryId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var d = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.Id == deliveryId)
+            .Select(d => new
+            {
+                d.ProjectId,
+                d.ReleasePipelineId,
+                OwnerId = d.ReleasePipeline!.Project!.CreatedByUserId,
+                d.EnvironmentName,
+                PipelineEnvironmentId = d.ReleasePipeline.ProjectEnvironmentId,
+            })
+            .FirstOrDefaultAsync(ct)
+            ?? throw Validation("Delivery", "That deployment no longer exists.");
+        // The same environment the run resolves: the snapshot name, preferring the
+        // pipeline's own environment when two share it.
+        var family = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.ProjectId == d.ProjectId && e.Name == d.EnvironmentName)
+            .OrderBy(e => e.Id == d.PipelineEnvironmentId ? 0 : 1)
+            .Select(e => e.ApplicationFamily)
+            .FirstOrDefaultAsync(ct);
+        return await CheckOpenSessionsOnAsync(d.ProjectId, d.OwnerId, d.EnvironmentName, family, d.ReleasePipelineId, ct);
+    }
+
+    private async Task<OpenSessionsCheck> CheckOpenSessionsOnAsync(
+        int projectId, int? ownerId, string envName, string? applicationFamily, int releasePipelineId, CancellationToken ct)
+    {
+        await _access.EnsureCanManageAsync(projectId, ownerId, ct);
 
         // The person is waiting in a dialog for this answer, so it gets a short leash rather
         // than the HTTP client's own timeout.
@@ -158,14 +194,14 @@ public sealed class DeliveryService
         BcDeliveryContext bc;
         try
         {
-            bc = await _tokens.AcquireDeliveryContextAsync(rp.ProjectId, timeout.Token);
+            bc = await _tokens.AcquireDeliveryContextAsync(projectId, timeout.Token);
         }
         catch (BcApiException ex)
         {
             // The connection's own sentence (not set up, secret expired) says what to fix.
             _logger.LogWarning("Couldn't sign in to check the sessions on {Env} before deploying through pipeline {ReleasePipelineId}: {Message}",
-                rp.EnvName, releasePipelineId, ex.Message);
-            return OpenSessionsCheck.Unknown(rp.EnvName, ex.Message);
+                envName, releasePipelineId, ex.Message);
+            return OpenSessionsCheck.Unknown(envName, ex.Message);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -174,14 +210,14 @@ public sealed class DeliveryService
 
         try
         {
-            var sessions = await _admin.ListSessionsAsync(bc.AccessToken, rp.ApplicationFamily, rp.EnvName, timeout.Token);
-            return OpenSessionsCheck.From(rp.EnvName, sessions);
+            var sessions = await _admin.ListSessionsAsync(bc.AccessToken, applicationFamily, envName, timeout.Token);
+            return OpenSessionsCheck.From(envName, sessions);
         }
         catch (BcApiException ex)
         {
             _logger.LogWarning("Couldn't read the sessions on {Env} before deploying through pipeline {ReleasePipelineId}: {Message}",
-                rp.EnvName, releasePipelineId, ex.Message);
-            return OpenSessionsCheck.Unknown(rp.EnvName, "Business Central didn't answer.");
+                envName, releasePipelineId, ex.Message);
+            return OpenSessionsCheck.Unknown(envName, "Business Central didn't answer.");
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -191,8 +227,8 @@ public sealed class DeliveryService
         OpenSessionsCheck TookTooLong()
         {
             _logger.LogWarning("Reading the sessions on {Env} before deploying through pipeline {ReleasePipelineId} timed out.",
-                rp.EnvName, releasePipelineId);
-            return OpenSessionsCheck.Unknown(rp.EnvName, "Business Central took too long to answer.");
+                envName, releasePipelineId);
+            return OpenSessionsCheck.Unknown(envName, "Business Central took too long to answer.");
         }
     }
 
