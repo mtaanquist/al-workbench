@@ -69,7 +69,7 @@
                 <h3 id="mcp-token">A personal access token</h3>
                 <p>
                     A token is a long, random password you create on
-                    <a href="/account?section=ai">your account page</a>. You paste it into
+                    <a href="/account/ai">your account page</a>. You paste it into
                     the assistant's settings or config file, and it uses that on every
                     request. Desktop and command-line assistants work this way.
                 </p>
@@ -83,7 +83,7 @@
                     Claude on the web and mobile, and ChatGPT, can connect on their own.
                     There's no token to paste - the assistant shows a permission screen,
                     you click <strong>Allow</strong>, and that's it. Take the access back
-                    any time from <a href="/account?section=ai">your account page</a>.
+                    any time from <a href="/account/ai">your account page</a>.
                 </p>
                 <p>
                     You don't have to work out which one you need: pick your assistant
@@ -169,7 +169,7 @@
                     <ol>
                         <li>
                             Create a token on
-                            <a href="/account?section=ai">your account page</a>. It is shown
+                            <a href="/account/ai">your account page</a>. It is shown
                             once - copy it before you close that screen.
                         </li>
                         <li>@((MarkupString)client.SettingsPath)</li>
@@ -281,7 +281,7 @@
 
                 <h2 id="mcp-revoke">Taking access back</h2>
                 <p>
-                    Both live on <a href="/account?section=ai">your account page</a>. Revoking
+                    Both live on <a href="/account/ai">your account page</a>. Revoking
                     a token makes the assistant start getting "401 Unauthorized" on every
                     request; revoking a connection signs the assistant out and forces it to
                     ask permission again. Neither can be undone - to reconnect, create a new

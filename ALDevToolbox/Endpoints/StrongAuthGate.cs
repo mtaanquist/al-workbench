@@ -10,7 +10,7 @@ namespace ALDevToolbox.Endpoints;
 /// <c>OrganizationSettings.RequireStrongAuth = true</c>, every authenticated
 /// request from a member of that org must be made by a user who has at
 /// least one of: confirmed TOTP, confirmed email-MFA, or a registered
-/// passkey. Users without one get redirected to <c>/account?required=1</c>,
+/// passkey. Users without one get redirected to <c>/account/security?required=1</c>,
 /// which renders an inline banner explaining what to do next.
 ///
 /// <para>
@@ -125,13 +125,13 @@ internal static class StrongAuthGate
             // user's next click.
             if (HttpMethods.IsGet(ctx.Request.Method))
             {
-                ctx.Response.Redirect("/account?required=1");
+                ctx.Response.Redirect("/account/security?required=1");
                 return;
             }
             ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
             ctx.Response.ContentType = "text/plain; charset=utf-8";
             await ctx.Response.WriteAsync(
-                "Your organisation requires two-factor authentication or a passkey. Set one up at /account before retrying.",
+                "Your organisation requires two-factor authentication or a passkey. Set one up at /account/security before retrying.",
                 ctx.RequestAborted);
         });
         return app;

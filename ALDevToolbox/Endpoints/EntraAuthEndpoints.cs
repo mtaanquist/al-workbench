@@ -83,12 +83,12 @@ internal static class EntraAuthEndpoints
             var config = await entra.ResolveChallengeForCurrentOrgAsync(ct);
             if (config is null)
             {
-                ctx.Response.Redirect("/account?section=security&err=" + Uri.EscapeDataString("Microsoft sign-in") + "&msg="
+                ctx.Response.Redirect("/account/security?err=" + Uri.EscapeDataString("Microsoft sign-in") + "&msg="
                     + Uri.EscapeDataString("Microsoft sign-in isn't set up for your organisation yet. An admin can turn it on under Administration."));
                 return;
             }
 
-            var properties = new AuthenticationProperties { RedirectUri = "/account?section=security&ok=ms-linked" };
+            var properties = new AuthenticationProperties { RedirectUri = "/account/security?ok=ms-linked" };
             properties.Items[OrgIdItem] = config.OrganizationId.ToString();
             properties.Items[ClientIdItem] = config.ClientId;
             properties.Items[ConfigSourceItem] = config.ConfigSource;
@@ -105,11 +105,11 @@ internal static class EntraAuthEndpoints
             try
             {
                 await entra.UnlinkAsync(userId.Value, id, ct);
-                ctx.Response.Redirect("/account?section=security&ok=ms-unlinked");
+                ctx.Response.Redirect("/account/security?ok=ms-unlinked");
             }
             catch (PlanValidationException ex)
             {
-                ctx.Response.Redirect("/account?section=security&err=" + Uri.EscapeDataString("Microsoft sign-in") + "&msg="
+                ctx.Response.Redirect("/account/security?err=" + Uri.EscapeDataString("Microsoft sign-in") + "&msg="
                     + Uri.EscapeDataString(ex.Errors.First().Value));
             }
         }).RequireAuthorization();
@@ -243,11 +243,11 @@ internal static class EntraAuthEndpoints
             try
             {
                 await entra.LinkAsync(linkUserId, token, ct);
-                ctx.Response.Redirect("/account?section=security&ok=ms-linked");
+                ctx.Response.Redirect("/account/security?ok=ms-linked");
             }
             catch (PlanValidationException ex)
             {
-                ctx.Response.Redirect("/account?section=security&err=" + Uri.EscapeDataString("Microsoft sign-in") + "&msg="
+                ctx.Response.Redirect("/account/security?err=" + Uri.EscapeDataString("Microsoft sign-in") + "&msg="
                     + Uri.EscapeDataString(ex.Errors.First().Value));
             }
             return;

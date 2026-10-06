@@ -37,7 +37,7 @@ connect.
    permission screen, and you're connected.
 
 To take access back, go to **Account → Connected assistants** at
-`/account?section=ai`.
+`/account/ai`.
 
 ## Connect with AL Workbench (ChatGPT custom connectors)
 
@@ -59,7 +59,7 @@ reconnect, not an administrator to intervene.
    permission screen, and you're connected.
 
 As with Claude, revoke access at **Account → Connected assistants**
-(`/account?section=ai`). If ChatGPT rotates its signing keys mid-flight
+(`/account/ai`). If ChatGPT rotates its signing keys mid-flight
 the next refresh fails and ChatGPT will prompt you to reconnect — clicking
 through re-fetches the JWKS and gets you back in.
 
@@ -69,7 +69,7 @@ through re-fetches the JWKS and gets you back in.
 
 1. Sign in at the AL Workbench web app.
 2. Go to **Account → Manage access tokens** (or directly to
-   `/account?section=ai`).
+   `/account/ai`).
 3. Click **Create token**. Give it a recognisable name (e.g. *Cursor on
    laptop*) and pick an expiry. **Save the token immediately** — the next
    page is the only place it will be shown.
