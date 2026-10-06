@@ -283,7 +283,7 @@
             {
                 _checkingSessions = true;
                 StateHasChanged();
-                var check = await CheckSessionsAsync(r);
+                var check = await OpenSessionsCheck.AskAsync(() => Deliveries.CheckOpenSessionsAsync(r.ReleasePipelineId), r.EnvironmentName, Log);
                 _checkingSessions = false;
                 if (check.NeedsConfirmation)
                 {
@@ -313,23 +313,6 @@
         {
             _releasing = false;
             _checkingSessions = false;
-        }
-    }
-
-    /// <summary>
-    /// Who is signed in to the target. Anything but being refused comes back as a check we
-    /// couldn't make, so a fault on our side asks the question rather than blocking the deployment.
-    /// </summary>
-    private async Task<OpenSessionsCheck> CheckSessionsAsync(Request r)
-    {
-        try
-        {
-            return await Deliveries.CheckOpenSessionsAsync(r.ReleasePipelineId);
-        }
-        catch (Exception ex) when (ex is not (ProjectAccessDeniedException or PlanValidationException))
-        {
-            Log.LogError(ex, "Failed to check the sessions before deploying delivery {DeliveryId} again.", r.DeliveryId);
-            return OpenSessionsCheck.Unknown(r.EnvironmentName, "Something went wrong at our end.");
         }
     }
 }

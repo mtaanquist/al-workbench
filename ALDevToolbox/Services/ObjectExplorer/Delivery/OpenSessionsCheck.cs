@@ -1,3 +1,4 @@
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
@@ -43,6 +44,26 @@ public sealed record OpenSessionsCheck(string EnvironmentName, int EndUsers, int
             .ToList();
         var delegated = users.Count(u => u.StartsWith(DelegatedUserPrefix, StringComparison.OrdinalIgnoreCase));
         return new OpenSessionsCheck(environmentName, users.Count - delegated, delegated);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="ask"/> (one of the <see cref="DeliveryService"/> session checks)
+    /// for a page that is about to deploy. A fault on our side comes back as a check we
+    /// couldn't make, so it asks the question rather than blocking the deployment. Being
+    /// refused (no access, a pipeline that is gone) still throws, for the page to say so.
+    /// </summary>
+    public static async Task<OpenSessionsCheck> AskAsync(
+        Func<Task<OpenSessionsCheck>> ask, string environmentName, ILogger logger)
+    {
+        try
+        {
+            return await ask();
+        }
+        catch (Exception ex) when (ex is not (ProjectAccessDeniedException or PlanValidationException))
+        {
+            logger.LogError(ex, "Failed to check who is signed in to {Env} before deploying.", environmentName);
+            return Unknown(environmentName, "Something went wrong at our end.");
+        }
     }
 
     /// <summary>A check that could not be made, with Business Central's reason.</summary>

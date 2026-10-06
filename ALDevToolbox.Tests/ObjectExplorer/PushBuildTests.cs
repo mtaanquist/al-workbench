@@ -96,7 +96,7 @@ public sealed class PushBuildTests : IDisposable
 
         due.PipelineId.Should().Be(pipelineId);
         due.UserId.Should().BeNull();
-        due.Blocked.Should().Be(PushBuildService.NoOwnerMessage);
+        due.Blocked.Should().Be(AutomatedBuilds.NoOwnerMessage);
     }
 
     [Fact]
@@ -211,7 +211,7 @@ public sealed class PushBuildTests : IDisposable
         await using var read = _db.NewContext();
         (await read.OeProjectBuilds.AnyAsync()).Should().BeFalse();
         (await read.OePipelines.SingleAsync(p => p.Id == pipelineId)).BuildOnPushBlocked
-            .Should().Be(PushBuildService.NoAccessMessage);
+            .Should().Be(AutomatedBuilds.NoAccessMessage);
     }
 
     [Fact]

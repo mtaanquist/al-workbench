@@ -223,6 +223,11 @@ public sealed class ReleasePipelineService
             .Select(e => new { e.Id, e.BcNextUpdateDate, Version = e.BcNextUpdateVersion!, e.BcNextUpdateType })
             .ToListAsync(ct);
 
+        // Whether Business Central still holds a handed-off last deployment, so the list
+        // offers Reschedule only where there is something left to move.
+        var stillHeld = await HeldInstalls.StillHeldAsync(_db,
+            latest.Where(l => l.Status == ProjectDeliveryStatus.HandedOff).Select(l => l.Id).ToList(), ct);
+
         var latestBy = latest.ToDictionary(l => l.ReleasePipelineId);
         var liveBy = live.GroupBy(l => l.ReleasePipelineId).ToDictionary(g => g.Key, g => g.First());
         var nextBy = next.ToDictionary(n => n.ReleasePipelineId);
@@ -233,6 +238,9 @@ public sealed class ReleasePipelineService
         {
             LastDelivery = latestBy.TryGetValue(r.Id, out var l)
                 ? new ReleasePipelineLastDelivery(l.Id, l.Status, l.At, l.FailedApp, l.DeploymentSchedule)
+                {
+                    StillHeld = stillHeld.Contains(l.Id),
+                }
                 : null,
             LiveDelivery = liveBy.TryGetValue(r.Id, out var v)
                 ? ReleasePipelineLiveDelivery.From(v.Id, v.Status, v.StartedAt, v.Apps,
@@ -781,7 +789,14 @@ public sealed record ReleasePipelineRow(
 /// <param name="FailedAppName">The first app that failed, when the deployment failed on one.</param>
 /// <param name="DeploymentSchedule">When the deployment told Business Central to install, snapshotted at deployment time.</param>
 public sealed record ReleasePipelineLastDelivery(
-    int DeliveryId, string Status, DateTime At, string? FailedAppName, string DeploymentSchedule);
+    int DeliveryId, string Status, DateTime At, string? FailedAppName, string DeploymentSchedule)
+{
+    /// <summary>
+    /// A handed-off deployment whose app Business Central is still holding for a later
+    /// update, so it can be rescheduled. False once it has installed or a later run replaced it.
+    /// </summary>
+    public bool StillHeld { get; init; }
+}
 
 /// <summary>
 /// A deployment shipping right now: what the app in hand is doing, which app it is and

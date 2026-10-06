@@ -760,10 +760,9 @@
                         <span>Reschedule next deployment</span>
                     </button>
                 }
-                else if (r.LiveDelivery is null && r.LastDelivery is { Status: ProjectDeliveryStatus.HandedOff } held)
+                else if (r.LiveDelivery is null && r.LastDelivery is { StillHeld: true } held)
                 {
-                    @* Business Central may still hold it for its update; the dialog's service
-                       read says whether it does, and moving it re-uploads the build. *@
+                    @* Business Central is holding it for its update; moving it re-uploads the build. *@
                     <button type="button" class="menu__item" @onclick="() => OpenRescheduleAsync(held.DeliveryId)" role="menuitem">
                         <Icon Name="calendar" Width="15" Height="15" />
                         <span>Reschedule next deployment</span>

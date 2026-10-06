@@ -143,32 +143,23 @@ public sealed class PreviewCheckScheduler : PolledScheduler
     /// </summary>
     private async Task<(bool Started, string? Blocked)> StartAsync(int orgId, bool isSystem, PreviewCheckDue due, CancellationToken ct)
     {
-        using var ambient = AmbientOrganizationScope.Enter(
-            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem, due.UserId));
-        await using var scope = _services.CreateAsyncScope();
-        var importer = scope.ServiceProvider.GetRequiredService<ProjectBuildImporter>();
-        try
+        var outcome = await AutomatedBuilds.StartAsAsync(
+            _services, orgId, isSystem, due.UserId,
+            importer => importer.StartPreviewCheckAsync(due.PipelineId, due.BcTarget!, ct),
+            "the check could not start.").ConfigureAwait(false);
+        if (outcome.Error is { } error)
         {
-            await importer.StartPreviewCheckAsync(due.PipelineId, due.BcTarget!, ct).ConfigureAwait(false);
-            return (true, null);
-        }
-        catch (ProjectAccessDeniedException)
-        {
-            _logger.LogInformation("Paused the preview check of pipeline {PipelineId}: user {UserId} can no longer manage it.",
-                due.PipelineId, due.UserId);
-            return (false, PreviewCheckService.NoAccessMessage);
-        }
-        catch (PlanValidationException ex)
-        {
-            return (false, ex.Errors.Values.FirstOrDefault() ?? "the check could not start.");
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // One pipeline's trouble is not the org's: log it, leave the pause alone,
-            // and carry on with the rest. Tomorrow night tries again.
-            _logger.LogError(ex, "PreviewCheckScheduler could not start a {BcTarget} check for pipeline {PipelineId}.",
+            // One pipeline's trouble is not the org's: log it and carry on with the
+            // rest. Tomorrow night tries again.
+            _logger.LogError(error, "PreviewCheckScheduler could not start a {BcTarget} check for pipeline {PipelineId}.",
                 due.BcTarget, due.PipelineId);
             return (false, null);
         }
+        if (outcome.Refusal is { } reason)
+        {
+            _logger.LogInformation("Paused the preview check of pipeline {PipelineId} as user {UserId}: {Reason}",
+                due.PipelineId, due.UserId, reason);
+        }
+        return (outcome.Started, outcome.Refusal);
     }
 }

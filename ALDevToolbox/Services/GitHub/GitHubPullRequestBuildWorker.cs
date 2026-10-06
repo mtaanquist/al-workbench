@@ -188,35 +188,23 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
     private async Task<(bool Settled, string? Blocked)> StartPushBuildAsync(
         GitHubPushJob push, AmbientOrganizationScope.OrganizationIdentity identity, PushBuildDue due, int userId, CancellationToken ct)
     {
-        using var ambient = AmbientOrganizationScope.Enter(
-            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(identity.OrganizationId, identity.IsSystemOrganization, userId));
-        await using var scope = _services.CreateAsyncScope();
-        var importer = scope.ServiceProvider.GetRequiredService<ProjectBuildImporter>();
-        try
-        {
-            await importer.StartPushBuildAsync(due.PipelineId, due.RepositoryId, push.HeadSha, ct).ConfigureAwait(false);
-            return (true, null);
-        }
-        catch (ProjectAccessDeniedException)
-        {
-            _logger.LogInformation(
-                "Paused building on push for pipeline {PipelineId}: user {UserId} can no longer manage it.", due.PipelineId, userId);
-            return (true, PushBuildService.NoAccessMessage);
-        }
-        catch (PlanValidationException ex)
-        {
-            var reason = ex.Errors.Values.FirstOrDefault() ?? "the build could not start.";
-            _logger.LogInformation(
-                "Paused building on push for pipeline {PipelineId} ({Job}): {Reason}", due.PipelineId, Describe(push), reason);
-            return (true, reason);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        var outcome = await AutomatedBuilds.StartAsAsync(
+            _services, identity.OrganizationId, identity.IsSystemOrganization, userId,
+            importer => importer.StartPushBuildAsync(due.PipelineId, due.RepositoryId, push.HeadSha, ct),
+            "the build could not start.").ConfigureAwait(false);
+        if (outcome.Error is { } error)
         {
             // Not something the pipeline can be told to fix: log it and leave any
             // pause as it is. The next push tries again.
-            _logger.LogError(ex, "Could not start a build on push of pipeline {PipelineId} for {Job}.", due.PipelineId, Describe(push));
+            _logger.LogError(error, "Could not start a build on push of pipeline {PipelineId} for {Job}.", due.PipelineId, Describe(push));
             return (false, null);
         }
+        if (outcome.Refusal is { } reason)
+        {
+            _logger.LogInformation(
+                "Paused building on push for pipeline {PipelineId} ({Job}) as user {UserId}: {Reason}", due.PipelineId, Describe(push), userId, reason);
+        }
+        return (true, outcome.Refusal);
     }
 
     private async Task BuildPullRequestAsync(GitHubPullRequestJob job, CancellationToken ct)
