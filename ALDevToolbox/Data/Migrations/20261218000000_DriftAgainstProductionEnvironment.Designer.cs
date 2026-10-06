@@ -14,7 +14,7 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20261212000000_DriftAgainstProductionEnvironment")]
+    [Migration("20261218000000_DriftAgainstProductionEnvironment")]
     partial class DriftAgainstProductionEnvironment
     {
         /// <inheritdoc />
