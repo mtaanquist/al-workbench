@@ -300,6 +300,73 @@ public sealed class GitHubExtensionDeliveryTests : IDisposable
         api.Calls.Should().BeEmpty("an extension nobody could generate is not worth a round trip");
     }
 
+    [Fact]
+    public async Task A_repository_holding_a_solution_is_joined_as_that_solution_without_being_told()
+    {
+        await ReadyAsync();
+        var api = WritableApi().On(HttpMethod.Get, $"/repos/{Repo}/contents/{WorkspaceConfigService.FileName}",
+            HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(WorkspaceConfigService.FileName, SavedSolutionConfig()));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        // No sibling: the MCP tools never pass one, and the repository's own
+        // settings are what make this an extension of CRONUS rather than a
+        // stranger dropped in beside it.
+        var delivery = await service.AddExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking", idFrom: 51000, idTo: 51999), sibling: null, Repo);
+
+        delivery.FolderName.Should().Be("Banking");
+        BodyOf(api, "POST", "/pulls").Should().Contain("Add the CRO Banking extension");
+        var tree = BodyOf(api, "POST", "/git/trees");
+        tree.Should().Contain("Banking/app.json");
+        tree.Should().Contain("CRONUSCustomer.code-workspace");
+        tree.Should().Contain($"\"path\":\"{WorkspaceConfigService.FileName}\"",
+            "the solution's saved settings list the new extension so the next one starts after it");
+    }
+
+    [Fact]
+    public async Task A_repository_holding_a_solution_refuses_an_id_range_already_in_use()
+    {
+        await ReadyAsync();
+        var api = WritableApi().On(HttpMethod.Get, $"/repos/{Repo}/contents/{WorkspaceConfigService.FileName}",
+            HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(WorkspaceConfigService.FileName, SavedSolutionConfig()));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var act = () => service.AddExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking", idFrom: 50000, idTo: 50999), sibling: null, Repo);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["IdRangeFrom"].Should().Contain("CRO Core");
+        api.Calls.Should().NotContain(c => c.Contains("git/blobs"), "nothing is written for a refused plan");
+    }
+
+    [Fact]
+    public async Task Example_files_are_left_out_of_any_repository()
+    {
+        var template = TemplateBuilder.Default().WithCoreFolder("src", ("Example.Table.al", "table 50000 Example { }"));
+        template.WorkspaceExtensions.Single(e => e.Path == TemplateBuilder.CoreExtensionPath)
+            .Folders.Single().Files.Single().IsExample = true;
+        await ReadyAsync(template);
+        var api = WritableApi();
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        // No saved settings to say what the repository holds, and the caller
+        // asked for examples - but whatever is there already may have its own.
+        await service.AddExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking") with { IncludeExamples = true }, sibling: null, Repo);
+
+        BodyOf(api, "POST", "/git/trees").Should().NotContain("Example.Table.al");
+    }
+
+    /// <summary>The settings a workbench-generated CRONUS solution saved at its root.</summary>
+    private static string SavedSolutionConfig() =>
+        new WorkspaceConfigService(null!).BuildWorkspace(
+            PlanBuilder.WorkspacePlan(workspaceName: "CRONUS Customer", shortName: "CRO", extensionPrefix: "CRO"),
+            [new WorkspaceExtensionIdentity(
+                WorkspaceExtensionIdentity.CoreKind, null, Guid.NewGuid(), "CRO Core", "Core", "CRONUS", 50000, 50999)]);
+
     // --- helpers ------------------------------------------------------------
 
     private (GitHubExtensionDeliveryService Service, AppDbContext Context) NewService(FakeGitHubApi api)
@@ -373,12 +440,12 @@ public sealed class GitHubExtensionDeliveryTests : IDisposable
     }
 
     /// <summary>Deployment configured, organisation connected, user linked, and a template to generate from.</summary>
-    private async Task ReadyAsync()
+    private async Task ReadyAsync(RuntimeTemplate? template = null)
     {
         await ConfigureDeploymentAsync();
         await ConnectOrganisationAsync();
         await LinkAsync();
-        await SeedTemplateAsync(TemplateBuilder.Default());
+        await SeedTemplateAsync(template ?? TemplateBuilder.Default());
     }
 
     /// <summary>

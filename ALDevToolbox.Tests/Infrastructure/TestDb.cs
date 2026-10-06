@@ -456,7 +456,8 @@ public sealed class TestDb : IDisposable
         AppDbContext ctx,
         ALDevToolbox.Services.GitHub.GitHubAppClient client,
         ALDevToolbox.Services.GitHub.GitHubAccessService access) =>
-        new(NewGenerationService(ctx), NewGitHubRepositoryService(ctx, client, access), access, client, OrgContext,
+        new(NewGenerationService(ctx), new WorkspaceConfigService(ctx), NewGitHubRepositoryService(ctx, client, access),
+            access, client, OrgContext,
             NullLogger<ALDevToolbox.Services.GitHub.GitHubExtensionDeliveryService>.Instance);
 
     /// <summary>"Create repository": generation, the membership gate, and the first commit.</summary>
@@ -474,6 +475,9 @@ public sealed class TestDb : IDisposable
         new(NewGenerationService(ctx), NewGitHubRepositoryService(ctx, client, access),
             NewGitHubConnectionService(ctx, access), access, client,
             NewGitHubRepositoryStandardsService(ctx), NewProjectService(ctx),
+            new ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService(
+                ctx, OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext),
+                NullLogger<ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService>.Instance),
             NewOrganizationConfigService(ctx), NewToolEnablement(ctx, toolAvailability), ctx, OrgContext,
             logger ?? NullLogger<ALDevToolbox.Services.GitHub.GitHubWorkspaceRepositoryService>.Instance);
 

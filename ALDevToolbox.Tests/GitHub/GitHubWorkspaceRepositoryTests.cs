@@ -184,7 +184,7 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
     }
 
     [Fact]
-    public async Task The_default_branch_is_the_only_branch_touched()
+    public async Task The_default_branch_is_the_only_branch_written_to()
     {
         await ReadyAsync();
         var api = WritableApi();
@@ -193,10 +193,13 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
 
         await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
 
-        // No throwaway branch, no ref created outright, no default-branch
-        // switch, no pull request: the whole detour the pre-bypass flow needed
-        // (#811) is gone, and the default branch is simply moved forward.
-        api.Calls.Should().NotContain(c => c.StartsWith("POST") && c.Contains("/git/refs"));
+        // No throwaway branch, no default-branch switch, no pull request: the
+        // whole detour the pre-bypass flow needed (#811) is gone, and the
+        // default branch is simply moved forward. The only refs created are the
+        // working branches, after the workspace is in.
+        api.Bodies.Where(b => b.Call.StartsWith("POST") && b.Call.Contains("/git/refs"))
+            .Should().HaveCount(2)
+            .And.OnlyContain(b => b.Body.Contains("\"sha\":\"new-commit-sha\""));
         api.Calls.Should().NotContain(c => c.StartsWith("DELETE"));
         api.Calls.Should().NotContain(c => c.StartsWith("PATCH") && c.EndsWith($"/repos/{Repo}"));
         api.Calls.Should().NotContain(c => c.Contains("/pulls"));
@@ -883,6 +886,205 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         (await read.OeProjects.AsNoTracking().AnyAsync()).Should().BeFalse();
     }
 
+    // --- Working branches and their build pipelines ------------------------
+
+    [Fact]
+    public async Task Test_and_staging_branches_are_created_at_the_workspace_commit()
+    {
+        await ReadyAsync();
+        var api = WritableApi();
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
+
+        created.Branches.Should().Equal("test", "staging");
+        created.BranchesWarning.Should().BeNull();
+        var refs = api.Bodies.Where(b => b.Call.StartsWith("POST") && b.Call.Contains($"/repos/{Repo}/git/refs"))
+            .Select(b => b.Body).ToList();
+        refs.Should().HaveCount(2);
+        refs[0].Should().Contain("refs/heads/test").And.Contain("new-commit-sha");
+        refs[1].Should().Contain("refs/heads/staging").And.Contain("new-commit-sha");
+        // The app makes them, like every other write into the new repository.
+        TokenFor(api, "POST", $"/repos/{Repo}/git/refs").Should().Be(InstallationToken);
+        // Before the branch rules, so a ruleset over every branch cannot refuse them.
+        var lastRef = api.Calls.FindLastIndex(c => c.StartsWith("POST") && c.Contains("/git/refs"));
+        var rulesetAt = api.Calls.FindIndex(c => c.Contains("/rulesets"));
+        if (rulesetAt >= 0) lastRef.Should().BeLessThan(rulesetAt);
+    }
+
+    [Fact]
+    public async Task A_new_solution_gets_a_build_pipeline_per_branch()
+    {
+        await ReadyAsync();
+        var (service, ctx) = NewService(WritableApi());
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
+
+        created.PipelineNames.Should().Equal("main", "test", "staging");
+        created.PipelinesWarning.Should().BeNull();
+
+        await using var read = _db.NewContext();
+        var pipelines = await read.OePipelines.AsNoTracking()
+            .Where(p => p.ProjectId == created.SolutionId)
+            .OrderBy(p => p.Id)
+            .ToListAsync();
+        pipelines.Select(p => p.Branch).Should().Equal("main", "test", "staging");
+        // Named after the default branch rather than left blank, so a deployment
+        // pipeline to production, which wants a named branch, accepts it.
+        pipelines.Should().OnlyContain(p =>
+            p.RequestedAppIdsJson == null && p.AutoVersion && !p.PreviewCheck
+            && p.CreatedByUserId == UserId && !p.NameIsCustom);
+    }
+
+    [Fact]
+    public async Task A_solution_with_other_repositories_gets_no_pipelines_and_says_why()
+    {
+        await ReadyAsync();
+        var solutionId = await SeedSolutionAsync("CRONUS Customer", ownedByCaller: true);
+        await using (var seed = _db.NewContext())
+        {
+            seed.OeProjectRepositories.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectRepository
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = solutionId,
+                Provider = RepositoryProvider.GitHub,
+                Url = $"https://github.com/{OrgLogin}/older.git",
+                DisplayName = "older",
+            });
+            await seed.SaveChangesAsync();
+        }
+        var (service, ctx) = NewService(WritableApi());
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(
+            WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
+
+        // The branches are the repository's own, so they are still made.
+        created.Branches.Should().Equal("test", "staging");
+        // A pipeline checks its branch out in every repository of the solution,
+        // and the older one has no test branch.
+        created.PipelineNames.Should().BeEmpty();
+        created.PipelinesWarning.Should().Contain("other repositories");
+        await using var read = _db.NewContext();
+        (await read.OePipelines.AsNoTracking().AnyAsync(p => p.ProjectId == solutionId)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_branch_the_solution_already_has_a_pipeline_for_is_left_alone()
+    {
+        await ReadyAsync();
+        var solutionId = await SeedSolutionAsync("CRONUS Customer", ownedByCaller: true);
+        await using (var seed = _db.NewContext())
+        {
+            seed.OePipelines.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = solutionId,
+                Name = "test",
+                Branch = "test",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        var (service, ctx) = NewService(WritableApi());
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(
+            WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
+
+        created.PipelineNames.Should().Equal("main", "staging");
+        created.PipelinesWarning.Should().BeNull();
+        await using var read = _db.NewContext();
+        (await read.OePipelines.AsNoTracking().CountAsync(p => p.ProjectId == solutionId)).Should().Be(3);
+    }
+
+    [Fact]
+    public async Task A_pipeline_that_follows_the_default_branch_already_covers_it()
+    {
+        await ReadyAsync();
+        var solutionId = await SeedSolutionAsync("CRONUS Customer", ownedByCaller: true);
+        await using (var seed = _db.NewContext())
+        {
+            seed.OePipelines.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = solutionId,
+                Name = "Default branch",
+                Branch = null,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        var (service, ctx) = NewService(WritableApi());
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(
+            WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
+
+        created.PipelineNames.Should().Equal("test", "staging");
+    }
+
+    [Fact]
+    public async Task A_default_branch_other_than_main_names_its_own_pipeline()
+    {
+        await ReadyAsync();
+        var api = WritableApi()
+            .On(HttpMethod.Post, $"/orgs/{OrgLogin}/repos", HttpStatusCode.Created,
+                FakeGitHubApi.RepositoryJson(Repo, defaultBranch: "master"));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
+
+        created.Branches.Should().Equal("test", "staging");
+        created.PipelineNames.Should().Equal("master", "test", "staging");
+    }
+
+    [Fact]
+    public async Task A_refused_branch_is_a_warning_and_gets_no_pipeline()
+    {
+        await ReadyAsync();
+        var api = WritableApi()
+            .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", HttpStatusCode.Forbidden,
+                """{"message":"Resource not accessible by integration"}""");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
+
+        created.Repository.FullName.Should().Be(Repo);
+        created.Branches.Should().BeEmpty();
+        created.BranchesWarning.Should().Contain("test and staging branches");
+        // The default branch is there either way, so its pipeline still is too.
+        created.PipelineNames.Should().Equal("main");
+    }
+
+    [Fact]
+    public async Task With_pipelines_switched_off_no_pipelines_are_added()
+    {
+        await ReadyAsync();
+        await using (var org = _db.NewContext())
+        {
+            var row = await org.Organizations.SingleAsync(o => o.Id == TestDb.DefaultOrgId);
+            row.DisabledTools = new List<string> { nameof(ToolKey.Pipelines) };
+            await org.SaveChangesAsync();
+        }
+        var (service, ctx) = NewService(WritableApi());
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
+
+        created.Branches.Should().Equal("test", "staging");
+        created.PipelineNames.Should().BeEmpty();
+        created.PipelinesWarning.Should().BeNull();
+        await using var read = _db.NewContext();
+        (await read.OePipelines.AsNoTracking().AnyAsync()).Should().BeFalse();
+    }
+
     /// <summary>
     /// Switches Solutions off for the acting organisation, the way an org Admin
     /// does on the Administration tools page.
@@ -1005,6 +1207,8 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
             // installation bypasses the organisation's branch rules, so GitHub
             // lets it.
             .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/", HttpStatusCode.OK, FakeGitHubApi.ShaJson("new-commit-sha"))
+            // The test and staging branches, created at the workspace commit.
+            .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", HttpStatusCode.Created, """{"ref":"refs/heads/x"}""")
             // GitHub refuses the Git Data API until a repository has a commit,
             // which is what the Contents write above is for.
             .EmptyRepository(Repo);

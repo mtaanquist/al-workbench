@@ -339,7 +339,7 @@
                                 @if (_canManage)
                                 {
                                     <span class="rp-approval__acts">
-                                        <button type="button" class="btn btn--sm" @onclick="() => ApproveAsync(p)" disabled="@_deciding">Approve</button>
+                                        <button type="button" class="btn btn--sm" @onclick="() => ApproveAsync(p)" disabled="@_deciding">@(_checkingSessions ? "Checking who is online..." : "Approve")</button>
                                         <button type="button" class="btn btn--sm btn--ghost" @onclick="() => DismissAsync(p)" disabled="@_deciding">Dismiss</button>
                                     </span>
                                 }
@@ -712,6 +712,7 @@
 
     // The approval band (#934).
     private bool _deciding;
+    private bool _checkingSessions;
     private bool _approveProdAck;
     private string _dismissReason = string.Empty;
     private string? _approvalError;
@@ -1009,7 +1010,7 @@
             .Select(a => a.AppName)
             .ToList();
         await _releaseAgainDialog.OpenAsync(new ReleaseAgainDialog.Request(
-            d.Id, d.ProjectBuildId, source, _rp.Project?.Name ?? "this solution",
+            d.Id, Id, d.ProjectBuildId, source, _rp.Project?.Name ?? "this solution",
             EnvName, _rp.ProjectEnvironment?.Type,
             BcDeploymentSchedule.ToWire(_rp.DeploymentSchedule) ?? _rp.DeploymentSchedule,
             _rp.SchemaSyncMode,
@@ -1049,6 +1050,23 @@
         return sentence + $" Approve it to install it {InstallsWhen()}, or dismiss it.";
     }
 
+    /// <summary>
+    /// True when approving installs right away, the same rule <see cref="InstallsWhen"/>
+    /// words: not waiting for a delivery window that is shut, and not handed to Business
+    /// Central's next update.
+    /// </summary>
+    private bool ApprovalInstallsNow()
+    {
+        var env = _rp?.ProjectEnvironment;
+        if (BcDeploymentSchedule.IsOurDeliveryWindow(_rp?.DeploymentSchedule)
+            && env is not null && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd))
+        {
+            return UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow)
+                <= DateTime.UtcNow.AddMinutes(1);
+        }
+        return !BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(_rp?.DeploymentSchedule));
+    }
+
     /// <summary>When an approved deployment installs, as a phrase: "right away", "in the next delivery window (today at 22:00)".</summary>
     private string InstallsWhen()
     {
@@ -1076,10 +1094,50 @@
         var where = _isProduction
             ? $"{CustomerName}'s Production environment \"{EnvName}\""
             : $"the {EnvType} environment \"{EnvName}\"";
+
+        // An approval that installs right away asks who is signed in first, and puts the
+        // answer in the same confirmation.
+        OpenSessionsCheck? sessions = null;
+        if (ApprovalInstallsNow())
+        {
+            _deciding = true;
+            _checkingSessions = true;
+            StateHasChanged();
+            try
+            {
+                // Its own scope: this waits on Business Central while the page's other
+                // buttons stay live on the circuit's one context (#679).
+                await using var scope = ScopeFactory.CreateAsyncScope();
+                sessions = await scope.ServiceProvider.GetRequiredService<DeliveryService>().CheckOpenSessionsAsync(Id);
+            }
+            catch (PlanValidationException ex)
+            {
+                _approvalError = ex.Errors.Values.FirstOrDefault() ?? "Couldn't approve this deployment.";
+                return;
+            }
+            catch (ProjectAccessDeniedException)
+            {
+                _approvalError = "Only the solution owner or an admin can approve deployments here.";
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.LogError(ex, "Failed to check the sessions before approving delivery {DeliveryId}.", p.Id);
+                sessions = OpenSessionsCheck.Unknown(EnvName, "Something went wrong at our end.");
+            }
+            finally
+            {
+                _deciding = false;
+                _checkingSessions = false;
+            }
+        }
+        var askAboutSessions = sessions is { NeedsConfirmation: true };
+
         var confirmed = await _approveConfirm.OpenAsync(
             $"Approve deployment {p.Number}?",
-            $"This installs build #{p.ProjectBuildId}, {apps}, into {where} {InstallsWhen()}. You can still cancel it on this page until it starts.",
-            "Approve", "btn--primary", "check");
+            $"This installs build #{p.ProjectBuildId}, {apps}, into {where} {InstallsWhen()}. You can still cancel it on this page until it starts."
+                + (askAboutSessions ? " " + sessions!.Question : ""),
+            askAboutSessions ? "Approve anyway" : "Approve", "btn--primary", "check");
         if (!confirmed) return;
 
         _deciding = true;
