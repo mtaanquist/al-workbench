@@ -522,6 +522,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         // The importer's credential check is for manual builds; a pull-request build never consults it.
         services.AddScoped<CloneCredentialResolver>(_ => null!);
         services.AddScoped<GitHubBranchActivityService>();
+        services.AddScoped<PushBuildService>();
 
         var provider = services.BuildServiceProvider();
         return new GitHubPullRequestBuildWorker(

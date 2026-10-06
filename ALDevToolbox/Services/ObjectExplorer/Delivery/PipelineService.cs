@@ -103,6 +103,8 @@ public sealed class PipelineService
             PreviewCheck = input.PreviewCheck,
             PreviewCheckByUserId = input.PreviewCheck ? _orgContext.CurrentUserId : null,
             AutoVersion = input.AutoVersion,
+            BuildOnPush = input.BuildOnPush,
+            BuildOnPushByUserId = input.BuildOnPush ? _orgContext.CurrentUserId : null,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -115,8 +117,8 @@ public sealed class PipelineService
     }
 
     /// <summary>
-    /// Updates a pipeline's extension selection, publishing target, branch and nightly
-    /// preview check, and the name that follows from them. Turning the check on makes
+    /// Updates a pipeline's extension selection, publishing target, branch, nightly
+    /// preview check and building on push, and the name that follows from them. Turning the check on makes
     /// the caller the person it runs as; so does saving while it is paused (its person
     /// gone or refused), which is how someone with access takes it over. A new name
     /// carries through to the deployment pipelines named after this one.
@@ -149,6 +151,19 @@ public sealed class PipelineService
             pipeline.PreviewCheckBlocked = null;
         }
         pipeline.PreviewCheck = input.PreviewCheck;
+        // Building on push follows the same rule: turning it on, or saving while it is
+        // paused, makes the caller the person its builds run as.
+        if (!input.BuildOnPush)
+        {
+            pipeline.BuildOnPushByUserId = null;
+            pipeline.BuildOnPushBlocked = null;
+        }
+        else if (!pipeline.BuildOnPush || pipeline.BuildOnPushByUserId is null || pipeline.BuildOnPushBlocked is not null)
+        {
+            pipeline.BuildOnPushByUserId = _orgContext.CurrentUserId;
+            pipeline.BuildOnPushBlocked = null;
+        }
+        pipeline.BuildOnPush = input.BuildOnPush;
         pipeline.AutoVersion = input.AutoVersion;
         pipeline.UpdatedAt = DateTime.UtcNow;
         if (!string.Equals(oldName, name, StringComparison.Ordinal))
@@ -182,6 +197,32 @@ public sealed class PipelineService
         pipeline.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
         _logger.LogInformation("Pipeline {PipelineId}'s preview check now runs as user {UserId}.", id, _orgContext.CurrentUserId);
+    }
+
+    /// <summary>
+    /// Resumes paused building on push by making the caller the person its builds run
+    /// as. Same rule as saving the pipeline while it is paused. The push that found it
+    /// paused is not built; the next one is.
+    /// </summary>
+    public async Task TakeOverBuildOnPushAsync(int id, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var pipeline = await _db.OePipelines
+            .FirstOrDefaultAsync(p => p.Id == id && p.DeletedAt == null, ct)
+            ?? throw Validation("Name", "This pipeline no longer exists.");
+        if (!pipeline.BuildOnPush) throw Validation("BuildOnPush", "This pipeline doesn't build on new commits.");
+
+        var ownerId = await _db.OeProjects.AsNoTracking()
+            .Where(c => c.Id == pipeline.ProjectId)
+            .Select(c => c.CreatedByUserId)
+            .FirstOrDefaultAsync(ct);
+        await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
+
+        pipeline.BuildOnPushByUserId = _orgContext.CurrentUserId;
+        pipeline.BuildOnPushBlocked = null;
+        pipeline.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Pipeline {PipelineId}'s builds on push now run as user {UserId}.", id, _orgContext.CurrentUserId);
     }
 
     /// <summary>Soft-deletes a pipeline. Its past builds stay reachable (their pipeline_id is nulled by the FK).</summary>
@@ -422,7 +463,12 @@ public sealed record PipelineInput(
     /// person turns it off. See <c>.design/object-explorer-project-builds.md</c>,
     /// "Build numbers in app versions".
     /// </summary>
-    bool AutoVersion = true);
+    bool AutoVersion = true,
+    /// <summary>
+    /// Whether a push to the pipeline's branch starts a build. Off unless the person
+    /// turns it on. See <c>.design/github-integration-phase2.md</c>, "Building on push".
+    /// </summary>
+    bool BuildOnPush = false);
 
 /// <summary>A project choice for the "New pipeline" dialog's project picker.</summary>
 public sealed record PipelineProjectOption(int Id, string Name);

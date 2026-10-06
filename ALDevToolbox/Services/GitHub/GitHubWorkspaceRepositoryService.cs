@@ -466,8 +466,10 @@ public sealed class GitHubWorkspaceRepositoryService
                 var covered = existing.Any(p => string.Equals(p.Branch, branch, StringComparison.Ordinal)
                     || (p.Branch is null && string.Equals(branch, branches[0], StringComparison.Ordinal)));
                 if (covered) continue;
+                // A repository made here is in the connected organisation, so its
+                // pushes arrive; each branch builds on push as the person who made it (#1079).
                 var id = await _pipelines.CreatePipelineAsync(
-                    new PipelineInput(solutionId, CustomName: null, SelectedAppIds: null, Branch: branch), ct);
+                    new PipelineInput(solutionId, CustomName: null, SelectedAppIds: null, Branch: branch, BuildOnPush: true), ct);
                 names.Add((await _pipelines.GetPipelineAsync(id, ct))!.Name);
             }
             return (names, null);

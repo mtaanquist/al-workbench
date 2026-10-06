@@ -22,6 +22,8 @@
 
     Named user: a BC developer who needs the latest compiled .app for a customer
     environment. New pipelines are created here (pick a solution) or from a solution.
+    The Solution select narrows the list to one customer, as Deployments does (#1078).
+    It lives in the URL (?solution=) like the search, so a filtered list can be shared.
 
     Archetype 2 (list / browser), table view. This was a bespoke .alr row grid; the
     handoff is explicit that a history like this "is a real .data-table ... not a
@@ -66,37 +68,55 @@
                aria-label="Search pipelines"
                aria-keyshortcuts="F3" title="Search pipelines (F3)" />
     </Search>
+    @* Keeps the chosen solution when the search is submitted, so the URL says both. *@
+    <SearchFormExtras>
+        @if (_solution is { } chosen)
+        {
+            <input type="hidden" name="solution" value="@chosen" />
+        }
+    </SearchFormExtras>
+    <Filters>
+        <SelectBox style="width: 170px">
+            <select class="select" aria-label="Solution" value="@_solution" @onchange="OnSolutionChanged">
+                <option value="">All solutions</option>
+                @foreach (var option in SolutionOptions)
+                {
+                    <option value="@option.Id" selected="@(option.Id == _solution)">@option.Name</option>
+                }
+            </select>
+        </SelectBox>
+    </Filters>
     <Trailing>
         <div class="pill-tabs" role="group" aria-label="Filter by build status">
             <button type="button" class="pill-tab @(_statusFilter is null ? "is-active" : "")"
                     @onclick="() => _statusFilter = null" aria-pressed="@(_statusFilter is null)">
-                All<span class="pill-tab__count">@(_rows?.Count ?? 0)</span>
+                All<span class="pill-tab__count">@InSolution(_rows ?? []).Count()</span>
             </button>
-            @if (_buildingCount > 0)
+            @if (BuildingCount > 0 || _statusFilter == "building")
             {
                 <button type="button" class="pill-tab @(_statusFilter == "building" ? "is-active" : "")"
                         @onclick="@(() => _statusFilter = "building")" aria-pressed="@(_statusFilter == "building")">
-                    Building<span class="pill-tab__count">@_buildingCount</span>
+                    Building<span class="pill-tab__count">@BuildingCount</span>
                 </button>
             }
-            @if (_readyCount > 0)
+            @if (ReadyCount > 0 || _statusFilter == "ready")
             {
                 <button type="button" class="pill-tab @(_statusFilter == "ready" ? "is-active" : "")"
                         @onclick="@(() => _statusFilter = "ready")" aria-pressed="@(_statusFilter == "ready")">
-                    Ready to build<span class="pill-tab__count">@_readyCount</span>
+                    Ready to build<span class="pill-tab__count">@ReadyCount</span>
                 </button>
             }
-            @if (_failedCount > 0)
+            @if (FailedCount > 0 || _statusFilter == "failed")
             {
                 <button type="button" class="pill-tab @(_statusFilter == "failed" ? "is-active" : "")"
                         @onclick="@(() => _statusFilter = "failed")" aria-pressed="@(_statusFilter == "failed")">
-                    Needs attention<span class="pill-tab__count">@_failedCount</span>
+                    Needs attention<span class="pill-tab__count">@FailedCount</span>
                 </button>
             }
         </div>
         @if (!string.IsNullOrEmpty(_search))
         {
-            <a class="btn btn--sm" href="/pipelines/builds">Clear search</a>
+            <a class="btn btn--sm" href="@ListUrl(_solution)">Clear search</a>
         }
     </Trailing>
     <Loading>
@@ -148,16 +168,22 @@
     <NoMatches>
         <div class="card">
             <EmptyState Icon="funnel-x" Title="@NoMatchesTitle">
-                <Text>Try a shorter search term, or clear the filters to see all @_totalCount.</Text>
-                <Action>
-                    @if (string.IsNullOrEmpty(_search))
+                <Text>
+                    @if (SolutionName is { } shown)
                     {
-                        <button type="button" class="btn" @onclick="() => _statusFilter = null">Clear filters</button>
+                        @(string.IsNullOrEmpty(_search) ? "Show" : "Try a shorter search term, or show")@($" every {shown} pipeline, or clear the filters to see all {_totalCount}.")
                     }
                     else
                     {
-                        <a class="btn" href="/pipelines/builds">Clear filters</a>
+                        @(string.IsNullOrEmpty(_search) ? "Clear the filters" : "Try a shorter search term, or clear the filters")@($" to see all {_totalCount}.")
                     }
+                </Text>
+                <Action>
+                    @if (SolutionName is { } shown)
+                    {
+                        <button type="button" class="btn" @onclick="ShowWholeSolution">Show all @shown pipelines</button>
+                    }
+                    <button type="button" class="btn" @onclick="ClearFilters">Clear filters</button>
                 </Action>
             </EmptyState>
         </div>
@@ -295,21 +321,41 @@
 <PipelineEditorDialog @ref="_editor" OnSaved="OnPipelineCreatedAsync" />
 
 @code {
-    private string NoMatchesTitle => string.IsNullOrEmpty(_search)
-        ? _statusFilter switch
+    /// <summary>The titles name the chosen solution, so an empty list is not read as every customer's.</summary>
+    private string NoMatchesTitle
+    {
+        get
         {
-            "failed" => "No pipelines are failing right now",
-            "ready" => "Every pipeline has a build of its latest changes",
-            _ => "No pipelines are building right now",
+            var of = SolutionName is { } name ? $"{name} " : string.Empty;
+            return string.IsNullOrEmpty(_search)
+                ? _statusFilter switch
+                {
+                    "failed" => $"No {of}pipelines are failing right now",
+                    "ready" => $"Every {of}pipeline has a build of its latest changes",
+                    "building" => $"No {of}pipelines are building right now",
+                    _ => "No pipelines match these filters",
+                }
+                : $"No {of}pipelines match \"{_search}\"";
         }
-        : $"No pipelines match \"{_search}\"";
+    }
+
+    /// <summary>The chosen solution's name, or null when the list shows all of them.</summary>
+    private string? SolutionName =>
+        _solution is { } id ? _all.FirstOrDefault(p => p.ProjectId == id)?.ProjectName : null;
 
     private List<PipelineArtifactsRow>? _rows;
     private List<PipelineProjectOption> _projectOptions = new();
     private int _totalCount;
-    private int _buildingCount;
-    private int _failedCount;
-    private int _readyCount;
+
+    /// <summary>
+    /// Every pipeline, before the search: what the Building, Ready and Needs attention
+    /// counts are taken over, so a search does not hide that something needs looking at.
+    /// </summary>
+    private List<PipelineArtifactsRow> _all = new();
+
+    private int BuildingCount => InSolution(_all).Count(p => p.Latest?.Status is "building" or "queued");
+    private int FailedCount => InSolution(_all).Count(IsFailing);
+    private int ReadyCount => InSolution(_all).Count(IsReady);
 
     /// <summary>Each pipeline's freshness, folded to one sentence (#964). A pipeline missing here says nothing.</summary>
     private Dictionary<int, PipelineFreshnessSummary> _summaries = new();
@@ -343,7 +389,21 @@
     [Parameter, SupplyParameterFromQuery(Name = "show")]
     public string? Show { get; set; }
 
+    /// <summary>
+    /// The solution the list is narrowed to, from <c>?solution=</c> (its id). Read on
+    /// every navigation, like <see cref="Q"/>: the select writes it to the URL.
+    /// </summary>
+    [Parameter, SupplyParameterFromQuery(Name = "solution")]
+    public int? Solution { get; set; }
+
     private string _search = string.Empty;
+
+    /// <summary>
+    /// The solution in force, or null for all of them: <see cref="Solution"/>, dropped
+    /// when no build pipeline belongs to it. Filters the loaded rows in memory, like the
+    /// status tab: an organisation has tens of pipelines, not thousands.
+    /// </summary>
+    private int? _solution;
 
     /// <summary>What <see cref="_rows"/> was last loaded for, so a re-render doesn't re-query.</summary>
     private string? _loadedFor;
@@ -357,41 +417,94 @@
     private PipelineEditorDialog? _editor;
 
     /// <summary>The rows the table actually renders: the search result, narrowed by the status tab.</summary>
-    private List<PipelineArtifactsRow> Visible =>
-        _rows is null ? new()
-        : _statusFilter switch
+    private List<PipelineArtifactsRow> Visible
+    {
+        get
         {
-            "building" => _rows.Where(p => p.Latest?.Status is "building" or "queued").ToList(),
-            "failed" => _rows.Where(IsFailing).ToList(),
-            "ready" => _rows.Where(IsReady).ToList(),
-            _ => _rows,
-        };
+            if (_rows is null) return new();
+            var rows = InSolution(_rows);
+            return _statusFilter switch
+            {
+                "building" => rows.Where(p => p.Latest?.Status is "building" or "queued").ToList(),
+                "failed" => rows.Where(IsFailing).ToList(),
+                "ready" => rows.Where(IsReady).ToList(),
+                _ => rows.ToList(),
+            };
+        }
+    }
+
+    /// <summary>The rows of the chosen solution, or all of them when none is chosen.</summary>
+    private IEnumerable<PipelineArtifactsRow> InSolution(IEnumerable<PipelineArtifactsRow> rows) =>
+        _solution is { } id ? rows.Where(p => p.ProjectId == id) : rows;
+
+    /// <summary>The solutions that have a build pipeline, by name: a solution without one would only ever filter to nothing.</summary>
+    private IEnumerable<PipelineProjectOption> SolutionOptions =>
+        _all.GroupBy(p => p.ProjectId)
+            .Select(g => new PipelineProjectOption(g.Key, g.First().ProjectName))
+            .OrderBy(o => o.Name, StringComparer.OrdinalIgnoreCase);
 
     protected override void OnInitialized() =>
         _statusFilter = Show is "failed" or "building" or "ready" ? Show : null;
+
+    /// <summary>The list's own URL, keeping a search when there is one.</summary>
+    private string ListUrl(int? solution, string? search = null) =>
+        Nav.GetUriWithQueryParameters("/pipelines/builds", new Dictionary<string, object?>
+        {
+            ["q"] = string.IsNullOrEmpty(search) ? null : search,
+            ["solution"] = solution,
+        });
+
+    private void OnSolutionChanged(ChangeEventArgs e) =>
+        Nav.NavigateTo(ListUrl(int.TryParse(e.Value as string, out var id) ? id : null, _search), replace: true);
+
+    /// <summary>Back to every pipeline of the chosen solution: the tab and the search go, the solution stays.</summary>
+    private void ShowWholeSolution()
+    {
+        _statusFilter = null;
+        Nav.NavigateTo(ListUrl(_solution));
+    }
+
+    private void ClearFilters()
+    {
+        _statusFilter = null;
+        Nav.NavigateTo(ListUrl(null));
+    }
 
     // OnParametersSetAsync rather than OnInitializedAsync so submitting the
     // search form — which is a navigation, not a new component — reloads.
     protected override async Task OnParametersSetAsync()
     {
         _search = (Q ?? string.Empty).Trim();
-        if (_loadedFor == _search) return;
+        _solution = Solution;
+        if (_loadedFor == _search)
+        {
+            DropUnknownSolution();
+            return;
+        }
         _loadedFor = _search;
 
         var projects = await Projects.ListProjectsAsync();
         _projectOptions = projects.Select(p => new PipelineProjectOption(p.Id, p.Name)).ToList();
 
         var all = await Artifacts.ListPipelinesAsync();
+        _all = all;
         _totalCount = all.Count;
-        _buildingCount = all.Count(p => p.Latest?.Status is "building" or "queued");
-        _failedCount = all.Count(IsFailing);
+        DropUnknownSolution();
 
         var freshness = await Freshness.ListAsync();
         _summaries = freshness.ToDictionary(f => f.PipelineId, PipelineFreshnessSummary.From);
         _canBuild = freshness.Where(f => f.CanBuild).Select(f => f.PipelineId).ToHashSet();
-        _readyCount = all.Count(IsReady);
 
         _rows = string.IsNullOrEmpty(_search) ? all : await Artifacts.ListPipelinesAsync(_search);
+    }
+
+    /// <summary>
+    /// A link to a solution with no build pipeline (or one since removed) would filter
+    /// to nothing behind a select that reads "All solutions", so it shows all of them.
+    /// </summary>
+    private void DropUnknownSolution()
+    {
+        if (_solution is { } chosen && _all.All(p => p.ProjectId != chosen)) _solution = null;
     }
 
     /// <summary>

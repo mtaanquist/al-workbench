@@ -87,6 +87,36 @@ public sealed class ProjectBuildImporter
     }
 
     /// <summary>
+    /// How many builds started by a push may wait for the worker per pipeline. A push
+    /// past that does not queue another build: it moves the newest waiting one onto
+    /// its own commit instead, so a rebase pushed as a run of pushes, or a burst of
+    /// small ones, cannot fill the build queue while the branch's latest state still
+    /// gets built.
+    /// </summary>
+    internal const int MaxWaitingPushBuilds = 5;
+
+    /// <summary>
+    /// Queues a build of the pipeline <paramref name="pipelineId"/> because
+    /// <paramref name="headSha"/> was pushed to its branch in the solution repository
+    /// <paramref name="repositoryId"/>. The caller runs it as the person who turned
+    /// building on push on (<see cref="OePipeline.BuildOnPushByUserId"/>), so the
+    /// access check and the clone credential are theirs, as for the nightly preview
+    /// check.
+    ///
+    /// <para>Unlike <see cref="StartBuildAsync"/> it is not refused while another build
+    /// of the pipeline runs: it waits behind it. The import worker runs one build at a
+    /// time in the order they were queued, so pushes are built in the order they
+    /// arrived, each at its own commit. Past <see cref="MaxWaitingPushBuilds"/> waiting
+    /// builds the newest one is moved onto this commit instead. Returns the release id
+    /// of the build that will build this commit.</para>
+    /// </summary>
+    public Task<int> StartPushBuildAsync(int pipelineId, int repositoryId, string headSha, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(headSha);
+        return StartPipelineBuildAsync(pipelineId, ProjectBuildTarget.Current, ProjectBuildTrigger.Push, ct, (repositoryId, headSha));
+    }
+
+    /// <summary>
     /// A build that keeps the pipeline's next manual build from starting: queued or
     /// building, against the current version, and its release still ingesting.
     /// <para>The nightly preview check is left out both ways: it does not hold up a
@@ -101,7 +131,8 @@ public sealed class ProjectBuildImporter
         && b.BcTarget == ProjectBuildTarget.Current
         && b.Release != null && b.Release.Status == "ingesting";
 
-    private async Task<int> StartPipelineBuildAsync(int pipelineId, string bcTarget, string trigger, CancellationToken ct)
+    private async Task<int> StartPipelineBuildAsync(
+        int pipelineId, string bcTarget, string trigger, CancellationToken ct, (int RepositoryId, string Sha)? head = null)
     {
         var pipeline = await _db.OePipelines.AsNoTracking()
             .Where(p => p.Id == pipelineId && p.DeletedAt == null)
@@ -150,9 +181,11 @@ public sealed class ProjectBuildImporter
         // A manual build clones as the person who pressed Build. Without a credential
         // for one of the repositories it would be skipped and the build would fail
         // with nothing to compile, so refuse before a build exists and say what to set
-        // up. The preview check is left to fail its build: it runs unattended, and a
-        // refusal here would pause the check rather than report one bad night.
-        if (trigger == ProjectBuildTrigger.Manual)
+        // up. A build on push is refused the same way, and the refusal pauses building
+        // on push with the reason on the pipeline. The preview check is left to fail
+        // its build: it runs unattended, and a refusal here would pause the check
+        // rather than report one bad night.
+        if (trigger is ProjectBuildTrigger.Manual or ProjectBuildTrigger.Push)
         {
             // Every missing host at once, so fixing one doesn't reveal the next.
             var missing = new List<string>();
@@ -160,7 +193,9 @@ public sealed class ProjectBuildImporter
             {
                 if ((await _credentials.ResolveAsync(provider, ct).ConfigureAwait(false)).Count == 0)
                 {
-                    missing.Add(CloneCredentialResolver.NothingToCloneWith(provider));
+                    missing.Add(trigger == ProjectBuildTrigger.Push
+                        ? NothingToCloneWithOnPush(provider)
+                        : CloneCredentialResolver.NothingToCloneWith(provider));
                 }
             }
             if (missing.Count > 0)
@@ -169,6 +204,39 @@ public sealed class ProjectBuildImporter
                 {
                     ["Pipeline"] = string.Join(" ", missing),
                 });
+            }
+        }
+
+        // A push past the waiting limit rides on the newest waiting build rather than
+        // adding one. Only a build still queued can move: one the worker has picked up
+        // has already cloned. The update is conditional on that, so a build that starts
+        // between the read and the write is left alone and this push queues its own.
+        if (trigger == ProjectBuildTrigger.Push && head is { } pushed)
+        {
+            var waiting = _db.OeProjectBuilds
+                .Where(b => b.PipelineId == pipelineId
+                    && b.Trigger == ProjectBuildTrigger.Push
+                    && b.Status == ProjectBuildStatus.Queued
+                    && b.Release != null && b.Release.Status == "ingesting");
+            if (await waiting.CountAsync(ct).ConfigureAwait(false) >= MaxWaitingPushBuilds)
+            {
+                var newest = await waiting.AsNoTracking()
+                    .OrderByDescending(b => b.Id)
+                    .Select(b => new { b.Id, b.ReleaseId })
+                    .FirstAsync(ct).ConfigureAwait(false);
+                var moved = await _db.OeProjectBuilds
+                    .Where(b => b.Id == newest.Id && b.Status == ProjectBuildStatus.Queued)
+                    .ExecuteUpdateAsync(u => u
+                        .SetProperty(b => b.HeadSha, pushed.Sha)
+                        .SetProperty(b => b.HeadRepositoryId, pushed.RepositoryId), ct)
+                    .ConfigureAwait(false);
+                if (moved == 1)
+                {
+                    _logger.LogInformation(
+                        "Pipeline {PipelineId} already has {Count} builds waiting; moved build {BuildId} onto pushed commit {HeadSha} instead of queuing another.",
+                        pipelineId, MaxWaitingPushBuilds, newest.Id, pushed.Sha);
+                    return newest.ReleaseId!.Value;
+                }
             }
         }
 
@@ -211,6 +279,10 @@ public sealed class ProjectBuildImporter
             // whether the build is a check-only preview build.
             BcTarget = bcTarget,
             Trigger = trigger,
+            // A build on push builds the commit its push named, not wherever the
+            // branch is by the time the worker reaches it.
+            HeadSha = head?.Sha,
+            HeadRepositoryId = head?.RepositoryId,
             StartedAt = now,
         });
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
@@ -226,6 +298,14 @@ public sealed class ProjectBuildImporter
             pipeline.ProjectName, bcTarget, pipelineId, pipeline.ProjectId, releaseId);
         return releaseId;
     }
+
+    /// <summary>
+    /// Why a build on push could not clone, in words for the pipeline page, where
+    /// people other than the one it runs as read it.
+    /// </summary>
+    internal static string NothingToCloneWithOnPush(RepositoryProvider provider) => provider == RepositoryProvider.GitHub
+        ? "the person it runs as has no GitHub account connected and no GitHub token under Account → Repository access."
+        : $"the person it runs as has no {provider.DisplayName()} token under Account → Repository access.";
 
     /// <summary>
     /// Creates an ingesting project Release for a pull-request build and queues

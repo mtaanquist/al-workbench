@@ -69,6 +69,21 @@
                                disabled="@_saving" placeholder="e.g. main or release/25.0" spellcheck="false" autocomplete="off" />
                         <small class="field__hint">Builds check out this branch. Leave empty for each repository's default branch.</small>
                     </div>
+                    @* Only where pushes can arrive: a solution repository the connected
+                       GitHub organisation holds, the same list publishing offers. Kept
+                       while it is on, so it can still be turned off. *@
+                    @if (_releaseRepositories is { Count: > 0 } || _buildOnPush)
+                    {
+                    <div class="field">
+                        <label class="@(_buildOnPush ? "check is-checked" : "check")">
+                            <input id="pe-build-on-push" type="checkbox" checked="@_buildOnPush" disabled="@_saving"
+                                   @onchange="e => _buildOnPush = (bool)(e.Value ?? false)" />
+                            <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                            <span>Build automatically when new commits are pushed</span>
+                        </label>
+                        <small class="field__hint">Each push to this pipeline's branch (or the default branch, if none is set) gets its own build, one after another. Builds use the repository access of whoever turned this on.</small>
+                    </div>
+                    }
                     <div class="field">
                         <label class="@(_previewCheck ? "check is-checked" : "check")">
                             <input id="pe-preview-check" type="checkbox" checked="@_previewCheck" disabled="@_saving"
@@ -298,6 +313,8 @@
     private bool _previewCheck;
     // Whether builds add their build number to each app's version.
     private bool _autoVersion = true;
+    // Whether a push to the branch starts a build (#1079).
+    private bool _buildOnPush;
     // The solution's GitHub repositories inside the connected organisation. Empty
     // (and the whole field hidden) when there is no GitHub connection - an
     // organisation on Azure DevOps is shown no GitHub machinery at all.
@@ -359,7 +376,7 @@
     /// <summary>Opens the dialog to edit an existing pipeline. <paramref name="requestedAppIdsJson"/> is the stored selection (null = all).</summary>
     public async Task OpenForEditAsync(int pipelineId, int projectId, string projectName, string name, string? requestedAppIdsJson,
         int? githubReleaseRepositoryId = null, string? branch = null, bool previewCheck = false, bool autoVersion = true,
-        bool nameIsCustom = false)
+        bool nameIsCustom = false, bool buildOnPush = false)
     {
         ResetForCreate();
         _editing = true;
@@ -376,6 +393,7 @@
         _branch = branch ?? string.Empty;
         _previewCheck = previewCheck;
         _autoVersion = autoVersion;
+        _buildOnPush = buildOnPush;
         _open = true;
         _focusPending = true;
         await LoadReleaseRepositoriesAsync();
@@ -393,6 +411,7 @@
         _branch = string.Empty;
         _previewCheck = false;
         _autoVersion = true;
+        _buildOnPush = false;
         _initialSelection = null;
         _initialIsAll = true; // new pipelines default to "build everything"
         _selectionSeeded = false;
@@ -720,7 +739,8 @@
                 _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
                 string.IsNullOrWhiteSpace(_branch) ? null : _branch.Trim(),
                 _previewCheck,
-                _autoVersion);
+                _autoVersion,
+                _buildOnPush);
 
             int id;
             if (_editing && _pipelineId is { } pid)

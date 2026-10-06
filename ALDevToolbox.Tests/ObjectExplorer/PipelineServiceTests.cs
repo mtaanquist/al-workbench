@@ -252,6 +252,72 @@ public sealed class PipelineServiceTests : IDisposable
         }
     }
 
+    // --- Building on push (#1079) ------------------------------------------
+
+    [Fact]
+    public async Task Building_on_push_is_off_unless_asked_and_runs_as_whoever_turned_it_on()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var alice = await SeedUserAsync(ctx, "alice@cronus.test");
+        var bob = await SeedUserAsync(ctx, "bob@cronus.test");
+        _db.OrgContext.CurrentUserId = alice;
+        var svc = NewService(ctx);
+
+        var off = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Test", null));
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null, BuildOnPush: true));
+        _db.OrgContext.CurrentUserId = bob;
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production line", null, BuildOnPush: true));
+
+        await using (var read = _db.NewContext())
+        {
+            var plain = await read.OePipelines.SingleAsync(p => p.Id == off);
+            plain.BuildOnPush.Should().BeFalse();
+            plain.BuildOnPushByUserId.Should().BeNull();
+            var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+            pipeline.BuildOnPush.Should().BeTrue();
+            pipeline.BuildOnPushByUserId.Should().Be(alice, "someone else saving the pipeline does not take it over");
+        }
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production line", null, BuildOnPush: false));
+        await using (var read = _db.NewContext())
+        {
+            var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+            pipeline.BuildOnPush.Should().BeFalse();
+            pipeline.BuildOnPushByUserId.Should().BeNull();
+        }
+    }
+
+    [Fact]
+    public async Task Build_them_as_me_resumes_paused_building_on_push()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var alice = await SeedUserAsync(ctx, "alice@cronus.test");
+        var bob = await SeedUserAsync(ctx, "bob@cronus.test");
+        _db.OrgContext.CurrentUserId = alice;
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null, BuildOnPush: true));
+        var plain = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Test", null));
+        await using (var paused = _db.NewContext())
+        {
+            await paused.OePipelines.Where(p => p.Id == id)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.BuildOnPushBlocked, "the person who turned it on can no longer manage this solution."));
+        }
+
+        _db.OrgContext.CurrentUserId = bob;
+        await using (var act = _db.NewContext())
+        {
+            await NewService(act).TakeOverBuildOnPushAsync(id);
+            var refused = () => NewService(act).TakeOverBuildOnPushAsync(plain);
+            await refused.Should().ThrowAsync<PlanValidationException>();
+        }
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.BuildOnPushByUserId.Should().Be(bob);
+        pipeline.BuildOnPushBlocked.Should().BeNull();
+    }
+
     // --- Nightly preview check (#994) ---------------------------------------
 
     [Fact]

@@ -478,6 +478,7 @@
                                     @(pipelines.Count == 1 ? "The build pipeline for" : "Build pipelines for")
                                     @CodeList(pipelines) @(pipelines.Count == 1 ? "is" : "are") on the solution's
                                     <a href="@($"/solutions/{pipelineSolutionId}/pipelines")">Pipelines tab</a>.
+                                    @(pipelines.Count == 1 ? "It builds" : "Each builds") automatically when new commits are pushed to its branch.
                                 </span>
                             }
                             @* The things a consultant does next, side by
