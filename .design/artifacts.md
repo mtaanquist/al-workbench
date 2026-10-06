@@ -301,9 +301,18 @@ populated; one primary button per page.
   **Create solution** in create mode and **Save solution** once it exists; building moved to
   Pipelines.*
 
+  **Each tab has its own address** (#1077): `/solutions/{slug}/general`, `/repositories`, `/bc`,
+  `/pipelines`, `/symbols`, `/access`; Customer, the default, is the bare `/solutions/{slug}`.
+  Opening one of those lands on that tab. Clicking a tab switches it in place and rewrites the
+  address bar (replacing the entry, so Back leaves the solution) rather than navigating: General
+  and Repositories share one Save, and a navigation builds the page afresh and would drop what
+  was typed. A tab name that is unknown, or one this person cannot open, lands on the bare
+  address. The old `?tab=` links still work and are forwarded to the path form. The create form
+  (`/solutions/new`) has no address to put a tab in.
+
   **Readable addresses.** A solution also answers at `/solutions/{slug}` (`cronus-a-s`), and that
   is the address the app links to and the one the page settles on: `/solutions/{id}` still
-  resolves and forwards there, keeping `?tab=`. The slug is lowercase ASCII words joined by
+  resolves and forwards there, keeping the tab. The slug is lowercase ASCII words joined by
   dashes, unique per organisation among active solutions, never all digits (that shape is an id)
   and never `new`. It is derived from the short name (ABJ becomes `abj`), or the name when there is none, on create (a counter is appended when two names
   fold to the same slug), kept on a rename so saved links keep working, and editable as

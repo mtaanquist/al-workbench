@@ -74,6 +74,8 @@ public sealed class SolutionSlugTests
     {
         SolutionLinks.Solution("cronus", 7).Should().Be("/solutions/cronus");
         SolutionLinks.Solution(null, 7).Should().Be("/solutions/7");
+        SolutionLinks.Solution("cronus", 7, "repositories").Should().Be("/solutions/cronus/repositories");
+        SolutionLinks.Solution(null, 7, "bc").Should().Be("/solutions/7/bc");
 
         SolutionLinks.Environment("cronus", "Production", 89).Should().Be("/environments/cronus/Production");
         SolutionLinks.Environment("cronus", "Production", 89, "apps").Should().Be("/environments/cronus/Production/apps");

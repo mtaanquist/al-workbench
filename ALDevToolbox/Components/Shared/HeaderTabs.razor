@@ -15,7 +15,9 @@
     A tab may instead carry OnSelected and switch a section in page state. That
     is for a family whose sections share one unsaved form - the solution settings
     page has a single Save covering General and Repositories, so navigating
-    between them would silently discard what the user had typed. The row looks
+    between them would silently discard what the user had typed (a link with
+    @onclick:preventDefault does not help: enhanced navigation still follows it).
+    The page can rewrite the address itself if the section has one. The row looks
     identical either way; only the element differs.
 *@
 

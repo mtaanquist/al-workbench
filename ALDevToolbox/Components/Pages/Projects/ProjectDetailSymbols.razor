@@ -44,7 +44,7 @@
 @if (_done is { } done)
 {
     <Alert Tone="AlertTone.Success" Role="status">
-        <span>@done <a href="@($"/solutions/{Id}?tab=pipelines")">Build again</a> to use @(_doneCount == 1 ? "it" : "them").</span>
+        <span>@done <a href="@($"/solutions/{Id}/pipelines")">Build again</a> to use @(_doneCount == 1 ? "it" : "them").</span>
     </Alert>
 }
 @if (_error is { } error)
