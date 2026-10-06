@@ -1428,6 +1428,99 @@ public sealed class DeliveryServiceTests : IDisposable
         _queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
+    // ── Who is online before a deployment ───────────────────────────────────
+
+    private static BcSession Session(int id, string user, string clientType = "WebClient") =>
+        new(id, user, clientType, DateTimeOffset.UtcNow, "", "", "", "", "", null, "", null);
+
+    [Fact]
+    public async Task CheckOpenSessionsAsync_counts_end_users_and_delegated_users_in_the_target_environment()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        _admin.Sessions =
+        [
+            Session(1, "ola@cronus.com"),
+            Session(2, "OLA@cronus.com", "WebServiceClient"),
+            Session(3, "anna@cronus.com"),
+            Session(4, "USER_E5EE0099AFAB445E8B604FE18E05FC1A"),
+            Session(5, "ola@cronus.com", "Background"),
+        ];
+
+        var check = await NewService(ctx).CheckOpenSessionsAsync(seed.ReleasePipelineId);
+
+        check.Should().Be(new OpenSessionsCheck("Production", EndUsers: 2, DelegatedUsers: 1));
+        _admin.Requested.Should().Equal("Production");
+    }
+
+    [Fact]
+    public async Task CheckOpenSessionsAsync_reports_a_Business_Central_failure_instead_of_throwing()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        _admin.SessionsThrow = new BcApiException(null, "Couldn't reach the Business Central Admin Center API while reading who is signed in.");
+
+        var check = await NewService(ctx).CheckOpenSessionsAsync(seed.ReleasePipelineId);
+
+        check.Failure.Should().Be("Business Central didn't answer.", "the wire wording stays in the log");
+        check.NeedsConfirmation.Should().BeTrue("we could not tell, so the person is asked");
+    }
+
+    [Fact]
+    public async Task CheckOpenSessionsAsync_gives_up_on_a_slow_answer_and_says_so()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        _admin.SessionsDelay = TimeSpan.FromSeconds(30);
+        var service = NewService(ctx);
+        service.OpenSessionsTimeout = TimeSpan.FromMilliseconds(100);
+
+        var check = await service.CheckOpenSessionsAsync(seed.ReleasePipelineId);
+
+        check.Failure.Should().Be("Business Central took too long to answer.");
+    }
+
+    [Fact]
+    public async Task CheckOpenSessionsAsync_reports_a_missing_connection_instead_of_throwing()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        _tokens.Throw = new BcApiException(null, "The Business Central client secret has expired.");
+
+        var check = await NewService(ctx).CheckOpenSessionsAsync(seed.ReleasePipelineId);
+
+        check.Failure.Should().Be("The Business Central client secret has expired.");
+    }
+
+    [Fact]
+    public async Task CheckOpenSessionsAsync_is_refused_without_manage_rights()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.Visibility, ProjectVisibility.ReadOnly));
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("Someone else");
+
+        var act = () => NewService(_db.NewContext()).CheckOpenSessionsAsync(seed.ReleasePipelineId);
+
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+        _admin.Requested.Should().BeEmpty("nobody who may not deploy learns who is signed in");
+    }
+
+    [Fact]
+    public async Task CheckOpenSessionsAsync_refuses_a_deleted_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+
+        var act = () => NewService(ctx).CheckOpenSessionsAsync(seed.ReleasePipelineId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ReleasePipeline");
+    }
+
     [Fact]
     public async Task ApproveProposalAsync_is_refused_without_manage_rights()
     {
@@ -1742,7 +1835,16 @@ public sealed class DeliveryServiceTests : IDisposable
         public Task SetUpdateSettingsAsync(string accessToken, string? applicationFamily, string environmentName, TimeOnly start, TimeOnly end, string windowsTimeZoneId, CancellationToken ct = default)
             => throw new NotSupportedException();
         public Task RecoverEnvironmentAsync(string accessToken, string? applicationFamily, string environmentName, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<IReadOnlyList<BcSession>> ListSessionsAsync(string accessToken, string? applicationFamily, string environmentName, CancellationToken ct = default) => throw new NotSupportedException();
+        /// <summary>Who is signed in, for the check before a deployment, unless <see cref="SessionsThrow"/> is set.</summary>
+        public IReadOnlyList<BcSession> Sessions = [];
+        public Exception? SessionsThrow;
+        public TimeSpan SessionsDelay = TimeSpan.Zero;
+        public async Task<IReadOnlyList<BcSession>> ListSessionsAsync(string accessToken, string? applicationFamily, string environmentName, CancellationToken ct = default)
+        {
+            Requested.Add(environmentName);
+            if (SessionsDelay > TimeSpan.Zero) await Task.Delay(SessionsDelay, ct);
+            return SessionsThrow is not null ? throw SessionsThrow : Sessions;
+        }
         public Task CancelSessionAsync(string accessToken, string? applicationFamily, string environmentName, int sessionId, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<BcEnvironmentCopy> CopyEnvironmentAsync(string accessToken, string? applicationFamily, string sourceEnvironmentName, string newEnvironmentName, string newEnvironmentType, CancellationToken ct = default) => throw new NotSupportedException();
     }
