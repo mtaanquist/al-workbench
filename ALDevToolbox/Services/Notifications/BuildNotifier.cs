@@ -80,9 +80,14 @@ public sealed class BuildNotifier
         // The finished build of the same kind before this one, by finish time:
         // after a restart, builds can finish out of the order they started in.
         var finishedAt = build.FinishedAt ?? DateTime.MaxValue;
+        // A build on push is the pipeline's ordinary build started another way, so it
+        // is compared with the manual builds and they with it (#1079).
+        string[] sameKind = build.Trigger is ProjectBuildTrigger.Manual or ProjectBuildTrigger.Push
+            ? [ProjectBuildTrigger.Manual, ProjectBuildTrigger.Push]
+            : [build.Trigger];
         var previous = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId == pipelineId
-                && b.Trigger == build.Trigger
+                && sameKind.Contains(b.Trigger)
                 && b.BcTarget == build.BcTarget
                 && b.Id != build.Id
                 && b.FinishedAt != null

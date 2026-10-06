@@ -315,7 +315,9 @@ public sealed class ArtifactService
                 p.Project.CreatedByUserId,
                 p.PreviewCheck,
                 p.PreviewCheck ? p.PreviewCheckBlocked : null,
-                null))
+                null,
+                p.BuildOnPush,
+                p.BuildOnPush ? p.BuildOnPushBlocked : null))
             .FirstOrDefaultAsync(ct);
         if (header is null || !header.PreviewCheck) return header;
 
@@ -502,7 +504,8 @@ public sealed class ArtifactService
                 // was; the repositories' default branch as known now stands in.
                 DefaultBranch: b.Branch is not null || b.Trigger == ProjectBuildTrigger.PullRequest
                     ? null
-                    : b.DefaultBranch ?? knownDefaults.GetValueOrDefault(b.ProjectId));
+                    : b.DefaultBranch ?? knownDefaults.GetValueOrDefault(b.ProjectId),
+                FromPush: b.Trigger == ProjectBuildTrigger.Push);
         }).ToList();
     }
 
@@ -809,7 +812,9 @@ public sealed record DeliverySummary(
 /// known now). Display only.
 /// </param>
 public sealed record BuildSummary(int BuildId, string Status, string? BcVersion, string? Branch, string? CommitShort, DateTime StartedAt, DateTime? FinishedAt, int ArtifactCount,
-    string? DefaultBranch = null)
+    string? DefaultBranch = null,
+    /// <summary>True when a push to the pipeline's branch started the build rather than a person.</summary>
+    bool FromPush = false)
 {
     /// <summary>The branch to show: the one built, its default branch's name, or a plain "(default branch)".</summary>
     [JsonIgnore]
@@ -844,7 +849,9 @@ public sealed record PipelineArtifactsRow(
 public sealed record PipelineHeader(int Id, string Name, int ProjectId, string ProjectName, string? OwnerName, int? OwnerUserId,
     bool PreviewCheck = false,
     string? PreviewCheckBlocked = null,
-    IReadOnlyList<PreviewCheckResult>? PreviewChecks = null);
+    IReadOnlyList<PreviewCheckResult>? PreviewChecks = null,
+    bool BuildOnPush = false,
+    string? BuildOnPushBlocked = null);
 
 /// <summary>
 /// The newest build of the nightly preview check for one preview target. See
@@ -914,7 +921,9 @@ public sealed record BuildRow(
     /// <summary>The exact Business Central build the symbols came from (e.g. <c>29.0.52914.0</c>). Null for builds made before it was recorded.</summary>
     string? BcArtifactVersion = null,
     /// <summary>When <see cref="Branch"/> is null, the default branch the build was made from, as best known. Display only.</summary>
-    string? DefaultBranch = null)
+    string? DefaultBranch = null,
+    /// <summary>True when a push to the pipeline's branch started the build rather than a person.</summary>
+    bool FromPush = false)
 {
     /// <summary>The branch to show: the one built, its default branch's name, or a plain "(default branch)".</summary>
     [JsonIgnore]

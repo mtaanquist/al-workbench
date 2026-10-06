@@ -143,6 +143,15 @@ public sealed class ProjectBuildService
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
         }
 
+        // A build started by a push checks the pushed repository out at the push's own
+        // commit, through the same option a pull-request build uses for its head. The
+        // row carries it so a restart-resumed job builds the same commit (#1079).
+        if (build is { Trigger: ProjectBuildTrigger.Push, HeadSha.Length: > 0, HeadRepositoryId: { } pushedRepositoryId }
+            && options.HeadSha is null)
+        {
+            options = options with { RepositoryId = pushedRepositoryId, HeadSha = build.HeadSha };
+        }
+
         // A next-major build compiles with the newest beta compiler, because the
         // stable one may not read the next major's symbols; everything else keeps
         // the stable compiler every build has used.
@@ -1086,6 +1095,9 @@ public sealed class ProjectBuildService
                 // that object and detach onto it. Everything else about the build
                 // (symbols, dependency order, ingest) is then identical to a manual
                 // one, which is the point.
+                // The branch is read before that checkout, which detaches HEAD: a build
+                // on push of the default branch still records which branch it was.
+                var clonedBranch = branch is null ? await CaptureBranchAsync(gitPath, dest, ct).ConfigureAwait(false) : branch;
                 if (options.HeadSha is { Length: > 0 } headSha && options.RepositoryId == repo.Id)
                 {
                     var checkedOut = await CheckoutCommitAsync(gitPath, dest, headSha, env, pat, repo, logs, results, ct)
@@ -1094,7 +1106,6 @@ public sealed class ProjectBuildService
                 }
 
                 var (sha, date) = await CaptureCommitAsync(gitPath, dest, ct).ConfigureAwait(false);
-                var clonedBranch = branch is null ? await CaptureBranchAsync(gitPath, dest, ct).ConfigureAwait(false) : branch;
                 clones.Add(new ClonedRepo(dest, repo.Url, sha, date, repo.Id, repo.DisplayName, clonedBranch));
                 logs.Add(new PendingLog(repo.Id, repo.DisplayName,
                     $"Cloned {repo.Url} at {(sha is null ? "(unknown commit)" : sha)} using {used.Source}.{(cloneLog.Length > 0 ? "\n" + cloneLog : "")}"));
@@ -1217,18 +1228,27 @@ public sealed class ProjectBuildService
         if (!CommitShaRegex.IsMatch(commitSha))
         {
             results.Add(new BuildAppResult(repo.DisplayName, string.Empty, ProjectBuildResultStatus.Failed,
-                "The pull request did not name a commit that could be checked out.", RepoUrl: repo.Url));
+                "The build was not given a commit that could be checked out.", RepoUrl: repo.Url));
             logs.Add(new PendingLog(repo.Id, repo.DisplayName, "Refused a commit name that is not a git object id."));
             _logger.LogWarning(
-                "Pull-request build: refused a commit name that is not a git object id in {Repo}.", repo.DisplayName);
+                "Build: refused a commit name that is not a git object id in {Repo}.", repo.DisplayName);
             return false;
         }
 
-        var outcome = await _processRunner.RunAsync(new ProcessRunRequest(
-            // "--" ends git's option parsing, so a revision beginning with a dash
-            // can never be read as a switch.
-            gitPath, new[] { "-C", cloneDir, "fetch", "--depth", "1", "origin", "--", commitSha }, cloneDir, env, BuildCloneTimeout()), ct)
+        // A build on push usually names a commit the clone already holds, because it
+        // is still on the branch that was just cloned. Checking that out directly
+        // keeps the clone's full history: a shallow fetch of a commit already present
+        // would graft it, and the changelog walks that history (#1079).
+        var local = await _processRunner.RunAsync(new ProcessRunRequest(
+            gitPath, new[] { "-C", cloneDir, "cat-file", "-e", commitSha + "^{commit}" }, cloneDir, env), ct)
             .ConfigureAwait(false);
+        var outcome = local.Succeeded
+            ? local
+            : await _processRunner.RunAsync(new ProcessRunRequest(
+                // "--" ends git's option parsing, so a revision beginning with a dash
+                // can never be read as a switch.
+                gitPath, new[] { "-C", cloneDir, "fetch", "--depth", "1", "origin", "--", commitSha }, cloneDir, env, BuildCloneTimeout()), ct)
+                .ConfigureAwait(false);
         if (outcome.Succeeded)
         {
             outcome = await _processRunner.RunAsync(new ProcessRunRequest(
@@ -1236,14 +1256,14 @@ public sealed class ProjectBuildService
                 .ConfigureAwait(false);
             if (outcome.Succeeded)
             {
-                logs.Add(new PendingLog(repo.Id, repo.DisplayName, $"Checked out {commitSha} for the pull request."));
+                logs.Add(new PendingLog(repo.Id, repo.DisplayName, $"Checked out {commitSha}."));
                 return true;
             }
         }
 
         var detail = Sanitize(string.IsNullOrWhiteSpace(outcome.StdErr) ? outcome.StdOut : outcome.StdErr, pat).Trim();
         results.Add(new BuildAppResult(repo.DisplayName, string.Empty, ProjectBuildResultStatus.Failed,
-            $"Could not check out the commit the pull request points at ({Short(commitSha)}). It may have been replaced since.",
+            $"Could not check out the commit this build was asked to build ({Short(commitSha)}). It may have been replaced since.",
             RepoUrl: repo.Url));
         logs.Add(new PendingLog(repo.Id, repo.DisplayName, $"Could not check out {commitSha}: {detail}".Trim()));
         _logger.LogWarning("Pull-request build: could not check out {CommitSha} in {Repo}.", commitSha, repo.DisplayName);
