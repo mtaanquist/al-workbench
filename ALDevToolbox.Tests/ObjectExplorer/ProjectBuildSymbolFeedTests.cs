@@ -574,18 +574,116 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         (await LogAsync(buildId, "Changes")).Should().Contain("no earlier build of this pipeline produced it");
     }
 
+    [Fact]
+    public async Task A_baseline_that_recorded_its_commits_twice_still_works()
+    {
+        // A rebuilt or restarted build writes its commit rows again.
+        var (projectId, releaseId, buildId, priorId) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        await using (var seed = _db.NewContext())
+        {
+            var row = await seed.OeProjectBuildRepoCommits.AsNoTracking().SingleAsync(c => c.ProjectBuildId == priorId);
+            seed.OeProjectBuildRepoCommits.Add(new OeProjectBuildRepoCommit
+            {
+                OrganizationId = row.OrganizationId, ProjectBuildId = priorId, ProjectRepositoryId = row.ProjectRepositoryId,
+                RepoUrl = row.RepoUrl, RepoDisplayName = row.RepoDisplayName, CommitHash = PriorSha,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == priorId);
+    }
+
+    [Fact]
+    public async Task An_app_whose_build_never_reached_a_GitHub_release_is_built_again()
+    {
+        var (projectId, releaseId, buildId, priorId) = await SeedChangedOnlyAsync(changedAppsOnly: true, publishesToGitHub: true);
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == null);
+        (await LogAsync(buildId, "Changes")).Should().Contain($"build #{priorId} did not publish it to a GitHub release");
+    }
+
+    [Fact]
+    public async Task An_app_from_a_build_that_did_reach_a_GitHub_release_is_carried()
+    {
+        var (projectId, releaseId, buildId, priorId) = await SeedChangedOnlyAsync(changedAppsOnly: true, publishesToGitHub: true, priorReleaseTag: "v1.0.500.0");
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == priorId);
+    }
+
+    [Fact]
+    public async Task An_app_compiled_before_the_sibling_it_depends_on_was_last_rebuilt_is_built_again()
+    {
+        // Sales was last built in the older build; Base alone in the newer one. Sales's
+        // .app was compiled against the older Base, so it does not travel with the new one.
+        var (projectId, releaseId, buildId, olderId) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        int newerId;
+        await using (var seed = _db.NewContext())
+        {
+            var older = await seed.OeProjectBuilds.Include(b => b.Artifacts).SingleAsync(b => b.Id == olderId);
+            var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+            var newer = PriorBuild(projectId, older.PipelineId!.Value, DateTime.UtcNow.AddMinutes(-30), [Pair[0]], "1.0.600.0");
+            seed.OeProjectBuilds.Add(newer);
+            await seed.SaveChangesAsync();
+            seed.OeProjectBuildRepoCommits.Add(Commit(newer.Id, repoId, PriorSha));
+            await seed.SaveChangesAsync();
+            newerId = newer.Id;
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        var artifacts = await ArtifactsAsync(buildId);
+        artifacts.Single(a => a.AppId == BaseId).CarriedFromBuildId.Should().Be(newerId);
+        artifacts.Single(a => a.AppId == SalesId).CarriedFromBuildId.Should().BeNull();
+        (await LogAsync(buildId, "Changes")).Should().Contain("CRONUS Sales Extension: rebuilt, because CRONUS Base Extension changed.");
+    }
+
+    [Fact]
+    public async Task An_app_built_for_another_Business_Central_version_is_built_again()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: true, priorBcVersion: "28.5");
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == null);
+        (await LogAsync(buildId, "Changes")).Should().Contain("targeted Business Central 28.5 and this one targets 29.0");
+    }
+
+    [Fact]
+    public async Task A_stored_commit_that_is_not_a_commit_id_never_reaches_git()
+    {
+        var (projectId, releaseId, buildId, priorId) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        await using (var seed = _db.NewContext())
+        {
+            await seed.OeProjectBuildRepoCommits.Where(c => c.ProjectBuildId == priorId)
+                .ExecuteUpdateAsync(u => u.SetProperty(c => c.CommitHash, "--output=/tmp/x"));
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.DiffedFolders.Should().BeEmpty();
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == null);
+    }
+
     /// <summary>
     /// A pipeline with numbering on, an earlier finished build of it that produced
     /// both extensions as 1.0.500.0 at <see cref="PriorSha"/>, and the queued build at
     /// <see cref="HeadSha"/>.
     /// </summary>
-    private async Task<(int ProjectId, int ReleaseId, int BuildId, int PriorBuildId)> SeedChangedOnlyAsync(bool changedAppsOnly)
+    private async Task<(int ProjectId, int ReleaseId, int BuildId, int PriorBuildId)> SeedChangedOnlyAsync(
+        bool changedAppsOnly, bool publishesToGitHub = false, string? priorReleaseTag = null, string priorBcVersion = "29.0")
     {
         var (projectId, releaseId, buildId) = await SeedAsync();
         _tools.Extensions = Pair;
         _tools.HeadSha = HeadSha;
         await using var seed = _db.NewContext();
         var now = DateTime.UtcNow;
+        var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
         var pipeline = new OePipeline
         {
             OrganizationId = TestDb.DefaultOrgId,
@@ -593,56 +691,65 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             Name = "main",
             AutoVersion = true,
             ChangedAppsOnly = changedAppsOnly,
+            GithubReleaseRepositoryId = publishesToGitHub ? repoId : null,
             CreatedAt = now,
             UpdatedAt = now,
         };
         seed.OePipelines.Add(pipeline);
         await seed.SaveChangesAsync();
 
-        var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
-        var prior = new OeProjectBuild
-        {
-            OrganizationId = TestDb.DefaultOrgId,
-            ProjectId = projectId,
-            PipelineId = pipeline.Id,
-            Status = ProjectBuildStatus.Ready,
-            Trigger = ProjectBuildTrigger.Manual,
-            BcVersion = "29.0",
-            StartedAt = now.AddHours(-1),
-            FinishedAt = now.AddMinutes(-55),
-        };
-        foreach (var ext in Pair)
-        {
-            var content = SyntheticApp.Build(ext.Id, ext.Name, "CRONUS", "1.0.500.0");
-            prior.Artifacts.Add(new OeProjectBuildArtifact
-            {
-                OrganizationId = TestDb.DefaultOrgId,
-                AppId = ext.Id,
-                FileName = $"CRONUS_{ext.Name.Replace(" ", string.Empty)}_1.0.500.0.app",
-                AppName = ext.Name,
-                AppVersion = "1.0.500.0",
-                SizeBytes = content.LongLength,
-                Content = content,
-                CreatedAt = now,
-            });
-        }
+        var prior = PriorBuild(projectId, pipeline.Id, now.AddHours(-1), Pair, "1.0.500.0", priorBcVersion);
+        prior.GithubReleaseTag = priorReleaseTag;
         seed.OeProjectBuilds.Add(prior);
         await seed.SaveChangesAsync();
-        seed.OeProjectBuildRepoCommits.Add(new OeProjectBuildRepoCommit
-        {
-            OrganizationId = TestDb.DefaultOrgId,
-            ProjectBuildId = prior.Id,
-            ProjectRepositoryId = repoId,
-            RepoUrl = "https://github.com/cronus/extensions",
-            RepoDisplayName = "cronus/extensions",
-            CommitHash = PriorSha,
-        });
+        seed.OeProjectBuildRepoCommits.Add(Commit(prior.Id, repoId, PriorSha));
         var build = await seed.OeProjectBuilds.SingleAsync(b => b.Id == buildId);
         build.PipelineId = pipeline.Id;
         build.Trigger = ProjectBuildTrigger.Manual;
         await seed.SaveChangesAsync();
         return (projectId, releaseId, buildId, prior.Id);
     }
+
+    private static OeProjectBuild PriorBuild(int projectId, int pipelineId, DateTime startedAt, IEnumerable<FakeExtension> apps, string version, string bcVersion = "29.0")
+    {
+        var build = new OeProjectBuild
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            PipelineId = pipelineId,
+            Status = ProjectBuildStatus.Ready,
+            Trigger = ProjectBuildTrigger.Manual,
+            BcVersion = bcVersion,
+            StartedAt = startedAt,
+            FinishedAt = startedAt.AddMinutes(5),
+        };
+        foreach (var ext in apps)
+        {
+            var content = SyntheticApp.Build(ext.Id, ext.Name, "CRONUS", version);
+            build.Artifacts.Add(new OeProjectBuildArtifact
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                AppId = ext.Id,
+                FileName = $"CRONUS_{ext.Name.Replace(" ", string.Empty)}_{version}.app",
+                AppName = ext.Name,
+                AppVersion = version,
+                SizeBytes = content.LongLength,
+                Content = content,
+                CreatedAt = startedAt,
+            });
+        }
+        return build;
+    }
+
+    private static OeProjectBuildRepoCommit Commit(int buildId, int repoId, string sha) => new()
+    {
+        OrganizationId = TestDb.DefaultOrgId,
+        ProjectBuildId = buildId,
+        ProjectRepositoryId = repoId,
+        RepoUrl = "https://github.com/cronus/extensions",
+        RepoDisplayName = "cronus/extensions",
+        CommitHash = sha,
+    };
 
     private async Task<List<OeProjectBuildArtifact>> ArtifactsAsync(int buildId)
     {

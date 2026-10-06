@@ -29,7 +29,8 @@ internal sealed class PipelineConfiguration : IEntityTypeConfiguration<OePipelin
         // "unset" and leave it to the database default, so turning numbering off on a new
         // pipeline would not stick. The migration's default only fills existing rows.
         entity.Property(e => e.AutoVersion).HasColumnName("auto_version").IsRequired();
-        entity.Property(e => e.ChangedAppsOnly).HasColumnName("changed_apps_only").HasDefaultValue(false).IsRequired();
+        // No HasDefaultValue(true), for the same reason as AutoVersion above.
+        entity.Property(e => e.ChangedAppsOnly).HasColumnName("changed_apps_only").IsRequired();
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
         entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");

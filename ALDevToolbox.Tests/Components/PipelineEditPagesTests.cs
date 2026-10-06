@@ -132,16 +132,16 @@ public sealed class PipelineEditPagesTests : IDisposable
         var cut = _ctx.Render<PipelineEdit>(p => p.Add(x => x.PipelineId, seed.PipelineId));
         cut.WaitForAssertion(() => cut.Find(".pe-picker"));
         cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Trim().Should().Be("Save build pipeline");
-        cut.Find("#pe-changed-apps-only").HasAttribute("checked").Should().BeFalse("every extension is published unless asked otherwise");
+        cut.Find("#pe-changed-apps-only").HasAttribute("checked").Should().BeTrue("only changed extensions are published unless turned off");
         cut.Find("#pe-branch").Input("test");
-        cut.Find("#pe-changed-apps-only").Change(true);
+        cut.Find("#pe-changed-apps-only").Change(false);
         cut.Find(".page-head .btn--primary").Click();
 
         cut.WaitForAssertion(() => Nav.ToBaseRelativePath(Nav.Uri).Should().Be($"pipelines/{seed.PipelineId}"));
         await using var read = _db.NewContext();
         var saved = await read.OePipelines.AsNoTracking().SingleAsync(p => p.Id == seed.PipelineId);
         saved.Branch.Should().Be("test");
-        saved.ChangedAppsOnly.Should().BeTrue();
+        saved.ChangedAppsOnly.Should().BeFalse();
     }
 
     [Fact]

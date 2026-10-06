@@ -255,7 +255,7 @@ public sealed class PipelineServiceTests : IDisposable
     // --- Publishing only what changed (#1094) -------------------------------
 
     [Fact]
-    public async Task A_new_pipeline_publishes_every_extension_unless_asked_for_only_the_changed_ones()
+    public async Task A_new_pipeline_publishes_only_changed_extensions_unless_turned_off()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
@@ -264,19 +264,19 @@ public sealed class PipelineServiceTests : IDisposable
         var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
         await using (var read = _db.NewContext())
         {
-            (await read.OePipelines.SingleAsync(p => p.Id == id)).ChangedAppsOnly.Should().BeFalse();
-        }
-
-        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production", null, ChangedAppsOnly: true));
-        await using (var read = _db.NewContext())
-        {
             (await read.OePipelines.SingleAsync(p => p.Id == id)).ChangedAppsOnly.Should().BeTrue();
         }
 
-        var other = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Test", null, ChangedAppsOnly: true));
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production", null, ChangedAppsOnly: false));
         await using (var read = _db.NewContext())
         {
-            (await read.OePipelines.SingleAsync(p => p.Id == other)).ChangedAppsOnly.Should().BeTrue();
+            (await read.OePipelines.SingleAsync(p => p.Id == id)).ChangedAppsOnly.Should().BeFalse();
+        }
+
+        var other = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Test", null, ChangedAppsOnly: false));
+        await using (var read = _db.NewContext())
+        {
+            (await read.OePipelines.SingleAsync(p => p.Id == other)).ChangedAppsOnly.Should().BeFalse("turning it off on a new pipeline sticks");
         }
     }
 

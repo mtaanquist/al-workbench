@@ -21,7 +21,8 @@ namespace ALDevToolbox.Data.Migrations
                 table: "oe_pipelines",
                 type: "boolean",
                 nullable: false,
-                defaultValue: false);
+                // Existing pipelines take it up too; new ones get it from the entity.
+                defaultValue: true);
         }
 
         /// <inheritdoc />

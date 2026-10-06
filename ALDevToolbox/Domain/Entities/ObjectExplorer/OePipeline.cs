@@ -137,11 +137,11 @@ public class OePipeline
     /// Whether this pipeline's builds publish only the extensions that changed. An
     /// extension with no change under its folder since the last build of this pipeline
     /// that produced it still compiles, but the build keeps that earlier <c>.app</c> and
-    /// version instead of a new one, and leaves it out of the GitHub release. Off by
-    /// default (every build publishes everything). See
+    /// version instead of a new one, and leaves it out of the GitHub release. On by
+    /// default; off, every build publishes everything. See
     /// <c>.design/object-explorer-project-builds.md</c>, "Publishing only what changed" (#1094).
     /// </summary>
-    public bool ChangedAppsOnly { get; set; }
+    public bool ChangedAppsOnly { get; set; } = true;
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }

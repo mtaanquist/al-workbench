@@ -2383,9 +2383,7 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnName("build_on_push_by_user_id");
 
                     b.Property<bool>("ChangedAppsOnly")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
-                        .HasDefaultValue(false)
                         .HasColumnName("changed_apps_only");
 
                     b.Property<DateTime>("CreatedAt")

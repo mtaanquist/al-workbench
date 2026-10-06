@@ -473,10 +473,10 @@ public sealed record PipelineInput(
     bool BuildOnPush = false,
     /// <summary>
     /// Whether builds publish only the extensions that changed since this pipeline last
-    /// produced them. Off unless the person turns it on. See
+    /// produced them. On unless the person turns it off. See
     /// <c>.design/object-explorer-project-builds.md</c>, "Publishing only what changed".
     /// </summary>
-    bool ChangedAppsOnly = false);
+    bool ChangedAppsOnly = true);
 
 /// <summary>A project choice for the "New pipeline" dialog's project picker.</summary>
 public sealed record PipelineProjectOption(int Id, string Name);

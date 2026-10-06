@@ -253,10 +253,10 @@ public sealed class GitHubReleaseService
             .OrderBy(a => a.FileName)
             .Select(a => new { a.FileName, a.AppName, a.AppVersion, a.Content })
             .ToListAsync(ct);
+        var anyCarried = await _db.OeProjectBuildArtifacts.AsNoTracking()
+            .AnyAsync(a => a.ProjectBuildId == projectBuildId && a.CarriedFromBuildId != null, ct);
         if (artifacts.Count == 0)
         {
-            var anyCarried = await _db.OeProjectBuildArtifacts.AsNoTracking()
-                .AnyAsync(a => a.ProjectBuildId == projectBuildId, ct);
             return anyCarried
                 ? new GitHubReleasePublishResult(false, null, null, null,
                     "No extension changed since the last build, so no GitHub release was made.")
@@ -268,6 +268,14 @@ public sealed class GitHubReleaseService
         var body = ReleaseBody(artifacts.Select(a => (a.AppName, a.AppVersion)).ToList(), projectBuildId);
 
         var existing = await _github.GetReleaseByTagAsync(token, owner, name, tag, ct);
+        if (existing is not null && anyCarried)
+        {
+            // Rewriting that release would drop the files of the apps this build carried
+            // over (they are not uploaded again), so a build that releases only part of the
+            // solution goes under its own number instead. Happens when numbering is off.
+            tag = $"build-{projectBuildId}";
+            existing = await _github.GetReleaseByTagAsync(token, owner, name, tag, ct);
+        }
         GitHubRelease release;
         if (existing is null)
         {

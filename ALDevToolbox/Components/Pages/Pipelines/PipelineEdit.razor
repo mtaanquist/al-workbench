@@ -263,9 +263,9 @@
                                     <input id="pe-changed-apps-only" type="checkbox" checked="@_changedAppsOnly" disabled="@_saving"
                                            @onchange="e => _changedAppsOnly = (bool)(e.Value ?? false)" />
                                     <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
-                                    <span>Only publish extensions that changed</span>
+                                    <span>Only release and deploy extensions that changed</span>
                                 </label>
-                                <small class="field__hint">An extension with no changes in its folder since this pipeline last built it keeps its earlier app file and version number. It isn't added to the GitHub release, and deployments leave it alone where it's already installed. Extensions that depend on a changed one are published again too.</small>
+                                <small class="field__hint">If nothing in an extension's folder has changed since this pipeline last built it, it keeps its earlier .app file and version. It's left out of the release, and deployments don't reinstall it. Extensions that depend on a changed one are always rebuilt.</small>
                             </div>
                             @if (_releaseRepositories is { Count: > 0 })
                             {
@@ -374,7 +374,7 @@
     private bool _previewCheck;
     // Whether builds add their build number to each app's version.
     private bool _autoVersion = true;
-    private bool _changedAppsOnly;
+    private bool _changedAppsOnly = true;
     // Whether a push to the branch starts a build (#1079).
     private bool _buildOnPush;
     // The solution's GitHub repositories inside the connected organisation. Empty

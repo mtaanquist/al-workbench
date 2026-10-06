@@ -841,7 +841,7 @@ public sealed record PipelineArtifactsRow(
     /// <summary>Whether the pipeline's builds add their build number to each app's version.</summary>
     bool AutoVersion = true,
     /// <summary>Whether the pipeline's builds publish only the extensions that changed since it last produced them.</summary>
-    bool ChangedAppsOnly = false);
+    bool ChangedAppsOnly = true);
 
 /// <summary>
 /// A pipeline's header for the pipeline detail page (its project + owner drive the

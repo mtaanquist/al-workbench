@@ -191,6 +191,34 @@ public sealed class GitHubReleaseServiceTests : IDisposable
             .Content.Should().Contain("No extension changed");
     }
 
+    [Fact]
+    public async Task A_partial_release_whose_version_tag_is_taken_goes_under_the_build_number()
+    {
+        // Numbering off: Sales changed but kept 1.0.0.0, the tag an earlier release with
+        // both apps already has. Rewriting it would drop Core's file from it.
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0"), ("CRONUS Sales", "1.0.0.0")]);
+        await CarryAsync(seed.BuildId, "CRONUS Core");
+        var tag = $"build-{seed.BuildId}";
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
+                HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson(InstallationToken))
+            .On(HttpMethod.Post, $"/repos/{Repo}/releases/{ReleaseId}/assets", HttpStatusCode.Created,
+                "{\"id\":77,\"name\":\"uploaded.app\",\"size\":3}")
+            .On(HttpMethod.Get, $"/repos/{Repo}/releases/tags/v1.0.0.0", HttpStatusCode.OK,
+                FakeGitHubApi.ReleaseJson(Repo, "v1.0.0.0", ReleaseId, assets: (AssetId, "CRONUS Core_1.0.0.0.app")))
+            .On(HttpMethod.Get, $"/repos/{Repo}/releases/tags/{tag}", HttpStatusCode.NotFound)
+            .On(HttpMethod.Post, $"/repos/{Repo}/releases", HttpStatusCode.Created,
+                FakeGitHubApi.ReleaseJson(Repo, tag, ReleaseId));
+
+        await using var ctx = _db.NewContext();
+        var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+
+        result.Published.Should().BeTrue();
+        result.Tag.Should().Be(tag);
+        api.Calls.Should().NotContain(c => c.StartsWith("DELETE", StringComparison.Ordinal));
+    }
+
     private async Task CarryAsync(int buildId, string appName)
     {
         await using var ctx = _db.NewContext();
