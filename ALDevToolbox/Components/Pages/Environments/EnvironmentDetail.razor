@@ -407,7 +407,7 @@
                                     {
                                         <text>
                                             Couldn't read this setting right now - try Refresh above, or check the
-                                            connection on the <a href="@(Row.SolutionHref + "?tab=bc")">solution's Business Central tab</a>.
+                                            connection on the <a href="@(Row.SolutionHref + "/bc")">solution's Business Central tab</a>.
                                         </text>
                                     }
                                     else if (_m365 is null)
@@ -1159,7 +1159,7 @@
     private RenderFragment? ConnectionAction()
     {
         if (!_canManage) return null;
-        return @<a class="btn" href="@(Row.SolutionHref + "?tab=bc")">Check the solution's connection</a>;
+        return @<a class="btn" href="@(Row.SolutionHref + "/bc")">Check the solution's connection</a>;
     }
 
     private bool Refreshing => _panelLoading || _operationsLoading || _sessionsLoading;

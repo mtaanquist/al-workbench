@@ -85,7 +85,7 @@ public sealed class PaletteContextServiceTests : IDisposable
 
         Titles(result.Context!, "tab").Should().Equal(
             "Customer", "General", "Repositories", "Business Central", "Pipelines", "Symbols", "Access");
-        result.Context!.Items.Single(i => i.Title == "Access").Href.Should().Be($"/solutions/{_publicId}?tab=access");
+        result.Context!.Items.Single(i => i.Title == "Access").Href.Should().Be($"/solutions/{_publicId}/access");
     }
 
     [Fact]

@@ -203,7 +203,7 @@ public sealed class PaletteEndpointTests : IDisposable
         var first = context.GetProperty("items")[0];
         first.GetProperty("kind").GetString().Should().Be("tab");
         first.GetProperty("title").GetString().Should().Be("Customer");
-        first.GetProperty("href").GetString().Should().Be($"/solutions/{projectId}?tab=customer");
+        first.GetProperty("href").GetString().Should().Be($"/solutions/{projectId}");
 
         json.GetProperty("recents").EnumerateArray()
             .Select(r => r.GetProperty("href").GetString())

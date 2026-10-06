@@ -477,7 +477,7 @@
                                 <span>
                                     @(pipelines.Count == 1 ? "The build pipeline for" : "Build pipelines for")
                                     @CodeList(pipelines) @(pipelines.Count == 1 ? "is" : "are") on the solution's
-                                    <a href="@($"/solutions/{pipelineSolutionId}?tab=pipelines")">Pipelines tab</a>.
+                                    <a href="@($"/solutions/{pipelineSolutionId}/pipelines")">Pipelines tab</a>.
                                 </span>
                             }
                             @* The things a consultant does next, side by
@@ -552,7 +552,7 @@
                                 @_createdRepo.PipelinesWarning
                                 @if (_createdRepo.SolutionId is { } warnSolutionId)
                                 {
-                                    <a href="@($"/solutions/{warnSolutionId}?tab=pipelines")">Open the Pipelines tab</a>
+                                    <a href="@($"/solutions/{warnSolutionId}/pipelines")">Open the Pipelines tab</a>
                                 }
                             </span>
                         </Alert>

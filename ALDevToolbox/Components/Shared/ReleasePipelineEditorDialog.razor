@@ -82,14 +82,14 @@
                     <p>
                         This solution has no build pipeline yet. A deployment installs compiled apps, so
                         create a build pipeline first on the
-                        <a href="@($"/solutions/{_projectId}?tab=pipelines")">solution's Pipelines tab</a>.
+                        <a href="@($"/solutions/{_projectId}/pipelines")">solution's Pipelines tab</a>.
                     </p>
                 }
                 else if (_environments is { Count: 0 })
                 {
                     <p>
                         This solution has no Business Central environments yet. Connect Business Central
-                        on the <a href="@($"/solutions/{_projectId}?tab=bc")">solution's Business Central tab</a>
+                        on the <a href="@($"/solutions/{_projectId}/bc")">solution's Business Central tab</a>
                         and refresh its environments, then come back.
                     </p>
                 }
@@ -146,7 +146,7 @@
                         <Alert Tone="AlertTone.Info" Role="status">
                             <span>
                                 Pick a GitHub repository above, or create a build pipeline first on the
-                                <a href="@($"/solutions/{_projectId}?tab=pipelines")">solution's Pipelines tab</a>.
+                                <a href="@($"/solutions/{_projectId}/pipelines")">solution's Pipelines tab</a>.
                                 You can't save until one of the two is chosen.
                             </span>
                         </Alert>

@@ -145,16 +145,16 @@ public sealed partial class PaletteContextService
         var root = $"/solutions/{project.Id.ToString(CultureInfo.InvariantCulture)}";
         var items = new List<PaletteResultItem>
         {
-            Tab("Customer", root + "?tab=customer"),
-            Tab("General", root + "?tab=general"),
-            Tab("Repositories", root + "?tab=repositories"),
+            Tab("Customer", root),
+            Tab("General", root + "/general"),
+            Tab("Repositories", root + "/repositories"),
         };
         if (canManage)
         {
-            if (!OeProject.IsOnPremisesHosting(project.HostingType)) items.Add(Tab("Business Central", root + "?tab=bc"));
-            items.Add(Tab("Pipelines", root + "?tab=pipelines"));
-            items.Add(Tab("Symbols", root + "?tab=symbols"));
-            if (canChangeAccess) items.Add(Tab("Access", root + "?tab=access"));
+            if (!OeProject.IsOnPremisesHosting(project.HostingType)) items.Add(Tab("Business Central", root + "/bc"));
+            items.Add(Tab("Pipelines", root + "/pipelines"));
+            items.Add(Tab("Symbols", root + "/symbols"));
+            if (canChangeAccess) items.Add(Tab("Access", root + "/access"));
         }
 
         // The Environments source's own filter: an environment Business Central no

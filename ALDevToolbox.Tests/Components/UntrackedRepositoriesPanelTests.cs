@@ -154,7 +154,7 @@ public sealed class UntrackedRepositoriesPanelTests : IDisposable
         project.Name.Should().Be("Payment Import");
         project.DefaultArtifactCountry.Should().Be("dk");
         _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>().Uri
-            .Should().EndWith($"/solutions/{project.Id}?tab=repositories",
+            .Should().EndWith($"/solutions/{project.Id}/repositories",
                 "the repository that was just tracked is what they came to see, and the solution now opens on Customer");
     }
 

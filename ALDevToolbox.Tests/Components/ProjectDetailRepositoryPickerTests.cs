@@ -44,10 +44,14 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
 
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly BunitJSModuleInterop _tabs;
 
     public ProjectDetailRepositoryPickerTests()
     {
         var auth = _ctx.AddAuthorization();
+        // A tab click rewrites the address in place rather than navigating.
+        _tabs = _ctx.JSInterop.SetupModule("./Components/Pages/Projects/ProjectDetail.razor.js");
+        _tabs.SetupVoid("showTab", _ => true);
         auth.SetAuthorized("consultant@cronus.example");
 
         _ctx.Services.AddSingleton<IOrganizationContext>(_db.OrgContext);
@@ -435,6 +439,9 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
     {
         cut.WaitForState(() => cut.FindAll(".settings__tabs button")
             .Any(t => t.TextContent.Trim() == "Repositories"));
+        // Once the Customer tab it opened on has finished reading, so its queries do
+        // not meet this tab's on the shared context.
+        cut.WaitForAssertion(() => cut.Markup.Should().NotContain("Loading customer details"));
         var tab = cut.FindAll(".settings__tabs button").First(t => t.TextContent.Trim() == "Repositories");
         await cut.InvokeAsync(() => tab.Click());
     }

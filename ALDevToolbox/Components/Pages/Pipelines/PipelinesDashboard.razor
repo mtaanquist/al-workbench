@@ -544,9 +544,9 @@
                 a.SolutionCount == 1
                     ? $"Used by {a.ProjectName}"
                     : $"Used by {a.ProjectName} and {a.SolutionCount - 1} other solution{(a.SolutionCount == 2 ? "" : "s")} with a deployment pipeline",
-                _isAdmin ? "/admin/administration/business-central" : $"/solutions/{a.ProjectId}?tab=bc"),
+                _isAdmin ? "/admin/administration/business-central" : $"/solutions/{a.ProjectId}/bc"),
             _ => SecretRow(a, $"The Business Central client secret for {a.ProjectName}", "Solution connection",
-                $"/solutions/{a.ProjectId}?tab=bc"),
+                $"/solutions/{a.ProjectId}/bc"),
         };
     }
 

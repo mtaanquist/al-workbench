@@ -11,11 +11,18 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// </summary>
 public static class SolutionLinks
 {
-    /// <summary>A solution's page.</summary>
-    public static string Solution(string? slug, int id) =>
-        string.IsNullOrEmpty(slug)
+    /// <summary>
+    /// A solution's page, optionally on one of its tabs (<c>general</c>,
+    /// <c>repositories</c>, <c>bc</c>, <c>pipelines</c>, <c>symbols</c>, <c>access</c>).
+    /// The Customer tab is the page's own address, so it takes no tab.
+    /// </summary>
+    public static string Solution(string? slug, int id, string? tab = null)
+    {
+        var root = string.IsNullOrEmpty(slug)
             ? $"/solutions/{id.ToString(CultureInfo.InvariantCulture)}"
             : $"/solutions/{slug}";
+        return string.IsNullOrEmpty(tab) ? root : $"{root}/{tab}";
+    }
 
     /// <summary>
     /// An environment's page, optionally on one of its tabs (<c>apps</c>,

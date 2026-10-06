@@ -689,8 +689,8 @@
     /// </summary>
     private static NextRelease NextOf(ReleasePipelineRow r)
     {
-        if (r.EnvironmentMissing) return new("Blocked", "rp-tone--danger rp-list__strong", "Environment not found", SubHref: $"/solutions/{r.ProjectId}?tab=bc", Title: "Reconnect it on the solution's Business Central tab");
-        if (EnvironmentBroken(r)) return new("Blocked", "rp-tone--danger rp-list__strong", "Environment failed in Business Central", SubHref: $"/solutions/{r.ProjectId}?tab=bc", Title: "Sort it out in the Business Central admin center, or point this pipeline at another environment");
+        if (r.EnvironmentMissing) return new("Blocked", "rp-tone--danger rp-list__strong", "Environment not found", SubHref: $"/solutions/{r.ProjectId}/bc", Title: "Reconnect it on the solution's Business Central tab");
+        if (EnvironmentBroken(r)) return new("Blocked", "rp-tone--danger rp-list__strong", "Environment failed in Business Central", SubHref: $"/solutions/{r.ProjectId}/bc", Title: "Sort it out in the Business Central admin center, or point this pipeline at another environment");
 
         if (r.NextDelivery is { } next)
         {

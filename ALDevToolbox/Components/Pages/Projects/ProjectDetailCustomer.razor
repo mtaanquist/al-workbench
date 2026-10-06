@@ -75,7 +75,7 @@ else if (_editing)
                     <section class="field">
                         <span class="field__label">Version</span>
                         <span class="cust__fixed">@(_basics.EffectiveVersion ?? NotReported)</span>
-                        <small class="field__hint">@ReadFrom <a href="@($"/solutions/{Id}?tab=bc")">Refresh it on the Business Central tab.</a></small>
+                        <small class="field__hint">@ReadFrom <a href="@($"/solutions/{Id}/bc")">Refresh it on the Business Central tab.</a></small>
                     </section>
                 }
                 else
@@ -125,7 +125,7 @@ else if (_editing)
                         {
                             <span class="cust__fixed">@NotReported</span>
                         }
-                        <small class="field__hint">@ReadFrom <a href="@($"/solutions/{Id}?tab=bc")">Refresh it on the Business Central tab.</a></small>
+                        <small class="field__hint">@ReadFrom <a href="@($"/solutions/{Id}/bc")">Refresh it on the Business Central tab.</a></small>
                     </section>
                 }
                 else
@@ -302,9 +302,21 @@ else
     private bool EditIsOnPremises =>
         Enum.TryParse<ProjectHostingType>(_edit.Hosting, out var chosen) && chosen != ProjectHostingType.MicrosoftCloud;
 
+    /// <summary>The solution this tab has started reading, so it reads once.</summary>
+    private int? _readFor;
+
     protected override async Task OnParametersSetAsync()
     {
-        if (_basics is not null) return;
+        // Once, and not only once it has finished: the page re-renders this tab whenever
+        // anything around it changes (Follow, a tab link), and a second read started
+        // while the first is still running would meet it on the shared context.
+        if (_readFor == Id) return;
+        _readFor = Id;
+        // Nothing of the last solution stays on screen while this one reads.
+        _basics = null;
+        _all = null;
+        _modules = null;
+        _editing = false;
         // One read for the whole tab, in sequence - see GetAllAsync for why.
         _all = await CustomerInfo.GetAllAsync(Id);
         if (_all is not null) _modules = await CustomerModules.GetSolutionModulesAsync(Id);

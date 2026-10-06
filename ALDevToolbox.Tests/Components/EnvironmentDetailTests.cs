@@ -841,7 +841,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.WaitForAssertion(() =>
             cut.Markup.Should().Contain("Couldn't read the operations from Business Central"));
         cut.Find(".empty a.btn, .empty-state a.btn, a.btn[href$='tab=bc']").GetAttribute("href")
-            .Should().Be($"/solutions/{projectId}?tab=bc");
+            .Should().Be($"/solutions/{projectId}/bc");
     }
 
     /// <summary>
@@ -1044,7 +1044,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.WaitForAssertion(() =>
             cut.Find(".empty-state__title").TextContent.Should()
                 .Be("Couldn't read who is signed in to this environment"));
-        cut.Find(".empty-state__action a").GetAttribute("href").Should().Be($"/solutions/{projectId}?tab=bc");
+        cut.Find(".empty-state__action a").GetAttribute("href").Should().Be($"/solutions/{projectId}/bc");
     }
 
     /// <summary>
@@ -1311,7 +1311,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         var cut = Render(envId);
 
         cut.Find(".empty-state__title").TextContent.Should().Be("Couldn't read apps and settings from Business Central");
-        cut.Find(".empty-state__action a").GetAttribute("href").Should().Be($"/solutions/{projectId}?tab=bc");
+        cut.Find(".empty-state__action a").GetAttribute("href").Should().Be($"/solutions/{projectId}/bc");
         cut.FindAll(".kv-grid").Should().HaveCount(1, "the mirror does not need the connection");
     }
 

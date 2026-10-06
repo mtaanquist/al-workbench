@@ -32,6 +32,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly BunitJSModuleInterop _tabs;
 
     private const int OwnerUserId = 9600;
     private const int OutsiderUserId = 9601;
@@ -39,6 +40,9 @@ public sealed class ProjectDetailAccessTests : IDisposable
     public ProjectDetailAccessTests()
     {
         var auth = _ctx.AddAuthorization();
+        // A tab click rewrites the address in place rather than navigating.
+        _tabs = _ctx.JSInterop.SetupModule("./Components/Pages/Projects/ProjectDetail.razor.js");
+        _tabs.SetupVoid("showTab", _ => true);
         auth.SetAuthorized("owner@example.com");
 
         _ctx.Services.AddSingleton<IOrganizationContext>(_db.OrgContext);
@@ -177,17 +181,15 @@ public sealed class ProjectDetailAccessTests : IDisposable
     }
 
     /// <summary>
-    /// The palette's context rows land on this page with ?tab=, and an enhanced
-    /// navigation reuses the component rather than building a new one - so a new
-    /// tab in the address has to move the page, not only the first one.
+    /// A page that is already built can be handed a new tab as new parameters, rather
+    /// than built afresh - so a new tab in the address has to move the page, not only
+    /// the first one.
     /// </summary>
     [Fact]
     public async Task A_new_tab_in_the_address_moves_the_page_to_it()
     {
         var (projectId, _) = await SeedAsync();
 
-        var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
-        nav.NavigateTo($"/solutions/{projectId}?tab=customer");
         var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         cut.WaitForAssertion(() => ActiveTab(cut).Should().Be("Customer"));
         // Let the Customer tab finish its reads before leaving it: switching away
@@ -197,10 +199,220 @@ public sealed class ProjectDetailAccessTests : IDisposable
 
         // What an enhanced navigation does to a page it keeps: new parameters,
         // same component.
-        nav.NavigateTo($"/solutions/{projectId}?tab=repositories");
-        cut.Render(p => p.Add(c => c.SolutionId, projectId));
-
+        cut.Render(p => p.Add(c => c.TabName, "repositories"));
         cut.WaitForAssertion(() => ActiveTab(cut).Should().Be("Repositories"));
+
+        // And back to the bare address, which is Customer's.
+        cut.Render(p => p.Add(c => c.TabName, (string?)null));
+        cut.WaitForAssertion(() => ActiveTab(cut).Should().Be("Customer"));
+        cut.WaitForAssertion(() => cut.Markup.Should().NotContain("Loading customer details"));
+    }
+
+    /// <summary>
+    /// Each tab of a saved solution has its own address (#1077), and choosing one puts
+    /// it in the bar so it can be copied. Customer, the default, is the bare one.
+    /// </summary>
+    [Fact]
+    public async Task Each_tab_puts_its_own_address_in_the_bar()
+    {
+        var (projectId, _) = await SeedAsync();
+
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
+        cut.WaitForAssertion(() => cut.FindAll(".settings__tabs button").Should().HaveCount(7));
+        cut.WaitForAssertion(() => cut.Markup.Should().NotContain("Loading customer details"));
+
+        var labels = new[] { "General", "Repositories", "Business Central", "Pipelines", "Symbols", "Access", "Customer" };
+        foreach (var label in labels)
+        {
+            await ClickTabAsync(cut, label);
+            cut.WaitForAssertion(() => ActiveTab(cut).Should().Be(label));
+            // Each tab reads on the page's context as it opens; leaving before it has
+            // finished is a race this test is not about.
+            _db.WaitForQueriesToSettle();
+        }
+
+        cut.WaitForAssertion(() => Addresses().Should().HaveCount(labels.Length));
+        Addresses().Should().Equal(
+                $"/solutions/{projectId}/general",
+                $"/solutions/{projectId}/repositories",
+                $"/solutions/{projectId}/bc",
+                $"/solutions/{projectId}/pipelines",
+                $"/solutions/{projectId}/symbols",
+                $"/solutions/{projectId}/access",
+                $"/solutions/{projectId}");
+    }
+
+    /// <summary>
+    /// What someone typed on General is still there after a look at Repositories:
+    /// one Save covers both, and moving between them is not a navigation, which would
+    /// build the page afresh.
+    /// </summary>
+    [Fact]
+    public async Task Unsaved_edits_survive_moving_between_tabs()
+    {
+        var (projectId, _) = await SeedAsync();
+
+        var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        nav.NavigateTo($"/solutions/{projectId}/general");
+        var cut = _ctx.Render<ProjectDetail>(p => p
+            .Add(c => c.SolutionId, projectId)
+            .Add(c => c.TabName, "general"));
+        var name = cut.WaitForElement("#proj-name");
+        await cut.InvokeAsync(() => name.Change("CRONUS Danmark"));
+
+        await ClickTabAsync(cut, "Repositories");
+        cut.WaitForAssertion(() => ActiveTab(cut).Should().Be("Repositories"));
+        await ClickTabAsync(cut, "General");
+
+        cut.WaitForAssertion(() =>
+            cut.Find("#proj-name").GetAttribute("value").Should().Be("CRONUS Danmark"));
+        cut.Markup.Should().Contain("Unsaved changes");
+        // The address followed the tabs by being rewritten, not navigated to.
+        cut.WaitForAssertion(() => Addresses().Should().Equal(
+            $"/solutions/{projectId}/repositories", $"/solutions/{projectId}/general"));
+    }
+
+    /// <summary>The addresses tab clicks have put in the bar, oldest first.</summary>
+    private List<string?> Addresses() =>
+        _tabs.Invocations["showTab"].Select(i => (string?)i.Arguments[0]).Where(a => a is not null).ToList();
+
+    private static async Task ClickTabAsync(IRenderedComponent<ProjectDetail> cut, string label)
+    {
+        var tab = cut.FindAll(".settings__tabs button").First(t => t.TextContent.Trim() == label);
+        await cut.InvokeAsync(() => tab.Click());
+    }
+
+    /// <summary>
+    /// The old ?tab= links live on in emails and bookmarks; they forward to the path
+    /// form so the page has one address per tab.
+    /// </summary>
+    [Theory]
+    [InlineData("bc", "/bc")]
+    [InlineData("repositories", "/repositories")]
+    [InlineData("customer", "")]
+    [InlineData("nonsense", "")]
+    public async Task An_old_tab_link_forwards_to_the_tab_address(string tab, string suffix)
+    {
+        var (projectId, _) = await SeedAsync();
+        var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        nav.NavigateTo($"/solutions/{projectId}?tab={tab}");
+
+        var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
+
+        cut.WaitForAssertion(() => new Uri(nav.Uri).PathAndQuery.Should().Be($"/solutions/{projectId}{suffix}"));
+    }
+
+    /// <summary>
+    /// A name that is not a tab, Customer's own name, or a different spelling of a tab
+    /// settles on the one address that tab has, rather than a 404.
+    /// </summary>
+    [Theory]
+    [InlineData("customer", "")]
+    [InlineData("nonsense", "")]
+    [InlineData("BC", "/bc")]
+    public async Task A_tab_name_settles_on_its_one_address(string tab, string suffix)
+    {
+        var (projectId, _) = await SeedAsync();
+        var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        nav.NavigateTo($"/solutions/{projectId}/{tab}");
+
+        var cut = _ctx.Render<ProjectDetail>(p => p
+            .Add(c => c.SolutionId, projectId)
+            .Add(c => c.TabName, tab));
+
+        cut.WaitForAssertion(() => new Uri(nav.Uri).PathAndQuery.Should().Be($"/solutions/{projectId}{suffix}"));
+    }
+
+    /// <summary>
+    /// A link to a tab this person does not get - here Access, for someone who can only
+    /// look - opens Customer at its own address instead of an empty page.
+    /// </summary>
+    [Fact]
+    public async Task A_tab_this_person_cannot_open_lands_on_customer()
+    {
+        var (projectId, _) = await SeedAsync();
+        _db.OrgContext.CurrentUserId = OutsiderUserId;
+        var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        nav.NavigateTo($"/solutions/{projectId}/access");
+
+        var cut = _ctx.Render<ProjectDetail>(p => p
+            .Add(c => c.SolutionId, projectId)
+            .Add(c => c.TabName, "access"));
+
+        cut.WaitForAssertion(() => new Uri(nav.Uri).PathAndQuery.Should().Be($"/solutions/{projectId}"));
+        cut.FindAll(".module-card__title").Should().BeEmpty("the Access tab is not drawn for them");
+    }
+
+    /// <summary>
+    /// A private solution's not-found page says nothing about whether the slug exists:
+    /// a tab name that would otherwise be tidied is left alone for someone who cannot
+    /// see the solution, exactly as for a slug that names nothing.
+    /// </summary>
+    [Fact]
+    public async Task A_tab_on_a_private_solution_says_nothing_to_an_outsider()
+    {
+        var (projectId, _) = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var project = await ctx.OeProjects.SingleAsync(p => p.Id == projectId);
+            project.Slug = "cronus-denmark";
+            project.Visibility = ProjectVisibility.Private;
+            await ctx.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentUserId = OutsiderUserId;
+        var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        nav.NavigateTo("/solutions/cronus-denmark/nonsense?tab=bc");
+
+        var cut = _ctx.Render<ProjectDetail>(p => p
+            .Add(c => c.Slug, "cronus-denmark")
+            .Add(c => c.TabName, "nonsense"));
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("This solution doesn't exist"));
+        new Uri(nav.Uri).PathAndQuery.Should().Be("/solutions/cronus-denmark/nonsense?tab=bc");
+    }
+
+    /// <summary>
+    /// With a slug, the tabs use the readable address, and a numeric one with a tab
+    /// forwards to it keeping the tab.
+    /// </summary>
+    [Fact]
+    public async Task The_readable_address_carries_the_tab()
+    {
+        var (projectId, _) = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var project = await ctx.OeProjects.SingleAsync(p => p.Id == projectId);
+            project.Slug = "cronus-denmark";
+            await ctx.SaveChangesAsync();
+        }
+        var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        nav.NavigateTo($"/solutions/{projectId}/pipelines");
+
+        var numbered = _ctx.Render<ProjectDetail>(p => p
+            .Add(c => c.SolutionId, projectId)
+            .Add(c => c.TabName, "pipelines"));
+        numbered.WaitForAssertion(() => new Uri(nav.Uri).PathAndQuery.Should().Be("/solutions/cronus-denmark/pipelines"));
+
+        var cut = _ctx.Render<ProjectDetail>(p => p
+            .Add(c => c.Slug, "cronus-denmark")
+            .Add(c => c.TabName, "pipelines"));
+        cut.WaitForAssertion(() => ActiveTab(cut).Should().Be("Pipelines"));
+        await ClickTabAsync(cut, "Repositories");
+        cut.WaitForAssertion(() => Addresses().Should().Contain("/solutions/cronus-denmark/repositories"));
+    }
+
+    /// <summary>The create form has no address to put a tab in; ?tab= still opens one.</summary>
+    [Fact]
+    public void The_create_form_opens_on_a_tab_and_leaves_the_address_alone()
+    {
+        var nav = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+        nav.NavigateTo("/solutions/new?tab=access");
+
+        var cut = _ctx.Render<ProjectDetail>();
+
+        cut.WaitForAssertion(() => ActiveTab(cut).Should().Be("Access"));
+        Addresses().Should().BeEmpty();
+        new Uri(nav.Uri).PathAndQuery.Should().Be("/solutions/new?tab=access");
     }
 
     private static string? ActiveTab(IRenderedComponent<ProjectDetail> cut) =>
@@ -442,6 +654,9 @@ public sealed class ProjectDetailAccessTests : IDisposable
 
         var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         cut.WaitForAssertion(() => FollowButton(cut).TextContent.Should().Contain("Following"));
+        // The Customer tab reads on the page's context too; clicking during that read
+        // is a race this test is not about.
+        cut.WaitForAssertion(() => cut.Markup.Should().NotContain("Loading customer details"));
 
         await cut.InvokeAsync(() => FollowButton(cut).Click());
 
@@ -457,6 +672,9 @@ public sealed class ProjectDetailAccessTests : IDisposable
         var (projectId, _) = await SeedAsync();
         var cut = _ctx.Render<ProjectDetail>(p => p.Add(c => c.SolutionId, projectId));
         cut.WaitForAssertion(() => FollowButton(cut).TextContent.Should().Contain("Following"));
+        // The Customer tab reads on the page's context too; clicking during that read
+        // is a race this test is not about.
+        cut.WaitForAssertion(() => cut.Markup.Should().NotContain("Loading customer details"));
         await cut.InvokeAsync(() => FollowButton(cut).Click());
         cut.WaitForAssertion(() => FollowButton(cut).TextContent.Trim().Should().Be("Follow"));
 
@@ -584,6 +802,10 @@ public sealed class ProjectDetailAccessTests : IDisposable
     {
         cut.WaitForState(() => cut.FindAll(".settings__tabs button")
             .Any(t => t.TextContent.Trim() == "Access"));
+        // A saved solution opens on Customer: let it finish reading first. Leaving
+        // disposes the tab but not its chain of queries, which would then meet this
+        // tab's on the shared context.
+        cut.WaitForAssertion(() => cut.Markup.Should().NotContain("Loading customer details"));
         var tab = cut.FindAll(".settings__tabs button").First(t => t.TextContent.Trim() == "Access");
         await cut.InvokeAsync(() => tab.Click());
     }
