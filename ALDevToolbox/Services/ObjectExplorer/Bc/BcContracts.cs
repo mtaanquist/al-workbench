@@ -239,6 +239,10 @@ public static class BcEnvironmentTypes
     /// <summary>True when Business Central calls this environment a production one.</summary>
     public static bool IsProduction(string? value) =>
         string.Equals(value?.Trim(), Production, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when Business Central calls this environment a sandbox. Unknown or blank is not one.</summary>
+    public static bool IsSandbox(string? value) =>
+        string.Equals(value?.Trim(), Sandbox, StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>
@@ -474,6 +478,23 @@ public static class BcSessionDisplay
         "management" or "managementclient" => "Management client",
         "" => "Unknown",
         _ => SpaceOut(clientType!),
+    };
+
+    /// <summary>
+    /// True when the session is a person at a client (web, tablet, phone, desktop, or a
+    /// client type we don't know yet), false for web service calls and sessions that run
+    /// under somebody's name without them: background, child and job queue. Used to count
+    /// who is online before a deployment, where an integration polling OData is not somebody
+    /// who would lose their work.
+    /// </summary>
+    public static bool IsPerson(string? clientType) => Normalise(clientType) switch
+    {
+        "webservice" or "webserviceclient" or "soap" or "soapwebserviceclient" => false,
+        "odata" or "odatav4" or "odatav4client" or "odatawebserviceclient" => false,
+        "api" or "apiclient" => false,
+        "background" or "backgroundsession" or "child" or "childsession" => false,
+        "nas" or "nasclient" or "jobqueue" => false,
+        _ => true,
     };
 
     /// <summary>

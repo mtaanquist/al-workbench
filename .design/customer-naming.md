@@ -188,9 +188,11 @@ Møbler" are both what the author meant.
 ## `workspace.aldt.toml`
 
 The `[workspace]` section gains `short_name` next to `name`. `name` stays the
-customer name. `WorkspaceConfigService` reads both back, so the New Extension
-sibling flow scaffolds "JM Banking" beside "JM Core" instead of guessing from
-the folder.
+customer name. `WorkspaceConfigService` reads both back, with the saved
+`extension_prefix`, so the New Extension sibling flow names the new extension
+"JM Banking" beside "JM Core" instead of guessing from the folder: the user types
+"Banking" and the prefix is added (`generation-engine.md`, "Adding to an
+existing workspace").
 
 ## The Solution picker
 

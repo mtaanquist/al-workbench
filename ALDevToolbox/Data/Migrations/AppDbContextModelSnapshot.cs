@@ -586,6 +586,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("detected_at");
 
+                    b.Property<int?>("EnvironmentId")
+                        .HasColumnType("integer")
+                        .HasColumnName("environment_id");
+
                     b.Property<string>("Field")
                         .IsRequired()
                         .HasMaxLength(120)
@@ -619,6 +623,9 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnName("repository");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("EnvironmentId")
+                        .HasDatabaseName("ix_github_repository_drift_environment_id");
 
                     b.HasIndex("ReleaseId");
 
@@ -2357,6 +2364,25 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("branch");
 
+                    b.Property<bool>("BuildOnPush")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("build_on_push");
+
+                    b.Property<string>("BuildOnPushBlocked")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("build_on_push_blocked");
+
+                    b.Property<int?>("BuildOnPushByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("build_on_push_by_user_id");
+
+                    b.Property<bool>("ChangedAppsOnly")
+                        .HasColumnType("boolean")
+                        .HasColumnName("changed_apps_only");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -2415,6 +2441,8 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnName("updated_at");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("BuildOnPushByUserId");
 
                     b.HasIndex("CreatedByUserId");
 
@@ -2665,6 +2693,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(500)")
                         .HasColumnName("github_release_url");
 
+                    b.Property<int?>("HeadRepositoryId")
+                        .HasColumnType("integer")
+                        .HasColumnName("head_repository_id");
+
                     b.Property<string>("HeadSha")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)")
@@ -2759,6 +2791,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
                         .HasColumnName("app_version");
+
+                    b.Property<int?>("CarriedFromBuildId")
+                        .HasColumnType("integer")
+                        .HasColumnName("carried_from_build_id");
 
                     b.Property<byte[]>("Content")
                         .IsRequired()
@@ -3181,6 +3217,12 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
+
+                    b.Property<bool>("DeployedWithoutApproval")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("deployed_without_approval");
 
                     b.Property<string>("DeploymentSchedule")
                         .IsRequired()
@@ -4064,6 +4106,16 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at");
 
+                    b.Property<bool>("DeployWithoutApproval")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("deploy_without_approval");
+
+                    b.Property<int?>("DeployWithoutApprovalByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("deploy_without_approval_by_user_id");
+
                     b.Property<string>("DeploymentSchedule")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -4120,6 +4172,8 @@ namespace ALDevToolbox.Data.Migrations
                         .HasDatabaseName("ix_oe_release_pipelines_build_pipeline");
 
                     b.HasIndex("CreatedByUserId");
+
+                    b.HasIndex("DeployWithoutApprovalByUserId");
 
                     b.HasIndex("GithubReleaseRepositoryId");
 
@@ -7051,6 +7105,11 @@ namespace ALDevToolbox.Data.Migrations
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryDrift", b =>
                 {
+                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectEnvironment", "Environment")
+                        .WithMany()
+                        .HasForeignKey("EnvironmentId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
                     b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
                         .WithMany()
                         .HasForeignKey("OrganizationId")
@@ -7062,6 +7121,8 @@ namespace ALDevToolbox.Data.Migrations
                         .HasForeignKey("ReleaseId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("Environment");
 
                     b.Navigation("Organization");
 
@@ -7624,6 +7685,11 @@ namespace ALDevToolbox.Data.Migrations
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OePipeline", b =>
                 {
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "BuildOnPushByUser")
+                        .WithMany()
+                        .HasForeignKey("BuildOnPushByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("ALDevToolbox.Domain.Entities.User", "CreatedByUser")
                         .WithMany()
                         .HasForeignKey("CreatedByUserId")
@@ -7650,6 +7716,8 @@ namespace ALDevToolbox.Data.Migrations
                         .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("BuildOnPushByUser");
 
                     b.Navigation("CreatedByUser");
 
@@ -8197,6 +8265,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasForeignKey("CreatedByUserId")
                         .OnDelete(DeleteBehavior.SetNull);
 
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "DeployWithoutApprovalByUser")
+                        .WithMany()
+                        .HasForeignKey("DeployWithoutApprovalByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectRepository", "GithubReleaseRepository")
                         .WithMany()
                         .HasForeignKey("GithubReleaseRepositoryId")
@@ -8223,6 +8296,8 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("BuildPipeline");
 
                     b.Navigation("CreatedByUser");
+
+                    b.Navigation("DeployWithoutApprovalByUser");
 
                     b.Navigation("GithubReleaseRepository");
 

@@ -13,7 +13,7 @@
         if (id is { } releaseId) { ...compare against releaseId... }
 
     Reuses the shared .confirm-dialog overlay (see ConfirmDialog /
-    PipelineEditorDialog); plain CSS overlay rather than native <dialog> so it
+    ReleaseBuildDialog); plain CSS overlay rather than native <dialog> so it
     renders consistently in InteractiveServer pages without a JS interop hop.
     Lives in Components/Shared/ per the CLAUDE.md folder map.
 *@
@@ -37,7 +37,11 @@
                        autofocus @bind="_filter" @bind:event="oninput"
                        aria-label="Filter releases by name" />
 
-                @if (Filtered.Count == 0)
+                @if (_releases.Count == 0)
+                {
+                    <p class="u-muted">There is no other release to compare with yet.</p>
+                }
+                else if (Filtered.Count == 0)
                 {
                     <p class="u-muted">No releases match &ldquo;@_filter&rdquo;.</p>
                 }

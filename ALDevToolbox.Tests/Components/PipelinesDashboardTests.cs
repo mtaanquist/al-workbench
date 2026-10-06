@@ -135,8 +135,10 @@ public sealed class PipelinesDashboardTests : IDisposable
                 .Should().Equal("View all builds", "View all deployments");
 
             cut.FindAll(".btn--primary").Should().BeEmpty("the populated page has no primary action");
-            cut.FindAll(".page-head__actions button").Select(b => b.TextContent.Trim())
+            cut.FindAll(".page-head__actions a.btn").Select(b => b.TextContent.Trim())
                 .Should().Equal("New build pipeline", "New deployment pipeline");
+            cut.FindAll(".page-head__actions a.btn").Select(b => b.GetAttribute("href"))
+                .Should().Equal("/pipelines/new?returnUrl=%2Fpipelines", "/pipelines/deployments/new?returnUrl=%2Fpipelines");
             cut.Find(".page-head__sub").TextContent.Should().Contain("2 failing, 1 waiting for approval.");
             tiles[2].QuerySelector(".cue__foot")!.TextContent.Should().Contain("Latest failed");
         });
@@ -219,10 +221,10 @@ public sealed class PipelinesDashboardTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.Find(".empty-state__title").TextContent.Trim().Should().Be("No pipelines yet");
-            cut.Find(".empty-state__text").TextContent.Should().Contain("when you press Build, or for")
+            cut.Find(".empty-state__text").TextContent.Should().Contain("when you press Build, when new")
                 .And.NotContain("every push");
             cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Should().Contain("New build pipeline");
-            cut.FindAll(".empty-state__action button").Select(b => b.TextContent.Trim())
+            cut.FindAll(".empty-state__action a.btn").Select(b => b.TextContent.Trim())
                 .Should().Equal("New build pipeline", "New deployment pipeline");
             cut.FindAll(".page-head__actions").Should().BeEmpty("the empty state carries the next step itself");
             cut.FindAll(".cue-grid").Should().BeEmpty();
@@ -273,7 +275,7 @@ public sealed class PipelinesDashboardTests : IDisposable
             cut.FindAll(".cue-grid a.cue").Select(t => t.QuerySelector(".cue__label")!.TextContent.Trim())
                 .Should().Equal("Build pipelines", "Builds this week", "Failed builds", "Ready to build");
             cut.FindAll("a[href^='/pipelines/deployments']").Should().BeEmpty();
-            cut.FindAll(".page-head__actions button").Select(b => b.TextContent.Trim()).Should().Equal("New build pipeline");
+            cut.FindAll(".page-head__actions a.btn").Select(b => b.TextContent.Trim()).Should().Equal("New build pipeline");
         });
     }
 

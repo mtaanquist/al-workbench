@@ -85,9 +85,9 @@
         <a class="btn" href="/pipelines/deployments"><Icon Name="arrow-left" Width="15" Height="15" /><span>All deployment pipelines</span></a>
         @if (_canManage)
         {
-            <button type="button" class="btn" @onclick="EditAsync">
+            <a class="btn" href="@($"/pipelines/deployments/{Id}/edit")">
                 <Icon Name="pencil" Width="15" Height="15" /><span>Edit</span>
-            </button>
+            </a>
             @* The one primary. When there is nothing to list it moves into the empty
                state, and the head keeps an outline copy so the action never vanishes. *@
             <button type="button" class="btn@(IsEmpty ? "" : " btn--primary")" @onclick="OpenReleaseAsync" disabled="@(!HasSomethingToRelease)"
@@ -97,12 +97,16 @@
         }
     </Actions>
     <ChildContent>
+        @if (_rescheduleNotice is { } rescheduleNotice)
+        {
+            <Alert Tone="AlertTone.Info" Role="status"><span>@rescheduleNotice</span></Alert>
+        }
         @if (_rp!.ProjectEnvironment!.MissingSince is not null)
         {
             <Alert Tone="AlertTone.Danger">
                 <span>
                     This deployment pipeline's target environment is no longer present in Business Central. Refresh the
-                    environments on <a href="@($"/solutions/{_rp!.ProjectId}")">the solution's Business Central page</a> before deploying.
+                    environments on <a href="@($"/solutions/{_rp!.ProjectId}/bc")">the solution's Business Central tab</a> before deploying.
                 </span>
             </Alert>
         }
@@ -339,7 +343,7 @@
                                 @if (_canManage)
                                 {
                                     <span class="rp-approval__acts">
-                                        <button type="button" class="btn btn--sm" @onclick="() => ApproveAsync(p)" disabled="@_deciding">Approve</button>
+                                        <button type="button" class="btn btn--sm" @onclick="() => ApproveAsync(p)" disabled="@_deciding">@(_checkingSessions ? "Checking who is online..." : "Approve")</button>
                                         <button type="button" class="btn btn--sm btn--ghost" @onclick="() => DismissAsync(p)" disabled="@_deciding">Dismiss</button>
                                     </span>
                                 }
@@ -422,8 +426,12 @@
                                     }
                                     @if (d.IsScheduled && _canManage)
                                     {
-                                        <button type="button" class="btn btn--sm" @onclick="() => OpenReschedule(d)" @onclick:stopPropagation="true">Reschedule</button>
+                                        <button type="button" class="btn btn--sm" @onclick="() => OpenRescheduleAsync(d)" @onclick:stopPropagation="true">Reschedule</button>
                                         <button type="button" class="btn btn--sm btn--ghost" @onclick="() => CancelAsync(d)" @onclick:stopPropagation="true">Cancel</button>
+                                    }
+                                    else if (MayStillBeHeld(d))
+                                    {
+                                        <button type="button" class="btn btn--sm" @onclick="() => OpenRescheduleAsync(d)" @onclick:stopPropagation="true">Reschedule</button>
                                     }
                                 </span>
                             </div>
@@ -575,8 +583,14 @@
                                         @* The phone layout's actions: the row's own cell is hidden
                                            there, and a 44px full-width pair takes its place. *@
                                         <div class="rp-rel__phone-acts">
-                                            <button type="button" class="btn" @onclick="() => OpenReschedule(d)">Reschedule</button>
+                                            <button type="button" class="btn" @onclick="() => OpenRescheduleAsync(d)">Reschedule</button>
                                             <button type="button" class="btn btn--ghost" @onclick="() => CancelAsync(d)">Cancel</button>
+                                        </div>
+                                    }
+                                    else if (MayStillBeHeld(d))
+                                    {
+                                        <div class="rp-rel__phone-acts rp-rel__phone-acts--one">
+                                            <button type="button" class="btn" @onclick="() => OpenRescheduleAsync(d)">Reschedule</button>
                                         </div>
                                     }
                                 </div>
@@ -598,7 +612,6 @@
     </ChildContent>
 </DetailPage>
 
-<ReleasePipelineEditorDialog @ref="_editor" OnSaved="OnEditedAsync" />
 <ReleaseBuildDialog @ref="_releaseDialog" OnReleased="OnReleasedAsync" />
 <ReleaseAgainDialog @ref="_releaseAgainDialog" OnReleased="OnReleasedAsync" />
 <ConfirmDialog @ref="_cancelConfirm" Title="Cancel this deployment?"
@@ -637,44 +650,18 @@
     </div>
 </ConfirmDialog>
 
-@if (_rescheduleId is not null)
-{
-    <div class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="rs-title" tabindex="-1">
-        <div class="modal-backdrop" @onclick="CloseReschedule" aria-hidden="true"></div>
-        <div class="confirm-dialog" @onclick:stopPropagation>
-            <div class="confirm-dialog__head">
-                <span class="confirm-dialog__icon" aria-hidden="true">
-                    <Icon Name="calendar" Width="17" Height="17" />
-                </span>
-                <h2 id="rs-title" class="confirm-dialog__title">Reschedule deployment</h2>
-            </div>
-            <div class="confirm-dialog__body">
-            <div class="field">
-                <label class="field__label" for="rs-when">New time</label>
-                <input id="rs-when" type="datetime-local" class="input" @bind="_rescheduleLocal" @bind:event="oninput" disabled="@_rescheduling" />
-                <small class="field__hint">Time is in the customer's timezone (@_tzLabel).</small>
-                @if (RescheduleSecretWarning is { } secretWarn)
-                {
-                    <span class="field-warn"><Icon Name="triangle-alert" Width="13" Height="13" />@secretWarn</span>
-                }
-            </div>
-            @if (_rescheduleError is { } err)
-            {
-                <Alert Tone="AlertTone.Danger"><span>@err</span></Alert>
-            }
-            </div>
-            <div class="confirm-dialog__actions">
-                <button type="button" class="btn" @onclick="CloseReschedule" disabled="@_rescheduling">Cancel</button>
-                <button type="button" class="btn btn--primary" @onclick="SaveRescheduleAsync" disabled="@_rescheduling">
-                    <Icon Name="save" Width="14" Height="14" /><span>@(_rescheduling ? "Saving..." : "Reschedule")</span>
-                </button>
-            </div>
-        </div>
-    </div>
-}
+<RescheduleDeploymentDialog @ref="_rescheduleDialog" OnRescheduled="OnRescheduledAsync" />
 
 @code {
     [Parameter] public int Id { get; set; }
+
+    /// <summary>
+    /// A build to open Deploy with, chosen: the new deployment pipeline page sends people
+    /// here after it was set up from a build's "Deploy..." (#938, #1080). Ignored unless
+    /// it is one of the source build pipeline's successful builds.
+    /// </summary>
+    [SupplyParameterFromQuery(Name = "deploy")] public int? DeployBuildId { get; set; }
+    private bool _deployOffered;
 
     /// <summary>How many deployments the list shows at first, and how many more each "Show older deployments" adds.</summary>
     internal const int PageSize = 10;
@@ -699,11 +686,12 @@
     // build pipeline's builds (#632).
     private List<ALDevToolbox.Services.GitHub.GitHubReleaseOption> _releaseOptions = new();
     private string? _releasesError;
+    // Set when Reschedule on a handed-off row finds Business Central no longer holds it.
+    private string? _rescheduleNotice;
 
     /// <summary>True when this pipeline installs apps from a repository's GitHub releases.</summary>
     private bool _fromReleases;
 
-    private ReleasePipelineEditorDialog? _editor;
     private ReleaseBuildDialog? _releaseDialog;
     private ReleaseAgainDialog? _releaseAgainDialog;
     private ConfirmDialog? _cancelConfirm;
@@ -712,19 +700,15 @@
 
     // The approval band (#934).
     private bool _deciding;
+    private bool _checkingSessions;
     private bool _approveProdAck;
     private string _dismissReason = string.Empty;
     private string? _approvalError;
 
     private TimeZoneInfo _tz = TimeZoneInfo.Utc;
-    private string _tzLabel = "UTC";
     private string _tzCity = "UTC";
 
-    // Reschedule modal state.
-    private int? _rescheduleId;
-    private DateTime _rescheduleLocal;
-    private bool _rescheduling;
-    private string? _rescheduleError;
+    private RescheduleDeploymentDialog? _rescheduleDialog;
 
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
     private PeriodicTimer? _poll;
@@ -811,7 +795,6 @@
         _isProduction = string.Equals(_rp.ProjectEnvironment?.Type, "Production", StringComparison.OrdinalIgnoreCase);
         _tz = UpdateWindow.ResolveTimeZone(_rp.Project?.BcTimeZone);
         var tzId = _rp.Project?.BcTimeZone;
-        _tzLabel = string.IsNullOrWhiteSpace(tzId) ? "UTC" : tzId!;
         _tzCity = string.IsNullOrWhiteSpace(tzId) ? "UTC" : tzId![(tzId!.LastIndexOf('/') + 1)..].Replace('_', ' ');
         _canManage = await Releases.CanManageAsync(Id);
 
@@ -939,25 +922,21 @@
         await LoadHistoryAsync();
     }
 
-    private async Task EditAsync()
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (_editor is null || _rp is null) return;
-        var row = new ReleasePipelineRow(
-            _rp.Id, _rp.ProjectId, _rp.Project?.Name ?? "", _rp.Name, _rp.BuildPipelineId, _rp.BuildPipeline?.Name ?? "",
-            _rp.ProjectEnvironmentId, _rp.ProjectEnvironment?.Name ?? "", _rp.ProjectEnvironment?.Type ?? "",
-            _rp.ProjectEnvironment?.MissingSince != null,
-            _rp.DeploymentSchedule, _rp.SchemaSyncMode,
-            _rp.ArtifactSource, _rp.GithubReleaseRepositoryId, _rp.GithubReleaseRepository?.DisplayName,
-            _rp.ProjectEnvironment?.Status, _rp.PrepareReleaseOnNewBuild)
-        {
-            RestrictBranch = _rp.RestrictBranch,
-            AllowedBranch = _rp.AllowedBranch,
-            NameIsCustom = _rp.NameIsCustom,
-        };
-        await _editor.OpenForEditAsync(row);
+        // After the history too: Deploy writes through the same context the history reads.
+        if (_deployOffered || DeployBuildId is not { } buildId || _loading || _historyLoading || _rp is null || _releaseDialog is null) return;
+        _deployOffered = true;
+        // Out of the address, so a reload or Back doesn't offer the same deploy again.
+        Nav.NavigateTo($"/pipelines/deployments/{Id}", replace: true);
+        if (!_canManage || _fromReleases || _successfulBuilds.All(b => b.Id != buildId)) return;
+        await _releaseDialog.OpenAsync(
+            _rp.Id, _rp.Project?.Name ?? "", _rp.ProjectEnvironment!.Name, _rp.ProjectEnvironment.Type,
+            _rp.DeploymentSchedule, _rp.SchemaSyncMode, _successfulBuilds,
+            _rp.Project?.BcTimeZone, _rp.ProjectEnvironment.UpdateWindowStart, _rp.ProjectEnvironment.UpdateWindowEnd,
+            _secretExpiresAt,
+            selectedBuildId: buildId);
     }
-
-    private async Task OnEditedAsync(int _) => await ReloadAsync();
 
     private async Task OpenReleaseAsync()
     {
@@ -1009,7 +988,7 @@
             .Select(a => a.AppName)
             .ToList();
         await _releaseAgainDialog.OpenAsync(new ReleaseAgainDialog.Request(
-            d.Id, d.ProjectBuildId, source, _rp.Project?.Name ?? "this solution",
+            d.Id, Id, d.ProjectBuildId, source, _rp.Project?.Name ?? "this solution",
             EnvName, _rp.ProjectEnvironment?.Type,
             BcDeploymentSchedule.ToWire(_rp.DeploymentSchedule) ?? _rp.DeploymentSchedule,
             _rp.SchemaSyncMode,
@@ -1049,6 +1028,23 @@
         return sentence + $" Approve it to install it {InstallsWhen()}, or dismiss it.";
     }
 
+    /// <summary>
+    /// True when approving installs right away, the same rule <see cref="InstallsWhen"/>
+    /// words: not waiting for a delivery window that is shut, and not handed to Business
+    /// Central's next update.
+    /// </summary>
+    private bool ApprovalInstallsNow()
+    {
+        var env = _rp?.ProjectEnvironment;
+        if (BcDeploymentSchedule.IsOurDeliveryWindow(_rp?.DeploymentSchedule)
+            && env is not null && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd))
+        {
+            return UpdateWindow.NextOpeningUtc(env.UpdateWindowStart, env.UpdateWindowEnd, _tz, DateTime.UtcNow)
+                <= DateTime.UtcNow.AddMinutes(1);
+        }
+        return !BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(_rp?.DeploymentSchedule));
+    }
+
     /// <summary>When an approved deployment installs, as a phrase: "right away", "in the next delivery window (today at 22:00)".</summary>
     private string InstallsWhen()
     {
@@ -1076,10 +1072,46 @@
         var where = _isProduction
             ? $"{CustomerName}'s Production environment \"{EnvName}\""
             : $"the {EnvType} environment \"{EnvName}\"";
+
+        // An approval that installs right away asks who is signed in first, and puts the
+        // answer in the same confirmation.
+        OpenSessionsCheck? sessions = null;
+        if (ApprovalInstallsNow())
+        {
+            _deciding = true;
+            _checkingSessions = true;
+            StateHasChanged();
+            try
+            {
+                // Its own scope: this waits on Business Central while the page's other
+                // buttons stay live on the circuit's one context (#679).
+                await using var scope = ScopeFactory.CreateAsyncScope();
+                var deliveries = scope.ServiceProvider.GetRequiredService<DeliveryService>();
+                sessions = await OpenSessionsCheck.AskAsync(() => deliveries.CheckOpenSessionsAsync(Id), EnvName, Log);
+            }
+            catch (PlanValidationException ex)
+            {
+                _approvalError = ex.Errors.Values.FirstOrDefault() ?? "Couldn't approve this deployment.";
+                return;
+            }
+            catch (ProjectAccessDeniedException)
+            {
+                _approvalError = "Only the solution owner or an admin can approve deployments here.";
+                return;
+            }
+            finally
+            {
+                _deciding = false;
+                _checkingSessions = false;
+            }
+        }
+        var askAboutSessions = sessions is { NeedsConfirmation: true };
+
         var confirmed = await _approveConfirm.OpenAsync(
             $"Approve deployment {p.Number}?",
-            $"This installs build #{p.ProjectBuildId}, {apps}, into {where} {InstallsWhen()}. You can still cancel it on this page until it starts.",
-            "Approve", "btn--primary", "check");
+            $"This installs build #{p.ProjectBuildId}, {apps}, into {where} {InstallsWhen()}. You can still cancel it on this page until it starts."
+                + (askAboutSessions ? " " + sessions!.Question : ""),
+            askAboutSessions ? "Approve anyway" : "Approve", "btn--primary", "check");
         if (!confirmed) return;
 
         _deciding = true;
@@ -1173,73 +1205,46 @@
         }
     }
 
-    private void OpenReschedule(DeliveryHistoryRow d)
-    {
-        _rescheduleId = d.Id;
-        _rescheduleError = null;
-        _rescheduling = false;
-        // Prefill to the deployment's current time in the customer's tz: the picker is a
-        // wall clock in the solution's zone, like the deployment dialog's.
-        var local = TimeZoneInfo.ConvertTimeFromUtc(ALDevToolbox.Services.Organizations.DisplayTimeZone.AsUtc(d.ScheduledFor), _tz);
-        _rescheduleLocal = new DateTime(local.Year, local.Month, local.Day, local.Hour, local.Minute, 0, DateTimeKind.Unspecified);
-    }
-
-    private void CloseReschedule()
-    {
-        if (_rescheduling) return;
-        _rescheduleId = null;
-    }
+    /// <summary>
+    /// True for a run cancelled after Business Central took it: only moving a held
+    /// deployment does that (#1097); a plain cancel stops a run before anything is sent.
+    /// </summary>
+    private static bool IsMoved(DeliveryHistoryRow d) =>
+        d.Status == ProjectDeliveryStatus.Cancelled && d.Apps.Any(a => a.OperationId is not null);
 
     /// <summary>
-    /// Warn-but-allow, mirroring the deployment dialog: flag when the new time falls after the
-    /// BC client secret expires (the run would hard-fail). See .design/saas-delivery.md.
+    /// True for a handed-off run Business Central is still holding, as the service read it:
+    /// one app, not replaced by a later run, and not installed yet.
     /// </summary>
-    private string? RescheduleSecretWarning
-    {
-        get
-        {
-            if (_secretExpiresAt is not { } expiry) return null;
-            if (expiry <= DateTime.UtcNow)
-            {
-                return "The Business Central client secret has expired. Rotate it in Entra and re-enter it before this can install.";
-            }
-            var utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(_rescheduleLocal, DateTimeKind.Unspecified), _tz);
-            if (utc > expiry)
-            {
-                // A calendar date the consultant typed, stored at midnight UTC: printed as
-                // that date, never converted into a zone that could move it a day.
-                return $"The Business Central client secret expires {expiry:yyyy-MM-dd}. This time is after that and will fail unless the secret is rotated first.";
-            }
-            return null;
-        }
-    }
+    private bool MayStillBeHeld(DeliveryHistoryRow d) => _canManage && d.StillHeld;
 
-    private async Task SaveRescheduleAsync()
+    private async Task OpenRescheduleAsync(DeliveryHistoryRow d)
     {
-        if (_rescheduleId is not { } id) return;
-        _rescheduling = true;
-        _rescheduleError = null;
+        if (_rescheduleDialog is null) return;
+        _rescheduleNotice = null;
         try
         {
-            var utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(_rescheduleLocal, DateTimeKind.Unspecified), _tz);
-            await Deliveries.RescheduleDeliveryAsync(id, utc);
-            _rescheduleId = null;
-            await ReloadAsync();
-            EnsurePolling();
-        }
-        catch (PlanValidationException ex)
-        {
-            _rescheduleError = ex.Errors.Values.FirstOrDefault() ?? "Couldn't reschedule the deployment.";
+            if (!await _rescheduleDialog.OpenAsync(d.Id, _secretExpiresAt))
+            {
+                if (d.Status == ProjectDeliveryStatus.HandedOff)
+                {
+                    _rescheduleNotice = _rescheduleDialog.LastRefusal;
+                }
+                // It started (or went) since the list was read: show what it is now.
+                await ReloadAsync();
+                EnsurePolling();
+            }
         }
         catch (Exception ex)
         {
-            Log.LogError(ex, "Failed to reschedule delivery {DeliveryId}.", id);
-            _rescheduleError = "Couldn't reschedule the deployment.";
+            Log.LogError(ex, "Failed to open the reschedule dialog for delivery {DeliveryId}.", d.Id);
         }
-        finally
-        {
-            _rescheduling = false;
-        }
+    }
+
+    private async Task OnRescheduledAsync(int deliveryId)
+    {
+        await ReloadAsync();
+        EnsurePolling();
     }
 
     // ── Live polling of in-flight deployments ────────────────────────────────────
@@ -1559,6 +1564,7 @@
         {
             ProjectDeliveryStatus.Scheduled => $"{Apps(n)} pending",
             ProjectDeliveryStatus.HandedOff => $"{n} handed over",
+            ProjectDeliveryStatus.Cancelled when IsMoved(d) => "Moved",
             ProjectDeliveryStatus.Cancelled => done == 0 ? "None installed" : $"{done} of {n} installed",
             ProjectDeliveryStatus.Dismissed => "None sent",
             ProjectDeliveryStatus.Claimed or ProjectDeliveryStatus.Uploading or ProjectDeliveryStatus.Installing
@@ -1583,12 +1589,20 @@
         {
             case ProjectDeliveryStatus.Dismissed:
                 return $"{DismissedLine(d)!.TrimEnd('.')}. Nothing was sent.";
+            case ProjectDeliveryStatus.Cancelled when IsMoved(d):
+                // Only a move cancels a run after its upload (#1097): Business Central's copy
+                // was cancelled and a newer deployment of the same build took its place.
+                return d.CancelledByName is { } mover
+                    ? $"Moved by {mover}: Business Central's copy was cancelled, and a new deployment of the same build replaces it."
+                    : "Moved: Business Central's copy was cancelled, and a new deployment of the same build replaces it.";
             case ProjectDeliveryStatus.Cancelled:
                 return d.CancelledByName is { } who
                     ? $"Cancelled by {who} before it started. No app was uploaded."
                     : "Cancelled before it started. No app was uploaded.";
             case ProjectDeliveryStatus.HandedOff:
-                return "Business Central has the apps and installs them with the customer's next update. Cancel it there if you need to stop it.";
+                return MayStillBeHeld(d)
+                    ? "Business Central has the apps and installs them with the customer's next update. Reschedule moves it to another time."
+                    : "Business Central has the apps and installs them with the customer's next update. Cancel it there if you need to stop it.";
             case ProjectDeliveryStatus.Scheduled:
             {
                 var sentence = $"Installs {WhenPhrase(d.ScheduledFor)}";
@@ -1630,14 +1644,21 @@
         var steps = new List<StepView>
         {
             new("Scheduled", "queued", When(d.ScheduledFor, seconds: true), Exact(d.ScheduledFor),
-                d.TriggeredByName is { } by ? $"by {by}" : ""),
+                d.DeployedWithoutApproval
+                    ? (d.TriggeredByName is { } runsAs ? $"automatically after a new build (no approval), set up by {runsAs}" : "automatically after a new build (no approval)")
+                    : d.TriggeredByName is { } by ? $"by {by}" : ""),
         };
 
         if (d.Status == ProjectDeliveryStatus.Cancelled)
         {
+            // A moved run had reached Business Central first, so its upload stays on the timeline.
+            if (IsMoved(d) && d.InstallStartedAt is { } handedAt)
+            {
+                steps.Add(new("Uploaded", "running", Clock(handedAt), Exact(handedAt), ""));
+            }
             if (d.FinishedAt is { } cancelledAt)
             {
-                steps.Add(new("Cancelled", "cancelled", Clock(cancelledAt), Exact(cancelledAt),
+                steps.Add(new(IsMoved(d) ? "Moved" : "Cancelled", "cancelled", Clock(cancelledAt), Exact(cancelledAt),
                     d.CancelledByName is { } who ? $"by {who}" : ""));
             }
             return steps;

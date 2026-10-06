@@ -157,6 +157,11 @@
                     </label>
                 }
 
+                @if (SessionsQuestion is { } question)
+                {
+                    <Alert Tone="AlertTone.Warn" Role="status"><span>@question</span></Alert>
+                }
+
                 @if (_error is { } err)
                 {
                     <Alert Tone="AlertTone.Danger"><span>@err</span></Alert>
@@ -166,7 +171,7 @@
                 <button type="button" class="btn" @onclick="Cancel" disabled="@_releasing">Cancel</button>
                 <button type="button" class="btn btn--primary" @onclick="ReleaseAsync" disabled="@(!CanRelease)">
                     <Icon Name="send" Width="14" Height="14" />
-                    <span>@(_staging ? "Getting the apps..." : _releasing ? "Deploying..." : IsImmediate ? "Deploy now" : "Schedule deployment")</span>
+                    <span>@(_checkingSessions ? "Checking who is online..." : _staging ? "Getting the apps..." : _releasing ? "Deploying..." : !IsImmediate ? "Schedule deployment" : SessionsQuestion is not null ? "Deploy anyway" : "Deploy now")</span>
                 </button>
             </div>
         </div>
@@ -202,6 +207,25 @@
     private bool _prodAck;
     private bool _releasing;
     private string? _error;
+    // Who was signed in when the person first pressed Deploy now; set only when somebody
+    // was (or we couldn't tell), and the second press goes ahead. See OpenSessionsCheck.
+    private OpenSessionsCheck? _sessionsCheck;
+    // What the check was asked for: a different build or release picked afterwards is a
+    // different deployment and is asked about again.
+    private (int BuildId, string Tag) _sessionsCheckFor;
+    private bool _checkingSessions;
+
+    private bool SessionsCheckStillApplies => _sessionsCheck is not null && _sessionsCheckFor == (_buildId, _tag);
+
+    /// <summary>
+    /// True when the deployment installs the moment it is sent: the time is now and the
+    /// pipeline does not hand the install to Business Central's next update. Only then do
+    /// the people signed in right now matter.
+    /// </summary>
+    private bool InstallsNow => IsImmediate && !BcDeploymentSchedule.IsDeferred(BcDeploymentSchedule.ToWire(_deploymentSchedule));
+
+    /// <summary>The "are you sure" about who is online, while it still applies.</summary>
+    private string? SessionsQuestion => InstallsNow && SessionsCheckStillApplies ? _sessionsCheck!.Question : null;
 
     // Scheduling: the picker value is a wall-clock in the solution's timezone.
     private TimeZoneInfo _tz = TimeZoneInfo.Utc;
@@ -369,6 +393,8 @@
         _prodAck = false;
         _error = null;
         _releasing = false;
+        _sessionsCheck = null;
+        _checkingSessions = false;
 
         _tz = UpdateWindow.ResolveTimeZone(timeZone);
         _tzLabel = string.IsNullOrWhiteSpace(timeZone) ? "UTC" : timeZone!;
@@ -413,6 +439,22 @@
         _error = null;
         try
         {
+            // Before a build that installs right away, ask who is signed in; if anybody
+            // is, the person answers "are you sure" with a second press.
+            if (InstallsNow && !SessionsCheckStillApplies)
+            {
+                _checkingSessions = true;
+                StateHasChanged();
+                var check = await OpenSessionsCheck.AskAsync(() => Deliveries.CheckOpenSessionsAsync(_releasePipelineId), _envName, Log);
+                _checkingSessions = false;
+                if (check.NeedsConfirmation)
+                {
+                    _sessionsCheck = check;
+                    _sessionsCheckFor = (_buildId, _tag);
+                    return;
+                }
+            }
+
             var buildId = _buildId;
             if (_fromReleases)
             {
@@ -452,8 +494,10 @@
         {
             _releasing = false;
             _staging = false;
+            _checkingSessions = false;
         }
     }
+
 
     /// <summary>
     /// The picker's options from a build pipeline's builds: the successful ones, newest

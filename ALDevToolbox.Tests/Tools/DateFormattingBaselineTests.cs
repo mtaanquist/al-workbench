@@ -66,8 +66,8 @@ public sealed class DateFormattingBaselineTests
         ["ALDevToolbox/Components/Pages/Environments/EnvironmentDetail.razor"] = (5,
             "The delivery window and Business Central's update window are times of day in the customer's zone, and the scheduled update is repeated as a labelled wall clock in that zone beside them so the three can be compared."),
         ["ALDevToolbox/Components/Pages/Error.razor"] = (1, "The error time is copied for someone matching it against server logs, which are in UTC, and it is labelled UTC; the page also has to render when the database is down."),
-        ["ALDevToolbox/Components/Pages/Pipelines/ReleasePipelineDetail.razor"] = (3,
-            "The delivery window is a time of day agreed in the customer's zone, and the client secret's expiry is a calendar date the consultant typed."),
+        ["ALDevToolbox/Components/Pages/Pipelines/ReleasePipelineDetail.razor"] = (2,
+            "The delivery window is a time of day agreed in the customer's zone."),
         ["ALDevToolbox/Components/Pages/Pipelines/ReleasePipelinesBrowser.razor"] = (1,
             "\"Prepared 3 hours ago\" sits inside a hover title, where relative wording reads the same in every zone and a Timestamp cannot go."),
         ["ALDevToolbox/Components/Pages/Projects/ProjectDetailBc.razor"] = (5,
@@ -84,7 +84,9 @@ public sealed class DateFormattingBaselineTests
             "A booked update slot is a wall clock in the customer's own zone, said back in that zone and labelled with it."),
         ["ALDevToolbox/Components/Shared/ReleaseBuildDialog.razor"] = (5,
             "The delivery window and the picked deployment time are wall clocks in the customer's zone, as the field's hint says, and the client secret's expiry is a calendar date the consultant typed."),
-        ["ALDevToolbox/Components/Shared/ReleasePipelineEditorDialog.razor"] = (2,
+        ["ALDevToolbox/Components/Shared/RescheduleDeploymentDialog.razor"] = (2,
+            "The delivery window's next opening is said on the customer's clock beside the window it belongs to, and the client secret's expiry is a calendar date the consultant typed."),
+        ["ALDevToolbox/Components/Pages/Pipelines/ReleasePipelineEdit.razor"] = (2,
             "The delivery window is a time of day agreed in the customer's zone."),
     };
 

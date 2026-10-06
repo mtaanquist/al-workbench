@@ -228,7 +228,7 @@ public sealed class ArtifactService
             .Where(p => _db.OeProjects.Where(visible).Any(v => v.Id == p.ProjectId))
             .Select(p => new
             {
-                p.Id, p.Name, p.ProjectId, p.PreviewCheck, p.PreviewCheckBlocked, p.AutoVersion,
+                p.Id, p.Name, p.ProjectId, p.PreviewCheck, p.PreviewCheckBlocked, p.AutoVersion, p.ChangedAppsOnly,
                 ProjectName = p.Project!.Name,
                 OwnerName = p.Project.CreatedByUser != null ? p.Project.CreatedByUser.DisplayName : null,
             })
@@ -281,7 +281,8 @@ public sealed class ArtifactService
                 PreviewCheck: p.PreviewCheck,
                 PreviewChecks: previewChecks.GetValueOrDefault(p.Id, []),
                 PreviewCheckBlocked: p.PreviewCheck ? p.PreviewCheckBlocked : null,
-                AutoVersion: p.AutoVersion));
+                AutoVersion: p.AutoVersion,
+                ChangedAppsOnly: p.ChangedAppsOnly));
         }
 
         if (!string.IsNullOrWhiteSpace(search))
@@ -315,7 +316,9 @@ public sealed class ArtifactService
                 p.Project.CreatedByUserId,
                 p.PreviewCheck,
                 p.PreviewCheck ? p.PreviewCheckBlocked : null,
-                null))
+                null,
+                p.BuildOnPush,
+                p.BuildOnPush ? p.BuildOnPushBlocked : null))
             .FirstOrDefaultAsync(ct);
         if (header is null || !header.PreviewCheck) return header;
 
@@ -502,7 +505,8 @@ public sealed class ArtifactService
                 // was; the repositories' default branch as known now stands in.
                 DefaultBranch: b.Branch is not null || b.Trigger == ProjectBuildTrigger.PullRequest
                     ? null
-                    : b.DefaultBranch ?? knownDefaults.GetValueOrDefault(b.ProjectId));
+                    : b.DefaultBranch ?? knownDefaults.GetValueOrDefault(b.ProjectId),
+                FromPush: b.Trigger == ProjectBuildTrigger.Push);
         }).ToList();
     }
 
@@ -652,7 +656,7 @@ public sealed class ArtifactService
         return await _db.OeProjectBuildArtifacts.AsNoTracking()
             .Where(a => a.ProjectBuildId == buildId)
             .OrderBy(a => a.FileName)
-            .Select(a => new ArtifactRow(a.Id, a.FileName, a.AppName, a.AppVersion, a.RuntimeVersion, a.SizeBytes))
+            .Select(a => new ArtifactRow(a.Id, a.FileName, a.AppName, a.AppVersion, a.RuntimeVersion, a.SizeBytes, a.CarriedFromBuildId))
             .ToListAsync(ct);
     }
 
@@ -835,7 +839,9 @@ public sealed record PipelineArtifactsRow(
     /// <summary>Why the check could not start last night, when it couldn't.</summary>
     string? PreviewCheckBlocked = null,
     /// <summary>Whether the pipeline's builds add their build number to each app's version.</summary>
-    bool AutoVersion = true);
+    bool AutoVersion = true,
+    /// <summary>Whether the pipeline's builds publish only the extensions that changed since it last produced them.</summary>
+    bool ChangedAppsOnly = true);
 
 /// <summary>
 /// A pipeline's header for the pipeline detail page (its project + owner drive the
@@ -844,7 +850,9 @@ public sealed record PipelineArtifactsRow(
 public sealed record PipelineHeader(int Id, string Name, int ProjectId, string ProjectName, string? OwnerName, int? OwnerUserId,
     bool PreviewCheck = false,
     string? PreviewCheckBlocked = null,
-    IReadOnlyList<PreviewCheckResult>? PreviewChecks = null);
+    IReadOnlyList<PreviewCheckResult>? PreviewChecks = null,
+    bool BuildOnPush = false,
+    string? BuildOnPushBlocked = null);
 
 /// <summary>
 /// The newest build of the nightly preview check for one preview target. See
@@ -914,7 +922,9 @@ public sealed record BuildRow(
     /// <summary>The exact Business Central build the symbols came from (e.g. <c>29.0.52914.0</c>). Null for builds made before it was recorded.</summary>
     string? BcArtifactVersion = null,
     /// <summary>When <see cref="Branch"/> is null, the default branch the build was made from, as best known. Display only.</summary>
-    string? DefaultBranch = null)
+    string? DefaultBranch = null,
+    /// <summary>True when a push to the pipeline's branch started the build rather than a person.</summary>
+    bool FromPush = false)
 {
     /// <summary>The branch to show: the one built, its default branch's name, or a plain "(default branch)".</summary>
     [JsonIgnore]
@@ -970,7 +980,8 @@ public sealed record ChangelogGroup(string RepoName, IReadOnlyList<ChangelogRow>
 public sealed record ChangelogRow(string ShortHash, string Message, string Author, DateTime? CommittedAt);
 
 /// <summary>One downloadable deliverable's metadata.</summary>
-public sealed record ArtifactRow(int Id, string FileName, string AppName, string AppVersion, string? RuntimeVersion, long SizeBytes);
+/// <param name="CarriedFromBuildId">The earlier build an unchanged app was carried over from, when the pipeline publishes only what changed (#1094).</param>
+public sealed record ArtifactRow(int Id, string FileName, string AppName, string AppVersion, string? RuntimeVersion, long SizeBytes, int? CarriedFromBuildId = null);
 
 /// <summary>One app a build produced — its display name and version.</summary>
 public sealed record BuildAppRow(string AppName, string AppVersion);

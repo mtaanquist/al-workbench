@@ -99,6 +99,31 @@ public class OePipeline
     public string? PreviewCheckBlocked { get; set; }
 
     /// <summary>
+    /// Whether a push to the branch this pipeline watches starts a build of it: one
+    /// build per push, at the commit the push left the branch on, queued behind any
+    /// build of the pipeline already waiting so every change gets its own build.
+    /// GitHub repositories only, since pushes arrive by GitHub webhook. Off by
+    /// default. See <c>.design/github-integration-phase2.md</c>, "Building on push" (#1079).
+    /// </summary>
+    public bool BuildOnPush { get; set; }
+
+    /// <summary>
+    /// Who turned building on push on. Those builds run as this person, the same way
+    /// the nightly preview check runs as <see cref="PreviewCheckByUserId"/>: the clone
+    /// uses their repository access and the build is theirs on the page. Null once
+    /// that user is deleted, which pauses building on push.
+    /// </summary>
+    public int? BuildOnPushByUserId { get; set; }
+    public User? BuildOnPushByUser { get; set; }
+
+    /// <summary>
+    /// Why the last push could not start a build (the person who turned it on lost
+    /// access or has nothing to clone with), shown on the pipeline. Null when the last
+    /// push queued its build.
+    /// </summary>
+    public string? BuildOnPushBlocked { get; set; }
+
+    /// <summary>
     /// Whether this pipeline's builds number their apps: the build's number is added to
     /// the third part (Build) of each <c>app.json</c> version in the build's own copy of
     /// the repository, so <c>28.2.0.0</c> built as build #4812 compiles as
@@ -107,6 +132,16 @@ public class OePipeline
     /// <c>.design/object-explorer-project-builds.md</c>, "Build numbers in app versions".
     /// </summary>
     public bool AutoVersion { get; set; } = true;
+
+    /// <summary>
+    /// Whether this pipeline's builds publish only the extensions that changed. An
+    /// extension with no change under its folder since the last build of this pipeline
+    /// that produced it still compiles, but the build keeps that earlier <c>.app</c> and
+    /// version instead of a new one, and leaves it out of the GitHub release. On by
+    /// default; off, every build publishes everything. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "Publishing only what changed" (#1094).
+    /// </summary>
+    public bool ChangedAppsOnly { get; set; } = true;
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }

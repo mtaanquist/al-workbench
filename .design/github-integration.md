@@ -378,6 +378,22 @@ created after the files, so it never governs this flow's own writes. The
 extension, translation and recipe flows write as the *user*, not the app, so
 the bypass does not reach them and they keep going through pull requests.
 
+**Working branches and their build pipelines.** Once the default branch holds
+the workspace, `test` and `staging` are created at that same commit
+(`POST /git/refs`, installation token), before the ruleset so a ruleset over
+every branch cannot refuse them. After the repository is registered on a
+solution, the solution gets one build pipeline per branch - the default branch
+by name, then `test` and `staging` - each building every extension, with the
+pipeline defaults (build numbers on, preview check off). Pipelines are only
+added when the new repository is the solution's only one, because a pipeline
+checks its branch out in every repository of the solution and older
+repositories will not have these branches; otherwise the person is told to add
+them from the solution's Pipelines tab. A branch the solution already has a
+pipeline for is skipped, and nothing is added when Pipelines is switched off.
+Unconditional, not a choice on the form: every new repository is meant to start
+with the same branches. A refused branch or a pipeline that would not save is
+a warning beside the success, like a refused ruleset.
+
 Ordered, in-process, behind the Generate button's existing loading state. No
 queue.
 
@@ -466,6 +482,15 @@ repository is refused rather than overwritten, since a tree write would silently
 replace whatever is in it. And a branch name already taken is stepped
 (`-2`, `-3`, ...) rather than moved: the first attempt's pull request may be
 under review.
+
+A repository holding a solution is joined as that solution by the service
+itself, not by the page: it reads the repository's `workspace.aldt.toml` and
+prefers it to anything the caller passed, so `add_extension_to_repository` and
+`generate_extension` with `addToRepository` name the extension with the
+solution's prefix, refuse a folder or ID range already in use, and update the
+`.code-workspace` and the saved settings exactly as the page does. Example files
+are left out of every repository, saved settings or not - see
+`generation-engine.md`, "Adding to an existing workspace".
 
 `GitHubRepositoryService.ResolveAsync` is the gate both callers go through. It
 refuses anything outside the connected GitHub organisation - the picker offers

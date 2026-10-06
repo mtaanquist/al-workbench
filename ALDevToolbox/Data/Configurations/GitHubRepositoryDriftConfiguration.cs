@@ -18,6 +18,7 @@ internal sealed class GitHubRepositoryDriftConfiguration : IEntityTypeConfigurat
         entity.Property(e => e.Current).HasColumnName("current").HasMaxLength(100).IsRequired();
         entity.Property(e => e.Proposed).HasColumnName("proposed").HasMaxLength(100).IsRequired();
         entity.Property(e => e.ReleaseId).HasColumnName("release_id").IsRequired();
+        entity.Property(e => e.EnvironmentId).HasColumnName("environment_id");
         entity.Property(e => e.DetectedAt).HasColumnName("detected_at").IsRequired();
 
         entity.HasOne(e => e.Organization)
@@ -32,6 +33,15 @@ internal sealed class GitHubRepositoryDriftConfiguration : IEntityTypeConfigurat
             .WithMany()
             .HasForeignKey(e => e.ReleaseId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        // A finding measured against a production environment goes with it. The
+        // index covers the cascade: an environment delete must not scan the table.
+        entity.HasOne(e => e.Environment)
+            .WithMany()
+            .HasForeignKey(e => e.EnvironmentId)
+            .OnDelete(DeleteBehavior.Cascade);
+        entity.HasIndex(e => e.EnvironmentId)
+            .HasDatabaseName("ix_github_repository_drift_environment_id");
 
         // One finding per value per manifest per organisation, so a rescan
         // replaces what it found rather than piling a second copy beside it.

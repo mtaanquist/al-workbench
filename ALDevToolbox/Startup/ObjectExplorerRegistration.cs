@@ -88,6 +88,7 @@ public static class ObjectExplorerRegistration
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.CloneCredentialResolver>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectBuildImporter>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.PreviewCheckService>();
+        services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.PushBuildService>();
         // Whether a pipeline's last build is still what its watched branch holds (#963).
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.BuildFreshnessService>();
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.IProcessRunner, ALDevToolbox.Services.ObjectExplorer.ProcessRunner>();

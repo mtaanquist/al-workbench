@@ -252,6 +252,100 @@ public sealed class PipelineServiceTests : IDisposable
         }
     }
 
+    // --- Publishing only what changed (#1094) -------------------------------
+
+    [Fact]
+    public async Task A_new_pipeline_publishes_only_changed_extensions_unless_turned_off()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
+        await using (var read = _db.NewContext())
+        {
+            (await read.OePipelines.SingleAsync(p => p.Id == id)).ChangedAppsOnly.Should().BeTrue();
+        }
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production", null, ChangedAppsOnly: false));
+        await using (var read = _db.NewContext())
+        {
+            (await read.OePipelines.SingleAsync(p => p.Id == id)).ChangedAppsOnly.Should().BeFalse();
+        }
+
+        var other = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Test", null, ChangedAppsOnly: false));
+        await using (var read = _db.NewContext())
+        {
+            (await read.OePipelines.SingleAsync(p => p.Id == other)).ChangedAppsOnly.Should().BeFalse("turning it off on a new pipeline sticks");
+        }
+    }
+
+    // --- Building on push (#1079) ------------------------------------------
+
+    [Fact]
+    public async Task Building_on_push_is_off_unless_asked_and_runs_as_whoever_last_saved_it()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var alice = await SeedUserAsync(ctx, "alice@cronus.test");
+        var bob = await SeedUserAsync(ctx, "bob@cronus.test");
+        _db.OrgContext.CurrentUserId = alice;
+        var svc = NewService(ctx);
+
+        var off = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Test", null));
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null, BuildOnPush: true));
+        _db.OrgContext.CurrentUserId = bob;
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production line", null, BuildOnPush: true));
+
+        await using (var read = _db.NewContext())
+        {
+            var plain = await read.OePipelines.SingleAsync(p => p.Id == off);
+            plain.BuildOnPush.Should().BeFalse();
+            plain.BuildOnPushByUserId.Should().BeNull();
+            var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+            pipeline.BuildOnPush.Should().BeTrue();
+            pipeline.BuildOnPushByUserId.Should().Be(bob, "saving the pipeline makes the saver the person its builds run as");
+        }
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production line", null, BuildOnPush: false));
+        await using (var read = _db.NewContext())
+        {
+            var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+            pipeline.BuildOnPush.Should().BeFalse();
+            pipeline.BuildOnPushByUserId.Should().BeNull();
+        }
+    }
+
+    [Fact]
+    public async Task Resume_with_my_access_resumes_paused_building_on_push()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var alice = await SeedUserAsync(ctx, "alice@cronus.test");
+        var bob = await SeedUserAsync(ctx, "bob@cronus.test");
+        _db.OrgContext.CurrentUserId = alice;
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null, BuildOnPush: true));
+        var plain = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Test", null));
+        await using (var paused = _db.NewContext())
+        {
+            await paused.OePipelines.Where(p => p.Id == id)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.BuildOnPushBlocked, "the person who turned it on can no longer manage this solution."));
+        }
+
+        _db.OrgContext.CurrentUserId = bob;
+        await using (var act = _db.NewContext())
+        {
+            await NewService(act).TakeOverBuildOnPushAsync(id);
+            var refused = () => NewService(act).TakeOverBuildOnPushAsync(plain);
+            await refused.Should().ThrowAsync<PlanValidationException>();
+        }
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.BuildOnPushByUserId.Should().Be(bob);
+        pipeline.BuildOnPushBlocked.Should().BeNull();
+    }
+
     // --- Nightly preview check (#994) ---------------------------------------
 
     [Fact]
@@ -295,7 +389,7 @@ public sealed class PipelineServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Someone_else_saving_the_pipeline_leaves_the_check_running_as_its_owner()
+    public async Task Someone_else_saving_the_pipeline_runs_the_check_as_them()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
@@ -309,7 +403,7 @@ public sealed class PipelineServiceTests : IDisposable
         await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production line", null, PreviewCheck: true));
 
         await using var read = _db.NewContext();
-        (await read.OePipelines.SingleAsync(p => p.Id == id)).PreviewCheckByUserId.Should().Be(alice);
+        (await read.OePipelines.SingleAsync(p => p.Id == id)).PreviewCheckByUserId.Should().Be(bob);
     }
 
     [Fact]

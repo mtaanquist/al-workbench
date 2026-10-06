@@ -112,6 +112,11 @@
                     <span class="field-warn"><Icon Name="triangle-alert" Width="13" Height="13" />@blocked</span>
                 }
 
+                @if (_sessionsCheck is { } check)
+                {
+                    <Alert Tone="AlertTone.Warn" Role="status"><span>@check.Question</span></Alert>
+                }
+
                 @if (_error is { } err)
                 {
                     <Alert Tone="AlertTone.Danger"><span>@err</span></Alert>
@@ -121,7 +126,7 @@
                 <button type="button" class="btn" @onclick="Cancel" disabled="@_releasing">Cancel</button>
                 <button type="button" class="btn btn--primary" @onclick="ReleaseAsync" disabled="@(!CanRelease)">
                     <Icon Name="send" Width="14" Height="14" />
-                    <span>@(_releasing ? "Deploying..." : "Deploy")</span>
+                    <span>@(_checkingSessions ? "Checking who is online..." : _releasing ? "Deploying..." : _sessionsCheck is not null ? "Deploy anyway" : "Deploy")</span>
                 </button>
             </div>
         </div>
@@ -136,6 +141,7 @@
     /// What the dialog shows and deploys.
     /// </summary>
     /// <param name="DeliveryId">The failed deployment to deploy again.</param>
+    /// <param name="ReleasePipelineId">The failed deployment's own deployment pipeline (the one it deploys through again), whose environment is asked who is online before an install that runs right away.</param>
     /// <param name="BuildId">The build it installed.</param>
     /// <param name="BuildSource">Where the build came from, read after its number: "from build pipeline \"Test\"".</param>
     /// <param name="CustomerName">The solution's name, which says whose environment this is.</param>
@@ -148,7 +154,7 @@
     /// <param name="OutsideWindowWarning">Set when deploying now falls outside the environment's delivery window.</param>
     /// <param name="FailedOnSchemaChange">True when Business Central refused a schema change, so deploying again without Force sync will likely fail the same way.</param>
     public sealed record Request(
-        int DeliveryId, int BuildId, string BuildSource, string CustomerName,
+        int DeliveryId, int ReleasePipelineId, int BuildId, string BuildSource, string CustomerName,
         string EnvironmentName, string? EnvironmentType, string WireSchedule, string PipelineSyncMode,
         IReadOnlyList<string> Apps, IReadOnlyList<string> AlreadyOn, string? OutsideWindowWarning = null,
         bool FailedOnSchemaChange = false)
@@ -165,6 +171,13 @@
     private bool _prodAck;
     private bool _releasing;
     private string? _error;
+    // Who was signed in when the person first pressed Deploy; set only when somebody was
+    // (or we couldn't tell), and the second press goes ahead. See OpenSessionsCheck.
+    private OpenSessionsCheck? _sessionsCheck;
+    private bool _checkingSessions;
+
+    /// <summary>True when Business Central installs on arrival, so the people signed in right now are affected.</summary>
+    private bool InstallsNow => _request is { } r && !BcDeploymentSchedule.IsDeferred(r.WireSchedule);
 
     private bool IsProduction => string.Equals(_request?.EnvironmentType, "Production", StringComparison.OrdinalIgnoreCase);
     private string EnvType => string.IsNullOrWhiteSpace(_request?.EnvironmentType) ? "Business Central" : _request!.EnvironmentType!;
@@ -233,6 +246,8 @@
         _prodAck = false;
         _releasing = false;
         _error = null;
+        _sessionsCheck = null;
+        _checkingSessions = false;
         _focusPending = true;
         StateHasChanged();
         return Task.CompletedTask;
@@ -262,6 +277,21 @@
         _error = null;
         try
         {
+            // Before an install that runs right away, ask who is signed in; if anybody is,
+            // the person answers "are you sure" with a second press.
+            if (InstallsNow && _sessionsCheck is null)
+            {
+                _checkingSessions = true;
+                StateHasChanged();
+                var check = await OpenSessionsCheck.AskAsync(() => Deliveries.CheckOpenSessionsAsync(r.ReleasePipelineId), r.EnvironmentName, Log);
+                _checkingSessions = false;
+                if (check.NeedsConfirmation)
+                {
+                    _sessionsCheck = check;
+                    return;
+                }
+            }
+
             var deliveryId = await Deliveries.ReleaseAgainAsync(r.DeliveryId, _force);
             _request = null;
             await OnReleased.InvokeAsync(deliveryId);
@@ -282,6 +312,7 @@
         finally
         {
             _releasing = false;
+            _checkingSessions = false;
         }
     }
 }

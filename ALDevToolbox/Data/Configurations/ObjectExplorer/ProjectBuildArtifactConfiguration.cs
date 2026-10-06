@@ -20,6 +20,7 @@ internal sealed class ProjectBuildArtifactConfiguration : IEntityTypeConfigurati
         entity.Property(e => e.RuntimeVersion).HasColumnName("runtime_version").HasMaxLength(50);
         entity.Property(e => e.SizeBytes).HasColumnName("size_bytes").IsRequired();
         entity.Property(e => e.Content).HasColumnName("content").IsRequired();
+        entity.Property(e => e.CarriedFromBuildId).HasColumnName("carried_from_build_id");
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
 
         entity.HasOne(e => e.Organization)

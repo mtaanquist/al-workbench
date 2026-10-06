@@ -145,7 +145,7 @@
                                            unsaved change, Save is the button to press, and this one
                                            leaves the page. See GitHubNeedsConnecting. *@
                                         <a class="btn @(GitHubNeedsConnecting ? "btn--primary" : null)"
-                                           href="/account?section=repos&return=@GitHubAppEndpoints.AdminRepositoriesReturn">
+                                           href="/account/repos?return=@GitHubAppEndpoints.AdminRepositoriesReturn">
                                             <Icon Name="link" Width="16" Height="16" />
                                             <span>@(_myGitHub is { IsLinked: true }
                                                 ? "Connect your GitHub account again"
@@ -328,7 +328,7 @@
                 <strong>Builds are separate, on both hosts.</strong> When a solution
                 builds, the workbench fetches its copy of the repository as whoever
                 started the build, using a token that person saved under
-                <a href="/account?section=repos">Account &#8594; Repository access</a>.
+                <a href="/account/repos">Account &#8594; Repository access</a>.
                 So a build only ever reaches what that person can reach - and they
                 each need a token there, whether or not you connect GitHub here.
             </span>

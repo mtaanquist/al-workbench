@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 namespace ALDevToolbox.Domain.Entities.ObjectExplorer;
 
@@ -44,6 +45,24 @@ public class OeRelease
     /// on them went quiet. Compare against this, never against a literal.
     /// </summary>
     public const string ProjectBuildKind = "project";
+
+    /// <summary>
+    /// The <see cref="DedupKey"/> prefix of a vendor symbols release a pipeline build
+    /// ingested from the public symbol feeds (<c>symbols:{appId}:{version}</c>).
+    /// Most of those packages carry no source, and one with no files is left off the
+    /// release list, the compare picker, the command palette and the launcher count
+    /// (#1092): it exists to resolve references, not to be browsed.
+    /// </summary>
+    public const string SymbolFeedDedupPrefix = "symbols:";
+
+    /// <summary>
+    /// Leaves out a feed symbols release that finished importing with no files
+    /// (<see cref="SymbolFeedDedupPrefix"/>, #1092). Only a ready one: an import still
+    /// running has not counted its files yet. Translates to SQL.
+    /// </summary>
+    public static readonly Expression<Func<OeRelease, bool>> NotAnEmptySymbolPackage =
+        r => !(r.DedupKey != null && r.DedupKey.StartsWith(SymbolFeedDedupPrefix)
+               && r.Status == "ready" && r.SourceFileCount == 0);
 
     /// <summary>
     /// Explicit, source-derived identity for releases that must not import twice —

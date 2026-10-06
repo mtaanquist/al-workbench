@@ -526,12 +526,12 @@ internal static class AccountAuthEndpoints
                     StepUpAuth.StrongAuthAt(ctx.User),
                     signedInAt: clock.GetUtcNow().UtcDateTime);
                 await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, ctx.User, props);
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=password");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=password");
             }
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.FirstOrDefault();
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
             }
         }).RequireAuthorization();
 

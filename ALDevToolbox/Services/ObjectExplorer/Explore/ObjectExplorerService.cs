@@ -91,14 +91,25 @@ public class ObjectExplorerService
     /// <paramref name="includeProjectBuilds"/> only for a genuinely project-scoped
     /// caller. See <c>.design/artifacts.md</c>.
     /// </para>
+    /// <para>
+    /// <paramref name="browsableOnly"/> narrows the list to what the releases page and
+    /// the compare picker show: ready releases, without the symbol packages a build
+    /// pulled from the feeds with no files in them (#1092). Those stay in the database
+    /// so builds can resolve references into them.
+    /// </para>
     /// </summary>
     public async Task<List<ReleaseListItem>> ListReleasesAsync(
-        bool includeSoftDeleted = false, bool includeProjectBuilds = false, CancellationToken ct = default)
+        bool includeSoftDeleted = false, bool includeProjectBuilds = false, bool browsableOnly = false,
+        CancellationToken ct = default)
     {
         var q = _db.OeReleases.AsNoTracking().AsQueryable();
         if (!includeSoftDeleted)
         {
             q = q.Where(r => r.DeletedAt == null);
+        }
+        if (browsableOnly)
+        {
+            q = q.Where(r => r.Status == "ready").Where(OeRelease.NotAnEmptySymbolPackage);
         }
         if (!includeProjectBuilds)
         {
@@ -201,6 +212,87 @@ public class ObjectExplorerService
 
         rows.Sort((a, b) => string.Compare(a.ProjectName, b.ProjectName, StringComparison.OrdinalIgnoreCase));
         return rows;
+    }
+
+    /// <summary>
+    /// The builds a <c>project</c>-kind Release can be compared with: the other
+    /// ready builds of the same project, its own pipeline's first, newest first
+    /// within each. This is the project-scoped compare picker
+    /// <see cref="ListReleasesAsync"/> defers to; the global list leaves project
+    /// builds out, so the release page cannot filter them out of it (#1075).
+    /// <para>
+    /// Every build of a project shares the label "{project} on BC {version}", so
+    /// each row's <see cref="ReleaseListItem.Label"/> is rewritten to name the
+    /// build and its pipeline. Empty when the release is not a tracked build or
+    /// the caller cannot see it. See <c>.design/artifacts.md</c>.
+    /// </para>
+    /// </summary>
+    public async Task<List<ReleaseListItem>> ListBuildCompareCandidatesAsync(int releaseId, CancellationToken ct = default)
+    {
+        if (!await ReleaseVisibleAsync(releaseId, ct)) return [];
+        var own = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.ReleaseId == releaseId)
+            .OrderBy(b => b.Id)
+            .Select(b => new { b.ProjectId, b.PipelineId })
+            .FirstOrDefaultAsync(ct);
+        if (own is null) return [];
+
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        var visibleRelease = _access.VisibleReleasePredicate(snapshot);
+        var rows = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.ProjectId == own.ProjectId
+                        && b.ReleaseId != null
+                        && b.ReleaseId != releaseId
+                        && b.Status == ProjectBuildStatus.Ready
+                        && b.Release!.Status == "ready"
+                        && b.Release!.DeletedAt == null
+                        // A deleted pipeline's builds go with it, as on the Pipelines pages.
+                        && (b.Pipeline == null || b.Pipeline.DeletedAt == null))
+            .Where(b => _db.OeReleases.Where(visibleRelease).Any(r => r.Id == b.ReleaseId))
+            .OrderBy(b => own.PipelineId != null && b.PipelineId == own.PipelineId ? 0 : 1)
+            .ThenByDescending(b => b.StartedAt)
+            .ThenByDescending(b => b.Id)
+            .Take(BuildCompareCandidateCap)
+            .Select(b => new
+            {
+                BuildId = b.Id,
+                b.BcTarget,
+                PipelineName = b.Pipeline != null ? b.Pipeline.Name : null,
+                Item = new ReleaseListItem(
+                    b.Release!.Id, b.Release.Label, b.Release.Kind, b.Release.Status,
+                    b.Release.BcVersion, b.Release.ParentReleaseId,
+                    ParentLabel: b.Release.ParentRelease != null ? b.Release.ParentRelease.Label : null,
+                    Publisher: b.Release.Publisher,
+                    ProjectName: b.Project!.Name,
+                    ImportedAt: b.Release.ImportedAt,
+                    SourceFileCount: b.Release.SourceFileCount,
+                    SourceContentLength: b.Release.SourceContentLength,
+                    DeletedAt: b.Release.DeletedAt,
+                    StatusMessage: b.Release.StatusMessage,
+                    PipelineName: b.Pipeline != null ? b.Pipeline.Name : null,
+                    IsPrerelease: b.Release.IsPrerelease),
+            })
+            .ToListAsync(ct);
+
+        return rows
+            .Select(r => r.Item with { Label = BuildCompareLabel(r.BuildId, r.BcTarget, r.PipelineName, r.Item.BcVersion) })
+            .ToList();
+    }
+
+    /// <summary>
+    /// How many builds the compare picker offers. A busy solution has hundreds;
+    /// the recent ones are the ones anyone compares against, and the picker is a
+    /// plain dropdown.
+    /// </summary>
+    internal const int BuildCompareCandidateCap = 50;
+
+    private static string BuildCompareLabel(int buildId, string bcTarget, string? pipelineName, string? bcVersion)
+    {
+        var label = bcTarget == ProjectBuildTarget.Current
+            ? $"Build #{buildId}"
+            : $"{ProjectBuildTarget.Label(bcTarget)} preview build #{buildId}";
+        if (!string.IsNullOrWhiteSpace(pipelineName)) label += $" of {pipelineName}";
+        return string.IsNullOrWhiteSpace(bcVersion) ? label : $"{label} on BC {bcVersion}";
     }
 
     /// <summary>

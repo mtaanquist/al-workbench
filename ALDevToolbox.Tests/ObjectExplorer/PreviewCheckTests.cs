@@ -170,7 +170,7 @@ public sealed class PreviewCheckTests : IDisposable
         var due = await ListDueAsync();
 
         due.Should().ContainSingle().Which.Should().Be(
-            new PreviewCheckDue(pipelineId, null, null, PreviewCheckService.NoOwnerMessage));
+            new PreviewCheckDue(pipelineId, null, null, AutomatedBuilds.NoOwnerMessage));
     }
 
     [Fact]
@@ -196,11 +196,11 @@ public sealed class PreviewCheckTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            await NewService(ctx).SetBlockedAsync(pipelineId, PreviewCheckService.NoAccessMessage);
+            await NewService(ctx).SetBlockedAsync(pipelineId, AutomatedBuilds.NoAccessMessage);
         }
         await using (var read = _db.NewContext())
         {
-            (await read.OePipelines.SingleAsync(p => p.Id == pipelineId)).PreviewCheckBlocked.Should().Be(PreviewCheckService.NoAccessMessage);
+            (await read.OePipelines.SingleAsync(p => p.Id == pipelineId)).PreviewCheckBlocked.Should().Be(AutomatedBuilds.NoAccessMessage);
         }
 
         await using (var ctx = _db.NewContext())
@@ -264,7 +264,7 @@ public sealed class PreviewCheckTests : IDisposable
         (await read.OeProjectBuilds.AnyAsync(b => b.PipelineId == pipelineId))
             .Should().BeFalse();
         (await read.OePipelines.SingleAsync(p => p.Id == pipelineId))
-            .PreviewCheckBlocked.Should().Be(PreviewCheckService.NoAccessMessage);
+            .PreviewCheckBlocked.Should().Be(AutomatedBuilds.NoAccessMessage);
     }
 
     [Fact]
@@ -277,7 +277,7 @@ public sealed class PreviewCheckTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             await ctx.OePipelines.Where(p => p.Id == pipelineId)
-                .ExecuteUpdateAsync(u => u.SetProperty(p => p.PreviewCheckBlocked, PreviewCheckService.NoOwnerMessage));
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.PreviewCheckBlocked, AutomatedBuilds.NoOwnerMessage));
         }
 
         var queued = await NewScheduler().SweepAsync(CancellationToken.None);

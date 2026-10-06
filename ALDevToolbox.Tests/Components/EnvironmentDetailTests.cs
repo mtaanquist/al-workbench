@@ -64,6 +64,11 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         _ctx.Services.AddSingleton(_panels);
         _ctx.Services.AddSingleton(TimeProvider.System);
         _ctx.Services.AddSingleton(new EnvironmentRefreshQueue());
+        // Scheduled installs lists the deployment pipelines' bookings too (#1097).
+        _ctx.Services.AddScoped<IDeliveryTokenSource>(sp => sp.GetRequiredService<ProjectConnectionService>());
+        _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryService>();
+        _ctx.Services.AddSingleton(new ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryQueue());
+        TestDb.AddToolServices(_ctx.Services);
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>),
@@ -564,6 +569,55 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
             .HasAttribute("disabled").Should().BeFalse();
     }
 
+    /// <summary>
+    /// A deployment pipeline's run booked for this environment is one of the scheduled
+    /// installs too (#1097), with the pipeline it comes from and a way to move or cancel it.
+    /// </summary>
+    [Fact]
+    public async Task A_pipeline_deployment_booked_for_later_is_listed_with_the_scheduled_installs()
+    {
+        var (projectId, envId) = await SeedAsync();
+        _panels.Set(projectId, envId, Panel());
+        await using (var ctx = _db.NewContext())
+        {
+            var now = DateTime.UtcNow;
+            var buildPipeline = new OePipeline { OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "main", CreatedAt = now, UpdatedAt = now };
+            ctx.OePipelines.Add(buildPipeline);
+            await ctx.SaveChangesAsync();
+            var build = new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = buildPipeline.Id,
+                Status = ProjectBuildStatus.Ready, StartedAt = now,
+            };
+            var release = new OeReleasePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "main to Production",
+                BuildPipelineId = buildPipeline.Id, ProjectEnvironmentId = envId, CreatedAt = now, UpdatedAt = now,
+            };
+            ctx.OeProjectBuilds.Add(build);
+            ctx.OeReleasePipelines.Add(release);
+            await ctx.SaveChangesAsync();
+            var envName = await ctx.OeProjectEnvironments.Where(e => e.Id == envId).Select(e => e.Name).SingleAsync();
+            ctx.OeProjectDeliveries.Add(new OeProjectDelivery
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, ReleasePipelineId = release.Id,
+                ProjectBuildId = build.Id, EnvironmentName = envName, Status = ProjectDeliveryStatus.Scheduled,
+                ScheduledFor = now.AddHours(6), CreatedAt = now, UpdatedAt = now,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = Render(envId, "apps");
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("main to Production"));
+        var row = cut.FindAll("tr").Single(r => r.TextContent.Contains("main to Production"));
+        row.TextContent.Should().Contain("Deployment pipeline").And.Contain("Build #").And.Contain("Booked for ");
+        row.QuerySelectorAll("button").Select(b => b.TextContent.Trim()).Should().Equal("Reschedule", "Cancel deployment");
+
+        row.QuerySelectorAll("button")[0].Click();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Reschedule deployment"));
+    }
+
     [Fact]
     public async Task An_app_from_another_company_can_be_uploaded_but_not_before_a_file_is_chosen()
     {
@@ -841,7 +895,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.WaitForAssertion(() =>
             cut.Markup.Should().Contain("Couldn't read the operations from Business Central"));
         cut.Find(".empty a.btn, .empty-state a.btn, a.btn[href$='tab=bc']").GetAttribute("href")
-            .Should().Be($"/solutions/{projectId}?tab=bc");
+            .Should().Be($"/solutions/{projectId}/bc");
     }
 
     /// <summary>
@@ -1044,7 +1098,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.WaitForAssertion(() =>
             cut.Find(".empty-state__title").TextContent.Should()
                 .Be("Couldn't read who is signed in to this environment"));
-        cut.Find(".empty-state__action a").GetAttribute("href").Should().Be($"/solutions/{projectId}?tab=bc");
+        cut.Find(".empty-state__action a").GetAttribute("href").Should().Be($"/solutions/{projectId}/bc");
     }
 
     /// <summary>
@@ -1311,7 +1365,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         var cut = Render(envId);
 
         cut.Find(".empty-state__title").TextContent.Should().Be("Couldn't read apps and settings from Business Central");
-        cut.Find(".empty-state__action a").GetAttribute("href").Should().Be($"/solutions/{projectId}?tab=bc");
+        cut.Find(".empty-state__action a").GetAttribute("href").Should().Be($"/solutions/{projectId}/bc");
         cut.FindAll(".kv-grid").Should().HaveCount(1, "the mirror does not need the connection");
     }
 

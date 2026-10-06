@@ -66,7 +66,7 @@ window.aldtPasskey = {
             const txt = await completeRes.text();
             throw new Error(txt || 'Passkey registration failed.');
         }
-        window.location.href = '/account?ok=passkey-added';
+        window.location.href = '/account/security?ok=passkey-added';
     },
 
     async login(email) {

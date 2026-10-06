@@ -475,6 +475,9 @@ public record WorkspaceExtensionIdentity(
 {
     public const string CoreKind = "core";
     public const string ModuleKind = "module";
+
+    /// <summary>An extension added to the workspace after it was generated, from New Extension.</summary>
+    public const string AddedKind = "added";
 }
 
 /// <summary>

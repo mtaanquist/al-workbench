@@ -67,17 +67,17 @@
             <span class="pd-actions">
                 @if (_buildsOn)
                 {
-                    <button type="button" class="btn" @onclick="NewBuildPipelineAsync">
+                    <a class="btn" href="@NewBuildPipelineHref">
                         <Icon Name="plus" Width="16" Height="16" />
                         <span>New build pipeline</span>
-                    </button>
+                    </a>
                 }
                 @if (_deploysOn)
                 {
-                    <button type="button" class="btn" @onclick="NewDeploymentPipelineAsync">
+                    <a class="btn" href="@NewDeploymentPipelineHref">
                         <Icon Name="plus" Width="16" Height="16" />
                         <span>New deployment pipeline</span>
-                    </button>
+                    </a>
                 }
             </span>
         </Actions>
@@ -135,8 +135,8 @@
         <section class="card">
             <EmptyState Icon="workflow" Title="No pipelines yet">
                 <Text>
-                    A build pipeline compiles a solution's repositories when you press Build, or for
-                    each pull request. A deployment pipeline installs a build on a Business Central
+                    A build pipeline compiles a solution's repositories when you press Build, when new
+                    commits are pushed, or for each pull request. A deployment pipeline installs a build on a Business Central
                     environment.
                 </Text>
                 <Action>
@@ -145,21 +145,21 @@
                            off, the deployment pipeline takes its place. *@
                         @if (_buildsOn)
                         {
-                            <button type="button" class="btn btn--primary" @onclick="NewBuildPipelineAsync">
+                            <a class="btn btn--primary" href="@NewBuildPipelineHref">
                                 <Icon Name="plus" Width="15" Height="15" />
                                 <span>New build pipeline</span>
-                            </button>
+                            </a>
                         }
                         @if (_deploysOn)
                         {
                             var cssClass = _buildsOn ? "btn" : "btn btn--primary";
-                            <button type="button" class="@cssClass" @onclick="NewDeploymentPipelineAsync">
+                            <a class="@cssClass" href="@NewDeploymentPipelineHref">
                                 @if (!_buildsOn)
                                 {
                                     <Icon Name="plus" Width="15" Height="15" />
                                 }
                                 <span>New deployment pipeline</span>
-                            </button>
+                            </a>
                         }
                     </span>
                 </Action>
@@ -304,8 +304,6 @@
     }
 </div>
 
-<PipelineEditorDialog @ref="_buildEditor" OnSaved="OnBuildPipelineCreated" />
-<ReleasePipelineEditorDialog @ref="_deployEditor" OnSaved="OnDeploymentPipelineCreated" />
 
 @code {
     [CascadingParameter] private Task<Microsoft.AspNetCore.Components.Authorization.AuthenticationState>? AuthState { get; set; }
@@ -318,8 +316,6 @@
     private bool _buildsOn;
     private bool _deploysOn;
     private bool _isAdmin;
-    private PipelineEditorDialog? _buildEditor;
-    private ReleasePipelineEditorDialog? _deployEditor;
 
     private static readonly string[] SkeletonCards = ["Needs attention", "Recent activity"];
     private static readonly string[] SkeletonWidths = ["75%", "60%", "82%", "54%"];
@@ -544,9 +540,9 @@
                 a.SolutionCount == 1
                     ? $"Used by {a.ProjectName}"
                     : $"Used by {a.ProjectName} and {a.SolutionCount - 1} other solution{(a.SolutionCount == 2 ? "" : "s")} with a deployment pipeline",
-                _isAdmin ? "/admin/administration/business-central" : $"/solutions/{a.ProjectId}?tab=bc"),
+                _isAdmin ? "/admin/administration/business-central" : $"/solutions/{a.ProjectId}/bc"),
             _ => SecretRow(a, $"The Business Central client secret for {a.ProjectName}", "Solution connection",
-                $"/solutions/{a.ProjectId}?tab=bc"),
+                $"/solutions/{a.ProjectId}/bc"),
         };
     }
 
@@ -673,19 +669,7 @@
 
     // ── Actions ──────────────────────────────────────────────────────────────
 
-    private async Task NewBuildPipelineAsync()
-    {
-        if (_buildEditor is null || _projects.Count == 0) return;
-        await _buildEditor.OpenForCreateAsync(_projects);
-    }
+    private const string NewBuildPipelineHref = "/pipelines/new?returnUrl=%2Fpipelines";
 
-    private async Task NewDeploymentPipelineAsync()
-    {
-        if (_deployEditor is null || _projects.Count == 0) return;
-        await _deployEditor.OpenForCreateAsync(_projects);
-    }
-
-    private void OnBuildPipelineCreated(int id) => Nav.NavigateTo($"/pipelines/{id}");
-
-    private void OnDeploymentPipelineCreated(int id) => Nav.NavigateTo($"/pipelines/deployments/{id}");
+    private const string NewDeploymentPipelineHref = "/pipelines/deployments/new?returnUrl=%2Fpipelines";
 }

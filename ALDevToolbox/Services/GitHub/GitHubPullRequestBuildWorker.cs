@@ -31,8 +31,9 @@ namespace ALDevToolbox.Services.GitHub;
 ///
 /// <para>The same drain also records <c>push</c> deliveries and merged pull
 /// requests (#963) through <see cref="GitHubBranchActivityService"/>, under the
-/// same per-organisation resolution. Those build nothing: they are what a
-/// pipeline's freshness is compared against.</para>
+/// same per-organisation resolution. They are what a pipeline's freshness is
+/// compared against, and a push also builds the pipelines that build on push
+/// (#1079, <see cref="PushBuildService"/>).</para>
 /// </summary>
 public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhookJob>
 {
@@ -108,7 +109,8 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
 
     /// <summary>
     /// Records a push or a merged pull request for the organisation that connected
-    /// the installation (#963). Nothing is built. A repository no solution in that
+    /// the installation (#963), then builds the pipelines that build on push
+    /// (#1079). A repository no solution in that
     /// organisation tracks is dropped at Debug - pushes are frequent, and most
     /// repositories in a GitHub organisation are not a solution's.
     /// </summary>
@@ -139,7 +141,70 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
             _logger.LogDebug(
                 "Dropped a delivery for {Repository}: no solution in organisation {OrganizationId} tracks it.",
                 job.RepositoryFullName, identity.OrganizationId);
+            return;
         }
+
+        if (job is GitHubPushJob buildable && PushBuildService.IsBuildable(buildable))
+        {
+            await StartPushBuildsAsync(buildable, identity, scope, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Queues a build of every pipeline that builds on push and watches the pushed
+    /// branch (#1079), each as the person who turned that on, the way
+    /// <c>PreviewCheckScheduler</c> starts a nightly check as its person. A refusal
+    /// pauses building on push for that pipeline with the reason on the page; a
+    /// started build lifts an earlier pause. One pipeline's trouble is not the others'.
+    /// </summary>
+    private async Task StartPushBuildsAsync(
+        GitHubPushJob push, AmbientOrganizationScope.OrganizationIdentity identity, AsyncServiceScope orgScope, CancellationToken ct)
+    {
+        var pushBuilds = orgScope.ServiceProvider.GetRequiredService<PushBuildService>();
+        foreach (var due in await pushBuilds.ListDueAsync(push, ct).ConfigureAwait(false))
+        {
+            var (settled, blocked) = (true, due.Blocked);
+            if (due.UserId is { } userId)
+            {
+                (settled, blocked) = await StartPushBuildAsync(push, identity, due, userId, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Did not build pipeline {PipelineId} for {Job}: {Reason}", due.PipelineId, Describe(push), due.Blocked);
+            }
+            if (settled)
+            {
+                await pushBuilds.SetBlockedAsync(due.PipelineId, blocked, ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Starts one build on push as <paramref name="userId"/>. Returns whether the
+    /// attempt settles the pipeline's pause, and the pause to show: null when it
+    /// queued, the reason when it was refused. An unexpected failure settles nothing.
+    /// </summary>
+    private async Task<(bool Settled, string? Blocked)> StartPushBuildAsync(
+        GitHubPushJob push, AmbientOrganizationScope.OrganizationIdentity identity, PushBuildDue due, int userId, CancellationToken ct)
+    {
+        var outcome = await AutomatedBuilds.StartAsAsync(
+            _services, identity.OrganizationId, identity.IsSystemOrganization, userId,
+            importer => importer.StartPushBuildAsync(due.PipelineId, due.RepositoryId, push.HeadSha, ct),
+            "the build could not start.").ConfigureAwait(false);
+        if (outcome.Error is { } error)
+        {
+            // Not something the pipeline can be told to fix: log it and leave any
+            // pause as it is. The next push tries again.
+            _logger.LogError(error, "Could not start a build on push of pipeline {PipelineId} for {Job}.", due.PipelineId, Describe(push));
+            return (false, null);
+        }
+        if (outcome.Refusal is { } reason)
+        {
+            _logger.LogInformation(
+                "Paused building on push for pipeline {PipelineId} ({Job}) as user {UserId}: {Reason}", due.PipelineId, Describe(push), userId, reason);
+        }
+        return (true, outcome.Refusal);
     }
 
     private async Task BuildPullRequestAsync(GitHubPullRequestJob job, CancellationToken ct)

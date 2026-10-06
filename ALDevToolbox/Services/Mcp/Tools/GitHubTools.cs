@@ -94,8 +94,10 @@ public sealed class GitHubTools
         "member of that GitHub organisation; a call from someone who is not, or from an account that has " +
         "not connected its GitHub account, is refused and nothing is created. A name the organisation " +
         "already uses is refused too. The repository is registered on a solution only when the " +
-        "organisation has Solutions enabled. The files are committed straight to the default branch; " +
-        "if the GitHub organisation's branch rules refuse that, the call is refused with what an owner " +
+        "organisation has Solutions enabled. The files are committed straight to the default branch, " +
+        "and test and staging branches are created at the same commit; when the repository is the only " +
+        "one on its solution, that solution also gets a build pipeline per branch. " +
+        "If the GitHub organisation's branch rules refuse the commit, the call is refused with what an owner " +
         "of the organisation has to allow. Use generate_workspace instead when you want the workspace " +
         "as a ZIP.")]
     public async Task<RepositoryCreationResult> CreateRepositoryAsync(
@@ -130,8 +132,11 @@ public sealed class GitHubTools
         "on the repository's default branch changes until somebody merges it. Only repositories in the " +
         "GitHub organisation your organisation has connected, and that you can open on GitHub yourself, " +
         "are accepted; a repository that already has an extension in a folder of that name is refused, as " +
-        "is a call from an account that has not connected its GitHub account. This returns the pull " +
-        "request only - use generate_extension with addToRepository when you want the ZIP alongside it.")]
+        "is a call from an account that has not connected its GitHub account. A repository holding a " +
+        "solution the workbench generated is joined as that solution: the extension gets the solution's " +
+        "prefix, example files are left out, an ID range another extension there uses is refused, and " +
+        "the pull request also updates the solution's .code-workspace and saved settings. This returns " +
+        "the pull request only - use generate_extension with addToRepository when you want the ZIP alongside it.")]
     public async Task<RepositoryDeliveryResult> AddExtensionToRepositoryAsync(
         StandaloneExtensionPlanInput plan,
         [Description("The repository as 'owner/name', from list_repositories.")]

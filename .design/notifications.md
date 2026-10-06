@@ -63,7 +63,7 @@ Agreed with the maintainer on 2026-10-03:
 - In-app notifications are deleted after 30 days, by the digest scheduler's run for each
   organisation (it already prunes digest items on the same window).
 - Every notification email passes `SettingsUrl` to `EmailLayout`, which puts a "Change
-  which emails you get" link in the footer, pointing at `/account?section=notifications`.
+  which emails you get" link in the footer, pointing at `/account/notifications`.
 - Every notification email has an `EmailPreviews` entry like any other email.
 
 ## In the app (#1042, #1043)

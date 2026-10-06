@@ -1,0 +1,900 @@
+@page "/pipelines/new"
+@page "/pipelines/{PipelineId:int}/edit"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@inject ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService Discovery
+@inject ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService Projects
+@inject ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService Pipelines
+@inject ALDevToolbox.Services.GitHub.GitHubReleaseService GitHubReleases
+@inject NavigationManager Nav
+@inject ILogger<PipelineEdit> Log
+@inject IServiceScopeFactory ScopeFactory
+@inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@using Microsoft.Extensions.DependencyInjection
+@using ALDevToolbox.Services.ObjectExplorer.Delivery
+@using ALDevToolbox.Services.ObjectExplorer.Projects
+@using ALDevToolbox.Services.GitHub
+@using ALDevToolbox.Domain.ValueObjects
+
+@*
+    Create / edit a build pipeline (#1080): its branch, which of the solution's
+    extensions it compiles, when it builds, and what happens to the apps. It was a
+    modal until the options outgrew one.
+
+    Named user: a BC consultant setting up how a customer's extensions get built,
+    from the solution page, the Pipelines tool, or an existing pipeline's page.
+
+    The name follows from the branch and extensions (PipelineNames); a name field only
+    appears when that name is taken, or the pipeline already has a name someone typed.
+    The checklist is served from the solution's discovered-extensions cache (warmed in
+    the background when repositories change), so it appears instantly; Refresh
+    re-discovers on demand. ?solution= fixes the solution for a new pipeline;
+    ?returnUrl= is where Cancel goes. Saving opens the pipeline. See .design/artifacts.md.
+*@
+
+<PageTitle>@HeadTitle · Pipelines · AL Workbench</PageTitle>
+
+<EditPage Title="@HeadTitle" Sticky="true"
+          IsLoading="@_loading" IsNotFound="@_notFound"
+          Trail="@Trail">
+    <SubtitleContent>
+        @if (_editing)
+        {
+            <span>Changes apply to the next build.</span>
+        }
+        else
+        {
+            <span>Choose what this pipeline builds. Once it is created, start builds from its page, or let them run on their own (see When it builds).</span>
+        }
+    </SubtitleContent>
+    <Actions>
+        <a class="btn btn--sm" href="@CancelHref">Cancel</a>
+        @if (ShowPrimary)
+        {
+            <button type="button" class="btn btn--sm btn--primary" @onclick="SaveAsync" disabled="@(!CanSave)">
+                <Icon Name="@(_editing ? "save" : "plus")" Width="14" Height="14" />
+                <span>@(_saving ? "Saving..." : _editing ? "Save build pipeline" : "Create build pipeline")</span>
+            </button>
+        }
+    </Actions>
+    <NotFound>
+        <EmptyState Icon="rocket" Title="This pipeline doesn't exist" Heading="true">
+            <Text>It may have been deleted, or it belongs to a solution you don't have access to.</Text>
+            <Action>
+                <a class="btn" href="/pipelines/builds"><Icon Name="arrow-left" Width="16" Height="16" /><span>All build pipelines</span></a>
+            </Action>
+        </EmptyState>
+    </NotFound>
+    <ChildContent>
+        @if (!_canManage)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>Only the solution owner or an admin can change this solution's pipelines.</span>
+            </Alert>
+        }
+        else if (!_editing && _projectOptions is { Count: 0 })
+        {
+            <EmptyState Icon="rocket" Title="No solutions yet">
+                <Text>A build pipeline builds a solution's extensions. Create a solution and add its repositories first.</Text>
+                <Action>
+                    <a class="btn" href="/solutions/new"><Icon Name="plus" Width="16" Height="16" /><span>New solution</span></a>
+                </Action>
+            </EmptyState>
+        }
+        else
+        {
+            @if (_saveError is { } se)
+            {
+                <Alert Tone="AlertTone.Danger"><span>@se</span></Alert>
+            }
+
+            <form class="edit-col" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                <section class="card">
+                    <div class="card__head"><h2 class="card__title">Source</h2></div>
+                    <div class="card__body form-sec">
+                        @if (_pickProject)
+                        {
+                            <div class="field">
+                                <label class="field__label" for="pe-solution">Solution</label>
+                                <SelectBox>
+                                    <select id="pe-solution" class="select" @onchange="OnProjectChosenAsync" disabled="@(_saving || _loadingSolution || IsDiscovering)">
+                                        <option value="0" selected="@(_projectId == 0)">Choose a solution...</option>
+                                        @foreach (var p in _projectOptions ?? [])
+                                        {
+                                            <option value="@p.Id" selected="@(_projectId == p.Id)">@p.Name</option>
+                                        }
+                                    </select>
+                                </SelectBox>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="field">
+                                <span class="field__label">Solution</span>
+                                <span class="field__value" id="pe-solution-name">@_projectName</span>
+                            </div>
+                        }
+                        @if (_solutionManageable)
+                        {
+                        <div class="field">
+                            <label class="field__label" for="pe-branch">Branch (optional)</label>
+                            <input id="pe-branch" type="text" class="input" maxlength="@GitBranchName.MaxLength"
+                                   pattern="@GitBranchName.HtmlPattern" @bind="_branch" @bind:event="oninput"
+                                   disabled="@_saving" placeholder="e.g. main or release/25.0" spellcheck="false" autocomplete="off" />
+                            <small class="field__hint">Builds check out this branch. Leave empty for each repository's default branch.</small>
+                        </div>
+                        }
+                    </div>
+                </section>
+
+                <section class="card">
+                    <div class="card__head"><h2 class="card__title">Extensions</h2></div>
+                    <div class="card__body form-sec">
+                        @if (_projectId == 0)
+                        {
+                            <p class="form-sec__cap">Choose a solution to see the extensions you can build.</p>
+                        }
+                        else if (!_solutionManageable)
+                        {
+                            <Alert Tone="AlertTone.Warn">
+                                <span>Only the solution owner or an admin can add pipelines to @(_projectName ?? "this solution").</span>
+                            </Alert>
+                        }
+                        else if (IsDiscovering || _extensions is null)
+                        {
+                            <LoadingBlock Text="Looking for extensions in the solution's repositories..." />
+                        }
+                        else if (_extensions is { Count: > 0 })
+                        {
+                            <p class="form-sec__cap">Choose the extensions this pipeline compiles. Leave out legacy apps you no longer build.</p>
+                            <div class="sub-rows sub-rows--plain pe-picker">
+                                @foreach (var ext in _extensions)
+                                {
+                                    <label class="sub-row check @(IsSelected(ext.AppId) ? "is-checked" : "")">
+                                        <span class="sub-row__stack">
+                                            <span class="sub-row__name">@ext.Name</span>
+                                            <span class="sub-row__val">@Meta(ext)</span>
+                                        </span>
+                                        <span class="sub-row__acts">
+                                            <input type="checkbox" checked="@IsSelected(ext.AppId)" disabled="@_saving"
+                                                   @onchange="e => Toggle(ext.AppId, (bool)(e.Value ?? false))" />
+                                            <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                        </span>
+                                    </label>
+                                }
+                                <div class="sub-rows__foot">
+                                    <button type="button" class="btn btn--ghost btn--sm" @onclick="SelectAll" disabled="@_saving">Select all</button>
+                                    <button type="button" class="btn btn--ghost btn--sm" @onclick="SelectNone" disabled="@_saving">Clear</button>
+                                    <span class="pe-picker__count">@_selected.Count of @_extensions.Count selected</span>
+                                </div>
+                            </div>
+                            @if (_selected.Count == 0)
+                            {
+                                <p class="field__hint pe-hint">Select at least one extension to continue.</p>
+                            }
+                            <div class="pe-discovery">
+                                <small class="field__hint">@DiscoveredCaption</small>
+                                <button type="button" class="btn btn--sm" @onclick="StartRefreshAsync" disabled="@(IsDiscovering || _saving)">
+                                    <Icon Name="refresh-cw" Width="14" Height="14" />
+                                    <span>Refresh</span>
+                                </button>
+                            </div>
+                        }
+                        else if (_discoverError is { } de)
+                        {
+                            <Alert Tone="AlertTone.Danger"><span>@de</span></Alert>
+                            <div class="pe-discovery">
+                                <a class="btn btn--sm" href="/account/repos">
+                                    <Icon Name="key-round" Width="14" Height="14" />
+                                    <span>Manage repository access</span>
+                                </a>
+                                <button type="button" class="btn btn--sm" @onclick="StartRefreshAsync" disabled="@IsDiscovering">
+                                    <Icon Name="refresh-cw" Width="14" Height="14" />
+                                    <span>Try again</span>
+                                </button>
+                            </div>
+                        }
+                        else
+                        {
+                            <p class="form-sec__cap">
+                                No extensions found in this solution's repositories. A pipeline needs at least one
+                                folder with an <code>app.json</code> outside test folders. Check the repositories in
+                                <a href="@($"/solutions/{_projectId}/repositories")">solution setup</a>.
+                            </p>
+                            <div class="pe-discovery">
+                                <small class="field__hint">@DiscoveredCaption</small>
+                                <button type="button" class="btn btn--sm" @onclick="StartRefreshAsync" disabled="@IsDiscovering">
+                                    <Icon Name="refresh-cw" Width="14" Height="14" />
+                                    <span>Refresh</span>
+                                </button>
+                            </div>
+                        }
+                    </div>
+                </section>
+
+                @if (_solutionManageable)
+                {
+                    <section class="card">
+                        <div class="card__head"><h2 class="card__title">When it builds</h2></div>
+                        <div class="card__body form-sec">
+                            <p class="form-sec__cap">You can always start a build yourself from the pipeline's page.</p>
+                            @* Only where pushes can arrive: a solution repository the connected
+                               GitHub organisation holds, the same list publishing offers. Kept
+                               while it is on, so it can still be turned off. *@
+                            @if (_releaseRepositories is { Count: > 0 } || _buildOnPush)
+                            {
+                                <div class="field">
+                                    <label class="@(_buildOnPush ? "check is-checked" : "check")">
+                                        <input id="pe-build-on-push" type="checkbox" checked="@_buildOnPush" disabled="@_saving"
+                                               @onchange="e => _buildOnPush = (bool)(e.Value ?? false)" />
+                                        <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                        <span>Build automatically when new commits are pushed</span>
+                                    </label>
+                                    <small class="field__hint">Each push to this pipeline's branch (or the default branch, if none is set) gets its own build, one after another. Builds use the repository access of whoever last saved this pipeline.</small>
+                                </div>
+                            }
+                            <div class="field">
+                                <label class="@(_previewCheck ? "check is-checked" : "check")">
+                                    <input id="pe-preview-check" type="checkbox" checked="@_previewCheck" disabled="@_saving"
+                                           @onchange="e => _previewCheck = (bool)(e.Value ?? false)" />
+                                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                    <span>Check against upcoming Business Central versions every night</span>
+                                </label>
+                                <small class="field__hint">Builds against Microsoft's previews of the next minor and next major Business Central versions, to catch breaking changes before they reach your customers. These preview builds can't be deployed; their results show beside the pipeline in the pipelines list.</small>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="card">
+                        <div class="card__head"><h2 class="card__title">Versions and releases</h2></div>
+                        <div class="card__body form-sec">
+                            <div class="field">
+                                <label class="@(_autoVersion ? "check is-checked" : "check")">
+                                    <input id="pe-auto-version" type="checkbox" checked="@_autoVersion" disabled="@_saving"
+                                           @onchange="e => _autoVersion = (bool)(e.Value ?? false)" />
+                                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                    <span>Add the build number to each app's version</span>
+                                </label>
+                                <small class="field__hint">The build number is added to the third part of the version: 28.2.0.0 in app.json becomes 28.2.4812.0 in build #4812. Business Central only installs a higher version over an installed app, so this lets every build be deployed without raising the version by hand. Your app.json files aren't changed.</small>
+                            </div>
+                            <div class="field">
+                                <label class="@(_changedAppsOnly ? "check is-checked" : "check")">
+                                    <input id="pe-changed-apps-only" type="checkbox" checked="@_changedAppsOnly" disabled="@_saving"
+                                           @onchange="e => _changedAppsOnly = (bool)(e.Value ?? false)" />
+                                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                    <span>Only release and deploy extensions that changed</span>
+                                </label>
+                                <small class="field__hint">If nothing in an extension's folder has changed since this pipeline last built it, it keeps its earlier .app file and version. It's left out of the release, and deployments don't reinstall it. Extensions that depend on a changed one are always rebuilt.</small>
+                            </div>
+                            @if (_releaseRepositories is { Count: > 0 })
+                            {
+                                <div class="field">
+                                    <label class="field__label" for="pe-release-repo">Publish successful builds to GitHub</label>
+                                    <SelectBox>
+                                        <select id="pe-release-repo" class="select" @bind="_releaseRepositoryId" disabled="@_saving">
+                                            <option value="0">Don't publish releases</option>
+                                            @foreach (var repo in _releaseRepositories)
+                                            {
+                                                <option value="@repo.Id">@repo.FullName</option>
+                                            }
+                                        </select>
+                                    </SelectBox>
+                                    <small class="field__hint">All apps in a build have to share one version number, because the release is tagged with it. If they don't match, the build still succeeds and its files can still be downloaded here; only the release is skipped.</small>
+                                </div>
+                            }
+                            else if (_releaseRepositoriesExplainable && _projectId != 0)
+                            {
+                                <div class="field">
+                                    <label class="field__label" for="pe-release-repo">Publish successful builds to GitHub</label>
+                                    <SelectBox>
+                                        <select id="pe-release-repo" class="select" disabled>
+                                            <option value="0">Don't publish releases</option>
+                                        </select>
+                                    </SelectBox>
+                                    <small class="field__hint">
+                                        @(_releaseRepositoriesFailed
+                                            ? "Couldn't reach GitHub just now; try again."
+                                            : "GitHub isn't connected for this organisation yet. An admin can connect it under Administration → Repositories.")
+                                    </small>
+                                </div>
+                            }
+                        </div>
+                    </section>
+
+                    <section class="card">
+                        <div class="card__head"><h2 class="card__title">Name</h2></div>
+                        <div class="card__body form-sec">
+                            @if (_showCustomName)
+                            {
+                                <div class="field">
+                                    <label class="field__label" for="pe-name">Name</label>
+                                    <input id="pe-name" type="text" class="input" maxlength="@PipelineNames.MaxLength" @bind="_customName"
+                                           disabled="@_saving" placeholder="e.g. @GeneratedName - nightly" @ref="_nameInput" />
+                                    @if (_nameError is not null)
+                                    {
+                                        <FieldError Message="@_nameError" />
+                                    }
+                                    else
+                                    {
+                                        <small class="field__hint">Clear it to name the pipeline after its branch and extensions.</small>
+                                    }
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="field">
+                                    <span class="field__label">Will be named</span>
+                                    <span class="field__value" id="pe-generated-name">@(IsDiscovering || _extensions is null ? "-" : GeneratedName)</span>
+                                    <small class="field__hint">Pipelines are named after their branch and the extensions they build.</small>
+                                </div>
+                            }
+                        </div>
+                    </section>
+                }
+            </form>
+        }
+    </ChildContent>
+</EditPage>
+
+@code {
+    /// <summary>The pipeline being edited; null on <c>/pipelines/new</c>.</summary>
+    [Parameter] public int? PipelineId { get; set; }
+
+    /// <summary>A solution to create the pipeline under, fixed rather than picked.</summary>
+    [SupplyParameterFromQuery(Name = "solution")] public int? Solution { get; set; }
+
+    /// <summary>Where Cancel goes: the page the person came from. Local paths only.</summary>
+    [SupplyParameterFromQuery(Name = "returnUrl")] public string? ReturnUrl { get; set; }
+
+    /// <summary>How often the page re-checks the cache while a background discovery is in flight.</summary>
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
+
+    private bool _loading = true;
+    private bool _notFound;
+    private bool _canManage = true;
+    private bool _editing;
+    private bool _pickProject;
+    private List<PipelineProjectOption>? _projectOptions;
+    private int _projectId;
+    private string? _projectName;
+    // The pipeline's name when the page opened, for the crumbs.
+    private string? _loadedName;
+    // A name the person typed, shown only when the generated one is taken (or the
+    // pipeline already carries a typed name). Blank means the generated name.
+    private string _customName = string.Empty;
+    private bool _showCustomName;
+    // Why the name field is showing: the name it would get is taken. Shown under the field.
+    private string? _nameError;
+    private ElementReference _nameInput;
+    private bool _focusName;
+    // The branch the pipeline builds; blank = each repository's default branch (#963).
+    private string _branch = string.Empty;
+    // The nightly preview check against the next minor and next major (#994).
+    private bool _previewCheck;
+    // Whether builds add their build number to each app's version.
+    private bool _autoVersion = true;
+    private bool _changedAppsOnly = true;
+    // Whether a push to the branch starts a build (#1079).
+    private bool _buildOnPush;
+    // The solution's GitHub repositories inside the connected organisation. Empty
+    // (and the whole field hidden) when there is no GitHub connection - an
+    // organisation on Azure DevOps is shown no GitHub machinery at all.
+    private IReadOnlyList<GitHubReleaseRepositoryOption>? _releaseRepositories;
+    private int _releaseRepositoryId;
+    // True when there is nothing to pick but the person can still be told why.
+    private bool _releaseRepositoriesExplainable;
+    private bool _releaseRepositoriesFailed;
+
+    private bool _loadingDiscovery;
+    private bool _saving;
+    private string? _discoverError;
+    private string? _saveError;
+    private ProjectDiscovery? _discovery;
+    private List<DiscoveredExtension>? _extensions;
+    private HashSet<string> _selected = new(StringComparer.Ordinal);
+    // The selection to pre-check (null = the pipeline builds everything).
+    private IReadOnlySet<string>? _initialSelection;
+    private bool _initialIsAll = true; // new pipelines default to "build everything"
+    private bool _selectionSeeded;
+
+    private PeriodicTimer? _poll;
+    private CancellationTokenSource? _pollCts;
+
+    /// <summary>True while the cache is being read or a background discovery is running.</summary>
+    private bool IsDiscovering => _loadingDiscovery || _poll is not null;
+
+    // Whether the chosen solution may get a new pipeline from this person. The picker lists
+    // every solution they can see, and a read-only one can be seen but not changed.
+    private bool _solutionManageable = true;
+    // True while a picked solution's access and repositories are read.
+    private bool _loadingSolution;
+
+    private string HeadTitle => _editing ? "Edit build pipeline" : "New build pipeline";
+
+    /// <summary>The primary action, except where the page shows a step to take first instead.</summary>
+    private bool ShowPrimary =>
+        _canManage && !_loading && !_notFound && !(!_editing && _projectOptions is { Count: 0 })
+        && !(_projectId != 0 && !_loadingSolution && !_solutionManageable);
+
+    private bool CanSave =>
+        _canManage && _solutionManageable && !_loadingSolution && !IsDiscovering && !_saving && _projectId != 0
+        && _extensions is { Count: > 0 } && _selected.Count > 0;
+
+    private IReadOnlyList<Crumb> Trail => _editing && PipelineId is { } id
+        ? [new("Build pipelines", "/pipelines/builds"), new(_loadedName ?? "Pipeline", $"/pipelines/{id}"), new("Edit")]
+        : [new("Build pipelines", "/pipelines/builds"), new("New build pipeline")];
+
+    /// <summary>The page the person came from, else the pipeline (editing) or the list (creating).</summary>
+    private string CancelHref
+    {
+        get
+        {
+            var fallback = _editing && PipelineId is { } id ? $"/pipelines/{id}" : "/pipelines/builds";
+            if (string.IsNullOrEmpty(ReturnUrl)) return fallback;
+            var safe = ALDevToolbox.Endpoints.EndpointHelpers.ResolveSafeReturn(ReturnUrl);
+            return safe == "/" && ReturnUrl != "/" ? fallback : safe;
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Zone.EnsureLoadedAsync();
+        if (PipelineId is { } id)
+        {
+            await LoadForEditAsync(id);
+        }
+        else
+        {
+            await LoadForCreateAsync();
+        }
+        _loading = false;
+        if (_notFound || !_canManage || _projectId == 0) return;
+        StateHasChanged();
+        await LoadSolutionAsync(_projectId);
+    }
+
+    /// <summary>
+    /// Reads what the chosen solution offers: whether this person may add a pipeline to
+    /// it (a new pipeline only; an edit has already checked), its repositories, and its
+    /// extensions. Stops quietly when the person has picked another solution meanwhile.
+    /// </summary>
+    private async Task LoadSolutionAsync(int projectId)
+    {
+        _loadingSolution = true;
+        try
+        {
+            _solutionManageable = _editing || await Projects.CanManageAsync(projectId);
+            if (projectId != _projectId || !_solutionManageable) return;
+            await LoadReleaseRepositoriesAsync();
+            if (projectId != _projectId) return;
+        }
+        finally
+        {
+            _loadingSolution = false;
+        }
+        await LoadDiscoveryAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focusName && _showCustomName)
+        {
+            _focusName = false;
+            try { await _nameInput.FocusAsync(); }
+            catch { /* element already detached */ }
+        }
+    }
+
+    private async Task LoadForEditAsync(int id)
+    {
+        _editing = true;
+        try
+        {
+            var pipeline = await Pipelines.GetPipelineAsync(id);
+            if (pipeline is null) { _notFound = true; return; }
+            _canManage = await Pipelines.CanManageAsync(id);
+            _projectId = pipeline.ProjectId;
+            _projectName = pipeline.Project?.Name ?? string.Empty;
+            _loadedName = pipeline.Name;
+            _customName = pipeline.NameIsCustom ? pipeline.Name : string.Empty;
+            _showCustomName = pipeline.NameIsCustom;
+            var parsed = ProjectBuildService.ParseSelectedAppIds(pipeline.RequestedAppIdsJson);
+            _initialSelection = parsed;
+            _initialIsAll = parsed is null;
+            _releaseRepositoryId = pipeline.GithubReleaseRepositoryId ?? 0;
+            _branch = pipeline.Branch ?? string.Empty;
+            _previewCheck = pipeline.PreviewCheck;
+            _autoVersion = pipeline.AutoVersion;
+            _changedAppsOnly = pipeline.ChangedAppsOnly;
+            _buildOnPush = pipeline.BuildOnPush;
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            // A private solution this person isn't on the team for reads the same
+            // as one that no longer exists.
+            _notFound = true;
+        }
+    }
+
+    private async Task LoadForCreateAsync()
+    {
+        var projects = await Projects.ListProjectsAsync();
+        _projectOptions = projects.Select(p => new PipelineProjectOption(p.Id, p.Name)).ToList();
+        if (Solution is { } sid && _projectOptions.FirstOrDefault(p => p.Id == sid) is { } chosen)
+        {
+            _pickProject = false;
+            _projectId = chosen.Id;
+            _projectName = chosen.Name;
+        }
+        else
+        {
+            _pickProject = true;
+            _projectId = 0;
+        }
+    }
+
+    /// <summary>
+    /// Loads the solution's publishable repositories. Never fails the page: without
+    /// them the field simply isn't offered, which is the same as an organisation that
+    /// has not connected GitHub.
+    /// </summary>
+    private async Task LoadReleaseRepositoriesAsync()
+    {
+        _releaseRepositoriesFailed = false;
+        _releaseRepositoriesExplainable = false;
+        if (_projectId == 0) { _releaseRepositories = null; return; }
+        try
+        {
+            var choices = await GitHubReleases.DescribeRepositoryOptionsAsync(_projectId);
+            _releaseRepositories = choices.Options;
+            // Somebody whose solution is on GitHub but whose organisation has not
+            // connected it can be helped by an admin - say so instead of hiding the
+            // field, which would look like the feature does not exist.
+            _releaseRepositoriesExplainable =
+                choices.DeploymentConfigured && choices.HasGitHubRepositories && choices.Options.Count == 0;
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Reading the solution's GitHub repositories failed for solution {ProjectId}.", _projectId);
+            _releaseRepositories = null;
+            _releaseRepositoriesFailed = true;
+            _releaseRepositoriesExplainable = true;
+        }
+    }
+
+    private async Task OnProjectChosenAsync(ChangeEventArgs e)
+    {
+        StopPoll();
+        _selectionSeeded = false;
+        _projectId = int.TryParse(e.Value?.ToString(), out var id) ? id : 0;
+        _projectName = _projectOptions?.FirstOrDefault(p => p.Id == _projectId)?.Name;
+        _releaseRepositoryId = 0;
+        // Only a GitHub solution can build on push; the box would otherwise stay ticked,
+        // and saved, for a solution where no push ever arrives.
+        _buildOnPush = false;
+        _extensions = null;
+        _discovery = null;
+        _discoverError = null;
+        _releaseRepositories = null;
+        _releaseRepositoriesExplainable = false;
+        _solutionManageable = true;
+        if (_projectId == 0) return;
+        await LoadSolutionAsync(_projectId);
+    }
+
+    /// <summary>
+    /// Cache-first load: read the solution's discovered extensions, render them
+    /// instantly when present, poll while a background discovery is in flight, and
+    /// auto-trigger a discovery for a solution that has nothing usable cached: never
+    /// discovered (e.g. a solution migrated before the cache existed), or whose last
+    /// attempt failed.
+    /// </summary>
+    private async Task LoadDiscoveryAsync()
+    {
+        _loadingDiscovery = true;
+        _discoverError = null;
+        _saveError = null;
+        _extensions = null;
+        StateHasChanged();
+        try
+        {
+            _discovery = await Discovery.GetDiscoveryAsync(_projectId);
+            if (_discovery.Extensions.Count == 0 && !_discovery.InFlight)
+            {
+                // Never discovered, or the last attempt failed. A cached failure is
+                // retried rather than shown: whatever caused it (a token, the App's
+                // reach) is often fixed elsewhere since, and the stale error would
+                // otherwise outlive the fix until someone thought to press Try again.
+                _loadingDiscovery = false;
+                await StartRefreshAsync();
+                return;
+            }
+            if (_discovery.InFlight) StartPoll();
+            else ApplyResultState();
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _discoverError = "Only the solution owner or an admin can manage this solution's pipelines.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Reading discovery cache failed for solution {ProjectId}.", _projectId);
+            _discoverError = "Couldn't load the solution's extensions. Try Refresh, or check your repository access.";
+        }
+        finally
+        {
+            _loadingDiscovery = false;
+        }
+    }
+
+    /// <summary>Enqueues a fresh background discovery and polls for it. Used by the Refresh button and the never-discovered auto-trigger.</summary>
+    private async Task StartRefreshAsync()
+    {
+        if (_projectId == 0 || _poll is not null) return;
+        _loadingDiscovery = true;
+        _discoverError = null;
+        _saveError = null;
+        StateHasChanged();
+        try
+        {
+            await Discovery.RequestDiscoveryAsync(_projectId);
+            _discovery = await Discovery.GetDiscoveryAsync(_projectId);
+            if (_discovery.InFlight) StartPoll();
+            else ApplyResultState();
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _discoverError = "Only the solution owner or an admin can manage this solution's pipelines.";
+        }
+        catch (PlanValidationException ex)
+        {
+            _discoverError = ex.Errors.Values.FirstOrDefault() ?? "Couldn't discover the solution's extensions.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Requesting discovery failed for solution {ProjectId}.", _projectId);
+            _discoverError = "Couldn't discover the solution's extensions. Check the repositories and your repository access, then try again.";
+        }
+        finally
+        {
+            _loadingDiscovery = false;
+        }
+    }
+
+    private void StartPoll()
+    {
+        if (_poll is not null) return;
+        _pollCts = new CancellationTokenSource();
+        _poll = new PeriodicTimer(PollInterval);
+        _ = PollLoopAsync(_poll, _projectId, _pollCts.Token);
+    }
+
+    private async Task PollLoopAsync(PeriodicTimer timer, int projectId, CancellationToken token)
+    {
+        try
+        {
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                // Own DI scope per tick: this runs on a thread-pool continuation, not the
+                // circuit's dispatcher, so sharing the circuit's DbContext would let a tick
+                // and a click have two commands in flight on one context. See #679.
+                ProjectDiscovery discovery;
+                await using (var scope = ScopeFactory.CreateAsyncScope())
+                {
+                    discovery = await scope.ServiceProvider.GetRequiredService<ProjectDiscoveryService>()
+                        .GetDiscoveryAsync(projectId, token);
+                }
+
+                // Disposal or a solution switch can happen while we were parked on the
+                // query; touching the renderer after that logs an error for what is a
+                // normal navigate-away.
+                if (token.IsCancellationRequested) break;
+                if (!discovery.InFlight)
+                {
+                    StopPoll();
+                    await InvokeAsync(() =>
+                    {
+                        if (projectId != _projectId) return;
+                        _discovery = discovery;
+                        ApplyResultState();
+                        StateHasChanged();
+                    });
+                    break;
+                }
+                await InvokeAsync(() => { if (projectId == _projectId) _discovery = discovery; });
+            }
+        }
+        catch (OperationCanceledException) { /* circuit tearing down or solution switched */ }
+        catch (ObjectDisposedException) when (token.IsCancellationRequested) { /* torn down mid-poll */ }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Discovery poll failed for solution {ProjectId}.", projectId);
+        }
+        finally
+        {
+            // Only this loop's own timer: a solution switch may already have started
+            // the next one, which this must not stop.
+            if (ReferenceEquals(_poll, timer)) StopPoll();
+        }
+    }
+
+    /// <summary>
+    /// Idempotent, single-shot teardown: disposal (renderer thread) and the poll loop's
+    /// finally (thread pool) both call this, so the fields are claimed atomically to avoid
+    /// a double Dispose / Cancel-on-disposed race.
+    /// </summary>
+    private void StopPoll()
+    {
+        var cts = Interlocked.Exchange(ref _pollCts, null);
+        var timer = Interlocked.Exchange(ref _poll, null);
+        cts?.Cancel();
+        cts?.Dispose();
+        timer?.Dispose();
+    }
+
+    /// <summary>Settles a not-in-flight discovery into the checklist / error / empty state and seeds or preserves the selection.</summary>
+    private void ApplyResultState()
+    {
+        var d = _discovery!;
+        if (d.Extensions.Count > 0)
+        {
+            _discoverError = null;
+            _extensions = d.Extensions.ToList();
+            var ids = _extensions.Select(e => ProjectBuildService.NormalizeAppId(e.AppId)).ToHashSet(StringComparer.Ordinal);
+            if (!_selectionSeeded)
+            {
+                // Pre-check: everything for a new (or "build all") pipeline; otherwise the
+                // stored selection intersected with what's currently discovered.
+                _selected = ids.Where(id => _initialIsAll || (_initialSelection?.Contains(id) ?? false)).ToHashSet(StringComparer.Ordinal);
+                _selectionSeeded = true;
+            }
+            else
+            {
+                // A refresh: keep the user's choices, dropping any extension that's gone.
+                _selected.IntersectWith(ids);
+            }
+        }
+        else if (d.Error is not null)
+        {
+            _extensions = new();
+            _discoverError = d.Error;
+        }
+        else
+        {
+            _extensions = new();
+            _discoverError = null; // genuine empty → the empty state
+        }
+    }
+
+    private bool IsSelected(string appId) => _selected.Contains(ProjectBuildService.NormalizeAppId(appId));
+
+    private void Toggle(string appId, bool isChecked)
+    {
+        var key = ProjectBuildService.NormalizeAppId(appId);
+        if (isChecked) _selected.Add(key);
+        else _selected.Remove(key);
+    }
+
+    private void SelectAll()
+    {
+        if (_extensions is null) return;
+        _selected = _extensions.Select(e => ProjectBuildService.NormalizeAppId(e.AppId)).ToHashSet(StringComparer.Ordinal);
+    }
+
+    private void SelectNone() => _selected = new(StringComparer.Ordinal);
+
+    /// <summary>The extensions as they will be saved: null when every one is picked (build everything).</summary>
+    private List<string>? PickedSelection()
+    {
+        if (_extensions is null) return null;
+        var picked = _extensions
+            .Where(e => _selected.Contains(ProjectBuildService.NormalizeAppId(e.AppId)))
+            .Select(e => e.AppId)
+            .ToList();
+        // All selected == build everything: store null so apps added later are included.
+        return picked.Count == _extensions.Count ? null : picked;
+    }
+
+    /// <summary>The name the service will give the pipeline, shown as the person picks.</summary>
+    private string GeneratedName => PipelineNames.ForBuildPipeline(
+        _branch,
+        PickedSelection(),
+        (_extensions ?? []).GroupBy(e => ProjectBuildService.NormalizeAppId(e.AppId))
+            .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.Ordinal));
+
+    private static string Meta(DiscoveredExtension e)
+    {
+        var pub = string.IsNullOrWhiteSpace(e.Publisher) ? "" : $"{e.Publisher} · ";
+        return $"{pub}v{e.Version} · {e.RepoDisplayName}";
+    }
+
+    /// <summary>"Last checked 4 min ago.", with the exact instant in UTC on hover.</summary>
+    private RenderFragment DiscoveredCaption => _discovery?.DiscoveredAt is { } at
+        ? @<text>Last checked <span title="@Zone.UtcTooltip(at)">@TimeAgo(at)</span>.</text>
+        : @<text>Not checked yet.</text>;
+
+    /// <summary>
+    /// The shorter phrasing ("4 min ago", then "on 2026-07-01" past a week); the date is
+    /// in the organisation's display zone.
+    /// </summary>
+    private string TimeAgo(DateTime utc)
+    {
+        var span = DateTime.UtcNow - utc;
+        if (span < TimeSpan.Zero) span = TimeSpan.Zero;
+        return span switch
+        {
+            { TotalSeconds: < 60 } => "just now",
+            { TotalMinutes: < 60 } => $"{(int)span.TotalMinutes} min ago",
+            { TotalHours: < 24 } => $"{(int)span.TotalHours} hr ago",
+            { TotalDays: < 7 } => $"{(int)span.TotalDays} day{((int)span.TotalDays == 1 ? "" : "s")} ago",
+            _ => $"on {Zone.Format(utc, "yyyy-MM-dd")}",
+        };
+    }
+
+    private async Task SaveAsync()
+    {
+        if (!CanSave) return;
+        _saving = true;
+        _saveError = null;
+        _nameError = null;
+        try
+        {
+            var input = new PipelineInput(
+                _projectId, _showCustomName && !string.IsNullOrWhiteSpace(_customName) ? _customName.Trim() : null,
+                PickedSelection(),
+                _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
+                string.IsNullOrWhiteSpace(_branch) ? null : _branch.Trim(),
+                _previewCheck,
+                _autoVersion,
+                _buildOnPush,
+                _changedAppsOnly);
+
+            int id;
+            if (_editing && PipelineId is { } pid)
+            {
+                await Pipelines.UpdatePipelineAsync(pid, input);
+                id = pid;
+            }
+            else
+            {
+                id = await Pipelines.CreatePipelineAsync(input);
+            }
+            StopPoll();
+            Nav.NavigateTo($"/pipelines/{id}");
+        }
+        catch (PlanValidationException ex)
+        {
+            // The name is taken: let the person give this one a name of their own, and
+            // say so beside the field rather than in the alert above the form.
+            if (ex.Errors.TryGetValue("Name", out var nameError))
+            {
+                _showCustomName = true;
+                _nameError = nameError;
+                _focusName = true;
+            }
+            // Anything else wrong with the form still shows in the alert.
+            _saveError = ex.Errors.Where(e => e.Key != "Name").Select(e => e.Value).FirstOrDefault()
+                ?? (_nameError is null ? "Couldn't save the pipeline." : null);
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _saveError = "Only the solution owner or an admin can manage this solution's pipelines.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Failed to save pipeline for solution {ProjectId}.", _projectId);
+            _saveError = "Couldn't save the pipeline.";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        StopPoll();
+        return ValueTask.CompletedTask;
+    }
+}

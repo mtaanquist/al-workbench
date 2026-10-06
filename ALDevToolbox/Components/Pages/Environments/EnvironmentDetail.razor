@@ -8,6 +8,7 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeFleetService Fleet
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService UpgradeActions
+@inject DeliveryService Deliveries
 @inject ALDevToolbox.Services.ObjectExplorer.ProjectAccess Access
 @inject ILogger<EnvironmentDetail> Log
 @inject NavigationManager Nav
@@ -21,6 +22,7 @@
 @using ALDevToolbox.Services
 @using ALDevToolbox.Services.ObjectExplorer
 @using ALDevToolbox.Services.ObjectExplorer.Bc
+@using ALDevToolbox.Services.ObjectExplorer.Delivery
 @using static ALDevToolbox.Components.Shared.FleetRowState
 
 @*
@@ -407,7 +409,7 @@
                                     {
                                         <text>
                                             Couldn't read this setting right now - try Refresh above, or check the
-                                            connection on the <a href="@(Row.SolutionHref + "?tab=bc")">solution's Business Central tab</a>.
+                                            connection on the <a href="@(Row.SolutionHref + "/bc")">solution's Business Central tab</a>.
                                         </text>
                                     }
                                     else if (_m365 is null)
@@ -494,7 +496,7 @@
                ours to show and cancel, and a tenant that will not answer today is exactly
                when somebody wants to call one off. *@
             var panel = LivePanel;
-            if (panel is not null || BookedInstalls.Count > 0)
+            if (panel is not null || BookedInstalls.Count > 0 || PipelineBookings.Count > 0)
             {
                 <div class="card">
                     <div class="card__head">
@@ -510,11 +512,11 @@
                             </button>
                         }
                     </div>
-                    @if (panel?.ScheduledInstallsError is { } scheduledErr && BookedInstalls.Count == 0)
+                    @if (panel?.ScheduledInstallsError is { } scheduledErr && BookedInstalls.Count == 0 && PipelineBookings.Count == 0)
                     {
                         <div class="card__body"><FieldError Message="@scheduledErr" /></div>
                     }
-                    else if ((panel?.ScheduledInstalls.Count ?? 0) == 0 && BookedInstalls.Count == 0)
+                    else if ((panel?.ScheduledInstalls.Count ?? 0) == 0 && BookedInstalls.Count == 0 && PipelineBookings.Count == 0)
                     {
                         <EmptyState Icon="calendar" Title="Nothing waiting to install" Quiet="true">
                             <Text>A deployment you schedule for this environment, or an app another company sent you that you upload for later, waits here until it installs.</Text>
@@ -573,12 +575,39 @@
                                         }
                                     </tr>
                                 }
+                                @* Deployment pipelines' runs booked here (#1097): they upload when
+                                   their time comes, so they can be moved or called off. *@
+                                @foreach (var booking in PipelineBookings)
+                                {
+                                    <tr @key="@($"pipeline-{booking.DeliveryId}")">
+                                        <td>
+                                            <a href="@($"/pipelines/deployments/{booking.ReleasePipelineId}")">@booking.PipelineName</a>
+                                            <span class="tag">Deployment pipeline</span>
+                                        </td>
+                                        <td class="u-num env-detail__mono">Build #@booking.BuildId</td>
+                                        <td>@PipelineWhen(booking)</td>
+                                        @if (_canManage)
+                                        {
+                                            <td class="data-table__actions">
+                                                <button type="button" class="btn btn--sm" disabled="@_settingSaving"
+                                                        @onclick="() => OpenRescheduleAsync(booking.DeliveryId)">Reschedule</button>
+                                                <button type="button" class="btn btn--sm btn--danger" disabled="@_settingSaving"
+                                                        @onclick="() => CancelPipelineBookingAsync(booking)">Cancel deployment</button>
+                                            </td>
+                                        }
+                                    </tr>
+                                }
                                 @foreach (var op in panel?.ScheduledInstalls ?? Array.Empty<BcScheduledPteOperation>())
                                 {
+                                    var heldFor = HeldFor(op);
                                     <tr>
                                         <td>
                                             @(string.IsNullOrWhiteSpace(op.Name) ? "An extension" : op.Name)
-                                            @if (op.AppId is { } ourApp && panel!.ReleasedAppIds.Contains(ourApp))
+                                            @if (heldFor is not null)
+                                            {
+                                                <span class="tag">From @heldFor.PipelineName</span>
+                                            }
+                                            else if (op.AppId is { } ourApp && panel!.ReleasedAppIds.Contains(ourApp))
                                             {
                                                 <span class="tag">Deployed from this workbench</span>
                                             }
@@ -588,6 +617,11 @@
                                         @if (_canManage)
                                         {
                                             <td class="data-table__actions">
+                                                @if (heldFor is not null)
+                                                {
+                                                    <button type="button" class="btn btn--sm" disabled="@_settingSaving"
+                                                            @onclick="() => OpenRescheduleAsync(heldFor.DeliveryId)">Reschedule</button>
+                                                }
                                                 @if (op.AppId is { } appId)
                                                 {
                                                     <button type="button" class="btn btn--sm btn--danger"
@@ -988,6 +1022,7 @@
 </ConfirmDialog>
 
 <UploadAppDialog @ref="_uploadDialog" />
+<RescheduleDeploymentDialog @ref="_rescheduleDialog" OnRescheduled="OnPipelineRescheduledAsync" />
 <CopyEnvironmentDialog @ref="_copyDialog" />
 
 @code {
@@ -1159,7 +1194,7 @@
     private RenderFragment? ConnectionAction()
     {
         if (!_canManage) return null;
-        return @<a class="btn" href="@(Row.SolutionHref + "?tab=bc")">Check the solution's connection</a>;
+        return @<a class="btn" href="@(Row.SolutionHref + "/bc")">Check the solution's connection</a>;
     }
 
     private bool Refreshing => _panelLoading || _operationsLoading || _sessionsLoading;
@@ -1988,8 +2023,81 @@
     /// </summary>
     private List<UpgradeActionRow>? _bookedInstalls;
 
-    private async Task LoadBookedInstallsAsync() =>
+    private async Task LoadBookedInstallsAsync()
+    {
         _bookedInstalls = await Read(ct => UpgradeActions.ListBookedInstallsAsync(Row.ProjectId, Id, ct));
+        _waitingDeployments = await Read(ct => Deliveries.ListWaitingDeploymentsAsync(Row.ProjectId, Id, ct));
+    }
+
+    /// <summary>Deployment pipeline runs waiting here and the ones Business Central may be holding (#1097).</summary>
+    private List<WaitingDeployment>? _waitingDeployments;
+
+    /// <summary>Pipeline runs booked here and not yet sent, soonest first.</summary>
+    private List<WaitingDeployment> PipelineBookings =>
+        _waitingDeployments?.Where(w => !w.HeldByBusinessCentral).ToList() ?? new();
+
+    /// <summary>The pipeline run that put this install in Business Central's hands, when it is one of ours and still movable.</summary>
+    private WaitingDeployment? HeldFor(BcScheduledPteOperation op) =>
+        _waitingDeployments?.FirstOrDefault(w => w.HeldByBusinessCentral && w.AppId == op.AppId
+            && string.Equals(w.AppVersion, op.TargetAppVersion, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>When a pipeline run booked here goes: Business Central's update, its slot, or "starting shortly" once that has come.</summary>
+    private string PipelineWhen(WaitingDeployment booking) =>
+        BcDeploymentSchedule.IsDeferred(booking.DeploymentSchedule) ? ScheduleWhen(booking.DeploymentSchedule)
+        : booking.ScheduledFor <= DateTime.UtcNow ? "Starting shortly"
+        : $"Booked for {BookedSlotText(booking.ScheduledFor)}";
+
+    private RescheduleDeploymentDialog? _rescheduleDialog;
+
+    private async Task OpenRescheduleAsync(int deliveryId)
+    {
+        if (_rescheduleDialog is null) return;
+        _settingError = null;
+        _settingDone = null;
+        try
+        {
+            if (!await _rescheduleDialog.OpenAsync(deliveryId, secretExpiresAt: null))
+            {
+                _settingError = _rescheduleDialog.LastRefusal;
+                await LoadPanelAsync(forceRefresh: true);
+                await LoadBookedInstallsAsync();
+            }
+        }
+        catch (ProjectAccessDeniedException ex)
+        {
+            _settingError = ex.Message;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.LogError(ex, "Failed to open the reschedule dialog for delivery {DeliveryId}.", deliveryId);
+            _settingError = "Couldn't open the deployment. Reload the page and try again.";
+        }
+    }
+
+    private async Task OnPipelineRescheduledAsync(int deliveryId)
+    {
+        _operations = null;
+        await LoadPanelAsync();
+        _activity = await Read(ct => UpgradeActions.ListEnvironmentActivityAsync(Row.ProjectId, Id, ct));
+        await LoadBookedInstallsAsync();
+        _settingDone = "The deployment was rescheduled.";
+    }
+
+    /// <summary>Calls off a pipeline run booked here, behind a confirm; nothing has been uploaded yet.</summary>
+    private async Task CancelPipelineBookingAsync(WaitingDeployment booking)
+    {
+        if (_confirm is null) return;
+        var confirmed = await _confirm.OpenAsync(
+            "Cancel this deployment?",
+            $"Build #{booking.BuildId} from {booking.PipelineName} won't be installed on {Row.EnvironmentName}. Nothing has been uploaded yet. You can deploy it again from the pipeline.",
+            "Cancel the deployment");
+        if (!confirmed) return;
+
+        await RunSettingWriteAsync($"pipeline-{booking.DeliveryId}",
+            () => Deliveries.CancelDeliveryAsync(booking.DeliveryId, _gone.Token),
+            "Couldn't cancel the deployment. It may already have started: check the deployment pipeline.",
+            () => $"The deployment of build #{booking.BuildId} was cancelled.");
+    }
 
     /// <summary>"2 of 3" for a row of a multi-app upload, so the list shows the order they go in; null for a single one.</summary>
     private string? BatchPlace(UpgradeActionRow booked)

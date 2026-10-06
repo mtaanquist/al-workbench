@@ -29,7 +29,7 @@ namespace ALDevToolbox.Services.Notifications;
 public sealed class NotificationService
 {
     /// <summary>Where a notification email's footer sends someone to change what they get.</summary>
-    public const string SettingsPath = "/account?section=notifications";
+    public const string SettingsPath = "/account/notifications";
 
     private readonly AppDbContext _db;
     private readonly IDbContextFactory<AppDbContext> _dbFactory;

@@ -23,6 +23,8 @@ internal sealed class ReleasePipelineConfiguration : IEntityTypeConfiguration<Oe
         entity.Property(e => e.DeploymentSchedule).HasColumnName("deployment_schedule").HasMaxLength(50).IsRequired();
         entity.Property(e => e.SchemaSyncMode).HasColumnName("schema_sync_mode").HasMaxLength(50).IsRequired();
         entity.Property(e => e.PrepareReleaseOnNewBuild).HasColumnName("prepare_release_on_new_build").IsRequired();
+        entity.Property(e => e.DeployWithoutApproval).HasColumnName("deploy_without_approval").HasDefaultValue(false).IsRequired();
+        entity.Property(e => e.DeployWithoutApprovalByUserId).HasColumnName("deploy_without_approval_by_user_id");
         entity.Property(e => e.RestrictBranch).HasColumnName("restrict_branch").IsRequired();
         entity.Property(e => e.AllowedBranch).HasColumnName("allowed_branch").HasMaxLength(255);
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
@@ -45,6 +47,12 @@ internal sealed class ReleasePipelineConfiguration : IEntityTypeConfiguration<Oe
         entity.HasOne(e => e.CreatedByUser)
             .WithMany()
             .HasForeignKey(e => e.CreatedByUserId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        // Whoever turned on deploying without approval; their deletion pauses it.
+        entity.HasOne(e => e.DeployWithoutApprovalByUser)
+            .WithMany()
+            .HasForeignKey(e => e.DeployWithoutApprovalByUserId)
             .OnDelete(DeleteBehavior.SetNull);
 
         // Build pipeline is the artifact source. Restrict: don't let a build

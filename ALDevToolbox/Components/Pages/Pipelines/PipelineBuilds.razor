@@ -9,6 +9,7 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Delivery.ReleasePipelineService Releases
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject NavigationManager Nav
+@inject ALDevToolbox.Services.Tools.IToolAvailability ToolAvailability
 @inject ILogger<PipelineBuilds> Log
 @inject IServiceScopeFactory ScopeFactory
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
@@ -27,12 +28,12 @@
     in the Object Explorer. The only path into a build's objects is the "Explore
     objects" deep-link here. While a build is in flight the page polls so the status
     flips Building -> Ready live. Editing which extensions are built is "Edit
-    pipeline" (the shared PipelineEditorDialog). See .design/artifacts.md.
+    pipeline", its own page (PipelineEdit, #1080). See .design/artifacts.md.
 
     A successful build's row carries "Deploy...", the shortcut .design/saas-delivery.md
     describes (#938): it resolves which deployment pipeline takes this pipeline's builds
-    (straight on when one does, a chooser when several do, the deployment pipeline editor
-    with this pipeline filled in when none does) and opens the same ReleaseBuildDialog
+    (straight on when one does, a chooser when several do, the new deployment pipeline page
+    with this pipeline filled in when none does, which carries on to the deployment) and opens the same ReleaseBuildDialog
     the deployment pipeline's page opens, with this build selected. The canonical Deploy
     action stays on the deployment pipeline.
 
@@ -98,10 +99,10 @@
                 <Icon Name="hammer" Width="15" Height="15" />
                 <span>@(_starting ? "Starting..." : _buildRunning ? "Build running" : "Build")</span>
             </button>
-            <button type="button" class="btn" @onclick="EditPipelineAsync">
+            <a class="btn" href="@($"/pipelines/{PipelineId}/edit")">
                 <Icon Name="settings" Width="15" Height="15" />
                 <span>Edit pipeline</span>
-            </button>
+            </a>
             <button type="button" class="btn" @onclick="DeletePipelineAsync">
                 <Icon Name="trash-2" Width="15" Height="15" />
                 <span>Delete</span>
@@ -137,6 +138,13 @@
                 </span>
             </span>
         }
+        @if (_header!.BuildOnPush)
+        {
+            <span class="meta-item">
+                <span class="meta-item__label">Build on push</span>
+                <span class="meta-item__value">@(_header!.BuildOnPushBlocked is { Length: > 0 } ? "Paused" : "On")</span>
+            </span>
+        }
         <span class="meta-item">
             <span class="meta-item__label">Latest BC</span>
             <span class="meta-item__value meta-item__value--mono">@(_latest is not null && BcShown(_latest) is { Length: > 0 } mb ? mb : "—")</span>
@@ -165,8 +173,22 @@
                 <span>The nightly preview check is paused: @paused</span>
                 @if (_canManage)
                 {
-                    <button type="button" class="btn btn--sm" @onclick="TakeOverPreviewCheckAsync" disabled="@_takingOver">
+                    <button type="button" class="btn btn--sm" @onclick="() => TakeOverAsync(PipelineAutomation.PreviewCheck)" disabled="@_takingOver">
                         <span>@(_takingOver ? "Saving..." : "Run the check as me")</span>
+                    </button>
+                }
+            </Alert>
+        }
+
+        @if (_header!.BuildOnPushBlocked is { Length: > 0 } pushPaused)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>New commits are not being built automatically: @pushPaused@(_canManage ? "" : " Ask someone who manages this solution to resume it.")</span>
+                @if (_canManage)
+                {
+                    <button type="button" class="btn btn--sm" @onclick="() => TakeOverAsync(PipelineAutomation.BuildOnPush)" disabled="@_takingOver"
+                            title="From now on, builds on push use your repository access.">
+                        <span>@(_takingOver ? "Saving..." : "Resume with my access")</span>
                     </button>
                 }
             </Alert>
@@ -195,7 +217,7 @@
                         Building compiles this pipeline's extensions, and the resulting
                         <span class="u-nowrap"><code>.app</code> files</span> show up here to
                         download. Each private repository needs a token first — set them up under
-                        <a href="/account?section=repos">Account → Repository access</a>.
+                        <a href="/account/repos">Account → Repository access</a>.
                     </p>
                     <button type="button" class="btn empty-state__action" @onclick="RunBuildAsync" disabled="@_starting">
                         <Icon Name="hammer" Width="15" Height="15" />
@@ -436,7 +458,7 @@
                                             @if (f.NeedsSymbols && _canManage)
                                             {
                                                 <div class="sub-row__acts">
-                                                    <a class="btn btn--sm" href="@($"/solutions/{_header!.ProjectId}?tab=symbols")">
+                                                    <a class="btn btn--sm" href="@($"/solutions/{_header!.ProjectId}/symbols")">
                                                         <Icon Name="upload" Width="14" Height="14" />
                                                         <span>Upload symbols</span>
                                                     </a>
@@ -465,7 +487,7 @@
                                                    the Download control. PageAdminEdit.dc.html uses
                                                    __val for metadata columns and keeps __acts to
                                                    buttons only. *@
-                                                <span class="sub-row__val">@a.AppName · v@(a.AppVersion)@(a.RuntimeVersion is { } rt ? $" · runtime {rt}" : "") · @FormatBytes(a.SizeBytes)</span>
+                                                <span class="sub-row__val">@a.AppName · v@(a.AppVersion)@(a.RuntimeVersion is { } rt ? $" · runtime {rt}" : "") · @FormatBytes(a.SizeBytes)@(a.CarriedFromBuildId is { } from ? $" · unchanged since build #{from}" : "")</span>
                                             </div>
                                             <div class="sub-row__acts">
                                                 <a class="btn btn--sm" href="@($"/artifacts/build/{_latest.Id}/app/{a.Id}")" aria-label="@($"Download {a.FileName}")">
@@ -626,7 +648,7 @@
                                             }
                                             else if (b.ArtifactCount > 0)
                                             {
-                                                @if (b.Status == "ready" && _canManage && !b.IsPreview)
+                                                @if (b.Status == "ready" && _canManage && !b.IsPreview && _deploymentsOn)
                                                 {
                                                     <button type="button" class="btn btn--sm" @onclick="() => StartReleaseAsync(b)"
                                                             disabled="@_openingRelease" aria-label="@($"Deploy build #{b.Id}")">
@@ -758,8 +780,6 @@
     </ChildContent>
 </DetailPage>
 
-<PipelineEditorDialog @ref="_editor" OnSaved="OnPipelineSavedAsync" />
-<ReleasePipelineEditorDialog @ref="_releasePipelineEditor" OnSaved="OnReleasePipelineCreatedAsync" />
 <ReleaseBuildDialog @ref="_releaseDialog" OnReleased="OnReleasedAsync" />
 
 @* Which deployment pipeline a build goes through, when that isn't a given: several take
@@ -812,7 +832,7 @@
                 <button type="button" class="btn" @onclick="CloseChooser">Cancel</button>
                 @if (_releaseTargets.Count == 0)
                 {
-                    <button type="button" class="btn btn--primary" @onclick="SetUpReleasePipelineAsync">
+                    <button type="button" class="btn btn--primary" @onclick="SetUpReleasePipeline">
                         <Icon Name="plus" Width="14" Height="14" />
                         <span>Set up a deployment pipeline</span>
                     </button>
@@ -826,6 +846,14 @@
 
 @code {
     [Parameter] public int PipelineId { get; set; }
+
+    [CascadingParameter] private Task<Microsoft.AspNetCore.Components.Authorization.AuthenticationState>? AuthState { get; set; }
+
+    /// <summary>
+    /// Whether the deployments tool is on for this person. "Deploy..." leads into it,
+    /// so it is not offered when that tool is switched off (its pages answer 404).
+    /// </summary>
+    private bool _deploymentsOn = true;
 
     /// <summary>
     /// A build to show in place of the latest one, which is how a preview check's
@@ -846,19 +874,15 @@
     private bool _starting;
     private string? _buildError;
 
-    private PipelineEditorDialog? _editor;
     private ConfirmDialog? _deleteConfirm;
 
     // "Deploy..." on a build row (#938).
-    private ReleasePipelineEditorDialog? _releasePipelineEditor;
     private ReleaseBuildDialog? _releaseDialog;
     private ElementReference _chooserRoot;
     private bool _focusChooser;
     private bool _openingRelease;
     /// <summary>The build whose deployment target is being chosen; the chooser is open while set.</summary>
     private BuildRow? _releaseBuild;
-    /// <summary>The build a deployment pipeline is being set up for, carried across the editor.</summary>
-    private int? _pendingReleaseBuildId;
     private List<ReleasePipelineRow> _releaseTargets = new();
     /// <summary>The deployment pipeline the open deployment dialog sends through, for the note after it.</summary>
     private (int Id, string EnvironmentName, int BuildId)? _releasingThrough;
@@ -896,6 +920,9 @@
     protected override async Task OnInitializedAsync()
     {
         await Zone.EnsureLoadedAsync();
+        var user = AuthState is null ? null : (await AuthState).User;
+        _deploymentsOn = ToolAvailability.IsSiteEnabled(ALDevToolbox.Domain.Tools.ToolKey.Releases)
+            && !ALDevToolbox.Endpoints.EndpointHelpers.ReadDisabledTools(user).Contains(ALDevToolbox.Domain.Tools.ToolKey.Releases);
         _loadedBuildId = BuildId;
         _loadedPipelineId = PipelineId;
         await LoadAsync();
@@ -933,14 +960,21 @@
 
     private bool _takingOver;
 
-    /// <summary>Resumes a paused preview check, running it as the person who pressed the button from now on.</summary>
-    private async Task TakeOverPreviewCheckAsync()
+    /// <summary>Resumes a paused preview check or paused building on push, running it as the person who pressed the button from now on.</summary>
+    private async Task TakeOverAsync(PipelineAutomation automation)
     {
         if (_takingOver) return;
         _takingOver = true;
         try
         {
-            await Pipelines.TakeOverPreviewCheckAsync(PipelineId);
+            if (automation == PipelineAutomation.PreviewCheck)
+            {
+                await Pipelines.TakeOverPreviewCheckAsync(PipelineId);
+            }
+            else
+            {
+                await Pipelines.TakeOverBuildOnPushAsync(PipelineId);
+            }
             await LoadAsync();
         }
         catch (PlanValidationException ex)
@@ -1143,22 +1177,16 @@
         if (e.Key is "Escape" or "Esc") CloseChooser();
     }
 
-    /// <summary>No deployment pipeline takes these builds yet: open the editor with this build pipeline as its source.</summary>
-    private async Task SetUpReleasePipelineAsync()
+    /// <summary>
+    /// No deployment pipeline takes these builds yet: open the create page with this build
+    /// pipeline as its source. Saving it carries on to deploying this build.
+    /// </summary>
+    private void SetUpReleasePipeline()
     {
-        if (_releaseBuild is not { } build || _releasePipelineEditor is null || _header is null) return;
+        if (_releaseBuild is not { } build || _header is null) return;
         _releaseBuild = null;
-        _pendingReleaseBuildId = build.Id;
-        await _releasePipelineEditor.OpenForCreateAsync(_header.ProjectId, _header.ProjectName, PipelineId,
-            nextStep: $"After you create it, you choose when build #{build.Id} installs.");
-    }
-
-    /// <summary>The new deployment pipeline is saved: carry on to deploying the build it was set up for.</summary>
-    private async Task OnReleasePipelineCreatedAsync(int releasePipelineId)
-    {
-        if (_pendingReleaseBuildId is not { } buildId) return;
-        _pendingReleaseBuildId = null;
-        await OpenReleaseDialogAsync(releasePipelineId, buildId);
+        var back = Uri.EscapeDataString($"/pipelines/{PipelineId}");
+        Nav.NavigateTo($"/pipelines/deployments/new?solution={_header.ProjectId}&buildPipeline={PipelineId}&deploy={build.Id}&returnUrl={back}");
     }
 
     /// <summary>
@@ -1243,23 +1271,6 @@
         return target.EnvironmentProblem is { } problem
             ? $"Installs into {env} — that environment is {problem}"
             : $"Installs into {env}";
-    }
-
-    private async Task EditPipelineAsync()
-    {
-        var pipeline = await Pipelines.GetPipelineAsync(PipelineId);
-        if (pipeline is null || _editor is null) return;
-        await _editor.OpenForEditAsync(
-            pipeline.Id, pipeline.ProjectId, pipeline.Project?.Name ?? _header?.ProjectName ?? "",
-            pipeline.Name, pipeline.RequestedAppIdsJson, pipeline.GithubReleaseRepositoryId, pipeline.Branch, pipeline.PreviewCheck,
-            pipeline.AutoVersion, pipeline.NameIsCustom);
-    }
-
-    private async Task OnPipelineSavedAsync(int _)
-    {
-        // Name / selection may have changed — refresh the header and history.
-        await LoadAsync();
-        StateHasChanged();
     }
 
     private async Task DeletePipelineAsync()
@@ -1364,6 +1375,7 @@
     {
         "ready" => "Built",
         "failed" => "Failed",
+        "queued" => "Queued",
         _ => "Started",
     };
 
@@ -1371,8 +1383,9 @@
     private static DateTime StartedWhen(BuildRow b) =>
         b.Status is "ready" or "failed" ? b.FinishedAt ?? b.StartedAt : b.StartedAt;
 
-    private static string? StartedBy(BuildRow b) =>
-        b.StartedByName is { } n ? $"Started by {n}" : null;
+    private static string? StartedBy(BuildRow b) => b.StartedByName is { } n
+        ? b.FromPush ? $"Started by a push, built with {n}'s access" : $"Started by {n}"
+        : b.FromPush ? "Started by a push" : null;
 
     /// <summary>
     /// How long a build took, for the run row's duration cell. A build still in

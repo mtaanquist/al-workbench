@@ -58,7 +58,7 @@ internal static class GitHubAppEndpoints
     private const string RepositoriesTab = "/admin/administration/repositories";
 
     /// <summary>The Account section the link routes redirect back to.</summary>
-    private const string AccountReposSection = "/account?section=repos";
+    private const string AccountReposSection = "/account/repos";
 
     /// <summary>
     /// The one place a member can be sent to link from and expect to be sent
@@ -256,7 +256,7 @@ internal static class GitHubAppEndpoints
             {
                 await access.LinkAsync(code, ct);
                 var next = returnTo is null ? string.Empty : $"&return={returnTo}";
-                ctx.Response.Redirect($"{AccountReposSection}&{RouteConstants.OkQuery}=github-linked{next}");
+                ctx.Response.Redirect($"{AccountReposSection}?{RouteConstants.OkQuery}=github-linked{next}");
             }
             catch (PlanValidationException ex)
             {
@@ -286,7 +286,7 @@ internal static class GitHubAppEndpoints
             try
             {
                 await access.UnlinkAsync(ct);
-                ctx.Response.Redirect($"{AccountReposSection}&{RouteConstants.OkQuery}=github-unlinked");
+                ctx.Response.Redirect($"{AccountReposSection}?{RouteConstants.OkQuery}=github-unlinked");
             }
             catch (Exception ex)
             {
@@ -317,7 +317,7 @@ internal static class GitHubAppEndpoints
     /// added here rather than left to seven call sites to remember.
     /// </summary>
     private static void RedirectToAccount(HttpContext ctx, string message) =>
-        RedirectWithMessage(ctx, $"{AccountReposSection}&{RouteConstants.ErrQuery}=GitHub", message);
+        RedirectWithMessage(ctx, $"{AccountReposSection}?{RouteConstants.ErrQuery}=GitHub", message);
 
     /// <summary>
     /// The same, without the <c>err=</c> field label. For the things that went

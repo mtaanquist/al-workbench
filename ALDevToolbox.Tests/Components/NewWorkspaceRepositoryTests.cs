@@ -67,6 +67,7 @@ public sealed class NewWorkspaceRepositoryTests : IDisposable
         _ctx.Services.AddScoped<GenerationService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.ProjectAccess>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>();
+        _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>();
         _ctx.Services.AddSingleton(new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue());
         _db.AddGitHubServices(_ctx.Services, _api);
@@ -127,6 +128,25 @@ public sealed class NewWorkspaceRepositoryTests : IDisposable
         cut.Find(".ws-repo").InnerHtml.Should().Contain($"/solutions/{solution.Id}");
         solution.Repositories.Should().ContainSingle()
             .Which.Url.Should().Be($"https://github.com/{Repo}.git");
+    }
+
+    [Fact]
+    public async Task The_success_card_names_the_new_branches_and_their_build_pipelines()
+    {
+        await ReadyAsync();
+
+        var cut = _ctx.Render<NewWorkspace>();
+        cut.WaitForElement("input[name='WorkspaceName']").Input("CRONUS Customer");
+        cut.WaitForElement("button:contains('Create repository')").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            var text = System.Text.RegularExpressions.Regex.Replace(cut.Find(".ws-repo").TextContent, @"\s+", " ");
+            text.Should().Contain("Also created the test and staging branches from main.");
+            text.Should().Contain("Build pipelines for main, test and staging are on the solution's Pipelines tab.");
+            text.Should().Contain("Each builds automatically when new commits are pushed to its branch.");
+            cut.Find(".ws-repo").InnerHtml.Should().MatchRegex(@"/solutions/\d+/pipelines");
+        }, TimeSpan.FromSeconds(10));
     }
 
     /// <summary>
@@ -250,6 +270,7 @@ public sealed class NewWorkspaceRepositoryTests : IDisposable
             // The default branch is moved on to the workspace commit; the
             // installation bypasses the organisation's branch rules.
             .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/", HttpStatusCode.OK, FakeGitHubApi.ShaJson("new-commit-sha"))
+            .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", HttpStatusCode.Created, """{"ref":"refs/heads/x"}""")
             .EmptyRepository(Repo);
 
     /// <summary>Deployment configured, organisation connected, user linked, one template.</summary>

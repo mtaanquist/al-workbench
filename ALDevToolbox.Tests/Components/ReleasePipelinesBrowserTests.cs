@@ -59,6 +59,12 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Bc.UpgradeActionService>();
         _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService>();
         _ctx.Services.AddSingleton(TimeProvider.System);
+        // The Reschedule dialog the list hosts deploys through the delivery service.
+        _ctx.Services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Bc.IDeliveryTokenSource>(
+            sp => sp.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService>());
+        _ctx.Services.AddScoped<DeliveryService>();
+        _ctx.Services.AddSingleton(new DeliveryQueue());
+        TestDb.AddToolServices(_ctx.Services);
         _db.AddStorageServices(_ctx.Services);
         _db.AddGitHubServices(_ctx.Services, new FakeGitHubApi());
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
@@ -104,8 +110,10 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.Find(".card .empty-state__title").TextContent.Trim().Should().Be("No deployment pipelines yet");
-            cut.Find(".empty-state__action button").TextContent.Should().Contain("New deployment pipeline");
-            cut.FindAll(".page-head__actions button").Should().BeEmpty("the empty state carries the one next step");
+            var action = cut.Find(".empty-state__action a.btn");
+            action.TextContent.Should().Contain("New deployment pipeline");
+            action.GetAttribute("href").Should().Be("/pipelines/deployments/new?returnUrl=%2Fpipelines%2Fdeployments");
+            cut.FindAll(".page-head__actions .btn").Should().BeEmpty("the empty state carries the one next step");
         });
     }
 
@@ -125,6 +133,33 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
             cut.FindAll("table.rp-list__wide tbody tr").Select(r => r.GetAttribute("data-pipeline"))
                 .Should().Equal(s.Blocked.ToString(), s.Failed.ToString());
         });
+    }
+
+    [Fact]
+    public async Task A_scheduled_deployment_can_be_rescheduled_from_the_row_menu()
+    {
+        var s = await SeedFleetAsync();
+        await using (var db = _db.NewContext())
+        {
+            var buildId = await db.OeProjectBuilds.Select(b => b.Id).FirstAsync();
+            var waiting = Delivery(s.ProjectId, s.Quiet, buildId, ProjectDeliveryStatus.Scheduled, DateTime.UtcNow.AddDays(1), null);
+            waiting.EnvironmentName = "Production";
+            waiting.StartedAt = null;
+            db.OeProjectDeliveries.Add(waiting);
+            await db.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<ReleasePipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var row = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']");
+            row.QuerySelectorAll(".menu__item").Select(i => i.TextContent.Trim()).Should().Contain("Reschedule next deployment");
+            cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Failed}']").QuerySelectorAll(".menu__item")
+                .Select(i => i.TextContent.Trim()).Should().NotContain("Reschedule next deployment", "nothing is waiting there");
+        });
+        cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}'] .menu__item").Click();
+        cut.WaitForAssertion(() => cut.Find("#rs-title").TextContent.Should().Be("Reschedule deployment"));
     }
 
     [Fact]
@@ -151,7 +186,7 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
             blocked.ClassList.Should().Contain("is-failed");
             blocked.Children[2].TextContent.Should().Contain("Missing");
             blocked.Children[4].TextContent.Should().Contain("Blocked").And.Contain("Environment not found");
-            blocked.Children[4].QuerySelector("a")!.GetAttribute("href").Should().Be($"/solutions/{s.ProjectId}?tab=bc",
+            blocked.Children[4].QuerySelector("a")!.GetAttribute("href").Should().Be($"/solutions/{s.ProjectId}/bc",
                 "a dead target says where to fix it");
 
             // The last release failed, and on which app.

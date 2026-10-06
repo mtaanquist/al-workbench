@@ -352,6 +352,23 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
 .page.upd .detail-head > div:first-child { flex: 1 1 260px; min-width: 0; }
 .page.upd .detail-head > .page-head__actions { flex-wrap: wrap; min-width: 0; max-width: 100%; }
 
+/* A solution's page (#1077) hands DetailPage the page class "sol". On a phone its head
+   held the name, Follow and All solutions on one line and pushed the buttons off
+   screen, and its seven tabs ran past the edge with the last ones unreachable. The
+   head wraps like the upgrade page's, and the tab row scrolls sideways inside the
+   page instead of widening it - a label never breaks onto two lines. */
+.page.sol .detail-head { flex-wrap: wrap; gap: var(--space-3); }
+.page.sol .detail-head > div:first-child { flex: 1 1 260px; min-width: 0; }
+.page.sol .detail-head > .page-head__actions { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.page.sol .settings > * { min-width: 0; }
+.page.sol .settings__tabs { min-width: 0; }
+.page.sol .header-tabs { min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+.page.sol .header-tab { flex: none; white-space: nowrap; }
+/* A scrolling row clips to inside its own border, so the active tab's underline sits
+   on the border's inner edge rather than over it. */
+.page.sol .header-tab::after { bottom: 0; }
+.page.sol .header-tab:focus-visible { outline-offset: -2px; }
+
 /* The modal scrim in the dark theme. The hand-off's recipe mixes --ink into
    transparent, which dims a light page and does the opposite to a dark one: --ink is
    near-white there, so the page behind a dialog went pale grey and the dialog lost

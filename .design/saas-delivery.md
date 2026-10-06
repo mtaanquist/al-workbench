@@ -361,6 +361,7 @@ the naming suggested.
 | `deployment_schedule` | `text` | App Management `deploymentSchedule` — **when** BC installs the upload: `Immediate` (default) / `UpdateWindow` / `NextMinorUpdate` / `NextMajorUpdate` — or our own `OurDeliveryWindow` (#928), which is never sent and becomes `Immediate` at the wire. **Renamed from `version_mode`** when publishing moved off the retired upload API: the old column held a *version target* (`Current version` / `Next minor version` / `Next major version`) and the new field genuinely means a time, so the values were migrated as well as the name. Four are offered in the picker — see *Deployment schedules* below. |
 | `schema_sync_mode` | `text` | App Management `syncMode`: `Add` (default, safe) or `ForceSync` (can drop columns — gate behind a confirm). Note the missing space: the retired API spelled it `Force Sync`, so stored values were migrated too. |
 | `prepare_release_on_new_build` | `bool` | #934. Off by default. When on, a new successful build of the source build pipeline **prepares** a release through this pipeline - a `proposed` delivery - and a person approves or dismisses it (see *Prepared releases* below). Nothing is ever approved on its own. Ignored (saved as false) for a pipeline that installs GitHub releases. |
+| `deploy_without_approval` / `deploy_without_approval_by_user_id` | `bool` / `int?` | #1096. Off by default. With the prepare setting on and a sandbox target, a new build is deployed without approval, as that user. See *Deploying to a sandbox without approval*. |
 | `restrict_branch` / `allowed_branch` | `bool` / `text?` | Only deploy builds made from `allowed_branch` (null is the repositories' default branch). See *Which branch may reach an environment* below. Ignored (saved off) for a pipeline that installs GitHub releases. |
 | `default_publish_time` | `time?` | **Superseded by the target environment's update window** (§1 → *Update window*) as the schedule prefill, and likely droppable. Keep only as a per-pipeline override when one deployment pipeline must default to a different time than its environment's window. The execution model is unchanged: the real schedule is always a concrete date+time per delivery (`OeProjectDelivery.scheduled_for`, §4) — the window/`default_publish_time` only seed the picker. **As built (CRUD slice):** the column was *not* added — there is no scheduling in the CRUD slice to prefill, and the per-environment update window (phase 3) is the intended source. Add it back only if a per-pipeline override turns out to be needed. |
 
@@ -849,9 +850,12 @@ whole. The page reads the log line back through the same parser, so a deployment
   version underneath, and an **Open in Business Central** link built from `web_client_login_url` —
   the question the row has to answer is "is this environment safe to deploy to right now".
 - **Deployment pipelines:** a listable surface alongside Build pipelines (own icon — e.g. `rocket` for
-  build stays, a `send`/`upload-cloud` for deployment), with a create/edit dialog: name, source build
+  build stays, a `send`/`upload-cloud` for deployment), with a create/edit page
+  (`/pipelines/deployments/new`, `/pipelines/deployments/{id}/edit`; a dialog until #1080): source build
   pipeline or GitHub repository, target environment (picker), when installs run, schema sync mode
-  (Force sync behind an acknowledgement). The list (`/pipelines/deployments`, #935) also says what each pipeline
+  (Force sync behind an acknowledgement), in sections (Source, Target, Installing, Automation, Name).
+  "Deploy..." on a build row with no deployment pipeline opens it with `?buildPipeline=` and
+  `?deploy=`, and saving lands on the new pipeline with Deploy open on that build. The list (`/pipelines/deployments`, #935) also says what each pipeline
   is doing: a "Shipping now" band per deployment in flight (which app of how many, and how long the
   last successful deployment took), the newest finished deployment's outcome, and the next one - a
   scheduled deployment, or for one handed to Business Central, the environment's next update. It is
@@ -869,6 +873,31 @@ whole. The page reads the log line back through the same parser, so a deployment
   dialog as a convenience, but the canonical action is on the deployment pipeline.
 - **Delivery history:** per deployment pipeline, the `OeProjectDelivery` runs with status,
   scheduled/started times, per-app results, and **Cancel** (only while `scheduled`) / **Reschedule**.
+  **Reschedule** (#1097) offers the timings a deployment pipeline can be set to, plus two of its own:
+  *Now* (an urgent fix; asks who is signed in first, as Deploy now does), *At a time I pick* (in the
+  customer's zone; a time that has gone is refused, so Now is the only way to run it at once), *In the
+  next delivery window* (only when the environment has one), and *With the next minor / major Business
+  Central update*. The last two change what is sent: the apps go up straight away and Business Central
+  holds them until that update, exactly as a pipeline set to that timing would. They are offered only
+  for a build Business Central can hold back - one app, already in the environment's app list as last
+  read; the run re-checks the live list. A deployment already handed to Business Central can be
+  rescheduled too, but not moved there - the admin API can only cancel a held install - so it is
+  replaced: a new deployment of the same build is written (far in the future, so a refusal such as
+  the branch rule leaves Business Central alone), Business Central's copy is cancelled, and only then
+  does the new one take the picked timing. If Business Central refuses the cancel, the new deployment
+  is removed and nothing has changed. The old one is marked cancelled with a log line naming its
+  replacement, and its app row skipped. Only a run Business Central may still hold is offered: the
+  newest of its pipeline to reach Business Central, one app, a version the environment's app list as
+  last read doesn't already have, still going to the environment the pipeline targets. Moving it to
+  the update it already waits for is refused.
+  Any choice that installs within the minute (Now, a picked time that has come, a delivery window that
+  is open) asks who is signed in first. Rescheduling takes the Deployment pipelines step-up rule, like
+  deploying. The worker only claims a delivery whose time has come, so a run still waiting in the queue
+  does nothing to a deployment moved to later; the scheduler queues it again when it is due. The same
+  dialog opens from "Reschedule next deployment" in the deployment pipelines list's row menu, and
+  from the environment's Scheduled installs card, which lists the pipeline runs booked for that
+  environment (with Reschedule and Cancel deployment) and offers Reschedule beside the install
+  Business Central lists for a run it is holding.
 - **Deployment pipeline page (`/pipelines/deployments/{id}`), as built (#929, #932):** ports
   `.design/handoff/ReleasePipelineBody.dc.html` on the `DetailPage` frame. The head names the
   solution, the source (build pipeline, or the repository for a GitHub-release pipeline) and the
@@ -911,6 +940,21 @@ whole. The page reads the log line back through the same parser, so a deployment
   run's log says the same. No new column: the snapshot was already there.
 - **Prepared deployments (#934):** see the section of that name below.
 - **Pipelines dashboard (#955):** see the section of that name below.
+- **Checking who is online before a deployment:** when a person starts a deployment that
+  installs right away (Deploy with the time at now, Deploy again, or approving a prepared
+  deployment whose rule says right away), the page first asks Business Central who is signed in
+  to the target (`DeliveryService.CheckOpenSessionsAsync`, gated like deploying). People are
+  counted once each, split into end-users and delegated users (a user name starting with
+  `USER_`, which is how Business Central names a delegated admin); web service calls and
+  background, child and job queue sessions are left out, since an integration or a job runs
+  under somebody's name without that person being online. The check waits 15 seconds at most. If anybody is signed in, the dialog says "There are X end-users online and Y delegated
+  users online in {environment}. Are you sure you want to deploy the build?" and its button
+  becomes "Deploy anyway" ("Approve anyway"), so the second press goes ahead. Nobody online
+  deploys on the first press. If Business Central can't be asked, the dialog says why and asks
+  the same question rather than blocking. A deployment for later, or one handed to Business
+  Central's next update, is not checked: who is online now says nothing about then. The counts
+  are shown and forgotten, like the Sessions tab. The `deploy_build` MCP tool does not check:
+  there is nobody to ask.
 
 ## Pipelines dashboard (#955)
 
@@ -1012,6 +1056,48 @@ the gap the issue names - and a prepared deployment closes that gap without movi
   the band are the v1 signal. A pipeline that installs **GitHub releases** does not prepare one:
   there is no sweep that sees a new release on GitHub today (releases are listed on demand when
   somebody opens the dialog), so the setting is hidden for that source and saved as false.
+
+## Deploying to a sandbox without approval (#1096)
+
+*Prepared deployments* above keep the decision with a person. For a **sandbox** that is a step
+nobody needs: a team's test environment should simply follow the branch. So a deployment pipeline
+whose target is a sandbox can go one step further than preparing: "Deploy it straight away,
+without waiting for approval" (`deploy_without_approval`, under the prepare setting, off by
+default). It does not touch the line drawn for production environments: those still never
+receive anything a person did not choose to send.
+
+- **Only a sandbox, checked three times.** The edit page offers the option only when the chosen
+  environment's type is `Sandbox`, and `ReleasePipelineService` refuses it for anything else. A
+  type can change after that (an environment copied over, a sandbox promoted), so the type is read
+  again when the build lands (`DeployWithoutApprovalAsync`, from the stored row) and once more
+  before the first upload (the run's live re-read of the environment; when that read fails, the
+  stored type decides). The run check applies to every delivery with `deployed_without_approval`
+  set, so a deployment that waits for its delivery window cannot slip through either. Not a sandbox
+  at the first check: the build is prepared for approval instead. At the run check: the delivery
+  fails with nothing sent, saying why.
+- **Runs as the person who last saved it on** (`deploy_without_approval_by_user_id`, `SET NULL`),
+  the way building on push (#1079) runs as its person: `ReleaseImportWorker` enters their identity,
+  every check an approval makes is made (their access, the environment's status, the build, the
+  pipeline's settings), they are the delivery's `triggered_by_user_id`, and they get its finished
+  or failed notification. Unlike building on push, every save with the option on makes the person
+  saving the one it runs as: the settings those deployments follow are then theirs, and a pipeline
+  whose person lost access is put right by simply saving it. A disabled account runs nothing.
+- **Falls back to approval, never to nothing.** When it can't deploy - that person is gone,
+  disabled or has lost access, the environment is not a sandbox or is busy, the build is refused,
+  anything unexpected - the build is prepared for approval as before, its log opening with "Not
+  deployed automatically: ..." and the reason. One pipeline's failure does not stop the others.
+- **One at a time.** A waiting proposal from an older build is replaced the same way a newer
+  proposal replaces it, and so is an older build's deployment without approval still waiting for
+  its time (`scheduled → dismissed`, compare-and-set, replaced by the newer build), so a day of
+  builds does not all install when a delivery window opens. The same build processed again, or an
+  older build finishing after a newer one already has a deployment, changes nothing.
+- **Timing and modes** are the pipeline's own, as for an approval: by its rule from the moment the
+  build landed. The delivery's log opens with "Started by build #N ... without waiting for
+  approval", and its step strip reads "automatically after a new build (no approval), set up by <person>".
+- **Not checked for open sessions.** The "who is signed in" question (#1082) is asked where a person
+  presses a button; scheduled deployments, the MCP tool and these are not checked.
+- **Agents** see the setting on `list_deployment_pipelines` (`deployWithoutApproval`) and cannot
+  change it; there is no MCP write for deployment pipelines.
 
 ## Security & tenant isolation
 
@@ -1151,6 +1237,8 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
   date+time; it then runs automatically at that time, and is **cancellable until a worker claims it**.
   **Revised by #934:** a pipeline may *prepare* a deployment when a new build succeeds, for a person to
   approve; it still never publishes on its own (see *Prepared deployments*).
+  **Revised by #1096:** to a **sandbox** it may, when the pipeline says so (see *Deploying to a
+  sandbox without approval*); a production environment still always waits for a person.
 - **Per-environment update window (revised):** each `OeProjectEnvironment` carries a recurring daily
   update window (start/end time in `bc_time_zone`, nullable = any time), mirroring BC's admin-center
   environment update window — the model BC admins already know. It is a **default, not a lock**:

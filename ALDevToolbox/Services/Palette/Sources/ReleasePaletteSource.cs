@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.Tools;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
@@ -105,9 +106,11 @@ public sealed class ReleasePaletteSource : IPaletteSource
 
         // Deleted releases are gone; failed ones are tombstones holding no
         // objects, so opening one is a dead end. Ingesting ones are offered -
-        // the subtitle says they are still coming.
+        // the subtitle says they are still coming. Feed symbol packages with no
+        // source are left out, as on the releases page (#1092).
         var rows = _db.OeReleases.AsNoTracking()
             .Where(r => r.DeletedAt == null && r.Status != FailedStatus)
+            .Where(OeRelease.NotAnEmptySymbolPackage)
             .Where(_access.VisibleReleasePredicate(snapshot));
 
         foreach (var term in query.SqlTerms)

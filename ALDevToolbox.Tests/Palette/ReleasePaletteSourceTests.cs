@@ -158,6 +158,46 @@ public sealed class ReleasePaletteSourceTests : PaletteSourceVisibilityTestBase
     private const int TestDbOrgId = Infrastructure.TestDb.DefaultOrgId;
 
     /// <summary>
+    /// A symbols package a build pulled from the feeds with no source in it is not on
+    /// the releases page, so the palette does not offer it either; one that carried
+    /// source is offered (#1092).
+    /// </summary>
+    [Fact]
+    public async Task An_empty_symbol_package_from_the_feeds_is_not_offered()
+    {
+        await SeedWorldAsync();
+        await SeedFeedSymbolsAsync("CRONUS Banking - Import 28.6.0.0 (symbols)", "symbols:aaaa:28.6.0.0", files: 0);
+        await SeedFeedSymbolsAsync("CRONUS Banking - PSP 28.6.0.0 (symbols)", "symbols:bbbb:28.6.0.0", files: 3);
+        // Still importing: its files are not counted yet, so it is offered like any
+        // other release that is on its way.
+        await SeedFeedSymbolsAsync("CRONUS Banking - SEPA 28.6.0.0 (symbols)", "symbols:cccc:28.6.0.0", files: 0, status: "ingesting");
+
+        var results = await SearchAsync("cronus banking");
+
+        results.Select(r => r.Title).Should().BeEquivalentTo(
+            "CRONUS Banking - PSP 28.6.0.0 (symbols)", "CRONUS Banking - SEPA 28.6.0.0 (symbols)");
+    }
+
+    private async Task SeedFeedSymbolsAsync(string label, string dedupKey, int files, string status = "ready")
+    {
+        await using var ctx = Db.NewContext();
+        ctx.OeReleases.Add(new OeRelease
+        {
+            OrganizationId = TestDbOrgId,
+            Label = label,
+            BcVersion = "28.6",
+            DedupKey = dedupKey,
+            Kind = "third_party",
+            Status = status,
+            SourceFileCount = files,
+            ImportedAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>
     /// A Microsoft OnPrem artifact import: the one kind of release that records
     /// a country, inside its dedup key. Mirrors
     /// <c>BcArtifactIndex.FormatLabel</c> / <c>FormatDedupKey</c>.

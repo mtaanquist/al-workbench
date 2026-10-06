@@ -103,6 +103,9 @@ public sealed class PipelineService
             PreviewCheck = input.PreviewCheck,
             PreviewCheckByUserId = input.PreviewCheck ? _orgContext.CurrentUserId : null,
             AutoVersion = input.AutoVersion,
+            ChangedAppsOnly = input.ChangedAppsOnly,
+            BuildOnPush = input.BuildOnPush,
+            BuildOnPushByUserId = input.BuildOnPush ? _orgContext.CurrentUserId : null,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -115,10 +118,9 @@ public sealed class PipelineService
     }
 
     /// <summary>
-    /// Updates a pipeline's extension selection, publishing target, branch and nightly
-    /// preview check, and the name that follows from them. Turning the check on makes
-    /// the caller the person it runs as; so does saving while it is paused (its person
-    /// gone or refused), which is how someone with access takes it over. A new name
+    /// Updates a pipeline's extension selection, publishing target, branch, nightly
+    /// preview check and building on push, and the name that follows from them. Saving with the check or
+    /// building on push on makes the caller the person those builds run as. A new name
     /// carries through to the deployment pipelines named after this one.
     /// </summary>
     public async Task UpdatePipelineAsync(int id, PipelineInput input, CancellationToken ct = default)
@@ -138,18 +140,19 @@ public sealed class PipelineService
         pipeline.RequestedAppIdsJson = selectionJson;
         pipeline.GithubReleaseRepositoryId = releaseRepositoryId;
         pipeline.Branch = branch;
-        if (!input.PreviewCheck)
-        {
-            pipeline.PreviewCheckByUserId = null;
-            pipeline.PreviewCheckBlocked = null;
-        }
-        else if (!pipeline.PreviewCheck || pipeline.PreviewCheckByUserId is null || pipeline.PreviewCheckBlocked is not null)
-        {
-            pipeline.PreviewCheckByUserId = _orgContext.CurrentUserId;
-            pipeline.PreviewCheckBlocked = null;
-        }
+        // Whoever saves the pipeline with the preview check or building on push on becomes
+        // the person those builds run as, the way a deployment pipeline's "deploy without
+        // approval" follows whoever saved it. Otherwise one manager could repoint the
+        // branch or the extensions and have the builds clone with another person's
+        // repository access.
+        pipeline.PreviewCheckByUserId = input.PreviewCheck ? _orgContext.CurrentUserId : null;
+        pipeline.PreviewCheckBlocked = null;
         pipeline.PreviewCheck = input.PreviewCheck;
+        pipeline.BuildOnPushByUserId = input.BuildOnPush ? _orgContext.CurrentUserId : null;
+        pipeline.BuildOnPushBlocked = null;
+        pipeline.BuildOnPush = input.BuildOnPush;
         pipeline.AutoVersion = input.AutoVersion;
+        pipeline.ChangedAppsOnly = input.ChangedAppsOnly;
         pipeline.UpdatedAt = DateTime.UtcNow;
         if (!string.Equals(oldName, name, StringComparison.Ordinal))
         {
@@ -161,15 +164,32 @@ public sealed class PipelineService
 
     /// <summary>
     /// Resumes a paused nightly preview check by making the caller the person it runs
-    /// as. Same rule as saving the pipeline while the check is paused.
+    /// as, without editing the pipeline. Same rule as saving it.
     /// </summary>
-    public async Task TakeOverPreviewCheckAsync(int id, CancellationToken ct = default)
+    public Task TakeOverPreviewCheckAsync(int id, CancellationToken ct = default) =>
+        TakeOverAsync(id, PipelineAutomation.PreviewCheck, ct);
+
+    /// <summary>
+    /// Resumes paused building on push by making the caller the person its builds run
+    /// as, without editing the pipeline. Same rule as saving it. The push that found it
+    /// paused is not built; the next one is.
+    /// </summary>
+    public Task TakeOverBuildOnPushAsync(int id, CancellationToken ct = default) =>
+        TakeOverAsync(id, PipelineAutomation.BuildOnPush, ct);
+
+    private async Task TakeOverAsync(int id, PipelineAutomation automation, CancellationToken ct)
     {
         RequireOrganizationId();
         var pipeline = await _db.OePipelines
             .FirstOrDefaultAsync(p => p.Id == id && p.DeletedAt == null, ct)
             ?? throw Validation("Name", "This pipeline no longer exists.");
-        if (!pipeline.PreviewCheck) throw Validation("PreviewCheck", "This pipeline doesn't run the preview check.");
+        var previewCheck = automation == PipelineAutomation.PreviewCheck;
+        if (previewCheck ? !pipeline.PreviewCheck : !pipeline.BuildOnPush)
+        {
+            throw previewCheck
+                ? Validation("PreviewCheck", "This pipeline doesn't run the preview check.")
+                : Validation("BuildOnPush", "This pipeline doesn't build on new commits.");
+        }
 
         var ownerId = await _db.OeProjects.AsNoTracking()
             .Where(c => c.Id == pipeline.ProjectId)
@@ -177,11 +197,19 @@ public sealed class PipelineService
             .FirstOrDefaultAsync(ct);
         await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
 
-        pipeline.PreviewCheckByUserId = _orgContext.CurrentUserId;
-        pipeline.PreviewCheckBlocked = null;
+        if (previewCheck)
+        {
+            pipeline.PreviewCheckByUserId = _orgContext.CurrentUserId;
+            pipeline.PreviewCheckBlocked = null;
+        }
+        else
+        {
+            pipeline.BuildOnPushByUserId = _orgContext.CurrentUserId;
+            pipeline.BuildOnPushBlocked = null;
+        }
         pipeline.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
-        _logger.LogInformation("Pipeline {PipelineId}'s preview check now runs as user {UserId}.", id, _orgContext.CurrentUserId);
+        _logger.LogInformation("Pipeline {PipelineId}'s {Automation} now runs as user {UserId}.", id, automation, _orgContext.CurrentUserId);
     }
 
     /// <summary>Soft-deletes a pipeline. Its past builds stay reachable (their pipeline_id is nulled by the FK).</summary>
@@ -422,7 +450,18 @@ public sealed record PipelineInput(
     /// person turns it off. See <c>.design/object-explorer-project-builds.md</c>,
     /// "Build numbers in app versions".
     /// </summary>
-    bool AutoVersion = true);
+    bool AutoVersion = true,
+    /// <summary>
+    /// Whether a push to the pipeline's branch starts a build. Off unless the person
+    /// turns it on. See <c>.design/github-integration-phase2.md</c>, "Building on push".
+    /// </summary>
+    bool BuildOnPush = false,
+    /// <summary>
+    /// Whether builds publish only the extensions that changed since this pipeline last
+    /// produced them. On unless the person turns it off. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "Publishing only what changed".
+    /// </summary>
+    bool ChangedAppsOnly = true);
 
 /// <summary>A project choice for the "New pipeline" dialog's project picker.</summary>
 public sealed record PipelineProjectOption(int Id, string Name);

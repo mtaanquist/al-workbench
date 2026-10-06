@@ -84,10 +84,21 @@ public class OeProjectBuild
 
     /// <summary>
     /// The exact commit built. Set for a pull-request build, where the head is
-    /// the whole point and moves under the branch name; null for a manual build,
-    /// whose per-repository commits are recorded as <see cref="RepoCommits"/>.
+    /// the whole point and moves under the branch name, and for a build started by
+    /// a push, which builds the commit that push left the branch on even when later
+    /// pushes have moved it since; null for a manual build, whose per-repository
+    /// commits are recorded as <see cref="RepoCommits"/>.
     /// </summary>
     public string? HeadSha { get; set; }
+
+    /// <summary>
+    /// For a build started by a push: the solution repository that was pushed to,
+    /// the one checked out at <see cref="HeadSha"/>. The solution's other
+    /// repositories are cloned at the pipeline's branch as usual. Null for every
+    /// other build. Deliberately not a foreign key: it only steers the checkout, and a
+    /// repository removed while the build waits simply leaves nothing to pin.
+    /// </summary>
+    public int? HeadRepositoryId { get; set; }
 
     /// <summary>
     /// The GitHub check run this build reports into, so the worker can complete
@@ -178,6 +189,16 @@ public static class ProjectBuildTrigger
     /// <c>.design/github-integration-phase2.md</c> (#627).
     /// </summary>
     public const string PullRequest = "pull_request";
+
+    /// <summary>
+    /// A push to the branch a pipeline watches queued it, because the pipeline builds
+    /// on push (<see cref="OePipeline.BuildOnPush"/>). It runs as the person who turned
+    /// that on, and checks the pushed repository out at the push's own commit
+    /// (<see cref="OeProjectBuild.HeadSha"/>, <see cref="OeProjectBuild.HeadRepositoryId"/>).
+    /// Otherwise an ordinary pipeline build. See
+    /// <c>.design/github-integration-phase2.md</c>, "Building on push" (#1079).
+    /// </summary>
+    public const string Push = "push";
 
     /// <summary>
     /// The nightly preview check on a pipeline queued it, as the person who turned

@@ -74,7 +74,7 @@ internal static class AccountPasskeyEndpoints
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             await passkeys.DeleteAsync(org.CurrentUserId!.Value, id, ct);
-            ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=passkey-deleted");
+            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=passkey-deleted");
         }).RequireAuthorization();
 
         app.MapPost("/auth/account/passkeys/{id:int}/rename", async (
@@ -86,12 +86,12 @@ internal static class AccountPasskeyEndpoints
             try
             {
                 await passkeys.RenameAsync(org.CurrentUserId!.Value, id, form["Name"].ToString(), ct);
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=passkey-renamed");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=passkey-renamed");
             }
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.First();
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
             }
         }).RequireAuthorization();
 
@@ -198,7 +198,7 @@ internal static class AccountPasskeyEndpoints
             {
                 var first = ex.Errors.FirstOrDefault();
                 var msg = string.IsNullOrEmpty(first.Value) ? "Invalid token request." : first.Value;
-                ctx.Response.Redirect($"/account?section=ai&err={Uri.EscapeDataString(msg)}");
+                ctx.Response.Redirect($"/account/ai?err={Uri.EscapeDataString(msg)}");
             }
         }).RequireAuthorization();
 
@@ -217,7 +217,7 @@ internal static class AccountPasskeyEndpoints
             // Scope to the caller's own tokens: PATs are visible org-wide, so the
             // org filter alone would let any member revoke another's by id (#375).
             await tokens.RevokeAsync(id, ignoreOrgScope: false, forUserId: org.CurrentUserId, ct: ct);
-            ctx.Response.Redirect("/account?section=ai&ok=token-revoked");
+            ctx.Response.Redirect("/account/ai?ok=token-revoked");
         }).RequireAuthorization();
 
         return app;

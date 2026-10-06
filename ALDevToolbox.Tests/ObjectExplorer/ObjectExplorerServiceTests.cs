@@ -198,6 +198,49 @@ public sealed class ObjectExplorerServiceTests : IDisposable
             "the project-scoped callers can still opt in");
     }
 
+    /// <summary>
+    /// The releases page and the compare picker ask for browsable releases only:
+    /// ready ones, without the symbol packages a build pulled from the feeds with no
+    /// files (#1092). The filter runs in the query; an admin import without source and
+    /// a feed package that is still importing both stay.
+    /// </summary>
+    [Fact]
+    public async Task ListReleasesAsync_browsable_only_leaves_out_empty_feed_symbol_packages_and_unready_rows()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            seed.OeReleases.AddRange(
+                BareRelease("Feed with files", "symbols:a:1.0", "ready", files: 4),
+                BareRelease("Feed without files", "symbols:b:1.0", "ready", files: 0),
+                BareRelease("Feed still importing", "symbols:c:1.0", "importing", files: 0),
+                BareRelease("Admin import without source", null, "ready", files: 0),
+                BareRelease("Failed import", null, "failed", files: 3));
+            await seed.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var query = NewQuery(read);
+
+        (await query.ListReleasesAsync(browsableOnly: true)).Select(r => r.Label).Should()
+            .BeEquivalentTo("Feed with files", "Admin import without source");
+        (await query.ListReleasesAsync()).Should().HaveCount(5,
+            "the admin lists still see every row");
+    }
+
+    private static OeRelease BareRelease(string label, string? dedupKey, string status, int files) =>
+        new()
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Label = label,
+            Kind = "third_party",
+            Status = status,
+            DedupKey = dedupKey,
+            SourceFileCount = files,
+            ImportedAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+
     /// <summary>Inserts a bare project-kind Release (no modules) and returns its id.</summary>
     private static async Task<int> SeedProjectReleaseAsync(Data.AppDbContext ctx, string label)
     {
