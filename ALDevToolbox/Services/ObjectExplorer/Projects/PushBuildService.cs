@@ -18,10 +18,10 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 public sealed class PushBuildService
 {
     internal const string NoOwnerMessage =
-        "the person who turned it on no longer has an active account.";
+        "the person its builds run as no longer has an active account.";
 
     internal const string NoAccessMessage =
-        "the person who turned it on can no longer manage this solution.";
+        "the person its builds run as can no longer manage this solution.";
 
     private readonly AppDbContext _db;
 

@@ -283,7 +283,7 @@ public sealed class PipelineServiceTests : IDisposable
     // --- Building on push (#1079) ------------------------------------------
 
     [Fact]
-    public async Task Building_on_push_is_off_unless_asked_and_runs_as_whoever_turned_it_on()
+    public async Task Building_on_push_is_off_unless_asked_and_runs_as_whoever_last_saved_it()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
@@ -304,7 +304,7 @@ public sealed class PipelineServiceTests : IDisposable
             plain.BuildOnPushByUserId.Should().BeNull();
             var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
             pipeline.BuildOnPush.Should().BeTrue();
-            pipeline.BuildOnPushByUserId.Should().Be(alice, "someone else saving the pipeline does not take it over");
+            pipeline.BuildOnPushByUserId.Should().Be(bob, "saving the pipeline makes the saver the person its builds run as");
         }
 
         await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production line", null, BuildOnPush: false));
@@ -317,7 +317,7 @@ public sealed class PipelineServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Build_them_as_me_resumes_paused_building_on_push()
+    public async Task Resume_with_my_access_resumes_paused_building_on_push()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
@@ -389,7 +389,7 @@ public sealed class PipelineServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Someone_else_saving_the_pipeline_leaves_the_check_running_as_its_owner()
+    public async Task Someone_else_saving_the_pipeline_runs_the_check_as_them()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
@@ -403,7 +403,7 @@ public sealed class PipelineServiceTests : IDisposable
         await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Production line", null, PreviewCheck: true));
 
         await using var read = _db.NewContext();
-        (await read.OePipelines.SingleAsync(p => p.Id == id)).PreviewCheckByUserId.Should().Be(alice);
+        (await read.OePipelines.SingleAsync(p => p.Id == id)).PreviewCheckByUserId.Should().Be(bob);
     }
 
     [Fact]

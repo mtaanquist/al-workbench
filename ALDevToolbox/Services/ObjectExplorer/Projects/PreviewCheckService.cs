@@ -24,10 +24,10 @@ public sealed class PreviewCheckService
     internal static readonly TimeSpan MaxQuietPeriod = TimeSpan.FromDays(7);
 
     internal const string NoOwnerMessage =
-        "the person who turned it on no longer has an active account.";
+        "the person its builds run as no longer has an active account.";
 
     internal const string NoAccessMessage =
-        "the person who turned it on can no longer manage this solution.";
+        "the person its builds run as can no longer manage this solution.";
 
     internal const string NoCountryMessage =
         "this solution has no country set, so there is no Business Central version to check against. Set one in the solution's settings.";

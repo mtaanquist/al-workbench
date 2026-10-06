@@ -835,15 +835,17 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   commit this pipeline already built on push. A pipeline with no branch builds pushes to
   the default branch GitHub names on the delivery. GitHub repositories only: pushes arrive
   by GitHub webhook, and Azure DevOps would need polling or a service hook.
-- **Whose identity.** The build runs as **the person who turned building on push on**
-  (`build_on_push_by_user_id`), exactly as the nightly preview check runs as its person:
+- **Whose identity.** The build runs as **the person who last saved the pipeline with
+  building on push on** (`build_on_push_by_user_id`), the way a deployment pipeline's
+  "deploy without approval" follows whoever saved it, so one manager cannot repoint a
+  pipeline and have it clone with someone else's access. As with the nightly preview check,
   the access check, the clone credential (their connected GitHub account, then their build
   token), the name on the build and its notifications are theirs. It is not the GitHub
   App's installation token, which would let builds keep running with nobody's permission
   behind them. When that person is gone, can no longer manage the solution, or has nothing
   to clone with, the push is not built and building on push is **paused** with the reason
   on the pipeline page (`build_on_push_blocked`), where anyone who manages the solution can
-  take it over ("Resume with my access"); saving the pipeline while paused does the same. The
+  take it over ("Resume with my access"); saving the pipeline does the same. The
   next push that starts a build lifts the pause.
 - **An ordinary pipeline build otherwise.** Trigger `push`; numbered and published like a
   manual build (build versioning, GitHub release, #934's prepared deployment), compared
