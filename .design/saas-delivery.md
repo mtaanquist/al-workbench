@@ -911,6 +911,21 @@ whole. The page reads the log line back through the same parser, so a deployment
   run's log says the same. No new column: the snapshot was already there.
 - **Prepared deployments (#934):** see the section of that name below.
 - **Pipelines dashboard (#955):** see the section of that name below.
+- **Checking who is online before a deployment:** when a person starts a deployment that
+  installs right away (Deploy with the time at now, Deploy again, or approving a prepared
+  deployment whose rule says right away), the page first asks Business Central who is signed in
+  to the target (`DeliveryService.CheckOpenSessionsAsync`, gated like deploying). People are
+  counted once each, split into end-users and delegated users (a user name starting with
+  `USER_`, which is how Business Central names a delegated admin); web service calls and
+  background, child and job queue sessions are left out, since an integration or a job runs
+  under somebody's name without that person being online. The check waits 15 seconds at most. If anybody is signed in, the dialog says "There are X end-users online and Y delegated
+  users online in {environment}. Are you sure you want to deploy the build?" and its button
+  becomes "Deploy anyway" ("Approve anyway"), so the second press goes ahead. Nobody online
+  deploys on the first press. If Business Central can't be asked, the dialog says why and asks
+  the same question rather than blocking. A deployment for later, or one handed to Business
+  Central's next update, is not checked: who is online now says nothing about then. The counts
+  are shown and forgotten, like the Sessions tab. The `deploy_build` MCP tool does not check:
+  there is nobody to ask.
 
 ## Pipelines dashboard (#955)
 
