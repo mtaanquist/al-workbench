@@ -718,7 +718,7 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     // ── Deploying to a sandbox without approval (#1096) ─────────────────────────
 
     [Fact]
-    public async Task Deploying_without_approval_is_saved_for_a_sandbox_and_runs_as_the_person_who_turned_it_on()
+    public async Task Deploying_without_approval_is_saved_for_a_sandbox_and_runs_as_the_person_who_saved_it()
     {
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectAsync(ctx);
@@ -737,20 +737,18 @@ public sealed class ReleasePipelineServiceTests : IDisposable
         rp.DeployWithoutApprovalByUserId.Should().Be(first);
         (await NewService(_db.NewContext()).ListReleasePipelinesAsync(projectId)).Single().DeployWithoutApproval.Should().BeTrue();
 
-        // Someone else saving it with the option still on keeps whoever turned it on.
-        _db.OrgContext.CurrentUserId = await SeedUserAsync(ctx, "Second Person");
+        // Someone else saving it with the option on makes them the person it runs as.
+        var second = await SeedUserAsync(ctx, "Second Person");
+        _db.OrgContext.CurrentUserId = second;
         var input = new ReleasePipelineInput(
             projectId, null, buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
             PrepareReleaseOnNewBuild: true, DeployWithoutApproval: true);
         await NewService(_db.NewContext()).UpdateReleasePipelineAsync(id, input);
-        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id)).DeployWithoutApprovalByUserId.Should().Be(first);
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id)).DeployWithoutApprovalByUserId.Should().Be(second);
 
-        // Off clears it; on again runs as the person turning it on.
+        // Off clears it.
         await NewService(_db.NewContext()).UpdateReleasePipelineAsync(id, input with { DeployWithoutApproval = false });
         (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id)).DeployWithoutApprovalByUserId.Should().BeNull();
-        await NewService(_db.NewContext()).UpdateReleasePipelineAsync(id, input);
-        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id)).DeployWithoutApprovalByUserId
-            .Should().Be(_db.OrgContext.CurrentUserId);
     }
 
     [Fact]

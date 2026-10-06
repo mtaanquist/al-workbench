@@ -1691,7 +1691,7 @@
         {
             new("Scheduled", "queued", When(d.ScheduledFor, seconds: true), Exact(d.ScheduledFor),
                 d.DeployedWithoutApproval
-                    ? (d.TriggeredByName is { } runsAs ? $"by a new build, as {runsAs}" : "by a new build")
+                    ? (d.TriggeredByName is { } runsAs ? $"automatically after a new build (no approval), set up by {runsAs}" : "automatically after a new build (no approval)")
                     : d.TriggeredByName is { } by ? $"by {by}" : ""),
         };
 

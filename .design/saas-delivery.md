@@ -1050,20 +1050,25 @@ receive anything a person did not choose to send.
   set, so a deployment that waits for its delivery window cannot slip through either. Not a sandbox
   at the first check: the build is prepared for approval instead. At the run check: the delivery
   fails with nothing sent, saying why.
-- **Runs as the person who turned it on** (`deploy_without_approval_by_user_id`, `SET NULL`), the
-  way building on push (#1079) runs as its person: `ReleaseImportWorker` enters their identity,
+- **Runs as the person who last saved it on** (`deploy_without_approval_by_user_id`, `SET NULL`),
+  the way building on push (#1079) runs as its person: `ReleaseImportWorker` enters their identity,
   every check an approval makes is made (their access, the environment's status, the build, the
   pipeline's settings), they are the delivery's `triggered_by_user_id`, and they get its finished
-  or failed notification. Saving the pipeline with the option still on keeps that person; turning
-  it off and on again makes the person saving it the new one.
-- **Falls back to approval, never to nothing.** When it can't deploy - that person is gone or has
-  lost access, the environment is not a sandbox or is busy, the build is refused - the build is
-  prepared for approval as before, its log opening with "Not deployed automatically: ..." and the
-  reason. A waiting proposal from an older build is replaced the same way a newer proposal
-  replaces it. One deployment per build per pipeline: the same build processed again changes nothing.
+  or failed notification. Unlike building on push, every save with the option on makes the person
+  saving the one it runs as: the settings those deployments follow are then theirs, and a pipeline
+  whose person lost access is put right by simply saving it. A disabled account runs nothing.
+- **Falls back to approval, never to nothing.** When it can't deploy - that person is gone,
+  disabled or has lost access, the environment is not a sandbox or is busy, the build is refused,
+  anything unexpected - the build is prepared for approval as before, its log opening with "Not
+  deployed automatically: ..." and the reason. One pipeline's failure does not stop the others.
+- **One at a time.** A waiting proposal from an older build is replaced the same way a newer
+  proposal replaces it, and so is an older build's deployment without approval still waiting for
+  its time (`scheduled → dismissed`, compare-and-set, replaced by the newer build), so a day of
+  builds does not all install when a delivery window opens. The same build processed again, or an
+  older build finishing after a newer one already has a deployment, changes nothing.
 - **Timing and modes** are the pipeline's own, as for an approval: by its rule from the moment the
   build landed. The delivery's log opens with "Started by build #N ... without waiting for
-  approval", and its step strip reads "by a new build, as <person>".
+  approval", and its step strip reads "automatically after a new build (no approval), set up by <person>".
 - **Not checked for open sessions.** The "who is signed in" question (#1082) is asked where a person
   presses a button; scheduled deployments, the MCP tool and these are not checked.
 - **Agents** see the setting on `list_deployment_pipelines` (`deployWithoutApproval`) and cannot

@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using System.Text;
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
@@ -630,6 +631,43 @@ public sealed class DeliveryService
     // ── Deploying to a sandbox without approval (#1096) ─────────────────────────────
 
     /// <summary>
+    /// Sets aside this pipeline's deployments without approval of older builds that are
+    /// still waiting for their time: <c>scheduled → dismissed</c> by compare-and-set, so
+    /// one a worker already claimed runs on. Recorded as replaced by the newer build, the
+    /// way a waiting proposal is.
+    /// </summary>
+    private async Task ReplaceWaitingDeploymentsWithoutApprovalAsync(int releasePipelineId, int newerBuildId, CancellationToken ct)
+    {
+        var ids = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.ReleasePipelineId == releasePipelineId
+                        && d.DeployedWithoutApproval
+                        && d.Status == ProjectDeliveryStatus.Scheduled
+                        && d.ProjectBuildId < newerBuildId)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        if (ids.Count == 0) return;
+        var line = LogLine($"Replaced by build #{newerBuildId} before its time came.");
+        var reason = DeliveryProposalLog.ReplacedReason(newerBuildId);
+        foreach (var id in ids)
+        {
+            var now = DateTime.UtcNow;
+            var changed = await _db.OeProjectDeliveries
+                .Where(d => d.Id == id && d.Status == ProjectDeliveryStatus.Scheduled)
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(d => d.Status, ProjectDeliveryStatus.Dismissed)
+                    .SetProperty(d => d.DismissReason, reason)
+                    .SetProperty(d => d.ReplacedByProjectBuildId, newerBuildId)
+                    .SetProperty(d => d.FinishedAt, now)
+                    .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line)
+                    .SetProperty(d => d.UpdatedAt, now), ct);
+            if (changed > 0)
+            {
+                await MarkAppsNotSentAsync(id, $"Not sent: build #{newerBuildId} replaced this deployment.", ct);
+            }
+        }
+    }
+
+    /// <summary>
     /// The deployment pipelines that deploy <paramref name="projectBuildId"/> without
     /// waiting for approval, each with the person it runs as (null once that account is
     /// gone). Same build rules as <see cref="ProposeReleasesForBuildAsync"/>. Whether the
@@ -650,7 +688,12 @@ public sealed class DeliveryService
                         && r.ArtifactSource == ReleaseArtifactSource.Build
                         && r.BuildPipelineId == buildPipelineId)
             .OrderBy(r => r.Id)
-            .Select(r => new DeploymentWithoutApproval(r.Id, r.DeployWithoutApprovalByUserId))
+            // A disabled account runs nothing, as with building on push: the build is
+            // prepared for approval instead.
+            .Select(r => new DeploymentWithoutApproval(r.Id,
+                r.DeployWithoutApprovalByUser != null && r.DeployWithoutApprovalByUser.Status == UserStatus.Active
+                    ? r.DeployWithoutApprovalByUserId
+                    : null))
             .ToListAsync(ct);
     }
 
@@ -699,10 +742,11 @@ public sealed class DeliveryService
 
         var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct);
 
-        // Once per build: a build that is processed again changes nothing.
+        // Once per build, and never behind a newer one: a build processed again, or an
+        // older build finishing after a newer one, changes nothing.
         if (await _db.OeProjectDeliveries.AsNoTracking()
                 .AnyAsync(d => d.ReleasePipelineId == releasePipelineId
-                               && d.ProjectBuildId == projectBuildId
+                               && d.ProjectBuildId >= projectBuildId
                                && d.Status != ProjectDeliveryStatus.Dismissed, ct))
         {
             return null;
@@ -715,6 +759,9 @@ public sealed class DeliveryService
             .Select(d => d.Id)
             .ToListAsync(ct);
         await ReplaceWaitingProposalsAsync(waiting, projectBuildId, ct);
+        // An older build's unapproved deployment still waiting for its time (a delivery
+        // window) is replaced too, so a day's builds don't all install when it opens.
+        await ReplaceWaitingDeploymentsWithoutApprovalAsync(releasePipelineId, projectBuildId, ct);
 
         var now = DateTime.UtcNow;
         var when = plan.RuleTime(now);

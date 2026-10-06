@@ -338,17 +338,11 @@ public sealed class ReleasePipelineService
         pipeline.DeploymentSchedule = v.DeploymentSchedule;
         pipeline.SchemaSyncMode = v.SchemaSyncMode;
         pipeline.PrepareReleaseOnNewBuild = v.PrepareReleaseOnNewBuild;
-        // Turning it on (or saving it on after its person was deleted) makes the person
-        // saving the one it runs as; leaving it on keeps whoever turned it on.
-        if (!v.DeployWithoutApproval)
-        {
-            pipeline.DeployWithoutApprovalByUserId = null;
-        }
-        else if (!pipeline.DeployWithoutApproval || pipeline.DeployWithoutApprovalByUserId is null)
-        {
-            pipeline.DeployWithoutApprovalByUserId = _orgContext.CurrentUserId;
-        }
+        // Whoever saves the pipeline with it on is the person it runs as from now on:
+        // the settings those deployments follow are then theirs, and a pipeline whose
+        // person lost access is put right by someone who has it simply saving it.
         pipeline.DeployWithoutApproval = v.DeployWithoutApproval;
+        pipeline.DeployWithoutApprovalByUserId = v.DeployWithoutApproval ? _orgContext.CurrentUserId : null;
         pipeline.RestrictBranch = v.RestrictBranch;
         pipeline.AllowedBranch = v.AllowedBranch;
         pipeline.UpdatedAt = DateTime.UtcNow;

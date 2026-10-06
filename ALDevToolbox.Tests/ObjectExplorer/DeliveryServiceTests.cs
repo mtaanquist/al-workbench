@@ -1647,6 +1647,45 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ListDeploymentsWithoutApprovalAsync_names_nobody_for_a_disabled_account()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var userId = await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+        await ctx.Users.Where(u => u.Id == userId)
+            .ExecuteUpdateAsync(s => s.SetProperty(u => u.Status, ALDevToolbox.Domain.Entities.UserStatus.Disabled));
+
+        (await NewService(_db.NewContext()).ListDeploymentsWithoutApprovalAsync(seed.BuildId))
+            .Should().Equal(new DeploymentWithoutApproval(seed.ReleasePipelineId, null));
+    }
+
+    [Fact]
+    public async Task DeployWithoutApprovalAsync_replaces_an_older_build_still_waiting_for_its_window()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" }, deploymentSchedule: BcDeploymentSchedule.OurDeliveryWindow);
+        await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+        // A one-minute window an hour and a half from now: never open while the test runs.
+        var start = TimeOnly.FromDateTime(DateTime.UtcNow.AddMinutes(90));
+        await SetWindowAsync(ctx, seed.EnvironmentId, start, start.AddMinutes(1));
+        var first = await NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId);
+        _queue.Reader.TryRead(out _).Should().BeFalse("it waits for the window");
+        var newer = await SeedBuildAsync(ctx, seed.ProjectId, seed.BuildPipelineId, ProjectBuildStatus.Ready, new[] { "CRONUS Core" });
+
+        var second = await NewService(_db.NewContext()).DeployWithoutApprovalAsync(seed.ReleasePipelineId, newer);
+
+        await using var read = _db.NewContext();
+        var old = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == first);
+        old.Status.Should().Be(ProjectDeliveryStatus.Dismissed);
+        old.ReplacedByProjectBuildId.Should().Be(newer);
+        old.Results.Should().OnlyContain(r => r.Message!.Contains("replaced"));
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == second)).Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+
+        // An older build finishing after the newer one changes nothing.
+        (await NewService(_db.NewContext()).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId)).Should().BeNull();
+    }
+
+    [Fact]
     public async Task DeployWithoutApprovalAsync_schedules_and_queues_it_as_the_person_who_turned_it_on()
     {
         await using var ctx = _db.NewContext();

@@ -106,10 +106,10 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
             var deliveries = services.GetRequiredService<Delivery.DeliveryService>();
             var deployed = new HashSet<int>();
             var notDeployed = new Dictionary<int, string>();
-            var identity = AmbientOrganizationScope.Current
-                ?? throw new InvalidOperationException("No organization in scope when deploying a finished build.");
             foreach (var due in await deliveries.ListDeploymentsWithoutApprovalAsync(id, ct).ConfigureAwait(false))
             {
+                var identity = AmbientOrganizationScope.Current
+                    ?? throw new InvalidOperationException("No organization in scope when deploying a finished build.");
                 var reason = await DeployWithoutApprovalAsync(identity, due, id, ct).ConfigureAwait(false);
                 if (reason is null) deployed.Add(due.ReleasePipelineId);
                 else notDeployed[due.ReleasePipelineId] = reason;
@@ -167,19 +167,21 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                 buildId, due.ReleasePipelineId, reason);
             return reason;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            // One pipeline's trouble is not the others': this build is prepared for
+            // approval here, and every other pipeline still gets its deployment.
             _logger.LogError(ex, "Deploying build {BuildId} through deployment pipeline {ReleasePipelineId} without approval failed.",
                 buildId, due.ReleasePipelineId);
-            return "something went wrong starting it.";
+            return "Something went wrong starting it.";
         }
     }
 
     internal const string NoLongerHasAccount =
-        "the person who turned on deploying without approval no longer has an account. Turn the option off and on again on the deployment pipeline's page so it runs as you.";
+        "The person it runs as no longer has an active account. Save the deployment pipeline to run it as you.";
 
     internal const string NoAccess =
-        "the person who turned on deploying without approval can no longer deploy to this solution. Turn the option off and on again on the deployment pipeline's page so it runs as you.";
+        "The person it runs as can no longer deploy to this solution. Save the deployment pipeline to run it as you.";
 
     /// <summary>
     /// Runs one pull-request build end to end and completes its check run.
