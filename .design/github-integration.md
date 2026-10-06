@@ -378,6 +378,22 @@ created after the files, so it never governs this flow's own writes. The
 extension, translation and recipe flows write as the *user*, not the app, so
 the bypass does not reach them and they keep going through pull requests.
 
+**Working branches and their build pipelines.** Once the default branch holds
+the workspace, `test` and `staging` are created at that same commit
+(`POST /git/refs`, installation token), before the ruleset so a ruleset over
+every branch cannot refuse them. After the repository is registered on a
+solution, the solution gets one build pipeline per branch - the default branch
+by name, then `test` and `staging` - each building every extension, with the
+pipeline defaults (build numbers on, preview check off). Pipelines are only
+added when the new repository is the solution's only one, because a pipeline
+checks its branch out in every repository of the solution and older
+repositories will not have these branches; otherwise the person is told to add
+them from the solution's Pipelines tab. A branch the solution already has a
+pipeline for is skipped, and nothing is added when Pipelines is switched off.
+Unconditional, not a choice on the form: every new repository is meant to start
+with the same branches. A refused branch or a pipeline that would not save is
+a warning beside the success, like a refused ruleset.
+
 Ordered, in-process, behind the Generate button's existing loading state. No
 queue.
 
