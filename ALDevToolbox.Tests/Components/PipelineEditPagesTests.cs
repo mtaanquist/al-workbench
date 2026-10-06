@@ -177,6 +177,8 @@ public sealed class PipelineEditPagesTests : IDisposable
 
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can add pipelines to CRONUS A/S."));
         cut.FindAll(".pe-picker").Should().BeEmpty();
+        cut.FindAll("#pe-branch").Should().BeEmpty("there is nothing to fill in that could be saved");
+        cut.FindAll(".edit-col > .card .card__title").Select(t => t.TextContent.Trim()).Should().Equal("Source", "Extensions");
         cut.FindAll(".btn--primary").Should().BeEmpty();
     }
 

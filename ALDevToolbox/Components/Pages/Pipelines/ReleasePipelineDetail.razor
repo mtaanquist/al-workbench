@@ -951,6 +951,8 @@
         // After the history too: Deploy writes through the same context the history reads.
         if (_deployOffered || DeployBuildId is not { } buildId || _loading || _historyLoading || _rp is null || _releaseDialog is null) return;
         _deployOffered = true;
+        // Out of the address, so a reload or Back doesn't offer the same deploy again.
+        Nav.NavigateTo($"/pipelines/deployments/{Id}", replace: true);
         if (!_canManage || _fromReleases || _successfulBuilds.All(b => b.Id != buildId)) return;
         await _releaseDialog.OpenAsync(
             _rp.Id, _rp.Project?.Name ?? "", _rp.ProjectEnvironment!.Name, _rp.ProjectEnvironment.Type,

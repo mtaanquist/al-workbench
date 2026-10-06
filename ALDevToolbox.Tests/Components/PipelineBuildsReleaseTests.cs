@@ -330,6 +330,8 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
             detail.Find("#rb-title").TextContent.Should().Be("Deploy to CRONUS Denmark — UAT");
             detail.Find("#rb-build").GetAttribute("value").Should().Be(seed.OlderBuildId.ToString());
         });
+        nav.ToBaseRelativePath(nav.Uri).Should().Be($"pipelines/deployments/{releasePipelineId}",
+            "a reload must not open Deploy a second time");
 
         await using var ctx = _db.NewContext();
         var created = await ctx.OeReleasePipelines.AsNoTracking().SingleAsync();

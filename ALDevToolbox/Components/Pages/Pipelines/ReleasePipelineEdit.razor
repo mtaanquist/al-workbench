@@ -511,6 +511,8 @@
         get
         {
             if (_saving || _loading || !HasOptions || _environments is not { Count: > 0 }) return null;
+            // The source card already says what to do when there is no build pipeline to choose.
+            if (_artifactSource == ReleaseArtifactSource.Build && _buildPipelines is not { Count: > 0 }) return null;
             if (_artifactSource == ReleaseArtifactSource.GithubRelease ? _releaseRepositoryId == 0 : _buildPipelineId == 0)
                 return _artifactSource == ReleaseArtifactSource.GithubRelease
                     ? "Choose a repository to deploy from to continue."
