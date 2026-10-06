@@ -147,6 +147,19 @@ public class GenerationService
         var stopwatch = Stopwatch.StartNew();
         var template = await LoadTemplateAsync(plan.TemplateKey, ct);
 
+        // OrgConfig is needed both for the sibling-rewrite path (which
+        // needs the org's workspace JSON template) and for the per-extension
+        // org files the standalone extension might opt into via
+        // RuntimeTemplateIncludedFile. Always load it now.
+        var orgConfig = await GetOrgConfigAsync(ct);
+
+        if (sibling is not null)
+        {
+            sibling = ResolveSibling(sibling, orgConfig);
+            ValidateAgainstSibling(plan, sibling);
+            plan = ApplySibling(plan, sibling);
+        }
+
         // Use the first (required) template extension as the scaffold for a
         // standalone build. Falls back to no template folders when the
         // template doesn't declare any extensions — the static fallback
@@ -157,12 +170,6 @@ public class GenerationService
         var folderRoots = scaffold is null
             ? new List<FolderNode>()
             : BuildFolderTree(scaffold.Folders);
-
-        // OrgConfig is needed both for the sibling-rewrite path (which
-        // needs the org's workspace JSON template) and for the per-extension
-        // org files the standalone extension might opt into via
-        // RuntimeTemplateIncludedFile. Always load it now.
-        var orgConfig = await GetOrgConfigAsync(ct);
 
         var (stream, fileCount, folderName) = await _zipBuilder.BuildStandaloneAsync(
             plan, template, folderRoots, sibling, orgConfig, includeWorkspaceRootFiles, ct);
@@ -253,13 +260,17 @@ public class GenerationService
     /// "the template still exists".
     /// </summary>
     public async Task<IReadOnlyDictionary<string, string>> ValidateExtensionAsync(
-        StandaloneExtensionPlan plan, CancellationToken ct = default)
+        StandaloneExtensionPlan plan, SiblingWorkspaceContext? sibling = null, CancellationToken ct = default)
     {
         try
         {
             ValidateExtensionPlan(plan);
             await ResolveLatestVersionAsync(plan, ct);
             await LoadTemplateAsync(plan.TemplateKey, ct);
+            if (sibling is not null)
+            {
+                ValidateAgainstSibling(plan, ResolveSibling(sibling, await GetOrgConfigAsync(ct)));
+            }
             return NoErrors;
         }
         catch (PlanValidationException ex)
@@ -270,6 +281,67 @@ public class GenerationService
 
     private static readonly IReadOnlyDictionary<string, string> NoErrors =
         new Dictionary<string, string>();
+
+    /// <summary>
+    /// <paramref name="sibling"/> with its prefix settled: the one the
+    /// workspace saved, or the organisation's policy for a workspace saved
+    /// before the prefix was recorded. Callers that name the new extension's
+    /// folder before generating (the GitHub delivery's "already there" check)
+    /// resolve through here so they name the same folder the generator writes.
+    /// </summary>
+    public async Task<SiblingWorkspaceContext> ResolveSiblingAsync(
+        SiblingWorkspaceContext sibling, CancellationToken ct = default) =>
+        ResolveSibling(sibling, await GetOrgConfigAsync(ct));
+
+    private static SiblingWorkspaceContext ResolveSibling(SiblingWorkspaceContext sibling, OrganizationConfig orgConfig) =>
+        sibling with
+        {
+            ExtensionPrefix = ExtensionPrefixPolicy.ForExistingWorkspace(
+                orgConfig.Settings, sibling.ExtensionPrefix, sibling.ShortName, sibling.WorkspaceName),
+        };
+
+    /// <summary>
+    /// What changes about an extension that joins an existing workspace: it is
+    /// named with the workspace's prefix, and it leaves the example files out.
+    /// The workspace already has the template's examples, and a second copy
+    /// would repeat their object names under the same prefix - which AL refuses
+    /// as soon as one extension depends on the other.
+    /// </summary>
+    private static StandaloneExtensionPlan ApplySibling(StandaloneExtensionPlan plan, SiblingWorkspaceContext sibling) =>
+        plan with
+        {
+            ExtensionName = sibling.ExtensionNameFor(plan.ExtensionName),
+            IncludeExamples = false,
+        };
+
+    /// <summary>
+    /// The two ways a new extension can collide with the workspace it joins:
+    /// a folder the workspace already has, and object IDs one of its
+    /// extensions already uses. The ID check needs the saved extension list, so
+    /// a workspace saved without one is only checked for the folder.
+    /// </summary>
+    private static void ValidateAgainstSibling(StandaloneExtensionPlan plan, SiblingWorkspaceContext sibling)
+    {
+        var errors = new Dictionary<string, string>();
+        var folder = sibling.FolderNameFor(plan.ExtensionName);
+        if (folder.Length > 0 && sibling.ExistingFolders.Contains(folder, StringComparer.OrdinalIgnoreCase))
+        {
+            errors[nameof(plan.ExtensionName)] =
+                $"This solution already has an extension in a folder called {folder}. Give this one a different name.";
+        }
+
+        var clash = (sibling.SavedExtensions ?? [])
+            .FirstOrDefault(e => e.IdRangeFrom <= plan.IdRangeTo && plan.IdRangeFrom <= e.IdRangeTo);
+        if (clash is not null)
+        {
+            var nextFree = sibling.SavedExtensions!.Max(e => e.IdRangeTo) + 1;
+            errors[nameof(plan.IdRangeFrom)] =
+                $"Overlaps the IDs {clash.Name} already uses ({clash.IdRangeFrom}-{clash.IdRangeTo}). "
+                + $"The first ID no extension in this solution uses is {nextFree}.";
+        }
+
+        if (errors.Count > 0) throw new PlanValidationException(errors);
+    }
 
     private async Task<StandaloneExtensionPlan> ResolveLatestVersionAsync(
         StandaloneExtensionPlan plan, CancellationToken ct)
@@ -625,7 +697,11 @@ public class GenerationService
 /// <summary>Container for a finished archive. The stream is rewound and ready to copy to the HTTP response body.</summary>
 public record GeneratedArchive(MemoryStream Stream, string FileName);
 
-/// <summary>Sibling-extension context for the New Extension flow.</summary>
+/// <summary>
+/// Sibling-extension context for the New Extension flow: the existing
+/// workspace a new extension is joining, read back from the settings it saved.
+/// See "Adding to an existing workspace" in <c>.design/generation-engine.md</c>.
+/// </summary>
 public record SiblingWorkspaceContext(
     string WorkspaceName,
     IReadOnlyList<string> ModuleKeys,
@@ -635,8 +711,64 @@ public record SiblingWorkspaceContext(
     /// for a workspace generated before short names existed, which falls back
     /// to the customer name.
     /// </summary>
-    string? ShortName = null)
+    string? ShortName = null,
+    /// <summary>
+    /// The prefix the workspace's own extensions were named with ("CRO" in
+    /// "CRO Core"). Blank for a workspace saved before the prefix was
+    /// recorded; <see cref="GenerationService.ResolveSiblingAsync"/> fills it
+    /// in from the organisation's policy, so read it after resolving.
+    /// </summary>
+    string? ExtensionPrefix = null,
+    /// <summary>
+    /// The workspace's saved settings, when the caller has them parsed - a
+    /// GitHub repository's own <c>workspace.aldt.toml</c>. With them the
+    /// generator writes that file back with the new extension listed, so the
+    /// next extension added after it knows its ID range and folder. Null when
+    /// only the fields above were posted (the ZIP download).
+    /// </summary>
+    ProjectPlan? SavedPlan = null,
+    /// <summary>The extensions <see cref="SavedPlan"/> lists, Core first. Empty when it lists none.</summary>
+    IReadOnlyList<WorkspaceExtensionIdentity>? SavedExtensions = null)
 {
     /// <summary>The short name with its fallback applied - see <see cref="ProjectPlan.EffectiveShortName"/>.</summary>
     public string EffectiveShortName => CustomerNaming.ShortNameOrFallback(ShortName, WorkspaceName);
+
+    /// <summary>
+    /// The name a new extension gets in this workspace: the workspace's prefix,
+    /// then what was typed - "Banking" becomes "CRO Banking", the way a module
+    /// becomes "CRO DocumentCapture". A name typed with the prefix already in
+    /// front is kept as it is rather than prefixed twice.
+    /// </summary>
+    public string ExtensionNameFor(string typed)
+    {
+        var name = (typed ?? string.Empty).Trim();
+        var prefix = ExtensionPrefix?.Trim();
+        if (string.IsNullOrEmpty(prefix) || name.Length == 0 || StripPrefix(name, prefix) is not null) return name;
+        return $"{prefix} {name}";
+    }
+
+    /// <summary>
+    /// The folder a new extension gets in this workspace: the name without the
+    /// prefix, as the workspace's own folders are ("Core", not "CROCore").
+    /// </summary>
+    public string FolderNameFor(string typed)
+    {
+        var name = (typed ?? string.Empty).Trim();
+        var prefix = ExtensionPrefix?.Trim();
+        var bare = string.IsNullOrEmpty(prefix) ? name : StripPrefix(name, prefix) ?? name;
+        return CustomerNaming.Apply(bare, NamingStyle.PascalCase);
+    }
+
+    /// <summary>What follows "<paramref name="prefix"/> " at the start of <paramref name="name"/>, or null when it does not start that way.</summary>
+    private static string? StripPrefix(string name, string prefix)
+    {
+        if (name.Length <= prefix.Length + 1
+            || !name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            || name[prefix.Length] != ' ')
+        {
+            return null;
+        }
+        var rest = name[(prefix.Length + 1)..].Trim();
+        return rest.Length == 0 ? null : rest;
+    }
 }

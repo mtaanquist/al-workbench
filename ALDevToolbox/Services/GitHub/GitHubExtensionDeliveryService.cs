@@ -63,6 +63,7 @@ public sealed class GitHubExtensionDeliveryService
     private const string ExtensionMarkerFile = "app.json";
 
     private readonly GenerationService _generation;
+    private readonly WorkspaceConfigService _configs;
     private readonly GitHubRepositoryService _repositories;
     private readonly GitHubAccessService _access;
     private readonly GitHubAppClient _github;
@@ -71,6 +72,7 @@ public sealed class GitHubExtensionDeliveryService
 
     public GitHubExtensionDeliveryService(
         GenerationService generation,
+        WorkspaceConfigService configs,
         GitHubRepositoryService repositories,
         GitHubAccessService access,
         GitHubAppClient github,
@@ -78,6 +80,7 @@ public sealed class GitHubExtensionDeliveryService
         ILogger<GitHubExtensionDeliveryService> logger)
     {
         _generation = generation;
+        _configs = configs;
         _repositories = repositories;
         _access = access;
         _github = github;
@@ -91,6 +94,13 @@ public sealed class GitHubExtensionDeliveryService
     /// <summary>
     /// Generates <paramref name="plan"/> and opens a pull request adding it to
     /// <paramref name="repoFullName"/>.
+    ///
+    /// <para>A repository holding a solution the workbench generated is joined
+    /// as that solution, whoever calls: its saved settings are read here and
+    /// win over <paramref name="sibling"/>, so the page and the MCP tools name
+    /// the extension with the solution's prefix, leave the example files out
+    /// and update the solution's files the same way. <paramref name="sibling"/>
+    /// only counts for a repository with no saved settings.</para>
     ///
     /// <para>Every refusal is a field-keyed <see cref="PlanValidationException"/>
     /// on <c>GitHubRepository</c>, so a page renders it beside the picker and an
@@ -108,10 +118,15 @@ public sealed class GitHubExtensionDeliveryService
     {
         var userId = RequireUserId();
 
+        // Whatever is going into a repository is going in beside something
+        // that is already there, so the template's example files stay out
+        // even when the repository saved no settings to say what it holds.
+        plan = plan with { IncludeExamples = false };
+
         // The plan's own rules first: an extension nobody could generate is not
         // worth a round trip to GitHub, and the errors it raises are keyed to
         // the fields that caused them rather than to the repository.
-        var planErrors = await _generation.ValidateExtensionAsync(plan, ct);
+        var planErrors = await _generation.ValidateExtensionAsync(plan, ct: ct);
         if (planErrors.Count > 0) throw new PlanValidationException(planErrors.ToDictionary(e => e.Key, e => e.Value));
 
         // Why-not first, so the answer names the thing the caller can change.
@@ -150,7 +165,22 @@ public sealed class GitHubExtensionDeliveryService
                 $"'{repo.FullName}' has no commits on {repo.DefaultBranch} yet, so there is nothing to open a "
                 + "pull request against. Push something to it first, then come back.");
 
-        var folderName = CustomerNaming.Apply(plan.ExtensionName, NamingStyle.PascalCase);
+        sibling = await ReadSavedWorkspaceAsync(token, repo, ct) ?? sibling;
+        if (sibling is not null)
+        {
+            // Settled here rather than left to the generator, because the
+            // folder checked below has to be the one it writes.
+            sibling = await _generation.ResolveSiblingAsync(sibling, ct);
+            var siblingErrors = await _generation.ValidateExtensionAsync(plan, sibling, ct);
+            if (siblingErrors.Count > 0)
+            {
+                throw new PlanValidationException(siblingErrors.ToDictionary(e => e.Key, e => e.Value));
+            }
+        }
+
+        var folderName = sibling?.FolderNameFor(plan.ExtensionName)
+            ?? CustomerNaming.Apply(plan.ExtensionName, NamingStyle.PascalCase);
+        var extensionName = sibling?.ExtensionNameFor(plan.ExtensionName) ?? plan.ExtensionName;
         var existing = await _github.GetFileAsync(
             token, repo.Owner, repo.Name, $"{folderName}/{ExtensionMarkerFile}", repo.DefaultBranch, ct);
         if (existing is not null)
@@ -177,23 +207,62 @@ public sealed class GitHubExtensionDeliveryService
         var tree = await _github.CreateTreeAsync(token, repo.Owner, repo.Name, baseTree, blobs, ct);
         var commit = await _github.CreateCommitAsync(
             token, repo.Owner, repo.Name,
-            $"Add the {plan.ExtensionName} extension", tree, baseSha, ct: ct);
+            $"Add the {extensionName} extension", tree, baseSha, ct: ct);
 
         var branch = await CreateBranchAsync(token, repo, folderName, commit, ct);
         var pullRequest = await _github.CreatePullRequestAsync(
             token, repo.Owner, repo.Name,
-            title: $"Add the {plan.ExtensionName} extension",
+            title: $"Add the {extensionName} extension",
             head: branch,
             baseBranch: repo.DefaultBranch,
-            body: BuildBody(plan, sibling, folderName, files.Count, folderStyle),
+            body: BuildBody(plan, extensionName, sibling, folderName, files.Count, folderStyle),
             ct);
 
         _logger.LogInformation(
             "User {UserId} added extension '{Extension}' to {RepoFullName} on branch {Branch} as pull request #{PullRequestNumber} ({FileCount} files).",
-            userId, plan.ExtensionName, repo.FullName, branch, pullRequest.Number, files.Count);
+            userId, extensionName, repo.FullName, branch, pullRequest.Number, files.Count);
 
         return new GitHubExtensionDelivery(
             repo, pullRequest, folderName, files.Count, archiveName, archiveBytes);
+    }
+
+    /// <summary>
+    /// The solution a repository holds, read from the settings the workbench
+    /// saved at its root - the same file picking the repository on the page
+    /// fills the form from. Null when there is no such file, when it describes
+    /// a single extension rather than a solution, or when it can no longer be
+    /// read (a template since deleted, say): the extension is then added as a
+    /// standalone one, which is what the page does with the same repository.
+    /// </summary>
+    private async Task<SiblingWorkspaceContext?> ReadSavedWorkspaceAsync(
+        string token, GitHubRepositorySummary repo, CancellationToken ct)
+    {
+        var file = await _github.GetFileAsync(
+            token, repo.Owner, repo.Name, WorkspaceConfigService.FileName, repo.DefaultBranch, ct);
+        if (file is null) return null;
+
+        WorkspaceConfigImport import;
+        try
+        {
+            import = await _configs.ParseAsync(file.Text, ct);
+        }
+        catch (PlanValidationException ex)
+        {
+            _logger.LogWarning(
+                "The saved config in {RepoFullName} could not be read, so the extension is added on its own: {Errors}",
+                repo.FullName, string.Join("; ", ex.Errors.Select(e => $"{e.Key}: {e.Value}")));
+            return null;
+        }
+
+        if (import.Workspace is not { } workspace) return null;
+        return new SiblingWorkspaceContext(
+            workspace.WorkspaceName,
+            workspace.SelectedModuleKeys,
+            import.Extensions.Select(e => e.Folder).ToList(),
+            workspace.ShortName,
+            workspace.ExtensionPrefix,
+            SavedPlan: workspace,
+            SavedExtensions: import.Extensions);
     }
 
     /// <summary>
@@ -260,12 +329,12 @@ public sealed class GitHubExtensionDeliveryService
 
     /// <summary>The pull request's description: what it adds, and where it came from.</summary>
     private static string BuildBody(
-        StandaloneExtensionPlan plan, SiblingWorkspaceContext? sibling, string folderName, int fileCount,
-        NamingStyle folderStyle)
+        StandaloneExtensionPlan plan, string extensionName, SiblingWorkspaceContext? sibling, string folderName,
+        int fileCount, NamingStyle folderStyle)
     {
         var lines = new List<string>
         {
-            $"Adds the **{plan.ExtensionName}** extension in `{folderName}/` ({fileCount} files), "
+            $"Adds the **{extensionName}** extension in `{folderName}/` ({fileCount} files), "
                 + $"object IDs {plan.IdRangeFrom}-{plan.IdRangeTo}.",
         };
         if (!string.IsNullOrWhiteSpace(plan.Brief))
@@ -276,6 +345,11 @@ public sealed class GitHubExtensionDeliveryService
         {
             lines.Add($"The `{CustomerNaming.Apply(sibling.WorkspaceName, folderStyle)}.code-workspace` file is "
                 + "updated so the new folder opens with the rest of the workspace.");
+            if (sibling.SavedPlan is not null)
+            {
+                lines.Add($"`{WorkspaceConfigService.FileName}` now lists it too, so the next extension added "
+                    + "here starts after its object IDs.");
+            }
         }
         lines.Add("Generated by AL Workbench.");
         return string.Join("\n\n", lines);

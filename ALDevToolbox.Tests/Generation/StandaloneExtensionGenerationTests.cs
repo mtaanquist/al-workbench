@@ -243,6 +243,184 @@ public sealed class StandaloneExtensionGenerationTests : IDisposable
         AppJsonLogo(zip).Should().Be("../.assets/logo.png");
     }
 
+    // ===== Joining an existing workspace =====
+
+    [Fact]
+    public async Task Sibling_extension_is_named_with_the_workspace_prefix_in_a_folder_without_it()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"), CronusSibling());
+
+        // "Banking" joins "CRO Core" as "CRO Banking", in a folder named the
+        // way the workspace's own are: "Banking", not "CROBanking".
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("Banking/app.json")!));
+        appJson.RootElement.GetProperty("name").GetString().Should().Be("CRO Banking");
+        using var workspace = JsonDocument.Parse(ReadEntry(zip.GetEntry("CRONUSCustomer.code-workspace")!));
+        workspace.RootElement.GetProperty("folders").EnumerateArray()
+            .Select(f => f.GetProperty("path").GetString())
+            .Should().Equal("Core", "Banking", ".");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_renders_the_workspace_short_name_and_prefix_in_its_files()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"), CronusSibling());
+
+        // What the workspace's own extensions render, not the new extension's
+        // name standing in for a customer it does not know about.
+        ReadEntry(zip.GetEntry("Banking/src/Naming.Codeunit.al")!)
+            .Should().Be("prefix=CRO short=CRO workspace=CRONUS Customer");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_typed_with_the_prefix_is_not_prefixed_twice()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "CRO Banking"), CronusSibling());
+
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("Banking/app.json")!));
+        appJson.RootElement.GetProperty("name").GetString().Should().Be("CRO Banking");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_from_a_workspace_saved_without_a_prefix_takes_the_organisations()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        // Saved before the prefix was recorded: the organisation's default
+        // policy falls back to the short name, which is what the workspace's
+        // own extensions were named with.
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"),
+            CronusSibling() with { ExtensionPrefix = null });
+
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("Banking/app.json")!));
+        appJson.RootElement.GetProperty("name").GetString().Should().Be("CRO Banking");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_leaves_the_example_files_out_even_when_asked_for_them()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking") with { IncludeExamples = true },
+            CronusSibling());
+
+        // The workspace already has the template's examples; a second copy
+        // repeats their object names under the same prefix.
+        zip.GetEntry("Banking/src/Example.Table.al").Should().BeNull();
+        zip.GetEntry("Banking/src/Naming.Codeunit.al").Should().NotBeNull("only the example files are left out");
+    }
+
+    [Fact]
+    public async Task Standalone_extension_keeps_the_example_files_when_asked_for_them()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        using var zip = await GenerateExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking") with { IncludeExamples = true });
+
+        zip.GetEntry("Banking/src/Example.Table.al").Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Sibling_extension_in_a_folder_the_workspace_already_has_is_refused()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        var act = () => GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Core"), CronusSibling());
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["ExtensionName"].Should().Contain("folder called Core");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_overlapping_an_existing_id_range_is_refused()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        var act = () => GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking", idFrom: 50500, idTo: 51499),
+            CronusSibling() with { SavedExtensions = [CoreIdentity()] });
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["IdRangeFrom"].Should().Contain("CRO Core").And.Contain("51000");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_lists_itself_in_the_workspaces_saved_settings()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+        var saved = PlanBuilder.WorkspacePlan(workspaceName: "CRONUS Customer", shortName: "CRO", extensionPrefix: "CRO");
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking", idFrom: 51000, idTo: 51999),
+            CronusSibling() with { SavedPlan = saved, SavedExtensions = [CoreIdentity()] });
+
+        // Read back the way the next "add an extension" will read it, so that
+        // one starts after Banking's IDs and keeps its folder in the workspace.
+        var import = await new WorkspaceConfigService(_db.NewContext())
+            .ParseAsync(ReadEntry(zip.GetEntry(WorkspaceConfigService.FileName)!));
+        import.Workspace!.WorkspaceName.Should().Be("CRONUS Customer");
+        import.Extensions.Select(e => (e.Name, e.Folder, e.IdRangeFrom, e.IdRangeTo)).Should().Equal(
+            ("CRO Core", "Core", 50000, 50999),
+            ("CRO Banking", "Banking", 51000, 51999));
+        import.Extensions[1].Kind.Should().Be(WorkspaceExtensionIdentity.AddedKind);
+
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("Banking/app.json")!));
+        import.Extensions[1].Id.ToString().Should().Be(appJson.RootElement.GetProperty("id").GetString(),
+            "the saved identity is what the next extension declares its dependency on");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_without_saved_settings_leaves_the_workspaces_file_alone()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"), CronusSibling());
+
+        // The download path posts only the fields it needs; it cannot rewrite
+        // a file it does not have.
+        zip.GetEntry(WorkspaceConfigService.FileName).Should().BeNull();
+    }
+
+    private static SiblingWorkspaceContext CronusSibling() => new(
+        "CRONUS Customer", Array.Empty<string>(), new[] { "Core" }, ShortName: "CRO", ExtensionPrefix: "CRO");
+
+    private static WorkspaceExtensionIdentity CoreIdentity() => new(
+        WorkspaceExtensionIdentity.CoreKind, null, Guid.NewGuid(), "CRO Core", "Core", "CRONUS", 50000, 50999);
+
+    /// <summary>
+    /// The default template with one example file and one ordinary file that
+    /// renders the workspace-level naming variables.
+    /// </summary>
+    private static RuntimeTemplate TemplateWithExample()
+    {
+        var template = TemplateBuilder.Default().WithCoreFolder("src",
+            ("Example.Table.al", "table 50000 Example { }"),
+            ("Naming.Codeunit.al", "prefix={{extension_prefix}} short={{short_name}} workspace={{workspace_name}}"));
+        var src = template.WorkspaceExtensions.Single(e => e.Path == TemplateBuilder.CoreExtensionPath)
+            .Folders.Single(f => f.Path == "src");
+        src.Files.Single(f => f.Path == "Example.Table.al").IsExample = true;
+        return template;
+    }
+
+    private async Task<ZipArchive> GenerateSiblingAsync(StandaloneExtensionPlan plan, SiblingWorkspaceContext sibling)
+    {
+        var archive = await NewService().GenerateExtensionAsync(plan, sibling);
+        return new ZipArchive(archive.Stream, ZipArchiveMode.Read, leaveOpen: false);
+    }
+
     private static RuntimeTemplate TemplateWithRootFolder()
     {
         var template = TemplateBuilder.Default();

@@ -81,4 +81,39 @@ public sealed class ExtensionPrefixPolicyTests
     {
         ExtensionPrefixPolicy.IsAskedFor(mode).Should().Be(asked);
     }
+
+    [Fact]
+    public void An_existing_workspace_keeps_the_prefix_it_saved_whatever_the_policy_is_now()
+    {
+        ExtensionPrefixPolicy
+            .ForExistingWorkspace(Settings(ExtensionPrefixMode.Fixed, "PARTNER"), "JM", "JM", "Jørgensen Møbler")
+            .Should().Be("JM");
+    }
+
+    [Fact]
+    public void An_existing_workspace_saved_without_a_prefix_gets_the_policys()
+    {
+        ExtensionPrefixPolicy
+            .ForExistingWorkspace(Settings(ExtensionPrefixMode.Fixed, "PARTNER"), " ", "JM", "Jørgensen Møbler")
+            .Should().Be("PARTNER");
+        ExtensionPrefixPolicy
+            .ForExistingWorkspace(Settings(ExtensionPrefixMode.PerWorkspace), null, "JM", "Jørgensen Møbler")
+            .Should().Be("JM");
+    }
+
+    [Theory]
+    [InlineData("Banking", "JM Banking", "Banking")]
+    [InlineData("JM Banking", "JM Banking", "Banking")]
+    [InlineData("jm Banking", "jm Banking", "Banking")]
+    [InlineData("JMBanking", "JM JMBanking", "JMBanking")]
+    [InlineData("  Cash Flow  ", "JM Cash Flow", "CashFlow")]
+    public void A_sibling_extension_is_named_with_the_prefix_and_foldered_without_it(
+        string typed, string name, string folder)
+    {
+        var sibling = new SiblingWorkspaceContext(
+            "Jørgensen Møbler", [], ["Core"], ShortName: "JM", ExtensionPrefix: "JM");
+
+        sibling.ExtensionNameFor(typed).Should().Be(name);
+        sibling.FolderNameFor(typed).Should().Be(folder);
+    }
 }

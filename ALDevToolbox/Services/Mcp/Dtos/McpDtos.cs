@@ -50,6 +50,7 @@ public sealed record ProjectPlanInput(
 /// <summary>Mirror of <see cref="StandaloneExtensionPlan"/> for the MCP boundary.</summary>
 public sealed record StandaloneExtensionPlanInput(
     string TemplateKey,
+    [property: Description("The extension's name, e.g. Banking. Added to a repository that holds a solution, the solution's prefix is put in front of it (Banking becomes CRO Banking, beside CRO Core) and its folder is named without the prefix.")]
     string ExtensionName,
     string Brief,
     string Description,
@@ -59,6 +60,7 @@ public sealed record StandaloneExtensionPlanInput(
     int IdRangeFrom,
     int IdRangeTo,
     string Publisher,
+    [property: Description("Whether to include the template's example files. Ignored when adding to a repository: examples are always left out there, so they cannot clash with the ones it already has.")]
     bool IncludeExamples = true,
     IReadOnlyList<DependencyEntryInput>? Dependencies = null)
 {

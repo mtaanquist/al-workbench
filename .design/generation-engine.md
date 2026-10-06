@@ -124,8 +124,9 @@ Root-level folders come from two places: every emitted extension contributes one
         Workspace / New Extension pages can read a generated workspace back
         and regenerate it (WorkspaceConfigService). Its `[workspace]` section
         carries `name` (the customer name) and `short_name` beside it, which
-        is how the New Extension sibling flow names "JM Banking" next to the
-        workspace's own "JM Core" rather than guessing from the folder. A
+        (with `extension_prefix`) is how the New Extension sibling flow names
+        "JM Banking" next to the workspace's own "JM Core" rather than guessing
+        from the folder - see "Adding to an existing workspace". A
         config written before short names existed has no key and falls back
         to the customer name.
      c. README.md and .gitignore are workspace-root-scoped
@@ -360,6 +361,18 @@ The template's **declared empty root folders follow the workspace-root files exa
 The folder structure inside the extension reuses the template's **first** `WorkspaceExtension` row as the scaffold (typically the conventional `Core` extension). All other declared extensions / modules / dependencies are ignored: the user is dropping the result into an existing workspace and wants only a self-contained extension shell. The `app.json` `dependencies` array comes from the user-supplied list rather than the template; if they want to depend on something Core-like in their existing workspace, they pick it via the dependency picker that sources from `well_known_dependencies`.
 
 The success page should explain "drop this folder into your existing workspace and add a corresponding entry to `.code-workspace` yourself" clearly, with a copy-pasteable line for the workspace `folders` array.
+
+### Adding to an existing workspace
+
+When the extension joins a workspace the workbench generated (the New Extension form loaded its `workspace.aldt.toml`, or a GitHub repository holding one was picked), it is generated as one of that workspace's extensions rather than as a stranger dropped in beside them. `SiblingWorkspaceContext` carries what the workspace saved, and `GenerationService` applies it the same way for every caller:
+
+- **Named with the workspace's prefix.** The user types "Banking"; the extension is called "JM Banking" in a folder called `Banking`, the way a module becomes "JM DocumentCapture" in `DocumentCapture`. A name typed with the prefix already in front is not prefixed twice. The prefix is the one the workspace saved, whatever the organisation's policy says today; a workspace saved before the prefix was recorded gets the policy's answer (`ExtensionPrefixPolicy.ForExistingWorkspace`).
+- **The workspace's naming variables.** `{{short_name}}`, `{{extension_prefix}}`, `{{workspace_name}}` and `{{workspace_folder}}` render what they render in the workspace's own extensions, not the new extension's name.
+- **No example files.** The workspace already has the template's examples, and a second copy repeats their object names under the same prefix. The form shows the switch off and locked; the generator forces it off regardless of what was posted.
+- **Collisions refused.** A folder the workspace already has is refused on `ExtensionName`, and an ID range one of its saved extensions uses is refused on `IdRangeFrom`.
+- **The saved settings follow.** When the caller has the workspace's settings parsed (the GitHub path, which reads them from the repository), `workspace.aldt.toml` is written back with the new extension listed (kind `added`), so the next extension added starts after its IDs and keeps its folder in the rewritten `.code-workspace`. The ZIP download only posts the fields it needs and leaves that file alone.
+
+Committing into a GitHub repository (`GitHubExtensionDeliveryService`) reads the repository's own `workspace.aldt.toml` and uses it in preference to anything the caller passed, so the page and the MCP tools join a solution identically. Example files stay out of any repository, saved settings or not.
 
 ## Error handling
 

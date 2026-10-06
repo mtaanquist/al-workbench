@@ -135,8 +135,9 @@ internal static class GenerationEndpoints
                     .Select(s => s!)
                     .ToList();
                 var workspaceShortName = form["WorkspaceShortName"].ToString().Trim();
+                var workspacePrefix = form["WorkspaceExtensionPrefix"].ToString().Trim();
                 sibling = new SiblingWorkspaceContext(
-                    workspaceName, workspaceModules, workspaceFolders, workspaceShortName);
+                    workspaceName, workspaceModules, workspaceFolders, workspaceShortName, workspacePrefix);
             }
 
             try

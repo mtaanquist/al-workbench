@@ -180,7 +180,7 @@ public sealed class WorkspaceTools
     [Description("Generates a single standalone BC extension as a ZIP. Pass the template key from list_templates, the extension details, its app ID range, publisher, and any optional dependencies. The ZIP is returned inline as base64-encoded contentBase64. Set addToRepository to also add the extension to one of your organisation's GitHub repositories as a pull request.")]
     public async Task<WorkspaceResult> GenerateExtensionAsync(
         StandaloneExtensionPlanInput plan,
-        [Description("Optional. A repository as 'owner/name'. When set, the extension is committed to a new branch there and a pull request is opened for it, in your name and never onto the repository's default branch; addedToRepository in the result carries the pull request. Only repositories in the GitHub organisation your organisation has connected, and that you can open on GitHub yourself, are accepted.")]
+        [Description("Optional. A repository as 'owner/name'. When set, the extension is committed to a new branch there and a pull request is opened for it, in your name and never onto the repository's default branch; addedToRepository in the result carries the pull request. A repository holding a solution is joined as that solution, as add_extension_to_repository describes. Only repositories in the GitHub organisation your organisation has connected, and that you can open on GitHub yourself, are accepted.")]
         string? addToRepository = null,
         CancellationToken ct = default)
     {

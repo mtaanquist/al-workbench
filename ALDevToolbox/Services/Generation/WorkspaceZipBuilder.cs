@@ -153,7 +153,10 @@ public sealed class WorkspaceZipBuilder
         CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var folderName = CustomerNaming.Apply(plan.ExtensionName, NamingStyle.PascalCase);
+        // Joining a workspace, the folder drops the workspace's prefix the way
+        // its own folders do ("Banking" beside "Core").
+        var folderName = sibling?.FolderNameFor(plan.ExtensionName)
+            ?? CustomerNaming.Apply(plan.ExtensionName, NamingStyle.PascalCase);
         var stream = new MemoryStream();
         var fileCount = 0;
 
@@ -191,11 +194,14 @@ public sealed class WorkspaceZipBuilder
                 Dependencies: standaloneDeps);
             var standaloneAsWorkspacePlan = new ProjectPlan(
                 TemplateKey: plan.TemplateKey,
-                WorkspaceName: plan.ExtensionName,
                 // A standalone extension has no customer behind it, so there is
                 // nothing to abbreviate: {{short_name}} renders the name itself.
-                ShortName: null,
-                ExtensionPrefix: string.Empty,
+                // Joining a workspace it has one, and the workspace-level
+                // variables render what they render in that workspace's own
+                // extensions - "CRO", not "CRO Banking".
+                WorkspaceName: sibling?.WorkspaceName ?? plan.ExtensionName,
+                ShortName: sibling?.ShortName,
+                ExtensionPrefix: sibling?.ExtensionPrefix ?? string.Empty,
                 Brief: plan.Brief,
                 Description: plan.Description,
                 ApplicationVersion: plan.ApplicationVersion,
@@ -278,7 +284,7 @@ public sealed class WorkspaceZipBuilder
                     // sibling workspace in step with how it was generated.
                     Publisher: GenerationNaming.ResolvePublisher(
                         orgConfig.Settings.DefaultPublisher, template.Defaults.Publisher),
-                    ExtensionPrefix: string.Empty,
+                    ExtensionPrefix: sibling.ExtensionPrefix ?? string.Empty,
                     Affix: template.Defaults.AffixType == AffixType.None ? string.Empty : template.Defaults.Affix,
                     FolderPath: string.Empty,
                     FolderStyle: siblingFolderStyle);
@@ -289,6 +295,27 @@ public sealed class WorkspaceZipBuilder
                         existing,
                         siblingCtx));
                 fileCount++;
+
+                // The workspace's own saved settings, with the new extension
+                // added to its list. Without this the next extension added to
+                // the same workspace would be offered this one's ID range and
+                // would rewrite the .code-workspace file without its folder.
+                if (sibling.SavedPlan is not null)
+                {
+                    var identities = (sibling.SavedExtensions ?? []).ToList();
+                    identities.Add(new WorkspaceExtensionIdentity(
+                        Kind: WorkspaceExtensionIdentity.AddedKind,
+                        Key: null,
+                        Id: standaloneExt.Id,
+                        Name: standaloneExt.Name,
+                        Folder: folderName,
+                        Publisher: standaloneExt.Publisher,
+                        IdRangeFrom: standaloneExt.IdRangeFrom,
+                        IdRangeTo: standaloneExt.IdRangeTo));
+                    WriteString(archive, WorkspaceConfigService.FileName,
+                        _config.BuildWorkspace(sibling.SavedPlan, identities));
+                    fileCount++;
+                }
             }
         }
 
