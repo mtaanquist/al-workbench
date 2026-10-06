@@ -237,7 +237,7 @@ public sealed class RepositoryPickerTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.Markup.Should().Contain("Connect your GitHub account");
-            cut.Find("a.empty-state__action").GetAttribute("href").Should().Be("/account?section=repos");
+            cut.Find("a.empty-state__action").GetAttribute("href").Should().Be("/account/repos");
         });
     }
 

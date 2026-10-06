@@ -98,7 +98,7 @@ app.UseAntiforgery();
 
 // Per-org strong-auth gate. When an org has RequireStrongAuth=true, any
 // authenticated request from a member of that org who hasn't yet enrolled
-// TOTP, email-MFA, or a passkey is redirected to /account?required=1 (or
+// TOTP, email-MFA, or a passkey is redirected to /account/security?required=1 (or
 // gets a 403 for non-GET). Runs after authentication so it can read the
 // cookie's user_id claim. See Endpoints/StrongAuthGate.cs.
 app.UseStrongAuthGate();

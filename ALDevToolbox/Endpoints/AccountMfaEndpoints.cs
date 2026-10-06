@@ -176,7 +176,7 @@ internal static class AccountMfaEndpoints
             var user = await AccountEndpoints.LoadUserAndVerifyPasswordAsync(ctx, db, auth, org, form["Password"].ToString(), ct);
             if (user is null) return;
             await totp.DisableAsync(user.Id, ct);
-            ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=totp-disabled");
+            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=totp-disabled");
         }).RequireAuthorization();
 
         // --- Email-MFA self-service -----------------------------------------
@@ -190,7 +190,7 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             if (!await emailSvc.IsConfiguredAsync(ct))
             {
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("SMTP isn't configured. Ask a SiteAdmin.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("SMTP isn't configured. Ask a SiteAdmin.")}");
                 return;
             }
             try
@@ -198,7 +198,7 @@ internal static class AccountMfaEndpoints
                 var code = await mfa.IssueChallengeAsync(org.CurrentUserId!.Value, ct);
                 if (code is null)
                 {
-                    ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Try again in a few minutes.")}");
+                    ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Try again in a few minutes.")}");
                     return;
                 }
                 // Fence category 4 (explicitly scoped user-id lookup): pinned to the signed-in
@@ -209,12 +209,12 @@ internal static class AccountMfaEndpoints
                     .FirstAsync(ct);
                 var content = await MfaCodeEmail.RenderAsync(emailRenderer, user.DisplayName, code, ct);
                 await emailSvc.SendAsync(user.Email, content, EmailPurpose.MfaCode, ct);
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=email-mfa-sent");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=email-mfa-sent");
             }
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Email-MFA setup failed.");
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Failed to send code.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Failed to send code.")}");
             }
         }).RequireAuthorization();
 
@@ -226,11 +226,11 @@ internal static class AccountMfaEndpoints
             var form = await ctx.Request.ReadFormAsync(ct);
             if (!await mfa.VerifyAsync(org.CurrentUserId!.Value, form["Code"].ToString(), ct))
             {
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}=Code&{RouteConstants.MsgQuery}={Uri.EscapeDataString("That code didn't match. Request a new one.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Code&{RouteConstants.MsgQuery}={Uri.EscapeDataString("That code didn't match. Request a new one.")}");
                 return;
             }
             await mfa.EnableAsync(org.CurrentUserId!.Value, ct);
-            ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=email-mfa-enabled");
+            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=email-mfa-enabled");
         }).RequireAuthorization();
 
         app.MapPost("/auth/account/2fa/email/disable", async (
@@ -242,7 +242,7 @@ internal static class AccountMfaEndpoints
             var user = await AccountEndpoints.LoadUserAndVerifyPasswordAsync(ctx, db, auth, org, form["Password"].ToString(), ct);
             if (user is null) return;
             await mfa.DisableAsync(user.Id, ct);
-            ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=email-mfa-disabled");
+            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=email-mfa-disabled");
         }).RequireAuthorization();
 
         // --- Recovery codes regen -------------------------------------------
@@ -258,7 +258,7 @@ internal static class AccountMfaEndpoints
             if (user is null) return;
             if (!user.TotpEnabled)
             {
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}=Totp&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Enable TOTP first.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Totp&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Enable TOTP first.")}");
                 return;
             }
             var codes = await recovery.RegenerateAsync(user.Id, ct);

@@ -46,7 +46,7 @@ public sealed class PaletteCommandsTests
             "a silently empty route set would make this assertion pass vacuously");
 
         var broken = PaletteCommands.All
-            .Where(c => c.Href is not null && !routes.Contains(PathOf(c.Href)))
+            .Where(c => c.Href is not null && !routes.Any(r => Matches(r, PathOf(c.Href))))
             .Select(c => $"{c.Label} -> {c.Href}")
             .ToList();
 
@@ -105,7 +105,20 @@ public sealed class PaletteCommandsTests
         return query < 0 ? href : href[..query];
     }
 
-    /// <summary>Every parameterless route the app assembly exposes.</summary>
+    /// <summary>
+    /// A route template matches a path segment by segment, a parameter segment matching
+    /// any one segment: the account tabs are one route, <c>/account/{SectionName}</c>
+    /// (#1088), and the palette links straight to them.
+    /// </summary>
+    private static bool Matches(string template, string path)
+    {
+        var want = template.Split('/');
+        var have = path.Split('/');
+        return want.Length == have.Length
+            && want.Zip(have).All(p => p.First.StartsWith('{') || string.Equals(p.First, p.Second, StringComparison.Ordinal));
+    }
+
+    /// <summary>Every route the app assembly exposes.</summary>
     private static HashSet<string> RoutableTemplates() =>
         typeof(HttpOrganizationContext).Assembly
             .GetTypes()

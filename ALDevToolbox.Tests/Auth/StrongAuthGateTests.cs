@@ -126,7 +126,7 @@ public sealed class StrongAuthGateTests : IDisposable
 
         reached.Should().BeFalse();
         ctx.Response.StatusCode.Should().Be(StatusCodes.Status302Found);
-        ctx.Response.Headers.Location.ToString().Should().Be("/account?required=1");
+        ctx.Response.Headers.Location.ToString().Should().Be("/account/security?required=1");
     }
 
     [Fact]

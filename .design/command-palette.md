@@ -308,7 +308,7 @@ There are two kinds:
 
 | Kind | What it is | The commands |
 | --- | --- | --- |
-| Navigate | An ordinary link to the page that owns the form | New solution, New workspace, New extension, Suggest a recipe (each behind its tool); Repository access (`/account?section=repos`); Import a Business Central release (Admins and Editors - named in full because "release" alone reads as the delivery area); Business Central app registration (Admins, where the organisation owns its settings) |
+| Navigate | An ordinary link to the page that owns the form | New solution, New workspace, New extension, Suggest a recipe (each behind its tool); Repository access (`/account/repos`); Import a Business Central release (Admins and Editors - named in full because "release" alone reads as the delivery area); Business Central app registration (Admins, where the organisation owns its settings) |
 | Act | `data-command-action`, run by the script from a closed list | `theme:light`, `theme:dark`, `theme:system`, `copy-link`, `sign-out`, `refresh` |
 
 **The act list is the whole list.** The script keeps its own copy and refuses any other
