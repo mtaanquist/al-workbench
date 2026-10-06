@@ -45,5 +45,15 @@ public class OeProjectBuildArtifact
     /// <summary>The compiled <c>.app</c> bytes. Loaded only by the download endpoint, never in listings.</summary>
     public byte[] Content { get; set; } = Array.Empty<byte>();
 
+    /// <summary>
+    /// The earlier build this <c>.app</c> was carried over from, unchanged, when the
+    /// pipeline publishes only the extensions that changed (#1094). Null for an app this
+    /// build compiled and published itself. A carried app is still deployed (the
+    /// deployment skips it where it is already installed) but is not uploaded to the
+    /// build's GitHub release. No foreign key: the bytes are copied, so the row stands
+    /// on its own if that build is deleted.
+    /// </summary>
+    public int? CarriedFromBuildId { get; set; }
+
     public DateTime CreatedAt { get; set; }
 }

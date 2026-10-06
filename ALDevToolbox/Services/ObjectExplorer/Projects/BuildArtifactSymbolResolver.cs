@@ -107,7 +107,9 @@ internal sealed class BuildArtifactSymbolResolver
     private async Task<Candidate?> FindAsync(int projectId, string appId, Version? floor, Version? target, CancellationToken ct)
     {
         var rows = await _db.OeProjectBuildArtifacts.AsNoTracking()
-            .Where(a => a.AppId == appId
+            // A carried row (#1094) is a copy of an earlier build's .app; the original
+            // row says which Business Central version it was really built on.
+            .Where(a => a.AppId == appId && a.CarriedFromBuildId == null
                 && a.ProjectBuild!.Status == ProjectBuildStatus.Ready
                 && a.ProjectBuild.Trigger != ProjectBuildTrigger.PullRequest
                 && a.ProjectBuild.BcTarget == ProjectBuildTarget.Current
