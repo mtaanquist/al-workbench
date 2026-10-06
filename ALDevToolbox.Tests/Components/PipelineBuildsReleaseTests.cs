@@ -43,6 +43,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         auth.SetAuthorized("owner@example.com");
 
         _ctx.Services.AddSingleton<IOrganizationContext>(_db.OrgContext);
+        _ctx.Services.AddSingleton<ALDevToolbox.Services.Tools.IToolAvailability>(TestDb.EverythingEnabled());
         _ctx.Services.AddDisplayTimeZone(_db);
         _ctx.Services.AddDbContext<ALDevToolbox.Data.AppDbContext>(opts =>
             opts.UseNpgsql(_db.ConnectionString)
@@ -329,13 +330,37 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
             detail.Find("#rb-title").TextContent.Should().Be("Deploy to CRONUS Denmark — UAT");
             detail.Find("#rb-build").GetAttribute("value").Should().Be(seed.OlderBuildId.ToString());
         });
-        nav.ToBaseRelativePath(nav.Uri).Should().Be($"pipelines/deployments/{releasePipelineId}",
-            "a reload must not open Deploy a second time");
 
         await using var ctx = _db.NewContext();
         var created = await ctx.OeReleasePipelines.AsNoTracking().SingleAsync();
         created.BuildPipelineId.Should().Be(seed.PipelineId);
         created.Name.Should().Be("CRONUS App to UAT");
+    }
+
+    [Fact]
+    public async Task A_build_in_the_address_that_the_pipeline_cannot_deploy_opens_nothing()
+    {
+        var seed = await SeedAsync();
+        int releasePipelineId;
+        await using (var ctx = _db.NewContext())
+        {
+            var rp = new OeReleasePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "CRONUS App to UAT",
+                BuildPipelineId = seed.PipelineId, ProjectEnvironmentId = seed.SandboxEnvId,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            ctx.OeReleasePipelines.Add(rp);
+            await ctx.SaveChangesAsync();
+            releasePipelineId = rp.Id;
+        }
+
+        _ctx.Services.GetRequiredService<NavigationManager>().NavigateTo($"/pipelines/deployments/{releasePipelineId}?deploy=999999");
+        var detail = _ctx.Render<ReleasePipelineDetail>(p => p.Add(x => x.Id, releasePipelineId));
+
+        detail.WaitForAssertion(() => detail.Markup.Should().Contain("CRONUS App to UAT"));
+        _db.WaitForQueriesToSettle();
+        detail.FindAll("#rb-title").Should().BeEmpty();
     }
 
     /// <summary>

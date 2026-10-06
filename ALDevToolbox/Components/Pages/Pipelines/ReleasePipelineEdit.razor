@@ -7,6 +7,7 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Delivery.ReleasePipelineService Releases
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connections
 @inject ALDevToolbox.Services.GitHub.GitHubReleaseService GitHubReleases
+@inject ALDevToolbox.Services.Tools.IToolAvailability ToolAvailability
 @inject NavigationManager Nav
 @inject ILogger<ReleasePipelineEdit> Log
 @using ALDevToolbox.Services.ObjectExplorer.Delivery
@@ -39,7 +40,7 @@
           IsLoading="@_loadingPage" IsNotFound="@_notFound"
           Trail="@Trail">
     <SubtitleContent>
-        @if (DeployBuildId is { } deployBuild && !_editing)
+        @if (DeployBuildId is { } deployBuild && !_editing && _artifactSource == ReleaseArtifactSource.Build && _buildPipelineId == BuildPipelineId)
         {
             <span>After you create it, you choose when build #@deployBuild installs.</span>
         }
@@ -49,12 +50,12 @@
         }
         else
         {
-            <span>A reusable target: which apps go to which environment, and how they install. You deploy from the pipeline's page once it is created.</span>
+            <span>Choose where a build pipeline's apps are installed and when. You deploy from the pipeline's page once it is created.</span>
         }
     </SubtitleContent>
     <Actions>
         <a class="btn btn--sm" href="@CancelHref">Cancel</a>
-        @if (_canManage && !_loadingPage && !_notFound)
+        @if (ShowPrimary)
         {
             <button type="button" class="btn btn--sm btn--primary" @onclick="SaveAsync" disabled="@(!CanSave)">
                 <Icon Name="@(_editing ? "save" : "plus")" Width="14" Height="14" />
@@ -102,7 +103,7 @@
                             <div class="field">
                                 <label class="field__label" for="rpe-solution">Solution</label>
                                 <SelectBox>
-                                    <select id="rpe-solution" class="select" @onchange="OnProjectChosenAsync" disabled="@_saving">
+                                    <select id="rpe-solution" class="select" @onchange="OnProjectChosenAsync" disabled="@(_saving || _loading)">
                                         <option value="0" selected="@(_projectId == 0)">Choose a solution...</option>
                                         @foreach (var p in _projectOptions ?? [])
                                         {
@@ -128,18 +129,27 @@
                         {
                             <LoadingBlock Text="Loading the solution's build pipelines and environments..." />
                         }
+                        else if (!_solutionManageable)
+                        {
+                            <Alert Tone="AlertTone.Warn">
+                                <span>Only the solution owner or an admin can add deployment pipelines to @(_projectName ?? "this solution").</span>
+                            </Alert>
+                        }
                         else if (_buildPipelines is { Count: 0 } && _releaseRepositories is not { Count: > 0 })
                         {
                             <p class="form-sec__cap">
                                 This solution has no build pipeline yet. A deployment installs compiled apps, so
                                 create a build pipeline first.
                             </p>
-                            <div>
-                                <a class="btn btn--sm" href="@($"/pipelines/new?solution={_projectId}")">
-                                    <Icon Name="plus" Width="14" Height="14" />
-                                    <span>New build pipeline</span>
-                                </a>
-                            </div>
+                            @if (_buildsOn)
+                            {
+                                <div>
+                                    <a class="btn btn--sm" href="@NewBuildPipelineHref">
+                                        <Icon Name="plus" Width="14" Height="14" />
+                                        <span>New build pipeline</span>
+                                    </a>
+                                </div>
+                            }
                         }
                         else if (_buildPipelines is not null)
                         {
@@ -193,9 +203,12 @@
                             {
                                 <Alert Tone="AlertTone.Info" Role="status">
                                     <span>
-                                        Pick a GitHub repository above, or
-                                        <a href="@($"/pipelines/new?solution={_projectId}")">create a build pipeline</a> first.
-                                        You can't save until one of the two is chosen.
+                                        This solution has no build pipeline yet. Set "Where the apps come from" to
+                                        GitHub releases@(_buildsOn ? ", or " : ".")
+                                        @if (_buildsOn)
+                                        {
+                                            <a href="@NewBuildPipelineHref">create a build pipeline</a><text>.</text>
+                                        }
                                     </span>
                                 </Alert>
                             }
@@ -212,9 +225,14 @@
                             {
                                 <p class="form-sec__cap">
                                     This solution has no Business Central environments yet. Connect Business Central
-                                    on the <a href="@($"/solutions/{_projectId}?tab=bc")">solution's Business Central tab</a>
-                                    and refresh its environments, then come back.
+                                    and refresh its environments to choose a target.
                                 </p>
+                                <div>
+                                    <a class="btn btn--sm" href="@($"/solutions/{_projectId}?tab=bc")">
+                                        <Icon Name="plug" Width="14" Height="14" />
+                                        <span>Connect Business Central</span>
+                                    </a>
+                                </div>
                             }
                             else
                             {
@@ -387,6 +405,11 @@
                         </section>
                     }
                 }
+
+                @if (MissingStep is { } missing)
+                {
+                    <p class="field__hint">@missing</p>
+                }
             </form>
         }
     </ChildContent>
@@ -462,7 +485,44 @@
     /// </summary>
     private bool _repositoriesFailed;
 
+    // Whether the chosen solution may get a new pipeline from this person. The picker lists
+    // every solution they can see, and a read-only one can be seen but not changed.
+    private bool _solutionManageable = true;
+    // Whether the build pipelines tool is on, so the "create a build pipeline" links lead somewhere.
+    private bool _buildsOn = true;
+
+    [CascadingParameter] private Task<Microsoft.AspNetCore.Components.Authorization.AuthenticationState>? AuthState { get; set; }
+
     private string HeadTitle => _editing ? "Edit deployment pipeline" : "New deployment pipeline";
+
+    /// <summary>A new build pipeline for this solution, coming back here when it is cancelled.</summary>
+    private string NewBuildPipelineHref =>
+        $"/pipelines/new?solution={_projectId}&returnUrl={Uri.EscapeDataString($"/pipelines/deployments/new?solution={_projectId}")}";
+
+    /// <summary>The primary action, except where the page shows a step to take first instead.</summary>
+    private bool ShowPrimary =>
+        _canManage && !_loadingPage && !_notFound
+        && !(!_editing && _projectOptions is { Count: 0 })
+        && !(_projectId != 0 && !_loading && (!_solutionManageable || !HasOptions || _environments is { Count: 0 }));
+
+    /// <summary>Why Save is still off, once the page has loaded and the reason is something to choose.</summary>
+    private string? MissingStep
+    {
+        get
+        {
+            if (_saving || _loading || !HasOptions || _environments is not { Count: > 0 }) return null;
+            if (_artifactSource == ReleaseArtifactSource.GithubRelease ? _releaseRepositoryId == 0 : _buildPipelineId == 0)
+                return _artifactSource == ReleaseArtifactSource.GithubRelease
+                    ? "Choose a repository to deploy from to continue."
+                    : "Choose a build pipeline to deploy from to continue.";
+            if (_environmentId == 0) return "Choose a target environment to continue.";
+            if (BcDeploymentSchedule.IsOurDeliveryWindow(_deploymentSchedule) && !ChosenEnvironmentHasWindow)
+                return "Choose another time for installs, or set a delivery window on the environment, to continue.";
+            if (_schemaSyncMode == BcSyncMode.ForceSync && !_forceSyncAck)
+                return "Tick the Force sync acknowledgement to continue.";
+            return null;
+        }
+    }
 
     private IReadOnlyList<Crumb> Trail => _editing && Id is { } id
         ? [new("Deployment pipelines", "/pipelines/deployments"), new(_loadedName ?? "Deployment pipeline", $"/pipelines/deployments/{id}"), new("Edit")]
@@ -519,7 +579,7 @@
 
     /// <summary>Save is live once the required fields are chosen and any Force-Sync acknowledgement is given.</summary>
     private bool CanSave =>
-        _canManage && !_saving && !_loading
+        _canManage && _solutionManageable && !_saving && !_loading
         && _environments is { Count: > 0 }
         && (_artifactSource == ReleaseArtifactSource.GithubRelease
             ? _releaseRepositoryId != 0 && !_repositoriesFailed
@@ -530,6 +590,9 @@
 
     protected override async Task OnInitializedAsync()
     {
+        var user = AuthState is null ? null : (await AuthState).User;
+        _buildsOn = ToolAvailability.IsSiteEnabled(ALDevToolbox.Domain.Tools.ToolKey.Pipelines)
+            && !ALDevToolbox.Endpoints.EndpointHelpers.ReadDisabledTools(user).Contains(ALDevToolbox.Domain.Tools.ToolKey.Pipelines);
         if (Id is { } id)
         {
             await LoadForEditAsync(id);
@@ -615,6 +678,8 @@
         _artifactSource = ReleaseArtifactSource.Build;
         _buildPipelineId = 0;
         _environmentId = 0;
+        _projectName = _projectOptions?.FirstOrDefault(p => p.Id == _projectId)?.Name;
+        _solutionManageable = true;
         SuggestBranchRule();
         if (_projectId != 0) await LoadProjectAsync();
     }
@@ -686,6 +751,9 @@
         StateHasChanged();
         try
         {
+            // A new pipeline only; an edit has already checked.
+            _solutionManageable = _editing || await Projects.CanManageAsync(_projectId);
+            if (!_solutionManageable) return;
             _buildPipelines = await Pipelines.ListPipelinesAsync(_projectId);
             // A build pipeline handed over in the address that isn't this solution's
             // would otherwise be saved without ever showing in the picker.
@@ -717,6 +785,12 @@
             _environments = envs
                 .Where(env => env.MissingSince is null || env.Id == _environmentId)
                 .ToList();
+            // With nothing built here yet, GitHub releases are the only source there is:
+            // show that picker rather than an empty one for build pipelines.
+            if (!_editing && _buildPipelines.Count == 0 && _releaseRepositories is { Count: > 0 })
+            {
+                _artifactSource = ReleaseArtifactSource.GithubRelease;
+            }
         }
         catch (ProjectAccessDeniedException)
         {

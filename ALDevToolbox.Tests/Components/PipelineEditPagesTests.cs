@@ -42,6 +42,7 @@ public sealed class PipelineEditPagesTests : IDisposable
     public PipelineEditPagesTests()
     {
         _ctx.Services.AddSingleton<IOrganizationContext>(_db.OrgContext);
+        _ctx.Services.AddSingleton<ALDevToolbox.Services.Tools.IToolAvailability>(TestDb.EverythingEnabled());
         _ctx.Services.AddDisplayTimeZone(_db);
         _ctx.Services.AddDbContext<ALDevToolbox.Data.AppDbContext>(opts =>
             opts.UseNpgsql(_db.ConnectionString).AddInterceptors(_db.CommandTracker));
@@ -96,7 +97,7 @@ public sealed class PipelineEditPagesTests : IDisposable
         cut.FindAll(".edit-col > .card .card__title").Select(t => t.TextContent.Trim())
             .Should().Equal("Source", "Extensions", "When it builds", "Versions and releases", "Name");
         cut.Find("#pe-solution-name").TextContent.Should().Be("CRONUS A/S", "the solution in the address is fixed, not picked");
-        cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Trim().Should().Be("Create pipeline");
+        cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Trim().Should().Be("Create build pipeline");
     }
 
     [Fact]
@@ -130,7 +131,7 @@ public sealed class PipelineEditPagesTests : IDisposable
 
         var cut = _ctx.Render<PipelineEdit>(p => p.Add(x => x.PipelineId, seed.PipelineId));
         cut.WaitForAssertion(() => cut.Find(".pe-picker"));
-        cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Trim().Should().Be("Save pipeline");
+        cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Trim().Should().Be("Save build pipeline");
         cut.Find("#pe-branch").Input("test");
         cut.Find(".page-head .btn--primary").Click();
 
@@ -162,6 +163,20 @@ public sealed class PipelineEditPagesTests : IDisposable
 
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can change this solution's pipelines."));
         cut.FindAll("form").Should().BeEmpty();
+        cut.FindAll(".btn--primary").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_new_build_pipeline_for_a_solution_the_person_cannot_manage_is_refused_up_front()
+    {
+        var seed = await SeedAsync(visibility: ProjectVisibility.ReadOnly);
+        _db.OrgContext.CurrentUserId = ColleagueUserId;
+
+        Nav.NavigateTo($"/pipelines/new?solution={seed.ProjectId}");
+        var cut = _ctx.Render<PipelineEdit>();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can add pipelines to CRONUS A/S."));
+        cut.FindAll(".pe-picker").Should().BeEmpty();
         cut.FindAll(".btn--primary").Should().BeEmpty();
     }
 
@@ -225,19 +240,7 @@ public sealed class PipelineEditPagesTests : IDisposable
     public async Task Editing_a_deployment_pipeline_saves_over_it_and_returns_to_it()
     {
         var seed = await SeedAsync();
-        int rpId;
-        await using (var ctx = _db.NewContext())
-        {
-            var rp = new OeReleasePipeline
-            {
-                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "Nightly to Test",
-                BuildPipelineId = seed.PipelineId, ProjectEnvironmentId = seed.TestEnvId,
-                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
-            };
-            ctx.OeReleasePipelines.Add(rp);
-            await ctx.SaveChangesAsync();
-            rpId = rp.Id;
-        }
+        var rpId = await SeedDeploymentPipelineAsync(seed);
 
         var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
         cut.WaitForAssertion(() => cut.Find("#rpe-prepare"));
@@ -258,6 +261,46 @@ public sealed class PipelineEditPagesTests : IDisposable
 
         cut.WaitForAssertion(() => cut.Find(".empty-state__title").TextContent.Trim().Should().Be("This deployment pipeline doesn't exist"));
         cut.FindAll("form").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_new_deployment_pipeline_for_a_solution_the_person_cannot_manage_is_refused_up_front()
+    {
+        var seed = await SeedAsync(visibility: ProjectVisibility.ReadOnly);
+        _db.OrgContext.CurrentUserId = ColleagueUserId;
+
+        Nav.NavigateTo($"/pipelines/deployments/new?solution={seed.ProjectId}");
+        var cut = _ctx.Render<ReleasePipelineEdit>();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can add deployment pipelines to CRONUS A/S."));
+        cut.FindAll("#rpe-env").Should().BeEmpty();
+        cut.FindAll(".btn--primary").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Someone_who_cannot_manage_the_solution_cannot_edit_its_deployment_pipelines()
+    {
+        var seed = await SeedAsync(visibility: ProjectVisibility.ReadOnly);
+        var rpId = await SeedDeploymentPipelineAsync(seed);
+        _db.OrgContext.CurrentUserId = ColleagueUserId;
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can change this solution's deployment pipelines."));
+        cut.FindAll("form").Should().BeEmpty();
+        cut.FindAll(".btn--primary").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Save_says_what_is_still_missing_on_a_new_deployment_pipeline()
+    {
+        var seed = await SeedAsync();
+
+        Nav.NavigateTo($"/pipelines/deployments/new?solution={seed.ProjectId}&buildPipeline={seed.PipelineId}");
+        var cut = _ctx.Render<ReleasePipelineEdit>();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Choose a target environment to continue."));
+        cut.Find(".page-head .btn--primary").HasAttribute("disabled").Should().BeTrue();
     }
 
     // --- rendering and seeding -----------------------------------------------
@@ -305,6 +348,20 @@ public sealed class PipelineEditPagesTests : IDisposable
         ctx.OeProjectEnvironments.Add(env);
         await ctx.SaveChangesAsync();
         return new Seed(project.Id, pipeline.Id, env.Id);
+    }
+
+    private async Task<int> SeedDeploymentPipelineAsync(Seed seed)
+    {
+        await using var ctx = _db.NewContext();
+        var rp = new OeReleasePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "Nightly to Test",
+            BuildPipelineId = seed.PipelineId, ProjectEnvironmentId = seed.TestEnvId,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        ctx.OeReleasePipelines.Add(rp);
+        await ctx.SaveChangesAsync();
+        return rp.Id;
     }
 
     private static User NewUser(int id, string email) => new()

@@ -9,6 +9,7 @@
 @inject ALDevToolbox.Services.ObjectExplorer.Delivery.ReleasePipelineService Releases
 @inject ALDevToolbox.Services.ObjectExplorer.Bc.ProjectConnectionService Connection
 @inject NavigationManager Nav
+@inject ALDevToolbox.Services.Tools.IToolAvailability ToolAvailability
 @inject ILogger<PipelineBuilds> Log
 @inject IServiceScopeFactory ScopeFactory
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
@@ -647,7 +648,7 @@
                                             }
                                             else if (b.ArtifactCount > 0)
                                             {
-                                                @if (b.Status == "ready" && _canManage && !b.IsPreview)
+                                                @if (b.Status == "ready" && _canManage && !b.IsPreview && _deploymentsOn)
                                                 {
                                                     <button type="button" class="btn btn--sm" @onclick="() => StartReleaseAsync(b)"
                                                             disabled="@_openingRelease" aria-label="@($"Deploy build #{b.Id}")">
@@ -846,6 +847,14 @@
 @code {
     [Parameter] public int PipelineId { get; set; }
 
+    [CascadingParameter] private Task<Microsoft.AspNetCore.Components.Authorization.AuthenticationState>? AuthState { get; set; }
+
+    /// <summary>
+    /// Whether the deployments tool is on for this person. "Deploy..." leads into it,
+    /// so it is not offered when that tool is switched off (its pages answer 404).
+    /// </summary>
+    private bool _deploymentsOn = true;
+
     /// <summary>
     /// A build to show in place of the latest one, which is how a preview check's
     /// result links to its errors (#994). Ignored when it is not one of this
@@ -911,6 +920,9 @@
     protected override async Task OnInitializedAsync()
     {
         await Zone.EnsureLoadedAsync();
+        var user = AuthState is null ? null : (await AuthState).User;
+        _deploymentsOn = ToolAvailability.IsSiteEnabled(ALDevToolbox.Domain.Tools.ToolKey.Releases)
+            && !ALDevToolbox.Endpoints.EndpointHelpers.ReadDisabledTools(user).Contains(ALDevToolbox.Domain.Tools.ToolKey.Releases);
         _loadedBuildId = BuildId;
         _loadedPipelineId = PipelineId;
         await LoadAsync();

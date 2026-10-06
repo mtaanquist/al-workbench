@@ -948,11 +948,10 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (_deployOffered || DeployBuildId is not { } buildId || _loading || _rp is null || _releaseDialog is null) return;
+        // After the history too: Deploy writes through the same context the history reads.
+        if (_deployOffered || DeployBuildId is not { } buildId || _loading || _historyLoading || _rp is null || _releaseDialog is null) return;
         _deployOffered = true;
         if (!_canManage || _fromReleases || _successfulBuilds.All(b => b.Id != buildId)) return;
-        // Drop it from the address so a reload doesn't open Deploy again.
-        Nav.NavigateTo($"/pipelines/deployments/{Id}", replace: true);
         await _releaseDialog.OpenAsync(
             _rp.Id, _rp.Project?.Name ?? "", _rp.ProjectEnvironment!.Name, _rp.ProjectEnvironment.Type,
             _rp.DeploymentSchedule, _rp.SchemaSyncMode, _successfulBuilds,

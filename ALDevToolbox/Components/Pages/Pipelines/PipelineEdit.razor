@@ -45,16 +45,16 @@
         }
         else
         {
-            <span>Choose what this pipeline builds. You start its builds from the pipeline's page once it is created.</span>
+            <span>Choose what this pipeline builds. Once it is created, start builds from its page, or let them run on their own (see When it builds).</span>
         }
     </SubtitleContent>
     <Actions>
         <a class="btn btn--sm" href="@CancelHref">Cancel</a>
-        @if (_canManage && !_loading && !_notFound)
+        @if (ShowPrimary)
         {
             <button type="button" class="btn btn--sm btn--primary" @onclick="SaveAsync" disabled="@(!CanSave)">
                 <Icon Name="@(_editing ? "save" : "plus")" Width="14" Height="14" />
-                <span>@(_saving ? "Saving..." : _editing ? "Save pipeline" : "Create pipeline")</span>
+                <span>@(_saving ? "Saving..." : _editing ? "Save build pipeline" : "Create build pipeline")</span>
             </button>
         }
     </Actions>
@@ -98,7 +98,7 @@
                             <div class="field">
                                 <label class="field__label" for="pe-solution">Solution</label>
                                 <SelectBox>
-                                    <select id="pe-solution" class="select" @onchange="OnProjectChosenAsync" disabled="@_saving">
+                                    <select id="pe-solution" class="select" @onchange="OnProjectChosenAsync" disabled="@(_saving || _loadingSolution || IsDiscovering)">
                                         <option value="0" selected="@(_projectId == 0)">Choose a solution...</option>
                                         @foreach (var p in _projectOptions ?? [])
                                         {
@@ -131,6 +131,12 @@
                         @if (_projectId == 0)
                         {
                             <p class="form-sec__cap">Choose a solution to see the extensions you can build.</p>
+                        }
+                        else if (!_solutionManageable)
+                        {
+                            <Alert Tone="AlertTone.Warn">
+                                <span>Only the solution owner or an admin can add pipelines to @(_projectName ?? "this solution").</span>
+                            </Alert>
                         }
                         else if (IsDiscovering || _extensions is null)
                         {
@@ -382,15 +388,26 @@
     /// <summary>True while the cache is being read or a background discovery is running.</summary>
     private bool IsDiscovering => _loadingDiscovery || _poll is not null;
 
-    private string HeadTitle => _editing ? "Edit pipeline" : "New pipeline";
+    // Whether the chosen solution may get a new pipeline from this person. The picker lists
+    // every solution they can see, and a read-only one can be seen but not changed.
+    private bool _solutionManageable = true;
+    // True while a picked solution's access and repositories are read.
+    private bool _loadingSolution;
+
+    private string HeadTitle => _editing ? "Edit build pipeline" : "New build pipeline";
+
+    /// <summary>The primary action, except where the page shows a step to take first instead.</summary>
+    private bool ShowPrimary =>
+        _canManage && !_loading && !_notFound && !(!_editing && _projectOptions is { Count: 0 })
+        && !(_projectId != 0 && !_loadingSolution && !_solutionManageable);
 
     private bool CanSave =>
-        _canManage && !IsDiscovering && !_saving && _projectId != 0
+        _canManage && _solutionManageable && !_loadingSolution && !IsDiscovering && !_saving && _projectId != 0
         && _extensions is { Count: > 0 } && _selected.Count > 0;
 
     private IReadOnlyList<Crumb> Trail => _editing && PipelineId is { } id
         ? [new("Build pipelines", "/pipelines/builds"), new(_loadedName ?? "Pipeline", $"/pipelines/{id}"), new("Edit")]
-        : [new("Build pipelines", "/pipelines/builds"), new("New pipeline")];
+        : [new("Build pipelines", "/pipelines/builds"), new("New build pipeline")];
 
     /// <summary>The page the person came from, else the pipeline (editing) or the list (creating).</summary>
     private string CancelHref
@@ -418,7 +435,28 @@
         _loading = false;
         if (_notFound || !_canManage || _projectId == 0) return;
         StateHasChanged();
-        await LoadReleaseRepositoriesAsync();
+        await LoadSolutionAsync(_projectId);
+    }
+
+    /// <summary>
+    /// Reads what the chosen solution offers: whether this person may add a pipeline to
+    /// it (a new pipeline only; an edit has already checked), its repositories, and its
+    /// extensions. Stops quietly when the person has picked another solution meanwhile.
+    /// </summary>
+    private async Task LoadSolutionAsync(int projectId)
+    {
+        _loadingSolution = true;
+        try
+        {
+            _solutionManageable = _editing || await Projects.CanManageAsync(projectId);
+            if (projectId != _projectId || !_solutionManageable) return;
+            await LoadReleaseRepositoriesAsync();
+            if (projectId != _projectId) return;
+        }
+        finally
+        {
+            _loadingSolution = false;
+        }
         await LoadDiscoveryAsync();
     }
 
@@ -513,18 +551,19 @@
         StopPoll();
         _selectionSeeded = false;
         _projectId = int.TryParse(e.Value?.ToString(), out var id) ? id : 0;
+        _projectName = _projectOptions?.FirstOrDefault(p => p.Id == _projectId)?.Name;
         _releaseRepositoryId = 0;
+        // Only a GitHub solution can build on push; the box would otherwise stay ticked,
+        // and saved, for a solution where no push ever arrives.
+        _buildOnPush = false;
         _extensions = null;
         _discovery = null;
         _discoverError = null;
-        if (_projectId == 0)
-        {
-            _releaseRepositories = null;
-            _releaseRepositoriesExplainable = false;
-            return;
-        }
-        await LoadReleaseRepositoriesAsync();
-        await LoadDiscoveryAsync();
+        _releaseRepositories = null;
+        _releaseRepositoriesExplainable = false;
+        _solutionManageable = true;
+        if (_projectId == 0) return;
+        await LoadSolutionAsync(_projectId);
     }
 
     /// <summary>
