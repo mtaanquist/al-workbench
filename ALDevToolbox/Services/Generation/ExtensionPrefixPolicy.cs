@@ -51,4 +51,17 @@ public static class ExtensionPrefixPolicy
                 : typedPrefix.Trim(),
         };
     }
+
+    /// <summary>
+    /// The prefix a new extension joining an existing workspace gets: the one
+    /// that workspace saved, so "Banking" lands as "CRO Banking" beside its
+    /// "CRO Core" whatever the organisation's policy says today. A workspace
+    /// saved before the prefix was recorded falls back to what
+    /// <see cref="Resolve"/> gives it now.
+    /// </summary>
+    public static string ForExistingWorkspace(
+        OrganizationSettings settings, string? savedPrefix, string? shortName, string customerName) =>
+        string.IsNullOrWhiteSpace(savedPrefix)
+            ? Resolve(settings, typedPrefix: null, shortName, customerName)
+            : savedPrefix.Trim();
 }

@@ -200,6 +200,44 @@ public sealed class NewExtensionRepositoryTests : IDisposable
         });
     }
 
+    [Fact]
+    public async Task A_picked_solution_names_the_extension_with_its_prefix()
+    {
+        await ReadyPageAsync(withSavedConfig: true);
+        var cut = _ctx.Render<NewExtension>();
+        await PickTheRepositoryAsync(cut);
+
+        cut.WaitForElement("#ext-name").Input("Banking");
+
+        // The prefix is added for the user, so the field says what it adds up
+        // to rather than leaving them to guess whether to type it.
+        cut.WaitForAssertion(() =>
+        {
+            var hint = cut.Find("#ext-name").ParentElement!.QuerySelector(".field__hint")!.TextContent;
+            hint.Should().Contain("CRO Banking").And.Contain("Banking/");
+        });
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_picked_repository_turns_the_example_files_off(bool withSavedConfig)
+    {
+        await ReadyPageAsync(withSavedConfig);
+        var cut = _ctx.Render<NewExtension>();
+        await PickTheRepositoryAsync(cut);
+
+        // Off and locked, not merely defaulted: the pull request leaves them out
+        // either way, and a switch that is ignored is worse than none.
+        cut.WaitForAssertion(() =>
+        {
+            var examples = cut.Find(".preview__head-tools input[type=checkbox]");
+            examples.HasAttribute("checked").Should().BeFalse();
+            examples.HasAttribute("disabled").Should().BeTrue();
+            cut.Find("input[type=hidden][name=IncludeExamples]").GetAttribute("value").Should().Be("false");
+        });
+    }
+
     // --- helpers ------------------------------------------------------------
 
     /// <summary>Focuses the picker, waits for its one row, and clicks it.</summary>

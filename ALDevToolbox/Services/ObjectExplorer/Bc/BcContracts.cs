@@ -477,6 +477,23 @@ public static class BcSessionDisplay
     };
 
     /// <summary>
+    /// True when the session is a person at a client (web, tablet, phone, desktop, or a
+    /// client type we don't know yet), false for web service calls and sessions that run
+    /// under somebody's name without them: background, child and job queue. Used to count
+    /// who is online before a deployment, where an integration polling OData is not somebody
+    /// who would lose their work.
+    /// </summary>
+    public static bool IsPerson(string? clientType) => Normalise(clientType) switch
+    {
+        "webservice" or "webserviceclient" or "soap" or "soapwebserviceclient" => false,
+        "odata" or "odatav4" or "odatav4client" or "odatawebserviceclient" => false,
+        "api" or "apiclient" => false,
+        "background" or "backgroundsession" or "child" or "childsession" => false,
+        "nas" or "nasclient" or "jobqueue" => false,
+        _ => true,
+    };
+
+    /// <summary>
     /// The same thing inside a sentence ("ended Ola's <em>web client</em> session"). Written
     /// out per arm rather than lower-cased from <see cref="ClientTypeWord"/>, because
     /// "ended their web service (soap) session" is how a wire value leaks into copy.

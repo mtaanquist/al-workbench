@@ -275,7 +275,7 @@ public sealed class ReleaseBuildDialogTests : IDisposable
         var cut = _ctx.Render<ReleaseAgainDialog>();
         cut.InvokeAsync(() => cut.Instance.OpenAsync(
             new ReleaseAgainDialog.Request(
-                DeliveryId: 49, BuildId: 118, BuildSource: "from build pipeline \"Test\"", CustomerName: "CRONUS A/S",
+                DeliveryId: 49, ReleasePipelineId: 7, BuildId: 118, BuildSource: "from build pipeline \"Test\"", CustomerName: "CRONUS A/S",
                 EnvironmentName: envName, EnvironmentType: envType, WireSchedule: "Immediate", PipelineSyncMode: "Add",
                 Apps: ["CRONUS Base", "CRONUS Core", "CRONUS Reports"], AlreadyOn: ["CRONUS Base"],
                 FailedOnSchemaChange: failedOnSchemaChange),
@@ -300,6 +300,68 @@ public sealed class ReleaseBuildDialogTests : IDisposable
         var release = cut.Find(".confirm-dialog__actions .btn--primary");
         release.TextContent.Trim().Should().Be("Deploy");
         release.HasAttribute("disabled").Should().BeFalse();
+    }
+
+    // ── Who is online, asked before an install that runs right away ──
+    // The delivery service here has no organisation behind it, so the check fails the way
+    // a fault at our end does: the dialog says it couldn't tell and still lets the person go on.
+
+    [Fact]
+    public void Deploy_now_asks_who_is_online_and_turns_into_Deploy_anyway()
+    {
+        var cut = _ctx.Render<ReleaseBuildDialog>();
+        cut.InvokeAsync(() => cut.Instance.OpenAsync(
+            releasePipelineId: 1, customerName: "CRONUS A/S", envName: "Test", envType: "Sandbox",
+            deploymentSchedule: "Immediate", schemaSyncMode: "Add",
+            builds: [new ReleaseBuildDialog.ReleasableBuildOption(412, "#412", [])],
+            timeZone: "UTC", windowStart: null, windowEnd: null)).GetAwaiter().GetResult();
+        cut.Find(".confirm-dialog__actions .btn--primary").TextContent.Should().Contain("Deploy now");
+
+        cut.Find(".confirm-dialog__actions .btn--primary").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".confirm-dialog__body [role=status]").TextContent.Trim().Should().Be(
+                "Couldn't check who is signed in to Test. Something went wrong at our end. Are you sure you want to deploy the build?");
+            var deploy = cut.Find(".confirm-dialog__actions .btn--primary");
+            deploy.TextContent.Should().Contain("Deploy anyway");
+            deploy.HasAttribute("disabled").Should().BeFalse("not knowing who is online never blocks a deployment");
+        });
+    }
+
+    [Fact]
+    public void A_deployment_handed_to_the_next_update_does_not_ask_who_is_online()
+    {
+        var cut = _ctx.Render<ReleaseBuildDialog>();
+        cut.InvokeAsync(() => cut.Instance.OpenAsync(
+            releasePipelineId: 1, customerName: "CRONUS A/S", envName: "Test", envType: "Sandbox",
+            deploymentSchedule: "NextMinorUpdate", schemaSyncMode: "Add",
+            builds: [new ReleaseBuildDialog.ReleasableBuildOption(412, "#412", [])],
+            timeZone: "UTC", windowStart: null, windowEnd: null)).GetAwaiter().GetResult();
+
+        cut.Find(".confirm-dialog__actions .btn--primary").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".confirm-dialog__body .alert").TextContent.Should().Contain("Couldn't start the deployment",
+                "it went straight to deploying, which this unconnected service refuses");
+            cut.Markup.Should().NotContain("Are you sure");
+        });
+    }
+
+    [Fact]
+    public void Deploy_again_asks_who_is_online_and_turns_into_Deploy_anyway()
+    {
+        var cut = OpenedReleaseAgain("Test", "Sandbox", forceSync: false);
+
+        cut.Find(".confirm-dialog__actions .btn--primary").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".confirm-dialog__body [role=status]").TextContent.Trim().Should().Be(
+                "Couldn't check who is signed in to Test. Something went wrong at our end. Are you sure you want to deploy the build?");
+            cut.Find(".confirm-dialog__actions .btn--primary").TextContent.Should().Contain("Deploy anyway");
+        });
     }
 
     [Fact]

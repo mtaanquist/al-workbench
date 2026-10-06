@@ -50,6 +50,7 @@ public sealed record ProjectPlanInput(
 /// <summary>Mirror of <see cref="StandaloneExtensionPlan"/> for the MCP boundary.</summary>
 public sealed record StandaloneExtensionPlanInput(
     string TemplateKey,
+    [property: Description("The extension's name, e.g. Banking. Added to a repository that holds a solution, the solution's prefix is put in front of it (Banking becomes CRO Banking, beside CRO Core) and its folder is named without the prefix.")]
     string ExtensionName,
     string Brief,
     string Description,
@@ -59,6 +60,7 @@ public sealed record StandaloneExtensionPlanInput(
     int IdRangeFrom,
     int IdRangeTo,
     string Publisher,
+    [property: Description("Whether to include the template's example files. Ignored when adding to a repository: examples are always left out there, so they cannot clash with the ones it already has.")]
     bool IncludeExamples = true,
     IReadOnlyList<DependencyEntryInput>? Dependencies = null)
 {
@@ -137,6 +139,16 @@ public sealed record WorkspaceResult(
 /// Why the repository is not on a solution, or null when it is. The repository
 /// exists either way.
 /// </param>
+/// <param name="Branches">
+/// The branches created beside the default branch at the same commit
+/// (test and staging), empty when none were.
+/// </param>
+/// <param name="BranchesWarning">Which of those GitHub refused, or null.</param>
+/// <param name="BuildPipelines">
+/// The build pipelines added to the solution, one per branch, each building
+/// every extension. Empty when the repository is not on a solution.
+/// </param>
+/// <param name="BuildPipelinesWarning">Why no build pipelines were added, or null.</param>
 public sealed record RepositoryCreationResult(
     string RepositoryFullName,
     string HtmlUrl,
@@ -149,7 +161,11 @@ public sealed record RepositoryCreationResult(
     int? SolutionId = null,
     string? SolutionName = null,
     bool SolutionCreated = false,
-    string? SolutionWarning = null)
+    string? SolutionWarning = null,
+    IReadOnlyList<string>? Branches = null,
+    string? BranchesWarning = null,
+    IReadOnlyList<string>? BuildPipelines = null,
+    string? BuildPipelinesWarning = null)
 {
     /// <summary>
     /// The projection of a created repository, written once because two tools
@@ -168,7 +184,11 @@ public sealed record RepositoryCreationResult(
         SolutionId: created.SolutionId,
         SolutionName: created.SolutionName,
         SolutionCreated: created.SolutionCreated,
-        SolutionWarning: created.SolutionWarning);
+        SolutionWarning: created.SolutionWarning,
+        Branches: created.Branches ?? [],
+        BranchesWarning: created.BranchesWarning,
+        BuildPipelines: created.PipelineNames ?? [],
+        BuildPipelinesWarning: created.PipelinesWarning);
 }
 
 /// <summary>
