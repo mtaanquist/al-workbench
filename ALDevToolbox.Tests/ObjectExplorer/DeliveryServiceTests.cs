@@ -1030,6 +1030,71 @@ public sealed class DeliveryServiceTests : IDisposable
         _apps.UploadedOrder.Should().BeEmpty("nothing is sent once any app would be refused");
     }
 
+    // ── Apps carried over unchanged from an earlier build (#1094) ──────────────
+
+    [Fact]
+    public async Task An_unchanged_app_with_a_newer_version_installed_is_skipped_rather_than_refused()
+    {
+        // Another pipeline of the solution put a newer Core into the environment. This
+        // build did not change Core, so there is nothing to refuse: it is left alone.
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales" });
+        var coreId = Guid.NewGuid();
+        await ctx.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == seed.BuildId && a.AppName == "CRONUS Core")
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.AppId, coreId.ToString())
+                .SetProperty(a => a.CarriedFromBuildId, seed.BuildId - 1));
+        ctx.OeEnvironmentApps.Add(new OeEnvironmentApp
+        {
+            OrganizationId = TestDb.DefaultOrgId, EnvironmentId = seed.EnvironmentId, AppId = coreId,
+            Name = "CRONUS Core", Publisher = "CRONUS A/S", Version = "1.0.10.0", FetchedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+        _apps.Installed.Add(InstalledApp("CRONUS Core") with { AppId = coreId, Version = "1.0.10.0" });
+
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
+        results[0].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
+        results[0].Message.Should().Be("Unchanged; Production already has the newer 1.0.10.0.");
+        _apps.UploadedOrder.Should().Equal(new[] { "CRONUS Sales" });
+    }
+
+    [Fact]
+    public async Task An_unchanged_app_already_waiting_for_the_update_is_skipped_and_the_rest_go_ahead()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales" });
+        var ids = new[] { Guid.NewGuid(), Guid.NewGuid() };
+        var artifacts = await ctx.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == seed.BuildId).OrderBy(a => a.Id).ToListAsync();
+        for (var i = 0; i < artifacts.Count; i++)
+        {
+            artifacts[i].AppId = ids[i].ToString();
+            _apps.Installed.Add(InstalledApp(artifacts[i].AppName) with { AppId = ids[i], Version = "0.9.0.0" });
+        }
+        artifacts[0].CarriedFromBuildId = seed.BuildId - 1;
+        await ctx.SaveChangesAsync();
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.DeploymentSchedule, BcDeploymentSchedule.NextMinorUpdate));
+        // The earlier build's deployment already queued Core at this version.
+        _apps.Scheduled.Add(ScheduledOperation(ids[0], "CRONUS Core", artifacts[0].AppVersion, BcDeploymentSchedule.NextMinorUpdate));
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+        var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
+        results[0].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
+        results[0].Message.Should().Be("Unchanged; this version is already waiting for the update.");
+        _apps.UploadedOrder.Should().Equal(new[] { "CRONUS Sales" });
+    }
+
     [Fact]
     public async Task RunDeliveryAsync_does_not_take_another_publishers_newer_app_with_the_same_name_as_this_one()
     {

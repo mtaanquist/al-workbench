@@ -385,7 +385,7 @@ public sealed class DeliveryService
         var artifacts = await _db.OeProjectBuildArtifacts.AsNoTracking()
             .Where(a => a.ProjectBuildId == build.Id)
             .OrderBy(a => a.Id)
-            .Select(a => new ReleaseApp(a.AppName, a.AppVersion, a.AppId))
+            .Select(a => new ReleaseApp(a.AppName, a.AppVersion, a.AppId, a.CarriedFromBuildId != null))
             .ToListAsync(ct);
         if (artifacts.Count == 0)
         {
@@ -442,7 +442,8 @@ public sealed class DeliveryService
         "Raise the version in app.json, or turn on \"Add the build number to each app's version\" on the build pipeline, then deploy a new build.";
 
     /// <summary>One app a deployment will install, in the build's order.</summary>
-    private sealed record ReleaseApp(string AppName, string AppVersion, string? AppId = null);
+    /// <param name="Carried">Carried over unchanged from an earlier build (#1094): an installed newer version is left alone rather than refused.</param>
+    private sealed record ReleaseApp(string AppName, string AppVersion, string? AppId = null, bool Carried = false);
 
     /// <summary>
     /// The first app of <paramref name="apps"/> that the environment's mirrored app list
@@ -459,7 +460,7 @@ public sealed class DeliveryService
             .ToListAsync(ct);
         foreach (var app in apps)
         {
-            if (!Guid.TryParse(app.AppId, out var id)) continue;
+            if (app.Carried || !Guid.TryParse(app.AppId, out var id)) continue;
             var on = installed.FirstOrDefault(a => a.AppId == id)?.Version;
             if (!string.IsNullOrWhiteSpace(on) && ProjectConnectionService.CompareVersions(on, app.AppVersion) > 0)
             {
@@ -1145,8 +1146,12 @@ public sealed class DeliveryService
         var artifacts = await _db.OeProjectBuildArtifacts.AsNoTracking()
             .Where(a => a.ProjectBuildId == delivery.ProjectBuildId)
             .OrderBy(a => a.Id)
-            .Select(a => new { a.Id, a.FileName, a.AppId })
+            .Select(a => new { a.Id, a.FileName, a.AppId, a.CarriedFromBuildId })
             .ToListAsync(ct);
+        // An app the build carried over unchanged from an earlier build (#1094). Where the
+        // environment already has it, or something newer from another pipeline, or has it
+        // waiting for an update, it is left alone: nothing about it changed in this build.
+        bool Carried(int i) => i < artifacts.Count && artifacts[i].CarriedFromBuildId is not null;
 
         // One read of what's already installed. The API only accepts a deferred schedule
         // for an app it already knows, so a first-time upload has to be caught before
@@ -1208,7 +1213,7 @@ public sealed class DeliveryService
         for (var i = 0; i < ordered.Count; i++)
         {
             // Matched on the app id only: a name could be another publisher's app.
-            if (appIds[i] is null
+            if (appIds[i] is null || Carried(i)
                 || InstalledMatch(i)?.Version is not { Length: > 0 } newerOn
                 || ProjectConnectionService.CompareVersions(newerOn, ordered[i].AppVersion) <= 0)
             {
@@ -1288,9 +1293,28 @@ public sealed class DeliveryService
                 await SaveResultAsync(delivery, log, ct);
                 continue;
             }
+            if (Carried(i) && InstalledMatch(i)?.Version is { Length: > 0 } newerOn
+                && ProjectConnectionService.CompareVersions(newerOn, result.AppVersion) > 0)
+            {
+                result.Status = ProjectDeliveryResultStatus.Skipped;
+                result.Message = $"Unchanged; {delivery.EnvironmentName} already has the newer {newerOn}.";
+                result.UpdatedAt = DateTime.UtcNow;
+                Append(log, $"Skipped {label}: unchanged in this build, and {delivery.EnvironmentName} already has {newerOn}.");
+                await SaveResultAsync(delivery, log, ct);
+                continue;
+            }
 
             if (AlreadyWaiting(waiting, appIds[i], result, delivery) is { } waitingRefusal)
             {
+                if (Carried(i))
+                {
+                    result.Status = ProjectDeliveryResultStatus.Skipped;
+                    result.Message = "Unchanged; this version is already waiting for the update.";
+                    result.UpdatedAt = DateTime.UtcNow;
+                    Append(log, $"Skipped {label}: unchanged in this build and already waiting on {delivery.EnvironmentName}.");
+                    await SaveResultAsync(delivery, log, ct);
+                    continue;
+                }
                 failedIndex = i;
                 refusal = waitingRefusal;
                 result.Status = ProjectDeliveryResultStatus.Failed;
