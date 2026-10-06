@@ -203,7 +203,11 @@ unchanged. The lifecycle is wrapped in `OeProjectBuild`:
 
 1. `StartBuildAsync(projectId)` (owner/admin) creates an `OeProjectBuild` (`queued`, with
    `StartedByUserId`) and the `OeRelease` (`Kind=project`, `Status=ingesting`), links them via
-   `OeProjectBuild.ReleaseId`, and enqueues the existing `ReleaseImportJob`.
+   `OeProjectBuild.ReleaseId`, and enqueues the existing `ReleaseImportJob`. A manual build is
+   refused while another build of the same pipeline is still `queued` or `building` (against the
+   current version, with its release still ingesting, so a lost job cannot lock the pipeline);
+   the pipeline page shows Build disabled as "Build running" until it finishes. The nightly
+   preview check neither blocks nor is blocked by a manual build.
 2. The worker runs `BuildAsync`, which now also:
    - clones each repo with the **triggering user's** token and records HEAD per repo
      (`OeProjectBuildRepoCommit`);
