@@ -1,4 +1,3 @@
-@inject NavigationManager Nav
 @using ALDevToolbox.Domain.Entities.ObjectExplorer
 
 @*
@@ -9,9 +8,9 @@
     and wants a first build.
 
     The list is the page's - it is read with the solution - so this tab only
-    renders it and owns the "New pipeline" dialog. Creating one navigates
-    straight into the Pipelines tool, which is where builds are started and
-    downloaded, so nothing comes back here to be refreshed.
+    renders it and links "New pipeline" to the create page. Creating one lands
+    in the Pipelines tool, which is where builds are started and downloaded, so
+    nothing comes back here to be refreshed.
 *@
 
 <div class="form-sec__head">
@@ -47,38 +46,20 @@
             </div>
         }
         <div class="form-actions">
-            <button type="button" class="btn btn--sm" @onclick="NewPipelineAsync" disabled="@Saving">
+            <a class="btn btn--sm" href="@($"/pipelines/new?solution={Id}&returnUrl={Uri.EscapeDataString($"/solutions/{Id}?tab=pipelines")}")">
                 <Icon Name="plus" Width="14" Height="14" />
                 <span>New pipeline</span>
-            </button>
+            </a>
         </div>
     </div>
 </div>
-
-<PipelineEditorDialog @ref="_editor" OnSaved="OnPipelineCreatedAsync" />
 
 @code {
     /// <summary>The solution these pipelines belong to.</summary>
     [Parameter, EditorRequired] public int Id { get; set; }
 
-    /// <summary>The solution's name, which the create dialog shows.</summary>
-    [Parameter] public string SolutionName { get; set; } = string.Empty;
-
     /// <summary>The pipelines, read with the solution by the page.</summary>
     [Parameter] public IReadOnlyList<OePipeline> Pipelines { get; set; } = Array.Empty<OePipeline>();
-
-    /// <summary>True while the page's own Save is in flight.</summary>
-    [Parameter] public bool Saving { get; set; }
-
-    private PipelineEditorDialog? _editor;
-
-    private async Task NewPipelineAsync()
-    {
-        if (_editor is null) return;
-        await _editor.OpenForCreateAsync(Id, SolutionName);
-    }
-
-    private void OnPipelineCreatedAsync(int pipelineId) => Nav.NavigateTo($"/pipelines/{pipelineId}");
 
     /// <summary>
     /// One-line scope summary for a pipeline row: how many extensions it builds.

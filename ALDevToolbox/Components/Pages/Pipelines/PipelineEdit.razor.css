@@ -1,0 +1,21 @@
+/*
+    Scoped chrome for the build pipeline editor page.
+
+    The extension picker is the design system's .sub-rows + .check +
+    .sub-rows__foot. What is left here is about this page rather than about a
+    form: the discovery footer, and the count.
+*/
+
+.pe-picker__count { margin-left: auto; font-size: var(--text-xs); color: var(--ink-3); }
+
+/* A .sub-row is a grid; a .check is an inline-flex. The row wins, and the
+   checkbox lands in the actions cell on the right - which is where a per-row
+   toggle belongs in a list you scan by name. */
+.pe-picker .sub-row { cursor: pointer; }
+
+/* When the extensions were last discovered, and the button to do it again. */
+.pe-discovery { display: flex; align-items: center; gap: var(--space-2); }
+.pe-discovery .btn { margin-left: auto; }
+
+/* Why the primary action is disabled - shown only when it is user-correctable. */
+.pe-hint { margin: 0; }

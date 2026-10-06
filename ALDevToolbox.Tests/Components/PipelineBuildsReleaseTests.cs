@@ -43,6 +43,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         auth.SetAuthorized("owner@example.com");
 
         _ctx.Services.AddSingleton<IOrganizationContext>(_db.OrgContext);
+        _ctx.Services.AddSingleton<ALDevToolbox.Services.Tools.IToolAvailability>(TestDb.EverythingEnabled());
         _ctx.Services.AddDisplayTimeZone(_db);
         _ctx.Services.AddDbContext<ALDevToolbox.Data.AppDbContext>(opts =>
             opts.UseNpgsql(_db.ConnectionString)
@@ -53,6 +54,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         _ctx.Services.AddScoped<BuildFreshnessService>();
         _ctx.Services.AddScoped<ReleasePipelineService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
+        _ctx.Services.AddScoped<ProjectService>();
         _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
         // The Build button's service. Nothing here builds, so only what it keeps
         // for itself is real.
@@ -295,33 +297,72 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
             () => cut.Find(ReleaseButton(seed.OlderBuildId)).Click(),
             () => cut.Markup.Should().Contain("CRONUS App isn't set up to install anywhere yet."));
 
-        ActThen(cut,
-            () => cut.Find(".confirm-dialog__actions .btn--primary").Click(),
-            // The source is this build pipeline already.
-            () =>
-            {
-                cut.Find("#rpe-build").GetAttribute("value").Should().Be(seed.PipelineId.ToString());
-                cut.Markup.Should().Contain($"After you create it, you choose when build #{seed.OlderBuildId} installs.");
-            });
-        cut.FindAll("#pb-rel-title").Should().BeEmpty();
+        var nav = _ctx.Services.GetRequiredService<NavigationManager>();
+        cut.Find(".confirm-dialog__actions .btn--primary").Click();
+        // Setting one up is its own page, with this build pipeline as the source.
+        cut.WaitForAssertion(() => nav.ToBaseRelativePath(nav.Uri).Should().Be(
+            $"pipelines/deployments/new?solution={seed.ProjectId}&buildPipeline={seed.PipelineId}&deploy={seed.OlderBuildId}" +
+            $"&returnUrl=%2Fpipelines%2F{seed.PipelineId}"));
 
-        ActThen(cut,
-            () =>
-            {
-                cut.Find("#rpe-env").Change(seed.SandboxEnvId.ToString());
-                cut.Find(".confirm-dialog__actions .btn--primary").Click();
-            },
-            () => cut.Find("#rb-title").TextContent.Should().Be("Deploy to CRONUS Denmark — UAT"));
-        cut.WaitForAssertion(() =>
+        var editor = _ctx.Render<ReleasePipelineEdit>();
+        editor.WaitForAssertion(() =>
         {
-            cut.FindAll("#rpe-title").Should().BeEmpty();
-            cut.Find("#rb-build").GetAttribute("value").Should().Be(seed.OlderBuildId.ToString());
+            editor.Find("#rpe-build").GetAttribute("value").Should().Be(seed.PipelineId.ToString());
+            editor.Markup.Should().Contain($"After you create it, you choose when build #{seed.OlderBuildId} installs.");
+            editor.Find(".page-head__actions a.btn").GetAttribute("href").Should().Be($"/pipelines/{seed.PipelineId}");
         });
+        editor.Find("#rpe-env").Change(seed.SandboxEnvId.ToString());
+        editor.Find(".page-head .btn--primary").Click();
+
+        // Saving carries on to deploying the build it was set up for.
+        int releasePipelineId = 0;
+        editor.WaitForAssertion(() =>
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(nav.ToBaseRelativePath(nav.Uri), @"^pipelines/deployments/(\d+)\?deploy=(\d+)$");
+            match.Success.Should().BeTrue(nav.Uri);
+            match.Groups[2].Value.Should().Be(seed.OlderBuildId.ToString());
+            releasePipelineId = int.Parse(match.Groups[1].Value);
+        });
+
+        var detail = _ctx.Render<ReleasePipelineDetail>(p => p.Add(x => x.Id, releasePipelineId));
+        detail.WaitForAssertion(() =>
+        {
+            detail.Find("#rb-title").TextContent.Should().Be("Deploy to CRONUS Denmark — UAT");
+            detail.Find("#rb-build").GetAttribute("value").Should().Be(seed.OlderBuildId.ToString());
+        });
+        nav.ToBaseRelativePath(nav.Uri).Should().Be($"pipelines/deployments/{releasePipelineId}",
+            "a reload must not open Deploy a second time");
 
         await using var ctx = _db.NewContext();
         var created = await ctx.OeReleasePipelines.AsNoTracking().SingleAsync();
         created.BuildPipelineId.Should().Be(seed.PipelineId);
         created.Name.Should().Be("CRONUS App to UAT");
+    }
+
+    [Fact]
+    public async Task A_build_in_the_address_that_the_pipeline_cannot_deploy_opens_nothing()
+    {
+        var seed = await SeedAsync();
+        int releasePipelineId;
+        await using (var ctx = _db.NewContext())
+        {
+            var rp = new OeReleasePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "CRONUS App to UAT",
+                BuildPipelineId = seed.PipelineId, ProjectEnvironmentId = seed.SandboxEnvId,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            ctx.OeReleasePipelines.Add(rp);
+            await ctx.SaveChangesAsync();
+            releasePipelineId = rp.Id;
+        }
+
+        _ctx.Services.GetRequiredService<NavigationManager>().NavigateTo($"/pipelines/deployments/{releasePipelineId}?deploy=999999");
+        var detail = _ctx.Render<ReleasePipelineDetail>(p => p.Add(x => x.Id, releasePipelineId));
+
+        detail.WaitForAssertion(() => detail.Markup.Should().Contain("CRONUS App to UAT"));
+        _db.WaitForQueriesToSettle();
+        detail.FindAll("#rb-title").Should().BeEmpty();
     }
 
     /// <summary>

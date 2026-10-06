@@ -849,9 +849,12 @@ whole. The page reads the log line back through the same parser, so a deployment
   version underneath, and an **Open in Business Central** link built from `web_client_login_url` —
   the question the row has to answer is "is this environment safe to deploy to right now".
 - **Deployment pipelines:** a listable surface alongside Build pipelines (own icon — e.g. `rocket` for
-  build stays, a `send`/`upload-cloud` for deployment), with a create/edit dialog: name, source build
+  build stays, a `send`/`upload-cloud` for deployment), with a create/edit page
+  (`/pipelines/deployments/new`, `/pipelines/deployments/{id}/edit`; a dialog until #1080): source build
   pipeline or GitHub repository, target environment (picker), when installs run, schema sync mode
-  (Force sync behind an acknowledgement). The list (`/pipelines/deployments`, #935) also says what each pipeline
+  (Force sync behind an acknowledgement), in sections (Source, Target, Installing, Automation, Name).
+  "Deploy..." on a build row with no deployment pipeline opens it with `?buildPipeline=` and
+  `?deploy=`, and saving lands on the new pipeline with Deploy open on that build. The list (`/pipelines/deployments`, #935) also says what each pipeline
   is doing: a "Shipping now" band per deployment in flight (which app of how many, and how long the
   last successful deployment took), the newest finished deployment's outcome, and the next one - a
   scheduled deployment, or for one handed to Business Central, the environment's next update. It is
