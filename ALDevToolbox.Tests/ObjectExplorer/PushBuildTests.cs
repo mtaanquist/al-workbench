@@ -119,6 +119,26 @@ public sealed class PushBuildTests : IDisposable
         (await ListDueAsync(Push())).Should().BeEmpty("GitHub redelivering a push does not build it twice");
     }
 
+    [Fact]
+    public async Task A_push_older_than_the_branch_head_already_recorded_is_not_due()
+    {
+        var owner = await SeedUserAsync();
+        var (repositoryId, _) = await SeedSolutionAsync(owner, branch: "main");
+        var push = Push();
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeRepositoryBranchHeads.Add(new OeRepositoryBranchHead
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectRepositoryId = repositoryId, Branch = "main",
+                HeadSha = "4444444444444444444444444444444444444444", PushedAt = push.PushedAt.AddMinutes(1),
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await ListDueAsync(push)).Should().BeEmpty("a late or redelivered push must not build older code after newer");
+    }
+
     // --- From the delivery to a queued build ---------------------------------
 
     [Fact]

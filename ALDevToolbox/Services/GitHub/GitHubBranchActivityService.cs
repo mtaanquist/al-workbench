@@ -42,7 +42,8 @@ public sealed class GitHubBranchActivityService
     /// known. A push that fast-forwards from the stored head appends its commits to
     /// the stored list; anything else (a forced push, a recreated branch, a push we
     /// missed the one before) replaces it, because the old commits may no longer be
-    /// on the branch.</para>
+    /// on the branch. A push older than the one already recorded (late or
+    /// redelivered) changes nothing.</para>
     /// </summary>
     public async Task<int> RecordPushAsync(GitHubPushJob push, CancellationToken ct = default)
     {
@@ -80,6 +81,13 @@ public sealed class GitHubBranchActivityService
                     IsDefaultBranch = string.Equals(push.Branch, push.DefaultBranch, StringComparison.Ordinal),
                 };
                 _db.OeRepositoryBranchHeads.Add(head);
+            }
+            else if (push.PushedAt < head.PushedAt)
+            {
+                // GitHub does not promise delivery order, and a redelivery carries the
+                // original push. Either is older than what the row already says, so
+                // it leaves the branch where the newer push put it.
+                continue;
             }
 
             if (push.Deleted)
