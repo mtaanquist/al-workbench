@@ -742,40 +742,108 @@ public sealed class DeliveryService
     }
 
     /// <summary>
-    /// Moves a <em>scheduled</em> delivery to a new time (atomic on <c>scheduled</c>),
-    /// recomputing the outside-window audit flag. Access-gated. Throws if the delivery has
-    /// already started or no longer exists. Enqueues immediately if the new time is now/past.
+    /// What the Reschedule dialog may offer for one <em>scheduled</em> delivery: the
+    /// environment's delivery window (when it has one), and whether the build can wait for
+    /// Business Central's next minor or major update - it can't when it has several apps
+    /// (Business Central picks the order) or an app the environment doesn't have yet (the
+    /// API refuses those timings for a first install). Null when the delivery is gone or no
+    /// longer scheduled. Access-gated like the reschedule itself.
     /// </summary>
-    public async Task RescheduleDeliveryAsync(int deliveryId, DateTime newScheduledForUtc, CancellationToken ct = default)
+    public async Task<RescheduleOptions?> GetRescheduleOptionsAsync(int deliveryId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        newScheduledForUtc = DateTime.SpecifyKind(newScheduledForUtc, DateTimeKind.Utc);
+        var info = await RescheduleInfoAsync(deliveryId, ct);
+        if (info is null || info.Status != ProjectDeliveryStatus.Scheduled) return null;
+        await _access.EnsureCanManageAsync(info.ProjectId, info.OwnerId, ct);
 
-        var info = await _db.OeProjectDeliveries.AsNoTracking()
-            .Where(d => d.Id == deliveryId)
-            .Select(d => new
-            {
-                d.OrganizationId,
-                d.TriggeredByUserId,
-                d.ProjectId,
-                OwnerId = d.ReleasePipeline!.Project!.CreatedByUserId,
-                TimeZone = d.ReleasePipeline.Project.BcTimeZone,
-                WindowStart = d.ReleasePipeline.ProjectEnvironment!.UpdateWindowStart,
-                WindowEnd = d.ReleasePipeline.ProjectEnvironment.UpdateWindowEnd,
-            })
-            .FirstOrDefaultAsync(ct)
+        var tz = UpdateWindow.ResolveTimeZone(info.TimeZone);
+        var hasWindow = UpdateWindow.IsConfigured(info.WindowStart, info.WindowEnd);
+        DateTime? nextOpening = hasWindow
+            ? UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, DateTime.UtcNow)
+            : null;
+        var current = CurrentTiming(info.DeploymentSchedule, info.ScheduledByDeliveryWindow, info.ScheduledOutsideWindow, hasWindow);
+        return new RescheduleOptions(
+            deliveryId, info.ReleasePipelineId, info.EnvironmentName, info.ScheduledFor, current,
+            info.TimeZone, info.WindowStart, info.WindowEnd, nextOpening,
+            await WhyNotLaterUpdateAsync(info, ct));
+    }
+
+    /// <summary>
+    /// Moves a <em>scheduled</em> delivery to another timing (atomic on <c>scheduled</c>):
+    /// right away, a picked time, the environment's next delivery window, or Business
+    /// Central's next minor or major update. The last two change what is sent: the apps go
+    /// up right away and Business Central installs them with that update, as a pipeline
+    /// set to that timing would. Recomputes the outside-window audit flag. Access-gated.
+    /// Throws if the delivery has already started or no longer exists, or the timing isn't
+    /// possible for it. Enqueues immediately when the new time is now or past.
+    /// </summary>
+    /// <param name="atUtc">The picked time for <see cref="RescheduleTiming.AtTime"/>; ignored otherwise.</param>
+    public async Task RescheduleDeliveryAsync(int deliveryId, RescheduleTiming timing, DateTime? atUtc = null, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var info = await RescheduleInfoAsync(deliveryId, ct)
             ?? throw Validation("Delivery", "That delivery no longer exists.");
         await _access.EnsureCanManageAsync(info.ProjectId, info.OwnerId, ct);
 
         var tz = UpdateWindow.ResolveTimeZone(info.TimeZone);
-        var outsideWindow = UpdateWindow.IsConfigured(info.WindowStart, info.WindowEnd)
-            && !UpdateWindow.IsWithin(info.WindowStart, info.WindowEnd, tz, newScheduledForUtc);
-
+        var hasWindow = UpdateWindow.IsConfigured(info.WindowStart, info.WindowEnd);
         var now = DateTime.UtcNow;
+
+        DateTime when;
+        var schedule = BcDeploymentSchedule.Immediate;
+        var byWindow = false;
+        switch (timing)
+        {
+            case RescheduleTiming.Now:
+                when = now;
+                break;
+            case RescheduleTiming.AtTime:
+                when = atUtc is { } at
+                    ? DateTime.SpecifyKind(at, DateTimeKind.Utc)
+                    : throw Validation("ScheduledFor", "Pick a date and time.");
+                // A time that has gone would run it now without the "Now" choice's checks.
+                if (when < now - ReschedulePastSlack)
+                {
+                    throw Validation("ScheduledFor", "Pick a time that hasn't happened yet, or choose Now to deploy right away.");
+                }
+                break;
+            case RescheduleTiming.DeliveryWindow:
+                if (!hasWindow)
+                {
+                    throw Validation("Timing",
+                        $"{info.EnvironmentName} has no delivery window. Set one on the environment, or pick a time.");
+                }
+                when = UpdateWindow.NextOpeningUtc(info.WindowStart, info.WindowEnd, tz, now);
+                byWindow = true;
+                break;
+            case RescheduleTiming.NextMinorUpdate:
+            case RescheduleTiming.NextMajorUpdate:
+                if (await WhyNotLaterUpdateAsync(info, ct) is { } why)
+                {
+                    throw Validation("Timing", why);
+                }
+                // Sent now; Business Central holds it until its update.
+                when = now;
+                schedule = timing == RescheduleTiming.NextMinorUpdate
+                    ? BcDeploymentSchedule.NextMinorUpdate
+                    : BcDeploymentSchedule.NextMajorUpdate;
+                break;
+            default:
+                throw Validation("Timing", "Choose when the deployment should install.");
+        }
+
+        // Only our own time can be outside the delivery window: a later Business Central
+        // update installs on Microsoft's schedule, not ours.
+        var outsideWindow = schedule == BcDeploymentSchedule.Immediate
+            && hasWindow
+            && !UpdateWindow.IsWithin(info.WindowStart, info.WindowEnd, tz, when);
+
         var changed = await _db.OeProjectDeliveries
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(d => d.ScheduledFor, newScheduledForUtc)
+                .SetProperty(d => d.ScheduledFor, when)
+                .SetProperty(d => d.DeploymentSchedule, schedule)
+                .SetProperty(d => d.ScheduledByDeliveryWindow, byWindow)
                 .SetProperty(d => d.ScheduledOutsideWindow, outsideWindow)
                 .SetProperty(d => d.UpdatedAt, now), ct);
         if (changed == 0)
@@ -783,14 +851,86 @@ public sealed class DeliveryService
             throw Validation("Delivery", "This delivery has already started and can no longer be rescheduled.");
         }
 
-        if (newScheduledForUtc <= now)
+        if (when <= now)
         {
             await _queue.EnqueueAsync(new DeliveryJob(deliveryId,
                 AmbientOrganizationScope.OrganizationIdentity.ForOrganization(
                     info.OrganizationId, _orgContext.IsSystemOrganization, info.TriggeredByUserId)), ct);
         }
-        _logger.LogInformation("Rescheduled delivery {DeliveryId} to {ScheduledFor:o}.", deliveryId, newScheduledForUtc);
+        _logger.LogInformation("Rescheduled delivery {DeliveryId} to {Timing} ({Schedule}, {ScheduledFor:o}).",
+            deliveryId, timing, schedule, when);
     }
+
+    /// <summary>How far in the past a picked time may be and still count as "now": the minute the person spent in the dialog.</summary>
+    private static readonly TimeSpan ReschedulePastSlack = TimeSpan.FromMinutes(1);
+
+    /// <summary>What a reschedule reads about a delivery, its pipeline and its environment.</summary>
+    private sealed record RescheduleInfo(
+        int OrganizationId, int? TriggeredByUserId, int ProjectId, int? OwnerId, int ReleasePipelineId,
+        int ProjectBuildId, int EnvironmentId, string EnvironmentName, string Status, DateTime ScheduledFor,
+        string DeploymentSchedule, bool ScheduledByDeliveryWindow, bool ScheduledOutsideWindow,
+        string? TimeZone, TimeOnly? WindowStart, TimeOnly? WindowEnd);
+
+    private Task<RescheduleInfo?> RescheduleInfoAsync(int deliveryId, CancellationToken ct) =>
+        _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.Id == deliveryId)
+            .Select(d => new RescheduleInfo(
+                d.OrganizationId,
+                d.TriggeredByUserId,
+                d.ProjectId,
+                d.ReleasePipeline!.Project!.CreatedByUserId,
+                d.ReleasePipelineId,
+                d.ProjectBuildId,
+                d.ReleasePipeline.ProjectEnvironmentId,
+                d.EnvironmentName,
+                d.Status,
+                d.ScheduledFor,
+                d.DeploymentSchedule,
+                d.ScheduledByDeliveryWindow,
+                d.ScheduledOutsideWindow,
+                d.ReleasePipeline.Project.BcTimeZone,
+                d.ReleasePipeline.ProjectEnvironment!.UpdateWindowStart,
+                d.ReleasePipeline.ProjectEnvironment.UpdateWindowEnd))
+            .FirstOrDefaultAsync(ct);
+
+    /// <summary>
+    /// Why the build can't wait for Business Central's next minor or major update, or null
+    /// when it can. The same two rules the deploy and the run apply: one app only, and only
+    /// an app the environment already has (as its app list was last read; the run checks
+    /// the live list again).
+    /// </summary>
+    private async Task<string?> WhyNotLaterUpdateAsync(RescheduleInfo info, CancellationToken ct)
+    {
+        var apps = await _db.OeProjectBuildArtifacts.AsNoTracking()
+            .Where(a => a.ProjectBuildId == info.ProjectBuildId)
+            .Select(a => new { a.AppName, a.AppId })
+            .ToListAsync(ct);
+        if (apps.Count > 1)
+        {
+            return $"This build has {apps.Count} apps, and Business Central chooses the order it installs them in when they wait for a later update. Pick a time or the delivery window instead.";
+        }
+        var installed = await _db.OeEnvironmentApps.AsNoTracking()
+            .Where(a => a.EnvironmentId == info.EnvironmentId)
+            .Select(a => a.AppId)
+            .ToListAsync(ct);
+        var missing = apps
+            .Where(a => !Guid.TryParse(a.AppId, out var id) || !installed.Contains(id))
+            .Select(a => a.AppName)
+            .ToList();
+        return missing.Count > 0
+            ? $"{string.Join(", ", missing)} isn't installed on {info.EnvironmentName} yet, and Business Central only waits for a later update with an app that's already there. Pick a time or the delivery window instead."
+            : null;
+    }
+
+    /// <summary>The timing a scheduled delivery is on now, for the dialog's first choice.</summary>
+    private static RescheduleTiming CurrentTiming(string schedule, bool byWindow, bool outsideWindow, bool hasWindow) =>
+        BcDeploymentSchedule.Normalize(schedule) switch
+        {
+            BcDeploymentSchedule.NextMinorUpdate => RescheduleTiming.NextMinorUpdate,
+            BcDeploymentSchedule.NextMajorUpdate => RescheduleTiming.NextMajorUpdate,
+            _ when byWindow && !outsideWindow && hasWindow => RescheduleTiming.DeliveryWindow,
+            _ => RescheduleTiming.AtTime,
+        };
 
     // ── Scheduler sweep helpers (called per-org under an AmbientOrganizationScope) ──
 
@@ -1638,6 +1778,44 @@ public static class DeliveryProposalLog
     /// <summary>What <see cref="OeProjectDelivery.DismissReason"/> holds for a replacement.</summary>
     public static string ReplacedReason(int newerBuildId) => $"Replaced by build #{newerBuildId}";
 }
+
+/// <summary>When a rescheduled deployment should install. See <see cref="DeliveryService.RescheduleDeliveryAsync"/>.</summary>
+public enum RescheduleTiming
+{
+    /// <summary>Right away: for an urgent fix.</summary>
+    Now,
+
+    /// <summary>At a time the person picks.</summary>
+    AtTime,
+
+    /// <summary>At the next opening of the environment's delivery window.</summary>
+    DeliveryWindow,
+
+    /// <summary>Uploaded right away; Business Central installs it with its next minor update.</summary>
+    NextMinorUpdate,
+
+    /// <summary>Uploaded right away; Business Central installs it with its next major update.</summary>
+    NextMajorUpdate,
+}
+
+/// <summary>
+/// What the Reschedule dialog can offer for one scheduled deployment.
+/// </summary>
+/// <param name="CurrentTiming">The timing it is on now, to open the dialog on.</param>
+/// <param name="TimeZone">The customer's IANA zone, which the delivery window and a picked time are read in.</param>
+/// <param name="NextWindowOpeningUtc">The next opening of the delivery window; null when the environment has none.</param>
+/// <param name="LaterUpdateUnavailable">Why the next minor/major update can't be chosen; null when it can.</param>
+public sealed record RescheduleOptions(
+    int DeliveryId,
+    int ReleasePipelineId,
+    string EnvironmentName,
+    DateTime ScheduledFor,
+    RescheduleTiming CurrentTiming,
+    string? TimeZone,
+    TimeOnly? WindowStart,
+    TimeOnly? WindowEnd,
+    DateTime? NextWindowOpeningUtc,
+    string? LaterUpdateUnavailable);
 
 /// <summary>A delivery for the history list, with its per-app rows resolved for display.</summary>
 public sealed record DeliveryHistoryRow(

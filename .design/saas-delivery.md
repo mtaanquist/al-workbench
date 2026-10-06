@@ -872,6 +872,15 @@ whole. The page reads the log line back through the same parser, so a deployment
   dialog as a convenience, but the canonical action is on the deployment pipeline.
 - **Delivery history:** per deployment pipeline, the `OeProjectDelivery` runs with status,
   scheduled/started times, per-app results, and **Cancel** (only while `scheduled`) / **Reschedule**.
+  **Reschedule** (#1097) offers the timings a deployment pipeline can be set to, plus two of its own:
+  *Now* (an urgent fix; asks who is signed in first, as Deploy now does), *At a time I pick* (in the
+  customer's zone; a time that has gone is refused, so Now is the only way to run it at once), *In the
+  next delivery window* (only when the environment has one), and *With the next minor / major Business
+  Central update*. The last two change what is sent: the apps go up straight away and Business Central
+  holds them until that update, exactly as a pipeline set to that timing would. They are offered only
+  for a build Business Central can hold back - one app, already in the environment's app list as last
+  read; the run re-checks the live list. A deployment already handed to Business Central is not
+  reschedulable: the admin API can only cancel it (from the environment's Scheduled installs), not move it.
 - **Deployment pipeline page (`/pipelines/deployments/{id}`), as built (#929, #932):** ports
   `.design/handoff/ReleasePipelineBody.dc.html` on the `DetailPage` frame. The head names the
   solution, the source (build pipeline, or the repository for a GitHub-release pipeline) and the
