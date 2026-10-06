@@ -14,7 +14,7 @@
 
 <div class="page">
     <PageHead Title="Save your token"
-              Trail='@([new("AI assistants", "/account?section=ai"), new("New token")])'>
+              Trail='@([new("AI assistants", "/account/ai"), new("New token")])'>
         <SubtitleContent>
             This is the only time the full token will be shown. Copy it now -
             you'll paste it into your AI client's configuration below. If you
@@ -33,7 +33,7 @@
                     fresh one and we'll show you that instead.
                 </span>
                 <span class="empty-state__action">
-                    <a class="btn btn--sm" href="/account?section=ai">Back to AI assistants</a>
+                    <a class="btn btn--sm" href="/account/ai">Back to AI assistants</a>
                 </span>
             </div>
         </section>
@@ -102,7 +102,7 @@
                 <p class="u-muted" style="margin-top:var(--space-3)">@CurrentHint</p>
             </div>
             <div class="card__foot">
-                <a class="btn btn--primary" href="/account?section=ai">I've saved it</a>
+                <a class="btn btn--primary" href="/account/ai">I've saved it</a>
             </div>
         </section>
     }

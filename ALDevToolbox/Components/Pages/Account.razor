@@ -1,4 +1,5 @@
 @page "/account"
+@page "/account/{SectionName}"
 @attribute [Microsoft.AspNetCore.Authorization.Authorize]
 @rendermode InteractiveServer
 @using ALDevToolbox.Data
@@ -15,6 +16,7 @@
 @inject AccountService Accounts
 @inject IOrganizationContext Org
 @inject IJSRuntime JS
+@inject NavigationManager Nav
 @inject RecoveryCodeService RecoveryCodes
 @inject PasskeyService Passkeys
 @inject EntraSignInService Entra
@@ -36,9 +38,10 @@
 
     - The left rail (.set-nav) is gone. The system's settings sub-nav is
       .header-tabs, and its component inventory has no vertical nav at all, so
-      the rail had nothing to port onto. The tabs are real links carrying
-      ?section=, which the page already understood, so every redirect that lands
-      on a section keeps working and a tab is now bookmarkable.
+      the rail had nothing to port onto. The tabs are real links, each to its
+      own address (/account/security; Profile is the bare /account, #1088), so a
+      tab is bookmarkable. The ?section= links that came before still work and
+      are forwarded to that address.
     - "Danger zone" is no longer a tab. There is nothing destructive left on this
       page to put in one: a user cannot delete their own account, because doing
       so would take their audit trail with them - an admin disables the account
@@ -1118,6 +1121,13 @@ else
 @code {
     private enum Section { Profile, Notifications, Security, Ai, Repos }
 
+    /// <summary>The tab in the address, /account/security. Absent is Profile. See <see cref="SegmentFor"/>.</summary>
+    [Parameter] public string? SectionName { get; set; }
+
+    /// <summary>
+    /// The address a tab had before it had a path, ?section=security. It is in sent
+    /// emails and bookmarks, so it is forwarded to the path form.
+    /// </summary>
     [SupplyParameterFromQuery(Name = "section")] public string? SectionParam { get; set; }
     [SupplyParameterFromQuery(Name = "err")] public string? Error { get; set; }
     [SupplyParameterFromQuery(Name = "msg")] public string? Message { get; set; }
@@ -1184,6 +1194,9 @@ else
 
     protected override async Task OnInitializedAsync()
     {
+        // Leaving for the tab's own address: OnParametersSet sends it, and the page
+        // there reads everything again.
+        if (AddressToSettleOn() is not null) return;
         var userId = Org.CurrentUserId;
         if (userId is null) return;
         var overview = await Accounts.GetAccountOverviewAsync(userId.Value);
@@ -1346,33 +1359,63 @@ else
     }
 
     /// <summary>
-    /// Runs on every parameter change, not just the first, because the section
-    /// tabs are real links carrying <c>?section=</c>: clicking one re-renders
-    /// this same component with new query parameters and never re-runs
-    /// <see cref="OnInitializedAsync"/>, so the loaded data is kept.
+    /// Runs on every parameter change, not just the first: a page that is already
+    /// built can be handed another tab's address as new parameters.
     /// </summary>
     protected override void OnParametersSet()
     {
+        if (AddressToSettleOn() is { } settled)
+        {
+            Nav.NavigateTo(settled, replace: true);
+            return;
+        }
         _section = ResolveSection();
         _tabs = new HeaderTabs.HeaderTabItem[]
         {
-            new("Profile", "/account?section=profile", _section == Section.Profile),
-            new("Notifications", "/account?section=notifications", _section == Section.Notifications),
-            new("Sign-in & security", "/account?section=security", _section == Section.Security),
-            new("AI assistants", "/account?section=ai", _section == Section.Ai),
-            new("Repository access", "/account?section=repos", _section == Section.Repos),
+            new("Profile", AddressOf(Section.Profile), _section == Section.Profile),
+            new("Notifications", AddressOf(Section.Notifications), _section == Section.Notifications),
+            new("Sign-in & security", AddressOf(Section.Security), _section == Section.Security),
+            new("AI assistants", AddressOf(Section.Ai), _section == Section.Ai),
+            new("Repository access", AddressOf(Section.Repos), _section == Section.Repos),
         };
     }
 
+    /// <summary>A tab's name in the address. Null for Profile, the tab the bare /account opens on.</summary>
+    private static string? SegmentFor(Section section) =>
+        section == Section.Profile ? null : section.ToString().ToLowerInvariant();
+
+    private static string AddressOf(Section section) =>
+        SegmentFor(section) is { } segment ? $"/account/{segment}" : "/account";
+
     /// <summary>
-    /// Picks the section to show. An explicit <c>?section=</c> wins; otherwise we
-    /// land the user where a redirect's <c>ok=</c>/<c>err=</c> code (or the
-    /// strong-auth gate's <c>required=1</c>) belongs, so the success/error banner
-    /// shows in context rather than on Profile.
+    /// Where this page should be, or null when it is there: a <c>?section=</c> moves
+    /// into the path, a name is lower-cased, Profile or a name that is not a tab drops
+    /// to the bare address, and a bare address carrying a redirect's code moves to the
+    /// tab the code belongs to. Every other query value (the codes and messages) rides
+    /// along.
+    /// </summary>
+    private string? AddressToSettleOn()
+    {
+        var wanted = AddressOf(ResolveSection());
+        var relative = "/" + Nav.ToBaseRelativePath(Nav.Uri);
+        var path = relative.Split('?', '#')[0];
+        if (SectionParam is null && string.Equals(path, wanted, StringComparison.Ordinal)) return null;
+        var query = new Uri(Nav.GetUriWithQueryParameter("section", (string?)null)).Query;
+        return wanted + query;
+    }
+
+    /// <summary>
+    /// Picks the section to show. A tab named in the address wins; otherwise we land
+    /// the user where a redirect's <c>ok=</c>/<c>err=</c> code (or the strong-auth
+    /// gate's <c>required=1</c>) belongs, so the success/error banner shows in context
+    /// rather than on Profile.
     /// </summary>
     private Section ResolveSection()
     {
-        if (Enum.TryParse<Section>(SectionParam, ignoreCase: true, out var explicitSection))
+        var named = SectionName ?? SectionParam;
+        // A number parses as an enum value too; /account/2 is not a tab.
+        if (Enum.TryParse<Section>(named, ignoreCase: true, out var explicitSection)
+            && Enum.IsDefined(explicitSection) && !int.TryParse(named, out _))
         {
             return explicitSection;
         }

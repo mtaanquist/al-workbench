@@ -198,7 +198,7 @@ internal static class AccountPasskeyEndpoints
             {
                 var first = ex.Errors.FirstOrDefault();
                 var msg = string.IsNullOrEmpty(first.Value) ? "Invalid token request." : first.Value;
-                ctx.Response.Redirect($"/account?section=ai&err={Uri.EscapeDataString(msg)}");
+                ctx.Response.Redirect($"/account/ai?err={Uri.EscapeDataString(msg)}");
             }
         }).RequireAuthorization();
 
@@ -217,7 +217,7 @@ internal static class AccountPasskeyEndpoints
             // Scope to the caller's own tokens: PATs are visible org-wide, so the
             // org filter alone would let any member revoke another's by id (#375).
             await tokens.RevokeAsync(id, ignoreOrgScope: false, forUserId: org.CurrentUserId, ct: ct);
-            ctx.Response.Redirect("/account?section=ai&ok=token-revoked");
+            ctx.Response.Redirect("/account/ai?ok=token-revoked");
         }).RequireAuthorization();
 
         return app;

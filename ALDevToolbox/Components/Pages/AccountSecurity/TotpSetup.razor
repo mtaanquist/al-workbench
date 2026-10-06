@@ -20,7 +20,7 @@
 <div class="page">
     <PageHead Title="Set up authenticator app"
               Subtitle="Once this is on, signing in asks for a six-digit code from your phone as well as your password."
-              Trail='@([new("Sign-in & security", "/account?section=security"), new("Authenticator app")])' />
+              Trail='@([new("Sign-in & security", "/account/security"), new("Authenticator app")])' />
 
     @if (!string.IsNullOrEmpty(Error) && !string.IsNullOrEmpty(Message))
     {
@@ -70,7 +70,7 @@
                     </label>
                 </div>
                 <div class="card__foot">
-                    <a class="btn" href="/account?section=security">Cancel</a>
+                    <a class="btn" href="/account/security">Cancel</a>
                     <button type="submit" class="btn btn--primary">
                         <Icon Name="shield" Width="16" Height="16" />
                         <span>Confirm and turn on</span>
@@ -96,7 +96,7 @@
         }
         catch (Exception)
         {
-            Nav.NavigateTo($"/account?err=Totp&msg={Uri.EscapeDataString("Your authenticator app is already set up. Disable it before setting up a new one.")}");
+            Nav.NavigateTo($"/account/security?err=Totp&msg={Uri.EscapeDataString("Your authenticator app is already set up. Disable it before setting up a new one.")}");
         }
     }
 }

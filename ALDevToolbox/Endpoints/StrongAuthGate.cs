@@ -125,7 +125,7 @@ internal static class StrongAuthGate
             // user's next click.
             if (HttpMethods.IsGet(ctx.Request.Method))
             {
-                ctx.Response.Redirect("/account?required=1");
+                ctx.Response.Redirect("/account/security?required=1");
                 return;
             }
             ctx.Response.StatusCode = StatusCodes.Status403Forbidden;

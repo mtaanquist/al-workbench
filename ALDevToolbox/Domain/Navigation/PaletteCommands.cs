@@ -107,7 +107,7 @@ public static class PaletteCommands
         new("Follow system theme", "monitor", "Appearance", Action: ThemeSystem, Keywords: "mode auto"),
 
         // ---- You ----
-        new("Repository access", "key-round", "Your account", Href: "/account?section=repos",
+        new("Repository access", "key-round", "Your account", Href: "/account/repos",
             Keywords: "repository tokens github azure devops"),
 
         // ---- Admin ----
