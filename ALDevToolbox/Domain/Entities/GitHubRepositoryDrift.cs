@@ -49,6 +49,16 @@ public class GitHubRepositoryDrift
     public int ReleaseId { get; set; }
     public ObjectExplorer.OeRelease? Release { get; set; }
 
+    /// <summary>
+    /// The production environment whose Business Central version <see cref="Proposed"/>
+    /// was measured against, when the solution tracking the repository has one with a
+    /// known version (issue #1081). Null when the scan fell back to
+    /// <see cref="Release"/>. Deleting the environment takes its findings with it, the
+    /// same as deleting the release does.
+    /// </summary>
+    public int? EnvironmentId { get; set; }
+    public ObjectExplorer.OeProjectEnvironment? Environment { get; set; }
+
     /// <summary>When the scan that recorded it ran (UTC).</summary>
     public DateTime DetectedAt { get; set; }
 }

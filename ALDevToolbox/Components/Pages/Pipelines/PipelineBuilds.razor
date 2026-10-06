@@ -137,6 +137,13 @@
                 </span>
             </span>
         }
+        @if (_header!.BuildOnPush)
+        {
+            <span class="meta-item">
+                <span class="meta-item__label">Build on push</span>
+                <span class="meta-item__value">@(_header!.BuildOnPushBlocked is { Length: > 0 } ? "Paused" : "On")</span>
+            </span>
+        }
         <span class="meta-item">
             <span class="meta-item__label">Latest BC</span>
             <span class="meta-item__value meta-item__value--mono">@(_latest is not null && BcShown(_latest) is { Length: > 0 } mb ? mb : "—")</span>
@@ -167,6 +174,20 @@
                 {
                     <button type="button" class="btn btn--sm" @onclick="TakeOverPreviewCheckAsync" disabled="@_takingOver">
                         <span>@(_takingOver ? "Saving..." : "Run the check as me")</span>
+                    </button>
+                }
+            </Alert>
+        }
+
+        @if (_header!.BuildOnPushBlocked is { Length: > 0 } pushPaused)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>New commits are not being built automatically: @pushPaused@(_canManage ? "" : " Ask someone who manages this solution to resume it.")</span>
+                @if (_canManage)
+                {
+                    <button type="button" class="btn btn--sm" @onclick="TakeOverBuildOnPushAsync" disabled="@_takingOver"
+                            title="From now on, builds on push use your repository access.">
+                        <span>@(_takingOver ? "Saving..." : "Resume with my access")</span>
                     </button>
                 }
             </Alert>
@@ -953,6 +974,26 @@
         }
     }
 
+    /// <summary>Resumes paused building on push, running those builds as the person who pressed the button from now on.</summary>
+    private async Task TakeOverBuildOnPushAsync()
+    {
+        if (_takingOver) return;
+        _takingOver = true;
+        try
+        {
+            await Pipelines.TakeOverBuildOnPushAsync(PipelineId);
+            await LoadAsync();
+        }
+        catch (PlanValidationException ex)
+        {
+            _buildError = ex.Errors.Values.FirstOrDefault();
+        }
+        finally
+        {
+            _takingOver = false;
+        }
+    }
+
     /// <summary>Everything one page load reads, so a background poll can gather it
     /// off the circuit and hand it back in a single assignment.</summary>
     private sealed record PageState(
@@ -1252,7 +1293,7 @@
         await _editor.OpenForEditAsync(
             pipeline.Id, pipeline.ProjectId, pipeline.Project?.Name ?? _header?.ProjectName ?? "",
             pipeline.Name, pipeline.RequestedAppIdsJson, pipeline.GithubReleaseRepositoryId, pipeline.Branch, pipeline.PreviewCheck,
-            pipeline.AutoVersion, pipeline.NameIsCustom);
+            pipeline.AutoVersion, pipeline.NameIsCustom, pipeline.BuildOnPush);
     }
 
     private async Task OnPipelineSavedAsync(int _)
@@ -1364,6 +1405,7 @@
     {
         "ready" => "Built",
         "failed" => "Failed",
+        "queued" => "Queued",
         _ => "Started",
     };
 
@@ -1371,8 +1413,9 @@
     private static DateTime StartedWhen(BuildRow b) =>
         b.Status is "ready" or "failed" ? b.FinishedAt ?? b.StartedAt : b.StartedAt;
 
-    private static string? StartedBy(BuildRow b) =>
-        b.StartedByName is { } n ? $"Started by {n}" : null;
+    private static string? StartedBy(BuildRow b) => b.StartedByName is { } n
+        ? b.FromPush ? $"Started by a push, built with {n}'s access" : $"Started by {n}"
+        : b.FromPush ? "Started by a push" : null;
 
     /// <summary>
     /// How long a build took, for the run row's duration cell. A build still in

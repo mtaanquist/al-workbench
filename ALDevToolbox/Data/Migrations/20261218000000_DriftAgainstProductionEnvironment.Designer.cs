@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -13,9 +14,11 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261218000000_DriftAgainstProductionEnvironment")]
+    partial class DriftAgainstProductionEnvironment
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2364,21 +2367,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("branch");
 
-                    b.Property<bool>("BuildOnPush")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false)
-                        .HasColumnName("build_on_push");
-
-                    b.Property<string>("BuildOnPushBlocked")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)")
-                        .HasColumnName("build_on_push_blocked");
-
-                    b.Property<int?>("BuildOnPushByUserId")
-                        .HasColumnType("integer")
-                        .HasColumnName("build_on_push_by_user_id");
-
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -2437,8 +2425,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnName("updated_at");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("BuildOnPushByUserId");
 
                     b.HasIndex("CreatedByUserId");
 
@@ -2688,10 +2674,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)")
                         .HasColumnName("github_release_url");
-
-                    b.Property<int?>("HeadRepositoryId")
-                        .HasColumnType("integer")
-                        .HasColumnName("head_repository_id");
 
                     b.Property<string>("HeadSha")
                         .HasMaxLength(64)
@@ -7659,11 +7641,6 @@ namespace ALDevToolbox.Data.Migrations
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OePipeline", b =>
                 {
-                    b.HasOne("ALDevToolbox.Domain.Entities.User", "BuildOnPushByUser")
-                        .WithMany()
-                        .HasForeignKey("BuildOnPushByUserId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
                     b.HasOne("ALDevToolbox.Domain.Entities.User", "CreatedByUser")
                         .WithMany()
                         .HasForeignKey("CreatedByUserId")
@@ -7690,8 +7667,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-
-                    b.Navigation("BuildOnPushByUser");
 
                     b.Navigation("CreatedByUser");
 
