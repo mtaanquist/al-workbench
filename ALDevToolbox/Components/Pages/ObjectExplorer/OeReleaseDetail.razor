@@ -447,7 +447,9 @@
                                   CompareBy="@_compareBy"
                                   FileResults="_compareResults"
                                   FileResultsTruncated="_compareTruncated"
-                                  ObjectResults="_objectCompareResults" />
+                                  ObjectResults="_objectCompareResults"
+                                  NothingToCompare="@(_otherReleases is { Count: 0 })"
+                                  IsBuild="@(_release?.Kind == OeRelease.ProjectBuildKind)" />
                 break;
         }
     </ChildContent>
@@ -618,8 +620,11 @@
         }
 
         _modules = await ObjectExplorer.ListModuleSummariesAsync(ReleaseId);
-        var allReleases = await ObjectExplorer.ListReleasesAsync();
-        _otherReleases = CompareCandidates(allReleases, ReleaseId, _release.Kind);
+        // Pipeline builds are left out of the global release list, so a build is
+        // offered the other builds of its own solution instead (#1075).
+        _otherReleases = _release.Kind == OeRelease.ProjectBuildKind
+            ? await ObjectExplorer.ListBuildCompareCandidatesAsync(ReleaseId)
+            : CompareCandidates(await ObjectExplorer.ListReleasesAsync(), ReleaseId, _release.Kind);
 
         // Seed filter state from the URL query string so back-navigation
         // from a result detail page restores what the user was searching.
@@ -634,10 +639,11 @@
 
     /// <summary>
     /// The releases this one can be compared with: every other ready release of
-    /// the same kind. Microsoft code and customisations live in separate apps now,
-    /// so a cross-kind compare is not one anyone makes, and with hundreds of
-    /// customer and pipeline-build releases imported the full list buried the
-    /// few releases worth comparing against.
+    /// the same kind. Microsoft code and customisations live in separate apps
+    /// now, so a cross-kind compare is not one anyone makes, and with hundreds
+    /// of customer releases imported the full list buried the few worth
+    /// comparing against. Pipeline builds are not in this list; they use
+    /// <c>ObjectExplorerService.ListBuildCompareCandidatesAsync</c> instead.
     /// </summary>
     internal static List<ReleaseListItem> CompareCandidates(
         IEnumerable<ReleaseListItem> releases, int releaseId, string releaseKind) =>
