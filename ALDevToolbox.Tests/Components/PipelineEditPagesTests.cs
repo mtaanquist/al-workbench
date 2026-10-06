@@ -264,6 +264,8 @@ public sealed class PipelineEditPagesTests : IDisposable
         cut.WaitForAssertion(() => cut.Find("#rpe-prepare"));
         cut.FindAll("#rpe-without-approval").Should().BeEmpty("it only follows a prepared deployment");
         cut.Find("#rpe-prepare").Change(true);
+        // The solution's environments load after the form, so the sandbox may arrive later.
+        cut.WaitForAssertion(() => cut.Find("#rpe-without-approval"));
         cut.Find("#rpe-without-approval").Change(true);
         cut.Find(".page-head .btn--primary").Click();
 
@@ -289,6 +291,8 @@ public sealed class PipelineEditPagesTests : IDisposable
         cut.WaitForAssertion(() => cut.Find("#rpe-prepare"));
         cut.Find("#rpe-prepare").Change(true);
 
+        // Once the environments have loaded, the page says why the option isn't there.
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("choose a sandbox as the target environment"));
         cut.FindAll("#rpe-without-approval").Should().BeEmpty();
     }
 
