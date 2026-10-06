@@ -94,6 +94,7 @@ public sealed class ReleasePipelineService
                 r.ProjectEnvironment.Status,
                 r.PrepareReleaseOnNewBuild)
             {
+                DeployWithoutApproval = r.DeployWithoutApproval,
                 RestrictBranch = r.RestrictBranch,
                 AllowedBranch = r.AllowedBranch,
                 NameIsCustom = r.NameIsCustom,
@@ -277,6 +278,7 @@ public sealed class ReleasePipelineService
             .Include(r => r.BuildPipeline)
             .Include(r => r.GithubReleaseRepository)
             .Include(r => r.ProjectEnvironment)
+            .Include(r => r.DeployWithoutApprovalByUser)
             .FirstOrDefaultAsync(ct);
     }
 
@@ -301,6 +303,8 @@ public sealed class ReleasePipelineService
             DeploymentSchedule = v.DeploymentSchedule,
             SchemaSyncMode = v.SchemaSyncMode,
             PrepareReleaseOnNewBuild = v.PrepareReleaseOnNewBuild,
+            DeployWithoutApproval = v.DeployWithoutApproval,
+            DeployWithoutApprovalByUserId = v.DeployWithoutApproval ? _orgContext.CurrentUserId : null,
             RestrictBranch = v.RestrictBranch,
             AllowedBranch = v.AllowedBranch,
             CreatedAt = now,
@@ -334,6 +338,11 @@ public sealed class ReleasePipelineService
         pipeline.DeploymentSchedule = v.DeploymentSchedule;
         pipeline.SchemaSyncMode = v.SchemaSyncMode;
         pipeline.PrepareReleaseOnNewBuild = v.PrepareReleaseOnNewBuild;
+        // Whoever saves the pipeline with it on is the person it runs as from now on:
+        // the settings those deployments follow are then theirs, and a pipeline whose
+        // person lost access is put right by someone who has it simply saving it.
+        pipeline.DeployWithoutApproval = v.DeployWithoutApproval;
+        pipeline.DeployWithoutApprovalByUserId = v.DeployWithoutApproval ? _orgContext.CurrentUserId : null;
         pipeline.RestrictBranch = v.RestrictBranch;
         pipeline.AllowedBranch = v.AllowedBranch;
         pipeline.UpdatedAt = DateTime.UtcNow;
@@ -451,7 +460,7 @@ public sealed class ReleasePipelineService
         // the user would hit later, just earlier and while they can still change it.
         var environment = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Id == input.ProjectEnvironmentId && e.ProjectId == input.ProjectId)
-            .Select(e => new { e.Name, e.Status, Missing = e.MissingSince != null, e.UpdateWindowStart, e.UpdateWindowEnd })
+            .Select(e => new { e.Name, e.Type, e.Status, Missing = e.MissingSince != null, e.UpdateWindowStart, e.UpdateWindowEnd })
             .FirstOrDefaultAsync(ct);
         if (environment is null)
         {
@@ -535,14 +544,23 @@ public sealed class ReleasePipelineService
             }
         }
 
+        // Deploying without approval is a step past preparing one, and only ever for a
+        // sandbox: a production environment always waits for a person (#1096).
+        var prepare = input.PrepareReleaseOnNewBuild && artifactSource == ReleaseArtifactSource.Build;
+        var deployWithoutApproval = input.DeployWithoutApproval && prepare;
+        if (deployWithoutApproval && environment is not null && !BcEnvironmentTypes.IsSandbox(environment.Type))
+        {
+            errors["DeployWithoutApproval"] =
+                $"'{environment.Name}' isn't a sandbox, so its deployments have to be approved. Turn off deploying without approval, or choose a sandbox environment.";
+        }
+
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
         // Preparing a deployment follows a build pipeline's builds; a pipeline that installs
         // GitHub releases has no build to follow, so the setting means nothing there.
         return new ValidatedReleasePipeline(
             name!, custom is not null, deploymentSchedule, schemaSyncMode, artifactSource, buildPipelineId, releaseRepositoryId,
-            input.PrepareReleaseOnNewBuild && artifactSource == ReleaseArtifactSource.Build,
-            restrictBranch, allowedBranch);
+            prepare, deployWithoutApproval, restrictBranch, allowedBranch);
     }
 
     /// <summary>The normalised values a validated deployment-pipeline input settles on.</summary>
@@ -555,6 +573,7 @@ public sealed class ReleasePipelineService
         int? BuildPipelineId,
         int? GithubReleaseRepositoryId,
         bool PrepareReleaseOnNewBuild,
+        bool DeployWithoutApproval,
         bool RestrictBranch,
         string? AllowedBranch);
 
@@ -648,7 +667,13 @@ public sealed record ReleasePipelineInput(
     /// </summary>
     bool RestrictBranch = false,
     /// <summary>The branch <see cref="RestrictBranch"/> allows; blank is the repositories' default branch.</summary>
-    string? AllowedBranch = null);
+    string? AllowedBranch = null,
+    /// <summary>
+    /// Deploy each new successful build straight away instead of waiting for approval
+    /// (#1096). Needs <see cref="PrepareReleaseOnNewBuild"/>, and refused unless the
+    /// target environment is a sandbox.
+    /// </summary>
+    bool DeployWithoutApproval = false);
 
 /// <summary>List-row projection of a deployment pipeline with its source and target resolved for display.</summary>
 public sealed record ReleasePipelineRow(
@@ -685,6 +710,12 @@ public sealed record ReleasePipelineRow(
     [property: System.Text.Json.Serialization.JsonPropertyName("prepareDeploymentOnNewBuild")]
     bool PrepareReleaseOnNewBuild = false)
 {
+    /// <summary>
+    /// True when a new successful build is deployed to this sandbox without waiting for
+    /// approval (#1096).
+    /// </summary>
+    public bool DeployWithoutApproval { get; init; }
+
     /// <summary>True when this pipeline only deploys builds made from <see cref="AllowedBranch"/>.</summary>
     public bool RestrictBranch { get; init; }
 
