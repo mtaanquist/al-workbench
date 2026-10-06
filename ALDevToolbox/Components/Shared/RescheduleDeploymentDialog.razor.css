@@ -1,0 +1,51 @@
+/* The "when" choices, drawn like the install dialogs' (InstallTimingPicker.razor.css). */
+.rs-when {
+    margin: var(--space-3) 0 0;
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    background: var(--surface-2);
+    display: grid;
+    gap: var(--space-2);
+}
+
+.rs-when__legend {
+    padding: 0 var(--space-1);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--ink-2);
+}
+
+.rs-when__opt {
+    display: inline-flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--ink-2);
+}
+
+/* The radio sits beside the first line when an option wraps. */
+.rs-when__opt input { margin-top: 0.2em; flex: none; }
+
+.rs-when__opt input:disabled + span { color: var(--ink-3); }
+
+/* Why the two Business Central updates can't be picked, said plainly under them. */
+.rs-when__why {
+    font-size: var(--text-sm);
+    color: var(--ink-2);
+}
+
+/* The picked time and the hints, indented under their option. */
+.rs-when__sub {
+    display: grid;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-1) calc(var(--space-2) + 1em);
+}
+
+/* The picked time said back on the customer's clock. */
+.rs-when__echo {
+    margin: 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--ink-2);
+}

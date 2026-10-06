@@ -56,11 +56,13 @@ public class OeProjectDelivery
     public string DeploymentSchedule { get; set; } = BcDeploymentSchedule.Immediate;
 
     /// <summary>
-    /// True when the release pipeline was set to install in the environment's delivery
-    /// window when this was scheduled, so the time was the pipeline's rule rather than a
-    /// schedule Business Central applies. Read with <see cref="ScheduledOutsideWindow"/>:
-    /// both true means the person releasing overrode the rule (for example with "Now").
-    /// A snapshot like the rest of this block, because the pipeline can be edited later.
+    /// True when this delivery's time came from the environment's delivery window: the
+    /// release pipeline was set to it when this was scheduled, or a reschedule chose "In the
+    /// next delivery window" (#1097). A reschedule to any other timing clears it, so it says
+    /// where the current time came from rather than what the pipeline was set to. Read with
+    /// <see cref="ScheduledOutsideWindow"/>: both true means the person releasing overrode
+    /// the rule (for example with "Now" in the deploy dialog). Not rewritten when the
+    /// pipeline is edited later.
     /// </summary>
     public bool ScheduledByDeliveryWindow { get; set; }
 

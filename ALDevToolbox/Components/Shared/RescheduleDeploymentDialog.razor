@@ -1,0 +1,397 @@
+@rendermode InteractiveServer
+@using ALDevToolbox.Services.ObjectExplorer.Delivery
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
+@inject DeliveryService Deliveries
+@inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
+@inject ILogger<RescheduleDeploymentDialog> Log
+
+@*
+    "Reschedule" for a deployment that is waiting to run: right away (an urgent fix), at a
+    time the person picks, in the environment's next delivery window, or with Business
+    Central's next minor or major update - the timings a deployment pipeline itself can be
+    set to. Right away asks who is signed in first, as Deploy now does. The two Business
+    Central updates are only offered for a build Business Central can hold back: one app,
+    already installed. Opened imperatively with the deployment's id; raises OnRescheduled
+    once the deployment has moved. See .design/saas-delivery.md ("Delivery history").
+
+    Named user: a BC consultant whose production deployment is booked for tonight's
+    delivery window, and who needs it out now for a hotfix, or later because the customer
+    asked for a quiet week.
+*@
+
+@if (_options is { } o)
+{
+    <div class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="rs-title"
+         tabindex="-1" @onkeydown="OnKeyDown" @ref="_root">
+        <div class="modal-backdrop" @onclick="Cancel" aria-hidden="true"></div>
+        <div class="confirm-dialog" @onclick:stopPropagation>
+            <div class="confirm-dialog__head">
+                <span class="confirm-dialog__icon" aria-hidden="true">
+                    <Icon Name="calendar" Width="17" Height="17" />
+                </span>
+                <h2 id="rs-title" class="confirm-dialog__title">Reschedule deployment</h2>
+            </div>
+            <div class="confirm-dialog__body">
+                <p>The deployment of build #@o.BuildId to <b>@o.EnvironmentName</b> is booked for @CurrentText.</p>
+
+                <fieldset class="rs-when">
+                    <legend class="rs-when__legend">When should it install?</legend>
+
+                    <label class="rs-when__opt">
+                        <input type="radio" name="rs-timing" checked="@(_timing == RescheduleTiming.Now)"
+                               disabled="@_saving" @onchange="() => Pick(RescheduleTiming.Now)" />
+                        <span>Now - anyone working in Business Central may be interrupted</span>
+                    </label>
+
+                    <label class="rs-when__opt">
+                        <input type="radio" name="rs-timing" checked="@(_timing == RescheduleTiming.AtTime)"
+                               disabled="@_saving" @onchange="() => Pick(RescheduleTiming.AtTime)" />
+                        <span>At a time I pick (@CityLabel time)</span>
+                    </label>
+                    @if (_timing == RescheduleTiming.AtTime)
+                    {
+                        <div class="rs-when__sub">
+                            <input id="rs-when" type="datetime-local" class="input" aria-label="Date and time"
+                                   @bind="_local" @bind:event="oninput" disabled="@_saving" />
+                            @* The browser may draw the field as a 12-hour clock; this sentence settles what was picked. *@
+                            <p class="rs-when__echo">Installs at @Said(PickedUtc).</p>
+                            @if (PickedTimeHasGone)
+                            {
+                                <FieldError Message="Pick a time that hasn't happened yet, or choose Now to deploy right away." />
+                            }
+                            else if (OutsideWindowWarning is { } outside)
+                            {
+                                <span class="field-warn"><Icon Name="triangle-alert" Width="13" Height="13" />@outside</span>
+                            }
+                        </div>
+                    }
+
+                    @if (o.NextWindowOpeningUtc is { } opening)
+                    {
+                        <label class="rs-when__opt">
+                            <input type="radio" name="rs-timing" checked="@(_timing == RescheduleTiming.DeliveryWindow)"
+                                   disabled="@_saving" @onchange="() => Pick(RescheduleTiming.DeliveryWindow)" />
+                            <span>In the delivery window, @WindowText - @(WindowIsOpen ? "open now, so it installs right away" : $"opens {Said(opening)}")</span>
+                        </label>
+                    }
+
+                    <label class="rs-when__opt">
+                        <input type="radio" name="rs-timing" checked="@(_timing == RescheduleTiming.NextMinorUpdate)"
+                               disabled="@(_saving || o.LaterUpdateUnavailable is not null)" @onchange="() => Pick(RescheduleTiming.NextMinorUpdate)" />
+                        <span>With the next minor Business Central update@(UpdateNote("minor"))</span>
+                    </label>
+                    <label class="rs-when__opt">
+                        <input type="radio" name="rs-timing" checked="@(_timing == RescheduleTiming.NextMajorUpdate)"
+                               disabled="@(_saving || o.LaterUpdateUnavailable is not null)" @onchange="() => Pick(RescheduleTiming.NextMajorUpdate)" />
+                        <span>With the next major Business Central update@(UpdateNote("major"))</span>
+                    </label>
+                    @if (o.LaterUpdateUnavailable is { } unavailable)
+                    {
+                        <small class="rs-when__sub rs-when__why">Not available: @unavailable</small>
+                    }
+                    else
+                    {
+                        <small class="field__hint rs-when__sub">
+                            With either update, the apps are uploaded now and Business Central installs them during that update. Until then you can cancel it under Scheduled installs on the environment.
+                        </small>
+                    }
+                </fieldset>
+
+                @if (o.ForceSync && InstallsNow)
+                {
+                    <span class="field-warn"><Icon Name="triangle-alert" Width="13" Height="13" />This deployment uses Force sync: if the build removes tables or fields, their data is deleted.</span>
+                }
+
+                @if (SecretWarning is { } secretWarn)
+                {
+                    <span class="field-warn"><Icon Name="triangle-alert" Width="13" Height="13" />@secretWarn</span>
+                }
+
+                @if (_sessionsCheck is { } check)
+                {
+                    <Alert Tone="AlertTone.Warn" Role="status"><span>@check.Question</span></Alert>
+                }
+
+                @if (_error is { } err)
+                {
+                    <Alert Tone="AlertTone.Danger"><span>@err</span></Alert>
+                }
+            </div>
+            <div class="confirm-dialog__actions">
+                <button type="button" class="btn" @onclick="Cancel" disabled="@_saving">Cancel</button>
+                <button type="button" class="btn btn--primary" @onclick="SaveAsync" disabled="@(_saving || PickedTimeHasGone || Unchanged)">
+                    <Icon Name="@(InstallsNow ? "send" : "save")" Width="14" Height="14" />
+                    <span>@ConfirmLabel</span>
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>Raised once the deployment has moved, with its id.</summary>
+    [Parameter] public EventCallback<int> OnRescheduled { get; set; }
+
+    private RescheduleOptions? _options;
+    private TimeZoneInfo _tz = TimeZoneInfo.Utc;
+    private DateTime? _secretExpiresAt;
+    private RescheduleTiming _timing;
+    private DateTime _local;
+    private bool _saving;
+    private bool _checkingSessions;
+    private string? _error;
+    // Who was signed in when "Now" was first confirmed; set only when somebody was (or we
+    // couldn't tell), and the second press goes ahead. See OpenSessionsCheck.
+    private OpenSessionsCheck? _sessionsCheck;
+    private bool _focusPending;
+    private ElementReference _root;
+
+    private string CityLabel => string.IsNullOrWhiteSpace(_options?.TimeZone) ? "UTC" : BcUpdateWindow.CityLabel(_options!.TimeZone!);
+
+    private string WindowText => _options is { WindowStart: { } s, WindowEnd: { } e }
+        ? $"{UpdateWindow.Clock(s)}-{UpdateWindow.Clock(e)} ({CityLabel})"
+        : string.Empty;
+
+    /// <summary>
+    /// "22:00 on 6 Oct, Copenhagen time (20:00 on 6 Oct, UTC time)": an instant on the
+    /// customer's clock, which the window and the picker are in, then on the page's clock
+    /// when that reads differently, so it can be matched against the times on the page.
+    /// </summary>
+    private string Said(DateTime utc)
+    {
+        var instant = DateTime.SpecifyKind(utc, DateTimeKind.Utc);
+        var customer = $"{CustomerClock(instant)}, {CityLabel} time";
+        return _tz.GetUtcOffset(instant) == Zone.Zone.GetUtcOffset(instant)
+            ? customer
+            : $"{customer} ({InstallTimingPicker.SlotText(Zone, instant)})";
+    }
+
+    /// <summary>What the deployment is booked for now, for the opening sentence.</summary>
+    private string CurrentText => _options!.CurrentTiming switch
+    {
+        RescheduleTiming.DeliveryWindow => $"the next delivery window, {Said(_options.ScheduledFor)}",
+        RescheduleTiming.NextMinorUpdate => "the next minor Business Central update",
+        RescheduleTiming.NextMajorUpdate => "the next major Business Central update",
+        _ => Said(_options.ScheduledFor),
+    };
+
+    /// <summary>
+    /// The environment's next update as last read, beside the option it belongs to:
+    /// " (next: 28.1 on 14 Oct)". Empty when it isn't of that kind or has no date.
+    /// </summary>
+    private string UpdateNote(string kind) =>
+        _options is { NextUpdateDate: { } date, NextUpdateVersion: { } version } o
+        && string.Equals(o.NextUpdateType, kind, StringComparison.OrdinalIgnoreCase)
+        && date > DateTime.UtcNow
+            ? $" (next: {version} on {Zone.Format(date, "d MMM")})"
+            : string.Empty;
+
+    /// <summary>True while the choice is the booking the deployment already has, so there is nothing to save.</summary>
+    private bool Unchanged => _options is { } o && _timing == o.CurrentTiming && _timing switch
+    {
+        RescheduleTiming.AtTime => Math.Abs((PickedUtc - o.ScheduledFor).TotalMinutes) < 1,
+        RescheduleTiming.Now => false,
+        _ => true,
+    };
+
+    /// <summary>"22:00 on 7 Oct": an instant on the customer's clock, the clock the window and the picker are in.</summary>
+    private string CustomerClock(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), _tz)
+            .ToString("HH:mm 'on' d MMM", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// The instant the picked wall clock means on the customer's clock. A time that doesn't
+    /// exist there (the spring-forward hour) is nudged forward rather than refused, as the
+    /// install dialogs do; converting it as it stands would throw mid-render.
+    /// </summary>
+    private DateTime PickedUtc
+    {
+        get
+        {
+            var wall = DateTime.SpecifyKind(_local, DateTimeKind.Unspecified);
+            for (var i = 0; i < 4 && _tz.IsInvalidTime(wall); i++) wall = wall.AddHours(1);
+            return TimeZoneInfo.ConvertTimeToUtc(wall, _tz);
+        }
+    }
+
+    /// <summary>
+    /// True when the chosen timing installs on arrival within the minute: Now, a picked time
+    /// that has come, or a delivery window that is open. Those interrupt whoever is signed
+    /// in, so they ask first, as the deploy dialog does.
+    /// </summary>
+    private bool InstallsNow => RunsAtUtc is { } at
+        && _timing is not (RescheduleTiming.NextMinorUpdate or RescheduleTiming.NextMajorUpdate)
+        && at <= DateTime.UtcNow.AddMinutes(1);
+
+    private bool WindowIsOpen => _options?.NextWindowOpeningUtc is { } opening && opening <= DateTime.UtcNow.AddMinutes(1);
+
+    private bool PickedTimeHasGone => _timing == RescheduleTiming.AtTime && PickedUtc < DateTime.UtcNow.AddMinutes(-1);
+
+    /// <summary>When the chosen timing sends the apps: the two Business Central updates upload them right away.</summary>
+    private DateTime? RunsAtUtc => _timing switch
+    {
+        RescheduleTiming.AtTime => PickedUtc,
+        RescheduleTiming.DeliveryWindow => _options?.NextWindowOpeningUtc,
+        _ => DateTime.UtcNow,
+    };
+
+    private string ConfirmLabel => _checkingSessions ? "Checking who is online..."
+        : _saving ? "Saving..."
+        : InstallsNow ? (_sessionsCheck is not null ? "Deploy anyway" : "Deploy now")
+        : "Reschedule";
+
+    private string? OutsideWindowWarning
+    {
+        get
+        {
+            if (_options is not { WindowStart: { } s, WindowEnd: { } e } o) return null;
+            if (UpdateWindow.IsWithin(s, e, _tz, PickedUtc)) return null;
+            return $"This time is outside {o.EnvironmentName}'s delivery window ({WindowText}). It will still run at the time you picked, and the deployment history will show it ran outside the window.";
+        }
+    }
+
+    /// <summary>
+    /// Warn-but-allow, as the deployment dialog does: the run fails if the Business Central
+    /// client secret has expired by the time it starts.
+    /// </summary>
+    private string? SecretWarning
+    {
+        get
+        {
+            if (_secretExpiresAt is not { } expiry) return null;
+            if (expiry <= DateTime.UtcNow)
+            {
+                return "The Business Central client secret has expired. Rotate it in Entra and re-enter it before this can install.";
+            }
+            if (RunsAtUtc is { } at && at > expiry)
+            {
+                // A calendar date the consultant typed, stored at midnight UTC: printed as
+                // that date, never converted into a zone that could move it a day.
+                return $"The Business Central client secret expires {expiry:yyyy-MM-dd}. This time is after that and will fail unless the secret is rotated first.";
+            }
+            return null;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focusPending && _options is not null)
+        {
+            _focusPending = false;
+            try { await _root.FocusAsync(); }
+            catch { /* detached */ }
+        }
+    }
+
+    /// <summary>
+    /// Opens the dialog for a scheduled deployment. Returns false when it can't be
+    /// rescheduled any more (it started, or is gone), so the page can reload instead.
+    /// </summary>
+    /// <param name="secretExpiresAt">When the Business Central client secret expires, for the warning; null when unknown.</param>
+    public async Task<bool> OpenAsync(int deliveryId, DateTime? secretExpiresAt)
+    {
+        var options = await Deliveries.GetRescheduleOptionsAsync(deliveryId);
+        if (options is null) return false;
+        await Zone.EnsureLoadedAsync();
+
+        _options = options;
+        _secretExpiresAt = secretExpiresAt;
+        _tz = UpdateWindow.ResolveTimeZone(options.TimeZone);
+        _timing = options.CurrentTiming;
+        // A deployment whose time has come is about to run; offer the next whole hour rather than a time that has gone.
+        var start = options.ScheduledFor > DateTime.UtcNow ? options.ScheduledFor : DateTime.UtcNow.AddHours(1);
+        var local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(start, DateTimeKind.Utc), _tz);
+        _local = new DateTime(local.Year, local.Month, local.Day, local.Hour,
+            options.ScheduledFor > DateTime.UtcNow ? local.Minute : 0, 0, DateTimeKind.Unspecified);
+        _saving = false;
+        _checkingSessions = false;
+        _error = null;
+        _sessionsCheck = null;
+        _focusPending = true;
+        StateHasChanged();
+        return true;
+    }
+
+    private void Pick(RescheduleTiming timing)
+    {
+        _timing = timing;
+        _sessionsCheck = null;
+        _error = null;
+    }
+
+    private void Cancel()
+    {
+        if (_saving) return;
+        _options = null;
+    }
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key is "Escape" or "Esc") Cancel();
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_saving || PickedTimeHasGone || _options is not { } o) return;
+        _saving = true;
+        _error = null;
+        try
+        {
+            // Installing right away interrupts whoever is signed in, so ask first, as Deploy now does.
+            if (InstallsNow && _sessionsCheck is null)
+            {
+                _checkingSessions = true;
+                StateHasChanged();
+                var check = await CheckSessionsAsync(o);
+                _checkingSessions = false;
+                if (check.NeedsConfirmation)
+                {
+                    _sessionsCheck = check;
+                    return;
+                }
+            }
+
+            await Deliveries.RescheduleDeliveryAsync(o.DeliveryId, _timing,
+                _timing == RescheduleTiming.AtTime ? PickedUtc : null);
+            _options = null;
+            await OnRescheduled.InvokeAsync(o.DeliveryId);
+        }
+        catch (PlanValidationException ex)
+        {
+            _error = ex.Errors.Values.FirstOrDefault() ?? "Couldn't reschedule the deployment. It may already have started: close this, check its status, and try again.";
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _error = "Only the solution owner or an admin can reschedule this solution's deployments.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Failed to reschedule delivery {DeliveryId}.", o.DeliveryId);
+            _error = "Couldn't reschedule the deployment. It may already have started: close this, check its status, and try again.";
+        }
+        finally
+        {
+            _saving = false;
+            _checkingSessions = false;
+        }
+    }
+
+    /// <summary>
+    /// Who is signed in to the target. Anything but being refused comes back as a check we
+    /// couldn't make, so a fault on our side asks the question rather than blocking.
+    /// </summary>
+    private async Task<OpenSessionsCheck> CheckSessionsAsync(RescheduleOptions o)
+    {
+        try
+        {
+            return await Deliveries.CheckOpenSessionsAsync(o.ReleasePipelineId);
+        }
+        catch (Exception ex) when (ex is not (ProjectAccessDeniedException or PlanValidationException))
+        {
+            Log.LogError(ex, "Failed to check the sessions before rescheduling delivery {DeliveryId} to now.", o.DeliveryId);
+            return OpenSessionsCheck.Unknown(o.EnvironmentName, "Something went wrong at our end.");
+        }
+    }
+}
