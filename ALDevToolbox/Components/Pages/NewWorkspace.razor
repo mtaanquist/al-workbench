@@ -498,6 +498,25 @@
                                     <a href="@($"/solutions/{solutionId}")">@_createdRepo.SolutionName</a>.
                                 </span>
                             }
+                            @if (_createdRepo.Branches is { Count: > 0 } branches)
+                            {
+                                <span>
+                                    Also created the
+                                    @for (var i = 0; i < branches.Count; i++)
+                                    {
+                                        @(i == 0 ? "" : i == branches.Count - 1 ? " and " : ", ")<code class="code">@branches[i]</code>
+                                    }
+                                    @(branches.Count == 1 ? " branch." : " branches.")
+                                    @if (_createdRepo.PipelineNames is { Count: > 0 } pipelines
+                                         && _createdRepo.SolutionId is { } pipelineSolutionId)
+                                    {
+                                        <text>
+                                            <a href="@($"/solutions/{pipelineSolutionId}?tab=pipelines")">@(pipelines.Count == 1 ? "A build pipeline" : "Build pipelines")</a>
+                                            for @(pipelines.Count == 1 ? "it" : "each branch") are ready to build.
+                                        </text>
+                                    }
+                                </span>
+                            }
                             @* The fallback for a machine without VS
                                Code, and for anyone who would rather
                                type it. Copy button wired the same
@@ -518,6 +537,18 @@
                            only the customer's solution is missing. *@
                         <Alert Tone="AlertTone.Warn">
                             <span>@_createdRepo.SolutionWarning</span>
+                        </Alert>
+                    }
+                    @if (!string.IsNullOrEmpty(_createdRepo.BranchesWarning))
+                    {
+                        <Alert Tone="AlertTone.Warn">
+                            <span>@_createdRepo.BranchesWarning</span>
+                        </Alert>
+                    }
+                    @if (!string.IsNullOrEmpty(_createdRepo.PipelinesWarning))
+                    {
+                        <Alert Tone="AlertTone.Warn">
+                            <span>@_createdRepo.PipelinesWarning</span>
                         </Alert>
                     }
                     @if (!string.IsNullOrEmpty(_createdRepo.StandardsWarning))

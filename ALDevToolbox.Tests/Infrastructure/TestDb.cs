@@ -474,6 +474,9 @@ public sealed class TestDb : IDisposable
         new(NewGenerationService(ctx), NewGitHubRepositoryService(ctx, client, access),
             NewGitHubConnectionService(ctx, access), access, client,
             NewGitHubRepositoryStandardsService(ctx), NewProjectService(ctx),
+            new ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService(
+                ctx, OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext),
+                NullLogger<ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService>.Instance),
             NewOrganizationConfigService(ctx), NewToolEnablement(ctx, toolAvailability), ctx, OrgContext,
             logger ?? NullLogger<ALDevToolbox.Services.GitHub.GitHubWorkspaceRepositoryService>.Instance);
 

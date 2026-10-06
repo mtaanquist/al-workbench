@@ -6,9 +6,11 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Tools;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Generation;
+using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Services.Organizations;
 using ALDevToolbox.Services.Tools;
+using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.GitHub;
 
@@ -49,6 +51,17 @@ namespace ALDevToolbox.Services.GitHub;
 /// committed by the time this can be set, so it is a warning on a success
 /// rather than a failure, the same shape as <paramref name="StandardsWarning"/>.
 /// </param>
+/// <param name="Branches">
+/// The branches created beside the default branch (<c>test</c> and <c>staging</c>),
+/// at the same commit. Empty when none were.
+/// </param>
+/// <param name="BranchesWarning">Which branches GitHub refused, or null when none were refused.</param>
+/// <param name="PipelineNames">
+/// The build pipelines added to the solution, one per branch. Empty when the
+/// repository is not on a solution, Pipelines is switched off, or the solution
+/// has other repositories (see <paramref name="PipelinesWarning"/>).
+/// </param>
+/// <param name="PipelinesWarning">Why no build pipelines were added, or null.</param>
 public sealed record GitHubWorkspaceRepository(
     GitHubRepositorySummary Repository,
     int FileCount,
@@ -59,7 +72,11 @@ public sealed record GitHubWorkspaceRepository(
     int? SolutionId = null,
     string? SolutionName = null,
     bool SolutionCreated = false,
-    string? SolutionWarning = null);
+    string? SolutionWarning = null,
+    IReadOnlyList<string>? Branches = null,
+    string? BranchesWarning = null,
+    IReadOnlyList<string>? PipelineNames = null,
+    string? PipelinesWarning = null);
 
 /// <summary>
 /// Creates a repository in the connected GitHub organisation and puts a freshly
@@ -119,6 +136,13 @@ public sealed class GitHubWorkspaceRepositoryService
 
     private static readonly Regex NameRegex = new(NamePattern, RegexOptions.Compiled);
 
+    /// <summary>
+    /// The branches every new repository gets beside its default branch, each
+    /// with a build pipeline: work moves through test and staging before it
+    /// reaches the default branch.
+    /// </summary>
+    public static readonly IReadOnlyList<string> WorkingBranches = ["test", "staging"];
+
     private readonly GenerationService _generation;
     private readonly GitHubRepositoryService _repositories;
     private readonly GitHubConnectionService _connection;
@@ -126,6 +150,7 @@ public sealed class GitHubWorkspaceRepositoryService
     private readonly GitHubAppClient _github;
     private readonly GitHubRepositoryStandardsService _standards;
     private readonly ProjectService _projects;
+    private readonly PipelineService _pipelines;
     private readonly OrganizationConfigService _orgConfig;
     private readonly ToolEnablement _tools;
     private readonly AppDbContext _db;
@@ -140,6 +165,7 @@ public sealed class GitHubWorkspaceRepositoryService
         GitHubAppClient github,
         GitHubRepositoryStandardsService standards,
         ProjectService projects,
+        PipelineService pipelines,
         OrganizationConfigService orgConfig,
         ToolEnablement tools,
         AppDbContext db,
@@ -153,6 +179,7 @@ public sealed class GitHubWorkspaceRepositoryService
         _github = github;
         _standards = standards;
         _projects = projects;
+        _pipelines = pipelines;
         _orgConfig = orgConfig;
         _tools = tools;
         _db = db;
@@ -311,8 +338,11 @@ public sealed class GitHubWorkspaceRepositoryService
         // The organisation's standards ride in the same commit as the generated
         // files, so read them before the fill rather than after it.
         var standards = await _standards.GetAsync(ct);
-        var standardsFileCount = await FillAsync(
+        var (standardsFileCount, headSha) = await FillAsync(
             token, repository, orgLogin, plan, files, standards.Files, userId, ct);
+        // Before the ruleset, for the same reason the files are: a ruleset that
+        // covers every branch would otherwise refuse the app its own branches.
+        var branches = await CreateWorkingBranchesAsync(token, repository, headSha, ct);
         var rulesetWarning = await ApplyRulesetAsync(
             token, repository, standards.Ruleset is { IsEmpty: false } configured ? configured : null, ct);
         // Last, because a solution with no repository is the orphan the whole
@@ -321,19 +351,131 @@ public sealed class GitHubWorkspaceRepositoryService
         var solution = solutionsEnabled
             ? await RegisterSolutionAsync(plan, repository, solutionId, ct)
             : default((int? Id, string? Name, bool Created, string? Warning));
+        var pipelines = solution.Id is { } registeredOn && headSha is not null
+            ? await CreateBuildPipelinesAsync(
+                registeredOn, [repository.DefaultBranch, .. branches.Created], ct)
+            : default((IReadOnlyList<string> Names, string? Warning));
         await RecordAsync(repository, plan, files.Count, solution.Id, ct);
 
         _logger.LogInformation(
             "User {UserId} created the repository {RepoFullName} from workspace '{Workspace}' "
-            + "(template '{Template}', {FileCount} files, {Visibility}, solution {SolutionId}).",
+            + "(template '{Template}', {FileCount} files, {Visibility}, solution {SolutionId}, "
+            + "{BranchCount} extra branches, {PipelineCount} build pipelines).",
             userId, repository.FullName, plan.WorkspaceName, plan.TemplateKey, files.Count,
-            isPrivate ? "private" : "public", solution.Id);
+            isPrivate ? "private" : "public", solution.Id, branches.Created.Count, pipelines.Names?.Count ?? 0);
 
         return new GitHubWorkspaceRepository(
             repository, files.Count, archiveName, archiveBytes,
             standardsFileCount, rulesetWarning,
-            solution.Id, solution.Name, solution.Created, solution.Warning);
+            solution.Id, solution.Name, solution.Created, solution.Warning,
+            branches.Created, branches.Warning,
+            pipelines.Names ?? [], pipelines.Warning);
     }
+
+    /// <summary>
+    /// Creates the <see cref="WorkingBranches"/> at the commit the default
+    /// branch was just moved on to, so a new repository starts with the branches
+    /// a team works through before anything reaches the default branch.
+    ///
+    /// <para><strong>Nothing here may throw.</strong> The repository exists and
+    /// holds the workspace by now, so a branch GitHub refuses is a sentence beside
+    /// the success, like a refused ruleset. A branch that is already there counts
+    /// as created: it can only have come from someone working in the repository
+    /// in the seconds since it was made, and it is the branch they wanted.</para>
+    /// </summary>
+    private async Task<(IReadOnlyList<string> Created, string? Warning)> CreateWorkingBranchesAsync(
+        string token, GitHubRepositorySummary repository, string? headSha, CancellationToken ct)
+    {
+        if (headSha is null) return ([], null);
+
+        var created = new List<string>();
+        var refused = new List<string>();
+        foreach (var branch in WorkingBranches)
+        {
+            if (string.Equals(branch, repository.DefaultBranch, StringComparison.Ordinal)) continue;
+            try
+            {
+                await _github.CreateBranchAsync(token, repository.Owner, repository.Name, branch, headSha, ct);
+                created.Add(branch);
+            }
+            catch (GitHubApiException ex)
+            {
+                _logger.LogWarning(
+                    ex, "GitHub refused to create branch {Branch} on {RepoFullName}.", branch, repository.FullName);
+                refused.Add(branch);
+            }
+        }
+
+        if (created.Count > 0)
+        {
+            _logger.LogInformation(
+                "Created the branches {Branches} on {RepoFullName}.", string.Join(", ", created), repository.FullName);
+        }
+        return (created, refused.Count == 0 ? null :
+            $"The repository is ready, but GitHub would not create the {JoinBranches(refused)} "
+            + $"{(refused.Count == 1 ? "branch" : "branches")}. Create {(refused.Count == 1 ? "it" : "them")} "
+            + $"on GitHub from {repository.DefaultBranch}.");
+    }
+
+    /// <summary>
+    /// Gives the solution a build pipeline per branch of the new repository,
+    /// building every extension in it, so the first push to any of them can be
+    /// built without setting anything up.
+    ///
+    /// <para>Only when the new repository is the solution's only one. A pipeline
+    /// checks its branch out in every repository of the solution, so a
+    /// <c>test</c> pipeline on a solution whose older repositories have no
+    /// <c>test</c> branch would fail every build. Then the person is told to add
+    /// the pipelines themselves. A branch the solution already has a pipeline for
+    /// is left alone.</para>
+    ///
+    /// <para><strong>Nothing here may throw</strong>, for the same reason as the
+    /// solution itself. A pipeline that would not save is cleared out of the
+    /// context, so it cannot ride along on the audit entry's save.</para>
+    /// </summary>
+    private async Task<(IReadOnlyList<string> Names, string? Warning)> CreateBuildPipelinesAsync(
+        int solutionId, IReadOnlyList<string> branches, CancellationToken ct)
+    {
+        const string AddThemYourself =
+            "Add build pipelines from the solution's Pipelines tab.";
+        try
+        {
+            if (!await _tools.IsEnabledAsync(ToolKey.Pipelines, ct)) return ([], null);
+
+            var repositoryCount = await _db.OeProjectRepositories.AsNoTracking()
+                .CountAsync(r => r.ProjectId == solutionId, ct);
+            if (repositoryCount != 1)
+            {
+                return ([],
+                    "No build pipelines were added, because the solution has other repositories that may "
+                    + "not have the same branches. " + AddThemYourself);
+            }
+
+            var existing = await _pipelines.ListPipelinesAsync(solutionId, ct);
+            var names = new List<string>();
+            foreach (var branch in branches)
+            {
+                if (existing.Any(p => string.Equals(p.Branch, branch, StringComparison.Ordinal))) continue;
+                var id = await _pipelines.CreatePipelineAsync(
+                    new PipelineInput(solutionId, CustomName: null, SelectedAppIds: null, Branch: branch), ct);
+                names.Add((await _pipelines.GetPipelineAsync(id, ct))!.Name);
+            }
+            return (names, null);
+        }
+        catch (Exception ex)
+        {
+            _db.ChangeTracker.Clear();
+            _logger.LogWarning(
+                ex, "Could not add build pipelines to solution {SolutionId} for the new repository.", solutionId);
+            return ([], "The repository is ready, but its build pipelines could not be added. " + AddThemYourself);
+        }
+    }
+
+    /// <summary>"test", "test and staging", "a, b and c".</summary>
+    private static string JoinBranches(IReadOnlyList<string> branches) =>
+        branches.Count == 1
+            ? branches[0]
+            : string.Join(", ", branches.Take(branches.Count - 1)) + " and " + branches[^1];
 
     /// <summary>
     /// Registers the new repository on the customer's solution (issue #759):
@@ -445,7 +587,8 @@ public sealed class GitHubWorkspaceRepositoryService
     /// <summary>
     /// Fills the new repository with the generated files and the organisation's
     /// standards, on the default branch, and returns how many standards files
-    /// went in.
+    /// went in and the commit the default branch now points at (null when there
+    /// was nothing to commit).
     ///
     /// <para><strong>Two writes, both to the default branch.</strong> The
     /// first is one file through the Contents API, which creates the
@@ -472,7 +615,7 @@ public sealed class GitHubWorkspaceRepositoryService
     ///
     /// <para>See <c>.design/github-integration.md</c>, "#622 New workspace".</para>
     /// </summary>
-    private async Task<int> FillAsync(
+    private async Task<(int StandardsFileCount, string? HeadSha)> FillAsync(
         string token, GitHubRepositorySummary repository, string orgLogin, ProjectPlan plan,
         List<GitHubCommitFile> files, IReadOnlyList<GitHubRepositoryStandardFile> standardsFiles,
         int userId, CancellationToken ct)
@@ -487,7 +630,7 @@ public sealed class GitHubWorkspaceRepositoryService
             _logger.LogWarning(
                 "The '{Template}' template generated no files, so {RepoFullName} was left empty.",
                 plan.TemplateKey, repository.FullName);
-            return 0;
+            return (0, null);
         }
 
         // Every commit names the same person: without an author the seed is
@@ -547,7 +690,7 @@ public sealed class GitHubWorkspaceRepositoryService
         _logger.LogInformation(
             "Filled {RepoFullName} with {FileCount} file(s) on {Branch}.",
             repository.FullName, contents.Count, branch);
-        return standardsFiles.Count;
+        return (standardsFiles.Count, commit);
     }
 
     /// <summary>
