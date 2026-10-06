@@ -1002,6 +1002,49 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task A_pipeline_that_follows_the_default_branch_already_covers_it()
+    {
+        await ReadyAsync();
+        var solutionId = await SeedSolutionAsync("CRONUS Customer", ownedByCaller: true);
+        await using (var seed = _db.NewContext())
+        {
+            seed.OePipelines.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = solutionId,
+                Name = "Default branch",
+                Branch = null,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        var (service, ctx) = NewService(WritableApi());
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(
+            WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
+
+        created.PipelineNames.Should().Equal("test", "staging");
+    }
+
+    [Fact]
+    public async Task A_default_branch_other_than_main_names_its_own_pipeline()
+    {
+        await ReadyAsync();
+        var api = WritableApi()
+            .On(HttpMethod.Post, $"/orgs/{OrgLogin}/repos", HttpStatusCode.Created,
+                FakeGitHubApi.RepositoryJson(Repo, defaultBranch: "master"));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(WorkspacePlan(), RepoName, isPrivate: true);
+
+        created.Branches.Should().Equal("test", "staging");
+        created.PipelineNames.Should().Equal("master", "test", "staging");
+    }
+
+    [Fact]
     public async Task A_refused_branch_is_a_warning_and_gets_no_pipeline()
     {
         await ReadyAsync();

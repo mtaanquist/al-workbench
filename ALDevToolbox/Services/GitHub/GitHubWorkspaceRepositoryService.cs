@@ -429,6 +429,10 @@ public sealed class GitHubWorkspaceRepositoryService
     /// the pipelines themselves. A branch the solution already has a pipeline for
     /// is left alone.</para>
     ///
+    /// <para>The default branch's pipeline names it rather than leaving the
+    /// branch blank, because a deployment pipeline to a production environment
+    /// only accepts builds from a named branch.</para>
+    ///
     /// <para><strong>Nothing here may throw</strong>, for the same reason as the
     /// solution itself. A pipeline that would not save is cleared out of the
     /// context, so it cannot ride along on the audit entry's save.</para>
@@ -438,6 +442,9 @@ public sealed class GitHubWorkspaceRepositoryService
     {
         const string AddThemYourself =
             "Add build pipelines from the solution's Pipelines tab.";
+        // Outside the try: each pipeline saves on its own, so the ones made
+        // before a failure exist and are reported.
+        var names = new List<string>();
         try
         {
             if (!await _tools.IsEnabledAsync(ToolKey.Pipelines, ct)) return ([], null);
@@ -447,15 +454,18 @@ public sealed class GitHubWorkspaceRepositoryService
             if (repositoryCount != 1)
             {
                 return ([],
-                    "No build pipelines were added, because the solution has other repositories that may "
-                    + "not have the same branches. " + AddThemYourself);
+                    "No build pipelines were added: this solution has other repositories, and a pipeline "
+                    + "builds the same branch in every one of them. " + AddThemYourself);
             }
 
             var existing = await _pipelines.ListPipelinesAsync(solutionId, ct);
-            var names = new List<string>();
             foreach (var branch in branches)
             {
-                if (existing.Any(p => string.Equals(p.Branch, branch, StringComparison.Ordinal))) continue;
+                // A pipeline with no branch builds the default branch, so it
+                // already covers the first entry.
+                var covered = existing.Any(p => string.Equals(p.Branch, branch, StringComparison.Ordinal)
+                    || (p.Branch is null && string.Equals(branch, branches[0], StringComparison.Ordinal)));
+                if (covered) continue;
                 var id = await _pipelines.CreatePipelineAsync(
                     new PipelineInput(solutionId, CustomName: null, SelectedAppIds: null, Branch: branch), ct);
                 names.Add((await _pipelines.GetPipelineAsync(id, ct))!.Name);
@@ -467,7 +477,9 @@ public sealed class GitHubWorkspaceRepositoryService
             _db.ChangeTracker.Clear();
             _logger.LogWarning(
                 ex, "Could not add build pipelines to solution {SolutionId} for the new repository.", solutionId);
-            return ([], "The repository is ready, but its build pipelines could not be added. " + AddThemYourself);
+            return (names, names.Count == 0
+                ? "The repository is ready, but its build pipelines could not be added. " + AddThemYourself
+                : "The repository is ready, but not all of its build pipelines could be added. " + AddThemYourself);
         }
     }
 
