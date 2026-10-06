@@ -322,7 +322,7 @@ public sealed class ProjectService
         await _access.EnsureCanManageAsync(project.Id, project.CreatedByUserId, ct);
 
         var url = (repository.Url ?? string.Empty).Trim();
-        if (url.Length == 0 || !IsValidProviderUrl(repository.Provider, url))
+        if (url.Length == 0 || !RepositoryLinks.IsValidUrl(repository.Provider, url))
         {
             throw Validation("Url", repository.Provider == RepositoryProvider.AzureDevOps
                 ? "Use an https Azure DevOps URL (dev.azure.com or *.visualstudio.com)."
@@ -803,7 +803,7 @@ public sealed class ProjectService
             {
                 errors[$"Repositories[{i}].Url"] = "Enter the repository URL.";
             }
-            else if (!IsValidProviderUrl(repo.Provider, url))
+            else if (!RepositoryLinks.IsValidUrl(repo.Provider, url))
             {
                 errors[$"Repositories[{i}].Url"] = repo.Provider == RepositoryProvider.AzureDevOps
                     ? "Use an https Azure DevOps URL (dev.azure.com or *.visualstudio.com)."
@@ -880,22 +880,6 @@ public sealed class ProjectService
             .Where(p => p.DeletedAt == null && p.Slug == key)
             .Select(p => (int?)p.Id)
             .FirstOrDefaultAsync(ct);
-    }
-
-    /// <summary>True when <paramref name="url"/> is an https URL on a host the provider serves.</summary>
-    private static bool IsValidProviderUrl(RepositoryProvider provider, string url)
-    {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
-        if (uri.Scheme != Uri.UriSchemeHttps) return false;
-        var host = uri.Host.ToLowerInvariant();
-        return provider switch
-        {
-            RepositoryProvider.AzureDevOps =>
-                host == "dev.azure.com" || host.EndsWith(".visualstudio.com", StringComparison.Ordinal),
-            RepositoryProvider.GitHub =>
-                host == "github.com" || host == "www.github.com",
-            _ => false,
-        };
     }
 
     /// <summary>

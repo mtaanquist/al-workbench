@@ -53,13 +53,24 @@
         }
         else
         {
-            <div class="row-editor">
+            <div class="row-editor pd-repo-table-wrap">
                 <table class="data-table row-editor__table">
+                    <colgroup>
+                        <col class="pd-repo-col-host" />
+                        <col />
+                        <col class="pd-repo-col-name" />
+                        <col class="pd-repo-col-links" />
+                        @if (CanManage)
+                        {
+                            <col class="row-editor__col-acts" />
+                        }
+                    </colgroup>
                     <thead>
                         <tr>
                             <th scope="col">Host</th>
                             <th scope="col">Repository URL</th>
                             <th scope="col">Display name <span class="u-muted">· optional</span></th>
+                            <th scope="col"><span class="u-sr">Open or clone</span></th>
                             @if (CanManage)
                             {
                                 <th scope="col"></th>
@@ -108,6 +119,23 @@
                                     else
                                     {
                                         <span>@repo.DisplayName</span>
+                                    }
+                                </td>
+                                <td>
+                                    @* Links only for a URL as it was saved: a row being typed
+                                       into would otherwise link to half a URL. *@
+                                    @if (repo.Url == repo.SavedUrl && RepositoryLinks.WebUrl(repo.Provider, repo.Url) is { } webUrl)
+                                    {
+                                        <div class="pd-repo-links">
+                                            <a class="btn btn--sm" href="@webUrl" target="_blank" rel="noopener">
+                                                <Icon Name="external-link" Width="14" Height="14" />
+                                                <span>Open in @repo.Provider.DisplayName()</span>
+                                            </a>
+                                            <a class="btn btn--sm" href="@RepositoryLinks.VsCodeCloneUrl(repo.Url)">
+                                                <Icon Name="code" Width="14" Height="14" />
+                                                <span>Clone in VS Code</span>
+                                            </a>
+                                        </div>
                                     }
                                 </td>
                                 @if (CanManage)

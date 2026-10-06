@@ -476,7 +476,7 @@
                                    Nothing happens on a machine without
                                    VS Code, which is why the command
                                    below stays on the card. *@
-                                <a class="btn" href="@VsCodeCloneUrl(_createdRepo.Repository.CloneUrl)">
+                                <a class="btn" href="@RepositoryLinks.VsCodeCloneUrl(_createdRepo.Repository.CloneUrl)">
                                     <Icon Name="code" Width="15" Height="15" />
                                     <span>Clone in VS Code</span>
                                 </a>
@@ -1120,16 +1120,6 @@
             _repoBusy = false;
         }
     }
-
-    /// <summary>
-    /// VS Code's documented URL handler for cloning: it opens VS Code, asks
-    /// where to put the repository, and clones it there. The clone URL is a
-    /// query-string value, so it is escaped rather than pasted in - its own
-    /// <c>://</c> and slashes would otherwise be read as part of the handler
-    /// path.
-    /// </summary>
-    private static string VsCodeCloneUrl(string cloneUrl) =>
-        $"vscode://vscode.git/clone?url={Uri.EscapeDataString(cloneUrl)}";
 
     /// <summary>
     /// The name the user typed. Once they have touched the field the workspace
