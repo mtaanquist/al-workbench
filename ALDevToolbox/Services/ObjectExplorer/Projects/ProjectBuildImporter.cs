@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
@@ -85,6 +86,21 @@ public sealed class ProjectBuildImporter
         return StartPipelineBuildAsync(pipelineId, bcTarget, ProjectBuildTrigger.PreviewCheck, ct);
     }
 
+    /// <summary>
+    /// A build that keeps the pipeline's next manual build from starting: queued or
+    /// building, against the current version, and its release still ingesting.
+    /// <para>The nightly preview check is left out both ways: it does not hold up a
+    /// manual build, and it is not held up by one (it starts its two targets back to
+    /// back and skips a target whose last check is still running). The release has to
+    /// be live because nothing resets a build row whose job was lost (a crash before
+    /// it was queued, a release deleted mid-build), while the startup sweep already
+    /// fails such a release; trusting the row alone would lock Build for good.</para>
+    /// </summary>
+    internal static readonly Expression<Func<OeProjectBuild, bool>> BlocksManualBuild = b =>
+        (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building)
+        && b.BcTarget == ProjectBuildTarget.Current
+        && b.Release != null && b.Release.Status == "ingesting";
+
     private async Task<int> StartPipelineBuildAsync(int pipelineId, string bcTarget, string trigger, CancellationToken ct)
     {
         var pipeline = await _db.OePipelines.AsNoTracking()
@@ -117,14 +133,12 @@ public sealed class ProjectBuildImporter
         }
 
         // One manual build at a time per pipeline. The page disables Build while one
-        // is queued or building, but its state can be stale (another tab, another
-        // person, the list page), so the refusal lives here too. The preview check
-        // is left alone: it skips a target whose last check is still running, and it
-        // starts its two targets back to back on purpose.
+        // is running, but its state can be stale (another tab, another person, the
+        // list page), so the refusal lives here too.
         if (trigger == ProjectBuildTrigger.Manual
             && await _db.OeProjectBuilds.AsNoTracking()
-                .AnyAsync(b => b.PipelineId == pipelineId
-                               && (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building), ct)
+                .Where(b => b.PipelineId == pipelineId)
+                .AnyAsync(BlocksManualBuild, ct)
                 .ConfigureAwait(false))
         {
             throw new PlanValidationException(new Dictionary<string, string>

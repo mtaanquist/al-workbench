@@ -407,16 +407,50 @@ public sealed class ProjectBuildImporterTests : IDisposable
     }
 
     [Fact]
-    public async Task A_preview_check_still_starts_while_a_build_of_the_pipeline_is_running()
+    public async Task A_running_preview_check_does_not_block_a_manual_build()
     {
-        // The check starts next minor and next major back to back, and it already
-        // skips a target whose last check is still running.
+        // The nightly check runs on its own schedule; the pipeline page and list do
+        // not show it as the pipeline's build, so it must not hold up Build either.
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
         await NewImporter(ctx, new ReleaseImportQueue()).StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.NextMinor);
 
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+
+        await act.Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task A_running_manual_build_does_not_block_the_preview_check()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+
         var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.NextMajor);
+
+        await act.Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task A_build_whose_job_was_lost_does_not_lock_the_pipeline()
+    {
+        // The startup sweep fails a release whose job is gone but leaves the build row
+        // queued; trusting the row alone would disable Build for good.
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        await using (var write = _db.NewContext())
+        {
+            var release = await write.OeReleases.SingleAsync(r => r.Id == first);
+            release.Status = "failed";
+            await write.SaveChangesAsync();
+        }
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
 
         await act.Should().NotThrowAsync();
     }

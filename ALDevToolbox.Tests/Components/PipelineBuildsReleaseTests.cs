@@ -345,10 +345,18 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         var seed = await SeedAsync();
         await using (var ctx = _db.NewContext())
         {
+            var release = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS", BcVersion = "",
+                DedupKey = Guid.NewGuid().ToString(), Kind = "project", Status = "ingesting",
+                ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow,
+            };
+            ctx.OeReleases.Add(release);
+            await ctx.SaveChangesAsync();
             ctx.OeProjectBuilds.Add(new OeProjectBuild
             {
                 OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, PipelineId = seed.PipelineId,
-                Status = ProjectBuildStatus.Building, StartedAt = DateTime.UtcNow,
+                ReleaseId = release.Id, Status = ProjectBuildStatus.Building, StartedAt = DateTime.UtcNow,
             });
             await ctx.SaveChangesAsync();
         }

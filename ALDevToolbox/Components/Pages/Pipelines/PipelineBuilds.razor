@@ -91,12 +91,12 @@
     <Actions>
         @if (_canManage)
         {
-            @* One build at a time per pipeline: while one is queued or building the
-               button says so instead of queuing a second. The status poll clears
-               _inFlight when it finishes; StartBuildAsync refuses a stale click. *@
-            <button type="button" class="btn btn--primary" @onclick="RunBuildAsync" disabled="@(_starting || _inFlight)">
+            @* One build at a time per pipeline: while one runs the button says so
+               instead of queuing a second. The status poll clears it when the build
+               finishes; StartBuildAsync refuses a click from a stale page. *@
+            <button type="button" class="btn btn--primary" @onclick="RunBuildAsync" disabled="@(_starting || _buildRunning)">
                 <Icon Name="hammer" Width="15" Height="15" />
-                <span>@(_starting ? "Starting..." : _inFlight ? "Build running" : "Build")</span>
+                <span>@(_starting ? "Starting..." : _buildRunning ? "Build running" : "Build")</span>
             </button>
             <button type="button" class="btn" @onclick="EditPipelineAsync">
                 <Icon Name="settings" Width="15" Height="15" />
@@ -834,10 +834,14 @@
     /// </summary>
     [SupplyParameterFromQuery(Name = "build")] public int? BuildId { get; set; }
     private int? _loadedBuildId;
+    private int _loadedPipelineId;
 
     private bool _loading = true;
     private bool _notFound;
     private bool _inFlight;
+
+    /// <summary>A build that blocks the next one is running; narrower than <see cref="_inFlight"/>, which also counts preview checks.</summary>
+    private bool _buildRunning;
     private bool _canManage;
     private bool _starting;
     private string? _buildError;
@@ -893,16 +897,18 @@
     {
         await Zone.EnsureLoadedAsync();
         _loadedBuildId = BuildId;
+        _loadedPipelineId = PipelineId;
         await LoadAsync();
         _loading = false;
         if (_inFlight) StartPoll();
     }
 
-    /// <summary>A link to another build of this pipeline lands here, not in a fresh page.</summary>
+    /// <summary>A link to another build, or another pipeline, lands here rather than in a fresh page.</summary>
     protected override async Task OnParametersSetAsync()
     {
-        if (_loading || BuildId == _loadedBuildId) return;
+        if (_loading || (BuildId == _loadedBuildId && PipelineId == _loadedPipelineId)) return;
         _loadedBuildId = BuildId;
+        _loadedPipelineId = PipelineId;
         await LoadAsync();
         if (_inFlight) StartPoll();
     }
@@ -957,7 +963,8 @@
         BuildDetail? LatestDetail,
         List<ComparableBuildRow> Comparable,
         bool InFlight,
-        PipelineFreshness? Freshness = null);
+        PipelineFreshness? Freshness = null,
+        bool BuildRunning = false);
 
     /// <summary>The user-driven load: reads through the circuit's own services.</summary>
     private async Task LoadAsync()
@@ -984,8 +991,9 @@
             var latestDetail = latest is null ? null : await artifacts.GetBuildDetailAsync(latest.Id, ct);
             var comparable = await artifacts.ListComparableBuildsAsync(PipelineId, ct);
             var inFlight = await artifacts.HasBuildInFlightAsync(PipelineId, ct);
+            var running = inFlight && await artifacts.IsBuildRunningAsync(PipelineId, ct);
             var fresh = await freshness.GetAsync(PipelineId, ct);
-            return new PageState(header, false, canManage, builds, latestDetail, comparable, inFlight, fresh);
+            return new PageState(header, false, canManage, builds, latestDetail, comparable, inFlight, fresh, running);
         }
         catch (ProjectAccessDeniedException)
         {
@@ -1015,6 +1023,7 @@
             _compareRight = defaults[1].ReleaseId;
         }
         _inFlight = s.InFlight;
+        _buildRunning = s.BuildRunning;
         _freshness = s.Freshness;
         _freshSummary = s.Freshness is { } f ? PipelineFreshnessSummary.From(f) : null;
     }
@@ -1033,7 +1042,7 @@
     /// </summary>
     private async Task RunBuildAsync()
     {
-        if (_starting || _inFlight) return;
+        if (_starting || _buildRunning) return;
         _starting = true;
         _buildError = null;
         try
@@ -1312,6 +1321,10 @@
         catch (Exception ex)
         {
             Log.LogError(ex, "Build-status poll failed for pipeline {PipelineId}.", PipelineId);
+            // Don't leave Build stuck on "Build running" until a reload; a click on a
+            // build that is in fact still running is refused by StartBuildAsync.
+            try { await InvokeAsync(() => { _buildRunning = false; StateHasChanged(); }); }
+            catch (ObjectDisposedException) { /* torn down */ }
         }
         finally
         {
