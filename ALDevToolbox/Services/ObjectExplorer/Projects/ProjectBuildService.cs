@@ -430,6 +430,7 @@ public sealed class ProjectBuildService
                         // compiled carries the earlier version, so storing it would publish
                         // different bytes under a version that already exists. Fail the app
                         // instead; building again finds no earlier build and gives it a new one.
+                        uploads.RemoveAt(uploads.Count - 1);
                         results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
                             ProjectBuildResultStatus.Failed,
                             $"The earlier build of {app.Manifest.Name} was removed while this one ran. Build again.",

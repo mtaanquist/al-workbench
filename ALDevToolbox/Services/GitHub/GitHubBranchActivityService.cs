@@ -86,7 +86,8 @@ public sealed class GitHubBranchActivityService
             {
                 // GitHub does not promise delivery order, and a redelivery carries the
                 // original push. Either is older than what the row already says, so
-                // it leaves the branch where the newer push put it.
+                // it leaves the branch where the newer push put it. GitHub's time is in
+                // whole seconds, so two pushes within one second still land in arrival order.
                 continue;
             }
 

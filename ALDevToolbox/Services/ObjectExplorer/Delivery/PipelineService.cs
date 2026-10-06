@@ -119,9 +119,8 @@ public sealed class PipelineService
 
     /// <summary>
     /// Updates a pipeline's extension selection, publishing target, branch, nightly
-    /// preview check and building on push, and the name that follows from them. Turning the check on makes
-    /// the caller the person it runs as; so does saving while it is paused (its person
-    /// gone or refused), which is how someone with access takes it over. A new name
+    /// preview check and building on push, and the name that follows from them. Saving with the check or
+    /// building on push on makes the caller the person those builds run as. A new name
     /// carries through to the deployment pipelines named after this one.
     /// </summary>
     public async Task UpdatePipelineAsync(int id, PipelineInput input, CancellationToken ct = default)
@@ -165,7 +164,7 @@ public sealed class PipelineService
 
     /// <summary>
     /// Resumes a paused nightly preview check by making the caller the person it runs
-    /// as. Same rule as saving the pipeline while the check is paused.
+    /// as, without editing the pipeline. Same rule as saving it.
     /// </summary>
     public async Task TakeOverPreviewCheckAsync(int id, CancellationToken ct = default)
     {
@@ -190,7 +189,7 @@ public sealed class PipelineService
 
     /// <summary>
     /// Resumes paused building on push by making the caller the person its builds run
-    /// as. Same rule as saving the pipeline while it is paused. The push that found it
+    /// as, without editing the pipeline. Same rule as saving it. The push that found it
     /// paused is not built; the next one is.
     /// </summary>
     public async Task TakeOverBuildOnPushAsync(int id, CancellationToken ct = default)
