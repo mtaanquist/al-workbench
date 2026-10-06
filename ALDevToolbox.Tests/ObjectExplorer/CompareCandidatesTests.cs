@@ -24,20 +24,34 @@ public sealed class CompareCandidatesTests
         Item(8, "cal"),
         Item(9, "first_party", status: "importing"),
         Item(10, "first_party", deleted: true),
+        Item(11, "third_party", files: 0, fromFeed: true),
+        Item(12, "cal", files: 0),
     ];
 
     [Theory]
     [InlineData(1, "first_party", 2)]
     [InlineData(3, "third_party", 4)]
-    [InlineData(7, "cal", 8)]
-    public void A_release_is_offered_only_other_ready_releases_of_its_own_kind(int self, string kind, int expected)
+    [InlineData(7, "cal", 8, 12)]
+    public void A_release_is_offered_only_other_ready_releases_of_its_own_kind(int self, string kind, params int[] expected)
     {
         OeReleaseDetail.CompareCandidates(Releases, self, kind)
             .Select(r => r.Id).Should().Equal(expected);
     }
 
-    private static ReleaseListItem Item(int id, string kind, string status = "ready", bool deleted = false) =>
+    /// <summary>
+    /// A symbol package a build pulled from the feeds with no source in it is not on
+    /// the releases page, so it is not offered here either (#1092). A release an
+    /// admin imported without source still is (release 12 in the C/AL case above).
+    /// </summary>
+    [Fact]
+    public void An_empty_symbol_package_from_the_feeds_is_not_offered()
+    {
+        OeReleaseDetail.CompareCandidates(Releases, 3, "third_party")
+            .Select(r => r.Id).Should().Equal(4);
+    }
+
+    private static ReleaseListItem Item(int id, string kind, string status = "ready", bool deleted = false, int files = 10, bool fromFeed = false) =>
         new(id, $"Release {id}", kind, status, BcVersion: null, ParentReleaseId: null, ParentLabel: null,
-            Publisher: null, ProjectName: null, ImportedAt: DateTime.UtcNow, SourceFileCount: 0,
-            SourceContentLength: 0, DeletedAt: deleted ? DateTime.UtcNow : null);
+            Publisher: null, ProjectName: null, ImportedAt: DateTime.UtcNow, SourceFileCount: files,
+            SourceContentLength: 0, DeletedAt: deleted ? DateTime.UtcNow : null, FromSymbolFeed: fromFeed);
 }

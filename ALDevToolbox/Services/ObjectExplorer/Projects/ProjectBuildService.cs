@@ -1662,7 +1662,7 @@ public sealed class ProjectBuildService
 
     /// <summary>The dedup key a vendor symbols Release is found again by: one per (app id, version) per organisation.</summary>
     internal static string VendorDedupKey(string appId, string version) =>
-        $"symbols:{NormalizeAppId(appId)}:{version.Trim()}";
+        $"{OeRelease.SymbolFeedDedupPrefix}{NormalizeAppId(appId)}:{version.Trim()}";
 
     private async Task<int?> EnsureVendorReleaseAsync(
         ResolvedSymbolPackage package, string symbolsDir, int? parentReleaseId, List<string> lines, CancellationToken ct)

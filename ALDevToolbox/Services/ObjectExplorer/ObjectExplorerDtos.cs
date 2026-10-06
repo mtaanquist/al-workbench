@@ -28,7 +28,18 @@ public sealed record ReleaseListItem(
     DateTime? DeletedAt,
     string? StatusMessage = null,
     string? PipelineName = null,
-    bool IsPrerelease = false);
+    bool IsPrerelease = false,
+    bool FromSymbolFeed = false)
+{
+    /// <summary>
+    /// A symbols package a pipeline build pulled from the symbol feeds that came
+    /// with no source files (#1092). It stays in the database so builds can resolve
+    /// references into it, but the releases page and the compare picker leave it
+    /// out. A manually imported release without source is still listed: an admin
+    /// chose to import it, and its objects can be browsed and compared.
+    /// </summary>
+    public bool IsEmptySymbolPackage => FromSymbolFeed && SourceFileCount == 0;
+}
 
 /// <summary>
 /// Release detail surface for the header bar — adds module count and the
