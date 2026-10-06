@@ -193,7 +193,14 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         cut.FindAll("#rpe-build").Should().ContainSingle();
         cut.FindAll("#rpe-repo").Should().BeEmpty();
 
-        await cut.InvokeAsync(() => cut.Find("#rpe-source").Change(ReleaseArtifactSource.GithubRelease));
+        // The page can still re-render from its own loading after the first paint, which
+        // retires the handler a found element points at; pick the source again until the
+        // change lands on the current render.
+        cut.WaitForAssertion(() =>
+        {
+            cut.InvokeAsync(() => cut.Find("#rpe-source").Change(ReleaseArtifactSource.GithubRelease)).GetAwaiter().GetResult();
+            cut.FindAll("#rpe-build").Should().BeEmpty();
+        });
 
         // One source at a time: the field it replaces is gone, not merely ignored.
         cut.FindAll("#rpe-build").Should().BeEmpty();

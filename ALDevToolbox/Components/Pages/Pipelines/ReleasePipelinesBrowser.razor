@@ -822,7 +822,8 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            // Not this person's to move: the dialog never opens, as Edit's page would refuse.
+            // Not this person's to move: say so rather than leave the click doing nothing.
+            _notice = "Only the solution's owner or an Admin can reschedule its deployments.";
         }
         catch (Exception ex)
         {

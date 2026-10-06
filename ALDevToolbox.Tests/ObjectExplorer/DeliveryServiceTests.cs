@@ -787,6 +787,45 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_move_parks_its_replacement_until_business_centrals_copy_is_cancelled()
+    {
+        var (_, heldId) = await HandedOffAsync();
+        string? statusDuringCancel = null;
+        _apps.DuringRemove = async () =>
+        {
+            await using var peek = _db.NewContext();
+            statusDuringCancel = await peek.OeProjectDeliveries.Where(d => d.Id != heldId).Select(d => d.Status).SingleAsync();
+        };
+
+        var newId = await NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+
+        statusDuringCancel.Should().Be(ProjectDeliveryStatus.Proposed,
+            "a move stopped half way must leave the replacement for a person, not the scheduler");
+        await using var read = _db.NewContext();
+        var moved = await read.OeProjectDeliveries.SingleAsync(d => d.Id == newId);
+        moved.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        moved.TriggeredByUserId.Should().Be(_db.OrgContext.CurrentUserId);
+    }
+
+    [Fact]
+    public async Task A_move_whose_replacement_was_dismissed_meanwhile_says_nothing_will_install()
+    {
+        var (_, heldId) = await HandedOffAsync();
+        _apps.DuringRemove = async () =>
+        {
+            await using var other = _db.NewContext();
+            await other.OeProjectDeliveries.Where(d => d.Id != heldId)
+                .ExecuteUpdateAsync(u => u.SetProperty(d => d.Status, ProjectDeliveryStatus.Dismissed));
+        };
+
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Delivery"].Should().Contain("nothing will install");
+        _queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task When_business_central_refuses_the_cancel_nothing_is_moved()
     {
         var (_, heldId) = await HandedOffAsync();
@@ -2763,10 +2802,14 @@ public sealed class DeliveryServiceTests : IDisposable
         public Exception? RemoveFault { get; set; }
         public bool RemoveTakesEffect { get; set; }
 
-        public Task<BcAppOperation> RemoveScheduledPteVersionAsync(
+        /// <summary>Runs while Business Central is being asked to cancel, to look at or change what the move wrote first.</summary>
+        public Func<Task>? DuringRemove { get; set; }
+
+        public async Task<BcAppOperation> RemoveScheduledPteVersionAsync(
             string accessToken, string applicationFamily, string environmentName, Guid appId, string targetVersion,
             string scheduleKind, CancellationToken ct = default)
         {
+            if (DuringRemove is { } during) await during();
             if (RemoveRefusal is { } refusal) throw new BcApiException(null, refusal);
             if (RemoveFault is { } fault)
             {
@@ -2774,7 +2817,7 @@ public sealed class DeliveryServiceTests : IDisposable
                 throw fault;
             }
             Removed.Add((appId, targetVersion, scheduleKind));
-            return Task.FromResult(Operation(appId, "canceled"));
+            return Operation(appId, "canceled");
         }
 
         private static BcAppOperation Operation(Guid appId, string status, Guid? operationId = null) => new(
