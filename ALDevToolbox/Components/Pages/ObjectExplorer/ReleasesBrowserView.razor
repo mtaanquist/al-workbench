@@ -276,9 +276,7 @@
         // (the hero's "Ready" pill is honest by construction). Symbol packages a
         // build pulled from the feeds with no source in them are left out too
         // (#1092).
-        _releases = (await ObjectExplorer.ListReleasesAsync())
-            .Where(r => r.Status == "ready" && !r.IsEmptySymbolPackage)
-            .ToList();
+        _releases = await ObjectExplorer.ListReleasesAsync(browsableOnly: true);
         _pipelineReleases = await ObjectExplorer.ListLatestPipelineBuildReleasesAsync();
     }
 

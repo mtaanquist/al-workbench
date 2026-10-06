@@ -91,14 +91,25 @@ public class ObjectExplorerService
     /// <paramref name="includeProjectBuilds"/> only for a genuinely project-scoped
     /// caller. See <c>.design/artifacts.md</c>.
     /// </para>
+    /// <para>
+    /// <paramref name="browsableOnly"/> narrows the list to what the releases page and
+    /// the compare picker show: ready releases, without the symbol packages a build
+    /// pulled from the feeds with no files in them (#1092). Those stay in the database
+    /// so builds can resolve references into them.
+    /// </para>
     /// </summary>
     public async Task<List<ReleaseListItem>> ListReleasesAsync(
-        bool includeSoftDeleted = false, bool includeProjectBuilds = false, CancellationToken ct = default)
+        bool includeSoftDeleted = false, bool includeProjectBuilds = false, bool browsableOnly = false,
+        CancellationToken ct = default)
     {
         var q = _db.OeReleases.AsNoTracking().AsQueryable();
         if (!includeSoftDeleted)
         {
             q = q.Where(r => r.DeletedAt == null);
+        }
+        if (browsableOnly)
+        {
+            q = q.Where(r => r.Status == "ready").Where(OeRelease.NotAnEmptySymbolPackage);
         }
         if (!includeProjectBuilds)
         {
@@ -128,8 +139,7 @@ public class ObjectExplorerService
                 DeletedAt: r.DeletedAt,
                 StatusMessage: r.StatusMessage,
                 PipelineName: null,
-                IsPrerelease: r.IsPrerelease,
-                FromSymbolFeed: r.DedupKey != null && r.DedupKey.StartsWith(OeRelease.SymbolFeedDedupPrefix)))
+                IsPrerelease: r.IsPrerelease))
             .ToListAsync(ct);
 
         // Sort in memory: active rows first, then by BC version descending

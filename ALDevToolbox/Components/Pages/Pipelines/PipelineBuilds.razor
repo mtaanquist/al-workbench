@@ -173,7 +173,7 @@
                 <span>The nightly preview check is paused: @paused</span>
                 @if (_canManage)
                 {
-                    <button type="button" class="btn btn--sm" @onclick="TakeOverPreviewCheckAsync" disabled="@_takingOver">
+                    <button type="button" class="btn btn--sm" @onclick="() => TakeOverAsync(PipelineAutomation.PreviewCheck)" disabled="@_takingOver">
                         <span>@(_takingOver ? "Saving..." : "Run the check as me")</span>
                     </button>
                 }
@@ -186,7 +186,7 @@
                 <span>New commits are not being built automatically: @pushPaused@(_canManage ? "" : " Ask someone who manages this solution to resume it.")</span>
                 @if (_canManage)
                 {
-                    <button type="button" class="btn btn--sm" @onclick="TakeOverBuildOnPushAsync" disabled="@_takingOver"
+                    <button type="button" class="btn btn--sm" @onclick="() => TakeOverAsync(PipelineAutomation.BuildOnPush)" disabled="@_takingOver"
                             title="From now on, builds on push use your repository access.">
                         <span>@(_takingOver ? "Saving..." : "Resume with my access")</span>
                     </button>
@@ -960,34 +960,21 @@
 
     private bool _takingOver;
 
-    /// <summary>Resumes a paused preview check, running it as the person who pressed the button from now on.</summary>
-    private async Task TakeOverPreviewCheckAsync()
+    /// <summary>Resumes a paused preview check or paused building on push, running it as the person who pressed the button from now on.</summary>
+    private async Task TakeOverAsync(PipelineAutomation automation)
     {
         if (_takingOver) return;
         _takingOver = true;
         try
         {
-            await Pipelines.TakeOverPreviewCheckAsync(PipelineId);
-            await LoadAsync();
-        }
-        catch (PlanValidationException ex)
-        {
-            _buildError = ex.Errors.Values.FirstOrDefault();
-        }
-        finally
-        {
-            _takingOver = false;
-        }
-    }
-
-    /// <summary>Resumes paused building on push, running those builds as the person who pressed the button from now on.</summary>
-    private async Task TakeOverBuildOnPushAsync()
-    {
-        if (_takingOver) return;
-        _takingOver = true;
-        try
-        {
-            await Pipelines.TakeOverBuildOnPushAsync(PipelineId);
+            if (automation == PipelineAutomation.PreviewCheck)
+            {
+                await Pipelines.TakeOverPreviewCheckAsync(PipelineId);
+            }
+            else
+            {
+                await Pipelines.TakeOverBuildOnPushAsync(PipelineId);
+            }
             await LoadAsync();
         }
         catch (PlanValidationException ex)

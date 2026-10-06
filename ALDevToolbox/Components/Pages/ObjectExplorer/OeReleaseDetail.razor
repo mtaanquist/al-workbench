@@ -624,7 +624,7 @@
         // offered the other builds of its own solution instead (#1075).
         _otherReleases = _release.Kind == OeRelease.ProjectBuildKind
             ? await ObjectExplorer.ListBuildCompareCandidatesAsync(ReleaseId)
-            : CompareCandidates(await ObjectExplorer.ListReleasesAsync(), ReleaseId, _release.Kind);
+            : CompareCandidates(await ObjectExplorer.ListReleasesAsync(browsableOnly: true), ReleaseId, _release.Kind);
 
         // Seed filter state from the URL query string so back-navigation
         // from a result detail page restores what the user was searching.
@@ -642,15 +642,15 @@
     /// the same kind. Microsoft code and customisations live in separate apps
     /// now, so a cross-kind compare is not one anyone makes, and with hundreds
     /// of customer releases imported the full list buried the few worth
-    /// comparing against. A symbol package a build pulled from the feeds with no
-    /// source in it is not on the releases page and is left out here too (#1092).
+    /// comparing against. The caller passes the browsable list, so a symbol
+    /// package a build pulled from the feeds with no files is already gone (#1092).
     /// Pipeline builds are not in this list; they use
     /// <c>ObjectExplorerService.ListBuildCompareCandidatesAsync</c> instead.
     /// </summary>
     internal static List<ReleaseListItem> CompareCandidates(
         IEnumerable<ReleaseListItem> releases, int releaseId, string releaseKind) =>
         releases
-            .Where(r => r.Id != releaseId && r.Status == "ready" && r.DeletedAt is null && !r.IsEmptySymbolPackage)
+            .Where(r => r.Id != releaseId && r.Status == "ready" && r.DeletedAt is null)
             .Where(r => r.Kind == releaseKind)
             .ToList();
 

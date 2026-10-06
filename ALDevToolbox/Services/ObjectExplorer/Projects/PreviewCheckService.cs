@@ -23,12 +23,6 @@ public sealed class PreviewCheckService
     /// </summary>
     internal static readonly TimeSpan MaxQuietPeriod = TimeSpan.FromDays(7);
 
-    internal const string NoOwnerMessage =
-        "the person its builds run as no longer has an active account.";
-
-    internal const string NoAccessMessage =
-        "the person its builds run as can no longer manage this solution.";
-
     internal const string NoCountryMessage =
         "this solution has no country set, so there is no Business Central version to check against. Set one in the solution's settings.";
 
@@ -81,7 +75,7 @@ public sealed class PreviewCheckService
         {
             if (pipeline.PreviewCheckByUserId is not { } userId || !pipeline.OwnerActive)
             {
-                due.Add(new PreviewCheckDue(pipeline.Id, null, null, NoOwnerMessage));
+                due.Add(new PreviewCheckDue(pipeline.Id, null, null, AutomatedBuilds.NoOwnerMessage));
                 continue;
             }
 
@@ -137,14 +131,8 @@ public sealed class PreviewCheckService
     /// Records why <paramref name="pipelineId"/>'s check could not start, or clears it
     /// with null. Writes only when the value changes.
     /// </summary>
-    public async Task SetBlockedAsync(int pipelineId, string? reason, CancellationToken ct = default)
-    {
-        if (reason is { Length: > 500 }) reason = reason[..500];
-        await _db.OePipelines
-            .Where(p => p.Id == pipelineId && p.PreviewCheckBlocked != reason)
-            .ExecuteUpdateAsync(s => s.SetProperty(p => p.PreviewCheckBlocked, reason), ct)
-            .ConfigureAwait(false);
-    }
+    public Task SetBlockedAsync(int pipelineId, string? reason, CancellationToken ct = default) =>
+        AutomatedBuilds.SetBlockedAsync(_db, pipelineId, PipelineAutomation.PreviewCheck, reason, ct);
 
     private async Task<string?> ResolveVersionAsync(string country, string target, CancellationToken ct)
     {

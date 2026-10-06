@@ -363,7 +363,7 @@
             {
                 _checkingSessions = true;
                 StateHasChanged();
-                var check = await CheckSessionsAsync(o);
+                var check = await OpenSessionsCheck.AskAsync(() => Deliveries.CheckOpenSessionsForDeliveryAsync(o.DeliveryId), o.EnvironmentName, Log);
                 _checkingSessions = false;
                 if (check.NeedsConfirmation)
                 {
@@ -394,23 +394,6 @@
         {
             _saving = false;
             _checkingSessions = false;
-        }
-    }
-
-    /// <summary>
-    /// Who is signed in to the target. Anything but being refused comes back as a check we
-    /// couldn't make, so a fault on our side asks the question rather than blocking.
-    /// </summary>
-    private async Task<OpenSessionsCheck> CheckSessionsAsync(RescheduleOptions o)
-    {
-        try
-        {
-            return await Deliveries.CheckOpenSessionsForDeliveryAsync(o.DeliveryId);
-        }
-        catch (Exception ex) when (ex is not (ProjectAccessDeniedException or PlanValidationException))
-        {
-            Log.LogError(ex, "Failed to check the sessions before rescheduling delivery {DeliveryId} to now.", o.DeliveryId);
-            return OpenSessionsCheck.Unknown(o.EnvironmentName, "Something went wrong at our end.");
         }
     }
 }

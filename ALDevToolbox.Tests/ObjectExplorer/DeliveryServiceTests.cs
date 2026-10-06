@@ -924,6 +924,47 @@ public sealed class DeliveryServiceTests : IDisposable
         _apps.Removed.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// The pipeline page and the deployment pipelines list offer Reschedule on a handed-off
+    /// run only while Business Central still holds it, by the same rules the dialog applies,
+    /// so a run that has installed never offers a Reschedule that is then refused.
+    /// </summary>
+    [Fact]
+    public async Task The_lists_offer_Reschedule_on_a_held_deployment_only_until_it_installs()
+    {
+        var (seed, heldId) = await HandedOffAsync();
+        (await HistoryRowAsync(seed, heldId)).StillHeld.Should().BeTrue();
+        (await LastDeliveryAsync(seed)).StillHeld.Should().BeTrue();
+
+        await using (var ctx = _db.NewContext())
+        {
+            var result = await ctx.OeProjectDeliveryResults.SingleAsync(r => r.ProjectDeliveryId == heldId);
+            ctx.OeEnvironmentApps.Add(new OeEnvironmentApp
+            {
+                OrganizationId = TestDb.DefaultOrgId, EnvironmentId = seed.EnvironmentId, AppId = Guid.Parse(result.AppId!),
+                Name = "CRONUS Core", Publisher = "CRONUS A/S", Version = result.AppVersion, FetchedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await HistoryRowAsync(seed, heldId)).StillHeld.Should().BeFalse("the environment shows that version installed");
+        (await LastDeliveryAsync(seed)).StillHeld.Should().BeFalse();
+    }
+
+    private async Task<DeliveryHistoryRow> HistoryRowAsync(Seed seed, int deliveryId)
+    {
+        await using var ctx = _db.NewContext();
+        return (await NewService(ctx).ListDeliveryHistoryAsync(seed.ReleasePipelineId)).Single(r => r.Id == deliveryId);
+    }
+
+    private async Task<ReleasePipelineLastDelivery> LastDeliveryAsync(Seed seed)
+    {
+        await using var ctx = _db.NewContext();
+        var rows = await new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
+            NullLogger<ReleasePipelineService>.Instance).ListReleasePipelineOverviewAsync();
+        return rows.Single(r => r.Id == seed.ReleasePipelineId).LastDelivery!;
+    }
+
     [Fact]
     public async Task A_held_deployment_the_environment_has_installed_is_no_longer_offered_or_moved()
     {

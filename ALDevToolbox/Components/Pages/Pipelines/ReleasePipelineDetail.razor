@@ -1086,7 +1086,8 @@
                 // Its own scope: this waits on Business Central while the page's other
                 // buttons stay live on the circuit's one context (#679).
                 await using var scope = ScopeFactory.CreateAsyncScope();
-                sessions = await scope.ServiceProvider.GetRequiredService<DeliveryService>().CheckOpenSessionsAsync(Id);
+                var deliveries = scope.ServiceProvider.GetRequiredService<DeliveryService>();
+                sessions = await OpenSessionsCheck.AskAsync(() => deliveries.CheckOpenSessionsAsync(Id), EnvName, Log);
             }
             catch (PlanValidationException ex)
             {
@@ -1097,11 +1098,6 @@
             {
                 _approvalError = "Only the solution owner or an admin can approve deployments here.";
                 return;
-            }
-            catch (Exception ex)
-            {
-                Log.LogError(ex, "Failed to check the sessions before approving delivery {DeliveryId}.", p.Id);
-                sessions = OpenSessionsCheck.Unknown(EnvName, "Something went wrong at our end.");
             }
             finally
             {
@@ -1210,23 +1206,17 @@
     }
 
     /// <summary>
-    /// True for the handed-off run Business Central may still be holding: the newest one
-    /// that reached it, with one app. Whether it really is still held (not installed with
-    /// the update yet) the service decides when the dialog opens.
-    /// </summary>
-    /// <summary>
     /// True for a run cancelled after Business Central took it: only moving a held
     /// deployment does that (#1097); a plain cancel stops a run before anything is sent.
     /// </summary>
     private static bool IsMoved(DeliveryHistoryRow d) =>
         d.Status == ProjectDeliveryStatus.Cancelled && d.Apps.Any(a => a.OperationId is not null);
 
-    private bool MayStillBeHeld(DeliveryHistoryRow d) =>
-        _canManage
-        && d.Status == ProjectDeliveryStatus.HandedOff
-        && d.Apps.Count(a => a.Status == ProjectDeliveryResultStatus.Scheduled) == 1
-        && !_deliveries.Any(x => x.Id > d.Id
-            && (x.Status is ProjectDeliveryStatus.Deployed or ProjectDeliveryStatus.HandedOff || x.IsActive));
+    /// <summary>
+    /// True for a handed-off run Business Central is still holding, as the service read it:
+    /// one app, not replaced by a later run, and not installed yet.
+    /// </summary>
+    private bool MayStillBeHeld(DeliveryHistoryRow d) => _canManage && d.StillHeld;
 
     private async Task OpenRescheduleAsync(DeliveryHistoryRow d)
     {

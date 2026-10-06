@@ -17,12 +17,6 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// </summary>
 public sealed class PushBuildService
 {
-    internal const string NoOwnerMessage =
-        "the person its builds run as no longer has an active account.";
-
-    internal const string NoAccessMessage =
-        "the person its builds run as can no longer manage this solution.";
-
     private readonly AppDbContext _db;
 
     public PushBuildService(AppDbContext db)
@@ -100,7 +94,7 @@ public sealed class PushBuildService
             .Where(p => !p.AlreadyBuilt)
             .Select(p => p.BuildOnPushByUserId is { } userId && p.OwnerActive
                 ? new PushBuildDue(p.Id, repositoryByProject[p.ProjectId], userId, null)
-                : new PushBuildDue(p.Id, repositoryByProject[p.ProjectId], null, NoOwnerMessage))
+                : new PushBuildDue(p.Id, repositoryByProject[p.ProjectId], null, AutomatedBuilds.NoOwnerMessage))
             .ToList();
     }
 
@@ -108,14 +102,8 @@ public sealed class PushBuildService
     /// Records why <paramref name="pipelineId"/>'s last push could not start a build,
     /// or clears it with null. Writes only when the value changes.
     /// </summary>
-    public async Task SetBlockedAsync(int pipelineId, string? reason, CancellationToken ct = default)
-    {
-        if (reason is { Length: > 500 }) reason = reason[..500];
-        await _db.OePipelines
-            .Where(p => p.Id == pipelineId && p.BuildOnPushBlocked != reason)
-            .ExecuteUpdateAsync(s => s.SetProperty(p => p.BuildOnPushBlocked, reason), ct)
-            .ConfigureAwait(false);
-    }
+    public Task SetBlockedAsync(int pipelineId, string? reason, CancellationToken ct = default) =>
+        AutomatedBuilds.SetBlockedAsync(_db, pipelineId, PipelineAutomation.BuildOnPush, reason, ct);
 }
 
 /// <summary>

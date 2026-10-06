@@ -1436,50 +1436,20 @@ public sealed class DeliveryService
 
     /// <summary>
     /// The app Business Central is still holding for a handed-off delivery, or why there is
-    /// none to move. A handed-off row never changes again once written, so "still held" is
-    /// read from what came after it: a later run of the same pipeline replaced Business
-    /// Central's copy, and the environment showing that version (or newer) installed means
-    /// the update has been and gone. Several apps aren't moved: cancelling them one by one
-    /// can leave half a build held. Nor is one whose pipeline now deploys somewhere else:
-    /// its replacement would go there instead.
+    /// none to move. <see cref="HeldInstalls"/> has the rules; the lists ask the same question.
     /// </summary>
     private async Task<(HeldApp? App, string? Why)> HeldAppAsync(RescheduleInfo info, CancellationToken ct)
     {
         const string goneWhy = "Business Central isn't holding this deployment any more: it has been installed or replaced by a later one.";
-        var held = await _db.OeProjectDeliveryResults.AsNoTracking()
-            .Where(r => r.ProjectDeliveryId == info.DeliveryId && r.Status == ProjectDeliveryResultStatus.Scheduled)
-            .Select(r => new { r.Id, r.AppId, r.AppVersion })
-            .ToListAsync(ct);
-        if (held.Count != 1 || !Guid.TryParse(held[0].AppId, out var appId) || string.IsNullOrWhiteSpace(held[0].AppVersion))
+        var checks = await HeldInstalls.CheckAsync(_db, new[] { info.DeliveryId }, ct);
+        if (!checks.TryGetValue(info.DeliveryId, out var check)) return (null, goneWhy);
+        return check.Verdict switch
         {
-            return (null, "This deployment can't be moved from here. Cancel it under Scheduled installs on the environment, then deploy the build again.");
-        }
-
-        var later = await _db.OeProjectDeliveries.AsNoTracking()
-            .AnyAsync(d => d.ReleasePipelineId == info.ReleasePipelineId && d.Id > info.DeliveryId
-                && (d.Status == ProjectDeliveryStatus.HandedOff || d.Status == ProjectDeliveryStatus.Deployed
-                    || d.Status == ProjectDeliveryStatus.Claimed || d.Status == ProjectDeliveryStatus.Uploading
-                    || d.Status == ProjectDeliveryStatus.Installing), ct);
-        if (later) return (null, goneWhy);
-
-        var installed = await _db.OeEnvironmentApps.AsNoTracking()
-            .Where(a => a.EnvironmentId == info.EnvironmentId && a.AppId == appId)
-            .Select(a => a.Version)
-            .FirstOrDefaultAsync(ct);
-        if (Version.TryParse(installed, out var have) && Version.TryParse(held[0].AppVersion, out var want) && have >= want)
-        {
-            return (null, goneWhy);
-        }
-
-        var pipelineEnv = await _db.OeReleasePipelines.AsNoTracking()
-            .Where(r => r.Id == info.ReleasePipelineId)
-            .Select(r => r.ProjectEnvironment!.Name)
-            .FirstOrDefaultAsync(ct);
-        if (!string.Equals(pipelineEnv, info.EnvironmentName, StringComparison.Ordinal))
-        {
-            return (null, $"Its deployment pipeline no longer deploys to {info.EnvironmentName}. Cancel the install under Scheduled installs on {info.EnvironmentName}, then deploy the build again.");
-        }
-        return (new HeldApp(held[0].Id, appId, held[0].AppVersion), null);
+            HeldInstalls.Verdict.Held => (new HeldApp(check.ResultId, check.AppId, check.AppVersion), null),
+            HeldInstalls.Verdict.NotOneApp => (null, "This deployment can't be moved from here. Cancel it under Scheduled installs on the environment, then deploy the build again."),
+            HeldInstalls.Verdict.PipelineMoved => (null, $"Its deployment pipeline no longer deploys to {info.EnvironmentName}. Cancel the install under Scheduled installs on {info.EnvironmentName}, then deploy the build again."),
+            _ => (null, goneWhy),
+        };
     }
 
     /// <summary>
@@ -2250,9 +2220,11 @@ public sealed class DeliveryService
             })
             .ToListAsync(ct);
 
+        var stillHeld = await HeldInstalls.StillHeldAsync(_db,
+            rows.Where(r => r.Status == ProjectDeliveryStatus.HandedOff).Select(r => r.Id).ToList(), ct);
         for (var i = 0; i < rows.Count; i++)
         {
-            rows[i] = rows[i] with { Number = total - i };
+            rows[i] = rows[i] with { Number = total - i, StillHeld = stillHeld.Contains(rows[i].Id) };
         }
         return rows;
     }
@@ -2539,6 +2511,13 @@ public sealed record DeliveryHistoryRow(
 
     /// <summary>True when a new build started it without waiting for approval (#1096).</summary>
     public bool DeployedWithoutApproval { get; init; }
+
+    /// <summary>
+    /// A handed-off deployment whose app Business Central is still holding for a later
+    /// update, so it can be rescheduled (#1097). False once it has installed or a later run
+    /// replaced it.
+    /// </summary>
+    public bool StillHeld { get; init; }
 
     /// <summary>The branch the deployed build was made from, when it was built here.</summary>
     public string? BuildBranch { get; init; }
