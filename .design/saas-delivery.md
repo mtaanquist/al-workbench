@@ -880,13 +880,24 @@ whole. The page reads the log line back through the same parser, so a deployment
   Central update*. The last two change what is sent: the apps go up straight away and Business Central
   holds them until that update, exactly as a pipeline set to that timing would. They are offered only
   for a build Business Central can hold back - one app, already in the environment's app list as last
-  read; the run re-checks the live list. A deployment already handed to Business Central is not
-  reschedulable: the admin API can only cancel it (from the environment's Scheduled installs), not move it.
+  read; the run re-checks the live list. A deployment already handed to Business Central can be
+  rescheduled too, but not moved there - the admin API can only cancel a held install - so it is
+  replaced: a new deployment of the same build is written (far in the future, so a refusal such as
+  the branch rule leaves Business Central alone), Business Central's copy is cancelled, and only then
+  does the new one take the picked timing. If Business Central refuses the cancel, the new deployment
+  is removed and nothing has changed. The old one is marked cancelled with a log line naming its
+  replacement, and its app row skipped. Only a run Business Central may still hold is offered: the
+  newest of its pipeline to reach Business Central, one app, a version the environment's app list as
+  last read doesn't already have, still going to the environment the pipeline targets. Moving it to
+  the update it already waits for is refused.
   Any choice that installs within the minute (Now, a picked time that has come, a delivery window that
   is open) asks who is signed in first. Rescheduling takes the Deployment pipelines step-up rule, like
   deploying. The worker only claims a delivery whose time has come, so a run still waiting in the queue
   does nothing to a deployment moved to later; the scheduler queues it again when it is due. The same
-  dialog opens from "Reschedule next deployment" in the deployment pipelines list's row menu.
+  dialog opens from "Reschedule next deployment" in the deployment pipelines list's row menu, and
+  from the environment's Scheduled installs card, which lists the pipeline runs booked for that
+  environment (with Reschedule and Cancel deployment) and offers Reschedule beside the install
+  Business Central lists for a run it is holding.
 - **Deployment pipeline page (`/pipelines/deployments/{id}`), as built (#929, #932):** ports
   `.design/handoff/ReleasePipelineBody.dc.html` on the `DetailPage` frame. The head names the
   solution, the source (build pipeline, or the repository for a GitHub-release pipeline) and the

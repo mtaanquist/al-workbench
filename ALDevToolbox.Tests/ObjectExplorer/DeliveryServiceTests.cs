@@ -695,6 +695,222 @@ public sealed class DeliveryServiceTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
+    // ── Moving a deployment Business Central is holding (#1097) ────────────────
+
+    /// <summary>A one-app deployment handed to Business Central for its next minor update.</summary>
+    private async Task<(Seed Seed, int DeliveryId)> HandedOffAsync()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" },
+            deploymentSchedule: BcDeploymentSchedule.NextMinorUpdate);
+        _apps.Installed.Add(InstalledApp("CRONUS Core"));
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+        DrainQueue();
+        return (seed, deliveryId);
+    }
+
+    [Fact]
+    public async Task Moving_a_held_deployment_to_now_cancels_business_centrals_copy_and_deploys_it_again()
+    {
+        var (seed, heldId) = await HandedOffAsync();
+        await using (var check = _db.NewContext())
+        {
+            (await NewService(check).GetRescheduleOptionsAsync(heldId))!.HeldByBusinessCentral.Should().BeTrue();
+        }
+
+        var newId = await NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+
+        newId.Should().NotBe(heldId, "Business Central's copy can't be moved, only replaced");
+        await using var read = _db.NewContext();
+        var held = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == heldId);
+        var result = held.Results.Single();
+        _apps.Removed.Should().ContainSingle().Which.Should().Be(
+            (Guid.Parse(result.AppId!), result.AppVersion, BcDeploymentSchedule.NextMinorUpdate));
+        held.Status.Should().Be(ProjectDeliveryStatus.Cancelled);
+        held.DiagnosticsLog.Should().Contain($"deployment #{newId}");
+        result.Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
+
+        var moved = await read.OeProjectDeliveries.SingleAsync(d => d.Id == newId);
+        moved.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        moved.ProjectBuildId.Should().Be(seed.BuildId);
+        moved.DeploymentSchedule.Should().Be(BcDeploymentSchedule.Immediate);
+        moved.ScheduledFor.Should().BeCloseTo(DateTime.UtcNow, TimeSpan.FromMinutes(1));
+        _queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.DeliveryId.Should().Be(newId);
+    }
+
+    [Fact]
+    public async Task Moving_a_held_deployment_to_a_picked_time_books_the_new_one_for_then()
+    {
+        var (_, heldId) = await HandedOffAsync();
+        var at = DateTime.UtcNow.AddDays(2);
+
+        var newId = await NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.AtTime, at);
+
+        await using var read = _db.NewContext();
+        var moved = await read.OeProjectDeliveries.SingleAsync(d => d.Id == newId);
+        moved.ScheduledFor.Should().BeCloseTo(at, TimeSpan.FromSeconds(1));
+        moved.DeploymentSchedule.Should().Be(BcDeploymentSchedule.Immediate);
+        _queue.Reader.TryRead(out _).Should().BeFalse("it isn't due yet");
+    }
+
+    [Fact]
+    public async Task When_business_central_refuses_the_cancel_nothing_is_moved()
+    {
+        var (_, heldId) = await HandedOffAsync();
+        _apps.RemoveRefusal = "No scheduled operation found.";
+
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Delivery"].Should().Contain("nothing was changed");
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.CountAsync()).Should().Be(1, "the replacement is removed again");
+        (await read.OeProjectDeliveries.SingleAsync()).Status.Should().Be(ProjectDeliveryStatus.HandedOff);
+        _queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_held_deployment_can_only_be_moved_once()
+    {
+        var (_, heldId) = await HandedOffAsync();
+        await NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.AtTime, DateTime.UtcNow.AddDays(2));
+
+        var again = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+
+        await again.Should().ThrowAsync<PlanValidationException>();
+        _apps.Removed.Should().ContainSingle();
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.CountAsync()).Should().Be(2, "one held run and the one that replaced it");
+    }
+
+    /// <summary>
+    /// The cancel's answer is lost (a timeout, the page closing). Whether the move finishes
+    /// is settled by asking Business Central what it still holds, so a dropped copy is
+    /// always replaced and a kept one never doubled.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_cancel_whose_answer_is_lost_is_settled_by_what_business_central_still_holds(bool reachedIt)
+    {
+        var (_, heldId) = await HandedOffAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var result = await ctx.OeProjectDeliveryResults.SingleAsync(r => r.ProjectDeliveryId == heldId);
+            _apps.Scheduled.Add(ScheduledOperation(Guid.Parse(result.AppId!), "CRONUS Core", result.AppVersion, BcDeploymentSchedule.NextMinorUpdate));
+        }
+        _apps.RemoveFault = new HttpRequestException("The connection was reset.");
+        _apps.RemoveTakesEffect = reachedIt;
+
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+
+        await using var read = _db.NewContext();
+        if (reachedIt)
+        {
+            await act.Should().NotThrowAsync();
+            (await read.OeProjectDeliveries.SingleAsync(d => d.Id == heldId)).Status.Should().Be(ProjectDeliveryStatus.Cancelled);
+            (await read.OeProjectDeliveries.CountAsync(d => d.Status == ProjectDeliveryStatus.Scheduled)).Should().Be(1);
+        }
+        else
+        {
+            await act.Should().ThrowAsync<HttpRequestException>();
+            (await read.OeProjectDeliveries.SingleAsync()).Status.Should().Be(ProjectDeliveryStatus.HandedOff);
+        }
+    }
+
+    [Fact]
+    public async Task A_held_deployment_whose_pipeline_now_targets_another_environment_is_not_moved()
+    {
+        var (seed, heldId) = await HandedOffAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var sandbox = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "Sandbox", Type = "Sandbox", FetchedAt = DateTime.UtcNow,
+            };
+            ctx.OeProjectEnvironments.Add(sandbox);
+            await ctx.SaveChangesAsync();
+            await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.ProjectEnvironmentId, sandbox.Id));
+        }
+
+        (await NewService(_db.NewContext()).GetRescheduleOptionsAsync(heldId)).Should().BeNull();
+        (await NewService(_db.NewContext()).WhyNotReschedulableAsync(heldId)).Should().Contain("no longer deploys to Production");
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+        await act.Should().ThrowAsync<PlanValidationException>();
+        _apps.Removed.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_held_deployment_cannot_be_moved_to_the_update_it_already_waits_for()
+    {
+        var (_, heldId) = await HandedOffAsync();
+
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.NextMinorUpdate);
+
+        await act.Should().ThrowAsync<PlanValidationException>();
+        _apps.Removed.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_held_deployment_the_environment_has_installed_is_no_longer_offered_or_moved()
+    {
+        var (seed, heldId) = await HandedOffAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var result = await ctx.OeProjectDeliveryResults.SingleAsync(r => r.ProjectDeliveryId == heldId);
+            ctx.OeEnvironmentApps.Add(new OeEnvironmentApp
+            {
+                OrganizationId = TestDb.DefaultOrgId, EnvironmentId = seed.EnvironmentId, AppId = Guid.Parse(result.AppId!),
+                Name = "CRONUS Core", Publisher = "CRONUS A/S", Version = result.AppVersion, FetchedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await NewService(_db.NewContext()).GetRescheduleOptionsAsync(heldId)).Should().BeNull();
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Delivery"].Should().Contain("isn't holding");
+        _apps.Removed.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_held_deployment_replaced_by_a_later_run_is_no_longer_offered()
+    {
+        var (seed, heldId) = await HandedOffAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var laterId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+            await using var run = _db.NewContext();
+            await NewService(run).RunDeliveryAsync(laterId);
+        }
+
+        (await NewService(_db.NewContext()).GetRescheduleOptionsAsync(heldId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ListWaitingDeploymentsAsync_lists_bookings_and_the_deployment_business_central_holds()
+    {
+        var (seed, heldId) = await HandedOffAsync();
+        int laterId;
+        await using (var ctx = _db.NewContext())
+        {
+            laterId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddDays(1));
+        }
+
+        var waiting = await NewService(_db.NewContext()).ListWaitingDeploymentsAsync(seed.ProjectId, seed.EnvironmentId);
+
+        waiting.Select(w => (w.DeliveryId, w.HeldByBusinessCentral)).Should().Equal((laterId, false), (heldId, true));
+        (await NewService(_db.NewContext()).ListWaitingDeploymentsAsync(seed.ProjectId, seed.EnvironmentId + 1000))
+            .Should().BeEmpty("another environment's list holds none of them");
+        await using var read = _db.NewContext();
+        var result = await read.OeProjectDeliveryResults.SingleAsync(r => r.ProjectDeliveryId == heldId);
+        waiting[1].AppId.Should().Be(Guid.Parse(result.AppId!));
+        waiting[1].AppVersion.Should().Be(result.AppVersion);
+    }
+
     // ── Deferred installs: Business Central takes over ─────────────────────────
 
     [Fact]
@@ -2464,10 +2680,29 @@ public sealed class DeliveryServiceTests : IDisposable
         public Task<IReadOnlyList<BcAvailableAppUpdate>> ListAvailableUpdatesAsync(string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
             => throw new NotSupportedException();
 
+        /// <summary>Scheduled installs cancelled, as (app id, version, schedule).</summary>
+        public List<(Guid AppId, string Version, string Schedule)> Removed { get; } = new();
+
+        /// <summary>When set, cancelling a scheduled install is refused with this message.</summary>
+        public string? RemoveRefusal { get; set; }
+
+        /// <summary>When set, the cancel is lost on the way back (after Business Central acted on it when <see cref="RemoveTakesEffect"/>).</summary>
+        public Exception? RemoveFault { get; set; }
+        public bool RemoveTakesEffect { get; set; }
+
         public Task<BcAppOperation> RemoveScheduledPteVersionAsync(
             string accessToken, string applicationFamily, string environmentName, Guid appId, string targetVersion,
             string scheduleKind, CancellationToken ct = default)
-            => Task.FromResult(Operation(appId, "canceled"));
+        {
+            if (RemoveRefusal is { } refusal) throw new BcApiException(null, refusal);
+            if (RemoveFault is { } fault)
+            {
+                if (RemoveTakesEffect) Scheduled.RemoveAll(s => s.AppId == appId && s.TargetAppVersion == targetVersion);
+                throw fault;
+            }
+            Removed.Add((appId, targetVersion, scheduleKind));
+            return Task.FromResult(Operation(appId, "canceled"));
+        }
 
         private static BcAppOperation Operation(Guid appId, string status, Guid? operationId = null) => new(
             Id: operationId ?? Guid.NewGuid(),
