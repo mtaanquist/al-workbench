@@ -713,10 +713,9 @@ Named user: a consultant who merged two pull requests this morning and wants to 
 without opening GitHub, whether the customer's pipeline has a build of them yet.
 
 A build pipeline watches one branch, and the workbench knows when that branch has moved
-past what the pipeline last built. **Nothing builds on push.** This is the engine for an
-indicator (the surfaces are #964): a person reads it and decides whether to press Build.
-Building or preparing a build on push, if it is ever wanted, is the #934 shape (a person
-approves) and a separate decision. Nothing polls GitHub either: pushes are free and
+past what the pipeline last built. **Nothing builds on push** unless the pipeline asks
+for it (see "Building on push (#1079)" below). This is the engine for an indicator (the
+surfaces are #964): a person reads it and decides whether to press Build. Nothing polls GitHub either: pushes are free and
 immediate, and a deployment whose App is not subscribed simply has no heads.
 
 - **A branch on the pipeline.** `oe_pipelines.branch` (nullable; null is each
@@ -806,6 +805,51 @@ build #118"), "No successful build yet" (the issue said "Never built", which rea
 - The handoff sheets have no line, card or tile for this yet; all three are composed from
   `.cell-stack`, `.card` + `.kv-grid` + `.meta-item`, and the dashboard's `.cue`, for the
   design project's next round.
+
+### Building on push (#1079)
+
+Named user: a developer on a customer team who pushes several small fixes to `test` in an
+afternoon and wants a build of each one waiting on the pipeline, without pressing Build
+after every push.
+
+A build pipeline can opt in to **building automatically when new commits are pushed**
+(`oe_pipelines.build_on_push`, off by default and off for every existing pipeline; a
+checkbox in the pipeline dialog). Mads chose one build per push on 2026-10-06:
+
+- **One build per push, not per commit.** A push that carries five commits is one build, at
+  the commit the push left the branch on (`oe_project_builds.head_sha`, plus
+  `head_repository_id` naming which of the solution's repositories it belongs to). The
+  solution's other repositories clone the pipeline's branch as usual. Intermediate commits
+  of one push are never built.
+- **Queued, in order.** A build on push is not refused while another build of the pipeline
+  runs (#1072): it is queued behind it. The import worker runs one build at a time in queue
+  order, so a run of pushes gives a run of builds, each at its own commit, and the build
+  history holds one build per change. A build on push that is still waiting does hold up a
+  manual build, by the same rule as any other. Past five waiting builds on push for one
+  pipeline (`ProjectBuildImporter.MaxWaitingPushBuilds`), a push moves the newest waiting
+  build onto its commit instead of adding a sixth, so a long rebase pushed piecemeal cannot
+  fill the queue and the branch's latest state is still built. A build the worker has
+  started is never moved.
+- **What does not build.** A forced push (it may have removed others' work, so a person
+  decides), a deleted branch, a push to any other branch, and a redelivery of a push whose
+  commit this pipeline already built on push. A pipeline with no branch builds pushes to
+  the default branch GitHub names on the delivery. GitHub repositories only: pushes arrive
+  by GitHub webhook, and Azure DevOps would need polling or a service hook.
+- **Whose identity.** The build runs as **the person who turned building on push on**
+  (`build_on_push_by_user_id`), exactly as the nightly preview check runs as its person:
+  the access check, the clone credential (their connected GitHub account, then their build
+  token), the name on the build and its notifications are theirs. It is not the GitHub
+  App's installation token, which would let builds keep running with nobody's permission
+  behind them. When that person is gone, can no longer manage the solution, or has nothing
+  to clone with, the push is not built and building on push is **paused** with the reason
+  on the pipeline page (`build_on_push_blocked`), where anyone who manages the solution can
+  take it over ("Resume with my access"); saving the pipeline while paused does the same. The
+  next push that starts a build lifts the pause.
+- **An ordinary pipeline build otherwise.** Trigger `push`; numbered and published like a
+  manual build (build versioning, GitHub release, #934's prepared deployment), compared
+  with manual builds for "build is failing / fixed" notices, and shown on the dashboard
+  with the pipeline as the actor. Builds are resumed after a restart like any pipeline
+  build, at the same commit.
 
 ## #631 Translation memory from every .xlf in the organisation's repositories
 

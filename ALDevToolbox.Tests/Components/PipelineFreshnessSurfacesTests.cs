@@ -10,6 +10,7 @@ using ALDevToolbox.Services.Organizations;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Bunit;
+using Microsoft.AspNetCore.Components;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -215,7 +216,7 @@ public sealed class PipelineFreshnessSurfacesTests : IDisposable
         await AddHeadAsync(_db, ahead.RepositoryId, "main", Newest, commits: [Built, Newest]);
         await SeedPipelineAsync("CRONUS Sales");
 
-        _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>()
+        _ctx.Services.GetRequiredService<NavigationManager>()
             .NavigateTo("/pipelines/builds?show=ready");
 
         var cut = _ctx.Render<PipelinesBrowser>();
@@ -225,6 +226,126 @@ public sealed class PipelineFreshnessSurfacesTests : IDisposable
             cut.Find(".pill-tab.is-active").TextContent.Should().Contain("Ready to build");
             cut.FindAll("tbody tr").Should().ContainSingle();
         });
+    }
+
+    // ── The Solution filter (#1078) ──────────────────────────────────────────
+
+    [Fact]
+    public async Task List_the_solution_select_narrows_the_rows_and_the_tab_counts_to_one_solution()
+    {
+        var ahead = await SeedPipelineAsync("CRONUS Base");
+        await AddBuildAsync(_db, ahead.ProjectId, ahead.PipelineId, ahead.RepositoryId);
+        await AddHeadAsync(_db, ahead.RepositoryId, "main", Newest, commits: [Built, Newest]);
+        var sales = await SeedPipelineAsync("CRONUS Sales");
+
+        var cut = _ctx.Render<PipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("select[aria-label='Solution'] option").Select(o => o.TextContent.Trim())
+                .Should().Equal("All solutions", "CRONUS Base solution", "CRONUS Sales solution");
+            cut.FindAll("tbody tr").Should().HaveCount(2);
+        });
+
+        cut.Find("select[aria-label='Solution']").Change(sales.ProjectId.ToString());
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("tbody tr").Select(r => r.QuerySelector(".cell-stack__main")!.TextContent.Trim())
+                .Should().Equal("CRONUS Sales");
+            cut.Find(".pill-tab.is-active .pill-tab__count").TextContent.Trim().Should().Be("1");
+            _ctx.Services.GetRequiredService<NavigationManager>().Uri
+                .Should().EndWith($"/pipelines/builds?solution={sales.ProjectId}", "the choice is in the URL, so it can be shared");
+            cut.FindAll(".pill-tab").Should().NotContain(t => t.TextContent.Contains("Ready to build"),
+                "the ahead pipeline belongs to the other solution");
+        });
+
+        cut.Find("select[aria-label='Solution']").Change("");
+
+        cut.WaitForAssertion(() => cut.FindAll("tbody tr").Should().HaveCount(2));
+    }
+
+    [Fact]
+    public async Task List_opens_on_the_solution_from_the_link_and_clears_back_to_all()
+    {
+        var ahead = await SeedPipelineAsync("CRONUS Base");
+        await AddBuildAsync(_db, ahead.ProjectId, ahead.PipelineId, ahead.RepositoryId);
+        await AddHeadAsync(_db, ahead.RepositoryId, "main", Newest, commits: [Built, Newest]);
+        var sales = await SeedPipelineAsync("CRONUS Sales");
+
+        _ctx.Services.GetRequiredService<NavigationManager>()
+            .NavigateTo($"/pipelines/builds?show=ready&solution={sales.ProjectId}");
+
+        var cut = _ctx.Render<PipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("select[aria-label='Solution']").GetAttribute("value").Should().Be(sales.ProjectId.ToString());
+            cut.FindAll("tbody tr").Should().BeEmpty("the ahead pipeline belongs to the other solution");
+            cut.Find(".pill-tab.is-active").TextContent.Should().Contain("Ready to build", "the active tab stays visible at zero");
+            cut.Find(".empty-state__title").TextContent.Trim()
+                .Should().Be("Every CRONUS Sales solution pipeline has a build of its latest changes");
+        });
+
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Show all CRONUS Sales solution pipelines").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("tbody tr").Select(r => r.QuerySelector(".cell-stack__main")!.TextContent.Trim())
+                .Should().Equal("CRONUS Sales");
+            cut.Find("select[aria-label='Solution']").GetAttribute("value").Should().Be(sales.ProjectId.ToString());
+        });
+
+        cut.Find(".pill-tab.is-active").TextContent.Should().Contain("All");
+
+        // Clear filters, from the same empty state, lets go of the solution too.
+        _ctx.Services.GetRequiredService<NavigationManager>()
+            .NavigateTo($"/pipelines/builds?show=ready&solution={sales.ProjectId}");
+        cut = _ctx.Render<PipelinesBrowser>();
+        cut.WaitForAssertion(() => cut.FindAll("tbody tr").Should().BeEmpty());
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Clear filters").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("tbody tr").Should().HaveCount(2);
+            cut.Find("select[aria-label='Solution']").GetAttribute("value").Should().BeNullOrEmpty();
+        });
+    }
+
+    [Fact]
+    public async Task List_a_search_keeps_the_solution_and_Clear_search_keeps_it_too()
+    {
+        var sales = await SeedPipelineAsync("CRONUS Sales");
+        await SeedPipelineAsync("CRONUS Sales Extra");
+        await SeedPipelineAsync("CRONUS Base");
+
+        _ctx.Services.GetRequiredService<NavigationManager>()
+            .NavigateTo($"/pipelines/builds?q=Sales&solution={sales.ProjectId}");
+
+        var cut = _ctx.Render<PipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("tbody tr").Select(r => r.QuerySelector(".cell-stack__main")!.TextContent.Trim())
+                .Should().Equal("CRONUS Sales");
+            cut.Find("form input[type=hidden][name=solution]").GetAttribute("value").Should().Be(sales.ProjectId.ToString(),
+                "submitting another search keeps the solution");
+            cut.FindAll("a").Single(a => a.TextContent.Trim() == "Clear search").GetAttribute("href")
+                .Should().EndWith($"/pipelines/builds?solution={sales.ProjectId}");
+        });
+    }
+
+    [Fact]
+    public async Task List_a_link_to_a_solution_without_build_pipelines_shows_all_of_them()
+    {
+        await SeedPipelineAsync("CRONUS Base");
+
+        _ctx.Services.GetRequiredService<NavigationManager>()
+            .NavigateTo("/pipelines/builds?solution=999999");
+
+        var cut = _ctx.Render<PipelinesBrowser>();
+
+        cut.WaitForAssertion(() => cut.FindAll("tbody tr").Should().ContainSingle());
     }
 
     // ── The pipeline page ────────────────────────────────────────────────────

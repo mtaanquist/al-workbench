@@ -22,6 +22,9 @@ internal sealed class PipelineConfiguration : IEntityTypeConfiguration<OePipelin
         entity.Property(e => e.PreviewCheck).HasColumnName("preview_check").HasDefaultValue(false).IsRequired();
         entity.Property(e => e.PreviewCheckByUserId).HasColumnName("preview_check_by_user_id");
         entity.Property(e => e.PreviewCheckBlocked).HasColumnName("preview_check_blocked").HasMaxLength(500);
+        entity.Property(e => e.BuildOnPush).HasColumnName("build_on_push").HasDefaultValue(false).IsRequired();
+        entity.Property(e => e.BuildOnPushByUserId).HasColumnName("build_on_push_by_user_id");
+        entity.Property(e => e.BuildOnPushBlocked).HasColumnName("build_on_push_blocked").HasMaxLength(500);
         // No HasDefaultValue(true): with a CLR default of true, EF would take false for
         // "unset" and leave it to the database default, so turning numbering off on a new
         // pipeline would not stick. The migration's default only fills existing rows.
@@ -53,6 +56,13 @@ internal sealed class PipelineConfiguration : IEntityTypeConfiguration<OePipelin
         entity.HasOne(e => e.PreviewCheckByUser)
             .WithMany()
             .HasForeignKey(e => e.PreviewCheckByUserId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        // Who builds started by a push run as. SET NULL on delete, which pauses
+        // building on push rather than removing the pipeline.
+        entity.HasOne(e => e.BuildOnPushByUser)
+            .WithMany()
+            .HasForeignKey(e => e.BuildOnPushByUserId)
             .OnDelete(DeleteBehavior.SetNull);
 
         // The build relationship is configured from the ProjectBuild side; don't

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -13,9 +14,11 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261215000000_AddBuildOnPush")]
+    partial class AddBuildOnPush
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -586,10 +589,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("detected_at");
 
-                    b.Property<int?>("EnvironmentId")
-                        .HasColumnType("integer")
-                        .HasColumnName("environment_id");
-
                     b.Property<string>("Field")
                         .IsRequired()
                         .HasMaxLength(120)
@@ -623,9 +622,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnName("repository");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("EnvironmentId")
-                        .HasDatabaseName("ix_github_repository_drift_environment_id");
 
                     b.HasIndex("ReleaseId");
 
@@ -7079,11 +7075,6 @@ namespace ALDevToolbox.Data.Migrations
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryDrift", b =>
                 {
-                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectEnvironment", "Environment")
-                        .WithMany()
-                        .HasForeignKey("EnvironmentId")
-                        .OnDelete(DeleteBehavior.Cascade);
-
                     b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
                         .WithMany()
                         .HasForeignKey("OrganizationId")
@@ -7095,8 +7086,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasForeignKey("ReleaseId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-
-                    b.Navigation("Environment");
 
                     b.Navigation("Organization");
 

@@ -935,7 +935,8 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         // pipeline to production, which wants a named branch, accepts it.
         pipelines.Should().OnlyContain(p =>
             p.RequestedAppIdsJson == null && p.AutoVersion && !p.PreviewCheck
-            && p.CreatedByUserId == UserId && !p.NameIsCustom);
+            && p.CreatedByUserId == UserId && !p.NameIsCustom
+            && p.BuildOnPush && p.BuildOnPushByUserId == UserId);
     }
 
     [Fact]

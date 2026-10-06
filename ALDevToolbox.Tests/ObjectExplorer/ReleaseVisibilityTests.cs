@@ -425,6 +425,40 @@ public sealed class ReleaseVisibilityTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_private_builds_compare_candidates_answer_only_its_teams_members()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var seeded = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, seeded.ReleaseId);
+        var sibling = await SeedReleaseAsync("CRONUS on BC 26.1");
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = projectId,
+                ReleaseId = sibling.ReleaseId,
+                Status = ProjectBuildStatus.Ready,
+                StartedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Explorer(ctx).ListBuildCompareCandidatesAsync(seeded.ReleaseId)).Should().BeEmpty();
+        }
+
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Explorer(ctx).ListBuildCompareCandidatesAsync(seeded.ReleaseId))
+                .Should().ContainSingle(r => r.Id == sibling.ReleaseId);
+        }
+    }
+
     [Theory]
     [MemberData(nameof(AllLevels))]
     public async Task The_releases_browser_list_follows_the_same_rule_as_the_single_id_check(ProjectVisibility visibility)
