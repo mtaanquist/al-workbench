@@ -1021,6 +1021,21 @@ year's Business Central after a new release lands in the Object Explorer.
   repository to render. `OpenUpdatePullRequestsAsync` applies it again before
   writing, and `GitHubRepositoryService.ResolveAsync` is still the gate on the
   repository itself.
+- **The customer's environment is the yardstick (#1081).** A repository's
+  `application` and `platform` are measured against the Business Central version of the
+  production environment of the solution that tracks it - the first by name that is not
+  deleted and has a version - because that is what the customer runs; a freshly imported
+  wave is not something a repository is behind until the customer is on it. A solution
+  with no such production environment is measured against its first sandbox, and one
+  with no environment at all is not checked: it is not live yet, so nothing it runs can
+  be behind. The release import still triggers the scan, but no longer sets the target.
+  `platform` is the environment version's major with a zero minor, since an environment
+  reports only its application version. A finding records the environment in
+  `environment_id` (cascade, like the release); the panel says per repository which
+  environment it was measured against, the pull request names it in its body (only
+  when the person can see its solution), and the release compare link is given only
+  when that release is the version being moved to. Environment refreshes do not
+  rescan; Check again does.
 - **`AppJsonDependency` gained `Version` as an optional positional parameter**,
   so every existing caller compiles unchanged.
 - **No MCP tool.** `list_dependency_drift` was optional in the brief and is not

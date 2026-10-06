@@ -135,6 +135,36 @@ public sealed class DependencyDriftPanelTests : IDisposable
     }
 
     [Fact]
+    public async Task A_finding_from_before_environments_were_the_yardstick_asks_for_a_fresh_check()
+    {
+        await ReadyAsync();
+        await SeedDriftAsync();
+        _db.AddGitHubServices(_ctx.Services, WritableApi());
+
+        var cut = _ctx.Render<DependencyDriftPanel>();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
+
+        cut.Find(".drift__sub").TextContent.Should().Contain("Check again to compare them with their solution's production environment");
+        cut.Find(".drift__on").TextContent.Should().Contain("Compared with the newest imported release, Business Central 28.2.");
+    }
+
+    [Fact]
+    public async Task A_repository_measured_against_production_names_the_environment()
+    {
+        await ReadyAsync();
+        await SeedDriftAsync(againstProduction: true);
+        _db.AddGitHubServices(_ctx.Services, WritableApi());
+
+        var cut = _ctx.Render<DependencyDriftPanel>();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
+
+        cut.Find(".drift__sub").TextContent.Should().Contain("than their solution's production environment runs")
+            .And.NotContain("imported");
+        cut.Find(".drift__on").TextContent
+            .Should().Contain("The production environment of CRONUS A/S payments (\"Production\") is on Business Central 28.2.");
+    }
+
+    [Fact]
     public async Task Opening_the_pull_requests_shows_the_link_it_got_back()
     {
         await ReadyAsync();
@@ -204,7 +234,7 @@ public sealed class DependencyDriftPanelTests : IDisposable
     }
 
     /// <summary>A solution tracking the repository, and one finding against it.</summary>
-    private async Task SeedDriftAsync()
+    private async Task SeedDriftAsync(bool againstProduction = false)
     {
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -240,8 +270,26 @@ public sealed class DependencyDriftPanelTests : IDisposable
         });
         await ctx.SaveChangesAsync();
 
+        int? environmentId = null;
+        if (againstProduction)
+        {
+            var environment = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = await ctx.OeProjects.Select(p => p.Id).SingleAsync(),
+                Name = "Production",
+                Type = "Production",
+                Version = "28.2.45123.0",
+                FetchedAt = now,
+            };
+            ctx.OeProjectEnvironments.Add(environment);
+            await ctx.SaveChangesAsync();
+            environmentId = environment.Id;
+        }
+
         ctx.GitHubRepositoryDrift.Add(new GitHubRepositoryDrift
         {
+            EnvironmentId = environmentId,
             OrganizationId = TestDb.DefaultOrgId,
             Repository = RepoA,
             Path = "app.json",

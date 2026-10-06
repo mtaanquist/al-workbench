@@ -193,7 +193,7 @@ public sealed class ReleaseImportDriftHookTests : IDisposable
     {
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
-        ctx.OeProjects.Add(new OeProject
+        var project = new OeProject
         {
             OrganizationId = TestDb.DefaultOrgId,
             Name = "CRONUS A/S payments",
@@ -211,6 +211,19 @@ public sealed class ReleaseImportDriftHookTests : IDisposable
                     DisplayName = "payment-import",
                 },
             ],
+        };
+        ctx.OeProjects.Add(project);
+        await ctx.SaveChangesAsync();
+
+        // A live customer: repositories are measured against what production runs.
+        ctx.OeProjectEnvironments.Add(new OeProjectEnvironment
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = project.Id,
+            Name = "Production",
+            Type = "Production",
+            Version = "28.2.45123.0",
+            FetchedAt = now,
         });
         await ctx.SaveChangesAsync();
     }
