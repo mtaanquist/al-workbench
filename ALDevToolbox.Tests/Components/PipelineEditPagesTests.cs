@@ -183,7 +183,7 @@ public sealed class PipelineEditPagesTests : IDisposable
     }
 
     [Theory]
-    [InlineData("/solutions/1?tab=pipelines", "/solutions/1?tab=pipelines")]
+    [InlineData("/solutions/1/pipelines", "/solutions/1/pipelines")]
     [InlineData("//evil.example/phish", "/pipelines/builds")]
     [InlineData("https://evil.example/phish", "/pipelines/builds")]
     [InlineData("/\\evil.example", "/pipelines/builds")]

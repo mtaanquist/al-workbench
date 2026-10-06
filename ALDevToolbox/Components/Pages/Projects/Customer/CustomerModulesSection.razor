@@ -105,7 +105,7 @@
                 }
                 else if (_modules.ReadFromEnvironment && _modules.EnvironmentId is null && CanManageSolution)
                 {
-                    <a class="btn btn--sm" href="@($"/solutions/{Id}?tab=bc")">Open the Business Central tab</a>
+                    <a class="btn btn--sm" href="@($"/solutions/{Id}/bc")">Open the Business Central tab</a>
                 }
                 else if (_modules.ReadFromEnvironment && _modules.EnvironmentId is { } envId && CanManageSolution)
                 {

@@ -429,12 +429,11 @@ palette may not be a side door to a tab the page would not draw:
 | A Solution | Customer, General, Repositories (anyone who can open it); Business Central (whoever manages it, not on-premises); Pipelines (whoever manages it); Access (its owner and the admins); its live environments (the Environments source's own filter, at most eight); its latest build, landing on that build's pipeline (behind the Pipelines tool) |
 | An environment | Overview, Apps, Operations, Sessions, Workbench history; Open in Business Central and Open the admin centre, only when the tenant is known (the page's own condition for its two buttons); its Solution |
 
-The tabs land on `?tab=` for a Solution and on the tab's own address for an environment.
-The Solution page switches its tabs in place without changing the address, so a `?tab=`
-arriving at a page that is already open moves it to that tab, and a navigation to another
-Solution reloads it - enhanced navigation keeps the component and hands it new
-parameters, so the page loads from `OnParametersSetAsync` rather than
-`OnInitializedAsync`, as the environment page already did.
+The tabs land on the tab's own address for both, `/solutions/{id}/bc` and
+`/environments/{id}/apps`; Customer and Overview are the bare address. A palette row is
+a navigation, so the page it lands on is built afresh; the page still loads from
+`OnParametersSetAsync` rather than `OnInitializedAsync`, so a new address handed to a page
+that is already built moves it too.
 
 The two links to Microsoft are the only rows that leave the app. They are their own kind,
 `external`, whose template opens them in a new tab like the page's own buttons do; the

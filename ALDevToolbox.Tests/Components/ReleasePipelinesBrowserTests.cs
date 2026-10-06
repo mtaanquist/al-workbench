@@ -153,7 +153,7 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
             blocked.ClassList.Should().Contain("is-failed");
             blocked.Children[2].TextContent.Should().Contain("Missing");
             blocked.Children[4].TextContent.Should().Contain("Blocked").And.Contain("Environment not found");
-            blocked.Children[4].QuerySelector("a")!.GetAttribute("href").Should().Be($"/solutions/{s.ProjectId}?tab=bc",
+            blocked.Children[4].QuerySelector("a")!.GetAttribute("href").Should().Be($"/solutions/{s.ProjectId}/bc",
                 "a dead target says where to fix it");
 
             // The last release failed, and on which app.

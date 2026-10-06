@@ -1,6 +1,8 @@
 @page "/solutions/new"
 @page "/solutions/{SolutionId:int}"
+@page "/solutions/{SolutionId:int}/{TabName}"
 @page "/solutions/{Slug}"
+@page "/solutions/{Slug}/{TabName}"
 @attribute [Authorize]
 @rendermode InteractiveServer
 @inject ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService Projects
@@ -15,6 +17,8 @@
 @inject ALDevToolbox.Services.Organizations.TeamService Teams
 @inject ALDevToolbox.Services.GitHub.GitHubRepositoryService GitHubRepos
 @inject NavigationManager Nav
+@inject IJSRuntime JS
+@implements IAsyncDisposable
 @inject ILogger<ProjectDetail> Log
 @using ALDevToolbox.Domain.Entities.ObjectExplorer
 @using ALDevToolbox.Domain.ValueObjects
@@ -59,6 +63,7 @@
 }
 
 <DetailPage IsLoading="@(_loading)"
+            PageClass="sol"
             LoadingText="Loading solution..."
             IsNotFound="@(_notFound || _providers.Count == 0)"
             Title="@(Id is null ? "New solution" : _header?.Name)">
@@ -202,10 +207,11 @@
         @*
             Horizontal section tabs, not the left rail this page used to carry:
             archetype 7 and every other settings family in the app (site-admin,
-            Administration, Account) put them under the title. The tabs switch a
-            section in page state rather than navigating, because General and
-            Repositories share one Save - a real navigation between them would
-            discard whatever the user had typed with no warning.
+            Administration, Account) put them under the title. Each tab of an
+            existing solution has its own address (#1077), but a click switches the
+            section in page state and only rewrites the address bar: General and
+            Repositories share one Save, and a real navigation builds the page
+            afresh - it would drop whatever the user had typed with no warning.
         *@
         <div class="settings">
             <div class="settings__tabs">
@@ -297,9 +303,16 @@
     private int? Id { get; set; }
 
     /// <summary>
-    /// Opens on a named tab. Only for links from elsewhere - the environment page sends
-    /// people to "bc" for the connection and the delivery window - so the tabs
-    /// themselves still switch in place and never rewrite the address.
+    /// The tab in the address, /solutions/cronus/bc - see <see cref="SegmentFor"/>.
+    /// Absent is Customer; a name that is not a tab, or not one this person can open,
+    /// is dropped from the address rather than left there looking like a place.
+    /// </summary>
+    [Parameter] public string? TabName { get; set; }
+
+    /// <summary>
+    /// The address a tab had before it had a path, ?tab=bc. Links like that live on in
+    /// emails and bookmarks, so an existing solution forwards it to the path form. The
+    /// create form has no path to put a tab in and still opens on it.
     /// </summary>
     [SupplyParameterFromQuery(Name = "tab")] public string? OpenTab { get; set; }
 
@@ -307,9 +320,8 @@
     private Section _section = Section.General;
 
     /// <summary>
-    /// The section tab row. Every tab carries OnSelected rather than an Href:
-    /// see the note above the markup - General and Repositories share one Save,
-    /// so a real navigation between them would drop unsaved edits.
+    /// The section tab row. Every tab switches in place and, on an existing solution,
+    /// puts its own address in the bar - see the note above the markup.
     ///
     /// Labels only, as archetype 7 renders them. The left rail this replaced
     /// also carried a repository count and a dot for the Business Central
@@ -317,43 +329,96 @@
     /// dot is a deliberate loss rather than a badge bolted onto a tab row the
     /// design system renders as plain text.
     /// </summary>
-    private List<HeaderTabs.HeaderTabItem> SectionTabs
+    private List<HeaderTabs.HeaderTabItem> SectionTabs =>
+        AvailableSections().Select(t => Tab(t.Label, t.Section)).ToList();
+
+    /// <summary>The tabs this person gets on this solution, in order.</summary>
+    private IEnumerable<(string Label, Section Section)> AvailableSections()
     {
-        get
+        // First, and the tab an existing solution opens on: it is what most people
+        // opening a solution come to read. A solution being created has no customer yet.
+        if (Id is not null) yield return ("Customer", Section.Customer);
+        yield return ("General", Section.General);
+        yield return ("Repositories", Section.Repos);
+
+        if (Id is not null && _canManage)
         {
-            var tabs = new List<HeaderTabs.HeaderTabItem>();
-
-            // First, and the tab an existing solution opens on: it is what most people
-            // opening a solution come to read. A solution being created has no customer yet.
-            if (Id is not null) tabs.Add(Tab("Customer", Section.Customer));
-            tabs.Add(Tab("General", Section.General));
-            tabs.Add(Tab("Repositories", Section.Repos));
-
-            if (Id is not null && _canManage)
-            {
-                // Nothing on it works without Business Central online.
-                if (!IsOnPremises) tabs.Add(Tab("Business Central", Section.Bc));
-                tabs.Add(Tab("Pipelines", Section.Pipelines));
-                // The dependency packages a build can't find on its own. Beside
-                // Pipelines, because a failed build is what sends people here.
-                tabs.Add(Tab("Symbols", Section.Symbols));
-                // Who may see the solution is the owner's and the admins' to set, not
-                // every manager's - on a Public solution that is everybody.
-                if (_canChangeAccess) tabs.Add(Tab("Access", Section.Access));
-            }
-            // Creating: the level is picked here rather than left at Public and fixed
-            // afterwards. A Public solution is managed by everyone in the organisation,
-            // so "we'll set that later" is a customer's Business Central connection
-            // open to the whole company in the meantime.
-            else if (Id is null) tabs.Add(Tab("Access", Section.Access));
-
-            return tabs;
+            // Nothing on it works without Business Central online.
+            if (!IsOnPremises) yield return ("Business Central", Section.Bc);
+            yield return ("Pipelines", Section.Pipelines);
+            // The dependency packages a build can't find on its own. Beside
+            // Pipelines, because a failed build is what sends people here.
+            yield return ("Symbols", Section.Symbols);
+            // Who may see the solution is the owner's and the admins' to set, not
+            // every manager's - on a Public solution that is everybody.
+            if (_canChangeAccess) yield return ("Access", Section.Access);
         }
+        // Creating: the level is picked here rather than left at Public and fixed
+        // afterwards. A Public solution is managed by everyone in the organisation,
+        // so "we'll set that later" is a customer's Business Central connection
+        // open to the whole company in the meantime.
+        else if (Id is null) yield return ("Access", Section.Access);
     }
 
     private HeaderTabs.HeaderTabItem Tab(string label, Section section) =>
         new(label, Href: null, IsActive: _section == section,
-            OnSelected: EventCallback.Factory.Create(this, () => _section = section));
+            OnSelected: EventCallback.Factory.Create(this, () => ShowSection(section)));
+
+    /// <summary>This solution's address on <paramref name="section"/>, the readable one when the slug is known.</summary>
+    private string SectionHref(Section section) =>
+        SolutionLinks.Solution(_loadedProject?.Slug ?? Slug, Id!.Value, SegmentFor(section));
+
+    /// <summary>
+    /// Moves to <paramref name="section"/> - a tab click, or Save sending the user to the
+    /// tab holding a problem - and, once it has drawn, puts its address in the bar. See
+    /// ProjectDetail.razor.js for why the address is rewritten rather than navigated to.
+    /// </summary>
+    private void ShowSection(Section section)
+    {
+        _section = section;
+        if (Id is null) return;
+        _addressToShow = SectionHref(section);
+        _revealTab = true;
+    }
+
+    /// <summary>The address <see cref="ShowSection"/> moved to, for the next render to put in the bar.</summary>
+    private string? _addressToShow;
+
+    /// <summary>Set when the active tab may be scrolled out of sight in the row (a phone), for the next render to bring it into view.</summary>
+    private bool _revealTab;
+
+    private IJSObjectReference? _tabsModule;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_revealTab || _loading) return;
+        _revealTab = false;
+        var address = _addressToShow;
+        _addressToShow = null;
+        try
+        {
+            _tabsModule ??= await JS.InvokeAsync<IJSObjectReference>(
+                "import", "./Components/Pages/Projects/ProjectDetail.razor.js");
+            await _tabsModule.InvokeVoidAsync("showTab", address);
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit is going; there is no address bar left to update.
+        }
+        catch (Exception ex) when (ex is JSException or OperationCanceledException)
+        {
+            // An address bar that did not move is not worth the circuit, and with it
+            // whatever is typed on General and Repositories.
+            Log.LogWarning(ex, "Could not put solution {ProjectId}'s tab in the address bar.", Id);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_tabsModule is null) return;
+        try { await _tabsModule.DisposeAsync(); }
+        catch (JSDisconnectedException) { }
+    }
 
     /// <summary>
     /// The label beside the solution name, or null for Public. Read off the loaded
@@ -463,12 +528,12 @@
     }
 
     /// <summary>
-    /// The solution and the <c>?tab=</c> the page last acted on. The page is reused
-    /// from one address to the next: an enhanced navigation to another solution, or
-    /// to this one with another tab (the command palette's context rows do both),
-    /// keeps this component and hands it new parameters rather than building a new
-    /// one - so the load keys off these rather than off <c>OnInitializedAsync</c>,
-    /// which would only ever have run for the first solution opened.
+    /// Whether the page has loaded a solution yet. A page that is already built can be
+    /// handed a new address - another solution, or another tab of this one - as new
+    /// parameters rather than as a fresh component, so the load keys off these rather
+    /// than off <c>OnInitializedAsync</c>, which would only ever run for the first.
+    /// An enhanced navigation in the running app builds the page afresh, which is why the
+    /// tabs' own clicks do not navigate.
     /// </summary>
     private bool _hasLoaded;
 
@@ -476,35 +541,97 @@
     private (int? SolutionId, string? Slug)? _resolvedFor;
     private int? _loadedId;
 
+    /// <summary>Set while the page hides itself for the address it just navigated to - see OnParametersSetAsync.</summary>
+    private bool _leaving;
+
     protected override async Task OnParametersSetAsync()
     {
         if (!await ResolveAddressAsync()) return;
 
         if (_hasLoaded && _loadedId == Id)
         {
-            // Same solution, so this is a navigation to it with a ?tab= - even the
-            // one already in the address, because the tabs switch in place without
-            // changing it: someone who clicked across to Repositories and then asks
-            // the palette for General again is asking to move. The edits in progress
-            // stay; the tabs share one model.
-            if (OpenTab is not null) _section = SectionFor(OpenTab);
+            // Same solution, so this is a move to another of its tabs. The edits in
+            // progress stay; the tabs share one model. The create form has no tab in
+            // its path, so only a ?tab= moves it.
+            if (_leaving)
+            {
+                // The address this page left for came back to it rather than to a
+                // fresh page, so it draws again.
+                _leaving = false;
+                _loading = false;
+            }
+            if (Id is not null && TabAddressToSettleOn() is { } settled)
+            {
+                Nav.NavigateTo(settled, replace: true);
+                return;
+            }
+            if (Id is not null) _section = SectionFor(TabName);
+            else if (OpenTab is not null) _section = SectionFor(OpenTab);
+            if (!IsAvailable(_section))
+            {
+                _section = Section.Customer;
+                Nav.NavigateTo(SectionHref(Section.Customer), replace: true);
+            }
             return;
         }
 
         _hasLoaded = true;
         _loadedId = Id;
         await LoadPageAsync();
+
+        // One address per tab: ?tab=bc, /BC, /customer and a tab this person does not
+        // get all settle on the address the tabs use. Only once the load has said the
+        // solution is there for them: settling first would answer "that slug exists"
+        // about a private solution the not-found page is meant to say nothing about.
+        if (Id is not null && _loadedProject is not null && !_notFound)
+        {
+            var leaveFor = TabAddressToSettleOn();
+            if (leaveFor is null && !IsAvailable(_section)) leaveFor = SectionHref(Section.Customer);
+            if (leaveFor is not null)
+            {
+                // The address is about to build the page afresh; drawing a tab now
+                // would only start reads that meet the new page's on the shared context.
+                _loading = true;
+                _leaving = true;
+                Nav.NavigateTo(leaveFor, replace: true);
+                return;
+            }
+        }
+        // A tab named in the address may sit past the edge of the row on a phone.
+        _revealTab = Id is not null && _section != Section.Customer;
     }
 
     /// <summary>
+    /// The address an existing solution's tab should be at, or null when it is already
+    /// there: a <c>?tab=</c> moves into the path, a name is lower-cased, and Customer or
+    /// a name that is not a tab drops to the bare address.
+    /// </summary>
+    private string? TabAddressToSettleOn()
+    {
+        if (OpenTab is null && TabName is null) return null;
+        var segment = SegmentFor(SectionFor(TabName ?? OpenTab));
+        if (OpenTab is null && string.Equals(TabName, segment, StringComparison.Ordinal)) return null;
+        return SectionHref(SectionFor(TabName ?? OpenTab));
+    }
+
+    /// <summary>
+    /// Whether this person gets <paramref name="section"/> here. One they do not -
+    /// Business Central on an on-premises solution, a manager's tab for someone who can
+    /// only look - opens the default one instead, at its own address, rather than an
+    /// empty page under a tab row that does not show it.
+    /// </summary>
+    private bool IsAvailable(Section section) =>
+        Id is null || _loadedProject is null || _notFound || AvailableSections().Any(t => t.Section == section);
+
+    /// <summary>
     /// Turns the address into <see cref="Id"/>. A numeric address for a solution this
-    /// person can see is forwarded to its slug, keeping any <c>?tab=</c>, so a page has
+    /// person can see is forwarded to its slug, keeping the tab, so a page has
     /// one address whichever link led to it. False when the page is leaving or the
     /// slug names nothing - the not-found state is then already set.
     /// </summary>
     private async Task<bool> ResolveAddressAsync()
     {
-        // The same address again - a ?tab= change, which keeps the component - needs no
+        // The same solution again - a change of tab, which keeps the component - needs no
         // lookup, and must not start one: the page's own reads may still be running on
         // the shared context.
         if (_hasLoaded && _resolvedFor == (SolutionId, Slug)) return !_notFound || Slug is null;
@@ -529,13 +656,12 @@
         // move the address, read nothing.
         if (Id is { } shown && _hasLoaded && _loadedId == shown && _loadedProject is { Slug: { } known })
         {
-            Nav.NavigateTo(SolutionLinks.Solution(known, shown) + new Uri(Nav.Uri).Query, replace: true);
+            Nav.NavigateTo(SolutionLinks.Solution(known, shown, SegmentFor(SectionFor(TabName ?? OpenTab))), replace: true);
             return false;
         }
         if (Id is { } id && await Projects.FindVisibleSlugAsync(id) is { } slug)
         {
-            var query = new Uri(Nav.Uri).Query;
-            Nav.NavigateTo(SolutionLinks.Solution(slug, id) + query, replace: true);
+            Nav.NavigateTo(SolutionLinks.Solution(slug, id, SegmentFor(SectionFor(TabName ?? OpenTab))), replace: true);
             return false;
         }
         return true;
@@ -553,10 +679,26 @@
         _ => Id is null ? Section.General : Section.Customer,
     };
 
+    /// <summary>
+    /// A tab's name in the address. Null for Customer, the tab the bare address opens
+    /// on, so it has one address rather than two.
+    /// </summary>
+    private static string? SegmentFor(Section section) => section switch
+    {
+        Section.General => "general",
+        Section.Repos => "repositories",
+        Section.Bc => "bc",
+        Section.Pipelines => "pipelines",
+        Section.Symbols => "symbols",
+        Section.Access => "access",
+        _ => null,
+    };
+
     private async Task LoadPageAsync()
     {
         // Everything the last solution left behind, for when the page is reused.
         _loading = true;
+        _leaving = false;
         _notFound = false;
         _saving = false;
         _dirty = false;
@@ -576,7 +718,7 @@
         _accessBaseline = null;
         _newAccess = new(ProjectVisibility.Public, Array.Empty<int>());
 
-        _section = SectionFor(OpenTab);
+        _section = SectionFor(Id is null ? OpenTab : TabName);
         _providers = (await Config.GetAllowedProvidersAsync()).ToList();
 
         if (Id is null)
@@ -801,8 +943,8 @@
 
         var generalProblem = _errors.ContainsKey("Name") || _errors.ContainsKey("ShortName")
             || _errors.ContainsKey("DefaultArtifactCountry");
-        if (generalProblem) _section = Section.General;
-        else if (_repoErrors.Count > 0) _section = Section.Repos;
+        if (generalProblem) ShowSection(Section.General);
+        else if (_repoErrors.Count > 0) ShowSection(Section.Repos);
     }
 
     /// <summary>Up-to-two-letter avatar initials for the audit trail and header.</summary>
@@ -851,10 +993,12 @@
             HydrateEdit();
             _message = "Solution saved.";
             // A new address moves the page with it, or the one in the bar stops working.
+            // Rewritten rather than navigated to, like a tab click: a navigation builds
+            // the page afresh and the confirmation above would go with it.
             if (_loadedProject is { } saved && saved.Slug != slugBefore)
             {
-                _loadedId = Id;
-                Nav.NavigateTo(SolutionLinks.Solution(saved.Slug, saved.Id) + new Uri(Nav.Uri).Query, replace: true);
+                _addressToShow = SectionHref(_section);
+                _revealTab = true;
             }
         }
         catch (PlanValidationException ex)

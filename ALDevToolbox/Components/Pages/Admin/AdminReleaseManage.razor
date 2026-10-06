@@ -179,7 +179,7 @@
                                     @(string.IsNullOrEmpty(r.Message) ? "—" : r.Message)
                                     @if (_projectId is { } solutionId && ALDevToolbox.Services.ObjectExplorer.Projects.MissingDependencyReport.NamesMissingDependency(r.Message))
                                     {
-                                        <text> </text><a href="@($"/solutions/{solutionId}?tab=symbols")">Add symbols to the solution</a>
+                                        <text> </text><a href="@($"/solutions/{solutionId}/symbols")">Add symbols to the solution</a>
                                     }
                                 </td>
                             </tr>
@@ -234,7 +234,7 @@
                     cleared and replaced by the rebuild.
                     @if (_projectId is { } symbolsFor)
                     {
-                        <text>The symbols already stored are on the solution's <a href="@($"/solutions/{symbolsFor}?tab=symbols")">Symbols tab</a>.</text>
+                        <text>The symbols already stored are on the solution's <a href="@($"/solutions/{symbolsFor}/symbols")">Symbols tab</a>.</text>
                     }
                 </p>
                 <form method="post" action="@($"/admin/object-explorer/{ReleaseId}/recover-symbols")"

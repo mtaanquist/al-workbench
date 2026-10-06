@@ -304,7 +304,7 @@
         try
         {
             var projectId = await ReadAsync(s => s.TrackAsync(row.CandidateId, _name, _country));
-            Nav.NavigateTo($"/solutions/{projectId}?tab=repositories");
+            Nav.NavigateTo($"/solutions/{projectId}/repositories");
         }
         catch (PlanValidationException ex)
         {

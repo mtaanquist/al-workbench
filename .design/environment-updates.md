@@ -1086,7 +1086,7 @@ that will not answer.
 
 The inline "Environment details" panel on the solution's Business Central tab is retired;
 its button goes here. The tab keeps the connection and the delivery window, and
-`/solutions/{id}?tab=bc` opens on it so this page can send people there.
+`/solutions/{slug}/bc` opens on it so this page can send people there.
 
 Where it differs from the sheet, and why:
 

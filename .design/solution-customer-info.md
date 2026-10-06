@@ -205,8 +205,8 @@ part of the list's GET form, so a filtered list is a shareable address; it count
 either way (typed in, or installed in any current environment).
 
 With modules in, **Customer is the first tab and the one an existing Solution opens on.**
-Links that mean another tab say so (`?tab=repositories`, `pipelines`, `bc`, `general`,
-`access`).
+Links that mean another tab say so (`/solutions/{slug}/repositories`, `pipelines`, `bc`,
+`general`, `access`).
 
 ### The Solutions list and its customer info (slice 4, reshaped in #906)
 

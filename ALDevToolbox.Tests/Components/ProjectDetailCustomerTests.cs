@@ -395,7 +395,7 @@ public sealed class ProjectDetailCustomerTests : IDisposable
                 .Should().Equal("26.1.30000.0", "https://businesscentral.dynamics.com/tenant/Production");
             cut.FindAll(".field__hint").Select(h => h.TextContent.Trim())
                 .Count(t => t == "From the Production environment, read 3 hours ago. Refresh it on the Business Central tab.").Should().Be(2);
-            cut.FindAll(".field__hint a").Select(a => a.GetAttribute("href")).Should().Contain($"/solutions/{id}?tab=bc");
+            cut.FindAll(".field__hint a").Select(a => a.GetAttribute("href")).Should().Contain($"/solutions/{id}/bc");
             cut.Find("#cust-licence").Should().NotBeNull("the rest of the basics are still typed");
         });
     }
