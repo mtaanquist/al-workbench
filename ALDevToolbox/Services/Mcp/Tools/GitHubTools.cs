@@ -132,8 +132,11 @@ public sealed class GitHubTools
         "on the repository's default branch changes until somebody merges it. Only repositories in the " +
         "GitHub organisation your organisation has connected, and that you can open on GitHub yourself, " +
         "are accepted; a repository that already has an extension in a folder of that name is refused, as " +
-        "is a call from an account that has not connected its GitHub account. This returns the pull " +
-        "request only - use generate_extension with addToRepository when you want the ZIP alongside it.")]
+        "is a call from an account that has not connected its GitHub account. A repository holding a " +
+        "solution the workbench generated is joined as that solution: the extension gets the solution's " +
+        "prefix, example files are left out, an ID range another extension there uses is refused, and " +
+        "the pull request also updates the solution's .code-workspace and saved settings. This returns " +
+        "the pull request only - use generate_extension with addToRepository when you want the ZIP alongside it.")]
     public async Task<RepositoryDeliveryResult> AddExtensionToRepositoryAsync(
         StandaloneExtensionPlanInput plan,
         [Description("The repository as 'owner/name', from list_repositories.")]
