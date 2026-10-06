@@ -139,7 +139,13 @@ public sealed class ApplicationVersionService
     /// inserted; rows missing from the input are soft-deleted (so templates
     /// pointing at them keep resolving for the audit log).
     /// </summary>
-    public async Task SaveAsync(IReadOnlyList<ApplicationVersionInput> inputs, CancellationToken ct = default)
+    /// <param name="shownIds">
+    /// The ids of the rows the editor was showing when it loaded. A row missing
+    /// from <paramref name="inputs"/> is only removed when it was shown: one the
+    /// daily wave sync added after the editor loaded stays. Null removes every
+    /// missing row.
+    /// </param>
+    public async Task SaveAsync(IReadOnlyList<ApplicationVersionInput> inputs, IReadOnlyCollection<int>? shownIds = null, CancellationToken ct = default)
     {
         // Pad short application/runtime values up to their canonical shapes
         // (28 → 28.0.0.0, 16 → 16.0) before validating, so admins can type the
@@ -157,6 +163,10 @@ public sealed class ApplicationVersionService
         var existing = await _db.ApplicationVersions.ToListAsync(ct);
         var existingById = existing.ToDictionary(e => e.Id);
         var inputIds = normalised.Where(i => i.Id is not null).Select(i => i.Id!.Value).ToHashSet();
+        // Rows the editor never showed are neither removed nor guarded: the admin
+        // did not drop them, they arrived after the page loaded.
+        bool Removed(ApplicationVersion row) =>
+            !inputIds.Contains(row.Id) && row.DeletedAt is null && (shownIds is null || shownIds.Contains(row.Id));
 
         // In-use guard: stop admins from soft-deleting or freshly-deprecating
         // a row that an active (non-deprecated, non-deleted) template still
@@ -171,7 +181,7 @@ public sealed class ApplicationVersionService
                 continue;
             }
             var names = string.Join(", ", usingTemplates);
-            if (!inputIds.Contains(row.Id) && row.DeletedAt is null)
+            if (Removed(row))
             {
                 guardErrors[$"InUse.{row.Key}"] =
                     $"Can't remove '{row.Name}': in use by {usingTemplates.Count} active template(s) ({names}). " +
@@ -241,7 +251,7 @@ public sealed class ApplicationVersionService
         // alone so we don't churn DeletedAt timestamps.
         foreach (var row in existing)
         {
-            if (!inputIds.Contains(row.Id) && row.DeletedAt is null)
+            if (Removed(row))
             {
                 row.DeletedAt = now;
                 row.UpdatedAt = now;
@@ -253,6 +263,73 @@ public sealed class ApplicationVersionService
         _logger.LogInformation(
             "Saved application-version catalogue: {Count} active entries.",
             normalised.Count);
+    }
+
+    /// <summary>
+    /// Adds the release waves in <paramref name="shippedVersions"/> that are newer
+    /// than every row the catalogue holds, at the top of the list, and returns
+    /// them. Driven daily by <see cref="ApplicationVersionSyncScheduler"/> from the
+    /// Microsoft symbol feed.
+    ///
+    /// <para>
+    /// Only ever adds. Existing rows, their order and their deprecated flags are
+    /// left alone, and older waves are never backfilled: the newest row decides
+    /// what counts as new, and removed rows count too, so a wave an admin removed
+    /// does not come back. An empty catalogue gets the newest wave only, so
+    /// "Latest" has something to resolve to.
+    /// </para>
+    /// </summary>
+    public async Task<List<ApplicationVersion>> AddNewWavesAsync(IReadOnlyList<string> shippedVersions, CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        var waves = BusinessCentralWaves.FromVersions(shippedVersions);
+        if (waves.Count == 0) return [];
+
+        var existing = await _db.ApplicationVersions
+            .AsNoTracking()
+            .Select(a => new { a.Key, a.Application, a.Ordering })
+            .ToListAsync(ct);
+        var newestMajor = existing
+            .Select(a => BusinessCentralWaves.MajorOf(a.Application))
+            .Max();
+        var keys = existing.Select(a => a.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var candidates = (existing.Count == 0 ? waves.Take(1) : waves.Where(w => w.Major > newestMajor)).ToList();
+        foreach (var clash in candidates.Where(w => keys.Contains(w.Key)))
+        {
+            // An older row already holds the key (a typo, most likely); it would
+            // be skipped again every day, so say why.
+            _logger.LogWarning(
+                "Release wave {Application} not added to the application-version catalogue for org {OrgId}: key {Key} is already used by another row.",
+                clash.Application, orgId, clash.Key);
+        }
+        var toAdd = candidates.Where(w => !keys.Contains(w.Key)).ToList();
+        if (toAdd.Count == 0) return [];
+
+        // Above the current top row without renumbering anyone else's order:
+        // "Latest" is the lowest ordering, and the newest wave belongs there.
+        var top = existing.Count == 0 ? 0 : existing.Min(a => a.Ordering);
+        var now = DateTime.UtcNow;
+        var added = toAdd
+            .Select((w, i) => new ApplicationVersion
+            {
+                OrganizationId = orgId,
+                Key = w.Key,
+                Name = w.Name,
+                Application = w.Application,
+                Runtime = w.Runtime,
+                Ordering = top - toAdd.Count + i,
+                CreatedAt = now,
+                UpdatedAt = now,
+            })
+            .ToList();
+        _db.ApplicationVersions.AddRange(added);
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "Added {Count} release wave(s) to the application-version catalogue for org {OrgId}: {Keys}.",
+            added.Count, orgId, string.Join(", ", added.Select(a => a.Key)));
+        return added;
     }
 
     /// <summary>

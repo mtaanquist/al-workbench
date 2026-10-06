@@ -177,6 +177,7 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `DISABLE_USAGE_SNAPSHOT_SCHEDULER`            | `1` to disable the hourly storage-usage snapshots.         | unset                  |
 | `DISABLE_BCQUALITY_REFRESH`                   | `1` to disable the daily mirror of Microsoft's BCQuality knowledge base. | unset    |
 | `DISABLE_RELEASE_AUTO_IMPORT_SCHEDULER`       | `1` to disable the daily auto-import of new Microsoft OnPrem releases for orgs that opted in. | unset |
+| `DISABLE_APPLICATION_VERSION_SYNC`            | `1` to stop adding newly shipped Business Central release waves to each organisation's application versions list every day. | unset |
 | `DISABLE_DELIVERY_SCHEDULER`                  | `1` to disable the scheduler that enqueues due deliveries, so scheduled publishes never fire. | unset |
 | `DISABLE_PREVIEW_CHECK_SCHEDULER`             | `1` to disable the nightly preview check, so pipelines never build against the next minor or next major preview. | unset |
 | `DISABLE_ENVIRONMENT_REFRESH_SCHEDULER`       | `1` to disable the nightly refresh of Business Central environment data behind the Upgrades page. | unset |

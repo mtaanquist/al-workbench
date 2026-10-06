@@ -245,6 +245,14 @@ application version automatically sets the matching runtime.
 picking an entry on the builder forms fills both fields atomically; seed and
 export round-trip; the audit log captures version-table changes.
 
+Later addition: the catalogue no longer has to be kept current by hand for
+new waves. `ApplicationVersionSyncScheduler` reads the shipped versions off the
+Microsoft symbol feed daily and adds each wave newer than an org's newest row
+(key, name, `Major.0.0.0`, runtime `Major - 11`.0), on top of the list. It only
+adds: no backfill of older waves, removed rows count as present, and update rows
+with a runtime minor (26.1 / 15.1) stay manual, because no feed carries the
+highest runtime a version supports. See `BusinessCentralWaves`.
+
 ## Phase 3 — organisations, accounts, multi-tenancy
 
 Phase 3 turned the single-tenant, shared-password v1 into a multi-tenant app with real accounts. All four milestones shipped; the detail below is the record, not a plan.
