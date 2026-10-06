@@ -135,7 +135,7 @@ public sealed class DependencyDriftPanelTests : IDisposable
     }
 
     [Fact]
-    public async Task A_solution_with_no_production_environment_says_it_was_compared_with_the_release()
+    public async Task A_finding_from_before_environments_were_the_yardstick_asks_for_a_fresh_check()
     {
         await ReadyAsync();
         await SeedDriftAsync();
@@ -144,8 +144,7 @@ public sealed class DependencyDriftPanelTests : IDisposable
         var cut = _ctx.Render<DependencyDriftPanel>();
         cut.WaitForAssertion(() => cut.Markup.Should().Contain(RepoA), WaitTimeout);
 
-        cut.Find(".drift__sub").TextContent.Should().Contain("Business Central 28.2 is imported here")
-            .And.Contain("no production environment with a known version");
+        cut.Find(".drift__sub").TextContent.Should().Contain("Check again to compare them with their solution's production environment");
         cut.Find(".drift__on").TextContent.Should().Contain("Compared with the newest imported release, Business Central 28.2.");
     }
 

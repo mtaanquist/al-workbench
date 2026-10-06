@@ -308,7 +308,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
     {
         await ReadyAsync();
         await SeedCatalogueAsync("28.2.0.0");
-        var projectId = await SeedSolutionAsync(RepoA);
+        var projectId = await SeedSolutionAsync(RepoA, withProduction: false);
         var environmentId = await SeedEnvironmentAsync(projectId, "Production", "28.0.45123.0");
         var releaseId = await SeedReleaseAsync(bcVersion: "29.0.55190.0");
         var (service, ctx) = NewService(ScannableApi(RepoA));
@@ -327,7 +327,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
     public async Task A_repository_on_the_version_production_runs_is_not_behind_a_newer_release()
     {
         await ReadyAsync();
-        var projectId = await SeedSolutionAsync(RepoB);
+        var projectId = await SeedSolutionAsync(RepoB, withProduction: false);
         await SeedEnvironmentAsync(projectId, "Production", "28.2.45123.0");
         var releaseId = await SeedReleaseAsync(bcVersion: "29.0.55190.0");
         var (service, ctx) = NewService(ScannableApi(RepoB));
@@ -340,7 +340,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
     public async Task The_first_live_production_environment_by_name_is_the_one_used()
     {
         await ReadyAsync();
-        var projectId = await SeedSolutionAsync(RepoA);
+        var projectId = await SeedSolutionAsync(RepoA, withProduction: false);
         await SeedEnvironmentAsync(projectId, "Sandbox", "29.0.1.0", type: "Sandbox");
         await SeedEnvironmentAsync(projectId, "AAA-Deleted", "29.0.1.0", softDeletedOn: DateTime.UtcNow);
         await SeedEnvironmentAsync(projectId, "Prod-B", "28.1.1.0");
@@ -358,11 +358,12 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_production_environment_with_no_known_version_falls_back_to_the_release()
+    public async Task A_solution_with_no_production_environment_is_measured_against_its_sandbox()
     {
         await ReadyAsync();
-        var projectId = await SeedSolutionAsync(RepoA);
+        var projectId = await SeedSolutionAsync(RepoA, withProduction: false);
         await SeedEnvironmentAsync(projectId, "Production", null);
+        var sandbox = await SeedEnvironmentAsync(projectId, "Sandbox", "28.1.45123.0", type: "Sandbox");
         var releaseId = await SeedReleaseAsync();
         var (service, ctx) = NewService(ScannableApi(RepoA));
         await using var _ = ctx;
@@ -371,15 +372,33 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
         await using var read = _db.NewContext();
         var application = await read.GitHubRepositoryDrift.AsNoTracking().SingleAsync(r => r.Field == "application");
-        application.EnvironmentId.Should().BeNull();
-        application.Proposed.Should().Be("28.2.0.0");
+        application.EnvironmentId.Should().Be(sandbox, "a production environment with no version says nothing");
+        application.Proposed.Should().Be("28.1.0.0");
+
+        var summary = await service.GetSummaryAsync();
+        summary.Repositories.Single().EnvironmentType.Should().Be("Sandbox");
+    }
+
+    [Fact]
+    public async Task A_solution_with_no_environment_is_not_live_yet_and_is_not_checked()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA, withProduction: false);
+        var releaseId = await SeedReleaseAsync();
+        var api = ScannableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.ScanForReleaseAsync(releaseId)).Should().Be(0, "a newer release is no reason to move a customer who is not live");
+        api.Calls.Should().NotContain(c => c.Contains($"/repos/{RepoA}/"));
     }
 
     [Fact]
     public async Task The_summary_says_a_repository_was_measured_against_production()
     {
         await ReadyAsync();
-        var projectId = await SeedSolutionAsync(RepoA, name: "CRONUS A/S");
+        var projectId = await SeedSolutionAsync(RepoA, name: "CRONUS A/S", withProduction: false);
         await SeedEnvironmentAsync(projectId, "Production", "28.0.45123.0");
         var releaseId = await SeedReleaseAsync(bcVersion: "29.0.55190.0");
         var (scanner, scanCtx) = NewService(ScannableApi(RepoA));
@@ -389,11 +408,11 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
         var summary = await service.GetSummaryAsync();
 
-        summary.TargetVersion.Should().BeNull("no repository was measured against the release");
+        summary.TargetVersion.Should().BeNull("nothing was measured against a release");
         var repo = summary.Repositories.Should().ContainSingle().Subject;
-        repo.ComparedWithProduction.Should().BeTrue();
+        repo.EnvironmentType.Should().Be("Production");
         repo.TargetApplication.Should().Be("28.0");
-        repo.ProductionEnvironment.Should().Be("Production");
+        repo.Environment.Should().Be("Production");
         repo.Solution.Should().Be("CRONUS A/S");
     }
 
@@ -401,7 +420,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
     public async Task The_pull_request_targets_productions_version_and_says_so()
     {
         await ReadyAsync();
-        var projectId = await SeedSolutionAsync(RepoA);
+        var projectId = await SeedSolutionAsync(RepoA, withProduction: false);
         await SeedEnvironmentAsync(projectId, "Production", "28.2.45123.0");
         // An earlier release, so a compare link would exist for 29.0.
         await SeedReleaseAsync();
@@ -425,7 +444,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
     public async Task Platform_only_drift_against_production_targets_productions_version_not_the_release()
     {
         await ReadyAsync();
-        var projectId = await SeedSolutionAsync(RepoA);
+        var projectId = await SeedSolutionAsync(RepoA, withProduction: false);
         await SeedEnvironmentAsync(projectId, "Production", "28.0.45123.0");
         var releaseId = await SeedReleaseAsync(bcVersion: "29.0.55190.0");
         const string platformBehind = """
@@ -459,9 +478,9 @@ public sealed class DependencyDriftServiceTests : IDisposable
         // Public one without. The Private one's environment is the yardstick, but its
         // name must not reach a viewer who is only on the Public one - nor GitHub.
         await ReadyAsync();
-        var hidden = await SeedSolutionAsync(RepoA, ProjectVisibility.Private, name: "CRONUS secret");
+        var hidden = await SeedSolutionAsync(RepoA, ProjectVisibility.Private, name: "CRONUS secret", withProduction: false);
         await SeedEnvironmentAsync(hidden, "CRONUS-PROD", "28.2.45123.0");
-        await SeedSolutionAsync(RepoA, name: "CRONUS A/S");
+        await SeedSolutionAsync(RepoA, name: "CRONUS A/S", withProduction: false);
         var releaseId = await SeedReleaseAsync(bcVersion: "29.0.55190.0");
         var (scanner, scanCtx) = NewService(ScannableApi(RepoA));
         await using (scanCtx) await scanner.ScanForReleaseAsync(releaseId);
@@ -470,8 +489,8 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await using var _ = ctx;
 
         var repo = (await service.GetSummaryAsync()).Repositories.Should().ContainSingle().Subject;
-        repo.ComparedWithProduction.Should().BeTrue();
-        repo.ProductionEnvironment.Should().BeNull();
+        repo.EnvironmentType.Should().Be("Production");
+        repo.Environment.Should().BeNull();
         repo.Solution.Should().BeNull();
 
         (await service.OpenUpdatePullRequestsAsync([RepoA])).Single().Refusal.Should().BeNull();
@@ -767,8 +786,13 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     /// <summary>A solution tracking one repository, as somebody would have pasted its URL.</summary>
+    /// <param name="withProduction">
+    /// Whether the solution is live, with a production environment on 28.2 - what most
+    /// tests measure against. Off for the tests that seed their own environments.
+    /// </param>
     private async Task<int> SeedSolutionAsync(
-        string fullName, ProjectVisibility visibility = ProjectVisibility.Public, string? name = null)
+        string fullName, ProjectVisibility visibility = ProjectVisibility.Public, string? name = null,
+        bool withProduction = true)
     {
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -794,6 +818,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         };
         ctx.OeProjects.Add(project);
         await ctx.SaveChangesAsync();
+        if (withProduction) await SeedEnvironmentAsync(project.Id, "Production", "28.2.45123.0");
         return project.Id;
     }
 
