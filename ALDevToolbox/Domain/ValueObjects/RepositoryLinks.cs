@@ -9,8 +9,8 @@ public static class RepositoryLinks
 {
     /// <summary>
     /// Whether <paramref name="url"/> is an https URL on <paramref name="provider"/>'s
-    /// host. The solution service's validation rule, so a URL it accepts is one
-    /// <see cref="WebUrl"/> can turn into a page link.
+    /// host. The solution service's validation rule, and the gate in front of
+    /// <see cref="WebUrl"/>.
     /// </summary>
     public static bool IsValidUrl(RepositoryProvider provider, string? url)
     {
@@ -57,7 +57,23 @@ public static class RepositoryLinks
     /// query-string value, so it is escaped rather than pasted in - its own
     /// <c>://</c> and slashes would otherwise be read as part of the handler
     /// path.
+    ///
+    /// <para>A password or token in the URL is dropped, keeping the user name
+    /// Azure DevOps needs: the link is handed to everyone who can see the
+    /// solution, and VS Code would write it into each clone's remote.</para>
     /// </summary>
-    public static string VsCodeCloneUrl(string cloneUrl) =>
-        $"vscode://vscode.git/clone?url={Uri.EscapeDataString(cloneUrl.Trim())}";
+    public static string VsCodeCloneUrl(string cloneUrl)
+    {
+        var url = cloneUrl.Trim();
+        if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.UserInfo.Contains(':'))
+        {
+            var user = uri.UserInfo[..uri.UserInfo.IndexOf(':')];
+            var at = url.IndexOf(uri.UserInfo + "@", StringComparison.Ordinal);
+            if (at >= 0)
+            {
+                url = url[..at] + (user.Length > 0 ? user + "@" : string.Empty) + url[(at + uri.UserInfo.Length + 1)..];
+            }
+        }
+        return $"vscode://vscode.git/clone?url={Uri.EscapeDataString(url)}";
+    }
 }

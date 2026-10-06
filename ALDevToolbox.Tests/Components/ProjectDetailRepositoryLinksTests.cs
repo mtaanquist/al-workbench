@@ -47,7 +47,7 @@ public sealed class ProjectDetailRepositoryLinksTests : IDisposable
         links[0].TextContent.Should().Contain("Open in GitHub");
         links[0].GetAttribute("href").Should().Be("https://github.com/cronus-dk/base-app");
         links[0].GetAttribute("target").Should().Be("_blank");
-        links[0].GetAttribute("rel").Should().Be("noopener");
+        links[0].GetAttribute("rel").Should().Be("noopener noreferrer");
         links[1].TextContent.Should().Contain("Clone in VS Code");
         links[1].GetAttribute("href").Should().Be($"vscode://vscode.git/clone?url={Uri.EscapeDataString(cloneUrl)}");
     }
@@ -70,6 +70,19 @@ public sealed class ProjectDetailRepositoryLinksTests : IDisposable
         var added = new ProjectDetail.RepoRow { Provider = RepositoryProvider.GitHub, Url = "https://github.com/cronus-dk/tools" };
 
         var cut = Render(true, edited, added);
+
+        cut.FindAll(".pd-repo-links").Should().BeEmpty();
+        cut.FindAll(".pd-repo-links__pending").Should().HaveCount(2)
+            .And.AllSatisfy(n => n.TextContent.Should().Contain("Save the solution"));
+    }
+
+    [Fact]
+    public void A_saved_row_whose_host_was_changed_has_no_links()
+    {
+        var row = Saved(RepositoryProvider.GitHub, "https://github.com/cronus-dk/base-app.git");
+        row.Provider = RepositoryProvider.AzureDevOps;
+
+        var cut = Render(true, row);
 
         cut.FindAll(".pd-repo-links").Should().BeEmpty();
     }

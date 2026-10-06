@@ -16,6 +16,8 @@ public sealed class RepositoryLinksTests
     [InlineData("https://github.com/cronus-dk/base-app/", "https://github.com/cronus-dk/base-app")]
     [InlineData("  https://github.com/cronus-dk/base-app.GIT  ", "https://github.com/cronus-dk/base-app")]
     [InlineData("https://x-access-token@github.com/cronus-dk/base-app.git", "https://github.com/cronus-dk/base-app")]
+    [InlineData("https://user:secret@github.com/cronus-dk/base-app.git?x=1#readme", "https://github.com/cronus-dk/base-app")]
+    [InlineData("https://github.com:443/cronus-dk/base-app.git", "https://github.com/cronus-dk/base-app")]
     public void A_github_clone_url_links_to_the_repository_page(string cloneUrl, string expected) =>
         RepositoryLinks.WebUrl(RepositoryProvider.GitHub, cloneUrl).Should().Be(expected);
 
@@ -43,6 +45,21 @@ public sealed class RepositoryLinksTests
     [InlineData(RepositoryProvider.GitHub, "javascript:alert(1)")]
     public void A_url_that_is_not_on_the_providers_host_gets_no_link(RepositoryProvider provider, string url) =>
         RepositoryLinks.WebUrl(provider, url).Should().BeNull();
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void A_missing_url_is_not_valid(string? url) =>
+        RepositoryLinks.IsValidUrl(RepositoryProvider.GitHub, url).Should().BeFalse();
+
+    [Theory]
+    [InlineData("https://cronus:pat123@dev.azure.com/cronus/Base/_git/BaseApp", "https://cronus@dev.azure.com/cronus/Base/_git/BaseApp")]
+    [InlineData("https://:pat123@dev.azure.com/cronus/Base/_git/BaseApp", "https://dev.azure.com/cronus/Base/_git/BaseApp")]
+    [InlineData("  https://github.com/cronus-dk/base-app.git ", "https://github.com/cronus-dk/base-app.git")]
+    public void The_vs_code_link_never_carries_a_password(string cloneUrl, string expected) =>
+        RepositoryLinks.VsCodeCloneUrl(cloneUrl)
+            .Should().Be($"vscode://vscode.git/clone?url={Uri.EscapeDataString(expected)}");
 
     [Fact]
     public void The_vs_code_link_carries_the_clone_url_escaped() =>

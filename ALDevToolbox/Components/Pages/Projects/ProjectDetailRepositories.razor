@@ -127,15 +127,20 @@
                                     @if (repo.Url == repo.SavedUrl && RepositoryLinks.WebUrl(repo.Provider, repo.Url) is { } webUrl)
                                     {
                                         <div class="pd-repo-links">
-                                            <a class="btn btn--sm" href="@webUrl" target="_blank" rel="noopener">
+                                            <a class="btn btn--sm" href="@webUrl" target="_blank" rel="noopener noreferrer">
                                                 <Icon Name="external-link" Width="14" Height="14" />
                                                 <span>Open in @repo.Provider.DisplayName()</span>
                                             </a>
-                                            <a class="btn btn--sm" href="@RepositoryLinks.VsCodeCloneUrl(repo.Url)">
+                                            <a class="btn btn--sm" href="@RepositoryLinks.VsCodeCloneUrl(repo.Url)"
+                                               title="Opens VS Code and asks where to put the clone">
                                                 <Icon Name="code" Width="14" Height="14" />
                                                 <span>Clone in VS Code</span>
                                             </a>
                                         </div>
+                                    }
+                                    else if (!string.IsNullOrWhiteSpace(repo.Url) && repo.Url != repo.SavedUrl)
+                                    {
+                                        <span class="field__hint pd-repo-links__pending">Save the solution to open or clone this repository.</span>
                                     }
                                 </td>
                                 @if (CanManage)
