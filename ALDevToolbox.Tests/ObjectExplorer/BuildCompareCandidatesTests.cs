@@ -73,6 +73,60 @@ public sealed class BuildCompareCandidatesTests : IDisposable
     }
 
     [Fact]
+    public async Task Leaves_out_deleted_pipelines_and_unfinished_releases_and_names_preview_builds()
+    {
+        int self, preview, previewBuild;
+        var now = DateTime.UtcNow;
+        await using (var seed = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(seed, "CRONUS");
+            var main = await SeedPipelineAsync(seed, projectId, "main");
+            var gone = await SeedPipelineAsync(seed, projectId, "old", deleted: true);
+
+            self = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
+            await SeedBuildAsync(seed, projectId, main, self, ProjectBuildStatus.Ready, now.AddDays(-1));
+            preview = await SeedProjectReleaseAsync(seed, "CRONUS on BC 29.0", bcVersion: "29.0");
+            previewBuild = await SeedBuildAsync(seed, projectId, main, preview, ProjectBuildStatus.Ready, now,
+                bcTarget: ProjectBuildTarget.NextMajor);
+
+            var deletedPipeline = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2");
+            await SeedBuildAsync(seed, projectId, gone, deletedPipeline, ProjectBuildStatus.Ready, now);
+            // The build reads ready but its release is still being ingested.
+            var ingesting = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", status: "ingesting");
+            await SeedBuildAsync(seed, projectId, main, ingesting, ProjectBuildStatus.Ready, now);
+        }
+
+        await using var read = _db.NewContext();
+        var rows = await NewQuery(read).ListBuildCompareCandidatesAsync(self);
+
+        rows.Should().ContainSingle().Which.Should().Match<ReleaseListItem>(r =>
+            r.Id == preview && r.Label == $"Next major preview build #{previewBuild} of main on BC 29.0");
+    }
+
+    [Fact]
+    public async Task Offers_only_the_most_recent_builds()
+    {
+        int self;
+        var now = DateTime.UtcNow;
+        await using (var seed = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(seed, "CRONUS");
+            self = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2");
+            await SeedBuildAsync(seed, projectId, pipelineId: null, self, ProjectBuildStatus.Ready, now);
+            for (var i = 1; i <= ObjectExplorerService.BuildCompareCandidateCap + 5; i++)
+            {
+                var release = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2");
+                await SeedBuildAsync(seed, projectId, pipelineId: null, release, ProjectBuildStatus.Ready, now.AddMinutes(-i));
+            }
+        }
+
+        await using var read = _db.NewContext();
+        var rows = await NewQuery(read).ListBuildCompareCandidatesAsync(self);
+
+        rows.Should().HaveCount(ObjectExplorerService.BuildCompareCandidateCap);
+    }
+
+    [Fact]
     public async Task A_release_no_build_produced_has_no_candidates()
     {
         int release;
@@ -101,7 +155,7 @@ public sealed class BuildCompareCandidatesTests : IDisposable
         return project.Id;
     }
 
-    private static async Task<int> SeedPipelineAsync(AppDbContext ctx, int projectId, string name)
+    private static async Task<int> SeedPipelineAsync(AppDbContext ctx, int projectId, string name, bool deleted = false)
     {
         var pipeline = new OePipeline
         {
@@ -110,6 +164,7 @@ public sealed class BuildCompareCandidatesTests : IDisposable
             Name = name,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
+            DeletedAt = deleted ? DateTime.UtcNow : null,
         };
         ctx.OePipelines.Add(pipeline);
         await ctx.SaveChangesAsync();
@@ -137,10 +192,12 @@ public sealed class BuildCompareCandidatesTests : IDisposable
     }
 
     private static async Task<int> SeedBuildAsync(
-        AppDbContext ctx, int projectId, int? pipelineId, int releaseId, string status, DateTime startedAt)
+        AppDbContext ctx, int projectId, int? pipelineId, int releaseId, string status, DateTime startedAt,
+        string bcTarget = ProjectBuildTarget.Current)
     {
         var build = new OeProjectBuild
         {
+            BcTarget = bcTarget,
             OrganizationId = TestDb.DefaultOrgId,
             ProjectId = projectId,
             PipelineId = pipelineId,

@@ -273,7 +273,8 @@ app). The **New build** action lets the user pick which to build:
   project builds.
   The Compare picker on a build's own release page is the same project-scoped list: the other
   ready builds of that project, its own pipeline's first, newest first, each named "Build #N of
-  {pipeline}" because every build of a project shares one release label (#1075).
+  {pipeline}" because every build of a project shares one release label (#1075). Builds of a
+  deleted pipeline are left out, and the list stops at the 50 most recent.
 - The only path into a build's objects is: open the artifact → deep-link to
   `/object-explorer/release/{ReleaseId}` (or the project-scoped compare view). `OeReleaseDetail`
   stays reachable by id and gains a "back to artifact" affordance so a deep-linked user isn't

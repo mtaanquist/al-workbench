@@ -221,6 +221,7 @@ public class ObjectExplorerService
         if (!await ReleaseVisibleAsync(releaseId, ct)) return [];
         var own = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.ReleaseId == releaseId)
+            .OrderBy(b => b.Id)
             .Select(b => new { b.ProjectId, b.PipelineId })
             .FirstOrDefaultAsync(ct);
         if (own is null) return [];
@@ -233,13 +234,18 @@ public class ObjectExplorerService
                         && b.ReleaseId != releaseId
                         && b.Status == ProjectBuildStatus.Ready
                         && b.Release!.Status == "ready"
-                        && b.Release!.DeletedAt == null)
+                        && b.Release!.DeletedAt == null
+                        // A deleted pipeline's builds go with it, as on the Pipelines pages.
+                        && (b.Pipeline == null || b.Pipeline.DeletedAt == null))
             .Where(b => _db.OeReleases.Where(visibleRelease).Any(r => r.Id == b.ReleaseId))
+            .OrderBy(b => own.PipelineId != null && b.PipelineId == own.PipelineId ? 0 : 1)
+            .ThenByDescending(b => b.StartedAt)
+            .ThenByDescending(b => b.Id)
+            .Take(BuildCompareCandidateCap)
             .Select(b => new
             {
                 BuildId = b.Id,
-                b.PipelineId,
-                b.StartedAt,
+                b.BcTarget,
                 PipelineName = b.Pipeline != null ? b.Pipeline.Name : null,
                 Item = new ReleaseListItem(
                     b.Release!.Id, b.Release.Label, b.Release.Kind, b.Release.Status,
@@ -258,16 +264,23 @@ public class ObjectExplorerService
             .ToListAsync(ct);
 
         return rows
-            .OrderBy(r => own.PipelineId != null && r.PipelineId == own.PipelineId ? 0 : 1)
-            .ThenByDescending(r => r.StartedAt)
-            .ThenByDescending(r => r.BuildId)
-            .Select(r => r.Item with { Label = BuildCompareLabel(r.BuildId, r.PipelineName, r.Item.BcVersion) })
+            .Select(r => r.Item with { Label = BuildCompareLabel(r.BuildId, r.BcTarget, r.PipelineName, r.Item.BcVersion) })
             .ToList();
     }
 
-    private static string BuildCompareLabel(int buildId, string? pipelineName, string? bcVersion)
+    /// <summary>
+    /// How many builds the compare picker offers. A busy solution has hundreds;
+    /// the recent ones are the ones anyone compares against, and the picker is a
+    /// plain dropdown.
+    /// </summary>
+    internal const int BuildCompareCandidateCap = 50;
+
+    private static string BuildCompareLabel(int buildId, string bcTarget, string? pipelineName, string? bcVersion)
     {
-        var label = string.IsNullOrWhiteSpace(pipelineName) ? $"Build #{buildId}" : $"Build #{buildId} of {pipelineName}";
+        var label = bcTarget == ProjectBuildTarget.Current
+            ? $"Build #{buildId}"
+            : $"{ProjectBuildTarget.Label(bcTarget)} preview build #{buildId}";
+        if (!string.IsNullOrWhiteSpace(pipelineName)) label += $" of {pipelineName}";
         return string.IsNullOrWhiteSpace(bcVersion) ? label : $"{label} on BC {bcVersion}";
     }
 

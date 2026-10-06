@@ -13,6 +13,21 @@
     (absent from the handoff) was added.
 *@
 
+@if (string.IsNullOrWhiteSpace(CompareRight) && NothingToCompare)
+{
+    <div class="card">
+        <div class="empty-state">
+            <span class="empty-state__icon"><Icon Name="git-compare" Width="21" Height="21" /></span>
+            <span class="empty-state__title">Nothing to compare with yet</span>
+            <span class="empty-state__text">
+                @(IsBuild
+                    ? "This is the only finished build of its solution. Run another build, and you can compare the two here."
+                    : "There is no other release of this kind to compare with. Import another one, and you can compare the two here.")
+            </span>
+        </div>
+    </div>
+    return;
+}
 @if (string.IsNullOrWhiteSpace(CompareRight))
 {
     <div class="card">
@@ -108,6 +123,10 @@
     /// <summary>True when more files changed than <see cref="FileResults"/> lists.</summary>
     [Parameter] public bool FileResultsTruncated { get; set; }
     [Parameter] public List<ObjectCompareRow>? ObjectResults { get; set; }
+    /// <summary>True when the picker has no release to offer, so the page says why instead of asking for a pick.</summary>
+    [Parameter] public bool NothingToCompare { get; set; }
+    /// <summary>True when the current release is a pipeline build, which changes how to get something to compare with.</summary>
+    [Parameter] public bool IsBuild { get; set; }
 
     private RenderFragment RenderObjectCompareResults => __builder =>
     {
