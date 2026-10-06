@@ -66,6 +66,10 @@
                 <span>@error</span>
             </Alert>
         }
+        @if (_notice is { } notice)
+        {
+            <Alert Tone="AlertTone.Info" Role="status"><span>@notice</span></Alert>
+        }
         @if (WaitingRows.Count > 0)
         {
             var waiting = WaitingRows;
@@ -756,6 +760,15 @@
                         <span>Reschedule next deployment</span>
                     </button>
                 }
+                else if (r.LiveDelivery is null && r.LastDelivery is { Status: ProjectDeliveryStatus.HandedOff } held)
+                {
+                    @* Business Central may still hold it for its update; the dialog's service
+                       read says whether it does, and moving it re-uploads the build. *@
+                    <button type="button" class="menu__item" @onclick="() => OpenRescheduleAsync(held.DeliveryId)" role="menuitem">
+                        <Icon Name="calendar" Width="15" Height="15" />
+                        <span>Reschedule next deployment</span>
+                    </button>
+                }
                 <a class="menu__item" href="@($"/pipelines/deployments/{r.Id}/edit?returnUrl={ListPath}")" role="menuitem">
                     <Icon Name="pencil" Width="15" Height="15" />
                     <span>Edit</span>
@@ -788,6 +801,8 @@
     private const string NewPipelineHref = "/pipelines/deployments/new?returnUrl=" + ListPath;
 
     private RescheduleDeploymentDialog? _rescheduleDialog;
+    // Set when Reschedule finds nothing waiting any more.
+    private string? _notice;
 
     /// <summary>
     /// Reschedule from the list: the same dialog as the pipeline page's. A deployment that
@@ -798,9 +813,11 @@
         if (_rescheduleDialog is null) return;
         try
         {
+            _notice = null;
             if (!await _rescheduleDialog.OpenAsync(deliveryId, secretExpiresAt: null))
             {
                 await ReloadAsync();
+                _notice = _rescheduleDialog.LastRefusal;
             }
         }
         catch (ProjectAccessDeniedException)

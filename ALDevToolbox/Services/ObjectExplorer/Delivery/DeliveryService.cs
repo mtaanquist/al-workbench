@@ -973,19 +973,22 @@ public sealed class DeliveryService
     }
 
     /// <summary>
-    /// What the Reschedule dialog may offer for one <em>scheduled</em> delivery: the
-    /// environment's delivery window (when it has one), and whether the build can wait for
-    /// Business Central's next minor or major update - it can't when it has several apps
-    /// (Business Central picks the order) or an app the environment doesn't have yet (the
-    /// API refuses those timings for a first install). Null when the delivery is gone or no
-    /// longer scheduled. Access-gated like the reschedule itself.
+    /// What the Reschedule dialog may offer for one waiting delivery - <em>scheduled</em>,
+    /// or handed to Business Central and still held there: the environment's delivery
+    /// window (when it has one), and whether the build can wait for Business Central's
+    /// next minor or major update - it can't when it has several apps (Business Central
+    /// picks the order) or an app the environment doesn't have yet (the API refuses those
+    /// timings for a first install). Null when the delivery is gone or there is nothing
+    /// waiting to move; <see cref="WhyNotReschedulableAsync"/> says which. Access-gated
+    /// like the reschedule itself.
     /// </summary>
     public async Task<RescheduleOptions?> GetRescheduleOptionsAsync(int deliveryId, CancellationToken ct = default)
     {
         RequireOrganizationId();
         var info = await RescheduleInfoAsync(deliveryId, ct);
-        if (info is null || info.Status != ProjectDeliveryStatus.Scheduled) return null;
+        if (info is null || info.Status is not (ProjectDeliveryStatus.Scheduled or ProjectDeliveryStatus.HandedOff)) return null;
         await _access.EnsureCanManageAsync(info.ProjectId, info.OwnerId, ct);
+        if (info.Status == ProjectDeliveryStatus.HandedOff && (await HeldAppAsync(info, ct)).App is null) return null;
 
         var tz = UpdateWindow.ResolveTimeZone(info.TimeZone);
         var hasWindow = UpdateWindow.IsConfigured(info.WindowStart, info.WindowEnd);
@@ -1009,20 +1012,51 @@ public sealed class DeliveryService
             NextUpdateType = update?.BcNextUpdateType,
             NextUpdateDate = update?.BcNextUpdateDate,
             ForceSync = BcSyncMode.Normalize(syncMode) == BcSyncMode.ForceSync,
+            HeldByBusinessCentral = info.Status == ProjectDeliveryStatus.HandedOff,
         };
     }
 
     /// <summary>
-    /// Moves a <em>scheduled</em> delivery to another timing (atomic on <c>scheduled</c>):
-    /// right away, a picked time, the environment's next delivery window, or Business
-    /// Central's next minor or major update. The last two change what is sent: the apps go
-    /// up right away and Business Central installs them with that update, as a pipeline
-    /// set to that timing would. Recomputes the outside-window audit flag. Access-gated.
-    /// Throws if the delivery has already started or no longer exists, or the timing isn't
-    /// possible for it. Enqueues immediately when the new time is now or past.
+    /// Why <see cref="GetRescheduleOptionsAsync"/> came back empty for a delivery, in a
+    /// sentence for the page.
+    /// </summary>
+    public async Task<string> WhyNotReschedulableAsync(int deliveryId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var info = await RescheduleInfoAsync(deliveryId, ct);
+        if (info is null) return "That deployment no longer exists.";
+        await _access.EnsureCanViewAsync(info.ProjectId, ct);
+        return info.Status switch
+        {
+            ProjectDeliveryStatus.HandedOff => (await HeldAppAsync(info, ct)).Why
+                ?? "That deployment can be rescheduled now. Try again.",
+            ProjectDeliveryStatus.Scheduled => "That deployment can be rescheduled now. Try again.",
+            _ when ProjectDeliveryStatus.IsTerminal(info.Status) => "That deployment has finished or was cancelled, so there is nothing waiting to reschedule.",
+            _ => "That deployment has already started, so it can no longer be rescheduled.",
+        };
+    }
+
+    /// <summary>
+    /// Moves a delivery that hasn't installed yet to another timing: right away, a picked
+    /// time, the environment's next delivery window, or Business Central's next minor or
+    /// major update. The last two change what is sent: the apps go up right away and
+    /// Business Central installs them with that update, as a pipeline set to that timing
+    /// would. Recomputes the outside-window audit flag. Access-gated and step-up-gated, as
+    /// deploying is. Returns the id of the delivery that now carries the deployment.
+    /// <para>
+    /// A <em>scheduled</em> delivery is moved in place (atomic on <c>scheduled</c>) and
+    /// queued at once when the new time is now or past. A delivery already
+    /// <em>handed to Business Central</em> can't be moved there - the admin API can only
+    /// cancel a held install - so it is replaced (#1097): a new delivery of the same build
+    /// is written first, Business Central's copy is cancelled, and only then does the new
+    /// one take the timing. If Business Central refuses the cancel, the new delivery is
+    /// removed again and nothing has changed. The old delivery is marked cancelled, with
+    /// a line in its log saying which deployment took its place.
+    /// </para>
+    /// Throws if the delivery has started, is gone, or the timing isn't possible for it.
     /// </summary>
     /// <param name="atUtc">The picked time for <see cref="RescheduleTiming.AtTime"/>; ignored otherwise.</param>
-    public async Task RescheduleDeliveryAsync(int deliveryId, RescheduleTiming timing, DateTime? atUtc = null, CancellationToken ct = default)
+    public async Task<int> RescheduleDeliveryAsync(int deliveryId, RescheduleTiming timing, DateTime? atUtc = null, CancellationToken ct = default)
     {
         RequireOrganizationId();
         var info = await RescheduleInfoAsync(deliveryId, ct)
@@ -1032,9 +1066,91 @@ public sealed class DeliveryService
         // as deploying does, so it takes the same step-up rule.
         await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
 
+        if (info.Status == ProjectDeliveryStatus.HandedOff)
+        {
+            return await MoveHeldDeliveryAsync(info, timing, atUtc, ct);
+        }
+        if (info.Status != ProjectDeliveryStatus.Scheduled)
+        {
+            throw Validation("Delivery", "This delivery has already started and can no longer be rescheduled.");
+        }
+
+        var now = DateTime.UtcNow;
+        var t = await ResolveTimingAsync(info, timing, atUtc, now, ct);
+        if (!await ApplyTimingAsync(deliveryId, t, now, ct))
+        {
+            throw Validation("Delivery", "This delivery has already started and can no longer be rescheduled.");
+        }
+        await EnqueueIfDueAsync(deliveryId, info, t.When, now, ct);
+        _logger.LogInformation("Rescheduled delivery {DeliveryId} to {Timing} ({Schedule}, {ScheduledFor:o}).",
+            deliveryId, timing, t.Schedule, t.When);
+        return deliveryId;
+    }
+
+    /// <summary>
+    /// The pipeline deployments waiting to install on one environment, for its Scheduled
+    /// installs card (#1097): every <c>scheduled</c> delivery whose pipeline targets it,
+    /// soonest first, and the handed-off ones Business Central may still be holding, so the
+    /// card can offer Reschedule beside the matching install Business Central lists. A
+    /// held one is only a candidate (one app, the newest run of its pipeline to reach
+    /// Business Central); the card shows it only when Business Central lists that version.
+    /// </summary>
+    public async Task<List<WaitingDeployment>> ListWaitingDeploymentsAsync(int projectId, int environmentId, CancellationToken ct = default)
+    {
+        await _access.EnsureCanViewAsync(projectId, ct);
+        var envName = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == environmentId && e.ProjectId == projectId)
+            .Select(e => e.Name)
+            .FirstOrDefaultAsync(ct);
+        if (envName is null) return new List<WaitingDeployment>();
+
+        // A delivery keeps the environment it was made for; the pipeline may have moved on since.
+        var rows = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.ProjectId == projectId
+                && d.ReleasePipeline!.ProjectEnvironmentId == environmentId
+                && d.EnvironmentName == envName
+                && (d.Status == ProjectDeliveryStatus.Scheduled || d.Status == ProjectDeliveryStatus.HandedOff))
+            .Select(d => new
+            {
+                d.Id, d.ReleasePipelineId, PipelineName = d.ReleasePipeline!.Name, d.ProjectBuildId,
+                d.Status, d.ScheduledFor, d.DeploymentSchedule,
+                Held = d.Results
+                    .Where(r => r.Status == ProjectDeliveryResultStatus.Scheduled)
+                    .Select(r => new { r.AppId, r.AppVersion })
+                    .ToList(),
+            })
+            .ToListAsync(ct);
+
+        // Only the newest run of a pipeline that reached Business Central can still be held there.
+        var newestHandedOff = rows
+            .Where(r => r.Status == ProjectDeliveryStatus.HandedOff)
+            .GroupBy(r => r.ReleasePipelineId)
+            .Select(g => g.MaxBy(r => r.Id)!.Id)
+            .ToHashSet();
+        return rows
+            .Where(r => r.Status == ProjectDeliveryStatus.Scheduled
+                || (newestHandedOff.Contains(r.Id) && r.Held.Count == 1 && Guid.TryParse(r.Held[0].AppId, out _)))
+            .Select(r => new WaitingDeployment(r.Id, r.ReleasePipelineId, r.PipelineName, r.ProjectBuildId,
+                r.Status == ProjectDeliveryStatus.HandedOff, r.ScheduledFor, r.DeploymentSchedule,
+                r.Status == ProjectDeliveryStatus.HandedOff ? Guid.Parse(r.Held[0].AppId!) : null,
+                r.Status == ProjectDeliveryStatus.HandedOff ? r.Held[0].AppVersion : null))
+            .OrderBy(r => r.HeldByBusinessCentral).ThenBy(r => r.ScheduledFor).ThenBy(r => r.DeliveryId)
+            .ToList();
+    }
+
+    /// <summary>A timing worked out for one delivery: when we send, what we send, and the two window flags.</summary>
+    private sealed record ResolvedTiming(DateTime When, string Schedule, bool ByWindow, bool OutsideWindow);
+
+    /// <summary>
+    /// Works <paramref name="timing"/> out for the delivery, refusing what can't be done:
+    /// a picked time that has gone, a window the environment doesn't have, a Business
+    /// Central update the build can't wait for.
+    /// </summary>
+    private async Task<ResolvedTiming> ResolveTimingAsync(
+        RescheduleInfo info, RescheduleTiming timing, DateTime? atUtc, DateTime now, CancellationToken ct)
+    {
         var tz = UpdateWindow.ResolveTimeZone(info.TimeZone);
         var hasWindow = UpdateWindow.IsConfigured(info.WindowStart, info.WindowEnd);
-        var now = DateTime.UtcNow;
 
         DateTime when;
         var schedule = BcDeploymentSchedule.Immediate;
@@ -1084,28 +1200,171 @@ public sealed class DeliveryService
         var outsideWindow = schedule == BcDeploymentSchedule.Immediate
             && hasWindow
             && !UpdateWindow.IsWithin(info.WindowStart, info.WindowEnd, tz, when);
+        return new ResolvedTiming(when, schedule, byWindow, outsideWindow);
+    }
 
-        var changed = await _db.OeProjectDeliveries
+    /// <summary>Writes a timing onto a delivery still <c>scheduled</c>; false when it has started meanwhile.</summary>
+    private async Task<bool> ApplyTimingAsync(int deliveryId, ResolvedTiming t, DateTime now, CancellationToken ct) =>
+        await _db.OeProjectDeliveries
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(d => d.ScheduledFor, when)
-                .SetProperty(d => d.DeploymentSchedule, schedule)
-                .SetProperty(d => d.ScheduledByDeliveryWindow, byWindow)
-                .SetProperty(d => d.ScheduledOutsideWindow, outsideWindow)
-                .SetProperty(d => d.UpdatedAt, now), ct);
-        if (changed == 0)
+                .SetProperty(d => d.ScheduledFor, t.When)
+                .SetProperty(d => d.DeploymentSchedule, t.Schedule)
+                .SetProperty(d => d.ScheduledByDeliveryWindow, t.ByWindow)
+                .SetProperty(d => d.ScheduledOutsideWindow, t.OutsideWindow)
+                .SetProperty(d => d.UpdatedAt, now), ct) > 0;
+
+    private async Task EnqueueIfDueAsync(int deliveryId, RescheduleInfo info, DateTime when, DateTime now, CancellationToken ct)
+    {
+        if (when > now) return;
+        await _queue.EnqueueAsync(new DeliveryJob(deliveryId,
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(
+                info.OrganizationId, _orgContext.IsSystemOrganization, _orgContext.CurrentUserId ?? info.TriggeredByUserId)), ct);
+    }
+
+    /// <summary>
+    /// Replaces a delivery Business Central is holding for a later update with a new
+    /// delivery of the same build on <paramref name="timing"/>. See
+    /// <see cref="RescheduleDeliveryAsync"/> for the order and why.
+    /// </summary>
+    private async Task<int> MoveHeldDeliveryAsync(RescheduleInfo info, RescheduleTiming timing, DateTime? atUtc, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        var t = await ResolveTimingAsync(info, timing, atUtc, now, ct);
+        if (t.Schedule == BcDeploymentSchedule.Normalize(info.DeploymentSchedule))
         {
-            throw Validation("Delivery", "This delivery has already started and can no longer be rescheduled.");
+            throw Validation("Timing", "Business Central is already holding it for that update. Pick another time.");
         }
 
-        if (when <= now)
+        var (app, notHeld) = await HeldAppAsync(info, ct);
+        if (app is not { } held)
         {
-            await _queue.EnqueueAsync(new DeliveryJob(deliveryId,
-                AmbientOrganizationScope.OrganizationIdentity.ForOrganization(
-                    info.OrganizationId, _orgContext.IsSystemOrganization, info.TriggeredByUserId)), ct);
+            throw Validation("Delivery", notHeld!);
         }
-        _logger.LogInformation("Rescheduled delivery {DeliveryId} to {Timing} ({Schedule}, {ScheduledFor:o}).",
-            deliveryId, timing, schedule, when);
+
+        // Claimed first, so two people moving it at once can't both cancel and redeploy:
+        // only one of them turns it from handed off to cancelled.
+        var cancelledBy = _orgContext.CurrentUserId;
+        if (!await SetHeldStatusAsync(info.DeliveryId, ProjectDeliveryStatus.HandedOff, ProjectDeliveryStatus.Cancelled, cancelledBy, now, CancellationToken.None))
+        {
+            throw Validation("Delivery", "Someone else has just moved or cancelled this deployment. Close this and check its status.");
+        }
+
+        int replacementId;
+        try
+        {
+            // Written far enough out that nothing runs it before it takes the new timing, so
+            // a refusal here (the build's branch, an app older than the environment's) leaves
+            // Business Central's copy alone.
+            replacementId = await CreateDeliveryAsync(
+                info.ReleasePipelineId, info.ProjectBuildId, now.AddDays(1),
+                forceSyncOnce: BcSyncMode.Normalize(info.SchemaSyncMode) == BcSyncMode.ForceSync, ct);
+        }
+        catch
+        {
+            await SetHeldStatusAsync(info.DeliveryId, ProjectDeliveryStatus.Cancelled, ProjectDeliveryStatus.HandedOff, null, null, CancellationToken.None);
+            throw;
+        }
+
+        var schedule = BcDeploymentSchedule.Normalize(info.DeploymentSchedule) ?? info.DeploymentSchedule;
+        var family = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == info.EnvironmentId)
+            .Select(e => e.ApplicationFamily)
+            .FirstOrDefaultAsync(CancellationToken.None)
+            ?? BcConstants.DefaultApplicationFamily;
+        string? token = null;
+        try
+        {
+            token = (await _tokens.AcquireDeliveryContextAsync(info.ProjectId, ct)).AccessToken;
+            await _apps.RemoveScheduledPteVersionAsync(token, family, info.EnvironmentName, held.AppId, held.Version, schedule, ct);
+        }
+        catch (Exception ex)
+        {
+            // A refusal means Business Central still has its copy. Anything else (a timeout,
+            // the page closing) may have reached it or not, so ask it before deciding: with
+            // its copy gone the move has to finish, or nothing would install at all.
+            var stillHeld = ex is BcApiException || token is null
+                || await StillHeldAsync(token, family, info.EnvironmentName, held) != false;
+            if (stillHeld)
+            {
+                await _db.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == replacementId).ExecuteDeleteAsync(CancellationToken.None);
+                await _db.OeProjectDeliveries.Where(d => d.Id == replacementId).ExecuteDeleteAsync(CancellationToken.None);
+                await SetHeldStatusAsync(info.DeliveryId, ProjectDeliveryStatus.Cancelled, ProjectDeliveryStatus.HandedOff, null, null, CancellationToken.None);
+                _panelCache.Invalidate(info.ProjectId, info.EnvironmentId);
+                if (ex is not BcApiException bcEx) throw;
+                _logger.LogWarning(bcEx, "Business Central refused to cancel the install held for delivery {DeliveryId}; nothing was moved.", info.DeliveryId);
+                throw Validation("Delivery",
+                    $"Business Central didn't cancel the copy it is holding, so nothing was changed. It may have installed it already: refresh {info.EnvironmentName} and check. ({bcEx.Message})");
+            }
+            _logger.LogWarning(ex, "Cancelling the install held for delivery {DeliveryId} failed, but Business Central no longer holds it; finishing the move.", info.DeliveryId);
+        }
+        _panelCache.Invalidate(info.ProjectId, info.EnvironmentId);
+
+        // Business Central has dropped its copy, so from here the move has to land whatever
+        // happens to the request: every write ignores its cancellation.
+        var line = LogLine($"Moved: Business Central's copy was cancelled, and deployment #{replacementId} of the same build replaces this one.");
+        await _db.OeProjectDeliveries
+            .Where(d => d.Id == info.DeliveryId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.FinishedAt, now)
+                .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line), CancellationToken.None);
+        await _db.OeProjectDeliveryResults
+            .Where(r => r.Id == held.ResultId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, ProjectDeliveryResultStatus.Skipped)
+                .SetProperty(r => r.Message, $"Moved to deployment #{replacementId} before Business Central installed it.")
+                .SetProperty(r => r.UpdatedAt, now), CancellationToken.None);
+
+        if (!await ApplyTimingAsync(replacementId, t, now, CancellationToken.None))
+        {
+            // Only someone cancelling the replacement in the moment it existed gets here.
+            _logger.LogWarning("Delivery {ReplacementId}, which replaces {DeliveryId}, was no longer scheduled when it took its timing.", replacementId, info.DeliveryId);
+        }
+        await EnqueueIfDueAsync(replacementId, info, t.When, now, CancellationToken.None);
+        _logger.LogInformation(
+            "Moved delivery {DeliveryId}, held by Business Central for {OldSchedule}, to delivery {ReplacementId} ({Timing}, {Schedule}, {ScheduledFor:o}).",
+            info.DeliveryId, info.DeploymentSchedule, replacementId, timing, t.Schedule, t.When);
+        return replacementId;
+    }
+
+    /// <summary>
+    /// Turns a held delivery between handed off and cancelled; false when it wasn't in
+    /// <paramref name="from"/>. Cancelling records who; turning it back clears that. The
+    /// finish time is left for the move to set once it lands, so a move turned back keeps
+    /// the time it was handed off.
+    /// </summary>
+    private async Task<bool> SetHeldStatusAsync(int deliveryId, string from, string to, int? byUserId, DateTime? at, CancellationToken ct)
+    {
+        var query = _db.OeProjectDeliveries.Where(d => d.Id == deliveryId && d.Status == from);
+        var changed = to == ProjectDeliveryStatus.Cancelled
+            ? await query.ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.Status, to)
+                .SetProperty(d => d.CancelledByUserId, byUserId)
+                .SetProperty(d => d.UpdatedAt, at!.Value), ct)
+            : await query.ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.Status, to)
+                .SetProperty(d => d.CancelledByUserId, (int?)null)
+                .SetProperty(d => d.UpdatedAt, DateTime.UtcNow), ct);
+        return changed > 0;
+    }
+
+    /// <summary>
+    /// Whether Business Central still lists the held version, after a cancel whose answer
+    /// was lost. Null when it can't be asked either.
+    /// </summary>
+    private async Task<bool?> StillHeldAsync(string token, string family, string environmentName, HeldApp held)
+    {
+        try
+        {
+            var waiting = await _apps.ListScheduledPteOperationsAsync(token, family, environmentName, CancellationToken.None);
+            return waiting.Any(w => w.AppId == held.AppId
+                && string.Equals(w.TargetAppVersion, held.Version, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Couldn't read Business Central's scheduled installs for {Environment} after a failed cancel.", environmentName);
+            return null;
+        }
     }
 
     /// <summary>How far in the past a picked time may be and still count as "now": the minute the person spent in the dialog.</summary>
@@ -1113,10 +1372,10 @@ public sealed class DeliveryService
 
     /// <summary>What a reschedule reads about a delivery, its pipeline and its environment.</summary>
     private sealed record RescheduleInfo(
-        int OrganizationId, int? TriggeredByUserId, int ProjectId, int? OwnerId, int ReleasePipelineId,
+        int DeliveryId, int OrganizationId, int? TriggeredByUserId, int ProjectId, int? OwnerId, int ReleasePipelineId,
         int ProjectBuildId, int EnvironmentId, string EnvironmentName, string Status, DateTime ScheduledFor,
         string DeploymentSchedule, bool ScheduledByDeliveryWindow, bool ScheduledOutsideWindow,
-        string? TimeZone, TimeOnly? WindowStart, TimeOnly? WindowEnd);
+        string? TimeZone, TimeOnly? WindowStart, TimeOnly? WindowEnd, string SchemaSyncMode);
 
     private async Task<RescheduleInfo?> RescheduleInfoAsync(int deliveryId, CancellationToken ct)
     {
@@ -1129,7 +1388,7 @@ public sealed class DeliveryService
                 d.ReleasePipelineId, d.ProjectBuildId,
                 PipelineEnvironmentId = d.ReleasePipeline.ProjectEnvironmentId,
                 d.EnvironmentName, d.Status, d.ScheduledFor, d.DeploymentSchedule,
-                d.ScheduledByDeliveryWindow, d.ScheduledOutsideWindow,
+                d.ScheduledByDeliveryWindow, d.ScheduledOutsideWindow, d.SchemaSyncMode,
                 TimeZone = d.ReleasePipeline.Project.BcTimeZone,
             })
             .FirstOrDefaultAsync(ct);
@@ -1144,10 +1403,61 @@ public sealed class DeliveryService
             .FirstOrDefaultAsync(ct);
 
         return new RescheduleInfo(
-            d.OrganizationId, d.TriggeredByUserId, d.ProjectId, d.OwnerId, d.ReleasePipelineId,
+            deliveryId, d.OrganizationId, d.TriggeredByUserId, d.ProjectId, d.OwnerId, d.ReleasePipelineId,
             d.ProjectBuildId, env?.Id ?? d.PipelineEnvironmentId, d.EnvironmentName, d.Status, d.ScheduledFor,
             d.DeploymentSchedule, d.ScheduledByDeliveryWindow, d.ScheduledOutsideWindow,
-            d.TimeZone, env?.UpdateWindowStart, env?.UpdateWindowEnd);
+            d.TimeZone, env?.UpdateWindowStart, env?.UpdateWindowEnd, d.SchemaSyncMode);
+    }
+
+    /// <summary>The one app a handed-off delivery left with Business Central, as the move cancels it.</summary>
+    private sealed record HeldApp(int ResultId, Guid AppId, string Version);
+
+    /// <summary>
+    /// The app Business Central is still holding for a handed-off delivery, or why there is
+    /// none to move. A handed-off row never changes again once written, so "still held" is
+    /// read from what came after it: a later run of the same pipeline replaced Business
+    /// Central's copy, and the environment showing that version (or newer) installed means
+    /// the update has been and gone. Several apps aren't moved: cancelling them one by one
+    /// can leave half a build held. Nor is one whose pipeline now deploys somewhere else:
+    /// its replacement would go there instead.
+    /// </summary>
+    private async Task<(HeldApp? App, string? Why)> HeldAppAsync(RescheduleInfo info, CancellationToken ct)
+    {
+        const string goneWhy = "Business Central isn't holding this deployment any more: it has been installed or replaced by a later one.";
+        var held = await _db.OeProjectDeliveryResults.AsNoTracking()
+            .Where(r => r.ProjectDeliveryId == info.DeliveryId && r.Status == ProjectDeliveryResultStatus.Scheduled)
+            .Select(r => new { r.Id, r.AppId, r.AppVersion })
+            .ToListAsync(ct);
+        if (held.Count != 1 || !Guid.TryParse(held[0].AppId, out var appId) || string.IsNullOrWhiteSpace(held[0].AppVersion))
+        {
+            return (null, "This deployment can't be moved from here. Cancel it under Scheduled installs on the environment, then deploy the build again.");
+        }
+
+        var later = await _db.OeProjectDeliveries.AsNoTracking()
+            .AnyAsync(d => d.ReleasePipelineId == info.ReleasePipelineId && d.Id > info.DeliveryId
+                && (d.Status == ProjectDeliveryStatus.HandedOff || d.Status == ProjectDeliveryStatus.Deployed
+                    || d.Status == ProjectDeliveryStatus.Claimed || d.Status == ProjectDeliveryStatus.Uploading
+                    || d.Status == ProjectDeliveryStatus.Installing), ct);
+        if (later) return (null, goneWhy);
+
+        var installed = await _db.OeEnvironmentApps.AsNoTracking()
+            .Where(a => a.EnvironmentId == info.EnvironmentId && a.AppId == appId)
+            .Select(a => a.Version)
+            .FirstOrDefaultAsync(ct);
+        if (Version.TryParse(installed, out var have) && Version.TryParse(held[0].AppVersion, out var want) && have >= want)
+        {
+            return (null, goneWhy);
+        }
+
+        var pipelineEnv = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.Id == info.ReleasePipelineId)
+            .Select(r => r.ProjectEnvironment!.Name)
+            .FirstOrDefaultAsync(ct);
+        if (!string.Equals(pipelineEnv, info.EnvironmentName, StringComparison.Ordinal))
+        {
+            return (null, $"Its deployment pipeline no longer deploys to {info.EnvironmentName}. Cancel the install under Scheduled installs on {info.EnvironmentName}, then deploy the build again.");
+        }
+        return (new HeldApp(held[0].Id, appId, held[0].AppVersion), null);
     }
 
     /// <summary>
@@ -2147,7 +2457,30 @@ public sealed record RescheduleOptions(
 
     /// <summary>True when the deployment installs with Force sync, which can drop data.</summary>
     public bool ForceSync { get; init; }
+
+    /// <summary>
+    /// True when Business Central already holds the apps for its next update: moving it
+    /// cancels that copy and uploads the build again, as a new deployment.
+    /// </summary>
+    public bool HeldByBusinessCentral { get; init; }
 }
+
+/// <summary>
+/// A pipeline deployment waiting to install on an environment: booked here
+/// (<paramref name="HeldByBusinessCentral"/> false, runs at <paramref name="ScheduledFor"/>)
+/// or handed to Business Central for a later update, holding <paramref name="AppId"/> at
+/// <paramref name="AppVersion"/>.
+/// </summary>
+public sealed record WaitingDeployment(
+    int DeliveryId,
+    int ReleasePipelineId,
+    string PipelineName,
+    int BuildId,
+    bool HeldByBusinessCentral,
+    DateTime ScheduledFor,
+    string DeploymentSchedule,
+    Guid? AppId,
+    string? AppVersion);
 
 /// <summary>A delivery for the history list, with its per-app rows resolved for display.</summary>
 public sealed record DeliveryHistoryRow(
