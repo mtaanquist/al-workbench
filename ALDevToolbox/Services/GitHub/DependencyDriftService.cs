@@ -4,6 +4,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services.ObjectExplorer;
+using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using Microsoft.EntityFrameworkCore;
@@ -27,17 +28,39 @@ public sealed record DependencyDriftFile(string Path, IReadOnlyList<DependencyDr
 /// The Business Central version its manifests still ask for, as
 /// <c>major.minor</c>. Empty when nothing but a dependency moved.
 /// </param>
+/// <param name="TargetApplication">
+/// The Business Central version it was measured against, as <c>major.minor</c>.
+/// Empty when nothing but a dependency moved.
+/// </param>
+/// <param name="ComparedWithProduction">
+/// True when the target is the version of the production environment of the solution
+/// tracking the repository (issue #1081); false when the scan fell back to the newest
+/// imported release because that solution has none with a known version.
+/// </param>
+/// <param name="ProductionEnvironment">
+/// The production environment's name, and <paramref name="Solution"/> the name of the
+/// solution it belongs to. Both null when the target is a release, or when that
+/// solution is not one the viewer may see.
+/// </param>
 public sealed record DependencyDriftRepository(
     string Repository,
     string HtmlUrl,
     string CurrentApplication,
-    IReadOnlyList<DependencyDriftFile> Files);
+    IReadOnlyList<DependencyDriftFile> Files,
+    string TargetApplication = "",
+    bool ComparedWithProduction = false,
+    string? ProductionEnvironment = null,
+    string? Solution = null);
 
 /// <summary>How many repositories are still on one Business Central version.</summary>
 public sealed record DependencyDriftGroup(string CurrentApplication, int RepositoryCount);
 
 /// <summary>What the Solutions panel needs in one read.</summary>
-/// <param name="TargetVersion">The version everything is being moved to, as <c>major.minor</c>. Null when there is no drift.</param>
+/// <param name="TargetVersion">
+/// The newest imported release's version, as <c>major.minor</c>, for the repositories
+/// measured against it. Null when there is no drift, or when every repository was
+/// measured against its solution's production environment instead.
+/// </param>
 public sealed record DependencyDriftSummary(
     IReadOnlyList<DependencyDriftRepository> Repositories,
     IReadOnlyList<DependencyDriftGroup> Groups,
@@ -72,6 +95,13 @@ public sealed record DependencyDriftPullRequest(
 /// file people maintain; a pull request that reflows it is one nobody can
 /// review. <see cref="AppJsonValueEditor"/> replaces the bytes of the values
 /// that changed and leaves the rest of the file alone.</para>
+///
+/// <para><strong>Production is the yardstick.</strong> A repository is measured
+/// against the Business Central version of the production environment of the
+/// solution that tracks it - the first by name when there are several - because
+/// that is what the customer runs (issue #1081). Only when the solution has no
+/// production environment with a known version does the scan fall back to the
+/// newest imported release.</para>
 ///
 /// <para><strong>Behind, never ahead.</strong> A value is only proposed when
 /// what the manifest asks for is <em>lower</em> than what the workbench now knows
@@ -209,6 +239,7 @@ public sealed class DependencyDriftService
             await ReplaceFindingsAsync([], releaseId, ct);
             return 0;
         }
+        var production = await ProductionTargetsAsync(ct);
 
         var token = await _github.GetInstallationTokenAsync(installationId, ct);
         var listing = await _github.ListInstallationRepositoriesAsync(token, ct);
@@ -239,8 +270,11 @@ public sealed class DependencyDriftService
 
             try
             {
+                var target = production.TryGetValue(fullName, out var environment)
+                    ? new DriftTarget(environment.Version, PlatformFor(environment.Version), environment.Id)
+                    : new DriftTarget(release.BcVersion!, platformVersion, null);
                 findings.AddRange(
-                    await ScanRepositoryAsync(orgId, token, repo, release, platformVersion, catalogue, ct));
+                    await ScanRepositoryAsync(orgId, token, repo, release, target, catalogue, ct));
             }
             catch (Exception ex) when (ex is GitHubApiException or HttpRequestException or TaskCanceledException)
             {
@@ -252,8 +286,8 @@ public sealed class DependencyDriftService
 
         var stored = await ReplaceFindingsAsync(findings, releaseId, ct);
         _logger.LogInformation(
-            "Dependency drift for organisation {OrgId} against release {ReleaseId} ({BcVersion}): {FindingCount} findings across {RepositoryCount} repositories.",
-            orgId, releaseId, release.BcVersion, stored,
+            "Dependency drift for organisation {OrgId} ({ProductionCount} repositories against production, the rest against release {ReleaseId} ({BcVersion})): {FindingCount} findings across {RepositoryCount} repositories.",
+            orgId, tracked.Count(production.ContainsKey), releaseId, release.BcVersion, stored,
             findings.Select(f => f.Repository).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         return stored;
     }
@@ -276,13 +310,84 @@ public sealed class DependencyDriftService
             .FirstOrDefault();
     }
 
+    /// <summary>
+    /// What one repository is measured against: the application and platform versions,
+    /// and the production environment they came from (null when they came from the release).
+    /// </summary>
+    private sealed record DriftTarget(string Application, string? Platform, int? EnvironmentId);
+
+    /// <summary>A production environment a repository is measured against.</summary>
+    private sealed record ProductionTarget(int Id, string Version);
+
+    /// <summary>
+    /// The production environment each tracked GitHub repository is measured against,
+    /// keyed by <c>owner/name</c>. Per solution the first production environment by name
+    /// that is not deleted and has a version; a repository tracked by more than one
+    /// solution takes the oldest solution that has one, so the answer does not change
+    /// from one scan to the next. A repository missing from the result falls back to the
+    /// release.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, ProductionTarget>> ProductionTargetsAsync(CancellationToken ct)
+    {
+        var tracking = await _db.OeProjectRepositories.AsNoTracking()
+            .Where(r => r.Provider == RepositoryProvider.GitHub)
+            .Where(r => _db.OeProjects.Any(p => p.Id == r.ProjectId && p.DeletedAt == null))
+            .Select(r => new { r.ProjectId, r.Url })
+            .ToListAsync(ct);
+        if (tracking.Count == 0) return new Dictionary<string, ProductionTarget>();
+
+        var projectIds = tracking.Select(t => t.ProjectId).Distinct().ToList();
+        // Production compared the way BcEnvironmentTypes.IsProduction does, which EF
+        // cannot translate.
+        var environments = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(EnvironmentQueries.NotSoftDeleted)
+            .Where(e => projectIds.Contains(e.ProjectId)
+                && e.MissingSince == null
+                && e.Version != null
+                && e.Type.Trim().ToUpper() == "PRODUCTION")
+            .Select(e => new { e.Id, e.ProjectId, e.Name, e.Version })
+            .ToListAsync(ct);
+
+        var perProject = environments
+            .Where(e => IsKnownVersion(e.Version))
+            .GroupBy(e => e.ProjectId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Id)
+                    .Select(e => new ProductionTarget(e.Id, e.Version!.Trim()))
+                    .First());
+
+        var result = new Dictionary<string, ProductionTarget>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in tracking.OrderBy(t => t.ProjectId))
+        {
+            if (ToFullName(row.Url) is not { } name || result.ContainsKey(name)) continue;
+            if (perProject.TryGetValue(row.ProjectId, out var target)) result[name] = target;
+        }
+        return result;
+    }
+
+    /// <summary>A version with at least a numeric major and minor - anything less says nothing a manifest can be behind.</summary>
+    private static bool IsKnownVersion(string? version)
+    {
+        var segments = (version ?? string.Empty).Trim().Split('.');
+        return segments.Length >= 2 && int.TryParse(segments[0], out _) && int.TryParse(segments[1], out _);
+    }
+
+    /// <summary>
+    /// The platform an environment's version implies. Business Central's platform keeps
+    /// the major and a zero minor through a whole wave (application 28.2 runs on platform
+    /// 28.0), and an environment reports only its application version.
+    /// </summary>
+    private static string PlatformFor(string applicationVersion) =>
+        applicationVersion.Trim().Split('.')[0] + ".0";
+
     /// <summary>One repository's manifests, and what each of them is behind on.</summary>
     private async Task<List<GitHubRepositoryDrift>> ScanRepositoryAsync(
         int orgId,
         string installationToken,
         GitHubRepositorySummary repo,
         OeRelease release,
-        string? platformVersion,
+        DriftTarget target,
         IReadOnlyDictionary<string, WellKnownDependency> catalogue,
         CancellationToken ct)
     {
@@ -319,7 +424,7 @@ public sealed class DependencyDriftService
             // it targets, so there is nothing to say it is behind.
             if (string.IsNullOrWhiteSpace(manifest.Application)) continue;
 
-            foreach (var change in Changes(manifest, release.BcVersion!, platformVersion, catalogue))
+            foreach (var change in Changes(manifest, target.Application, target.Platform, catalogue))
             {
                 findings.Add(new GitHubRepositoryDrift
                 {
@@ -330,6 +435,7 @@ public sealed class DependencyDriftService
                     Current = Trim(change.Current, 100),
                     Proposed = Trim(change.Proposed, 100),
                     ReleaseId = release.Id,
+                    EnvironmentId = target.EnvironmentId,
                     DetectedAt = now,
                 });
             }
@@ -374,8 +480,7 @@ public sealed class DependencyDriftService
     }
 
     /// <summary>
-    /// Whether a manifest asks for an older Business Central than the release
-    /// brought. Compared at <c>major.minor</c>, because that is the wave a
+    /// Whether a manifest asks for an older Business Central than its target. Compared at <c>major.minor</c>, because that is the wave a
     /// repository is on - a build number nobody typed is not drift.
     /// </summary>
     private static bool IsBehindByRelease(string current, string target) =>
@@ -383,10 +488,10 @@ public sealed class DependencyDriftService
             BcArtifactIndex.ToMajorMinor(current), BcArtifactIndex.ToMajorMinor(target)) < 0;
 
     /// <summary>
-    /// The new value, written the way the old one was: the release's
+    /// The new value, written the way the old one was: the target's
     /// <c>major.minor</c> followed by as many zeroes as the manifest's own value
     /// had segments. An <c>application</c> is a minimum, so <c>28.2.0.0</c> is
-    /// what a person would have typed - not the release's four-part build number.
+    /// what a person would have typed - not a four-part build number.
     /// </summary>
     private static string ProposedVersion(string target, string current)
     {
@@ -559,29 +664,61 @@ public sealed class DependencyDriftService
             .ToDictionary(g => g.Key, g => g.First().DepName);
 
         var target = rows
-            .Where(r => r.Field == ApplicationField)
+            .Where(r => r.Field == ApplicationField && r.EnvironmentId == null)
             .Select(r => BcArtifactIndex.ToMajorMinor(r.Proposed))
             .OrderByDescending(v => v, BcVersionComparer.Instance)
             .FirstOrDefault();
 
+        // Which production environment each finding was measured against, named only
+        // when its solution is one this viewer may see.
+        var environmentIds = rows.Where(r => r.EnvironmentId != null).Select(r => r.EnvironmentId!.Value).Distinct().ToList();
+        var environments = new Dictionary<int, (string Name, string Solution)>();
+        if (environmentIds.Count > 0)
+        {
+            var snapshot = await _projectAccess.GetSnapshotAsync(ct);
+            var visibleProjects = await _db.OeProjects.AsNoTracking()
+                .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
+                .Where(p => p.DeletedAt == null)
+                .Select(p => p.Id)
+                .ToListAsync(ct);
+            environments = (await _db.OeProjectEnvironments.AsNoTracking()
+                    .Where(e => environmentIds.Contains(e.Id) && visibleProjects.Contains(e.ProjectId))
+                    .Select(e => new { e.Id, e.Name, Solution = e.Project!.Name })
+                    .ToListAsync(ct))
+                .ToDictionary(e => e.Id, e => (e.Name, e.Solution));
+        }
+
         var repositories = rows
             .GroupBy(r => r.Repository, StringComparer.OrdinalIgnoreCase)
-            .Select(byRepo => new DependencyDriftRepository(
-                byRepo.Key,
-                $"https://github.com/{byRepo.Key}",
-                byRepo
-                    .Where(r => r.Field == ApplicationField)
-                    .Select(r => BcArtifactIndex.ToMajorMinor(r.Current))
-                    .OrderBy(v => v, BcVersionComparer.Instance)
-                    .FirstOrDefault() ?? string.Empty,
-                byRepo
-                    .GroupBy(r => r.Path, StringComparer.Ordinal)
-                    .Select(byPath => new DependencyDriftFile(
-                        byPath.Key,
-                        byPath.Select(r => new DependencyDriftChange(
-                            r.Field, FieldLabel(r.Field, names), r.Current, r.Proposed)).ToList()))
-                    .OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase)
-                    .ToList()))
+            .Select(byRepo =>
+            {
+                var application = byRepo.Where(r => r.Field == ApplicationField).ToList();
+                var environmentId = application.Select(r => r.EnvironmentId).FirstOrDefault(id => id != null);
+                (string Name, string Solution)? environment =
+                    environmentId is { } id && environments.TryGetValue(id, out var named) ? named : null;
+                return new DependencyDriftRepository(
+                    byRepo.Key,
+                    $"https://github.com/{byRepo.Key}",
+                    application
+                        .Select(r => BcArtifactIndex.ToMajorMinor(r.Current))
+                        .OrderBy(v => v, BcVersionComparer.Instance)
+                        .FirstOrDefault() ?? string.Empty,
+                    byRepo
+                        .GroupBy(r => r.Path, StringComparer.Ordinal)
+                        .Select(byPath => new DependencyDriftFile(
+                            byPath.Key,
+                            byPath.Select(r => new DependencyDriftChange(
+                                r.Field, FieldLabel(r.Field, names), r.Current, r.Proposed)).ToList()))
+                        .OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase)
+                        .ToList(),
+                    application
+                        .Select(r => BcArtifactIndex.ToMajorMinor(r.Proposed))
+                        .OrderByDescending(v => v, BcVersionComparer.Instance)
+                        .FirstOrDefault() ?? string.Empty,
+                    environmentId is not null,
+                    environment?.Name,
+                    environment?.Solution);
+            })
             .OrderBy(r => r.Repository, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -720,8 +857,17 @@ public sealed class DependencyDriftService
         }
 
         var release = await _db.OeReleases.AsNoTracking().FirstOrDefaultAsync(r => r.Id == rows[0].ReleaseId, ct);
+        var environmentId = rows.Select(r => r.EnvironmentId).FirstOrDefault(id => id != null);
+        // Named only when its solution is one this person may see: the body goes to
+        // GitHub, and a Private solution's environment is not theirs to publish.
+        var environment = environmentId is { } envId
+            ? await VisibleEnvironmentAsync(envId, ct)
+            : null;
+        // Without an application finding (only the platform or a dependency moved),
+        // the version is the one the repository was measured against.
         var version = BcArtifactIndex.ToMajorMinor(
             rows.Where(r => r.Field == ApplicationField).Select(r => r.Proposed).FirstOrDefault()
+            ?? (environmentId is { } measuredId ? await EnvironmentVersionAsync(measuredId, ct) : null)
             ?? release?.BcVersion
             ?? "0.0");
 
@@ -782,7 +928,7 @@ public sealed class DependencyDriftService
             title: $"Target Business Central {version}",
             head: target.Branch,
             baseBranch: repo.DefaultBranch,
-            body: await BuildBodyAsync(version, edited, release, ct),
+            body: await BuildBodyAsync(version, edited, release, environmentId is not null, environment, ct),
             ct);
 
         _logger.LogInformation(
@@ -935,6 +1081,30 @@ public sealed class DependencyDriftService
             + "none of them has a pull request open. Tidy those up on GitHub, then try again.");
     }
 
+    /// <summary>The name of an environment whose solution this viewer may see; null otherwise.</summary>
+    private async Task<string?> VisibleEnvironmentAsync(int environmentId, CancellationToken ct)
+    {
+        var snapshot = await _projectAccess.GetSnapshotAsync(ct);
+        var visibleProjects = _db.OeProjects.AsNoTracking()
+            .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
+            .Where(p => p.DeletedAt == null)
+            .Select(p => p.Id);
+        return await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == environmentId && visibleProjects.Contains(e.ProjectId))
+            .Select(e => e.Name)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    /// <summary>An environment's version, when it still has one worth comparing with.</summary>
+    private async Task<string?> EnvironmentVersionAsync(int environmentId, CancellationToken ct)
+    {
+        var version = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.Id == environmentId)
+            .Select(e => e.Version)
+            .FirstOrDefaultAsync(ct);
+        return IsKnownVersion(version) ? version : null;
+    }
+
     /// <summary>
     /// The pull request's description: every value that moved, per file, and a
     /// link to what changed between the two Business Central releases so a
@@ -944,6 +1114,8 @@ public sealed class DependencyDriftService
         string version,
         IReadOnlyList<(string Path, IReadOnlyList<GitHubRepositoryDrift> Changes)> edited,
         OeRelease? release,
+        bool measuredAgainstProduction,
+        string? environmentName,
         CancellationToken ct)
     {
         var names = (await _catalog.GetAllAsync(ct))
@@ -965,7 +1137,19 @@ public sealed class DependencyDriftService
             lines.Add(body.ToString());
         }
 
-        if (release is not null && await CompareLinkAsync(release, ct) is { } link)
+        if (measuredAgainstProduction)
+        {
+            lines.Add(environmentName is not null
+                ? $"Measured against the production environment {environmentName}, which was on Business Central {version} when checked."
+                : $"Measured against the solution's production environment, which was on Business Central {version} when checked.");
+        }
+
+        // The compare link is only worth giving when it lands on the version this pull
+        // request moves to; a production environment can be on a wave other than the
+        // newest imported release.
+        if (release?.BcVersion is { } releaseVersion
+            && BcArtifactIndex.ToMajorMinor(releaseVersion) == version
+            && await CompareLinkAsync(release, ct) is { } link)
         {
             lines.Add($"What changed between the two releases: {link}");
         }
