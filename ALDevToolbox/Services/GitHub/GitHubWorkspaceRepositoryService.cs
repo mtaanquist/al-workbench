@@ -459,6 +459,7 @@ public sealed class GitHubWorkspaceRepositoryService
             }
 
             var existing = await _pipelines.ListPipelinesAsync(solutionId, ct);
+            var skipped = false;
             foreach (var branch in branches)
             {
                 // A pipeline with no branch builds the default branch, so it
@@ -468,11 +469,27 @@ public sealed class GitHubWorkspaceRepositoryService
                 if (covered) continue;
                 // A repository made here is in the connected organisation, so its
                 // pushes arrive; each branch builds on push as the person who made it (#1079).
-                var id = await _pipelines.CreatePipelineAsync(
-                    new PipelineInput(solutionId, CustomName: null, SelectedAppIds: null, Branch: branch, BuildOnPush: true), ct);
-                names.Add((await _pipelines.GetPipelineAsync(id, ct))!.Name);
+                // One branch refused (say its generated name is already another
+                // pipeline's) does not stop the others.
+                try
+                {
+                    var id = await _pipelines.CreatePipelineAsync(
+                        new PipelineInput(solutionId, CustomName: null, SelectedAppIds: null, Branch: branch, BuildOnPush: true), ct);
+                    names.Add((await _pipelines.GetPipelineAsync(id, ct))!.Name);
+                }
+                catch (PlanValidationException ex)
+                {
+                    _db.ChangeTracker.Clear();
+                    skipped = true;
+                    _logger.LogWarning(
+                        "Could not add a build pipeline for branch {Branch} to solution {SolutionId}: {Reason}",
+                        branch, solutionId, string.Join(" ", ex.Errors.Values));
+                }
             }
-            return (names, null);
+            return (names, !skipped ? null
+                : names.Count == 0
+                    ? "The repository is ready, but its build pipelines could not be added. " + AddThemYourself
+                    : "The repository is ready, but not all of its build pipelines could be added. " + AddThemYourself);
         }
         catch (Exception ex)
         {

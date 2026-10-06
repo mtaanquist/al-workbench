@@ -343,8 +343,13 @@ public sealed class GitHubExtensionDeliveryService
         }
         if (sibling is not null)
         {
-            lines.Add($"The `{CustomerNaming.Apply(sibling.WorkspaceName, folderStyle)}.code-workspace` file is "
-                + "updated so the new folder opens with the rest of the workspace.");
+            // Only when the builder rewrote it: an older saved workspace lists no
+            // folders, and the file is then left alone.
+            if (sibling.ExistingFolders.Count > 0)
+            {
+                lines.Add($"The `{CustomerNaming.Apply(sibling.WorkspaceName, folderStyle)}.code-workspace` file is "
+                    + "updated so the new folder opens with the rest of the workspace.");
+            }
             if (sibling.SavedPlan is not null && sibling.SavedExtensions is { Count: > 0 })
             {
                 lines.Add($"`{WorkspaceConfigService.FileName}` now lists it too, so the next extension added "
