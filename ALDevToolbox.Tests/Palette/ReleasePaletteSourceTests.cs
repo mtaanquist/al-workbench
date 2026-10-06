@@ -168,13 +168,17 @@ public sealed class ReleasePaletteSourceTests : PaletteSourceVisibilityTestBase
         await SeedWorldAsync();
         await SeedFeedSymbolsAsync("CRONUS Banking - Import 28.6.0.0 (symbols)", "symbols:aaaa:28.6.0.0", files: 0);
         await SeedFeedSymbolsAsync("CRONUS Banking - PSP 28.6.0.0 (symbols)", "symbols:bbbb:28.6.0.0", files: 3);
+        // Still importing: its files are not counted yet, so it is offered like any
+        // other release that is on its way.
+        await SeedFeedSymbolsAsync("CRONUS Banking - SEPA 28.6.0.0 (symbols)", "symbols:cccc:28.6.0.0", files: 0, status: "ingesting");
 
         var results = await SearchAsync("cronus banking");
 
-        results.Select(r => r.Title).Should().Equal("CRONUS Banking - PSP 28.6.0.0 (symbols)");
+        results.Select(r => r.Title).Should().BeEquivalentTo(
+            "CRONUS Banking - PSP 28.6.0.0 (symbols)", "CRONUS Banking - SEPA 28.6.0.0 (symbols)");
     }
 
-    private async Task SeedFeedSymbolsAsync(string label, string dedupKey, int files)
+    private async Task SeedFeedSymbolsAsync(string label, string dedupKey, int files, string status = "ready")
     {
         await using var ctx = Db.NewContext();
         ctx.OeReleases.Add(new OeRelease
@@ -184,7 +188,7 @@ public sealed class ReleasePaletteSourceTests : PaletteSourceVisibilityTestBase
             BcVersion = "28.6",
             DedupKey = dedupKey,
             Kind = "third_party",
-            Status = "ready",
+            Status = status,
             SourceFileCount = files,
             ImportedAt = DateTime.UtcNow,
             CreatedAt = DateTime.UtcNow,
