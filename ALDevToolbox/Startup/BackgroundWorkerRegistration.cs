@@ -60,6 +60,9 @@ public static class BackgroundWorkerRegistration
         // Sends the daily and weekly notification digests, and drops items that
         // waited too long. See .design/notifications.md.
         services.AddHostedService<ALDevToolbox.Services.Notifications.NotificationDigestScheduler>();
+        // Adds each newly shipped Business Central release wave to every org's
+        // application-version catalogue, read daily off the Microsoft symbol feed.
+        services.AddHostedService<ALDevToolbox.Services.Templates.ApplicationVersionSyncScheduler>();
         return services;
     }
 }
