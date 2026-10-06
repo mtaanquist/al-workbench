@@ -881,6 +881,11 @@ whole. The page reads the log line back through the same parser, so a deployment
   for a build Business Central can hold back - one app, already in the environment's app list as last
   read; the run re-checks the live list. A deployment already handed to Business Central is not
   reschedulable: the admin API can only cancel it (from the environment's Scheduled installs), not move it.
+  Any choice that installs within the minute (Now, a picked time that has come, a delivery window that
+  is open) asks who is signed in first. Rescheduling takes the Deployment pipelines step-up rule, like
+  deploying. The worker only claims a delivery whose time has come, so a run still waiting in the queue
+  does nothing to a deployment moved to later; the scheduler queues it again when it is due. The same
+  dialog opens from "Reschedule next deployment" in the deployment pipelines list's row menu.
 - **Deployment pipeline page (`/pipelines/deployments/{id}`), as built (#929, #932):** ports
   `.design/handoff/ReleasePipelineBody.dc.html` on the `DetailPage` frame. The head names the
   solution, the source (build pipeline, or the repository for a GitHub-release pipeline) and the
