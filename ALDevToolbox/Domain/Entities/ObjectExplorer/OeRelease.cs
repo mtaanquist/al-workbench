@@ -46,6 +46,15 @@ public class OeRelease
     public const string ProjectBuildKind = "project";
 
     /// <summary>
+    /// The <see cref="DedupKey"/> prefix of a vendor symbols release a pipeline build
+    /// ingested from the public symbol feeds (<c>symbols:{appId}:{version}</c>).
+    /// Most of those packages carry no source, and one with no files is left off the
+    /// release list, the compare picker, the command palette and the launcher count
+    /// (#1092): it exists to resolve references, not to be browsed.
+    /// </summary>
+    public const string SymbolFeedDedupPrefix = "symbols:";
+
+    /// <summary>
     /// Explicit, source-derived identity for releases that must not import twice —
     /// first-party OnPrem artifacts (<c>bc-onprem:{Maj}.{Min}:{cc}</c>) and the vendor
     /// symbols a pipeline build ingests from the public feeds

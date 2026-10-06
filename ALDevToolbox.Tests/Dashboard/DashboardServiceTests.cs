@@ -359,7 +359,11 @@ public sealed class DashboardServiceTests : IDisposable
 
             var build = Release("CRONUS Sales Extension #247", "ready", Now);
             build.Kind = "project";
+            var emptySymbols = Release("CRONUS Banking 28.6.0.0 (symbols)", "ready", Now);
+            emptySymbols.Kind = "third_party";
+            emptySymbols.DedupKey = "symbols:aaaa:28.6.0.0";
             seed.OeReleases.AddRange(
+                emptySymbols,
                 Release("BC 26", "ready", Now),
                 Release("BC 25 still importing", "ingesting", Now),
                 Release("BC 24 failed", "failed", Now),
@@ -389,7 +393,8 @@ public sealed class DashboardServiceTests : IDisposable
         counts.Recipes.Should().Be(1);
         // A release that is still importing or has failed cannot be browsed, so
         // promising it on the tile would be a lie the user finds out one click
-        // later; a pipeline build is not listed by /object-explorer at all.
+        // later; a pipeline build is not listed by /object-explorer at all, and
+        // neither is a symbols package from the feeds with no source in it (#1092).
         counts.Releases.Should().Be(1);
         counts.Projects.Should().Be(1);
     }
