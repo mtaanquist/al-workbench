@@ -104,8 +104,10 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.Find(".card .empty-state__title").TextContent.Trim().Should().Be("No deployment pipelines yet");
-            cut.Find(".empty-state__action button").TextContent.Should().Contain("New deployment pipeline");
-            cut.FindAll(".page-head__actions button").Should().BeEmpty("the empty state carries the one next step");
+            var action = cut.Find(".empty-state__action a.btn");
+            action.TextContent.Should().Contain("New deployment pipeline");
+            action.GetAttribute("href").Should().Be("/pipelines/deployments/new?returnUrl=%2Fpipelines%2Fdeployments");
+            cut.FindAll(".page-head__actions .btn").Should().BeEmpty("the empty state carries the one next step");
         });
     }
 

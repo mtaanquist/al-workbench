@@ -6,7 +6,7 @@ namespace ALDevToolbox.Components.Shared;
 /// system's list archetype and would have been the third byte-identical copy.
 ///
 /// Note there is a *second*, shorter phrasing still living privately on
-/// <c>PipelineEditorDialog</c> and <c>ReleasePipelineDetail</c> ("4 min ago",
+/// <c>PipelineEdit</c> and <c>ReleasePipelineDetail</c> ("4 min ago",
 /// then "on 2026-07-01" past a week). That one is deliberately not merged in
 /// here: unifying them would change visible copy on two pages as a side effect
 /// of a refactor. Fold them in when those pages migrate and the wording is a
