@@ -27,12 +27,12 @@
     in the Object Explorer. The only path into a build's objects is the "Explore
     objects" deep-link here. While a build is in flight the page polls so the status
     flips Building -> Ready live. Editing which extensions are built is "Edit
-    pipeline" (the shared PipelineEditorDialog). See .design/artifacts.md.
+    pipeline", its own page (PipelineEdit, #1080). See .design/artifacts.md.
 
     A successful build's row carries "Deploy...", the shortcut .design/saas-delivery.md
     describes (#938): it resolves which deployment pipeline takes this pipeline's builds
-    (straight on when one does, a chooser when several do, the deployment pipeline editor
-    with this pipeline filled in when none does) and opens the same ReleaseBuildDialog
+    (straight on when one does, a chooser when several do, the new deployment pipeline page
+    with this pipeline filled in when none does, which carries on to the deployment) and opens the same ReleaseBuildDialog
     the deployment pipeline's page opens, with this build selected. The canonical Deploy
     action stays on the deployment pipeline.
 
@@ -98,10 +98,10 @@
                 <Icon Name="hammer" Width="15" Height="15" />
                 <span>@(_starting ? "Starting..." : _buildRunning ? "Build running" : "Build")</span>
             </button>
-            <button type="button" class="btn" @onclick="EditPipelineAsync">
+            <a class="btn" href="@($"/pipelines/{PipelineId}/edit")">
                 <Icon Name="settings" Width="15" Height="15" />
                 <span>Edit pipeline</span>
-            </button>
+            </a>
             <button type="button" class="btn" @onclick="DeletePipelineAsync">
                 <Icon Name="trash-2" Width="15" Height="15" />
                 <span>Delete</span>
@@ -779,8 +779,6 @@
     </ChildContent>
 </DetailPage>
 
-<PipelineEditorDialog @ref="_editor" OnSaved="OnPipelineSavedAsync" />
-<ReleasePipelineEditorDialog @ref="_releasePipelineEditor" OnSaved="OnReleasePipelineCreatedAsync" />
 <ReleaseBuildDialog @ref="_releaseDialog" OnReleased="OnReleasedAsync" />
 
 @* Which deployment pipeline a build goes through, when that isn't a given: several take
@@ -833,7 +831,7 @@
                 <button type="button" class="btn" @onclick="CloseChooser">Cancel</button>
                 @if (_releaseTargets.Count == 0)
                 {
-                    <button type="button" class="btn btn--primary" @onclick="SetUpReleasePipelineAsync">
+                    <button type="button" class="btn btn--primary" @onclick="SetUpReleasePipeline">
                         <Icon Name="plus" Width="14" Height="14" />
                         <span>Set up a deployment pipeline</span>
                     </button>
@@ -867,19 +865,15 @@
     private bool _starting;
     private string? _buildError;
 
-    private PipelineEditorDialog? _editor;
     private ConfirmDialog? _deleteConfirm;
 
     // "Deploy..." on a build row (#938).
-    private ReleasePipelineEditorDialog? _releasePipelineEditor;
     private ReleaseBuildDialog? _releaseDialog;
     private ElementReference _chooserRoot;
     private bool _focusChooser;
     private bool _openingRelease;
     /// <summary>The build whose deployment target is being chosen; the chooser is open while set.</summary>
     private BuildRow? _releaseBuild;
-    /// <summary>The build a deployment pipeline is being set up for, carried across the editor.</summary>
-    private int? _pendingReleaseBuildId;
     private List<ReleasePipelineRow> _releaseTargets = new();
     /// <summary>The deployment pipeline the open deployment dialog sends through, for the note after it.</summary>
     private (int Id, string EnvironmentName, int BuildId)? _releasingThrough;
@@ -1184,22 +1178,16 @@
         if (e.Key is "Escape" or "Esc") CloseChooser();
     }
 
-    /// <summary>No deployment pipeline takes these builds yet: open the editor with this build pipeline as its source.</summary>
-    private async Task SetUpReleasePipelineAsync()
+    /// <summary>
+    /// No deployment pipeline takes these builds yet: open the create page with this build
+    /// pipeline as its source. Saving it carries on to deploying this build.
+    /// </summary>
+    private void SetUpReleasePipeline()
     {
-        if (_releaseBuild is not { } build || _releasePipelineEditor is null || _header is null) return;
+        if (_releaseBuild is not { } build || _header is null) return;
         _releaseBuild = null;
-        _pendingReleaseBuildId = build.Id;
-        await _releasePipelineEditor.OpenForCreateAsync(_header.ProjectId, _header.ProjectName, PipelineId,
-            nextStep: $"After you create it, you choose when build #{build.Id} installs.");
-    }
-
-    /// <summary>The new deployment pipeline is saved: carry on to deploying the build it was set up for.</summary>
-    private async Task OnReleasePipelineCreatedAsync(int releasePipelineId)
-    {
-        if (_pendingReleaseBuildId is not { } buildId) return;
-        _pendingReleaseBuildId = null;
-        await OpenReleaseDialogAsync(releasePipelineId, buildId);
+        var back = Uri.EscapeDataString($"/pipelines/{PipelineId}");
+        Nav.NavigateTo($"/pipelines/deployments/new?solution={_header.ProjectId}&buildPipeline={PipelineId}&deploy={build.Id}&returnUrl={back}");
     }
 
     /// <summary>
@@ -1284,23 +1272,6 @@
         return target.EnvironmentProblem is { } problem
             ? $"Installs into {env} — that environment is {problem}"
             : $"Installs into {env}";
-    }
-
-    private async Task EditPipelineAsync()
-    {
-        var pipeline = await Pipelines.GetPipelineAsync(PipelineId);
-        if (pipeline is null || _editor is null) return;
-        await _editor.OpenForEditAsync(
-            pipeline.Id, pipeline.ProjectId, pipeline.Project?.Name ?? _header?.ProjectName ?? "",
-            pipeline.Name, pipeline.RequestedAppIdsJson, pipeline.GithubReleaseRepositoryId, pipeline.Branch, pipeline.PreviewCheck,
-            pipeline.AutoVersion, pipeline.NameIsCustom, pipeline.BuildOnPush);
-    }
-
-    private async Task OnPipelineSavedAsync(int _)
-    {
-        // Name / selection may have changed — refresh the header and history.
-        await LoadAsync();
-        StateHasChanged();
     }
 
     private async Task DeletePipelineAsync()

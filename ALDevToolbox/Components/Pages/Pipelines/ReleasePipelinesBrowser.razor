@@ -51,10 +51,10 @@
         }
         else
         {
-            <button type="button" class="btn btn--primary" @onclick="NewReleaseAsync">
+            <a class="btn btn--primary" href="@NewPipelineHref">
                 <Icon Name="plus" Width="16" Height="16" />
                 <span>New deployment pipeline</span>
-            </button>
+            </a>
         }
     </Actions>
 
@@ -178,10 +178,10 @@
                         Business Central update.
                     </Text>
                     <Action>
-                        <button type="button" class="btn btn--primary" @onclick="NewReleaseAsync">
+                        <a class="btn btn--primary" href="@NewPipelineHref">
                             <Icon Name="plus" Width="15" Height="15" />
                             <span>New deployment pipeline</span>
-                        </button>
+                        </a>
                     </Action>
                 </EmptyState>
             }
@@ -428,14 +428,12 @@
     </Footer>
 </ListPage>
 
-<ReleasePipelineEditorDialog @ref="_editor" OnSaved="OnSavedAsync" />
 <ConfirmDialog @ref="_deleteConfirm" Title="Delete deployment pipeline?"
                ConfirmLabel="Delete deployment pipeline" ConfirmButtonClass="btn--danger" ConfirmIcon="trash-2" />
 
 @code {
     private List<ReleasePipelineRow>? _rows;
     private List<PipelineProjectOption> _projectOptions = new();
-    private ReleasePipelineEditorDialog? _editor;
     private ConfirmDialog? _deleteConfirm;
     private string? _error;
 
@@ -748,10 +746,10 @@
                 <Icon Name="ellipsis-vertical" Width="17" Height="17" />
             </button>
             <div class="ra__menu menu" role="menu">
-                <button type="button" class="menu__item" @onclick="() => EditAsync(r)" role="menuitem">
+                <a class="menu__item" href="@($"/pipelines/deployments/{r.Id}/edit?returnUrl={ListPath}")" role="menuitem">
                     <Icon Name="pencil" Width="15" Height="15" />
                     <span>Edit</span>
-                </button>
+                </a>
                 <a class="menu__item" href="@($"/solutions/{r.ProjectId}")" role="menuitem">
                     <Icon Name="folder-git-2" Width="15" Height="15" />
                     <span>Solution settings</span>
@@ -774,19 +772,10 @@
         _tab = ListTab.All;
     }
 
-    private async Task NewReleaseAsync()
-    {
-        if (_editor is null || _projectOptions.Count == 0) return;
-        await _editor.OpenForCreateAsync(_projectOptions);
-    }
+    /// <summary>This list, escaped for a returnUrl, so Cancel on the editor comes back here.</summary>
+    private const string ListPath = "%2Fpipelines%2Fdeployments";
 
-    private async Task EditAsync(ReleasePipelineRow row)
-    {
-        if (_editor is null) return;
-        await _editor.OpenForEditAsync(row);
-    }
-
-    private async Task OnSavedAsync(int _) => await ReloadAsync();
+    private const string NewPipelineHref = "/pipelines/deployments/new?returnUrl=" + ListPath;
 
     private async Task DeleteAsync(ReleasePipelineRow row)
     {

@@ -814,7 +814,7 @@ after every push.
 
 A build pipeline can opt in to **building automatically when new commits are pushed**
 (`oe_pipelines.build_on_push`, off by default and off for every existing pipeline; a
-checkbox in the pipeline dialog). Mads chose one build per push on 2026-10-06:
+checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
 
 - **One build per push, not per commit.** A push that carries five commits is one build, at
   the commit the push left the branch on (`oe_project_builds.head_sha`, plus

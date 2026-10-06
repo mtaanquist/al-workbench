@@ -21,7 +21,8 @@
     download. See .design/artifacts.md.
 
     Named user: a BC developer who needs the latest compiled .app for a customer
-    environment. New pipelines are created here (pick a solution) or from a solution.
+    environment. New pipelines are created from here (on their own page, for the filtered solution
+    if there is one) or from a solution.
     The Solution select narrows the list to one customer, as Deployments does (#1078).
     It lives in the URL (?solution=) like the search, so a filtered list can be shared.
 
@@ -54,10 +55,10 @@
        redundant button (which, with no solutions, would read as a bare "go make a
        solution"). *@
     <Actions>
-        <button type="button" class="btn btn--primary" @onclick="NewPipelineAsync">
+        <a class="btn btn--primary" href="@NewPipelineHref">
             <Icon Name="plus" Width="16" Height="16" />
             <span>New build pipeline</span>
-        </button>
+        </a>
     </Actions>
     @* A plain GET form, so the search survives a reload and stays a shareable URL.
        The status tabs at the far end filter in memory - they're a view of what's
@@ -140,10 +141,10 @@
                         start producing downloadable <code>.app</code> files.
                     </Text>
                     <Action>
-                        <button type="button" class="btn btn--primary" @onclick="NewPipelineAsync">
+                        <a class="btn btn--primary" href="@NewPipelineHref">
                             <Icon Name="plus" Width="15" Height="15" />
                             <span>New build pipeline</span>
-                        </button>
+                        </a>
                     </Action>
                 </EmptyState>
             }
@@ -318,7 +319,6 @@
     </ChildContent>
 </ListPage>
 
-<PipelineEditorDialog @ref="_editor" OnSaved="OnPipelineCreatedAsync" />
 
 @code {
     /// <summary>The titles name the chosen solution, so an empty list is not read as every customer's.</summary>
@@ -414,7 +414,6 @@
     /// </summary>
     private string? _statusFilter;
 
-    private PipelineEditorDialog? _editor;
 
     /// <summary>The rows the table actually renders: the search result, narrowed by the status tab.</summary>
     private List<PipelineArtifactsRow> Visible
@@ -559,13 +558,10 @@
         }
     }
 
-    private async Task NewPipelineAsync()
-    {
-        if (_editor is null || _projectOptions.Count == 0) return;
-        await _editor.OpenForCreateAsync(_projectOptions);
-    }
-
-    private void OnPipelineCreatedAsync(int pipelineId) => Nav.NavigateTo($"/pipelines/{pipelineId}");
+    /// <summary>The create page, for the solution the list is filtered to when it is.</summary>
+    private string NewPipelineHref => _solution is { } sid
+        ? $"/pipelines/new?solution={sid}&returnUrl={Uri.EscapeDataString($"/pipelines/builds?solution={sid}")}"
+        : "/pipelines/new?returnUrl=%2Fpipelines%2Fbuilds";
 
     private static string Verb(string status) => status switch
     {
