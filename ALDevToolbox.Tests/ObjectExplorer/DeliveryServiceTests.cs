@@ -1990,6 +1990,24 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task DeployWithoutApprovalAsync_leaves_a_build_already_deployed_alone_even_when_it_would_now_refuse()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+        (await NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId)).Should().NotBeNull();
+        await using (var change = _db.NewContext())
+        {
+            var envId = await change.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId).Select(r => r.ProjectEnvironmentId).SingleAsync();
+            await change.OeProjectEnvironments.Where(e => e.Id == envId).ExecuteUpdateAsync(u => u.SetProperty(e => e.Type, "Production"));
+        }
+
+        // Processing the build again (a resumed import) must not come back as a refusal,
+        // which would leave a second deployment waiting for approval beside the first.
+        (await NewService(_db.NewContext()).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId)).Should().BeNull();
+    }
+
+    [Fact]
     public async Task DeployWithoutApprovalAsync_refuses_an_environment_that_is_no_longer_a_sandbox()
     {
         await using var ctx = _db.NewContext();

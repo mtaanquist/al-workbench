@@ -725,6 +725,18 @@ public sealed class DeliveryService
             })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
+        // Once per build, and never behind a newer one: a build processed again, or an
+        // older build finishing after a newer one, changes nothing. Checked before
+        // anything that can refuse, so a refusal never turns into a second deployment
+        // waiting for approval beside the one already made.
+        if (await _db.OeProjectDeliveries.AsNoTracking()
+                .AnyAsync(d => d.ReleasePipelineId == releasePipelineId
+                               && d.ProjectBuildId >= projectBuildId
+                               && d.Status != ProjectDeliveryStatus.Dismissed, ct))
+        {
+            return null;
+        }
+
         if (!rp.PrepareReleaseOnNewBuild || !rp.DeployWithoutApproval)
         {
             throw Validation("DeployWithoutApproval", "This deployment pipeline no longer deploys without approval.");
@@ -742,16 +754,6 @@ public sealed class DeliveryService
         }
 
         var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct);
-
-        // Once per build, and never behind a newer one: a build processed again, or an
-        // older build finishing after a newer one, changes nothing.
-        if (await _db.OeProjectDeliveries.AsNoTracking()
-                .AnyAsync(d => d.ReleasePipelineId == releasePipelineId
-                               && d.ProjectBuildId >= projectBuildId
-                               && d.Status != ProjectDeliveryStatus.Dismissed, ct))
-        {
-            return null;
-        }
 
         var waiting = await _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => d.ReleasePipelineId == releasePipelineId
