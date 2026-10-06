@@ -271,6 +271,11 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         });
 
         // Releasing goes through the dialog's own path, and the page says where to follow it.
+        // No Business Central connection here, so who is online can't be checked; the dialog
+        // asks, and the second press goes ahead.
+        ActThen(cut,
+            () => cut.Find(".modal-layer .btn--primary").Click(),
+            () => cut.Find(".modal-layer .btn--primary").TextContent.Should().Contain("Deploy anyway"));
         ActThen(cut,
             () => cut.Find(".modal-layer .btn--primary").Click(),
             () => cut.Find(".alert").TextContent.Should().Contain($"Build #{seed.NewerBuildId} is lined up to install into UAT."));
