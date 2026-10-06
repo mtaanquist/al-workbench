@@ -187,7 +187,7 @@
                             <div class="pe-discovery">
                                 <a class="btn btn--sm" href="/account/repos">
                                     <Icon Name="key-round" Width="14" Height="14" />
-                                    <span>Manage repository tokens</span>
+                                    <span>Manage repository access</span>
                                 </a>
                                 <button type="button" class="btn btn--sm" @onclick="StartRefreshAsync" disabled="@IsDiscovering">
                                     <Icon Name="refresh-cw" Width="14" Height="14" />
@@ -620,7 +620,7 @@
         catch (Exception ex)
         {
             Log.LogError(ex, "Reading discovery cache failed for solution {ProjectId}.", _projectId);
-            _discoverError = "Couldn't load the solution's extensions. Try Refresh, or check your repository tokens.";
+            _discoverError = "Couldn't load the solution's extensions. Try Refresh, or check your repository access.";
         }
         finally
         {
@@ -654,7 +654,7 @@
         catch (Exception ex)
         {
             Log.LogError(ex, "Requesting discovery failed for solution {ProjectId}.", _projectId);
-            _discoverError = "Couldn't discover the solution's extensions. Check the repositories and your repository tokens, then try again.";
+            _discoverError = "Couldn't discover the solution's extensions. Check the repositories and your repository access, then try again.";
         }
         finally
         {
