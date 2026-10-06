@@ -264,7 +264,11 @@ public sealed class WorkspaceZipBuilder
             WriteString(archive, $"{folderName}/{WorkspaceConfigService.FileName}", _config.BuildExtension(plan));
             fileCount++;
 
-            if (sibling is not null)
+            // A workspace saved without its extension list (an older config)
+            // gives no folders to rewrite the .code-workspace file from, and
+            // writing one listing only the new folder would drop every other
+            // extension from it. Leave the workspace's own files alone then.
+            if (sibling is not null && sibling.ExistingFolders.Count > 0)
             {
                 var siblingFolderStyle = orgConfig.Settings.NamingFolderStyle;
                 var workspaceFile = $"{CustomerNaming.Apply(sibling.WorkspaceName, siblingFolderStyle)}.code-workspace";
@@ -300,7 +304,7 @@ public sealed class WorkspaceZipBuilder
                 // added to its list. Without this the next extension added to
                 // the same workspace would be offered this one's ID range and
                 // would rewrite the .code-workspace file without its folder.
-                if (sibling.SavedPlan is not null)
+                if (sibling.SavedPlan is not null && sibling.SavedExtensions is { Count: > 0 })
                 {
                     var identities = (sibling.SavedExtensions ?? []).ToList();
                     identities.Add(new WorkspaceExtensionIdentity(
@@ -313,7 +317,12 @@ public sealed class WorkspaceZipBuilder
                         IdRangeFrom: standaloneExt.IdRangeFrom,
                         IdRangeTo: standaloneExt.IdRangeTo));
                     WriteString(archive, WorkspaceConfigService.FileName,
-                        _config.BuildWorkspace(sibling.SavedPlan, identities));
+                        // The prefix as settled, so a workspace saved before the
+                        // prefix was recorded keeps the one this extension got
+                        // even if the organisation's policy changes later.
+                        _config.BuildWorkspace(
+                            sibling.SavedPlan with { ExtensionPrefix = sibling.ExtensionPrefix ?? string.Empty },
+                            identities));
                     fileCount++;
                 }
             }

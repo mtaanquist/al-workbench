@@ -345,7 +345,7 @@ public sealed class GitHubExtensionDeliveryService
         {
             lines.Add($"The `{CustomerNaming.Apply(sibling.WorkspaceName, folderStyle)}.code-workspace` file is "
                 + "updated so the new folder opens with the rest of the workspace.");
-            if (sibling.SavedPlan is not null)
+            if (sibling.SavedPlan is not null && sibling.SavedExtensions is { Count: > 0 })
             {
                 lines.Add($"`{WorkspaceConfigService.FileName}` now lists it too, so the next extension added "
                     + "here starts after its object IDs.");

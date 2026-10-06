@@ -394,6 +394,53 @@ public sealed class StandaloneExtensionGenerationTests : IDisposable
         zip.GetEntry(WorkspaceConfigService.FileName).Should().BeNull();
     }
 
+    [Fact]
+    public async Task Sibling_extension_of_a_workspace_saved_without_its_extension_list_leaves_its_files_alone()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+        var saved = PlanBuilder.WorkspacePlan(workspaceName: "CRONUS Customer", shortName: "CRO", extensionPrefix: "CRO");
+
+        // No folders to rebuild the workspace file from: one listing only the
+        // new folder would drop Core and every module from it.
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"),
+            new SiblingWorkspaceContext("CRONUS Customer", [], [], "CRO", "CRO", SavedPlan: saved, SavedExtensions: []));
+
+        zip.GetEntry("CRONUSCustomer.code-workspace").Should().BeNull();
+        zip.GetEntry(WorkspaceConfigService.FileName).Should().BeNull();
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("Banking/app.json")!));
+        appJson.RootElement.GetProperty("name").GetString().Should().Be("CRO Banking");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_saves_the_prefix_it_was_given_when_the_workspace_had_none()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+        var saved = PlanBuilder.WorkspacePlan(workspaceName: "CRONUS Customer", shortName: "CRO", extensionPrefix: "");
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking", idFrom: 51000, idTo: 51999),
+            CronusSibling() with { ExtensionPrefix = null, SavedPlan = saved, SavedExtensions = [CoreIdentity()] });
+
+        // Recorded, so a later change to the organisation's policy cannot give
+        // the next extension in this solution a different prefix.
+        var import = await new WorkspaceConfigService(_db.NewContext())
+            .ParseAsync(ReadEntry(zip.GetEntry(WorkspaceConfigService.FileName)!));
+        import.Workspace!.ExtensionPrefix.Should().Be("CRO");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_whose_prefixed_name_is_too_long_is_refused()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        var act = () => GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "B" + new string('a', 197)), CronusSibling());
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["ExtensionName"].Should().Contain("202 characters");
+    }
+
     private static SiblingWorkspaceContext CronusSibling() => new(
         "CRONUS Customer", Array.Empty<string>(), new[] { "Core" }, ShortName: "CRO", ExtensionPrefix: "CRO");
 

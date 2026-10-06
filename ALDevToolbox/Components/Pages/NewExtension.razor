@@ -156,8 +156,9 @@
                             @if (string.IsNullOrWhiteSpace(_extensionName))
                             {
                                 <text>
-                                    Type the name without <strong>@joining.ExtensionPrefix</strong>: it is
-                                    added for you, as it is on the other extensions in this solution.
+                                    Type just the name, e.g. Banking. <strong>@joining.ExtensionPrefix</strong>
+                                    is added for you, like the solution's other extensions. Letters,
+                                    digits and spaces only.
                                 </text>
                             }
                             else
@@ -165,7 +166,7 @@
                                 <text>
                                     Will be called <strong>@joining.ExtensionNameFor(_extensionName)</strong>,
                                     like the other extensions in this solution, in a folder called
-                                    <code class="code">@FolderName/</code>.
+                                    <code class="code">@FolderName/</code>. Letters, digits and spaces only.
                                 </text>
                             }
                         </span>
@@ -303,8 +304,8 @@
             {
                 <div class="card__body">
                     <p class="field__hint">
-                        Example files are left out when adding to an existing solution, so they
-                        cannot clash with the ones it already has.
+                        Example files are off when adding to an existing solution: it already
+                        has its own, so these would be duplicates.
                     </p>
                 </div>
             }

@@ -330,6 +330,16 @@ public class GenerationService
                 $"This solution already has an extension in a folder called {folder}. Give this one a different name.";
         }
 
+        // The prefix makes the name longer than what was typed, and Business
+        // Central refuses an extension name past its ceiling (AS0047).
+        var fullName = sibling.ExtensionNameFor(plan.ExtensionName);
+        if (fullName.Length > CustomerNaming.MaxExtensionNameLength)
+        {
+            errors[nameof(plan.ExtensionName)] =
+                $"With the solution's prefix this name would be {fullName.Length} characters, and Business Central "
+                + $"accepts at most {CustomerNaming.MaxExtensionNameLength}. Shorten it.";
+        }
+
         var clash = (sibling.SavedExtensions ?? [])
             .FirstOrDefault(e => e.IdRangeFrom <= plan.IdRangeTo && plan.IdRangeFrom <= e.IdRangeTo);
         if (clash is not null)
