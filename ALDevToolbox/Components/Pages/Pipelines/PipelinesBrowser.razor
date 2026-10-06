@@ -92,21 +92,21 @@
                     @onclick="() => _statusFilter = null" aria-pressed="@(_statusFilter is null)">
                 All<span class="pill-tab__count">@InSolution(_rows ?? []).Count()</span>
             </button>
-            @if (BuildingCount > 0)
+            @if (BuildingCount > 0 || _statusFilter == "building")
             {
                 <button type="button" class="pill-tab @(_statusFilter == "building" ? "is-active" : "")"
                         @onclick="@(() => _statusFilter = "building")" aria-pressed="@(_statusFilter == "building")">
                     Building<span class="pill-tab__count">@BuildingCount</span>
                 </button>
             }
-            @if (ReadyCount > 0)
+            @if (ReadyCount > 0 || _statusFilter == "ready")
             {
                 <button type="button" class="pill-tab @(_statusFilter == "ready" ? "is-active" : "")"
                         @onclick="@(() => _statusFilter = "ready")" aria-pressed="@(_statusFilter == "ready")">
                     Ready to build<span class="pill-tab__count">@ReadyCount</span>
                 </button>
             }
-            @if (FailedCount > 0)
+            @if (FailedCount > 0 || _statusFilter == "failed")
             {
                 <button type="button" class="pill-tab @(_statusFilter == "failed" ? "is-active" : "")"
                         @onclick="@(() => _statusFilter = "failed")" aria-pressed="@(_statusFilter == "failed")">
@@ -168,8 +168,21 @@
     <NoMatches>
         <div class="card">
             <EmptyState Icon="funnel-x" Title="@NoMatchesTitle">
-                <Text>@(string.IsNullOrEmpty(_search) ? "Clear the filters" : "Try a shorter search term, or clear the filters") to see all @_totalCount.</Text>
+                <Text>
+                    @if (SolutionName is { } shown)
+                    {
+                        @(string.IsNullOrEmpty(_search) ? "Show" : "Try a shorter search term, or show")@($" every {shown} pipeline, or clear the filters to see all {_totalCount}.")
+                    }
+                    else
+                    {
+                        @(string.IsNullOrEmpty(_search) ? "Clear the filters" : "Try a shorter search term, or clear the filters")@($" to see all {_totalCount}.")
+                    }
+                </Text>
                 <Action>
+                    @if (SolutionName is { } shown)
+                    {
+                        <button type="button" class="btn" @onclick="ShowWholeSolution">Show all @shown pipelines</button>
+                    }
                     <button type="button" class="btn" @onclick="ClearFilters">Clear filters</button>
                 </Action>
             </EmptyState>
@@ -308,18 +321,27 @@
 <PipelineEditorDialog @ref="_editor" OnSaved="OnPipelineCreatedAsync" />
 
 @code {
-    private string NoMatchesTitle => string.IsNullOrEmpty(_search)
-        ? (_statusFilter, _solution is not null) switch
+    /// <summary>The titles name the chosen solution, so an empty list is not read as every customer's.</summary>
+    private string NoMatchesTitle
+    {
+        get
         {
-            ("failed", false) => "No pipelines are failing right now",
-            ("failed", true) => "No pipelines of this solution are failing right now",
-            ("ready", false) => "Every pipeline has a build of its latest changes",
-            ("ready", true) => "Every pipeline of this solution has a build of its latest changes",
-            ("building", false) => "No pipelines are building right now",
-            ("building", true) => "No pipelines of this solution are building right now",
-            _ => "No pipelines match these filters",
+            var of = SolutionName is { } name ? $"{name} " : string.Empty;
+            return string.IsNullOrEmpty(_search)
+                ? _statusFilter switch
+                {
+                    "failed" => $"No {of}pipelines are failing right now",
+                    "ready" => $"Every {of}pipeline has a build of its latest changes",
+                    "building" => $"No {of}pipelines are building right now",
+                    _ => "No pipelines match these filters",
+                }
+                : $"No {of}pipelines match \"{_search}\"";
         }
-        : $"No pipelines match \"{_search}\"";
+    }
+
+    /// <summary>The chosen solution's name, or null when the list shows all of them.</summary>
+    private string? SolutionName =>
+        _solution is { } id ? _all.FirstOrDefault(p => p.ProjectId == id)?.ProjectName : null;
 
     private List<PipelineArtifactsRow>? _rows;
     private List<PipelineProjectOption> _projectOptions = new();
@@ -434,6 +456,13 @@
 
     private void OnSolutionChanged(ChangeEventArgs e) =>
         Nav.NavigateTo(ListUrl(int.TryParse(e.Value as string, out var id) ? id : null, _search), replace: true);
+
+    /// <summary>Back to every pipeline of the chosen solution: the tab and the search go, the solution stays.</summary>
+    private void ShowWholeSolution()
+    {
+        _statusFilter = null;
+        Nav.NavigateTo(ListUrl(_solution));
+    }
 
     private void ClearFilters()
     {

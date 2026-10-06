@@ -282,8 +282,27 @@ public sealed class PipelineFreshnessSurfacesTests : IDisposable
         {
             cut.Find("select[aria-label='Solution']").GetAttribute("value").Should().Be(sales.ProjectId.ToString());
             cut.FindAll("tbody tr").Should().BeEmpty("the ahead pipeline belongs to the other solution");
+            cut.Find(".pill-tab.is-active").TextContent.Should().Contain("Ready to build", "the active tab stays visible at zero");
+            cut.Find(".empty-state__title").TextContent.Trim()
+                .Should().Be("Every CRONUS Sales solution pipeline has a build of its latest changes");
         });
 
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Show all CRONUS Sales solution pipelines").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll("tbody tr").Select(r => r.QuerySelector(".cell-stack__main")!.TextContent.Trim())
+                .Should().Equal("CRONUS Sales");
+            cut.Find("select[aria-label='Solution']").GetAttribute("value").Should().Be(sales.ProjectId.ToString());
+        });
+
+        cut.Find(".pill-tab.is-active").TextContent.Should().Contain("All");
+
+        // Clear filters, from the same empty state, lets go of the solution too.
+        _ctx.Services.GetRequiredService<NavigationManager>()
+            .NavigateTo($"/pipelines/builds?show=ready&solution={sales.ProjectId}");
+        cut = _ctx.Render<PipelinesBrowser>();
+        cut.WaitForAssertion(() => cut.FindAll("tbody tr").Should().BeEmpty());
         cut.FindAll("button").Single(b => b.TextContent.Trim() == "Clear filters").Click();
 
         cut.WaitForAssertion(() =>
