@@ -85,9 +85,9 @@
         <a class="btn" href="/pipelines/deployments"><Icon Name="arrow-left" Width="15" Height="15" /><span>All deployment pipelines</span></a>
         @if (_canManage)
         {
-            <button type="button" class="btn" @onclick="EditAsync">
+            <a class="btn" href="@($"/pipelines/deployments/{Id}/edit")">
                 <Icon Name="pencil" Width="15" Height="15" /><span>Edit</span>
-            </button>
+            </a>
             @* The one primary. When there is nothing to list it moves into the empty
                state, and the head keeps an outline copy so the action never vanishes. *@
             <button type="button" class="btn@(IsEmpty ? "" : " btn--primary")" @onclick="OpenReleaseAsync" disabled="@(!HasSomethingToRelease)"
@@ -598,7 +598,6 @@
     </ChildContent>
 </DetailPage>
 
-<ReleasePipelineEditorDialog @ref="_editor" OnSaved="OnEditedAsync" />
 <ReleaseBuildDialog @ref="_releaseDialog" OnReleased="OnReleasedAsync" />
 <ReleaseAgainDialog @ref="_releaseAgainDialog" OnReleased="OnReleasedAsync" />
 <ConfirmDialog @ref="_cancelConfirm" Title="Cancel this deployment?"
@@ -676,6 +675,14 @@
 @code {
     [Parameter] public int Id { get; set; }
 
+    /// <summary>
+    /// A build to open Deploy with, chosen: the new deployment pipeline page sends people
+    /// here after it was set up from a build's "Deploy..." (#938, #1080). Ignored unless
+    /// it is one of the source build pipeline's successful builds.
+    /// </summary>
+    [SupplyParameterFromQuery(Name = "deploy")] public int? DeployBuildId { get; set; }
+    private bool _deployOffered;
+
     /// <summary>How many deployments the list shows at first, and how many more each "Show older deployments" adds.</summary>
     internal const int PageSize = 10;
 
@@ -703,7 +710,6 @@
     /// <summary>True when this pipeline installs apps from a repository's GitHub releases.</summary>
     private bool _fromReleases;
 
-    private ReleasePipelineEditorDialog? _editor;
     private ReleaseBuildDialog? _releaseDialog;
     private ReleaseAgainDialog? _releaseAgainDialog;
     private ConfirmDialog? _cancelConfirm;
@@ -940,25 +946,21 @@
         await LoadHistoryAsync();
     }
 
-    private async Task EditAsync()
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (_editor is null || _rp is null) return;
-        var row = new ReleasePipelineRow(
-            _rp.Id, _rp.ProjectId, _rp.Project?.Name ?? "", _rp.Name, _rp.BuildPipelineId, _rp.BuildPipeline?.Name ?? "",
-            _rp.ProjectEnvironmentId, _rp.ProjectEnvironment?.Name ?? "", _rp.ProjectEnvironment?.Type ?? "",
-            _rp.ProjectEnvironment?.MissingSince != null,
-            _rp.DeploymentSchedule, _rp.SchemaSyncMode,
-            _rp.ArtifactSource, _rp.GithubReleaseRepositoryId, _rp.GithubReleaseRepository?.DisplayName,
-            _rp.ProjectEnvironment?.Status, _rp.PrepareReleaseOnNewBuild)
-        {
-            RestrictBranch = _rp.RestrictBranch,
-            AllowedBranch = _rp.AllowedBranch,
-            NameIsCustom = _rp.NameIsCustom,
-        };
-        await _editor.OpenForEditAsync(row);
+        // After the history too: Deploy writes through the same context the history reads.
+        if (_deployOffered || DeployBuildId is not { } buildId || _loading || _historyLoading || _rp is null || _releaseDialog is null) return;
+        _deployOffered = true;
+        // Out of the address, so a reload or Back doesn't offer the same deploy again.
+        Nav.NavigateTo($"/pipelines/deployments/{Id}", replace: true);
+        if (!_canManage || _fromReleases || _successfulBuilds.All(b => b.Id != buildId)) return;
+        await _releaseDialog.OpenAsync(
+            _rp.Id, _rp.Project?.Name ?? "", _rp.ProjectEnvironment!.Name, _rp.ProjectEnvironment.Type,
+            _rp.DeploymentSchedule, _rp.SchemaSyncMode, _successfulBuilds,
+            _rp.Project?.BcTimeZone, _rp.ProjectEnvironment.UpdateWindowStart, _rp.ProjectEnvironment.UpdateWindowEnd,
+            _secretExpiresAt,
+            selectedBuildId: buildId);
     }
-
-    private async Task OnEditedAsync(int _) => await ReloadAsync();
 
     private async Task OpenReleaseAsync()
     {

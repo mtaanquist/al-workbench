@@ -325,6 +325,11 @@ populated; one primary button per page.
   (cache-backed extension picker with Refresh, a `.confirm-modal` panel), latest-build card with per-`.app`
   download + Download all (outline), the per-repo changelog, build history (failures shown
   honestly), the BUILD LOG card with `Raw log`, project-scoped Compare builds, and the OE deep-link.
+  `PipelineEdit` (`/pipelines/new`, `/pipelines/{id}/edit`, #1080) creates and edits a build
+  pipeline on its own page, in sections (Source, Extensions, When it builds, Versions and
+  releases, Name); it replaced the editor modal once the options outgrew one. `?solution=`
+  fixes the solution, `?returnUrl=` is where Cancel goes (local paths only), and saving opens
+  the pipeline.
 - Shared: `RowStateIcon` (the row-state glyph; `BuildStatusPill` was retired in PR 18c once every caller moved onto `.status-pill` or the row keyline) under `Components/Shared/`. `CommitRef` (mono short hash + branch) was sketched here but never used by a page, and has since been deleted.
 
 Each user-facing page states the CLAUDE.md "UX definition of done" and gets a fresh-eyes

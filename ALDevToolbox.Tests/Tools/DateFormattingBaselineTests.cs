@@ -84,7 +84,7 @@ public sealed class DateFormattingBaselineTests
             "A booked update slot is a wall clock in the customer's own zone, said back in that zone and labelled with it."),
         ["ALDevToolbox/Components/Shared/ReleaseBuildDialog.razor"] = (5,
             "The delivery window and the picked deployment time are wall clocks in the customer's zone, as the field's hint says, and the client secret's expiry is a calendar date the consultant typed."),
-        ["ALDevToolbox/Components/Shared/ReleasePipelineEditorDialog.razor"] = (2,
+        ["ALDevToolbox/Components/Pages/Pipelines/ReleasePipelineEdit.razor"] = (2,
             "The delivery window is a time of day agreed in the customer's zone."),
     };
 

@@ -266,10 +266,7 @@
                 }
                 else if (_section == Section.Pipelines && Id is not null && _canManage)
                 {
-                    <ProjectDetailPipelines Id="Id.Value"
-                                            SolutionName="@(_header?.Name ?? _edit.Name)"
-                                            Pipelines="_pipelines"
-                                            Saving="_saving" />
+                    <ProjectDetailPipelines Id="Id.Value" Pipelines="_pipelines" />
                 }
                 else if (_section == Section.Symbols && Id is not null && _canManage)
                 {
