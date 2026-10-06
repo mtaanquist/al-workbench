@@ -97,6 +97,10 @@
         }
     </Actions>
     <ChildContent>
+        @if (_rescheduleNotice is { } rescheduleNotice)
+        {
+            <Alert Tone="AlertTone.Info" Role="status"><span>@rescheduleNotice</span></Alert>
+        }
         @if (_rp!.ProjectEnvironment!.MissingSince is not null)
         {
             <Alert Tone="AlertTone.Danger">
@@ -425,6 +429,10 @@
                                         <button type="button" class="btn btn--sm" @onclick="() => OpenRescheduleAsync(d)" @onclick:stopPropagation="true">Reschedule</button>
                                         <button type="button" class="btn btn--sm btn--ghost" @onclick="() => CancelAsync(d)" @onclick:stopPropagation="true">Cancel</button>
                                     }
+                                    else if (MayStillBeHeld(d))
+                                    {
+                                        <button type="button" class="btn btn--sm" @onclick="() => OpenRescheduleAsync(d)" @onclick:stopPropagation="true">Reschedule</button>
+                                    }
                                 </span>
                             </div>
 
@@ -579,6 +587,12 @@
                                             <button type="button" class="btn btn--ghost" @onclick="() => CancelAsync(d)">Cancel</button>
                                         </div>
                                     }
+                                    else if (MayStillBeHeld(d))
+                                    {
+                                        <div class="rp-rel__phone-acts rp-rel__phone-acts--one">
+                                            <button type="button" class="btn" @onclick="() => OpenRescheduleAsync(d)">Reschedule</button>
+                                        </div>
+                                    }
                                 </div>
                             }
                         </div>
@@ -672,6 +686,8 @@
     // build pipeline's builds (#632).
     private List<ALDevToolbox.Services.GitHub.GitHubReleaseOption> _releaseOptions = new();
     private string? _releasesError;
+    // Set when Reschedule on a handed-off row finds Business Central no longer holds it.
+    private string? _rescheduleNotice;
 
     /// <summary>True when this pipeline installs apps from a repository's GitHub releases.</summary>
     private bool _fromReleases;
@@ -1193,13 +1209,37 @@
         }
     }
 
+    /// <summary>
+    /// True for the handed-off run Business Central may still be holding: the newest one
+    /// that reached it, with one app. Whether it really is still held (not installed with
+    /// the update yet) the service decides when the dialog opens.
+    /// </summary>
+    /// <summary>
+    /// True for a run cancelled after Business Central took it: only moving a held
+    /// deployment does that (#1097); a plain cancel stops a run before anything is sent.
+    /// </summary>
+    private static bool IsMoved(DeliveryHistoryRow d) =>
+        d.Status == ProjectDeliveryStatus.Cancelled && d.Apps.Any(a => a.OperationId is not null);
+
+    private bool MayStillBeHeld(DeliveryHistoryRow d) =>
+        _canManage
+        && d.Status == ProjectDeliveryStatus.HandedOff
+        && d.Apps.Count(a => a.Status == ProjectDeliveryResultStatus.Scheduled) == 1
+        && !_deliveries.Any(x => x.Id > d.Id
+            && (x.Status is ProjectDeliveryStatus.Deployed or ProjectDeliveryStatus.HandedOff || x.IsActive));
+
     private async Task OpenRescheduleAsync(DeliveryHistoryRow d)
     {
         if (_rescheduleDialog is null) return;
+        _rescheduleNotice = null;
         try
         {
             if (!await _rescheduleDialog.OpenAsync(d.Id, _secretExpiresAt))
             {
+                if (d.Status == ProjectDeliveryStatus.HandedOff)
+                {
+                    _rescheduleNotice = _rescheduleDialog.LastRefusal;
+                }
                 // It started (or went) since the list was read: show what it is now.
                 await ReloadAsync();
                 EnsurePolling();
@@ -1534,6 +1574,7 @@
         {
             ProjectDeliveryStatus.Scheduled => $"{Apps(n)} pending",
             ProjectDeliveryStatus.HandedOff => $"{n} handed over",
+            ProjectDeliveryStatus.Cancelled when IsMoved(d) => "Moved",
             ProjectDeliveryStatus.Cancelled => done == 0 ? "None installed" : $"{done} of {n} installed",
             ProjectDeliveryStatus.Dismissed => "None sent",
             ProjectDeliveryStatus.Claimed or ProjectDeliveryStatus.Uploading or ProjectDeliveryStatus.Installing
@@ -1558,12 +1599,20 @@
         {
             case ProjectDeliveryStatus.Dismissed:
                 return $"{DismissedLine(d)!.TrimEnd('.')}. Nothing was sent.";
+            case ProjectDeliveryStatus.Cancelled when IsMoved(d):
+                // Only a move cancels a run after its upload (#1097): Business Central's copy
+                // was cancelled and a newer deployment of the same build took its place.
+                return d.CancelledByName is { } mover
+                    ? $"Moved by {mover}: Business Central's copy was cancelled, and a new deployment of the same build replaces it."
+                    : "Moved: Business Central's copy was cancelled, and a new deployment of the same build replaces it.";
             case ProjectDeliveryStatus.Cancelled:
                 return d.CancelledByName is { } who
                     ? $"Cancelled by {who} before it started. No app was uploaded."
                     : "Cancelled before it started. No app was uploaded.";
             case ProjectDeliveryStatus.HandedOff:
-                return "Business Central has the apps and installs them with the customer's next update. Cancel it there if you need to stop it.";
+                return MayStillBeHeld(d)
+                    ? "Business Central has the apps and installs them with the customer's next update. Reschedule moves it to another time."
+                    : "Business Central has the apps and installs them with the customer's next update. Cancel it there if you need to stop it.";
             case ProjectDeliveryStatus.Scheduled:
             {
                 var sentence = $"Installs {WhenPhrase(d.ScheduledFor)}";
@@ -1610,9 +1659,14 @@
 
         if (d.Status == ProjectDeliveryStatus.Cancelled)
         {
+            // A moved run had reached Business Central first, so its upload stays on the timeline.
+            if (IsMoved(d) && d.InstallStartedAt is { } handedAt)
+            {
+                steps.Add(new("Uploaded", "running", Clock(handedAt), Exact(handedAt), ""));
+            }
             if (d.FinishedAt is { } cancelledAt)
             {
-                steps.Add(new("Cancelled", "cancelled", Clock(cancelledAt), Exact(cancelledAt),
+                steps.Add(new(IsMoved(d) ? "Moved" : "Cancelled", "cancelled", Clock(cancelledAt), Exact(cancelledAt),
                     d.CancelledByName is { } who ? $"by {who}" : ""));
             }
             return steps;

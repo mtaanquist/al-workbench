@@ -13,7 +13,9 @@
     Central's next minor or major update - the timings a deployment pipeline itself can be
     set to. Right away asks who is signed in first, as Deploy now does. The two Business
     Central updates are only offered for a build Business Central can hold back: one app,
-    already installed. Opened imperatively with the deployment's id; raises OnRescheduled
+    already installed. A deployment Business Central already holds can be moved too: its
+    copy there is cancelled and the build uploaded again (the opening sentence says so).
+    Opened imperatively with the deployment's id; raises OnRescheduled
     once the deployment has moved. See .design/saas-delivery.md ("Delivery history").
 
     Named user: a BC consultant whose production deployment is booked for tonight's
@@ -34,7 +36,15 @@
                 <h2 id="rs-title" class="confirm-dialog__title">Reschedule deployment</h2>
             </div>
             <div class="confirm-dialog__body">
-                <p>The deployment of build #@o.BuildId to <b>@o.EnvironmentName</b> is booked for @CurrentText.</p>
+                @if (o.HeldByBusinessCentral)
+                {
+                    <p>Business Central is holding build #@o.BuildId for <b>@o.EnvironmentName</b> until @CurrentText.
+                        Picking another time cancels that copy and uploads the build again.</p>
+                }
+                else
+                {
+                    <p>The deployment of build #@o.BuildId to <b>@o.EnvironmentName</b> is booked for @CurrentText.</p>
+                }
 
                 <fieldset class="rs-when">
                     <legend class="rs-when__legend">When should it install?</legend>
@@ -133,6 +143,9 @@
 @code {
     /// <summary>Raised once the deployment has moved, with its id.</summary>
     [Parameter] public EventCallback<int> OnRescheduled { get; set; }
+
+    /// <summary>Why the last <see cref="OpenAsync"/> didn't open, in a sentence for the page.</summary>
+    public string? LastRefusal { get; private set; }
 
     private RescheduleOptions? _options;
     private TimeZoneInfo _tz = TimeZoneInfo.Utc;
@@ -286,14 +299,20 @@
     }
 
     /// <summary>
-    /// Opens the dialog for a scheduled deployment. Returns false when it can't be
-    /// rescheduled any more (it started, or is gone), so the page can reload instead.
+    /// Opens the dialog for a waiting deployment. Returns false when it can't be
+    /// rescheduled any more (it started, was installed, or is gone), so the page can reload
+    /// instead and show <see cref="LastRefusal"/>.
     /// </summary>
     /// <param name="secretExpiresAt">When the Business Central client secret expires, for the warning; null when unknown.</param>
     public async Task<bool> OpenAsync(int deliveryId, DateTime? secretExpiresAt)
     {
+        LastRefusal = null;
         var options = await Deliveries.GetRescheduleOptionsAsync(deliveryId);
-        if (options is null) return false;
+        if (options is null)
+        {
+            LastRefusal = await Deliveries.WhyNotReschedulableAsync(deliveryId);
+            return false;
+        }
         await Zone.EnsureLoadedAsync();
 
         _options = options;
