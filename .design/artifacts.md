@@ -271,6 +271,9 @@ app). The **New build** action lets the user pick which to build:
   selecting two reuses `ReleaseComparisonService.CompareReleases` on the underlying Release ids and
   the existing compare view. Only the picker is project-scoped; the global picker never lists
   project builds.
+  The Compare picker on a build's own release page is the same project-scoped list: the other
+  ready builds of that project, its own pipeline's first, newest first, each named "Build #N of
+  {pipeline}" because every build of a project shares one release label (#1075).
 - The only path into a build's objects is: open the artifact → deep-link to
   `/object-explorer/release/{ReleaseId}` (or the project-scoped compare view). `OeReleaseDetail`
   stays reachable by id and gains a "back to artifact" affordance so a deep-linked user isn't
