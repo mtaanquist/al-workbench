@@ -243,14 +243,33 @@ public sealed class ProjectBuildService
                 discovered = kept;
             }
 
-            // 2c. Number the apps: the build's number goes into the third part of each
+            // 2c. On a pipeline that publishes only what changed, find the apps with no
+            //     change since the pipeline last produced them. They keep that earlier
+            //     version (written into the clone so the compile agrees), and after the
+            //     compile the build carries the earlier .app instead of its own (#1094).
+            var settings = build is not null && MayNumberApps(build.PipelineId, build.Trigger, options.Target)
+                ? await ReadPipelineBuildSettingsAsync(_db, build.PipelineId!.Value, ct).ConfigureAwait(false)
+                : null;
+            var carried = new Dictionary<string, CarriedApp>(StringComparer.Ordinal);
+            if (settings is { ChangedAppsOnly: true })
+            {
+                carried = await FindUnchangedAppsAsync(build!, discovered, settings.PublishesToGitHub, logs, ct).ConfigureAwait(false);
+                discovered = discovered
+                    .Select(d => carried.TryGetValue(NormalizeAppId(d.Manifest.Id), out var c)
+                        ? d with { Manifest = d.Manifest with { Version = c.Version } }
+                        : d)
+                    .ToList();
+            }
+
+            // 2d. Number the apps: the build's number goes into the third part of each
             //     version, in this build's own copy of the repository only. Before the
             //     compile so the .app, its file name and every record of it agree.
-            if (build is not null
-                && MayNumberApps(build.PipelineId, build.Trigger, options.Target)
-                && await PipelineNumbersAppsAsync(_db, build.PipelineId!.Value, ct).ConfigureAwait(false))
+            if (settings is { AutoVersion: true })
             {
-                discovered = StampBuildNumber(discovered, build.Id, logs);
+                var numbered = StampBuildNumber(
+                    discovered.Where(d => !carried.ContainsKey(NormalizeAppId(d.Manifest.Id))).ToList(), build!.Id, logs);
+                var byDir = numbered.ToDictionary(d => d.ProjectDir, StringComparer.Ordinal);
+                discovered = discovered.Select(d => byDir.GetValueOrDefault(d.ProjectDir) ?? d).ToList();
             }
 
             // 3. Resolve the target BC version + country, download Microsoft symbols.
@@ -392,7 +411,25 @@ public sealed class ProjectBuildService
                 // Retain the compiled .app as a downloadable deliverable. Packaging
                 // artifacts (.dep.app) are never compiler output here, but guard
                 // anyway so they can't slip in as a download. See .design/artifacts.md.
-                if (!fileName.EndsWith(".dep.app", StringComparison.OrdinalIgnoreCase))
+                if (carried.TryGetValue(NormalizeAppId(app.Manifest.Id), out var earlier))
+                {
+                    // Unchanged: deliver exactly the .app the earlier build produced, so
+                    // an environment already on it sees the same version and skips it.
+                    var kept = await _db.OeProjectBuildArtifacts.AsNoTracking()
+                        .Where(a => a.Id == earlier.ArtifactId)
+                        .Select(a => new { a.FileName, a.AppVersion, a.RuntimeVersion, a.Content })
+                        .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                    if (kept is not null)
+                    {
+                        artifacts.Add(new PendingArtifact(kept.FileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name,
+                            kept.AppVersion, kept.RuntimeVersion, kept.Content, earlier.OriginBuildId));
+                    }
+                    else
+                    {
+                        artifacts.Add(new PendingArtifact(fileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name, app.Manifest.Version, app.Manifest.Runtime, bytes));
+                    }
+                }
+                else if (!fileName.EndsWith(".dep.app", StringComparison.OrdinalIgnoreCase))
                 {
                     artifacts.Add(new PendingArtifact(fileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name, app.Manifest.Version, app.Manifest.Runtime, bytes));
                 }
@@ -444,10 +481,165 @@ public sealed class ProjectBuildService
     /// before the setting changed follows it. See <see cref="BuildVersionStamp"/>.
     /// </summary>
     internal static async Task<bool> PipelineNumbersAppsAsync(AppDbContext db, int pipelineId, CancellationToken ct) =>
-        await db.OePipelines.AsNoTracking()
+        (await ReadPipelineBuildSettingsAsync(db, pipelineId, ct).ConfigureAwait(false))?.AutoVersion ?? false;
+
+    /// <summary>
+    /// The pipeline settings that shape what a build produces, read at build time so a
+    /// build queued before a setting changed follows it. Null when the pipeline is gone.
+    /// </summary>
+    private static Task<PipelineBuildSettings?> ReadPipelineBuildSettingsAsync(AppDbContext db, int pipelineId, CancellationToken ct) =>
+        db.OePipelines.AsNoTracking()
             .Where(p => p.Id == pipelineId)
-            .Select(p => p.AutoVersion)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            .Select(p => new PipelineBuildSettings(p.AutoVersion, p.ChangedAppsOnly, p.GithubReleaseRepositoryId != null))
+            .FirstOrDefaultAsync(ct);
+
+    private sealed record PipelineBuildSettings(bool AutoVersion, bool ChangedAppsOnly, bool PublishesToGitHub);
+
+    // ── Publishing only what changed (#1094) ────────────────────────────
+
+    /// <summary>
+    /// The apps in <paramref name="apps"/> with no change since this build's pipeline
+    /// last produced them, keyed by normalised app id, each with the earlier artifact
+    /// to carry. An app counts as changed when the pipeline has no earlier build of it,
+    /// when that build targeted another Business Central version, when the pipeline
+    /// publishes to GitHub and the app never made it into a release, when git can't say
+    /// (the earlier commit is not in this clone's history, say), when any file under its
+    /// folder differs, or when an app in this build it depends on changed or was built
+    /// after it, so it is never left compiled against an older sibling than the one
+    /// deployed beside it. Writes one <b>Changes</b> log section saying which is which.
+    /// </summary>
+    private async Task<Dictionary<string, CarriedApp>> FindUnchangedAppsAsync(
+        OeProjectBuild build, IReadOnlyList<DiscoveredApp> apps, bool publishesToGitHub, List<PendingLog> logs, CancellationToken ct)
+    {
+        var ids = apps.Select(a => NormalizeAppId(a.Manifest.Id)).Where(id => id.Length > 0).ToList();
+        // The newest artifact of each app from a finished build of this pipeline. A
+        // carried artifact counts: its build's commit has the same folder contents.
+        var earlier = (await _db.OeProjectBuildArtifacts.AsNoTracking()
+                .Where(a => a.AppId != null && ids.Contains(a.AppId)
+                            && a.ProjectBuildId != build.Id
+                            && a.ProjectBuild!.PipelineId == build.PipelineId
+                            && a.ProjectBuild.Status == ProjectBuildStatus.Ready
+                            && a.ProjectBuild.BcTarget == ProjectBuildTarget.Current
+                            && a.ProjectBuild.Trigger != ProjectBuildTrigger.PullRequest)
+                .Select(a => new
+                {
+                    a.Id, AppId = a.AppId!, a.ProjectBuildId, a.AppVersion, a.CarriedFromBuildId,
+                    a.ProjectBuild!.StartedAt, a.ProjectBuild.BcVersion,
+                })
+                .ToListAsync(ct).ConfigureAwait(false))
+            .GroupBy(a => a.AppId, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(a => a.StartedAt).ThenByDescending(a => a.Id).First(), StringComparer.Ordinal);
+
+        var buildIds = earlier.Values.Select(a => a.ProjectBuildId).Distinct().ToList();
+        // A build that was rebuilt or resumed records its commits again, so the newest
+        // row per repository is the one its artifacts came from.
+        var commits = (await _db.OeProjectBuildRepoCommits.AsNoTracking()
+                .Where(c => buildIds.Contains(c.ProjectBuildId) && c.ProjectRepositoryId != null && c.CommitHash != "")
+                .Select(c => new { c.Id, c.ProjectBuildId, RepoId = c.ProjectRepositoryId!.Value, c.CommitHash })
+                .ToListAsync(ct).ConfigureAwait(false))
+            .GroupBy(c => (c.ProjectBuildId, c.RepoId))
+            .ToDictionary(g => g.Key, g => g.MaxBy(c => c.Id)!.CommitHash);
+
+        // The build each app's bytes were compiled in. Where the pipeline publishes to
+        // GitHub, an app whose build never made a release (the publish failed, or
+        // publishing was set up later) is built again so it reaches one.
+        int Origin(int artifactBuildId, int? carriedFrom) => carriedFrom ?? artifactBuildId;
+        var released = new HashSet<int>();
+        if (publishesToGitHub)
+        {
+            var origins = earlier.Values.Select(a => Origin(a.ProjectBuildId, a.CarriedFromBuildId)).Distinct().ToList();
+            released = (await _db.OeProjectBuilds.AsNoTracking()
+                    .Where(b => origins.Contains(b.Id) && b.GithubReleaseTag != null)
+                    .Select(b => b.Id)
+                    .ToListAsync(ct).ConfigureAwait(false))
+                .ToHashSet();
+        }
+
+        var target = SelectTargetMajorMinor(apps.Select(a => a.Manifest));
+        var gitPath = NullIfBlank(Environment.GetEnvironmentVariable("GIT_PATH")) ?? "git";
+        var unchanged = new Dictionary<string, CarriedApp>(StringComparer.Ordinal);
+        var lines = new List<string>();
+        // Dependencies first, so a changed sibling is known before its dependents.
+        foreach (var app in TopologicalOrder(apps))
+        {
+            var id = NormalizeAppId(app.Manifest.Id);
+            var name = app.Manifest.Name;
+            if (!earlier.TryGetValue(id, out var prior))
+            {
+                lines.Add($"{name}: changed (no earlier build of this pipeline produced it).");
+                continue;
+            }
+            var origin = Origin(prior.ProjectBuildId, prior.CarriedFromBuildId);
+            if (!string.Equals(prior.BcVersion, target, StringComparison.Ordinal))
+            {
+                lines.Add($"{name}: rebuilt, because build #{prior.ProjectBuildId} targeted Business Central {prior.BcVersion} and this one targets {target}.");
+                continue;
+            }
+            if (publishesToGitHub && !released.Contains(origin))
+            {
+                lines.Add($"{name}: rebuilt, because build #{origin} did not publish it to a GitHub release.");
+                continue;
+            }
+            if (app.Repo.RepositoryId is not { } repoId || app.Repo.CommitSha is not { } headSha
+                || !commits.TryGetValue((prior.ProjectBuildId, repoId), out var priorSha)
+                || !CommitShaRegex.IsMatch(priorSha) || !CommitShaRegex.IsMatch(headSha))
+            {
+                lines.Add($"{name}: changed (build #{prior.ProjectBuildId} did not record its commit).");
+                continue;
+            }
+            // A sibling it depends on that changed, or that was compiled after it: either
+            // way its own .app was compiled against something other than what is deployed.
+            var dependencyIds = app.Manifest.Dependencies.Select(d => NormalizeAppId(d.Id)).ToHashSet(StringComparer.Ordinal);
+            var newerSibling = apps.FirstOrDefault(a =>
+            {
+                var siblingId = NormalizeAppId(a.Manifest.Id);
+                if (!dependencyIds.Contains(siblingId)) return false;
+                if (!unchanged.TryGetValue(siblingId, out var sibling)) return true;
+                return sibling.OriginBuildId > origin;
+            });
+            if (newerSibling is not null)
+            {
+                lines.Add($"{name}: rebuilt, because {newerSibling.Manifest.Name} changed.");
+                continue;
+            }
+
+            var folder = Path.GetRelativePath(app.Repo.Dir, app.ProjectDir).Replace('\\', '/');
+            var diff = await _processRunner.RunAsync(new ProcessRunRequest(
+                gitPath,
+                ["-C", app.Repo.Dir, "diff", "--name-only", "--no-renames", priorSha, headSha, "--",
+                 folder == "." ? "." : ":(literal)" + folder],
+                app.Repo.Dir,
+                // Never prompt or fetch: the answer is in the clone's history or not at all.
+                new Dictionary<string, string> { ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_NO_LAZY_FETCH"] = "1" }), ct).ConfigureAwait(false);
+            if (!diff.Succeeded)
+            {
+                lines.Add($"{name}: changed (the commit build #{prior.ProjectBuildId} used, {Short(priorSha)}, could not be compared).");
+                continue;
+            }
+            if (!string.IsNullOrWhiteSpace(diff.StdOut))
+            {
+                lines.Add($"{name}: changed since build #{prior.ProjectBuildId}.");
+                continue;
+            }
+            if (!TryWriteVersion(app, prior.AppVersion))
+            {
+                lines.Add($"{name}: changed (its app.json could not be set back to {prior.AppVersion}).");
+                continue;
+            }
+            unchanged[id] = new CarriedApp(prior.Id, origin, prior.AppVersion);
+            lines.Add($"{name}: unchanged since build #{origin}, so it keeps {prior.AppVersion} and is not published again.");
+        }
+
+        logs.Add(new PendingLog(null, "Changes",
+            "This pipeline publishes only the extensions that changed since it last built them.\n" + string.Join("\n", lines)));
+        return unchanged;
+    }
+
+    /// <summary>
+    /// An unchanged app's earlier artifact, carried into this build in place of the one
+    /// it compiles, and the build that compiled those bytes.
+    /// </summary>
+    private sealed record CarriedApp(int ArtifactId, int OriginBuildId, string Version);
 
     /// <summary>
     /// The kinds of build that can number their apps: a pipeline's own build against the
@@ -958,6 +1150,7 @@ public sealed class ProjectBuildService
                 RuntimeVersion = a.Runtime is null ? null : Truncate(a.Runtime, 50),
                 SizeBytes = a.Content.LongLength,
                 Content = a.Content,
+                CarriedFromBuildId = a.CarriedFromBuildId,
                 CreatedAt = now,
             });
         }
@@ -1662,7 +1855,7 @@ public sealed class ProjectBuildService
 
     /// <summary>The dedup key a vendor symbols Release is found again by: one per (app id, version) per organisation.</summary>
     internal static string VendorDedupKey(string appId, string version) =>
-        $"symbols:{NormalizeAppId(appId)}:{version.Trim()}";
+        $"{OeRelease.SymbolFeedDedupPrefix}{NormalizeAppId(appId)}:{version.Trim()}";
 
     private async Task<int?> EnsureVendorReleaseAsync(
         ResolvedSymbolPackage package, string symbolsDir, int? parentReleaseId, List<string> lines, CancellationToken ct)
@@ -2078,7 +2271,7 @@ public sealed class ProjectBuildService
     internal sealed record PendingLog(int? RepoId, string Section, string Content);
 
     /// <summary>A compiled deliverable held in memory, before it's persisted as a <see cref="OeProjectBuildArtifact"/>.</summary>
-    private sealed record PendingArtifact(string FileName, string? AppId, string AppName, string AppVersion, string? Runtime, byte[] Content);
+    private sealed record PendingArtifact(string FileName, string? AppId, string AppName, string AppVersion, string? Runtime, byte[] Content, int? CarriedFromBuildId = null);
 
     /// <summary>One parsed compiler diagnostic with its path already made repository-relative, before it becomes a row.</summary>
     private sealed record PendingDiagnostic(int? RepoId, string RelativePath, AlcDiagnostic Diagnostic);

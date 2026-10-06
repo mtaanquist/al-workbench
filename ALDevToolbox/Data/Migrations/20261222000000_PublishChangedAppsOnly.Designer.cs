@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -13,9 +14,11 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261222000000_PublishChangedAppsOnly")]
+    partial class PublishChangedAppsOnly
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3218,12 +3221,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
 
-                    b.Property<bool>("DeployedWithoutApproval")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false)
-                        .HasColumnName("deployed_without_approval");
-
                     b.Property<string>("DeploymentSchedule")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -4106,16 +4103,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at");
 
-                    b.Property<bool>("DeployWithoutApproval")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false)
-                        .HasColumnName("deploy_without_approval");
-
-                    b.Property<int?>("DeployWithoutApprovalByUserId")
-                        .HasColumnType("integer")
-                        .HasColumnName("deploy_without_approval_by_user_id");
-
                     b.Property<string>("DeploymentSchedule")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -4172,8 +4159,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasDatabaseName("ix_oe_release_pipelines_build_pipeline");
 
                     b.HasIndex("CreatedByUserId");
-
-                    b.HasIndex("DeployWithoutApprovalByUserId");
 
                     b.HasIndex("GithubReleaseRepositoryId");
 
@@ -8265,11 +8250,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasForeignKey("CreatedByUserId")
                         .OnDelete(DeleteBehavior.SetNull);
 
-                    b.HasOne("ALDevToolbox.Domain.Entities.User", "DeployWithoutApprovalByUser")
-                        .WithMany()
-                        .HasForeignKey("DeployWithoutApprovalByUserId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
                     b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectRepository", "GithubReleaseRepository")
                         .WithMany()
                         .HasForeignKey("GithubReleaseRepositoryId")
@@ -8296,8 +8276,6 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("BuildPipeline");
 
                     b.Navigation("CreatedByUser");
-
-                    b.Navigation("DeployWithoutApprovalByUser");
 
                     b.Navigation("GithubReleaseRepository");
 

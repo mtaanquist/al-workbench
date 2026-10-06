@@ -105,7 +105,8 @@ public sealed class ArtifactsTools
         var apps = detail.Artifacts
             .Select(a => new BuildAppDownload(
                 a.FileName, a.AppName, a.AppVersion, a.RuntimeVersion, a.SizeBytes,
-                DownloadPath: $"/artifacts/build/{buildId}/app/{a.Id}"))
+                DownloadPath: $"/artifacts/build/{buildId}/app/{a.Id}",
+                UnchangedSinceBuildId: a.CarriedFromBuildId))
             .ToList();
 
         return new ProjectBuildDetailResult(
@@ -195,4 +196,10 @@ public sealed record BuildAppDownload(
     string AppVersion,
     string? RuntimeVersion,
     long SizeBytes,
-    string DownloadPath);
+    string DownloadPath,
+    /// <summary>
+    /// Set when the app had no changes and the build reused the .app from this earlier
+    /// build instead of publishing a new version (the pipeline releases and deploys only
+    /// extensions that changed). Null for an app this build published itself.
+    /// </summary>
+    int? UnchangedSinceBuildId = null);
