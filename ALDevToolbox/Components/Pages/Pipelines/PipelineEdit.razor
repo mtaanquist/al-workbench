@@ -258,6 +258,15 @@
                                 </label>
                                 <small class="field__hint">The build number is added to the third part of the version: 28.2.0.0 in app.json becomes 28.2.4812.0 in build #4812. Business Central only installs a higher version over an installed app, so this lets every build be deployed without raising the version by hand. Your app.json files aren't changed.</small>
                             </div>
+                            <div class="field">
+                                <label class="@(_changedAppsOnly ? "check is-checked" : "check")">
+                                    <input id="pe-changed-apps-only" type="checkbox" checked="@_changedAppsOnly" disabled="@_saving"
+                                           @onchange="e => _changedAppsOnly = (bool)(e.Value ?? false)" />
+                                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                    <span>Only publish extensions that changed</span>
+                                </label>
+                                <small class="field__hint">An extension with no changes in its folder since this pipeline last built it keeps its earlier app file and version number. It isn't added to the GitHub release, and deployments leave it alone where it's already installed. Extensions that depend on a changed one are published again too.</small>
+                            </div>
                             @if (_releaseRepositories is { Count: > 0 })
                             {
                                 <div class="field">
@@ -365,6 +374,7 @@
     private bool _previewCheck;
     // Whether builds add their build number to each app's version.
     private bool _autoVersion = true;
+    private bool _changedAppsOnly;
     // Whether a push to the branch starts a build (#1079).
     private bool _buildOnPush;
     // The solution's GitHub repositories inside the connected organisation. Empty
@@ -496,6 +506,7 @@
             _branch = pipeline.Branch ?? string.Empty;
             _previewCheck = pipeline.PreviewCheck;
             _autoVersion = pipeline.AutoVersion;
+            _changedAppsOnly = pipeline.ChangedAppsOnly;
             _buildOnPush = pipeline.BuildOnPush;
         }
         catch (ProjectAccessDeniedException)
@@ -836,7 +847,8 @@
                 string.IsNullOrWhiteSpace(_branch) ? null : _branch.Trim(),
                 _previewCheck,
                 _autoVersion,
-                _buildOnPush);
+                _buildOnPush,
+                _changedAppsOnly);
 
             int id;
             if (_editing && PipelineId is { } pid)

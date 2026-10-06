@@ -474,6 +474,199 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         return build.Id;
     }
 
+    // ── Publishing only what changed (#1094) ───────────────────────────
+
+    private const string BaseId = "33333333-0000-0000-0000-000000000003";
+    private const string SalesId = "44444444-0000-0000-0000-000000000004";
+    private const string PriorSha = "1111111111111111111111111111111111111111";
+    private const string HeadSha = "2222222222222222222222222222222222222222";
+
+    // Two extensions in one repository, the second built on the first.
+    private static readonly FakeExtension[] Pair =
+    [
+        new("base-ext", BaseId, "CRONUS Base Extension", []),
+        new("sales-ext", SalesId, "CRONUS Sales Extension", [(BaseId, "CRONUS Base Extension", "1.0.0.0")]),
+    ];
+
+    [Fact]
+    public async Task An_unchanged_extension_carries_its_earlier_app_and_a_changed_one_gets_a_new_number()
+    {
+        var (projectId, releaseId, buildId, priorId) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        _tools.Diffs["sales-ext"] = "sales-ext/src/Sales.Codeunit.al\n";
+
+        await BuildAsync(projectId, releaseId);
+
+        var artifacts = await ArtifactsAsync(buildId);
+        var carried = artifacts.Single(a => a.AppId == BaseId);
+        carried.CarriedFromBuildId.Should().Be(priorId);
+        carried.AppVersion.Should().Be("1.0.500.0", "an unchanged app keeps the version it was deployed as");
+        carried.Content.Should().Equal(await PriorContentAsync(priorId, BaseId), "the very same .app is delivered again");
+        var fresh = artifacts.Single(a => a.AppId == SalesId);
+        fresh.CarriedFromBuildId.Should().BeNull();
+        fresh.AppVersion.Should().Be($"1.0.{buildId}.0");
+        _tools.SeenVersions["CRONUS Sales Extension"][BaseId].Should().Be("1.0.500.0",
+            "the changed app compiles against the version of its sibling that is deployed beside it");
+
+        var log = await LogAsync(buildId, "Changes");
+        log.Should().Contain($"CRONUS Base Extension: unchanged since build #{priorId}, so it keeps 1.0.500.0")
+            .And.Contain($"CRONUS Sales Extension: changed since build #{priorId}.");
+        (await LogAsync(buildId, "Version")).Should().Contain("CRONUS Sales Extension").And.NotContain("CRONUS Base Extension");
+    }
+
+    [Fact]
+    public async Task An_extension_built_on_a_changed_one_is_published_again()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        _tools.Diffs["base-ext"] = "base-ext/app.json\n";
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == null);
+        (await LogAsync(buildId, "Changes")).Should().Contain("CRONUS Sales Extension: rebuilt, because CRONUS Base Extension changed.");
+        _tools.DiffedFolders.Should().Equal(["base-ext"], "a dependent of a changed app needs no diff");
+    }
+
+    [Fact]
+    public async Task Nothing_is_carried_when_git_cannot_compare_the_commits()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        _tools.DiffFails = true;
+
+        await BuildAsync(projectId, releaseId);
+
+        var artifacts = await ArtifactsAsync(buildId);
+        artifacts.Should().HaveCount(2).And.OnlyContain(a => a.CarriedFromBuildId == null && a.AppVersion == $"1.0.{buildId}.0");
+        (await LogAsync(buildId, "Changes")).Should().Contain("could not be compared");
+    }
+
+    [Fact]
+    public async Task Every_extension_is_published_when_the_pipeline_has_the_option_off()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ArtifactsAsync(buildId)).Should().HaveCount(2).And.OnlyContain(a => a.CarriedFromBuildId == null);
+        _tools.DiffedFolders.Should().BeEmpty();
+        (await LogAsync(buildId, "Changes")).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Another_pipelines_build_is_never_the_baseline()
+    {
+        var (projectId, releaseId, buildId, priorId) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        await using (var seed = _db.NewContext())
+        {
+            var other = new OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "test",
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            seed.OePipelines.Add(other);
+            await seed.SaveChangesAsync();
+            (await seed.OeProjectBuilds.SingleAsync(b => b.Id == priorId)).PipelineId = other.Id;
+            await seed.SaveChangesAsync();
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == null);
+        (await LogAsync(buildId, "Changes")).Should().Contain("no earlier build of this pipeline produced it");
+    }
+
+    /// <summary>
+    /// A pipeline with numbering on, an earlier finished build of it that produced
+    /// both extensions as 1.0.500.0 at <see cref="PriorSha"/>, and the queued build at
+    /// <see cref="HeadSha"/>.
+    /// </summary>
+    private async Task<(int ProjectId, int ReleaseId, int BuildId, int PriorBuildId)> SeedChangedOnlyAsync(bool changedAppsOnly)
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        _tools.Extensions = Pair;
+        _tools.HeadSha = HeadSha;
+        await using var seed = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var pipeline = new OePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            Name = "main",
+            AutoVersion = true,
+            ChangedAppsOnly = changedAppsOnly,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        seed.OePipelines.Add(pipeline);
+        await seed.SaveChangesAsync();
+
+        var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+        var prior = new OeProjectBuild
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            PipelineId = pipeline.Id,
+            Status = ProjectBuildStatus.Ready,
+            Trigger = ProjectBuildTrigger.Manual,
+            BcVersion = "29.0",
+            StartedAt = now.AddHours(-1),
+            FinishedAt = now.AddMinutes(-55),
+        };
+        foreach (var ext in Pair)
+        {
+            var content = SyntheticApp.Build(ext.Id, ext.Name, "CRONUS", "1.0.500.0");
+            prior.Artifacts.Add(new OeProjectBuildArtifact
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                AppId = ext.Id,
+                FileName = $"CRONUS_{ext.Name.Replace(" ", string.Empty)}_1.0.500.0.app",
+                AppName = ext.Name,
+                AppVersion = "1.0.500.0",
+                SizeBytes = content.LongLength,
+                Content = content,
+                CreatedAt = now,
+            });
+        }
+        seed.OeProjectBuilds.Add(prior);
+        await seed.SaveChangesAsync();
+        seed.OeProjectBuildRepoCommits.Add(new OeProjectBuildRepoCommit
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectBuildId = prior.Id,
+            ProjectRepositoryId = repoId,
+            RepoUrl = "https://github.com/cronus/extensions",
+            RepoDisplayName = "cronus/extensions",
+            CommitHash = PriorSha,
+        });
+        var build = await seed.OeProjectBuilds.SingleAsync(b => b.Id == buildId);
+        build.PipelineId = pipeline.Id;
+        build.Trigger = ProjectBuildTrigger.Manual;
+        await seed.SaveChangesAsync();
+        return (projectId, releaseId, buildId, prior.Id);
+    }
+
+    private async Task<List<OeProjectBuildArtifact>> ArtifactsAsync(int buildId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeProjectBuildArtifacts.AsNoTracking().Where(a => a.ProjectBuildId == buildId).ToListAsync();
+    }
+
+    private async Task<byte[]> PriorContentAsync(int buildId, string appId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeProjectBuildArtifacts.AsNoTracking()
+            .Where(a => a.ProjectBuildId == buildId && a.AppId == appId).Select(a => a.Content).SingleAsync();
+    }
+
+    private async Task<string> LogAsync(int buildId, string section)
+    {
+        await using var read = _db.NewContext();
+        var sections = await read.OeProjectBuildLogs.AsNoTracking()
+            .Where(l => l.ProjectBuildId == buildId && l.Section == section)
+            .Select(l => l.Content)
+            .ToListAsync();
+        return string.Join("\n", sections);
+    }
+
     // ── Part 4: the vendor package lands in the Object Explorer ──────────
 
     [Fact]
@@ -879,6 +1072,18 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         /// <summary>Per compiled extension: the version of each dependency the compiler found in the cache.</summary>
         public Dictionary<string, Dictionary<string, string>> SeenVersions { get; } = new();
 
+        /// <summary>The commit every clone lands on; null makes <c>git show</c> fail, as before.</summary>
+        public string? HeadSha { get; set; }
+
+        /// <summary>What <c>git diff --name-only</c> prints per extension folder; a folder not named prints nothing.</summary>
+        public Dictionary<string, string> Diffs { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>Makes every <c>git diff</c> fail, as it does when the earlier commit is not in the clone.</summary>
+        public bool DiffFails { get; set; }
+
+        /// <summary>The folder of every <c>git diff</c> run.</summary>
+        public List<string> DiffedFolders { get; } = new();
+
         public Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken ct = default)
         {
             if (request.FileName == AlcPath)
@@ -910,6 +1115,18 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                     }));
                 }
                 return Task.FromResult(new ProcessRunResult(0, string.Empty, string.Empty));
+            }
+            if (request.Arguments.Contains("show") && HeadSha is not null)
+            {
+                return Task.FromResult(new ProcessRunResult(0, $"{HeadSha}\t2026-10-01T00:00:00+00:00\n", string.Empty));
+            }
+            if (request.Arguments.Contains("diff"))
+            {
+                var folder = request.Arguments[^1].Replace(":(literal)", string.Empty, StringComparison.Ordinal);
+                DiffedFolders.Add(folder);
+                return Task.FromResult(DiffFails
+                    ? new ProcessRunResult(128, string.Empty, "fatal: bad object")
+                    : new ProcessRunResult(0, Diffs.GetValueOrDefault(folder, string.Empty), string.Empty));
             }
             // The branch a clone without --branch landed on: its default branch.
             if (request.Arguments.Contains("symbolic-ref"))

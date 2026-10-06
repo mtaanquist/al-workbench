@@ -16,7 +16,7 @@ namespace ALDevToolbox.Services.GitHub;
 /// <param name="Tag">The tag the build was published at, when it was.</param>
 /// <param name="Url">The Release's page on GitHub, when it was published.</param>
 /// <param name="Error">Why it was not published, in words a consultant can act on.</param>
-public sealed record GitHubReleasePublishResult(bool Published, string? Tag, string? Url, string? Error)
+public sealed record GitHubReleasePublishResult(bool Published, string? Tag, string? Url, string? Error, string? Note = null)
 {
     /// <summary>Nothing was asked of us: the pipeline does not publish anywhere.</summary>
     public static readonly GitHubReleasePublishResult NotRequested = new(false, null, null, null);
@@ -246,14 +246,21 @@ public sealed class GitHubReleaseService
                 $"{owner}/{name} is outside the connected GitHub organisation ({connection.OrgLogin}), so nothing was published there.");
         }
 
+        // An app carried over unchanged from an earlier build (#1094) was released by
+        // that build already, so only what this build compiled itself goes up.
         var artifacts = await _db.OeProjectBuildArtifacts.AsNoTracking()
-            .Where(a => a.ProjectBuildId == projectBuildId)
+            .Where(a => a.ProjectBuildId == projectBuildId && a.CarriedFromBuildId == null)
             .OrderBy(a => a.FileName)
             .Select(a => new { a.FileName, a.AppName, a.AppVersion, a.Content })
             .ToListAsync(ct);
         if (artifacts.Count == 0)
         {
-            return NotPublished("This build produced no app files to publish.");
+            var anyCarried = await _db.OeProjectBuildArtifacts.AsNoTracking()
+                .AnyAsync(a => a.ProjectBuildId == projectBuildId, ct);
+            return anyCarried
+                ? new GitHubReleasePublishResult(false, null, null, null,
+                    "No extension changed since the last build, so no GitHub release was made.")
+                : NotPublished("This build produced no app files to publish.");
         }
 
         var tag = ReleaseTag(artifacts.Select(a => a.AppVersion).ToList(), projectBuildId);
@@ -334,7 +341,7 @@ public sealed class GitHubReleaseService
             Section = "GitHub Release",
             Content = result.Published
                 ? $"Published as {result.Tag} ({result.Url})."
-                : result.Error ?? "Not published.",
+                : result.Error ?? result.Note ?? "Not published.",
             Ordering = nextOrdering + 1,
             CreatedAt = _clock.GetUtcNow().UtcDateTime,
         });

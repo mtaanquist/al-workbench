@@ -103,6 +103,7 @@ public sealed class PipelineService
             PreviewCheck = input.PreviewCheck,
             PreviewCheckByUserId = input.PreviewCheck ? _orgContext.CurrentUserId : null,
             AutoVersion = input.AutoVersion,
+            ChangedAppsOnly = input.ChangedAppsOnly,
             BuildOnPush = input.BuildOnPush,
             BuildOnPushByUserId = input.BuildOnPush ? _orgContext.CurrentUserId : null,
             CreatedAt = now,
@@ -165,6 +166,7 @@ public sealed class PipelineService
         }
         pipeline.BuildOnPush = input.BuildOnPush;
         pipeline.AutoVersion = input.AutoVersion;
+        pipeline.ChangedAppsOnly = input.ChangedAppsOnly;
         pipeline.UpdatedAt = DateTime.UtcNow;
         if (!string.Equals(oldName, name, StringComparison.Ordinal))
         {
@@ -468,7 +470,13 @@ public sealed record PipelineInput(
     /// Whether a push to the pipeline's branch starts a build. Off unless the person
     /// turns it on. See <c>.design/github-integration-phase2.md</c>, "Building on push".
     /// </summary>
-    bool BuildOnPush = false);
+    bool BuildOnPush = false,
+    /// <summary>
+    /// Whether builds publish only the extensions that changed since this pipeline last
+    /// produced them. Off unless the person turns it on. See
+    /// <c>.design/object-explorer-project-builds.md</c>, "Publishing only what changed".
+    /// </summary>
+    bool ChangedAppsOnly = false);
 
 /// <summary>A project choice for the "New pipeline" dialog's project picker.</summary>
 public sealed record PipelineProjectOption(int Id, string Name);

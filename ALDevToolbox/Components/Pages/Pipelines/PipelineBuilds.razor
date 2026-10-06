@@ -487,7 +487,7 @@
                                                    the Download control. PageAdminEdit.dc.html uses
                                                    __val for metadata columns and keeps __acts to
                                                    buttons only. *@
-                                                <span class="sub-row__val">@a.AppName · v@(a.AppVersion)@(a.RuntimeVersion is { } rt ? $" · runtime {rt}" : "") · @FormatBytes(a.SizeBytes)</span>
+                                                <span class="sub-row__val">@a.AppName · v@(a.AppVersion)@(a.RuntimeVersion is { } rt ? $" · runtime {rt}" : "") · @FormatBytes(a.SizeBytes)@(a.CarriedFromBuildId is { } from ? $" · unchanged since build #{from}" : "")</span>
                                             </div>
                                             <div class="sub-row__acts">
                                                 <a class="btn btn--sm" href="@($"/artifacts/build/{_latest.Id}/app/{a.Id}")" aria-label="@($"Download {a.FileName}")">

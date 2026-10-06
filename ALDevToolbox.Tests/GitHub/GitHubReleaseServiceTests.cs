@@ -150,6 +150,55 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         api.Calls.Where(c => c.Contains("uploads.github.com")).Should().HaveCount(2);
     }
 
+    [Fact]
+    public async Task An_app_carried_over_unchanged_is_left_out_of_the_release()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.500.0"), ("CRONUS Sales", "1.0.612.0")]);
+        await CarryAsync(seed.BuildId, "CRONUS Core");
+        var api = PublishableApi(existingRelease: false, tag: "v1.0.612.0");
+
+        await using var ctx = _db.NewContext();
+        var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+
+        result.Published.Should().BeTrue();
+        result.Tag.Should().Be("v1.0.612.0", "the tag follows the apps this build published");
+        api.Calls.Where(c => c.Contains("uploads.github.com")).Should().ContainSingle()
+            .Which.Should().Contain("name=CRONUS Sales_1.0.612.0.app");
+        CreateReleaseBody(api).Should().NotContain("CRONUS Core");
+    }
+
+    [Fact]
+    public async Task A_build_where_nothing_changed_makes_no_release_and_says_so()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.500.0")]);
+        await CarryAsync(seed.BuildId, "CRONUS Core");
+        var api = PublishableApi(existingRelease: false);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+            result.Published.Should().BeFalse();
+            result.Error.Should().BeNull("nothing went wrong");
+        }
+
+        api.Calls.Should().NotContain(c => c.Contains("/releases"));
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.Id == seed.BuildId)).GithubReleaseError.Should().BeNull();
+        (await verify.OeProjectBuildLogs.AsNoTracking()
+                .SingleAsync(l => l.ProjectBuildId == seed.BuildId && l.Section == "GitHub Release"))
+            .Content.Should().Contain("No extension changed");
+    }
+
+    private async Task CarryAsync(int buildId, string appName)
+    {
+        await using var ctx = _db.NewContext();
+        var artifact = await ctx.OeProjectBuildArtifacts.SingleAsync(a => a.ProjectBuildId == buildId && a.AppName == appName);
+        artifact.CarriedFromBuildId = buildId - 1;
+        await ctx.SaveChangesAsync();
+    }
+
     [Theory]
     [InlineData(new[] { "28.2.4812.0" }, "v28.2.4812.0")]
     [InlineData(new[] { "28.2.4812.0", "28.2.4812.0" }, "v28.2.4812.0")]
