@@ -55,7 +55,7 @@ The folder structure mirrors this: `Components/`, `Services/`, `Domain/`, `Data/
 - **`TemplateService`** — read templates and folders, list available templates for the dropdown, get full template detail by key. CRUD operations for the admin UI.
 - **`ModuleService`** — read module catalogue, list available modules, CRUD for admin UI.
 - **`CatalogService`** — read/edit the well-known-dependencies catalogue used by the New Extension flow.
-- **`ApplicationVersionService`** — read/edit the curated AL application versions used to populate the New Workspace and New Extension dropdowns.
+- **`ApplicationVersionService`** — read/edit the curated AL application versions used to populate the New Workspace and New Extension dropdowns. `ApplicationVersionSyncScheduler` adds each newly shipped release wave to every org's list daily, from the Microsoft symbol feed (see `completed-milestones.md`, P2.4).
 - **`GenerationService`** — given a `ProjectPlan` (workspace + selected modules + options) and a template, produce a ZIP stream. See `generation-engine.md`.
 - **`TemplateImportService`** — fork pipeline: copies a template (plus its referenced modules and default application version) from the singleton system org into the acting org. Wired to the "From the site catalogue" section of `/admin/templates`. The on-disk `Templates.seed/` bootstrap was retired in favour of this — fresh orgs start empty and import on demand.
 - **`OrganizationConfigService`** — reads and writes per-org settings (default publisher, default ID range, default brief / core description), the org logo, and the always-included files admins want appended to every generated workspace.

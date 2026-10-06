@@ -31,7 +31,9 @@
             Workspace and New Extension forms. Picking an entry there fills
             both the <code class="code">application</code> and
             <code class="code">runtime</code> fields on the generated
-            <code class="code">app.json</code>.
+            <code class="code">app.json</code>. Each new release wave is added
+            at the top of the list automatically once Microsoft ships it;
+            updates such as "update 1" are still yours to add.
         </SubtitleContent>
         <Actions>
             <button type="button" class="btn btn--sm btn--primary"
@@ -136,7 +138,7 @@
                                 <tr @key="row" class="@RowCss(index, row)"
                                     @onfocusin="() => _selected = row">
                                     <td>
-                                        <input class="input" type="text" required placeholder="bc-2026-w1"
+                                        <input class="input" type="text" required placeholder="bc-2026-rw1"
                                                pattern="[a-z0-9-]+"
                                                title="Lowercase letters, digits, hyphens. Press F8 to copy the cell above."
                                                data-row="@index" data-col="0"
@@ -223,6 +225,9 @@
     private IReadOnlyDictionary<string, string> _fieldErrors = new Dictionary<string, string>();
     private IReadOnlyDictionary<string, string> _globalErrors = new Dictionary<string, string>();
     private Dictionary<int, List<string>> _usage = new();
+    // The rows the editor loaded, so a save only removes what the admin removed
+    // and keeps a row the daily wave sync added while the page was open.
+    private HashSet<int> _shownIds = new();
 
     // Tracked by reference (not index) so the highlight follows the row across
     // reorders - the toolbar acts on whichever row this points at.
@@ -285,6 +290,7 @@
         var rows = await Versions.GetActiveAsync(includeDeprecated: true);
         _usage = await Versions.GetActiveUsageAsync();
         _form = FormState.From(rows);
+        _shownIds = rows.Select(r => r.Id).ToHashSet();
         EnsureTrailingBlank();
     }
 
@@ -458,10 +464,11 @@
 
         try
         {
-            await Versions.SaveAsync(payload);
+            await Versions.SaveAsync(payload, _shownIds);
             var rows = await Versions.GetActiveAsync(includeDeprecated: true);
             _usage = await Versions.GetActiveUsageAsync();
             _form = FormState.From(rows);
+        _shownIds = rows.Select(r => r.Id).ToHashSet();
             EnsureTrailingBlank();
             _selected = null;
             _saveSuccess = "Saved.";
