@@ -1654,7 +1654,9 @@
         var steps = new List<StepView>
         {
             new("Scheduled", "queued", When(d.ScheduledFor, seconds: true), Exact(d.ScheduledFor),
-                d.TriggeredByName is { } by ? $"by {by}" : ""),
+                d.DeployedWithoutApproval
+                    ? (d.TriggeredByName is { } runsAs ? $"automatically after a new build (no approval), set up by {runsAs}" : "automatically after a new build (no approval)")
+                    : d.TriggeredByName is { } by ? $"by {by}" : ""),
         };
 
         if (d.Status == ProjectDeliveryStatus.Cancelled)

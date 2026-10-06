@@ -259,6 +259,48 @@ public sealed class PipelineEditPagesTests : IDisposable
     }
 
     [Fact]
+    public async Task A_sandbox_pipeline_can_be_set_to_deploy_new_builds_without_approval()
+    {
+        var seed = await SeedAsync();
+        var rpId = await SeedDeploymentPipelineAsync(seed);
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
+        cut.WaitForAssertion(() => cut.Find("#rpe-prepare"));
+        cut.FindAll("#rpe-without-approval").Should().BeEmpty("it only follows a prepared deployment");
+        cut.Find("#rpe-prepare").Change(true);
+        // The solution's environments load after the form, so the sandbox may arrive later.
+        cut.WaitForAssertion(() => cut.Find("#rpe-without-approval"));
+        cut.Find("#rpe-without-approval").Change(true);
+        cut.Find(".page-head .btn--primary").Click();
+
+        cut.WaitForAssertion(() => Nav.ToBaseRelativePath(Nav.Uri).Should().Be($"pipelines/deployments/{rpId}"));
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.AsNoTracking().SingleAsync(r => r.Id == rpId);
+        rp.DeployWithoutApproval.Should().BeTrue();
+        rp.DeployWithoutApprovalByUserId.Should().Be(OwnerUserId);
+    }
+
+    [Fact]
+    public async Task A_production_pipeline_is_never_offered_deploying_without_approval()
+    {
+        var seed = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectEnvironments.Where(e => e.Id == seed.TestEnvId)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.Type, "Production"));
+        }
+        var rpId = await SeedDeploymentPipelineAsync(seed);
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
+        cut.WaitForAssertion(() => cut.Find("#rpe-prepare"));
+        cut.Find("#rpe-prepare").Change(true);
+
+        // Once the environments have loaded, the page says why the option isn't there.
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("choose a sandbox as the target environment"));
+        cut.FindAll("#rpe-without-approval").Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task A_deployment_pipeline_that_is_gone_says_so_instead_of_drawing_a_form()
     {
         await SeedAsync();

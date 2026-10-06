@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using System.Text;
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
@@ -232,7 +233,8 @@ public sealed class DeliveryService
     /// triggering user - and opens its log with the line that says where it came from.
     /// </summary>
     private async Task<OeProjectDelivery> WriteDeliveryAsync(
-        int orgId, ReleasePlan plan, DateTime scheduledForUtc, bool forceSyncOnce, bool proposed, CancellationToken ct)
+        int orgId, ReleasePlan plan, DateTime scheduledForUtc, bool forceSyncOnce, bool proposed, CancellationToken ct,
+        string? openingLog = null, bool withoutApproval = false)
     {
         var now = DateTime.UtcNow;
         var delivery = new OeProjectDelivery
@@ -251,7 +253,8 @@ public sealed class DeliveryService
             // Audit the override: a window exists and the chosen time falls outside it.
             ScheduledOutsideWindow = plan.IsOutsideWindow(scheduledForUtc),
             Status = proposed ? ProjectDeliveryStatus.Proposed : ProjectDeliveryStatus.Scheduled,
-            DiagnosticsLog = proposed ? LogLine(DeliveryProposalLog.Prepared(plan.BuildId)) : null,
+            DiagnosticsLog = openingLog ?? (proposed ? LogLine(DeliveryProposalLog.Prepared(plan.BuildId)) : null),
+            DeployedWithoutApproval = withoutApproval,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -509,17 +512,22 @@ public sealed class DeliveryService
     /// Pull-request builds and preview builds are never prepared. Returns the ids of the
     /// deployments it prepared, so the people who approve them can be told (#1036).
     /// </summary>
-    public async Task<List<int>> ProposeReleasesForBuildAsync(int projectBuildId, CancellationToken ct = default)
+    /// <param name="deployedWithoutApproval">
+    /// Pipelines that already deployed this build without approval
+    /// (<see cref="DeployWithoutApprovalAsync"/>), so there is nothing left to prepare.
+    /// </param>
+    /// <param name="notDeployedReasons">
+    /// Pipelines set to deploy without approval that could not, with why: their prepared
+    /// deployment says so in its log, so the person approving it knows.
+    /// </param>
+    public async Task<List<int>> ProposeReleasesForBuildAsync(
+        int projectBuildId,
+        IReadOnlySet<int>? deployedWithoutApproval = null,
+        IReadOnlyDictionary<int, string>? notDeployedReasons = null,
+        CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var build = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.Id == projectBuildId)
-            .Select(b => new { b.Id, b.PipelineId, b.Status, b.Trigger, b.BcTarget })
-            .FirstOrDefaultAsync(ct);
-        if (build?.PipelineId is not { } buildPipelineId
-            || build.Status != ProjectBuildStatus.Ready
-            || build.Trigger == ProjectBuildTrigger.PullRequest
-            || ProjectBuildTarget.IsPreview(build.BcTarget))
+        if (await PreparableBuildPipelineAsync(projectBuildId, ct) is not { } buildPipelineId)
         {
             return [];
         }
@@ -536,54 +544,238 @@ public sealed class DeliveryService
         var prepared = new List<int>();
         foreach (var releasePipelineId in pipelineIds)
         {
+            if (deployedWithoutApproval?.Contains(releasePipelineId) == true) continue;
+
             var waiting = await _db.OeProjectDeliveries.AsNoTracking()
                 .Where(d => d.ReleasePipelineId == releasePipelineId && d.Status == ProjectDeliveryStatus.Proposed)
                 .Select(d => new { d.Id, d.ProjectBuildId })
                 .ToListAsync(ct);
             // The same build twice, or a newer one already waiting: nothing to do.
-            if (waiting.Any(w => w.ProjectBuildId >= build.Id)) continue;
+            if (waiting.Any(w => w.ProjectBuildId >= projectBuildId)) continue;
 
             ReleasePlan plan;
             try
             {
-                plan = await ResolveReleaseAsync(releasePipelineId, build.Id, checkAccess: false, ct, checkEnvironmentStatus: false);
+                plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: false, ct, checkEnvironmentStatus: false);
             }
             catch (PlanValidationException ex)
             {
                 _logger.LogWarning(
                     "Not preparing a deployment of build {BuildId} through deployment pipeline {ReleasePipelineId}: {Reason}",
-                    build.Id, releasePipelineId, string.Join(" ", ex.Errors.Values));
+                    projectBuildId, releasePipelineId, string.Join(" ", ex.Errors.Values));
                 continue;
             }
 
-            var replacedLine = LogLine(DeliveryProposalLog.Replaced(build.Id));
-            foreach (var old in waiting)
-            {
-                var now = DateTime.UtcNow;
-                var replacedBy = build.Id;
-                var replacedReason = DeliveryProposalLog.ReplacedReason(build.Id);
-                await _db.OeProjectDeliveries
-                    .Where(d => d.Id == old.Id && d.Status == ProjectDeliveryStatus.Proposed)
-                    .ExecuteUpdateAsync(u => u
-                        .SetProperty(d => d.Status, ProjectDeliveryStatus.Dismissed)
-                        .SetProperty(d => d.DismissReason, replacedReason)
-                        .SetProperty(d => d.ReplacedByProjectBuildId, replacedBy)
-                        .SetProperty(d => d.FinishedAt, now)
-                        .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + replacedLine)
-                        .SetProperty(d => d.UpdatedAt, now), ct);
-                await MarkAppsNotSentAsync(old.Id, $"Not sent: build #{build.Id} replaced this deployment.", ct);
-            }
-            // The newer build's request replaces theirs; the old one has nothing left to approve.
-            await NotificationSubject.MarkDoneAsync(
-                _db, waiting.Select(w => NotificationSubject.Delivery(w.Id)).ToList(), DateTime.UtcNow, _logger, ct);
+            await ReplaceWaitingProposalsAsync(waiting.Select(w => w.Id).ToList(), projectBuildId, ct);
 
-            var delivery = await WriteDeliveryAsync(orgId, plan, plan.RuleTime(DateTime.UtcNow), forceSyncOnce: false, proposed: true, ct);
+            var opening = LogLine(DeliveryProposalLog.Prepared(projectBuildId));
+            if (notDeployedReasons?.TryGetValue(releasePipelineId, out var why) == true)
+            {
+                opening += LogLine(DeliveryProposalLog.NotDeployedWithoutApproval(why));
+            }
+            var delivery = await WriteDeliveryAsync(orgId, plan, plan.RuleTime(DateTime.UtcNow), forceSyncOnce: false, proposed: true, ct, opening);
             prepared.Add(delivery.Id);
             _logger.LogInformation(
                 "Prepared delivery {DeliveryId}: build {BuildId} → deployment pipeline {ReleasePipelineId} ({Env}), waiting for approval; replaced {Replaced} older.",
-                delivery.Id, build.Id, releasePipelineId, plan.EnvName, waiting.Count);
+                delivery.Id, projectBuildId, releasePipelineId, plan.EnvName, waiting.Count);
         }
         return prepared;
+    }
+
+    /// <summary>
+    /// The build pipeline of <paramref name="projectBuildId"/> when the build is one a
+    /// new-build deployment follows: a successful build of a build pipeline, not a
+    /// pull-request or preview build. Null otherwise.
+    /// </summary>
+    private async Task<int?> PreparableBuildPipelineAsync(int projectBuildId, CancellationToken ct)
+    {
+        var build = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.Id == projectBuildId)
+            .Select(b => new { b.PipelineId, b.Status, b.Trigger, b.BcTarget })
+            .FirstOrDefaultAsync(ct);
+        return build is null
+               || build.Status != ProjectBuildStatus.Ready
+               || build.Trigger == ProjectBuildTrigger.PullRequest
+               || ProjectBuildTarget.IsPreview(build.BcTarget)
+            ? null
+            : build.PipelineId;
+    }
+
+    /// <summary>
+    /// Sets aside prepared deployments still waiting on an older build: dismissed, with
+    /// the newer build recorded on them, and their approval requests settled.
+    /// </summary>
+    private async Task ReplaceWaitingProposalsAsync(IReadOnlyList<int> waitingIds, int newerBuildId, CancellationToken ct)
+    {
+        if (waitingIds.Count == 0) return;
+        var replacedLine = LogLine(DeliveryProposalLog.Replaced(newerBuildId));
+        var replacedReason = DeliveryProposalLog.ReplacedReason(newerBuildId);
+        foreach (var id in waitingIds)
+        {
+            var now = DateTime.UtcNow;
+            await _db.OeProjectDeliveries
+                .Where(d => d.Id == id && d.Status == ProjectDeliveryStatus.Proposed)
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(d => d.Status, ProjectDeliveryStatus.Dismissed)
+                    .SetProperty(d => d.DismissReason, replacedReason)
+                    .SetProperty(d => d.ReplacedByProjectBuildId, newerBuildId)
+                    .SetProperty(d => d.FinishedAt, now)
+                    .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + replacedLine)
+                    .SetProperty(d => d.UpdatedAt, now), ct);
+            await MarkAppsNotSentAsync(id, $"Not sent: build #{newerBuildId} replaced this deployment.", ct);
+        }
+        // The newer build's request replaces theirs; the old one has nothing left to approve.
+        await NotificationSubject.MarkDoneAsync(
+            _db, waitingIds.Select(NotificationSubject.Delivery).ToList(), DateTime.UtcNow, _logger, ct);
+    }
+
+    // ── Deploying to a sandbox without approval (#1096) ─────────────────────────────
+
+    /// <summary>
+    /// Sets aside this pipeline's deployments without approval of older builds that are
+    /// still waiting for their time: <c>scheduled → dismissed</c> by compare-and-set, so
+    /// one a worker already claimed runs on. Recorded as replaced by the newer build, the
+    /// way a waiting proposal is.
+    /// </summary>
+    private async Task ReplaceWaitingDeploymentsWithoutApprovalAsync(int releasePipelineId, int newerBuildId, CancellationToken ct)
+    {
+        var ids = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.ReleasePipelineId == releasePipelineId
+                        && d.DeployedWithoutApproval
+                        && d.Status == ProjectDeliveryStatus.Scheduled
+                        && d.ProjectBuildId < newerBuildId)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        if (ids.Count == 0) return;
+        var line = LogLine($"Replaced by build #{newerBuildId} before its time came.");
+        var reason = DeliveryProposalLog.ReplacedReason(newerBuildId);
+        foreach (var id in ids)
+        {
+            var now = DateTime.UtcNow;
+            var changed = await _db.OeProjectDeliveries
+                .Where(d => d.Id == id && d.Status == ProjectDeliveryStatus.Scheduled)
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(d => d.Status, ProjectDeliveryStatus.Dismissed)
+                    .SetProperty(d => d.DismissReason, reason)
+                    .SetProperty(d => d.ReplacedByProjectBuildId, newerBuildId)
+                    .SetProperty(d => d.FinishedAt, now)
+                    .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line)
+                    .SetProperty(d => d.UpdatedAt, now), ct);
+            if (changed > 0)
+            {
+                await MarkAppsNotSentAsync(id, $"Not sent: build #{newerBuildId} replaced this deployment.", ct);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The deployment pipelines that deploy <paramref name="projectBuildId"/> without
+    /// waiting for approval, each with the person it runs as (null once that account is
+    /// gone). Same build rules as <see cref="ProposeReleasesForBuildAsync"/>. Whether the
+    /// target is still a sandbox, and whether that person may still deploy, is decided by
+    /// <see cref="DeployWithoutApprovalAsync"/> under their identity.
+    /// </summary>
+    public async Task<List<DeploymentWithoutApproval>> ListDeploymentsWithoutApprovalAsync(int projectBuildId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        if (await PreparableBuildPipelineAsync(projectBuildId, ct) is not { } buildPipelineId)
+        {
+            return [];
+        }
+        return await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.DeletedAt == null
+                        && r.PrepareReleaseOnNewBuild
+                        && r.DeployWithoutApproval
+                        && r.ArtifactSource == ReleaseArtifactSource.Build
+                        && r.BuildPipelineId == buildPipelineId)
+            .OrderBy(r => r.Id)
+            // A disabled account runs nothing, as with building on push: the build is
+            // prepared for approval instead.
+            .Select(r => new DeploymentWithoutApproval(r.Id,
+                r.DeployWithoutApprovalByUser != null && r.DeployWithoutApprovalByUser.Status == UserStatus.Active
+                    ? r.DeployWithoutApprovalByUserId
+                    : null))
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Deploys <paramref name="projectBuildId"/> through <paramref name="releasePipelineId"/>
+    /// without waiting for approval, as the current user, who must be the person that
+    /// turned the option on (the caller runs it under their identity). Refused unless the
+    /// target environment is a sandbox right now, and with every check an approval makes:
+    /// their access, the environment's state, the build and the pipeline's settings. Any
+    /// waiting prepared deployment of an older build is replaced. Scheduled by the
+    /// pipeline's rule, like an approval. Returns the new delivery's id, or null when this
+    /// build already has one here. Throws <see cref="PlanValidationException"/> with the
+    /// reason when it can't deploy, <see cref="ProjectAccessDeniedException"/> when the
+    /// person may no longer deploy; the caller then prepares it for approval instead.
+    /// </summary>
+    public async Task<int?> DeployWithoutApprovalAsync(int releasePipelineId, int projectBuildId, CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        var rp = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.Id == releasePipelineId && r.DeletedAt == null)
+            .Select(r => new
+            {
+                r.PrepareReleaseOnNewBuild,
+                r.DeployWithoutApproval,
+                r.DeployWithoutApprovalByUserId,
+                EnvName = r.ProjectEnvironment!.Name,
+                EnvType = r.ProjectEnvironment.Type,
+            })
+            .FirstOrDefaultAsync(ct)
+            ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
+        if (!rp.PrepareReleaseOnNewBuild || !rp.DeployWithoutApproval)
+        {
+            throw Validation("DeployWithoutApproval", "This deployment pipeline no longer deploys without approval.");
+        }
+        if (rp.DeployWithoutApprovalByUserId is null || rp.DeployWithoutApprovalByUserId != _orgContext.CurrentUserId)
+        {
+            throw new InvalidOperationException(
+                $"Deployment pipeline {releasePipelineId} deploys without approval as user {rp.DeployWithoutApprovalByUserId}, not {_orgContext.CurrentUserId}.");
+        }
+        // Checked now, not only when the option was saved: an environment can change type.
+        if (!BcEnvironmentTypes.IsSandbox(rp.EnvType))
+        {
+            throw Validation("DeployWithoutApproval",
+                $"{rp.EnvName} is no longer a sandbox, so its deployments have to be approved.");
+        }
+
+        var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct);
+
+        // Once per build, and never behind a newer one: a build processed again, or an
+        // older build finishing after a newer one, changes nothing.
+        if (await _db.OeProjectDeliveries.AsNoTracking()
+                .AnyAsync(d => d.ReleasePipelineId == releasePipelineId
+                               && d.ProjectBuildId >= projectBuildId
+                               && d.Status != ProjectDeliveryStatus.Dismissed, ct))
+        {
+            return null;
+        }
+
+        var waiting = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.ReleasePipelineId == releasePipelineId
+                        && d.Status == ProjectDeliveryStatus.Proposed
+                        && d.ProjectBuildId < projectBuildId)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        await ReplaceWaitingProposalsAsync(waiting, projectBuildId, ct);
+        // An older build's unapproved deployment still waiting for its time (a delivery
+        // window) is replaced too, so a day's builds don't all install when it opens.
+        await ReplaceWaitingDeploymentsWithoutApprovalAsync(releasePipelineId, projectBuildId, ct);
+
+        var now = DateTime.UtcNow;
+        var when = plan.RuleTime(now);
+        var opening = LogLine(DeliveryProposalLog.DeployedWithoutApproval(projectBuildId, await CurrentUserNameAsync(ct)));
+        var delivery = await WriteDeliveryAsync(orgId, plan, when, forceSyncOnce: false, proposed: false, ct, opening, withoutApproval: true);
+        if (when <= delivery.CreatedAt)
+        {
+            await _queue.EnqueueAsync(new DeliveryJob(delivery.Id, AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "capturing identity for a delivery")), ct);
+        }
+        _logger.LogInformation(
+            "Deploying build {BuildId} through deployment pipeline {ReleasePipelineId} ({Env}) without approval as delivery {DeliveryId}, for {ScheduledFor:o}.",
+            projectBuildId, releasePipelineId, plan.EnvName, delivery.Id, when);
+        return delivery.Id;
     }
 
     /// <summary>
@@ -1837,7 +2029,7 @@ public sealed class DeliveryService
     {
         var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.ProjectId == delivery.ProjectId && e.Name == delivery.EnvironmentName)
-            .Select(e => new { e.Id, e.ApplicationFamily })
+            .Select(e => new { e.Id, e.ApplicationFamily, e.Type })
             .FirstOrDefaultAsync(ct);
 
         BcEnvironment? live;
@@ -1849,7 +2041,9 @@ public sealed class DeliveryService
         {
             _logger.LogWarning("Delivery {DeliveryId}: couldn't re-read environment {Env} before publishing: {Message}.",
                 delivery.Id, delivery.EnvironmentName, ex.Message);
-            return null;
+            // Without the live answer, the type as last read decides: an unapproved
+            // deployment never goes ahead on a guess.
+            return NotASandboxRefusal(delivery, env?.Type);
         }
 
         if (live is null)
@@ -1866,6 +2060,13 @@ public sealed class DeliveryService
                     .SetProperty(e => e.StatusFetchedAt, stamped), ct);
         }
 
+        if (NotASandboxRefusal(delivery, live.Type) is { } notSandbox)
+        {
+            _logger.LogWarning("Delivery {DeliveryId} refused: it was not approved and environment {Env} is {Type}, not a sandbox.",
+                delivery.Id, delivery.EnvironmentName, live.Type);
+            return notSandbox;
+        }
+
         var refusal = BcEnvironmentStatus.RefusalMessage(delivery.EnvironmentName, live.Status);
         if (refusal is not null)
         {
@@ -1874,6 +2075,16 @@ public sealed class DeliveryService
         }
         return refusal;
     }
+
+    /// <summary>
+    /// The refusal for a deployment nobody approved (#1096) whose environment is not a
+    /// sandbox; null for every other deployment. This is what keeps the option away from a
+    /// Production environment even when the environment's type changed after it was set.
+    /// </summary>
+    private static string? NotASandboxRefusal(OeProjectDelivery delivery, string? environmentType) =>
+        delivery.DeployedWithoutApproval && !BcEnvironmentTypes.IsSandbox(environmentType)
+            ? $"Not deployed: {delivery.EnvironmentName} is no longer a sandbox, and only a sandbox can be deployed to without approval. Deploy this build from the pipeline's page if it should go there."
+            : null;
 
     /// <summary>
     /// Polls one install operation until it reports a terminal state or the per-app
@@ -1970,6 +2181,7 @@ public sealed class DeliveryService
                 DeploymentSchedule = d.DeploymentSchedule,
                 SchemaSyncMode = d.SchemaSyncMode,
                 CancelledByName = d.CancelledByUser != null ? d.CancelledByUser.DisplayName : null,
+                DeployedWithoutApproval = d.DeployedWithoutApproval,
                 DismissReason = d.DismissReason,
                 ReplacedByBuildId = d.ReplacedByProjectBuildId,
                 BuildBranch = d.ProjectBuild != null ? d.ProjectBuild.Branch : null,
@@ -2144,9 +2356,20 @@ public static class DeliveryProposalLog
     public static string Replaced(int newerBuildId) =>
         $"{ReplacedReason(newerBuildId)} before anyone approved it.";
 
+    /// <summary>The first line of a deployment a new build started without approval (#1096).</summary>
+    public static string DeployedWithoutApproval(int buildId, string who) =>
+        $"Started by build #{buildId} when it succeeded, without waiting for approval, because the pipeline deploys to this sandbox automatically. Runs as {who}, who turned that on.";
+
+    /// <summary>Why a pipeline set to deploy without approval prepared this one for approval instead.</summary>
+    public static string NotDeployedWithoutApproval(string reason) =>
+        $"Not deployed automatically: {reason}";
+
     /// <summary>What <see cref="OeProjectDelivery.DismissReason"/> holds for a replacement.</summary>
     public static string ReplacedReason(int newerBuildId) => $"Replaced by build #{newerBuildId}";
 }
+
+/// <summary>A deployment pipeline that deploys a new build without approval, and who it runs as (null once that account is gone).</summary>
+public sealed record DeploymentWithoutApproval(int ReleasePipelineId, int? UserId);
 
 /// <summary>When a rescheduled deployment should install. See <see cref="DeliveryService.RescheduleDeliveryAsync"/>.</summary>
 public enum RescheduleTiming
@@ -2253,6 +2476,9 @@ public sealed record DeliveryHistoryRow(
 
     /// <summary>Who cancelled it. Null unless cancelled, and for cancellations before this was recorded.</summary>
     public string? CancelledByName { get; init; }
+
+    /// <summary>True when a new build started it without waiting for approval (#1096).</summary>
+    public bool DeployedWithoutApproval { get; init; }
 
     /// <summary>The branch the deployed build was made from, when it was built here.</summary>
     public string? BuildBranch { get; init; }

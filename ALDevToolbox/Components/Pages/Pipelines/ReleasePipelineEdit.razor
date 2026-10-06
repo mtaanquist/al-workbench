@@ -368,8 +368,24 @@
                                             <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
                                             <span>Prepare a deployment when a new build succeeds</span>
                                         </label>
-                                        <small class="field__hint">The deployment waits on this pipeline's page until someone approves it. A newer build replaces one still waiting. Nothing is installed before then.</small>
+                                        <small class="field__hint">@PrepareHint</small>
                                     </div>
+                                    @if (_prepareOnNewBuild && ChosenEnvironment is not null && !ChosenEnvironmentIsSandbox)
+                                    {
+                                        <p class="field__hint">To deploy new builds without waiting for approval, choose a sandbox as the target environment. Production environments always wait for approval.</p>
+                                    }
+                                    @if (_prepareOnNewBuild && ChosenEnvironmentIsSandbox)
+                                    {
+                                        <div class="field">
+                                            <label class="@(_deployWithoutApproval ? "check is-checked" : "check")">
+                                                <input id="rpe-without-approval" type="checkbox" checked="@_deployWithoutApproval" disabled="@_saving"
+                                                       @onchange="e => _deployWithoutApproval = (bool)(e.Value ?? false)" />
+                                                <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                                <span>Deploy it automatically, without waiting for approval</span>
+                                            </label>
+                                            <small class="field__hint">@WithoutApprovalHint</small>
+                                        </div>
+                                    }
                                 </div>
                             </section>
                         }
@@ -458,6 +474,9 @@
     private string _schemaSyncMode = BcSyncMode.Add;
     private bool _forceSyncAck;
     private bool _prepareOnNewBuild;
+    private bool _deployWithoutApproval;
+    // Who deployments without approval run as, for an existing pipeline that has it on.
+    private string? _withoutApprovalBy;
     // The branch rule: only builds from _allowedBranch (blank = the default branch).
     private bool _restrictBranch;
     private string _allowedBranch = string.Empty;
@@ -552,6 +571,24 @@
         _environmentId == 0 ? null : _environments?.FirstOrDefault(e => e.Id == _environmentId);
 
     /// <summary>
+    /// Only a sandbox may be deployed to without approval (#1096). The server refuses it
+    /// for anything else and checks again before every such deployment.
+    /// </summary>
+    private bool ChosenEnvironmentIsSandbox =>
+        ChosenEnvironment is { } env && BcEnvironmentTypes.IsSandbox(env.Type);
+
+    private string PrepareHint => DeploysWithoutApproval
+        ? "Each new build is deployed automatically. A newer build replaces a deployment still waiting for its time."
+        : "The deployment waits on this pipeline's page until someone approves it. A newer build replaces one still waiting. Nothing is installed before then.";
+
+    private bool DeploysWithoutApproval => _prepareOnNewBuild && _deployWithoutApproval && ChosenEnvironmentIsSandbox;
+
+    private string WithoutApprovalHint =>
+        "Installs at the time chosen under 'When a deployment installs', using your access, and recorded as started by you. "
+        + (_withoutApprovalBy is { Length: > 0 } who ? $"Saving makes you the person it runs as instead of {who}. " : "")
+        + "Production environments always wait for approval.";
+
+    /// <summary>
     /// Whether the picked environment has a delivery window. The "in its delivery
     /// window" choice is offered only when it does, and re-evaluated whenever the
     /// environment changes, because the window belongs to the environment.
@@ -639,6 +676,8 @@
             _schemaSyncMode = rp.SchemaSyncMode;
             _forceSyncAck = rp.SchemaSyncMode == BcSyncMode.ForceSync; // already-saved choice is pre-acknowledged
             _prepareOnNewBuild = rp.PrepareReleaseOnNewBuild;
+            _deployWithoutApproval = rp.DeployWithoutApproval;
+            _withoutApprovalBy = rp.DeployWithoutApproval ? rp.DeployWithoutApprovalByUser?.DisplayName : null;
             _restrictBranch = rp.RestrictBranch;
             _allowedBranch = rp.AllowedBranch ?? string.Empty;
         }
@@ -831,7 +870,8 @@
                 _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
                 _prepareOnNewBuild && _artifactSource == ReleaseArtifactSource.Build,
                 _restrictBranch && _artifactSource == ReleaseArtifactSource.Build,
-                string.IsNullOrWhiteSpace(_allowedBranch) ? null : _allowedBranch.Trim());
+                string.IsNullOrWhiteSpace(_allowedBranch) ? null : _allowedBranch.Trim(),
+                _deployWithoutApproval && _prepareOnNewBuild && _artifactSource == ReleaseArtifactSource.Build && ChosenEnvironmentIsSandbox);
 
             int id;
             if (_editing && Id is { } rid)
