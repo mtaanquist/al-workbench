@@ -483,6 +483,15 @@ replace whatever is in it. And a branch name already taken is stepped
 (`-2`, `-3`, ...) rather than moved: the first attempt's pull request may be
 under review.
 
+A repository holding a solution is joined as that solution by the service
+itself, not by the page: it reads the repository's `workspace.aldt.toml` and
+prefers it to anything the caller passed, so `add_extension_to_repository` and
+`generate_extension` with `addToRepository` name the extension with the
+solution's prefix, refuse a folder or ID range already in use, and update the
+`.code-workspace` and the saved settings exactly as the page does. Example files
+are left out of every repository, saved settings or not - see
+`generation-engine.md`, "Adding to an existing workspace".
+
 `GitHubRepositoryService.ResolveAsync` is the gate both callers go through. It
 refuses anything outside the connected GitHub organisation - the picker offers
 nothing else, so neither does the MCP tool - and then asks GitHub, with the

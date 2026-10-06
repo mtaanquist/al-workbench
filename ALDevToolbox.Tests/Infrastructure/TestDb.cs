@@ -456,7 +456,8 @@ public sealed class TestDb : IDisposable
         AppDbContext ctx,
         ALDevToolbox.Services.GitHub.GitHubAppClient client,
         ALDevToolbox.Services.GitHub.GitHubAccessService access) =>
-        new(NewGenerationService(ctx), NewGitHubRepositoryService(ctx, client, access), access, client, OrgContext,
+        new(NewGenerationService(ctx), new WorkspaceConfigService(ctx), NewGitHubRepositoryService(ctx, client, access),
+            access, client, OrgContext,
             NullLogger<ALDevToolbox.Services.GitHub.GitHubExtensionDeliveryService>.Instance);
 
     /// <summary>"Create repository": generation, the membership gate, and the first commit.</summary>

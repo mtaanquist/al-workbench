@@ -79,6 +79,7 @@
         {
             <input type="hidden" name="WorkspaceName" value="@_workspaceContext.WorkspaceName" />
             <input type="hidden" name="WorkspaceShortName" value="@_workspaceContext.ShortName" />
+            <input type="hidden" name="WorkspaceExtensionPrefix" value="@_workspaceContext.ExtensionPrefix" />
             @foreach (var key in _workspaceContext.ModuleKeys)
             {
                 <input type="hidden" name="WorkspaceModuleKeys" value="@key" />
@@ -147,10 +148,36 @@
                            pattern="^[A-Za-z][A-Za-z0-9 ]*$" required
                            title="Letters, digits and spaces only; must start with a letter."
                            @bind="_extensionName" @bind:event="oninput" />
-                    <span class="field__hint">
-                        Kept as you type it inside the extension. Spaces come out of the
-                        folder name. Letters, digits and spaces only; must start with a letter.
-                    </span>
+                    @if (BuildSiblingContext() is { } joining)
+                    {
+                        @* The prefix is added for the user rather than asked
+                           for, so the hint shows the name it produces. *@
+                        <span class="field__hint">
+                            @if (string.IsNullOrWhiteSpace(_extensionName))
+                            {
+                                <text>
+                                    Type just the name, e.g. Banking. <strong>@joining.ExtensionPrefix</strong>
+                                    is added for you, like the solution's other extensions. Letters,
+                                    digits and spaces only.
+                                </text>
+                            }
+                            else
+                            {
+                                <text>
+                                    Will be called <strong>@joining.ExtensionNameFor(_extensionName)</strong>,
+                                    like the other extensions in this solution, in a folder called
+                                    <code class="code">@FolderName/</code>. Letters, digits and spaces only.
+                                </text>
+                            }
+                        </span>
+                    }
+                    else
+                    {
+                        <span class="field__hint">
+                            Kept as you type it inside the extension. Spaces come out of the
+                            folder name. Letters, digits and spaces only; must start with a letter.
+                        </span>
+                    }
                     <FieldError Field="ExtensionName" Errors="_errors" />
                 </div>
                 <div class="field field--full">
@@ -265,13 +292,23 @@
                    the option needs. *@
                 <div class="preview__head-tools">
                     <Switch Name="IncludeExamples" Label="Include example files"
-                            @bind-Checked="_includeExamples" />
+                            Checked="IncludeExamples" Disabled="JoinsExistingSolution"
+                            CheckedChanged="v => _includeExamples = v" />
                     <StatusPill Tone="live">Live</StatusPill>
                 </div>
             </div>
             @* Switch drives component state, so it posts nothing of its
                own - this carries the value into the form post. *@
-            <input type="hidden" name="IncludeExamples" value="@(_includeExamples ? "true" : "false")" />
+            <input type="hidden" name="IncludeExamples" value="@(IncludeExamples ? "true" : "false")" />
+            @if (JoinsExistingSolution)
+            {
+                <div class="card__body">
+                    <p class="field__hint">
+                        Example files are off when adding to an existing solution: it already
+                        has its own, so these would be duplicates.
+                    </p>
+                </div>
+            }
             <FolderTreePreview Root="BuildPreview()" />
         </div>
     </Preview>
@@ -518,15 +555,10 @@
     private record WorkspaceImportContext(
         string WorkspaceName,
         string? ShortName,
+        string ExtensionPrefix,
+        bool IncludeExamples,
         IReadOnlyList<string> ModuleKeys,
-        IReadOnlyList<WorkspaceExtensionIdentity> Extensions)
-    {
-        /// <summary>
-        /// The workspace's short name with its fallback applied, so a sibling
-        /// is named "CRO Banking" beside "CRO Core".
-        /// </summary>
-        public string EffectiveShortName => CustomerNaming.ShortNameOrFallback(ShortName, WorkspaceName);
-    }
+        IReadOnlyList<WorkspaceExtensionIdentity> Extensions);
 
     // Import-config feedback. _importFileName labels the picked file next to
     // the button; _importMessage is the success/seed line shown underneath;
@@ -584,9 +616,29 @@
 
     // The folder name drops the spaces the display name in app.json keeps,
     // mirroring how the generator derives it (CustomerNaming). See issue #520.
+    // Joining a solution it drops the solution's prefix too, as the
+    // generator does.
     private string FolderName => string.IsNullOrWhiteSpace(_extensionName)
         ? "MyExtension"
-        : CustomerNaming.Apply(_extensionName, NamingStyle.PascalCase);
+        : BuildSiblingContext()?.FolderNameFor(_extensionName)
+            ?? CustomerNaming.Apply(_extensionName, NamingStyle.PascalCase);
+
+    /// <summary>
+    /// Whether the extension is being added to something that already exists:
+    /// a solution loaded from a saved config, or a picked repository. Either
+    /// way the template's example files stay out - see
+    /// <see cref="IncludeExamples"/>.
+    /// </summary>
+    private bool JoinsExistingSolution => _workspaceContext is not null || _repository is not null;
+
+    /// <summary>
+    /// The example-files choice that actually applies. The generator and the
+    /// pull request both leave examples out when joining a solution, so the
+    /// switch shows off and is locked rather than offering a choice that
+    /// would be ignored. The user's own choice is kept for when they go back
+    /// to a standalone extension.
+    /// </summary>
+    private bool IncludeExamples => _includeExamples && !JoinsExistingSolution;
 
     private string WorkspaceFoldersSnippet => $"{{ \"path\": \"{FolderName}\" }}";
 
@@ -675,11 +727,11 @@
             RuntimeVersion: runtime,
             IdRangeFrom: _idRangeFrom,
             IdRangeTo: _idRangeTo,
-            IncludeExamples: _includeExamples,
+            IncludeExamples: IncludeExamples,
             Publisher: _orgConfig?.Settings.DefaultPublisher ?? string.Empty,
             Dependencies: _dependencies);
 
-        SetErrors(await Gen.ValidateExtensionAsync(plan));
+        SetErrors(await Gen.ValidateExtensionAsync(plan, BuildSiblingContext()));
         return _errors.Count > 0 ? null : plan;
     }
 
@@ -728,17 +780,25 @@
     /// </summary>
     private string ExtensionNamePlaceholder => _workspaceContext is null
         ? "e.g. My Custom Feature"
-        : $"e.g. {_workspaceContext.EffectiveShortName} Banking";
+        : "e.g. Banking";
 
-    /// <summary>The workspace this extension is joining, in the shape the generator takes it.</summary>
+    /// <summary>
+    /// The workspace this extension is joining, in the shape the generator
+    /// takes it, with its prefix settled the way the generator settles it so
+    /// the name and folder shown here are the ones it writes.
+    /// </summary>
     private SiblingWorkspaceContext? BuildSiblingContext() =>
-        _workspaceContext is null
+        _workspaceContext is null || _orgConfig is null
             ? null
             : new SiblingWorkspaceContext(
                 _workspaceContext.WorkspaceName,
                 _workspaceContext.ModuleKeys,
                 _workspaceContext.Extensions.Select(e => e.Folder).ToList(),
-                _workspaceContext.ShortName);
+                _workspaceContext.ShortName,
+                ExtensionPrefixPolicy.ForExistingWorkspace(
+                    _orgConfig.Settings, _workspaceContext.ExtensionPrefix,
+                    _workspaceContext.ShortName, _workspaceContext.WorkspaceName),
+                SavedExtensions: _workspaceContext.Extensions);
 
     /// <summary>
     /// Picking a repository fills the form in from the settings the workbench
@@ -1036,7 +1096,7 @@
             .FirstOrDefault();
         var folders = scaffold?.Folders ?? new List<WorkspaceExtensionFolder>();
         var (workspaceRootPaths, perExtensionPaths) = SplitIncludedFiles();
-        var contents = ExtensionPreviewBuilder.BuildContents(folders, _includeExamples, perExtensionPaths).ToList();
+        var contents = ExtensionPreviewBuilder.BuildContents(folders, IncludeExamples, perExtensionPaths).ToList();
         // Every generated extension folder carries its own saved config so the
         // form can be restored from it later.
         contents.Add(PreviewNode.File(ALDevToolbox.Services.Generation.WorkspaceConfigService.FileName));
@@ -1103,7 +1163,7 @@
             {
                 children.Add(PreviewNode.Extension(
                     ext.Path,
-                    ExtensionPreviewBuilder.BuildContents(ext.Folders, _includeExamples, perExtensionPaths)));
+                    ExtensionPreviewBuilder.BuildContents(ext.Folders, context.IncludeExamples, perExtensionPaths)));
             }
         }
 
@@ -1118,7 +1178,7 @@
                 if (module is null) continue;
                 children.Add(PreviewNode.Extension(
                     module.ExtensionName,
-                    ExtensionPreviewBuilder.BuildContents(module.ExtensionFolders, _includeExamples, perExtensionPaths)));
+                    ExtensionPreviewBuilder.BuildContents(module.ExtensionFolders, context.IncludeExamples, perExtensionPaths)));
             }
         }
 
@@ -1216,15 +1276,15 @@
 
             case WorkspaceConfigService.WorkspaceKind when import.Workspace is not null:
                 ApplyImportedWorkspace(import.Workspace, import.Extensions);
-                // Extensions include the workspace's own Core, so the modules
-                // are what is left after it.
-                var modules = Math.Max(0, import.Extensions.Count - 1);
-                var modulePhrase = modules == 0
-                    ? "no modules"
-                    : $"its {modules} {(modules == 1 ? "module" : "modules")}";
+                // Extensions include the workspace's own Core, so the others
+                // (modules, and extensions added since) are what is left after it.
+                var others = Math.Max(0, import.Extensions.Count - 1);
+                var othersPhrase = others == 0
+                    ? "nothing else"
+                    : $"its {others} other {(others == 1 ? "extension" : "extensions")}";
                 return (import.Extensions.Count > 0
                     ? $"Filled in from {source}: its template, versions, dependencies on Core and "
-                        + $"{modulePhrase}, and an ID range starting after the last one it uses. "
+                        + $"{othersPhrase}, and an ID range starting after the last one it uses. "
                         + "That replaced anything already typed here, the ID range included. "
                         + "Give the extension a name."
                     : $"Filled in from {source}: its template and versions only, because it was saved "
@@ -1284,7 +1344,6 @@
         _description = plan.Description;
         _applicationVersion = plan.ApplicationVersion;
         _runtimeVersion = plan.RuntimeVersion;
-        _includeExamples = plan.IncludeExamples;
 
         if (extensions.Count > 0)
         {
@@ -1322,6 +1381,8 @@
         _workspaceContext = new WorkspaceImportContext(
             plan.WorkspaceName,
             plan.ShortName,
+            plan.ExtensionPrefix,
+            plan.IncludeExamples,
             plan.SelectedModuleKeys.ToList(),
             extensions);
     }
