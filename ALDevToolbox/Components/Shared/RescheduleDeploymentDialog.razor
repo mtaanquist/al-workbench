@@ -405,7 +405,7 @@
     {
         try
         {
-            return await Deliveries.CheckOpenSessionsAsync(o.ReleasePipelineId);
+            return await Deliveries.CheckOpenSessionsForDeliveryAsync(o.DeliveryId);
         }
         catch (Exception ex) when (ex is not (ProjectAccessDeniedException or PlanValidationException))
         {

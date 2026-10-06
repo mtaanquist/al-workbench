@@ -119,9 +119,8 @@ public sealed class PipelineService
 
     /// <summary>
     /// Updates a pipeline's extension selection, publishing target, branch, nightly
-    /// preview check and building on push, and the name that follows from them. Turning the check on makes
-    /// the caller the person it runs as; so does saving while it is paused (its person
-    /// gone or refused), which is how someone with access takes it over. A new name
+    /// preview check and building on push, and the name that follows from them. Saving with the check or
+    /// building on push on makes the caller the person those builds run as. A new name
     /// carries through to the deployment pipelines named after this one.
     /// </summary>
     public async Task UpdatePipelineAsync(int id, PipelineInput input, CancellationToken ct = default)
@@ -141,29 +140,16 @@ public sealed class PipelineService
         pipeline.RequestedAppIdsJson = selectionJson;
         pipeline.GithubReleaseRepositoryId = releaseRepositoryId;
         pipeline.Branch = branch;
-        if (!input.PreviewCheck)
-        {
-            pipeline.PreviewCheckByUserId = null;
-            pipeline.PreviewCheckBlocked = null;
-        }
-        else if (!pipeline.PreviewCheck || pipeline.PreviewCheckByUserId is null || pipeline.PreviewCheckBlocked is not null)
-        {
-            pipeline.PreviewCheckByUserId = _orgContext.CurrentUserId;
-            pipeline.PreviewCheckBlocked = null;
-        }
+        // Whoever saves the pipeline with the preview check or building on push on becomes
+        // the person those builds run as, the way a deployment pipeline's "deploy without
+        // approval" follows whoever saved it. Otherwise one manager could repoint the
+        // branch or the extensions and have the builds clone with another person's
+        // repository access.
+        pipeline.PreviewCheckByUserId = input.PreviewCheck ? _orgContext.CurrentUserId : null;
+        pipeline.PreviewCheckBlocked = null;
         pipeline.PreviewCheck = input.PreviewCheck;
-        // Building on push follows the same rule: turning it on, or saving while it is
-        // paused, makes the caller the person its builds run as.
-        if (!input.BuildOnPush)
-        {
-            pipeline.BuildOnPushByUserId = null;
-            pipeline.BuildOnPushBlocked = null;
-        }
-        else if (!pipeline.BuildOnPush || pipeline.BuildOnPushByUserId is null || pipeline.BuildOnPushBlocked is not null)
-        {
-            pipeline.BuildOnPushByUserId = _orgContext.CurrentUserId;
-            pipeline.BuildOnPushBlocked = null;
-        }
+        pipeline.BuildOnPushByUserId = input.BuildOnPush ? _orgContext.CurrentUserId : null;
+        pipeline.BuildOnPushBlocked = null;
         pipeline.BuildOnPush = input.BuildOnPush;
         pipeline.AutoVersion = input.AutoVersion;
         pipeline.ChangedAppsOnly = input.ChangedAppsOnly;
@@ -178,7 +164,7 @@ public sealed class PipelineService
 
     /// <summary>
     /// Resumes a paused nightly preview check by making the caller the person it runs
-    /// as. Same rule as saving the pipeline while the check is paused.
+    /// as, without editing the pipeline. Same rule as saving it.
     /// </summary>
     public async Task TakeOverPreviewCheckAsync(int id, CancellationToken ct = default)
     {
@@ -203,7 +189,7 @@ public sealed class PipelineService
 
     /// <summary>
     /// Resumes paused building on push by making the caller the person its builds run
-    /// as. Same rule as saving the pipeline while it is paused. The push that found it
+    /// as, without editing the pipeline. Same rule as saving it. The push that found it
     /// paused is not built; the next one is.
     /// </summary>
     public async Task TakeOverBuildOnPushAsync(int id, CancellationToken ct = default)

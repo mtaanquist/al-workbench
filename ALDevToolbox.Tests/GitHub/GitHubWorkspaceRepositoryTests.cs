@@ -973,6 +973,36 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task A_pipeline_name_already_taken_skips_that_branch_but_adds_the_others()
+    {
+        await ReadyAsync();
+        var solutionId = await SeedSolutionAsync("CRONUS Customer", ownedByCaller: true);
+        await using (var seed = _db.NewContext())
+        {
+            // Named by hand like the pipeline the test branch would get, but building another branch.
+            seed.OePipelines.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = solutionId,
+                Name = "test",
+                NameIsCustom = true,
+                Branch = "release",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        var (service, ctx) = NewService(WritableApi());
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(
+            WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
+
+        created.PipelineNames.Should().Equal("main", "staging");
+        created.PipelinesWarning.Should().Contain("not all of its build pipelines");
+    }
+
+    [Fact]
     public async Task A_branch_the_solution_already_has_a_pipeline_for_is_left_alone()
     {
         await ReadyAsync();

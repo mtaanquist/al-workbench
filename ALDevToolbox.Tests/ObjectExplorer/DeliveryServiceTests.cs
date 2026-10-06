@@ -485,6 +485,37 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task RescheduleDeliveryAsync_asks_for_a_time_when_none_was_picked()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(deliveryId, RescheduleTiming.AtTime, atUtc: null);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("ScheduledFor");
+    }
+
+    [Fact]
+    public async Task RescheduleDeliveryAsync_is_refused_without_manage_rights()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var when = DateTime.UtcNow.AddHours(1);
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, when);
+        await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.Visibility, ProjectVisibility.ReadOnly));
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("Someone else");
+
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(deliveryId, RescheduleTiming.AtTime, DateTime.UtcNow.AddHours(8));
+
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).ScheduledFor
+            .Should().BeCloseTo(when, TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
     public async Task RescheduleDeliveryAsync_refuses_a_picked_time_that_has_gone()
     {
         await using var ctx = _db.NewContext();
@@ -753,6 +784,45 @@ public sealed class DeliveryServiceTests : IDisposable
         moved.ScheduledFor.Should().BeCloseTo(at, TimeSpan.FromSeconds(1));
         moved.DeploymentSchedule.Should().Be(BcDeploymentSchedule.Immediate);
         _queue.Reader.TryRead(out _).Should().BeFalse("it isn't due yet");
+    }
+
+    [Fact]
+    public async Task A_move_parks_its_replacement_until_business_centrals_copy_is_cancelled()
+    {
+        var (_, heldId) = await HandedOffAsync();
+        string? statusDuringCancel = null;
+        _apps.DuringRemove = async () =>
+        {
+            await using var peek = _db.NewContext();
+            statusDuringCancel = await peek.OeProjectDeliveries.Where(d => d.Id != heldId).Select(d => d.Status).SingleAsync();
+        };
+
+        var newId = await NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+
+        statusDuringCancel.Should().Be(ProjectDeliveryStatus.Proposed,
+            "a move stopped half way must leave the replacement for a person, not the scheduler");
+        await using var read = _db.NewContext();
+        var moved = await read.OeProjectDeliveries.SingleAsync(d => d.Id == newId);
+        moved.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        moved.TriggeredByUserId.Should().Be(_db.OrgContext.CurrentUserId);
+    }
+
+    [Fact]
+    public async Task A_move_whose_replacement_was_dismissed_meanwhile_says_nothing_will_install()
+    {
+        var (_, heldId) = await HandedOffAsync();
+        _apps.DuringRemove = async () =>
+        {
+            await using var other = _db.NewContext();
+            await other.OeProjectDeliveries.Where(d => d.Id != heldId)
+                .ExecuteUpdateAsync(u => u.SetProperty(d => d.Status, ProjectDeliveryStatus.Dismissed));
+        };
+
+        var act = () => NewService(_db.NewContext()).RescheduleDeliveryAsync(heldId, RescheduleTiming.Now);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Delivery"].Should().Contain("nothing will install");
+        _queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
     [Fact]
@@ -1948,6 +2018,30 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task CheckOpenSessionsForDeliveryAsync_asks_the_environment_the_deployment_installs_to()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+        // The pipeline is pointed at another environment after the deployment was made.
+        var sandbox = new OeProjectEnvironment
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "Sandbox", Type = "Sandbox",
+            FetchedAt = DateTime.UtcNow,
+        };
+        ctx.OeProjectEnvironments.Add(sandbox);
+        await ctx.SaveChangesAsync();
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.ProjectEnvironmentId, sandbox.Id));
+        _admin.Sessions = [Session(1, "ola@cronus.com")];
+
+        var check = await NewService(_db.NewContext()).CheckOpenSessionsForDeliveryAsync(deliveryId);
+
+        check.Should().Be(new OpenSessionsCheck("Production", EndUsers: 1, DelegatedUsers: 0));
+        _admin.Requested.Should().Equal("Production");
+    }
+
+    [Fact]
     public async Task CheckOpenSessionsAsync_reports_a_Business_Central_failure_instead_of_throwing()
     {
         await using var ctx = _db.NewContext();
@@ -2203,6 +2297,24 @@ public sealed class DeliveryServiceTests : IDisposable
         DrainQueue();
         (await NewService(_db.NewContext()).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId)).Should().BeNull();
         (await _db.NewContext().OeProjectDeliveries.CountAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task DeployWithoutApprovalAsync_leaves_a_build_already_deployed_alone_even_when_it_would_now_refuse()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+        (await NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId)).Should().NotBeNull();
+        await using (var change = _db.NewContext())
+        {
+            var envId = await change.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId).Select(r => r.ProjectEnvironmentId).SingleAsync();
+            await change.OeProjectEnvironments.Where(e => e.Id == envId).ExecuteUpdateAsync(u => u.SetProperty(e => e.Type, "Production"));
+        }
+
+        // Processing the build again (a resumed import) must not come back as a refusal,
+        // which would leave a second deployment waiting for approval beside the first.
+        (await NewService(_db.NewContext()).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId)).Should().BeNull();
     }
 
     [Fact]
@@ -2690,10 +2802,14 @@ public sealed class DeliveryServiceTests : IDisposable
         public Exception? RemoveFault { get; set; }
         public bool RemoveTakesEffect { get; set; }
 
-        public Task<BcAppOperation> RemoveScheduledPteVersionAsync(
+        /// <summary>Runs while Business Central is being asked to cancel, to look at or change what the move wrote first.</summary>
+        public Func<Task>? DuringRemove { get; set; }
+
+        public async Task<BcAppOperation> RemoveScheduledPteVersionAsync(
             string accessToken, string applicationFamily, string environmentName, Guid appId, string targetVersion,
             string scheduleKind, CancellationToken ct = default)
         {
+            if (DuringRemove is { } during) await during();
             if (RemoveRefusal is { } refusal) throw new BcApiException(null, refusal);
             if (RemoveFault is { } fault)
             {
@@ -2701,7 +2817,7 @@ public sealed class DeliveryServiceTests : IDisposable
                 throw fault;
             }
             Removed.Add((appId, targetVersion, scheduleKind));
-            return Task.FromResult(Operation(appId, "canceled"));
+            return Operation(appId, "canceled");
         }
 
         private static BcAppOperation Operation(Guid appId, string status, Guid? operationId = null) => new(

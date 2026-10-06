@@ -150,8 +150,8 @@ public sealed class DashboardService
         // them would drift further from what the page shows every day. Feed symbol
         // packages with no source are left off the page, so off the count (#1092).
         var releases = await _db.OeReleases.AsNoTracking()
-            .CountAsync(r => r.DeletedAt == null && r.Status == "ready" && r.Kind != ProjectBuildKind
-                && !(r.DedupKey != null && r.DedupKey.StartsWith(OeRelease.SymbolFeedDedupPrefix) && r.SourceFileCount == 0), ct);
+            .Where(OeRelease.NotAnEmptySymbolPackage)
+            .CountAsync(r => r.DeletedAt == null && r.Status == "ready" && r.Kind != ProjectBuildKind, ct);
         var projects = await _db.OeProjects.AsNoTracking()
             .CountAsync(p => p.DeletedAt == null, ct);
         return new ToolCounts(templates, recipes, releases, projects);

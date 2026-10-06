@@ -264,6 +264,24 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_push_that_arrives_after_a_newer_one_leaves_the_branch_head_alone()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
+        await SeedSolutionTrackingTheRepositoryAsync();
+        var worker = NewWorker();
+        const string Next = "4444444444444444444444444444444444444444";
+
+        await worker.RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push(
+            before: GitHubWebhookPayloads.After, after: Next, pushedAt: 1_790_000_060)), CancellationToken.None);
+        await worker.RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push(pushedAt: 1_790_000_000)), CancellationToken.None);
+
+        var head = (await HeadsAsync()).Single();
+        head.HeadSha.Should().Be(Next, "GitHub does not promise delivery order, so the older push is late, not new");
+        head.PushedAt.Should().Be(DateTimeOffset.FromUnixTimeSeconds(1_790_000_060).UtcDateTime);
+    }
+
+    [Fact]
     public async Task A_force_push_is_flagged_and_replaces_the_stored_commits()
     {
         await ConfigureDeploymentAsync();

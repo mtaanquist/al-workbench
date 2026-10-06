@@ -110,7 +110,7 @@ public sealed class ReleasePaletteSource : IPaletteSource
         // source are left out, as on the releases page (#1092).
         var rows = _db.OeReleases.AsNoTracking()
             .Where(r => r.DeletedAt == null && r.Status != FailedStatus)
-            .Where(r => !(r.DedupKey != null && r.DedupKey.StartsWith(OeRelease.SymbolFeedDedupPrefix) && r.SourceFileCount == 0))
+            .Where(OeRelease.NotAnEmptySymbolPackage)
             .Where(_access.VisibleReleasePredicate(snapshot));
 
         foreach (var term in query.SqlTerms)
