@@ -69,6 +69,11 @@
                                disabled="@_saving" placeholder="e.g. main or release/25.0" spellcheck="false" autocomplete="off" />
                         <small class="field__hint">Builds check out this branch. Leave empty for each repository's default branch.</small>
                     </div>
+                    @* Only where pushes can arrive: a solution repository the connected
+                       GitHub organisation holds, the same list publishing offers. Kept
+                       while it is on, so it can still be turned off. *@
+                    @if (_releaseRepositories is { Count: > 0 } || _buildOnPush)
+                    {
                     <div class="field">
                         <label class="@(_buildOnPush ? "check is-checked" : "check")">
                             <input id="pe-build-on-push" type="checkbox" checked="@_buildOnPush" disabled="@_saving"
@@ -76,8 +81,9 @@
                             <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
                             <span>Build automatically when new commits are pushed</span>
                         </label>
-                        <small class="field__hint">Every push to the branch this pipeline builds starts a build of the pushed commit. Pushes that arrive while a build is running wait their turn, so each one gets its own build. The builds run as the person who turned this on, with their repository access. GitHub repositories only.</small>
+                        <small class="field__hint">Each push to this pipeline's branch (or the default branch, if none is set) gets its own build, one after another. Builds use the repository access of whoever turned this on.</small>
                     </div>
+                    }
                     <div class="field">
                         <label class="@(_previewCheck ? "check is-checked" : "check")">
                             <input id="pe-preview-check" type="checkbox" checked="@_previewCheck" disabled="@_saving"

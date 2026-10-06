@@ -843,7 +843,7 @@ checkbox in the pipeline dialog). Mads chose one build per push on 2026-10-06:
   behind them. When that person is gone, can no longer manage the solution, or has nothing
   to clone with, the push is not built and building on push is **paused** with the reason
   on the pipeline page (`build_on_push_blocked`), where anyone who manages the solution can
-  take it over ("Build them as me"); saving the pipeline while paused does the same. The
+  take it over ("Resume with my access"); saving the pipeline while paused does the same. The
   next push that starts a build lifts the pause.
 - **An ordinary pipeline build otherwise.** Trigger `push`; numbered and published like a
   manual build (build versioning, GitHub release, #934's prepared deployment), compared

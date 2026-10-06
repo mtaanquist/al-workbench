@@ -194,6 +194,24 @@ public sealed class PushBuildTests : IDisposable
             .Should().Be(PushBuildService.NoAccessMessage);
     }
 
+    [Fact]
+    public async Task One_pipelines_refusal_does_not_stop_the_others()
+    {
+        await ConnectAsync();
+        var withToken = await SeedUserAsync("alice@cronus.test");
+        var withoutToken = await SeedUserAsync("bob@cronus.test");
+        await GiveTokenAsync(withToken);
+        var (_, refused) = await SeedSolutionAsync(withoutToken, branch: "main");
+        var (_, built) = await SeedSolutionAsync(withToken, branch: "main");
+
+        await NewWorker(new ReleaseImportQueue()).RunOneAsync(Push(), CancellationToken.None);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == built)).Should().Be(1);
+        (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == refused)).Should().Be(0);
+        (await read.OePipelines.SingleAsync(p => p.Id == refused)).BuildOnPushBlocked.Should().NotBeNull();
+    }
+
     // --- Fixture -------------------------------------------------------------
 
     private static GitHubPushJob Push(

@@ -140,8 +140,8 @@
         @if (_header!.BuildOnPush)
         {
             <span class="meta-item">
-                <span class="meta-item__label">New commits</span>
-                <span class="meta-item__value">@(_header!.BuildOnPushBlocked is { Length: > 0 } ? "Paused" : "Built automatically")</span>
+                <span class="meta-item__label">Build on push</span>
+                <span class="meta-item__value">@(_header!.BuildOnPushBlocked is { Length: > 0 } ? "Paused" : "On")</span>
             </span>
         }
         <span class="meta-item">
@@ -182,11 +182,12 @@
         @if (_header!.BuildOnPushBlocked is { Length: > 0 } pushPaused)
         {
             <Alert Tone="AlertTone.Warn">
-                <span>New commits are not being built automatically: @pushPaused</span>
+                <span>New commits are not being built automatically: @pushPaused@(_canManage ? "" : " Ask someone who manages this solution to resume it.")</span>
                 @if (_canManage)
                 {
-                    <button type="button" class="btn btn--sm" @onclick="TakeOverBuildOnPushAsync" disabled="@_takingOver">
-                        <span>@(_takingOver ? "Saving..." : "Build them as me")</span>
+                    <button type="button" class="btn btn--sm" @onclick="TakeOverBuildOnPushAsync" disabled="@_takingOver"
+                            title="From now on, builds on push use your repository access.">
+                        <span>@(_takingOver ? "Saving..." : "Resume with my access")</span>
                     </button>
                 }
             </Alert>
@@ -1413,7 +1414,7 @@
         b.Status is "ready" or "failed" ? b.FinishedAt ?? b.StartedAt : b.StartedAt;
 
     private static string? StartedBy(BuildRow b) => b.StartedByName is { } n
-        ? b.FromPush ? $"Started by a push, as {n}" : $"Started by {n}"
+        ? b.FromPush ? $"Started by a push, built with {n}'s access" : $"Started by {n}"
         : b.FromPush ? "Started by a push" : null;
 
     /// <summary>

@@ -121,6 +121,14 @@ public sealed class ProjectBuildService
         {
             build.Status = ProjectBuildStatus.Building;
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            // A push may have moved this build onto its own commit between the read
+            // above and the save (ProjectBuildImporter.StartPushBuildAsync). That move
+            // only lands on a queued row, so once this one says building, the commit
+            // read now is the one it builds.
+            if (build.Trigger == ProjectBuildTrigger.Push)
+            {
+                await _db.Entry(build).ReloadAsync(ct).ConfigureAwait(false);
+            }
         }
 
         // The build row carries the target it was started with (so a restart-resumed
@@ -1100,7 +1108,8 @@ public sealed class ProjectBuildService
                 var clonedBranch = branch is null ? await CaptureBranchAsync(gitPath, dest, ct).ConfigureAwait(false) : branch;
                 if (options.HeadSha is { Length: > 0 } headSha && options.RepositoryId == repo.Id)
                 {
-                    var checkedOut = await CheckoutCommitAsync(gitPath, dest, headSha, env, pat, repo, logs, results, ct)
+                    var checkedOut = await CheckoutCommitAsync(gitPath, dest, headSha, env, pat, repo, logs, results,
+                        shallow: options.InstallationToken is not null, ct)
                         .ConfigureAwait(false);
                     if (!checkedOut) continue;
                 }
@@ -1218,7 +1227,7 @@ public sealed class ProjectBuildService
     /// </summary>
     private async Task<bool> CheckoutCommitAsync(
         string gitPath, string cloneDir, string commitSha, Dictionary<string, string> env, string pat,
-        OeProjectRepository repo, List<PendingLog> logs, List<BuildAppResult> results, CancellationToken ct)
+        OeProjectRepository repo, List<PendingLog> logs, List<BuildAppResult> results, bool shallow, CancellationToken ct)
     {
         // The commit reaches this method from a GitHub webhook, so it is checked
         // against what a git object name can be before it goes on a command line.
@@ -1235,20 +1244,18 @@ public sealed class ProjectBuildService
             return false;
         }
 
-        // A build on push usually names a commit the clone already holds, because it
-        // is still on the branch that was just cloned. Checking that out directly
-        // keeps the clone's full history: a shallow fetch of a commit already present
-        // would graft it, and the changelog walks that history (#1079).
-        var local = await _processRunner.RunAsync(new ProcessRunRequest(
-            gitPath, new[] { "-C", cloneDir, "cat-file", "-e", commitSha + "^{commit}" }, cloneDir, env), ct)
+        // A pull-request head is fetched shallow: nothing reads history from that
+        // repository. A build on push is not, because the changelog walks this clone's
+        // history and a shallow fetch would graft it at the pushed commit; usually the
+        // commit is already on the cloned branch and the fetch has nothing to bring (#1079).
+        string[] fetch = shallow
+            // "--" ends git's option parsing, so a revision beginning with a dash
+            // can never be read as a switch.
+            ? ["-C", cloneDir, "fetch", "--depth", "1", "origin", "--", commitSha]
+            : ["-C", cloneDir, "fetch", "origin", "--", commitSha];
+        var outcome = await _processRunner.RunAsync(new ProcessRunRequest(
+            gitPath, fetch, cloneDir, env, BuildCloneTimeout()), ct)
             .ConfigureAwait(false);
-        var outcome = local.Succeeded
-            ? local
-            : await _processRunner.RunAsync(new ProcessRunRequest(
-                // "--" ends git's option parsing, so a revision beginning with a dash
-                // can never be read as a switch.
-                gitPath, new[] { "-C", cloneDir, "fetch", "--depth", "1", "origin", "--", commitSha }, cloneDir, env, BuildCloneTimeout()), ct)
-                .ConfigureAwait(false);
         if (outcome.Succeeded)
         {
             outcome = await _processRunner.RunAsync(new ProcessRunRequest(

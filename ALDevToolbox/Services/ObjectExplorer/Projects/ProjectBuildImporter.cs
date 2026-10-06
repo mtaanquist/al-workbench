@@ -304,8 +304,8 @@ public sealed class ProjectBuildImporter
     /// people other than the one it runs as read it.
     /// </summary>
     internal static string NothingToCloneWithOnPush(RepositoryProvider provider) => provider == RepositoryProvider.GitHub
-        ? "the person it runs as has no connected GitHub account and no GitHub build token."
-        : $"the person it runs as has no build token for {provider.DisplayName()}.";
+        ? "the person it runs as has no GitHub account connected and no GitHub token under Account → Repository access."
+        : $"the person it runs as has no {provider.DisplayName()} token under Account → Repository access.";
 
     /// <summary>
     /// Creates an ingesting project Release for a pull-request build and queues

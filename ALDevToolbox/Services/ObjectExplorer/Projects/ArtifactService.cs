@@ -812,9 +812,7 @@ public sealed record DeliverySummary(
 /// known now). Display only.
 /// </param>
 public sealed record BuildSummary(int BuildId, string Status, string? BcVersion, string? Branch, string? CommitShort, DateTime StartedAt, DateTime? FinishedAt, int ArtifactCount,
-    string? DefaultBranch = null,
-    /// <summary>True when a push to the pipeline's branch started the build rather than a person.</summary>
-    bool FromPush = false)
+    string? DefaultBranch = null)
 {
     /// <summary>The branch to show: the one built, its default branch's name, or a plain "(default branch)".</summary>
     [JsonIgnore]
