@@ -118,6 +118,13 @@ public class OeProjectDelivery
     public string? DismissReason { get; set; }
 
     /// <summary>
+    /// True when a new build started this deployment on its own, through a deployment
+    /// pipeline set to deploy to a sandbox without approval (#1096). The run refuses it
+    /// unless the environment is still a sandbox when it is about to upload.
+    /// </summary>
+    public bool DeployedWithoutApproval { get; set; }
+
+    /// <summary>
     /// The newer build that replaced this prepared release before anyone approved it
     /// (#934), for a <see cref="ProjectDeliveryStatus.Dismissed"/> row; null when a person
     /// dismissed it, and on every other row. A plain id, not a foreign key: it is a fact

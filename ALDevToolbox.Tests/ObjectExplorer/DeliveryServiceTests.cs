@@ -1603,6 +1603,221 @@ public sealed class DeliveryServiceTests : IDisposable
         await dismiss.Should().ThrowAsync<PlanValidationException>();
     }
 
+    // ── Deploying to a sandbox without approval (#1096) ──────────────────────────────
+
+    /// <summary>Makes the seeded environment a sandbox and turns deploying without approval on, as a new current user.</summary>
+    private async Task<int> DeployWithoutApprovalAsSandboxAsync(AppDbContext ctx, Seed seed, string environmentType = "Sandbox")
+    {
+        var userId = await SeedUserAsync("Mads Example");
+        _db.OrgContext.CurrentUserId = userId;
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.Type, environmentType));
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.PrepareReleaseOnNewBuild, true)
+                .SetProperty(r => r.DeployWithoutApproval, true)
+                .SetProperty(r => r.DeployWithoutApprovalByUserId, userId));
+        _admin.OnGet = name => new BcEnvironment(name, "Sandbox") { Status = "Active" };
+        return userId;
+    }
+
+    [Fact]
+    public async Task ListDeploymentsWithoutApprovalAsync_lists_only_pipelines_that_ask_for_it()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        (await NewService(ctx).ListDeploymentsWithoutApprovalAsync(seed.BuildId)).Should().BeEmpty();
+
+        var userId = await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+
+        (await NewService(_db.NewContext()).ListDeploymentsWithoutApprovalAsync(seed.BuildId))
+            .Should().Equal(new DeploymentWithoutApproval(seed.ReleasePipelineId, userId));
+    }
+
+    [Fact]
+    public async Task ListDeploymentsWithoutApprovalAsync_ignores_preview_builds()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+        await MakePreviewAsync(ctx, seed.BuildId, ProjectBuildTarget.NextMajor);
+
+        (await NewService(ctx).ListDeploymentsWithoutApprovalAsync(seed.BuildId)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task DeployWithoutApprovalAsync_schedules_and_queues_it_as_the_person_who_turned_it_on()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var userId = await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+
+        var id = await NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        id.Should().NotBeNull();
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == id);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        delivery.DeployedWithoutApproval.Should().BeTrue();
+        delivery.TriggeredByUserId.Should().Be(userId);
+        delivery.DiagnosticsLog.Should().Contain($"Started by build #{seed.BuildId}").And.Contain("Runs as Mads Example");
+        _queue.Reader.TryRead(out var job).Should().BeTrue("an immediate pipeline deploys right away");
+        job!.DeliveryId.Should().Be(id!.Value);
+        job.Identity.UserId.Should().Be(userId);
+
+        // The same build again changes nothing.
+        DrainQueue();
+        (await NewService(_db.NewContext()).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId)).Should().BeNull();
+        (await _db.NewContext().OeProjectDeliveries.CountAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task DeployWithoutApprovalAsync_refuses_an_environment_that_is_no_longer_a_sandbox()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await DeployWithoutApprovalAsSandboxAsync(ctx, seed, environmentType: "Production");
+
+        var act = () => NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("DeployWithoutApproval");
+        (await _db.NewContext().OeProjectDeliveries.AnyAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId)).Should().BeFalse();
+        _queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task DeployWithoutApprovalAsync_refuses_to_run_as_anyone_but_the_person_who_turned_it_on()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("Someone Else");
+
+        var act = () => NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task DeployWithoutApprovalAsync_replaces_a_proposal_still_waiting_on_an_older_build()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId);
+        await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+        var newer = await SeedBuildAsync(ctx, seed.ProjectId, seed.BuildPipelineId, ProjectBuildStatus.Ready, new[] { "CRONUS Core" });
+
+        await NewService(_db.NewContext()).DeployWithoutApprovalAsync(seed.ReleasePipelineId, newer);
+
+        var rows = await _db.NewContext().OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.ReleasePipelineId == seed.ReleasePipelineId).OrderBy(d => d.Id).ToListAsync();
+        rows.Should().HaveCount(2);
+        rows[0].Status.Should().Be(ProjectDeliveryStatus.Dismissed);
+        rows[0].ReplacedByProjectBuildId.Should().Be(newer);
+        rows[1].Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        rows[1].DeployedWithoutApproval.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ProposeReleasesForBuildAsync_skips_a_pipeline_that_deployed_and_explains_one_that_could_not()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+
+        (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId, deployedWithoutApproval: new HashSet<int> { seed.ReleasePipelineId }))
+            .Should().BeEmpty("it already deployed");
+
+        var prepared = await NewService(_db.NewContext()).ProposeReleasesForBuildAsync(seed.BuildId,
+            notDeployedReasons: new Dictionary<int, string> { [seed.ReleasePipelineId] = "Production is no longer a sandbox." });
+
+        prepared.Should().HaveCount(1);
+        var delivery = await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == prepared[0]);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Proposed);
+        delivery.DeployedWithoutApproval.Should().BeFalse();
+        delivery.DiagnosticsLog.Should().Contain("Not deployed automatically: Production is no longer a sandbox.");
+    }
+
+    [Fact]
+    public async Task RunDeliveryAsync_deploys_an_unapproved_deployment_to_a_sandbox()
+    {
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+            id = (await NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId))!.Value;
+        }
+        DrainQueue();
+
+        await using (var run = _db.NewContext()) (await NewService(run).RunDeliveryAsync(id)).Should().BeTrue();
+
+        _apps.UploadedOrder.Should().NotBeEmpty();
+        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id)).Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+    }
+
+    [Fact]
+    public async Task RunDeliveryAsync_refuses_an_unapproved_deployment_once_the_environment_is_production()
+    {
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+            id = (await NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId))!.Value;
+        }
+        DrainQueue();
+        // The environment was turned into a production one between scheduling and running.
+        _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Active" };
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(id);
+
+        var delivery = await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        delivery.FailureMessage.Should().Contain("no longer a sandbox");
+        _apps.UploadedOrder.Should().BeEmpty("an unapproved deployment never reaches a production environment");
+    }
+
+    [Fact]
+    public async Task RunDeliveryAsync_falls_back_to_the_stored_type_when_the_environment_cannot_be_read()
+    {
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+            id = (await NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId))!.Value;
+            await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.Type, "Production"));
+        }
+        DrainQueue();
+        _admin.OnGet = _ => throw new BcApiException(null, "Couldn't reach the Business Central Admin Center API.");
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(id);
+
+        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id)).Status.Should().Be(ProjectDeliveryStatus.Failed);
+        _apps.UploadedOrder.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RunDeliveryAsync_leaves_an_approved_deployment_to_production_alone()
+    {
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            id = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        }
+        DrainQueue();
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(id);
+
+        _apps.UploadedOrder.Should().NotBeEmpty("the sandbox rule is only for deployments nobody approved");
+    }
+
     private static async Task MakePreviewAsync(AppDbContext ctx, int buildId, string target) =>
         await ctx.OeProjectBuilds.Where(b => b.Id == buildId)
             .ExecuteUpdateAsync(s => s.SetProperty(b => b.BcTarget, target));

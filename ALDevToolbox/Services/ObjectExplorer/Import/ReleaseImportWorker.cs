@@ -85,9 +85,12 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
     /// <summary>
     /// Prepares a release of the finished build through every release pipeline that has
     /// "Prepare a release when a new build succeeds" on (#934). Nothing is sent: the
-    /// release waits for a person to approve it. Swallows everything for the same reason
-    /// <see cref="PublishReleaseAsync"/> does - the build has already succeeded, and
-    /// nothing about preparing a release may turn it into a failed one.
+    /// release waits for a person to approve it. A pipeline set to deploy to a sandbox
+    /// without approval (#1096) deploys it instead, as the person who turned that on;
+    /// when it can't, the build is prepared for approval with the reason in its log.
+    /// Swallows everything for the same reason <see cref="PublishReleaseAsync"/> does -
+    /// the build has already succeeded, and nothing about deploying it may turn it into a
+    /// failed one.
     /// </summary>
     private async Task PrepareReleasesAsync(IServiceProvider services, int releaseId, CancellationToken ct)
     {
@@ -101,7 +104,18 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
             if (buildId is not { } id) return;
 
             var deliveries = services.GetRequiredService<Delivery.DeliveryService>();
-            var prepared = await deliveries.ProposeReleasesForBuildAsync(id, ct).ConfigureAwait(false);
+            var deployed = new HashSet<int>();
+            var notDeployed = new Dictionary<int, string>();
+            var identity = AmbientOrganizationScope.Current
+                ?? throw new InvalidOperationException("No organization in scope when deploying a finished build.");
+            foreach (var due in await deliveries.ListDeploymentsWithoutApprovalAsync(id, ct).ConfigureAwait(false))
+            {
+                var reason = await DeployWithoutApprovalAsync(identity, due, id, ct).ConfigureAwait(false);
+                if (reason is null) deployed.Add(due.ReleasePipelineId);
+                else notDeployed[due.ReleasePipelineId] = reason;
+            }
+
+            var prepared = await deliveries.ProposeReleasesForBuildAsync(id, deployed, notDeployed, ct).ConfigureAwait(false);
             // Someone has to approve them before anything is sent (#1036).
             await services.GetRequiredService<Notifications.DeploymentNotifier>()
                 .ProposedAsync(prepared, ct).ConfigureAwait(false);
@@ -115,6 +129,57 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
             _logger.LogError(ex, "Preparing releases of release {ReleaseId}'s build failed.", releaseId);
         }
     }
+
+    /// <summary>
+    /// Deploys the build through one pipeline set to deploy without approval, in a scope
+    /// of its own under the identity of the person who turned that on, the way a build on
+    /// push runs as its person. Returns null when it deployed (or this build already had
+    /// a deployment there), else why not, for the prepared deployment that takes its place.
+    /// </summary>
+    internal async Task<string?> DeployWithoutApprovalAsync(
+        AmbientOrganizationScope.OrganizationIdentity identity, Delivery.DeploymentWithoutApproval due, int buildId, CancellationToken ct)
+    {
+        if (due.UserId is not { } userId)
+        {
+            return NoLongerHasAccount;
+        }
+        using var ambient = AmbientOrganizationScope.Enter(
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(identity.OrganizationId, identity.IsSystemOrganization, userId));
+        await using var scope = _services.CreateAsyncScope();
+        var deliveries = scope.ServiceProvider.GetRequiredService<Delivery.DeliveryService>();
+        try
+        {
+            await deliveries.DeployWithoutApprovalAsync(due.ReleasePipelineId, buildId, ct).ConfigureAwait(false);
+            return null;
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _logger.LogInformation(
+                "Did not deploy build {BuildId} through deployment pipeline {ReleasePipelineId} without approval: user {UserId} can no longer deploy it.",
+                buildId, due.ReleasePipelineId, userId);
+            return NoAccess;
+        }
+        catch (PlanValidationException ex)
+        {
+            var reason = ex.Errors.Values.FirstOrDefault() ?? "the deployment could not start.";
+            _logger.LogInformation(
+                "Did not deploy build {BuildId} through deployment pipeline {ReleasePipelineId} without approval: {Reason}",
+                buildId, due.ReleasePipelineId, reason);
+            return reason;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Deploying build {BuildId} through deployment pipeline {ReleasePipelineId} without approval failed.",
+                buildId, due.ReleasePipelineId);
+            return "something went wrong starting it.";
+        }
+    }
+
+    internal const string NoLongerHasAccount =
+        "the person who turned on deploying without approval no longer has an account. Turn the option off and on again on the deployment pipeline's page so it runs as you.";
+
+    internal const string NoAccess =
+        "the person who turned on deploying without approval can no longer deploy to this solution. Turn the option off and on again on the deployment pipeline's page so it runs as you.";
 
     /// <summary>
     /// Runs one pull-request build end to end and completes its check run.

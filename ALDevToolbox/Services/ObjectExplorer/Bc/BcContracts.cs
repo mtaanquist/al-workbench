@@ -239,6 +239,10 @@ public static class BcEnvironmentTypes
     /// <summary>True when Business Central calls this environment a production one.</summary>
     public static bool IsProduction(string? value) =>
         string.Equals(value?.Trim(), Production, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when Business Central calls this environment a sandbox. Unknown or blank is not one.</summary>
+    public static bool IsSandbox(string? value) =>
+        string.Equals(value?.Trim(), Sandbox, StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>

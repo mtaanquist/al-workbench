@@ -102,6 +102,25 @@ public class OeReleasePipeline
     public bool PrepareReleaseOnNewBuild { get; set; }
 
     /// <summary>
+    /// When true, a new successful build is deployed straight away instead of being
+    /// prepared for approval: only with <see cref="PrepareReleaseOnNewBuild"/> on, and only
+    /// while the target environment is a sandbox. The type is checked again when the build
+    /// lands and, live, before anything is uploaded, so this can never reach a Production
+    /// environment. Off by default. See <c>.design/saas-delivery.md</c>, "Deploying to a
+    /// sandbox without approval" (#1096).
+    /// </summary>
+    public bool DeployWithoutApproval { get; set; }
+
+    /// <summary>
+    /// Who turned <see cref="DeployWithoutApproval"/> on. Those deployments run as this
+    /// person, the way building on push runs as <see cref="OePipeline.BuildOnPushByUserId"/>:
+    /// their access is checked and the deployment is theirs in the history. Null once that
+    /// user is deleted, which leaves new builds waiting for approval again.
+    /// </summary>
+    public int? DeployWithoutApprovalByUserId { get; set; }
+    public User? DeployWithoutApprovalByUser { get; set; }
+
+    /// <summary>
     /// When true, this pipeline only deploys builds made from <see cref="AllowedBranch"/>,
     /// so a build of a test branch cannot reach the environment by way of a build pipeline
     /// whose branch was changed. On by default for a Production environment. Only builds

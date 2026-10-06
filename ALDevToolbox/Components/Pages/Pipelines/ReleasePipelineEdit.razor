@@ -370,6 +370,18 @@
                                         </label>
                                         <small class="field__hint">The deployment waits on this pipeline's page until someone approves it. A newer build replaces one still waiting. Nothing is installed before then.</small>
                                     </div>
+                                    @if (_prepareOnNewBuild && ChosenEnvironmentIsSandbox)
+                                    {
+                                        <div class="field">
+                                            <label class="@(_deployWithoutApproval ? "check is-checked" : "check")">
+                                                <input id="rpe-without-approval" type="checkbox" checked="@_deployWithoutApproval" disabled="@_saving"
+                                                       @onchange="e => _deployWithoutApproval = (bool)(e.Value ?? false)" />
+                                                <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                                <span>Deploy it straight away, without waiting for approval</span>
+                                            </label>
+                                            <small class="field__hint">@WithoutApprovalHint</small>
+                                        </div>
+                                    }
                                 </div>
                             </section>
                         }
@@ -458,6 +470,9 @@
     private string _schemaSyncMode = BcSyncMode.Add;
     private bool _forceSyncAck;
     private bool _prepareOnNewBuild;
+    private bool _deployWithoutApproval;
+    // Who deployments without approval run as, for an existing pipeline that has it on.
+    private string? _withoutApprovalBy;
     // The branch rule: only builds from _allowedBranch (blank = the default branch).
     private bool _restrictBranch;
     private string _allowedBranch = string.Empty;
@@ -556,6 +571,18 @@
     /// window" choice is offered only when it does, and re-evaluated whenever the
     /// environment changes, because the window belongs to the environment.
     /// </summary>
+    /// <summary>
+    /// Only a sandbox may be deployed to without approval (#1096). The server refuses it
+    /// for anything else and checks again before every such deployment.
+    /// </summary>
+    private bool ChosenEnvironmentIsSandbox =>
+        ChosenEnvironment is { } env && BcEnvironmentTypes.IsSandbox(env.Type);
+
+    private string WithoutApprovalHint =>
+        "Only for a sandbox. A new build is deployed as soon as it succeeds, at the time set above, as "
+        + (_withoutApprovalBy is { Length: > 0 } who ? who : "you")
+        + ". If the environment stops being a sandbox, deployments wait for approval again.";
+
     private bool ChosenEnvironmentHasWindow =>
         ChosenEnvironment is { } env && UpdateWindow.IsConfigured(env.UpdateWindowStart, env.UpdateWindowEnd);
 
@@ -639,6 +666,8 @@
             _schemaSyncMode = rp.SchemaSyncMode;
             _forceSyncAck = rp.SchemaSyncMode == BcSyncMode.ForceSync; // already-saved choice is pre-acknowledged
             _prepareOnNewBuild = rp.PrepareReleaseOnNewBuild;
+            _deployWithoutApproval = rp.DeployWithoutApproval;
+            _withoutApprovalBy = rp.DeployWithoutApproval ? rp.DeployWithoutApprovalByUser?.DisplayName : null;
             _restrictBranch = rp.RestrictBranch;
             _allowedBranch = rp.AllowedBranch ?? string.Empty;
         }
@@ -831,7 +860,8 @@
                 _releaseRepositoryId == 0 ? null : _releaseRepositoryId,
                 _prepareOnNewBuild && _artifactSource == ReleaseArtifactSource.Build,
                 _restrictBranch && _artifactSource == ReleaseArtifactSource.Build,
-                string.IsNullOrWhiteSpace(_allowedBranch) ? null : _allowedBranch.Trim());
+                string.IsNullOrWhiteSpace(_allowedBranch) ? null : _allowedBranch.Trim(),
+                _deployWithoutApproval && _prepareOnNewBuild && _artifactSource == ReleaseArtifactSource.Build && ChosenEnvironmentIsSandbox);
 
             int id;
             if (_editing && Id is { } rid)

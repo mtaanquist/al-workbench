@@ -715,6 +715,93 @@ public sealed class ReleasePipelineServiceTests : IDisposable
         solution.Should().ContainSingle().Which.Should().Be(new ReleaseWaitingForApproval(rpId, "CRONUS to UAT", waiting, buildId));
     }
 
+    // ── Deploying to a sandbox without approval (#1096) ─────────────────────────
+
+    [Fact]
+    public async Task Deploying_without_approval_is_saved_for_a_sandbox_and_runs_as_the_person_who_turned_it_on()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, type: "Sandbox");
+        var first = await SeedUserAsync(ctx, "First Person");
+        _db.OrgContext.CurrentUserId = first;
+        var svc = NewService(ctx);
+
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(
+            projectId, null, buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            PrepareReleaseOnNewBuild: true, DeployWithoutApproval: true));
+
+        var rp = await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.DeployWithoutApproval.Should().BeTrue();
+        rp.DeployWithoutApprovalByUserId.Should().Be(first);
+        (await NewService(_db.NewContext()).ListReleasePipelinesAsync(projectId)).Single().DeployWithoutApproval.Should().BeTrue();
+
+        // Someone else saving it with the option still on keeps whoever turned it on.
+        _db.OrgContext.CurrentUserId = await SeedUserAsync(ctx, "Second Person");
+        var input = new ReleasePipelineInput(
+            projectId, null, buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            PrepareReleaseOnNewBuild: true, DeployWithoutApproval: true);
+        await NewService(_db.NewContext()).UpdateReleasePipelineAsync(id, input);
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id)).DeployWithoutApprovalByUserId.Should().Be(first);
+
+        // Off clears it; on again runs as the person turning it on.
+        await NewService(_db.NewContext()).UpdateReleasePipelineAsync(id, input with { DeployWithoutApproval = false });
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id)).DeployWithoutApprovalByUserId.Should().BeNull();
+        await NewService(_db.NewContext()).UpdateReleasePipelineAsync(id, input);
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id)).DeployWithoutApprovalByUserId
+            .Should().Be(_db.OrgContext.CurrentUserId);
+    }
+
+    [Fact]
+    public async Task Deploying_without_approval_is_refused_for_an_environment_that_is_not_a_sandbox()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "Production");
+
+        var act = () => NewService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
+            projectId, null, buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            PrepareReleaseOnNewBuild: true, DeployWithoutApproval: true));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("DeployWithoutApproval")
+            .WhoseValue.Should().Contain("isn't a sandbox");
+    }
+
+    [Fact]
+    public async Task Deploying_without_approval_needs_a_prepared_deployment_to_skip()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, type: "Sandbox");
+
+        var id = await NewService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
+            projectId, null, buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            PrepareReleaseOnNewBuild: false, DeployWithoutApproval: true));
+
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id)).DeployWithoutApproval.Should().BeFalse();
+    }
+
+    private static async Task<int> SeedUserAsync(AppDbContext ctx, string displayName)
+    {
+        var user = new ALDevToolbox.Domain.Entities.User
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Email = $"u{Guid.NewGuid():N}@example.com",
+            PasswordHash = "x",
+            DisplayName = displayName,
+            Role = ALDevToolbox.Domain.Entities.UserRole.User,
+            Status = ALDevToolbox.Domain.Entities.UserStatus.Active,
+            CreatedAt = DateTime.UtcNow,
+        };
+        ctx.Users.Add(user);
+        await ctx.SaveChangesAsync();
+        return user.Id;
+    }
+
     private static async Task<int> SeedRepositoryAsync(AppDbContext ctx, int projectId)
     {
         var repository = new OeProjectRepository
@@ -764,14 +851,14 @@ public sealed class ReleasePipelineServiceTests : IDisposable
 
     private static async Task<int> SeedEnvironmentAsync(
         AppDbContext ctx, int projectId, string? name = null, string? status = null, bool missing = false,
-        TimeOnly? windowStart = null, TimeOnly? windowEnd = null)
+        TimeOnly? windowStart = null, TimeOnly? windowEnd = null, string type = "Production")
     {
         var env = new OeProjectEnvironment
         {
             OrganizationId = TestDb.DefaultOrgId,
             ProjectId = projectId,
             Name = name ?? "Env " + Guid.NewGuid().ToString("N"),
-            Type = "Production",
+            Type = type,
             Status = status,
             MissingSince = missing ? DateTime.UtcNow : null,
             FetchedAt = DateTime.UtcNow,
