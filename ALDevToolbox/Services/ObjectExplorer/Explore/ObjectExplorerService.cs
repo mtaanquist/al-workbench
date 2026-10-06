@@ -128,7 +128,8 @@ public class ObjectExplorerService
                 DeletedAt: r.DeletedAt,
                 StatusMessage: r.StatusMessage,
                 PipelineName: null,
-                IsPrerelease: r.IsPrerelease))
+                IsPrerelease: r.IsPrerelease,
+                FromSymbolFeed: r.DedupKey != null && r.DedupKey.StartsWith(OeRelease.SymbolFeedDedupPrefix)))
             .ToListAsync(ct);
 
         // Sort in memory: active rows first, then by BC version descending

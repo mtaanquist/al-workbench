@@ -158,6 +158,42 @@ public sealed class ReleasePaletteSourceTests : PaletteSourceVisibilityTestBase
     private const int TestDbOrgId = Infrastructure.TestDb.DefaultOrgId;
 
     /// <summary>
+    /// A symbols package a build pulled from the feeds with no source in it is not on
+    /// the releases page, so the palette does not offer it either; one that carried
+    /// source is offered (#1092).
+    /// </summary>
+    [Fact]
+    public async Task An_empty_symbol_package_from_the_feeds_is_not_offered()
+    {
+        await SeedWorldAsync();
+        await SeedFeedSymbolsAsync("CRONUS Banking - Import 28.6.0.0 (symbols)", "symbols:aaaa:28.6.0.0", files: 0);
+        await SeedFeedSymbolsAsync("CRONUS Banking - PSP 28.6.0.0 (symbols)", "symbols:bbbb:28.6.0.0", files: 3);
+
+        var results = await SearchAsync("cronus banking");
+
+        results.Select(r => r.Title).Should().Equal("CRONUS Banking - PSP 28.6.0.0 (symbols)");
+    }
+
+    private async Task SeedFeedSymbolsAsync(string label, string dedupKey, int files)
+    {
+        await using var ctx = Db.NewContext();
+        ctx.OeReleases.Add(new OeRelease
+        {
+            OrganizationId = TestDbOrgId,
+            Label = label,
+            BcVersion = "28.6",
+            DedupKey = dedupKey,
+            Kind = "third_party",
+            Status = "ready",
+            SourceFileCount = files,
+            ImportedAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>
     /// A Microsoft OnPrem artifact import: the one kind of release that records
     /// a country, inside its dedup key. Mirrors
     /// <c>BcArtifactIndex.FormatLabel</c> / <c>FormatDedupKey</c>.

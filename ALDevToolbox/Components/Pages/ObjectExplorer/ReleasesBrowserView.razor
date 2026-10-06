@@ -273,9 +273,11 @@
         // tool — except each pipeline's latest ready build, which rides along
         // on the Third-party tab. Only ready releases are browsable, so the
         // ingesting/failed rows the admin list needs are filtered out here
-        // (the hero's "Ready" pill is honest by construction).
+        // (the hero's "Ready" pill is honest by construction). Symbol packages a
+        // build pulled from the feeds with no source in them are left out too
+        // (#1092).
         _releases = (await ObjectExplorer.ListReleasesAsync())
-            .Where(r => r.Status == "ready")
+            .Where(r => r.Status == "ready" && !r.IsEmptySymbolPackage)
             .ToList();
         _pipelineReleases = await ObjectExplorer.ListLatestPipelineBuildReleasesAsync();
     }

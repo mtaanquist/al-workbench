@@ -1,5 +1,6 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using Microsoft.EntityFrameworkCore;
@@ -146,9 +147,11 @@ public sealed class DashboardService
         // later. Pipeline builds are excluded for the same reason: they are
         // oe_releases rows too, but /object-explorer does not list them (they
         // live in the Artifacts tool), and there is one per build, so counting
-        // them would drift further from what the page shows every day.
+        // them would drift further from what the page shows every day. Feed symbol
+        // packages with no source are left off the page, so off the count (#1092).
         var releases = await _db.OeReleases.AsNoTracking()
-            .CountAsync(r => r.DeletedAt == null && r.Status == "ready" && r.Kind != ProjectBuildKind, ct);
+            .CountAsync(r => r.DeletedAt == null && r.Status == "ready" && r.Kind != ProjectBuildKind
+                && !(r.DedupKey != null && r.DedupKey.StartsWith(OeRelease.SymbolFeedDedupPrefix) && r.SourceFileCount == 0), ct);
         var projects = await _db.OeProjects.AsNoTracking()
             .CountAsync(p => p.DeletedAt == null, ct);
         return new ToolCounts(templates, recipes, releases, projects);

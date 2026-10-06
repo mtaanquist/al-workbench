@@ -642,13 +642,15 @@
     /// the same kind. Microsoft code and customisations live in separate apps
     /// now, so a cross-kind compare is not one anyone makes, and with hundreds
     /// of customer releases imported the full list buried the few worth
-    /// comparing against. Pipeline builds are not in this list; they use
+    /// comparing against. A symbol package a build pulled from the feeds with no
+    /// source in it is not on the releases page and is left out here too (#1092).
+    /// Pipeline builds are not in this list; they use
     /// <c>ObjectExplorerService.ListBuildCompareCandidatesAsync</c> instead.
     /// </summary>
     internal static List<ReleaseListItem> CompareCandidates(
         IEnumerable<ReleaseListItem> releases, int releaseId, string releaseKind) =>
         releases
-            .Where(r => r.Id != releaseId && r.Status == "ready" && r.DeletedAt is null)
+            .Where(r => r.Id != releaseId && r.Status == "ready" && r.DeletedAt is null && !r.IsEmptySymbolPackage)
             .Where(r => r.Kind == releaseKind)
             .ToList();
 
