@@ -10,10 +10,12 @@
     "These repositories still target an older Business Central" (issue #630),
     under the untracked-repositories panel on the Solutions page.
 
-    Named user: a consultant who has just imported a new Business Central
-    release and wants to know which customer repositories are still on last
-    year's - and to get the pull requests that move them on without opening
-    twelve repositories by hand.
+    Named user: a consultant who wants to know which customer repositories
+    still target an older Business Central than the customer's production
+    environment runs - and to get the pull requests that move them on without
+    opening twelve repositories by hand. A solution with no production
+    environment is measured against its sandbox, and one with no environment
+    at all (not live yet) is not checked (issue #1081).
 
     Silent unless it has something to say: the organisation has to allow GitHub
     repositories, the person looking has to have linked their own account, and
@@ -62,7 +64,7 @@
                         <a class="drift__name" href="@repo.HtmlUrl" target="_blank" rel="noopener">@repo.Repository</a>
                         @if (repo.CurrentApplication.Length > 0)
                         {
-                            <span class="drift__on">on Business Central @repo.CurrentApplication</span>
+                            <span class="drift__on">on Business Central @repo.CurrentApplication. @ComparedWith(repo)</span>
                         }
                         <details class="drift__what">
                             <summary>What would change</summary>
@@ -133,9 +135,44 @@
         }
     }
 
-    private string Subheading => _summary?.TargetVersion is { } version
-        ? $"Business Central {version} is imported here. These repositories' app.json still ask for an older version."
-        : "These repositories' app.json ask for older versions than the workbench knows about.";
+    /// <summary>
+    /// What the repositories were measured against (issue #1081): each solution's
+    /// production environment, and the newest imported release only for the
+    /// solutions that have no production environment with a known version.
+    /// </summary>
+    private string Subheading
+    {
+        get
+        {
+            var measured = _summary?.Repositories.Where(r => r.TargetApplication.Length > 0).ToList() ?? [];
+            if (measured.Count == 0)
+                return "These repositories' app.json ask for older versions than the workbench knows about.";
+            if (measured.Any(r => r.EnvironmentType is null))
+                return "These repositories' app.json still ask for an older Business Central. Check again to compare "
+                    + "them with their solution's production environment.";
+            return measured.Any(r => r.EnvironmentType == "Sandbox")
+                ? "These repositories' app.json still ask for an older Business Central than their solution's "
+                    + "production environment runs, or its sandbox where it has no production environment yet."
+                : "These repositories' app.json still ask for an older Business Central than their solution's "
+                    + "production environment runs.";
+        }
+    }
+
+    /// <summary>One repository's yardstick, in a sentence under its name.</summary>
+    private static string ComparedWith(DependencyDriftRepository repo)
+    {
+        var version = repo.TargetApplication;
+        return repo.EnvironmentType switch
+        {
+            null => $"Compared with the newest imported release, Business Central {version}.",
+            "Sandbox" => repo.Environment is { } sandbox
+                ? $"{repo.Solution} has no production environment, so its sandbox (\"{sandbox}\") was used: Business Central {version}."
+                : $"Compared with the sandbox of another solution that tracks this repository, on Business Central {version}.",
+            _ => repo.Environment is { } production
+                ? $"The production environment of {repo.Solution} (\"{production}\") is on Business Central {version}."
+                : $"Compared with the production environment of another solution that tracks this repository, on Business Central {version}.",
+        };
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -181,8 +218,8 @@
     }
 
     /// <summary>
-    /// Runs the scan the release import runs, against the newest Business
-    /// Central release the workbench holds - so somebody who has just tidied a
+    /// Runs the scan the release import runs - each repository against its
+    /// solution's production environment, or its sandbox where there is none - so somebody who has just tidied a
     /// repository by hand can see it drop off the list.
     /// </summary>
     private async Task CheckAgainAsync()
