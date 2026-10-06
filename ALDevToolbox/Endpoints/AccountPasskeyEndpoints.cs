@@ -74,7 +74,7 @@ internal static class AccountPasskeyEndpoints
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             await passkeys.DeleteAsync(org.CurrentUserId!.Value, id, ct);
-            ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=passkey-deleted");
+            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=passkey-deleted");
         }).RequireAuthorization();
 
         app.MapPost("/auth/account/passkeys/{id:int}/rename", async (
@@ -86,12 +86,12 @@ internal static class AccountPasskeyEndpoints
             try
             {
                 await passkeys.RenameAsync(org.CurrentUserId!.Value, id, form["Name"].ToString(), ct);
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.OkQuery}=passkey-renamed");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.OkQuery}=passkey-renamed");
             }
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.First();
-                ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
             }
         }).RequireAuthorization();
 

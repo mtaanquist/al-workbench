@@ -9,6 +9,7 @@ internal static class RouteConstants
 {
     public const string Login = "/login";
     public const string Account = "/account";
+    public const string AccountSecurity = "/account/security";
     public const string AdminUsers = "/admin/administration/users";
     public const string AdminUsersNew = "/admin/administration/users/new";
     public const string AdminTemplates = "/admin/templates";

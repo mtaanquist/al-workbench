@@ -36,6 +36,11 @@ public sealed class AccountTabAddressTests : IDisposable
     [InlineData("/account/Security", "/account/security")]
     [InlineData("/account/nonsense", "/account")]
     [InlineData("/account/2", "/account")]
+    [InlineData("/account/security,notifications", "/account")]
+    [InlineData("/account?section=security&err=Totp&msg=Can%27t%20do%20A%26B%2Bc", "/account/security?err=Totp&msg=Can%27t%20do%20A%26B%2Bc")]
+    [InlineData("/account?ok=x&section=ai&msg=y", "/account/ai?ok=x&msg=y")]
+    [InlineData("/account?err=NewPassword&msg=Too%20short", "/account/security?err=NewPassword&msg=Too%20short")]
+    [InlineData("/account?ok=passkey-added", "/account/security?ok=passkey-added")]
     public async Task An_address_settles_on_the_tab_s_own(string asked, string settled)
     {
         using var factory = new EndpointFactory(_db);

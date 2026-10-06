@@ -89,7 +89,7 @@ internal static class AccountEndpoints
         var user = await db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == org.CurrentUserId!.Value, ct);
         if (!auth.VerifyPassword(password, user.PasswordHash))
         {
-            ctx.Response.Redirect($"{RouteConstants.Account}?{RouteConstants.ErrQuery}=Password&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Password is incorrect.")}");
+            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Password is incorrect.")}");
             return null;
         }
         return user;

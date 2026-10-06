@@ -1413,12 +1413,16 @@ else
     private Section ResolveSection()
     {
         var named = SectionName ?? SectionParam;
-        // A number parses as an enum value too; /account/2 is not a tab.
-        if (Enum.TryParse<Section>(named, ignoreCase: true, out var explicitSection)
-            && Enum.IsDefined(explicitSection) && !int.TryParse(named, out _))
+        Section? explicitSection = named?.ToLowerInvariant() switch
         {
-            return explicitSection;
-        }
+            "profile" => Section.Profile,
+            "notifications" => Section.Notifications,
+            "security" => Section.Security,
+            "ai" => Section.Ai,
+            "repos" => Section.Repos,
+            _ => null,
+        };
+        if (explicitSection is { } section) return section;
         if (Required == "1") return Section.Security;
         if (CameFromRepositoriesTab) return Section.Repos;
         var code = Ok ?? Error;
@@ -1426,9 +1430,10 @@ else
         {
             "display-name" => Section.Profile,
             "password" or "totp-disabled" or "email-mfa-sent" or "email-mfa-enabled"
-                or "email-mfa-disabled" or "passkey-deleted" or "passkey-renamed"
+                or "email-mfa-disabled" or "passkey-added" or "passkey-deleted" or "passkey-renamed"
                 or "ms-linked" or "ms-unlinked"
-                or "Totp" or "Email" or "Code" or "Password" => Section.Security,
+                or "Totp" or "Email" or "Code" or "Password" or "CurrentPassword" or "NewPassword"
+                or "Passkey" => Section.Security,
             "token-revoked" or "token-created" => Section.Ai,
             "github-linked" or "github-unlinked" => Section.Repos,
             _ => Section.Profile,
@@ -1443,6 +1448,7 @@ else
         "email-mfa-sent" => "We sent you a verification code. Enter it below to turn on email codes.",
         "email-mfa-enabled" => "Email codes turned on.",
         "email-mfa-disabled" => "Email codes turned off.",
+        "passkey-added" => "Passkey added.",
         "passkey-deleted" => "Passkey removed.",
         "passkey-renamed" => "Passkey renamed.",
         "ms-linked" => "Microsoft account connected. You can now use \"Sign in with Microsoft\" on the login page.",
