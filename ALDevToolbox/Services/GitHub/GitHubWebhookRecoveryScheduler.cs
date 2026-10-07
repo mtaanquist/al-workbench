@@ -50,7 +50,8 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
     /// <summary>
     /// The most log pages one sweep reads. A hundred deliveries a page; the first
     /// sweep after a restart reads up to three days, and a busy GitHub organisation
-    /// can log more than this in that time, so the newest are the ones covered.
+    /// can log more than this in that time, so the newest are read first and the
+    /// rest over the following sweeps, each picking up where the last stopped.
     /// </summary>
     internal const int MaxPages = 20;
 
@@ -74,15 +75,31 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
     private readonly DateTime _startedAt;
 
     private bool _orphansClosed;
-    private DateTime? _lastSweepAt;
+
+    // When the last sweep that read the newest stretch of the log down to its
+    // floor began: the next one reads back only to here, less the overlap.
+    private DateTime? _readThrough;
+
+    // Older stretches a sweep's page budget did not reach, newest first: the
+    // cursor to resume from, how far back the log had been read when it stopped,
+    // and how far back the stretch runs.
+    private readonly List<(string Cursor, DateTime ReachedBack, DateTime Floor)> _gaps = new();
+
+    // Events seen to have got through (guid, when seen), so a failure read in a
+    // later sweep than its success is still recognised as delivered.
+    private readonly Dictionary<string, DateTime> _delivered = new(StringComparer.Ordinal);
+
+    // Failed entries a sweep read but did not act on (no room in the queue, or
+    // GitHub was struggling), carried to the next sweep by id.
+    private readonly Dictionary<long, GitHubHookDelivery> _pending = new();
 
     // Per event (the delivery guid GitHub keeps across redeliveries): how many
     // times this process asked for it, and when it last did, so the map can be
     // pruned past the lookback.
     private readonly Dictionary<string, (int Count, DateTime LastAt)> _attempts = new(StringComparer.Ordinal);
 
-    // Log entries already acted on. A sweep's overlap reads the same failed entry
-    // twice; the second read must not ask again before the first resend is logged.
+    // Log entries GitHub took a resend of. A sweep's overlap reads the same failed
+    // entry twice; the second read must not ask again before the first resend is logged.
     private readonly Dictionary<long, DateTime> _resentEntries = new();
 
     public GitHubWebhookRecoveryScheduler(
@@ -144,36 +161,22 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
 
         var now = _clock.GetUtcNow().UtcDateTime;
         var oldest = now - Lookback;
-        var since = _lastSweepAt is { } last && last - Overlap > oldest ? last - Overlap : oldest;
-
         var github = scope.ServiceProvider.GetRequiredService<GitHubAppClient>();
-        var log = new List<GitHubHookDelivery>();
-        string? cursor = null;
-        var pages = 0;
-        var complete = false;
-        while (pages < MaxPages)
+        var log = await ReadLogAsync(github, now, oldest, ct).ConfigureAwait(false);
+
+        // An event got through when any of its attempts did. Remembered across
+        // sweeps: the success and the failure it answers can be read sweeps apart.
+        foreach (var delivery in log.Where(d => d.Succeeded))
         {
-            var page = await github.ListHookDeliveriesAsync(cursor, ct).ConfigureAwait(false);
-            pages++;
-            log.AddRange(page.Deliveries.Where(d => d.DeliveredAt >= since));
-            if (page.NextCursor is null || page.Deliveries.Count == 0 || page.Deliveries.Min(d => d.DeliveredAt) < since)
-            {
-                complete = true;
-                break;
-            }
-            cursor = page.NextCursor;
-        }
-        if (!complete)
-        {
-            _logger.LogWarning(
-                "Read {Pages} pages of GitHub's webhook delivery log back to {Oldest:O} without reaching {Since:O}; failures older than that are not resent.",
-                pages, log.Count > 0 ? log.Min(d => d.DeliveredAt) : now, since);
+            _delivered[delivery.Guid] = now;
         }
 
-        // An event got through when any of its attempts did; the rest are what to resend.
-        var delivered = log.Where(d => d.Succeeded).Select(d => d.Guid).ToHashSet(StringComparer.Ordinal);
         var due = log
-            .Where(d => IsResentEvent(d) && IsWorthResending(d.StatusCode) && !delivered.Contains(d.Guid))
+            .Where(d => IsResentEvent(d) && IsWorthResending(d.StatusCode))
+            // What an earlier sweep found but did not get to.
+            .Concat(_pending.Values)
+            .Where(d => d.DeliveredAt >= oldest && !_delivered.ContainsKey(d.Guid))
+            .DistinctBy(d => d.Id)
             .GroupBy(d => d.Guid, StringComparer.Ordinal)
             // GitHub resends the same payload whichever attempt is named, so the
             // newest one stands for the event, ordered by when the event first
@@ -185,19 +188,21 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
             .OrderBy(e => e.FirstAt)
             .Select(e => e.Delivery)
             .ToList();
+        _pending.Clear();
 
         // Only as many as the queue has room for: a resend refused again spends
-        // one of the event's attempts for nothing. The rest wait for the next sweep.
+        // one of the event's attempts for nothing. The rest wait for the next sweep,
+        // carried by id rather than by reading their part of the log again.
         var room = Math.Max(0, GitHubWebhookQueue.Capacity / 2 - _queue.Backlog);
         var resent = 0;
         var asked = 0;
-        var leftOver = false;
+        var gitHubStruggling = false;
         foreach (var delivery in due)
         {
-            if (asked >= room)
+            if (asked >= room || gitHubStruggling)
             {
-                leftOver = true;
-                break;
+                _pending[delivery.Id] = delivery;
+                continue;
             }
             ct.ThrowIfCancellationRequested();
 
@@ -216,7 +221,7 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
                     // Not knowing is not a yes; the next sweep asks again.
                     _logger.LogWarning(ex,
                         "Could not tell whether the pull_request delivery {Guid} is still current; not resent this time.", delivery.Guid);
-                    leftOver = true;
+                    _pending[delivery.Id] = delivery;
                     continue;
                 }
                 if (current != true)
@@ -230,36 +235,155 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
             }
 
             asked++;
-            var count = (_attempts.TryGetValue(delivery.Guid, out var tried) ? tried.Count : 0) + 1;
-            _attempts[delivery.Guid] = (count, now);
-            _resentEntries[delivery.Id] = now;
             try
             {
                 await github.RedeliverHookDeliveryAsync(delivery.Id, ct).ConfigureAwait(false);
-                resent++;
-                _logger.LogInformation(
-                    "Asked GitHub to resend a {Event} delivery ({Guid}) we answered {Status} at {DeliveredAt:O} (attempt {Attempt} of {MaxAttempts}).",
-                    delivery.Event, delivery.Guid, delivery.StatusCode, delivery.DeliveredAt, count, MaxAttempts);
             }
-            catch (GitHubApiException ex)
+            catch (GitHubApiException ex) when (!IsTransient(ex))
             {
-                // One delivery GitHub will not resend (too old, say) is not the others'.
+                // GitHub will not resend this one (gone, or older than it keeps), and
+                // asking again will not change that. Settled; the others are not.
                 _logger.LogWarning(ex,
-                    "GitHub would not resend the {Event} delivery {Guid} ({DeliveryId}).",
+                    "GitHub would not resend the {Event} delivery {Guid} ({DeliveryId}); not asking for it again.",
                     delivery.Event, delivery.Guid, delivery.Id);
+                _attempts[delivery.Guid] = (MaxAttempts, now);
+                continue;
             }
+            catch (Exception ex) when (ex is GitHubApiException or HttpRequestException)
+            {
+                // GitHub is struggling or rate limiting us. No new attempt was made,
+                // so none is counted: this one and the rest are asked for next sweep.
+                _logger.LogWarning(ex,
+                    "GitHub could not take the resend of the {Event} delivery {Guid} ({DeliveryId}); asking again next time.",
+                    delivery.Event, delivery.Guid, delivery.Id);
+                _pending[delivery.Id] = delivery;
+                gitHubStruggling = true;
+                continue;
+            }
+
+            // Counted only once GitHub took it: the new attempt is in its log now,
+            // and this entry must not be asked for again before that attempt shows.
+            var count = (_attempts.TryGetValue(delivery.Guid, out var tried) ? tried.Count : 0) + 1;
+            _attempts[delivery.Guid] = (count, now);
+            _resentEntries[delivery.Id] = now;
+            resent++;
+            _logger.LogInformation(
+                "Asked GitHub to resend a {Event} delivery ({Guid}) we answered {Status} at {DeliveredAt:O} (attempt {Attempt} of {MaxAttempts}).",
+                delivery.Event, delivery.Guid, delivery.StatusCode, delivery.DeliveredAt, count, MaxAttempts);
         }
 
-        // The next sweep only reads back to here, so it moves on only when this one
-        // read the whole window and asked for everything it found. Otherwise the
-        // next sweep reads the same window again.
-        if (complete && !leftOver)
-        {
-            _lastSweepAt = now;
-        }
         Prune(oldest);
         return resent;
     }
+
+    /// <summary>
+    /// Reads the part of the log no earlier sweep has: the newest stretch, down to
+    /// where the last complete read of it began, then whatever older stretch a page
+    /// budget left unread, resumed from where it stopped. At most
+    /// <see cref="MaxPages"/> pages in all, so a busy log is read over several
+    /// sweeps rather than the whole window being read again every five minutes.
+    /// </summary>
+    private async Task<List<GitHubHookDelivery>> ReadLogAsync(
+        GitHubAppClient github, DateTime now, DateTime oldest, CancellationToken ct)
+    {
+        var log = new List<GitHubHookDelivery>();
+        var floor = _readThrough is { } through && through - Overlap > oldest ? through - Overlap : oldest;
+        var top = await ReadStretchAsync(github, cursor: null, floor, MaxPages, isGap: false, log, ct).ConfigureAwait(false);
+        if (top.Failed)
+        {
+            // Nothing moves: the next sweep reads the same stretch again.
+            return log;
+        }
+        if (top.StoppedAt is { } stoppedAt)
+        {
+            _gaps.Insert(0, (stoppedAt, top.ReachedBack, floor));
+            _logger.LogInformation(
+                "Read {Pages} pages of GitHub's webhook delivery log without reaching {Floor:O}; the rest is read over the next sweeps.",
+                top.Pages, floor);
+        }
+        _readThrough = now;
+
+        // A stretch whose cursor is already past the window holds nothing GitHub
+        // would resend any more.
+        _gaps.RemoveAll(g => g.ReachedBack < oldest);
+        var pagesLeft = MaxPages - top.Pages;
+        while (pagesLeft > 0 && _gaps.Count > 0)
+        {
+            var (cursor, _, gapFloor) = _gaps[0];
+            var gap = await ReadStretchAsync(
+                github, cursor, gapFloor > oldest ? gapFloor : oldest, pagesLeft, isGap: true, log, ct).ConfigureAwait(false);
+            pagesLeft -= gap.Pages;
+            if (gap.Failed) break;
+            if (gap.StoppedAt is { } next)
+            {
+                _gaps[0] = (next, gap.ReachedBack, gapFloor);
+            }
+            else
+            {
+                _gaps.RemoveAt(0);
+            }
+        }
+        return log;
+    }
+
+    /// <param name="Pages">How many pages were read.</param>
+    /// <param name="StoppedAt">The cursor of the next page when the page budget ran out first; null when the stretch was read to its floor.</param>
+    /// <param name="ReachedBack">The oldest delivery on the last page read.</param>
+    /// <param name="Failed">GitHub could not be read; what was read before that is kept.</param>
+    private readonly record struct StretchRead(int Pages, string? StoppedAt, DateTime ReachedBack, bool Failed);
+
+    /// <summary>
+    /// Reads log pages from <paramref name="cursor"/> (null for the newest) until one
+    /// reaches past <paramref name="floor"/>, the log ends, or <paramref name="maxPages"/>
+    /// are read, adding every delivery at or after the floor to <paramref name="log"/>.
+    /// <paramref name="isGap"/> says it resumes an older stretch from a saved cursor.
+    /// </summary>
+    private async Task<StretchRead> ReadStretchAsync(
+        GitHubAppClient github, string? cursor, DateTime floor, int maxPages, bool isGap,
+        List<GitHubHookDelivery> log, CancellationToken ct)
+    {
+        var pages = 0;
+        var reachedBack = DateTime.MaxValue;
+        while (pages < maxPages)
+        {
+            GitHubHookDeliveryPage page;
+            try
+            {
+                page = await github.ListHookDeliveriesAsync(cursor, ct).ConfigureAwait(false);
+            }
+            catch (GitHubApiException ex) when (isGap && !IsTransient(ex))
+            {
+                // GitHub no longer takes this cursor, so the stretch behind it cannot
+                // be reached; give it up rather than ask for it every sweep.
+                _logger.LogWarning(ex, "GitHub refused a page of its webhook delivery log; that stretch is skipped.");
+                return new StretchRead(pages, null, reachedBack, Failed: false);
+            }
+            catch (Exception ex) when (ex is GitHubApiException or HttpRequestException)
+            {
+                _logger.LogWarning(ex, "Could not read GitHub's webhook delivery log; reading it again next time.");
+                return new StretchRead(pages, cursor, reachedBack, Failed: true);
+            }
+            pages++;
+            log.AddRange(page.Deliveries.Where(d => d.DeliveredAt >= floor));
+            if (page.Deliveries.Count > 0) reachedBack = page.Deliveries.Min(d => d.DeliveredAt);
+            if (page.NextCursor is null || page.Deliveries.Count == 0 || reachedBack < floor)
+            {
+                return new StretchRead(pages, null, reachedBack, Failed: false);
+            }
+            cursor = page.NextCursor;
+        }
+        return new StretchRead(pages, cursor, reachedBack, Failed: false);
+    }
+
+    /// <summary>
+    /// Whether GitHub's refusal is about GitHub rather than the delivery: a server
+    /// error, a timeout, or rate limiting (a 429, or the 403 GitHub answers when the
+    /// App's rate limit is spent). Asking again later can succeed.
+    /// </summary>
+    internal static bool IsTransient(GitHubApiException ex) =>
+        (int)ex.StatusCode is >= 500 or 408 or 429
+        || (ex.StatusCode == System.Net.HttpStatusCode.Forbidden
+            && ex.Message.Contains("rate limit", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>The pull-request actions the endpoint builds on.</summary>
     private static readonly HashSet<string> PullRequestBuildActions =
@@ -312,6 +436,10 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
         foreach (var id in _resentEntries.Where(e => e.Value < oldest).Select(e => e.Key).ToList())
         {
             _resentEntries.Remove(id);
+        }
+        foreach (var guid in _delivered.Where(d => d.Value < oldest).Select(d => d.Key).ToList())
+        {
+            _delivered.Remove(guid);
         }
     }
 
