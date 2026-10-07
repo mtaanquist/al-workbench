@@ -201,6 +201,35 @@ public sealed class ProjectBuildServiceTests
         ProjectBuildService.IsTestSegment(segment).Should().Be(expected);
     }
 
+    [Theory]
+    [InlineData("dd0be2ea-f733-4d65-bb34-a28f4624fb14", "Library Assert", true)]
+    [InlineData("{23DE40A6-DFE8-4F80-80DB-D70F83CE8CAF}", "", true)]
+    [InlineData("", "Any", true)]
+    [InlineData("11111111-0000-0000-0000-000000000001", "Tests-TestLibraries", true)]
+    [InlineData("63ca2fa4-4f03-4f2b-a480-172fef340d3f", "System Application", false)]
+    [InlineData("11111111-0000-0000-0000-000000000001", "CRONUS Test Helpers", false)]
+    public void An_app_that_depends_on_Microsofts_test_framework_is_a_test_app(string id, string name, bool expected)
+    {
+        var manifest = new AppJsonManifest("app", "CRONUS App", "CRONUS", "1.0.0.0", "29.0.0.0", null, null,
+            [new AppJsonDependency(id, name)]);
+
+        AppJsonManifestParser.IsTestApp(manifest).Should().Be(expected);
+    }
+
+    [Fact]
+    public void An_app_with_no_dependencies_is_not_a_test_app() =>
+        AppJsonManifestParser.IsTestApp(new AppJsonManifest("app", "CRONUS App", "CRONUS", "1.0.0.0", null, null, null, []))
+            .Should().BeFalse();
+
+    [Fact]
+    public void The_note_for_skipped_test_apps_names_each_once()
+    {
+        ProjectBuildService.DescribeSkippedTestApps(["A Tests"]).Should()
+            .Be("Not built: A Tests. It depends on Microsoft's test framework, so it is a test app rather than an extension to ship.");
+        ProjectBuildService.DescribeSkippedTestApps(["A Tests", "B Tests", "A Tests"]).Should()
+            .Be("Not built: A Tests, B Tests. They depend on Microsoft's test framework, so they are test apps rather than extensions to ship.");
+    }
+
     // ── SelectTargetMajorMinor ──────────────────────────────────────────
 
     [Fact]
