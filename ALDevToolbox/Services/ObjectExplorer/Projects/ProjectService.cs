@@ -278,6 +278,7 @@ public sealed class ProjectService
         else if (input.Slug is not null) project.Slug = await FreeSlugAsync(SolutionSlug.Derive(shortName ?? name), existingId: id, ct);
         project.DefaultArtifactCountry = country;
         project.UpdatedAt = DateTime.UtcNow;
+        var toggled = false;
         if (input.AutoUpdatePullRequests is { } auto && auto != project.AutoUpdatePullRequests)
         {
             // Turning it on makes the saver the person the pull requests are opened
@@ -285,9 +286,17 @@ public sealed class ProjectService
             project.AutoUpdatePullRequests = auto;
             project.AutoUpdatePullRequestsByUserId = auto ? _orgContext.CurrentUserId : null;
             project.AutoUpdatePullRequestsBlocked = null;
+            toggled = true;
         }
 
+        var gitHubBefore = GitHubRepositoryKeys(project);
         ReconcileRepositories(project, repos, orgId);
+        // Only a repository that was not there before - added, or its URL changed - is
+        // somewhere the previous person never agreed to write. Removing one is not.
+        if (!toggled && GitHubRepositoryKeys(project).Except(gitHubBefore).Any())
+        {
+            await FollowRepositoryChangeAsync(project, ct);
+        }
 
         await SaveTranslatingNameClashAsync(ct);
         _logger.LogInformation("Updated project {ProjectId} ({Name}); now {RepoCount} repo(s).",
@@ -300,10 +309,10 @@ public sealed class ProjectService
 
     /// <summary>
     /// Makes the acting person the one automatic update pull requests are opened as,
-    /// and clears whatever held the last run up - "Resume with my access" on the
+    /// and clears whatever held the last run up - "Resume with my GitHub account" on the
     /// Repositories tab (#1104). Nothing happens when the setting is off.
     /// </summary>
-    /// <exception cref="PlanValidationException">The solution is gone.</exception>
+    /// <exception cref="PlanValidationException">The solution is gone, or the caller has no GitHub account connected.</exception>
     /// <exception cref="ProjectAccessDeniedException">The caller may not manage this solution.</exception>
     public async Task ResumeAutoUpdatePullRequestsAsync(int projectId, CancellationToken ct = default)
     {
@@ -315,6 +324,12 @@ public sealed class ProjectService
             ?? throw Validation("Name", "This solution no longer exists.");
         await _access.EnsureCanManageAsync(project.Id, project.CreatedByUserId, ct);
         if (!project.AutoUpdatePullRequests) return;
+        // Taking it over without a GitHub account would only swap one reason it has
+        // stopped for another, and clear the warning until the night says so again.
+        if (!await HasGitHubAccountAsync(userId, ct))
+        {
+            throw Validation("AutoUpdatePullRequests", DependencyDriftService.NotLinkedRefusal);
+        }
 
         project.AutoUpdatePullRequestsByUserId = userId;
         project.AutoUpdatePullRequestsBlocked = null;
@@ -387,6 +402,7 @@ public sealed class ProjectService
             DisplayName = display,
         });
         project.UpdatedAt = DateTime.UtcNow;
+        if (repository.Provider == RepositoryProvider.GitHub) await FollowRepositoryChangeAsync(project, ct);
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Added {Url} to project {ProjectId} ({Name}).", url, project.Id, project.Name);
@@ -397,6 +413,46 @@ public sealed class ProjectService
         await WarmDiscoveryAsync(project.Id, ct);
         return project.Name;
     }
+
+    /// <summary>The solution's GitHub repositories, keyed the way <see cref="ReconcileRepositories"/> matches them.</summary>
+    private static HashSet<string> GitHubRepositoryKeys(OeProject project) =>
+        project.Repositories
+            .Where(r => r.Provider == RepositoryProvider.GitHub)
+            .Select(r => GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(r.Url))
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Makes the acting person the one automatic update pull requests are opened as,
+    /// when they add a GitHub repository to the solution (or change one's address) while
+    /// it is on - the "whoever
+    /// last saved" rule building on push follows (#1101). Otherwise anyone who manages a
+    /// Public solution could add a repository they cannot write to and have the nightly
+    /// run open pull requests there with somebody else's GitHub account, which the
+    /// button, running as whoever presses it, would refuse them.
+    ///
+    /// <para>When the acting person has no GitHub account connected, they still take it
+    /// over, and the solution shows it as stopped straight away, with "Resume with my
+    /// GitHub account" for anyone who manages it - the same pause the nightly run would
+    /// reach. Nothing is opened as the previous person in between. See
+    /// <c>.design/github-integration-phase2.md</c>.</para>
+    /// </summary>
+    private async Task FollowRepositoryChangeAsync(OeProject project, CancellationToken ct)
+    {
+        if (!project.AutoUpdatePullRequests) return;
+        if (_orgContext.CurrentUserId is not { } userId || userId == project.AutoUpdatePullRequestsByUserId) return;
+
+        var linked = await HasGitHubAccountAsync(userId, ct);
+        project.AutoUpdatePullRequestsByUserId = userId;
+        project.AutoUpdatePullRequestsBlocked = linked ? null : DependencyDriftService.AutomaticNotLinkedMessage;
+        _logger.LogInformation(
+            "User {UserId} changed the repositories of solution {ProjectId}, so its automatic update pull requests are now opened as them (GitHub account connected: {Linked}).",
+            userId, project.Id, linked);
+    }
+
+    /// <summary>Whether <paramref name="userId"/> has connected a GitHub account - read from the database, without asking GitHub.</summary>
+    private Task<bool> HasGitHubAccountAsync(int userId, CancellationToken ct) =>
+        _db.UserExternalLogins.AsNoTracking()
+            .AnyAsync(l => l.UserId == userId && l.Provider == GitHubAccessService.ProviderName, ct);
 
     /// <summary>
     /// Brings <paramref name="project"/>'s repository rows in line with the posted

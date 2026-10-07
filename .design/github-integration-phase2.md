@@ -1110,22 +1110,54 @@ Business Central, the way Dependabot does it, instead of remembering to press th
   building on push and the nightly preview check (`oe_projects.auto_update_pull_requests_by_user_id`,
   `SET NULL` on delete). There is no GitHub App fallback. When that person is gone, can no
   longer manage the solution, or has no GitHub account connected, the solution says so
-  (`auto_update_pull_requests_blocked`) with "Resume with my access", which makes whoever
-  presses it the new person. A repository GitHub refused shows the same way; the next
-  night tries again either way.
+  (`auto_update_pull_requests_blocked`) with "Resume with my GitHub account", which makes
+  whoever presses it the new person. A repository GitHub refused shows the same way; the
+  next night tries again either way.
+- **Adding a repository takes it over (#1177).** Whoever saves the solution with a GitHub
+  repository it did not have before - added, or an address changed - while the setting is
+  on becomes the person the pull requests are opened as - the "whoever last saved" rule of
+  building on push - so nobody can add a repository they cannot write to and have it
+  written to with somebody else's account. Removing a repository does not change who it
+  is. When the new person has no GitHub account connected, the solution shows it as
+  stopped straight away, with the same Resume button; nothing is opened as the previous
+  person in between. While the list has such an unsaved change, the section tells the
+  person that saving will use their GitHub account. Resume refuses a person with no
+  GitHub account connected rather than clearing the warning, and the warning is worded
+  to the person it is about ("you have not connected your GitHub account").
 - **`DependencyDriftScheduler` runs once a night at 05:00 UTC**, after the environment
   refresh, for every organisation with an imported first-party release: it rescans (so a
   customer moved to a new version during the day is measured against it, and the
   Solutions panel stays current with nobody pressing Check again), then for each solution
   with the setting on, opens the pull requests of its repositories that are behind, in a
   scope signed in as that person. Opt out with `DISABLE_DEPENDENCY_DRIFT_SCHEDULER=1`.
+- **Only its own environment counts (#1177).** A repository two solutions share is measured
+  once, against one of their environments. The automatic run of a solution acts only on
+  findings measured against one of that solution's own environments, so a customer still
+  on 25 is never offered the 27 the other customer moved to. The panel and the button are
+  unchanged. To keep that from silencing a solution that asked for automatic pull
+  requests, the scan measures a shared repository against a solution with the setting on
+  before one without it (then the oldest, as before). When two solutions sharing a
+  repository both have it on, only the older one's run opens pull requests there; the
+  other's customer is not measured for it.
+- **Paced, and stopped by a rate limit (#1177).** The automatic run leaves a second between
+  the writes it makes to GitHub (GitHub's guidance for requests that create content; its
+  secondary limit is about 80 a minute per account) - closing a superseded pull request
+  and commenting on it count as two - and the spacing is kept per person across all their
+  solutions in one nightly pass. It stops at the first rate-limit
+  refusal. The solution does not show that as stopped - there is nothing for it to fix -
+  and the person's other solutions wait for the next night too. The button stops at a
+  rate limit as well, and says to try again in a few minutes.
 - **Each version is offered once per repository.** Every update pull request the
   workbench opens or joins, by hand or not, is recorded in `github_update_pull_requests`
   (repository, version, number, whether it was automatic). The automatic run skips a
-  version that has a row, because a closed pull request is somebody's answer and GitHub
-  usually deletes its branch with it. For the same reason it does not step past an
-  `aldt/bump-bc-<version>` branch that exists with no open pull request, as the button
-  does. An open one is joined, never doubled. The button is unaffected: a person can
+  version that has a row and no open pull request, because a closed pull request is
+  somebody's answer and GitHub usually deletes its branch with it. The row, not the
+  branch, is what decides: like the button, the run walks `aldt/bump-bc-<version>`, `-2`,
+  `-3` and joins the first one with an open pull request (so one a person opened as `-2`
+  is joined too), stepping past branches with none. A branch with neither an open pull
+  request nor a row is a run that failed between creating the branch and opening the pull
+  request; it is stepped past like any other, so one failed night never strands a
+  version. An open one is joined, never doubled. The button is unaffected: a person can
   always ask again.
 - **A newer version supersedes the older automatic pull request.** Once the pull request
   for, say, 29.0 is open, the automatic ones for older versions on the same repository are
