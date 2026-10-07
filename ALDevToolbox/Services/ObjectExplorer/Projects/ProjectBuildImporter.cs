@@ -4,6 +4,7 @@ using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 
@@ -138,10 +139,17 @@ public sealed class ProjectBuildImporter
     /// and no other build of its pipeline may be running (#1110). The rebuild clones
     /// with the person's own credentials and first wipes what the build holds, so the
     /// refusal has to come before anything is touched.
+    /// <para>
+    /// Returns an open transaction holding the same pipeline lock a manual build takes,
+    /// with the build already marked queued in it (#1119). The caller reopens the release
+    /// inside it and commits, so a Build click at the same moment either waits and sees
+    /// this build, or got in first and this call refuses. Disposing without committing
+    /// undoes the mark.
+    /// </para>
     /// </summary>
     /// <param name="projectId">The solution the release was built from, for a release with no build row.</param>
     /// <param name="errorKey">The form field a refusal is shown against.</param>
-    public async Task EnsureCanRebuildAsync(int releaseId, int projectId, string errorKey, CancellationToken ct = default)
+    public async Task<IDbContextTransaction> BeginRebuildAsync(int releaseId, int projectId, string errorKey, CancellationToken ct = default)
     {
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.ReleaseId == releaseId)
@@ -165,15 +173,6 @@ public sealed class ProjectBuildImporter
                 : "Add at least one repository to this solution before building.");
         }
 
-        if (build is { PipelineId: { } pipelineId }
-            && await _db.OeProjectBuilds.AsNoTracking()
-                .Where(b => b.PipelineId == pipelineId && b.Id != build.Id)
-                .AnyAsync(BlocksManualBuild, ct)
-                .ConfigureAwait(false))
-        {
-            throw Refuse("Another build of this pipeline is running. Wait for it to finish, then try again.");
-        }
-
         var missing = new List<string>();
         foreach (var provider in solution.Providers.OrderBy(p => p))
         {
@@ -183,6 +182,35 @@ public sealed class ProjectBuildImporter
             }
         }
         if (missing.Count > 0) throw Refuse(string.Join(" ", missing));
+
+        var tx = build is { PipelineId: { } lockedPipelineId }
+            ? await LockPipelineForManualBuildAsync(lockedPipelineId, ct).ConfigureAwait(false)
+            : await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (build is { PipelineId: { } pipelineId }
+                && await _db.OeProjectBuilds.AsNoTracking()
+                    .Where(b => b.PipelineId == pipelineId && b.Id != build.Id)
+                    .AnyAsync(BlocksManualBuild, ct)
+                    .ConfigureAwait(false))
+            {
+                throw Refuse("Another build of this pipeline is running. Wait for it to finish, then try again.");
+            }
+
+            if (build is not null)
+            {
+                await _db.OeProjectBuilds
+                    .Where(b => b.Id == build.Id)
+                    .ExecuteUpdateAsync(u => u.SetProperty(b => b.Status, ProjectBuildStatus.Queued), ct)
+                    .ConfigureAwait(false);
+            }
+            return tx;
+        }
+        catch
+        {
+            await tx.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
 
         PlanValidationException Refuse(string message) =>
             new(new Dictionary<string, string> { [errorKey] = message });
@@ -196,7 +224,7 @@ public sealed class ProjectBuildImporter
     /// manual build of the same pipeline waits for, so its running check sees the first
     /// one's build. Released when the transaction commits or is disposed.
     /// </summary>
-    private async Task<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction> LockPipelineForManualBuildAsync(
+    private async Task<IDbContextTransaction> LockPipelineForManualBuildAsync(
         int pipelineId, CancellationToken ct)
     {
         var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);

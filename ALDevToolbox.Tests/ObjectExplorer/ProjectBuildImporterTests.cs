@@ -510,7 +510,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
         await FinishAsync(first);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
+        var act = async () => { await using var _ = await NewImporter(ctx, new ReleaseImportQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
 
         await act.Should().NotThrowAsync();
     }
@@ -525,7 +525,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await FinishAsync(first);
         await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
+        var act = async () => { await using var _ = await NewImporter(ctx, new ReleaseImportQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Retry");
     }
@@ -553,7 +553,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         _db.OrgContext.IsSiteAdmin = false;
         _db.OrgContext.CurrentUserId = 9631;
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
+        var act = async () => { await using var _ = await NewImporter(ctx, new ReleaseImportQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
 
         await act.Should().ThrowAsync<ProjectAccessDeniedException>();
     }
@@ -568,10 +568,53 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await FinishAsync(first);
         await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, null, clear: true);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Symbols");
+        var act = async () => { await using var _ = await NewImporter(ctx, new ReleaseImportQueue()).BeginRebuildAsync(first, projectId, "Symbols"); };
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Symbols"]
             .Should().Be(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.GitHub));
+    }
+
+    // Retry and Build pressed together: the retried build is marked queued under the
+    // pipeline's lock, so Build sees it once the release is reopened (#1119).
+    [Fact]
+    public async Task A_build_being_retried_holds_up_a_new_build_of_its_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+
+        await using (var rebuild = await NewImporter(ctx, new ReleaseImportQueue()).BeginRebuildAsync(first, projectId, "Retry"))
+        {
+            // What reopening the release does.
+            await ctx.OeReleases.Where(r => r.Id == first)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Status, "ingesting"));
+            await rebuild.CommitAsync();
+        }
+
+        await using var other = _db.NewContext();
+        var act = () => NewImporter(other, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
+            .Should().Contain("already running");
+    }
+
+    [Fact]
+    public async Task A_refused_rebuild_leaves_the_build_as_it_was()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+
+        await using (await NewImporter(ctx, new ReleaseImportQueue()).BeginRebuildAsync(first, projectId, "Retry"))
+        {
+            // Disposed without a commit, as when reopening the release fails.
+        }
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == first)).Status.Should().Be(ProjectBuildStatus.Ready);
     }
 
     private async Task FinishAsync(int releaseId)
