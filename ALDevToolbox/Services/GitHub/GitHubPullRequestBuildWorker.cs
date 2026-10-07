@@ -26,7 +26,7 @@ namespace ALDevToolbox.Services.GitHub;
 ///
 /// <para>The actual clone, compile and ingest is the ordinary project build,
 /// entered through <see cref="ProjectBuildImporter.StartPullRequestBuildAsync"/>
-/// and run by <see cref="ReleaseImportWorker"/>. This worker's whole job is the
+/// and run by a <see cref="ObjectExplorer.Import.ProjectBuildWorker"/>. This worker's whole job is the
 /// routing. See <c>.design/github-integration-phase2.md</c> (#627).</para>
 ///
 /// <para>The same drain also records <c>push</c> deliveries and merged pull

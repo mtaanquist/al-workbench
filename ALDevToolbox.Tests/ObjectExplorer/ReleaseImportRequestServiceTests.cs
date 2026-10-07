@@ -291,7 +291,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
 
     private void Track(string tempPath) => _tempPaths.Add(tempPath);
 
-    private ReleaseImportRequestService NewService(Data.AppDbContext ctx, ReleaseImportQueue queue)
+    private ReleaseImportRequestService NewService(Data.AppDbContext ctx, ReleaseImportQueue queue, ProjectBuildQueue? builds = null)
     {
         var translations = new TranslationImportService(
             ctx, _db.OrgContext,
@@ -310,7 +310,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             NullLogger<DvdDownloadService>.Instance);
         var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
         var projectBuilds = new ProjectBuildImporter(
-            importer, queue, persistedJobs, ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
+            importer, builds ?? new ProjectBuildQueue(), persistedJobs, ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             new CloneCredentialResolver(
                 new UserRepositoryTokenService(ctx, _db.OrgContext, NullLogger<UserRepositoryTokenService>.Instance, _db.DataProtectionProvider),
                 _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new FakeGitHubApi())),
