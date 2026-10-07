@@ -99,14 +99,17 @@ public sealed class BuildFreshnessService
         // The last successful build of each pipeline, and the commit it pinned in
         // each repository. A repository added after that build, or whose clone
         // failed in it, has no commit there and reads as never built.
-        var readyBuilds = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value) && b.Status == ProjectBuildStatus.Ready
-                && b.BcTarget == ProjectBuildTarget.Current)
-            .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.StartedAt, b.FinishedAt })
-            .ToListAsync(ct).ConfigureAwait(false);
-        var lastBuilds = readyBuilds
-            .GroupBy(b => b.PipelineId)
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).First());
+        // Picked in SQL: the pipelines' whole build history is not read for one row each (#1138).
+        var lastBuilds = (await _db.OeProjectBuilds.AsNoTracking()
+                .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value) && b.Status == ProjectBuildStatus.Ready
+                    && b.BcTarget == ProjectBuildTarget.Current)
+                .GroupBy(b => b.PipelineId!.Value)
+                .Select(g => g
+                    .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
+                    .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.StartedAt, b.FinishedAt })
+                    .First())
+                .ToListAsync(ct).ConfigureAwait(false))
+            .ToDictionary(b => b.PipelineId);
         var lastBuildIds = lastBuilds.Values.Select(b => b.Id).ToList();
         var pinned = await _db.OeProjectBuildRepoCommits.AsNoTracking()
             .Where(c => lastBuildIds.Contains(c.ProjectBuildId) && c.ProjectRepositoryId != null && c.CommitHash != "")
@@ -123,12 +126,24 @@ public sealed class BuildFreshnessService
             .Select(b => new ActiveBuild(b.PipelineId!.Value, b.Branch, b.HeadSha, b.HeadRepositoryId, b.StartedAt))
             .ToListAsync(ct).ConfigureAwait(false);
 
+        // Only the branches a pipeline watches: its own, or the repository's default.
+        var namedBranches = pipelines.Where(p => p.Branch is not null).Select(p => p.Branch!).Distinct().ToList();
         var heads = await _db.OeRepositoryBranchHeads.AsNoTracking()
-            .Where(h => repositoryIds.Contains(h.ProjectRepositoryId))
+            .Where(h => repositoryIds.Contains(h.ProjectRepositoryId)
+                        && ((h.IsDefaultBranch && h.DeletedAt == null) || namedBranches.Contains(h.Branch)))
             .ToListAsync(ct).ConfigureAwait(false);
-        var merged = await _db.OeRepositoryMergedPullRequests.AsNoTracking()
-            .Where(m => repositoryIds.Contains(m.ProjectRepositoryId))
-            .ToListAsync(ct).ConfigureAwait(false);
+
+        // Only pull requests that merged after the oldest commit any of these builds
+        // pinned: nothing earlier can be "merged since" for any of them.
+        var lastBuildStarted = lastBuilds.Values.ToDictionary(b => b.Id, b => b.StartedAt);
+        var mergedAfter = pinned.Count == 0
+            ? (DateTime?)null
+            : pinned.Min(c => c.CommittedAt ?? lastBuildStarted[c.ProjectBuildId]);
+        var merged = mergedAfter is not { } after
+            ? []
+            : await _db.OeRepositoryMergedPullRequests.AsNoTracking()
+                .Where(m => repositoryIds.Contains(m.ProjectRepositoryId) && m.MergedAt > after)
+                .ToListAsync(ct).ConfigureAwait(false);
 
         var answers = new List<PipelineFreshness>(pipelines.Count);
         foreach (var pipeline in pipelines)

@@ -462,6 +462,57 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     }
 
     [Fact]
+    public async Task Build_history_lists_the_newest_builds_and_shows_more_on_request()
+    {
+        var seed = await SeedAsync();
+        int oldest;
+        await using (var ctx = _db.NewContext())
+        {
+            // 28 more, all older than the seed's two: 30 in all.
+            oldest = 0;
+            for (var i = 0; i < 28; i++)
+            {
+                oldest = await SeedBuildAsync(ctx, seed.ProjectId, seed.PipelineId, DateTime.UtcNow.AddDays(-3).AddHours(-i));
+            }
+        }
+
+        var cut = RenderPage(seed);
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(25);
+            cut.Markup.Should().Contain("Showing 25 of 30");
+        });
+
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Show more builds").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(30);
+            cut.FindAll("button").Should().NotContain(b => b.TextContent.Trim() == "Show more builds");
+            cut.FindAll($"a[href='/artifacts/build/{oldest}/all']").Should().ContainSingle();
+        });
+    }
+
+    [Fact]
+    public async Task A_build_older_than_the_history_lists_still_opens_in_the_hero()
+    {
+        var seed = await SeedAsync();
+        int oldest = 0;
+        await using (var ctx = _db.NewContext())
+        {
+            for (var i = 0; i < 28; i++)
+            {
+                oldest = await SeedBuildAsync(ctx, seed.ProjectId, seed.PipelineId, DateTime.UtcNow.AddDays(-3).AddHours(-i));
+            }
+        }
+
+        _ctx.Services.GetRequiredService<NavigationManager>().NavigateTo($"/pipelines/{seed.PipelineId}?build={oldest}");
+        var cut = _ctx.Render<PipelineBuilds>(p => p.Add(c => c.PipelineId, seed.PipelineId));
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain($"Build #{oldest}"));
+    }
+
+    [Fact]
     public async Task The_latest_build_stays_the_pipelines_own_and_the_check_result_sits_beside_it()
     {
         var seed = await SeedAsync();

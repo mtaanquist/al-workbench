@@ -857,11 +857,17 @@
         }
         else if (_rp.BuildPipelineId is { } buildPipelineId)
         {
-            // The releasable builds are the source build pipeline's successful builds, newest first.
-            var builds = await Artifacts.ListBuildsAsync(buildPipelineId);
+            // The releasable builds are the source build pipeline's newest successful builds.
+            var builds = await Artifacts.ListDeployableBuildsAsync(buildPipelineId);
+            // A build offered through the address may be older than those.
+            if (DeployBuildId is { } offered && builds.All(b => b.Id != offered)
+                && await Artifacts.GetPipelineBuildRowAsync(buildPipelineId, offered) is { Status: ProjectBuildStatus.Ready, IsPreview: false } older)
+            {
+                builds.Add(older);
+            }
             // The apps each build carries, so the deployment dialog can show what is about
             // to be installed before the consultant confirms (#714).
-            var appsByBuild = await Artifacts.ListBuildAppsAsync(buildPipelineId);
+            var appsByBuild = await Artifacts.ListBuildAppsAsync(buildPipelineId, builds.Select(b => b.Id).ToList());
             _successfulBuilds = ReleaseBuildDialog.OptionsFrom(builds, appsByBuild, Zone);
         }
 
