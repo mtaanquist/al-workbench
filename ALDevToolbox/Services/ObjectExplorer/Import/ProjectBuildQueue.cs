@@ -32,6 +32,12 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// (#1164): raising it wakes the waiting workers, lowering it lets the running builds
 /// finish and holds back new ones until fewer than the new limit are running.
 /// </para>
+///
+/// <para>
+/// A running build that has to wait on another import stands aside
+/// (<see cref="StepAsideAsync"/>): it stops counting against the limit until the wait
+/// is over, so the next build can start in its place (#1180).
+/// </para>
 /// </summary>
 public sealed class ProjectBuildQueue
 {
@@ -52,6 +58,8 @@ public sealed class ProjectBuildQueue
     private readonly List<Waiting> _waiting = [];
     private readonly Dictionary<int, string?> _runningByRelease = [];
     private readonly HashSet<string> _runningKeys = [];
+    private readonly HashSet<int> _steppedAside = [];
+    private int _rejoining;
     private TaskCompletionSource _changed = NewSignal();
     private long _sequence;
     private int _limit;
@@ -158,9 +166,110 @@ public sealed class ProjectBuildQueue
         {
             if (!_runningByRelease.Remove(job.ReleaseId, out var key)) return;
             if (key is not null) _runningKeys.Remove(key);
+            _steppedAside.Remove(job.ReleaseId);
             Signal();
         }
     }
+
+    /// <summary>
+    /// Runs <paramref name="wait"/> without the build of <paramref name="releaseId"/>
+    /// counting against <see cref="Limit"/>, so another build can use its place, then
+    /// waits for a place again before handing back the result (#1180). For a running
+    /// build that has to wait on someone else's work - another build's import of the
+    /// Business Central release they share - and would otherwise hold a place doing
+    /// nothing for up to the better part of an hour. The build keeps its pipeline's
+    /// turn while it waits. A release this queue is not running, or one already
+    /// standing aside, just runs <paramref name="wait"/>.
+    /// </summary>
+    /// <remarks>
+    /// A build coming back goes ahead of every waiting build. When
+    /// <paramref name="ct"/> is cancelled the build is unwinding, so it takes its place
+    /// back at once rather than queueing for it.
+    /// </remarks>
+    public async Task<T> StepAsideAsync<T>(int releaseId, Func<Task<T>> wait, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(wait);
+        bool stepped;
+        lock (_lock)
+        {
+            stepped = _runningByRelease.ContainsKey(releaseId) && _steppedAside.Add(releaseId);
+            if (stepped) Signal();
+        }
+        if (!stepped) return await wait().ConfigureAwait(false);
+
+        T result;
+        try
+        {
+            result = await wait().ConfigureAwait(false);
+        }
+        catch (Exception) when (ct.IsCancellationRequested)
+        {
+            Rejoin(releaseId);
+            throw;
+        }
+        catch (Exception)
+        {
+            await RejoinAsync(releaseId, ct).ConfigureAwait(false);
+            throw;
+        }
+        try
+        {
+            await RejoinAsync(releaseId, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Nobody will receive what the wait produced, so a lock it took is let go here.
+            (result as IDisposable)?.Dispose();
+            throw;
+        }
+        return result;
+    }
+
+    // Takes the place back at once, over the limit if need be.
+    private void Rejoin(int releaseId)
+    {
+        lock (_lock) _steppedAside.Remove(releaseId);
+    }
+
+    // Waits for a free place, ahead of every waiting build, then takes it.
+    private async Task RejoinAsync(int releaseId, CancellationToken ct)
+    {
+        lock (_lock) _rejoining++;
+        try
+        {
+            while (true)
+            {
+                Task changed;
+                lock (_lock)
+                {
+                    if (!_steppedAside.Contains(releaseId)) return;
+                    if (Active < _limit)
+                    {
+                        _steppedAside.Remove(releaseId);
+                        return;
+                    }
+                    changed = _changed.Task;
+                }
+                await changed.WaitAsync(ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            Rejoin(releaseId);
+            throw;
+        }
+        finally
+        {
+            lock (_lock)
+            {
+                _rejoining--;
+                Signal();
+            }
+        }
+    }
+
+    // Caller holds _lock. Builds holding a place: running and not standing aside.
+    private int Active => _runningByRelease.Count - _steppedAside.Count;
 
     private bool TryTake(out ReleaseImportJob job)
     {
@@ -180,14 +289,15 @@ public sealed class ProjectBuildQueue
         }
     }
 
-    // Caller holds _lock. Nothing starts while the limit is reached. A build whose key
+    // Caller holds _lock. Nothing starts while the limit is reached, or while a build
+    // that stood aside is waiting to come back: it was here first. A build whose key
     // is running is skipped, and so is every later build with the same key, which
     // keeps the key's builds in queue order. A release already building is skipped
     // too: two Retry clicks on a build with no pipeline must not build into the same
     // release at once.
     private Waiting? NextStartable()
     {
-        if (_runningByRelease.Count >= _limit) return null;
+        if (Active >= _limit || _rejoining > 0) return null;
         Waiting? best = null;
         HashSet<string>? passed = null;
         foreach (var w in _waiting.OrderBy(w => w.Sequence))

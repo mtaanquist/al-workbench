@@ -149,6 +149,8 @@ public class ReleaseImportService
         CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
+        // A build waiting on this release tells a running import from an abandoned one by this (#1180).
+        using var tracked = ReleaseIngests.Track(releaseId);
         var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Release {releaseId} not found for processing.");
 
@@ -249,25 +251,41 @@ public class ReleaseImportService
                 SourceFilesImported: totals.SourceFilesImported,
                 TranslationsImported: totals.TranslationsImported);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The caller's own cancellation: the caller decides what the release
+            // becomes. The import worker leaves it importing on shutdown so the
+            // startup reconciler resumes the job (#483); a build that gives up on a
+            // parent or vendor import it started marks that release failed itself (#1180).
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex,
                 "Release ingest failed: ReleaseId={ReleaseId} ModulesImportedBeforeFailure={ModulesImported}",
                 release.Id, totals.ModulesImported);
             // Stamp the release as failed so the UI can show the operator which
-            // upload didn't make it. SaveChanges in a fresh tracker state so
-            // we don't drag the failed entity's tracker into the status update.
-            _db.ChangeTracker.Clear();
-            var failed = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct).ConfigureAwait(false);
-            if (failed is not null)
-            {
-                failed.Status = "failed";
-                failed.StatusMessage = ex.Message;
-                failed.UpdatedAt = DateTime.UtcNow;
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-            }
+            // upload didn't make it.
+            await StampFailedAsync(release.Id, ex.Message).ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Flips a release to <c>failed</c> on a fresh tracker, so the failed entity's
+    /// state is not dragged into the status update. Never cancelled: a status write
+    /// that does not land leaves the release <c>ingesting</c> with nobody importing
+    /// it, and builds parenting onto it wait for it (#1180).
+    /// </summary>
+    private async Task StampFailedAsync(int releaseId, string message)
+    {
+        _db.ChangeTracker.Clear();
+        var failed = await _db.OeReleases.FindAsync(new object?[] { releaseId }, CancellationToken.None).ConfigureAwait(false);
+        if (failed is null) return;
+        failed.Status = "failed";
+        failed.StatusMessage = message;
+        failed.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -341,6 +359,7 @@ public class ReleaseImportService
         var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Release {releaseId} disappeared between the pre-check and the load.");
 
+        using var tracked = ReleaseIngests.Track(release.Id);
         release.Status = "ingesting";
         release.StatusMessage = null;
         release.UpdatedAt = DateTime.UtcNow;
@@ -427,15 +446,9 @@ public class ReleaseImportService
             _logger.LogError(ex,
                 "Release amend failed: ReleaseId={ReleaseId} ModulesImportedBeforeFailure={ModulesImported}",
                 release.Id, totals.ModulesImported);
-            _db.ChangeTracker.Clear();
-            var failed = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct).ConfigureAwait(false);
-            if (failed is not null)
-            {
-                failed.Status = "failed";
-                failed.StatusMessage = ex.Message;
-                failed.UpdatedAt = DateTime.UtcNow;
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-            }
+            // Cancelled or not: an amend has no job to resume it, so leaving it
+            // importing would only strand it until the next restart (#1180).
+            await StampFailedAsync(release.Id, ex.Message).ConfigureAwait(false);
             throw;
         }
     }

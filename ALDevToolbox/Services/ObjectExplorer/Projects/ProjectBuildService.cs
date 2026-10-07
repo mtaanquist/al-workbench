@@ -87,6 +87,13 @@ public sealed class ProjectBuildService
     private readonly TimeProvider _clock;
     private readonly ILogger<ProjectBuildService> _logger;
 
+    /// <summary>
+    /// The build queue, so a build can give up its place while it waits on another
+    /// import (#1180). Optional so a test, or any caller that builds this service by
+    /// hand, can run a build without one; in the app it is always injected.
+    /// </summary>
+    private readonly ProjectBuildQueue? _buildQueue;
+
     public ProjectBuildService(
         AppDbContext db,
         IOrganizationContext orgContext,
@@ -99,8 +106,10 @@ public sealed class ProjectBuildService
         CloneCredentialResolver credentials,
         IProcessRunner processRunner,
         TimeProvider clock,
-        ILogger<ProjectBuildService> logger)
+        ILogger<ProjectBuildService> logger,
+        ProjectBuildQueue? buildQueue = null)
     {
+        _buildQueue = buildQueue;
         _db = db;
         _orgContext = orgContext;
         _access = access;
@@ -418,7 +427,7 @@ public sealed class ProjectBuildService
                 //    it links the catalogue's preview when there is one and imports
                 //    nothing.
                 parentReleaseId = options.Target == BcBuildTarget.Current
-                    ? await EnsureParentReleaseAsync(resolved, download, ct).ConfigureAwait(false)
+                    ? await EnsureParentReleaseAsync(resolved, download, releaseId, ct).ConfigureAwait(false)
                     : await ExistingParentReleaseAsync(resolved, ct).ConfigureAwait(false);
             }
             finally
@@ -431,7 +440,7 @@ public sealed class ProjectBuildService
             //     into it resolve (#901, Part 4). Best-effort, like the parent. Not
             //     for a preview check, which has no references to resolve (#1140).
             IReadOnlyList<int> dependencyReleaseIds = options.Target == BcBuildTarget.Current
-                ? await EnsureVendorReleasesAsync(fromFeeds, symbolsDir, parentReleaseId, logs, ct).ConfigureAwait(false)
+                ? await EnsureVendorReleasesAsync(fromFeeds, symbolsDir, parentReleaseId, releaseId, logs, ct).ConfigureAwait(false)
                 : [];
 
             // 5. Compile each extension in dependency order; a compiled sibling
@@ -1936,7 +1945,8 @@ public sealed class ProjectBuildService
             .Select(r => (int?)r.Id)
             .FirstOrDefaultAsync(ct);
 
-    private async Task<int?> EnsureParentReleaseAsync(ResolvedArtifact resolved, BcArtifactDownload download, CancellationToken ct)
+    private async Task<int?> EnsureParentReleaseAsync(
+        ResolvedArtifact resolved, BcArtifactDownload download, int buildReleaseId, CancellationToken ct)
     {
         var existing = await _db.OeReleases.AsNoTracking()
             .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null)
@@ -1961,7 +1971,7 @@ public sealed class ProjectBuildService
             if (!refresh)
             {
                 return existing.Status == "ingesting"
-                    ? await AfterIngestAsync(existing.Id, resolved.Label, ct).ConfigureAwait(false)
+                    ? await AfterIngestAsync(buildReleaseId, existing.Id, resolved.Label, ct).ConfigureAwait(false)
                     : existing.Id;
             }
             stalePreviewId = existing.Id;
@@ -1970,6 +1980,10 @@ public sealed class ProjectBuildService
         // The release this call creates, so a failure of its own import is never
         // mistaken below for someone else's import still running.
         int? createdId = null;
+        // Marks the release as being imported by this process from the moment it
+        // exists, through the wait for the import gate, so a build waiting on it
+        // never takes it for abandoned (#1180).
+        IDisposable? tracked = null;
         try
         {
             var metadata = new ReleaseImportMetadata(
@@ -1980,6 +1994,7 @@ public sealed class ProjectBuildService
             {
                 parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
                 createdId = parentId;
+                tracked = ReleaseIngests.Track(parentId);
             }
             else
             {
@@ -1992,10 +2007,14 @@ public sealed class ProjectBuildService
                 parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
                 await tx.CommitAsync(ct).ConfigureAwait(false);
                 createdId = parentId;
+                tracked = ReleaseIngests.Track(parentId);
                 _logger.LogInformation("Replaced preview release {OldReleaseId} with build {Version} for a project build.",
                     stalePreviewId.Value, resolved.Version);
             }
 
+            // Whole Business Central releases import one at a time, here and on the
+            // import worker alike (#1180).
+            using var heavy = await EnterHeavyImportAsync(buildReleaseId, ct).ConfigureAwait(false);
             var openedStreams = new List<Stream>();
             System.IO.Compression.ZipArchive? appArchive = null;
             System.IO.Compression.ZipArchive? platArchive = null;
@@ -2021,6 +2040,20 @@ public sealed class ProjectBuildService
             _logger.LogInformation("Auto-imported parent BC release {Label} (release {ParentId}) for a project build.", resolved.Label, parentId);
             return parentId;
         }
+        catch (Exception) when (ct.IsCancellationRequested)
+        {
+            // This build was cancelled (a newer commit on its pull request, or a
+            // shutdown) part way through an import it started. Nothing else will
+            // finish that import, so it is failed now rather than left importing for
+            // every later build of this version to wait on (#1180). Whatever was
+            // thrown, the build is being cancelled, so that is what it hears.
+            if (createdId is { } abandoned)
+            {
+                await MarkAbandonedImportFailedAsync(abandoned).ConfigureAwait(false);
+            }
+            ct.ThrowIfCancellationRequested();
+            throw;
+        }
         catch (Exception ex)
         {
             // A concurrent first-party/artifact import (independent of the
@@ -2043,7 +2076,7 @@ public sealed class ProjectBuildService
                     resolved.Label, adopted);
                 return adopted == createdId
                     ? adopted
-                    : await AfterIngestAsync(adopted.Value, resolved.Label, ct).ConfigureAwait(false);
+                    : await AfterIngestAsync(buildReleaseId, adopted.Value, resolved.Label, ct).ConfigureAwait(false);
             }
 
             _logger.LogError(ex,
@@ -2051,7 +2084,50 @@ public sealed class ProjectBuildService
                 resolved.Label);
             return null;
         }
+        finally
+        {
+            tracked?.Dispose();
+        }
     }
+
+    /// <summary>What a release says when the build importing it was stopped part way through.</summary>
+    internal const string StoppedImportMessage =
+        "The build that started this import was stopped before the import finished.";
+
+    /// <summary>What a release says when a build found it importing with nothing left working on it.</summary>
+    internal const string AbandonedImportMessage =
+        "This import stopped before it finished. Import the release again to use it.";
+
+    /// <summary>
+    /// Fails a release this build started importing and is abandoning. Never
+    /// cancelled, since the build's own token already is; a failure to write is
+    /// logged, never thrown over the cancellation that brought us here.
+    /// </summary>
+    private async Task MarkAbandonedImportFailedAsync(int releaseId)
+    {
+        try
+        {
+            _db.ChangeTracker.Clear();
+            await _importer.MarkFailedAsync(releaseId, StoppedImportMessage, CancellationToken.None).ConfigureAwait(false);
+            _logger.LogInformation("Marked release {ReleaseId} failed: the build importing it was stopped.", releaseId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not mark release {ReleaseId} failed after its build was stopped.", releaseId);
+        }
+    }
+
+    /// <summary>
+    /// Takes the import gate of <see cref="ReleaseIngests"/>. When another import
+    /// holds it, the build gives up its place in the build queue while it waits.
+    /// </summary>
+    private async Task<IDisposable> EnterHeavyImportAsync(int buildReleaseId, CancellationToken ct) =>
+        ReleaseIngests.TryEnterHeavy()
+        ?? await StepAsideAsync(buildReleaseId, () => ReleaseIngests.EnterHeavyAsync(ct), ct).ConfigureAwait(false);
+
+    /// <summary>Runs <paramref name="wait"/> without holding this build's place in the queue, when there is a queue.</summary>
+    private Task<T> StepAsideAsync<T>(int buildReleaseId, Func<Task<T>> wait, CancellationToken ct) =>
+        _buildQueue is null ? wait() : _buildQueue.StepAsideAsync(buildReleaseId, wait, ct);
 
     /// <summary>
     /// How long a build waits for a release another import is still ingesting. Kept
@@ -2062,23 +2138,54 @@ public sealed class ProjectBuildService
 
     internal static readonly TimeSpan IngestPollInterval = TimeSpan.FromSeconds(10);
 
-    /// <summary>Where a release another import owns stands: its status, and whether that import is still waiting for a worker.</summary>
-    internal sealed record IngestState(string? Status, bool WaitingForWorker);
+    /// <summary>
+    /// Where a release another import owns stands: its status, whether that import is
+    /// still waiting for a worker, and whether anything in this process is working on
+    /// it (#1180).
+    /// </summary>
+    internal sealed record IngestState(string? Status, bool WaitingForWorker, bool ImportRunning = true);
 
     /// <summary>
     /// Waits while another import is still ingesting <paramref name="releaseId"/>
     /// (another build's inline parent import, or the catalogue sweep), now that builds
     /// run side by side (#1137). This build's own ingest resolves references into it,
-    /// and a half-imported parent would drop them for good.
+    /// and a half-imported parent would drop them for good. While it waits, the build
+    /// of <paramref name="buildReleaseId"/> gives its place in the build queue to
+    /// another build (#1180).
     /// </summary>
-    private Task<int?> AfterIngestAsync(int releaseId, string label, CancellationToken ct) =>
-        WaitForIngestAsync(releaseId, label, async token => new IngestState(
-                await _db.OeReleases.AsNoTracking()
+    private Task<int?> AfterIngestAsync(int buildReleaseId, int releaseId, string label, CancellationToken ct) =>
+        WaitForIngestAsync(
+            releaseId, label,
+            async token =>
+            {
+                // The status is read before the jobs and the in-process imports, so an
+                // import that finishes in between reads as ready on the next poll.
+                var status = await _db.OeReleases.AsNoTracking()
                     .Where(r => r.Id == releaseId)
                     .Select(r => r.Status)
-                    .FirstOrDefaultAsync(token).ConfigureAwait(false),
-                await _db.OeImportJobs.AsNoTracking()
-                    .AnyAsync(j => j.ReleaseId == releaseId && j.Status == "queued", token).ConfigureAwait(false)),
+                    .FirstOrDefaultAsync(token).ConfigureAwait(false);
+                var jobs = await _db.OeImportJobs.AsNoTracking()
+                    .Where(j => j.ReleaseId == releaseId && (j.Status == "queued" || j.Status == "running"))
+                    .Select(j => j.Status)
+                    .ToListAsync(token).ConfigureAwait(false);
+                return new IngestState(
+                    status,
+                    WaitingForWorker: jobs.Contains("queued"),
+                    ImportRunning: jobs.Contains("running") || ReleaseIngests.IsRunning(releaseId));
+            },
+            async token =>
+            {
+                // Only while it still reads as importing: an import finishing at this
+                // moment keeps its result.
+                await _db.OeReleases
+                    .Where(r => r.Id == releaseId && r.Status == "ingesting")
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(r => r.Status, "failed")
+                        .SetProperty(r => r.StatusMessage, AbandonedImportMessage)
+                        .SetProperty(r => r.UpdatedAt, _clock.GetUtcNow().UtcDateTime), token)
+                    .ConfigureAwait(false);
+            },
+            wait => StepAsideAsync(buildReleaseId, wait, ct),
             _clock, _logger, ct);
 
     /// <summary>
@@ -2086,31 +2193,69 @@ public sealed class ProjectBuildService
     /// id regardless, as before builds overlapped, when its import has not started
     /// (it waits behind other imports, so waiting here would hold a build worker for
     /// nothing) or after <see cref="IngestWaitLimit"/>.
+    ///
+    /// <para>
+    /// Returns null, after <paramref name="markAbandoned"/>, when two polls in a row
+    /// find nothing in this process importing it: a build cancelled part way through
+    /// left it behind, and waiting the full limit for it would hold the build for
+    /// nothing (#1180). Two polls rather than one, because a release exists a moment
+    /// before its import is recorded as running. Only a real wait goes through
+    /// <paramref name="stepAside"/>, so a build never gives up its place for a release
+    /// that is already settled.
+    /// </para>
     /// </summary>
     internal static async Task<int?> WaitForIngestAsync(
         int releaseId, string label, Func<CancellationToken, Task<IngestState>> read,
+        Func<CancellationToken, Task> markAbandoned, Func<Func<Task<int?>>, Task<int?>> stepAside,
         TimeProvider clock, ILogger logger, CancellationToken ct)
     {
-        var giveUpAt = clock.GetUtcNow() + IngestWaitLimit;
-        var logged = false;
-        while (true)
+        var first = await read(ct).ConfigureAwait(false);
+        if (Settled(first, releaseId, out var settled)) return settled;
+        return await stepAside(PollAsync).ConfigureAwait(false);
+
+        async Task<int?> PollAsync()
         {
-            var state = await read(ct).ConfigureAwait(false);
-            if (state.Status is null or "failed") return null;
-            if (state.Status != "ingesting" || state.WaitingForWorker) return releaseId;
-            if (clock.GetUtcNow() >= giveUpAt)
+            logger.LogInformation("Waiting for release {Label} (release {ReleaseId}) to finish importing.", label, releaseId);
+            var giveUpAt = clock.GetUtcNow() + IngestWaitLimit;
+            var state = first;
+            var unattended = false;
+            while (true)
             {
-                logger.LogWarning("Release {Label} (release {ReleaseId}) is still importing; the build carries on without waiting for it.",
-                    label, releaseId);
-                return releaseId;
+                if (state.ImportRunning)
+                {
+                    unattended = false;
+                }
+                else if (unattended)
+                {
+                    logger.LogWarning(
+                        "Release {Label} (release {ReleaseId}) is importing but nothing is working on it; marking it failed and carrying on without it.",
+                        label, releaseId);
+                    await markAbandoned(ct).ConfigureAwait(false);
+                    return null;
+                }
+                else
+                {
+                    unattended = true;
+                }
+                if (clock.GetUtcNow() >= giveUpAt)
+                {
+                    logger.LogWarning("Release {Label} (release {ReleaseId}) is still importing; the build carries on without waiting for it.",
+                        label, releaseId);
+                    return releaseId;
+                }
+                await Task.Delay(IngestPollInterval, clock, ct).ConfigureAwait(false);
+                state = await read(ct).ConfigureAwait(false);
+                if (Settled(state, releaseId, out var done)) return done;
             }
-            if (!logged)
-            {
-                logger.LogInformation("Waiting for release {Label} (release {ReleaseId}) to finish importing.", label, releaseId);
-                logged = true;
-            }
-            await Task.Delay(IngestPollInterval, clock, ct).ConfigureAwait(false);
         }
+    }
+
+    // Whether a wait is over: a release gone or failed gives null, one that is ready
+    // or still waiting for a worker gives its id.
+    private static bool Settled(IngestState state, int releaseId, out int? id)
+    {
+        id = state.Status is null or "failed" ? null : releaseId;
+        return state.Status != "ingesting" || state.WaitingForWorker;
     }
 
     /// <summary>
@@ -2126,7 +2271,7 @@ public sealed class ProjectBuildService
     /// symbols").
     /// </summary>
     private async Task<IReadOnlyList<int>> EnsureVendorReleasesAsync(
-        IReadOnlyList<ResolvedSymbolPackage> packages, string symbolsDir, int? parentReleaseId,
+        IReadOnlyList<ResolvedSymbolPackage> packages, string symbolsDir, int? parentReleaseId, int buildReleaseId,
         List<PendingLog> logs, CancellationToken ct)
     {
         var ids = new List<int>();
@@ -2134,7 +2279,7 @@ public sealed class ProjectBuildService
         foreach (var package in packages)
         {
             ct.ThrowIfCancellationRequested();
-            var id = await EnsureVendorReleaseAsync(package, symbolsDir, parentReleaseId, lines, ct).ConfigureAwait(false);
+            var id = await EnsureVendorReleaseAsync(package, symbolsDir, parentReleaseId, buildReleaseId, lines, ct).ConfigureAwait(false);
             if (id is { } found && !ids.Contains(found)) ids.Add(found);
         }
         if (lines.Count > 0) logs.Add(new PendingLog(null, "Symbols", string.Join("\n", lines)));
@@ -2146,12 +2291,12 @@ public sealed class ProjectBuildService
         $"{OeRelease.SymbolFeedDedupPrefix}{NormalizeAppId(appId)}:{version.Trim()}";
 
     private async Task<int?> EnsureVendorReleaseAsync(
-        ResolvedSymbolPackage package, string symbolsDir, int? parentReleaseId, List<string> lines, CancellationToken ct)
+        ResolvedSymbolPackage package, string symbolsDir, int? parentReleaseId, int buildReleaseId, List<string> lines, CancellationToken ct)
     {
         var dedupKey = VendorDedupKey(package.AppId, package.Version);
         var label = $"{package.Name} {package.Version} (symbols)";
         var existing = await FindVendorReleaseAsync(dedupKey, ct).ConfigureAwait(false);
-        if (existing is not null) return await AdoptAsync(existing.Value, label, lines, ct).ConfigureAwait(false);
+        if (existing is not null) return await AdoptAsync(buildReleaseId, existing.Value, label, lines, ct).ConfigureAwait(false);
 
         byte[] bytes;
         AppManifest? manifest;
@@ -2193,7 +2338,18 @@ public sealed class ProjectBuildService
             lines.Add($"Added {label} to the Object Explorer.");
             return vendorId;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        catch (Exception) when (ct.IsCancellationRequested)
+        {
+            // The build was stopped part way through an import it started: fail it
+            // rather than leave it importing for later builds to wait on (#1180).
+            if (createdId is { } abandoned)
+            {
+                await MarkAbandonedImportFailedAsync(abandoned).ConfigureAwait(false);
+            }
+            ct.ThrowIfCancellationRequested();
+            throw;
+        }
+        catch (Exception ex)
         {
             // Same race as the parent (#431): another build may have won the
             // unique dedup-key insert. Adopt its Release if one now exists.
@@ -2202,7 +2358,7 @@ public sealed class ProjectBuildService
             // Its own failed import is not waited on: nobody else is ingesting it.
             if (adopted is not null && adopted.Value.Id != createdId)
             {
-                return await AdoptAsync(adopted.Value, label, lines, ct).ConfigureAwait(false);
+                return await AdoptAsync(buildReleaseId, adopted.Value, label, lines, ct).ConfigureAwait(false);
             }
 
             _logger.LogWarning(ex, "Failed to ingest vendor symbols {Label}; the build continues without them.", label);
@@ -2220,9 +2376,9 @@ public sealed class ProjectBuildService
         return row is null ? null : (row.Id, row.Status);
     }
 
-    private async Task<int?> AdoptAsync((int Id, string Status) release, string label, List<string> lines, CancellationToken ct)
+    private async Task<int?> AdoptAsync(int buildReleaseId, (int Id, string Status) release, string label, List<string> lines, CancellationToken ct)
     {
-        if (release.Status == "ingesting" && await AfterIngestAsync(release.Id, label, ct).ConfigureAwait(false) is null)
+        if (release.Status == "ingesting" && await AfterIngestAsync(buildReleaseId, release.Id, label, ct).ConfigureAwait(false) is null)
         {
             release = (release.Id, "failed");
         }

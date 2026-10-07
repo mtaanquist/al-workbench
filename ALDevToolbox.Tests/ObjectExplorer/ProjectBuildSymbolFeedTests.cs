@@ -1235,10 +1235,75 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         outcome.ParentReleaseId.Should().Be(recentId);
     }
 
+    // ── A parent import nobody finishes (#1180) ────────────────────────
+
+    private const string ParentDedupKey = "bc-onprem:29.0:dk";
+
+    [Fact]
+    public async Task A_parent_left_importing_with_nothing_working_on_it_is_failed_rather_than_waited_on()
+    {
+        var (projectId, releaseId, _) = await SeedAsync(parentStatus: "ingesting");
+        var clock = new SkippingClock();
+
+        var outcome = await BuildAsync(projectId, releaseId, clock: clock).WaitAsync(TimeSpan.FromMinutes(2));
+
+        outcome.ParentReleaseId.Should().BeNull("a half-imported parent would drop this build's references into it");
+        clock.Waited.Should().BeLessThan(TimeSpan.FromMinutes(1), "nothing is importing it, so there is nothing to wait for");
+        await using var read = _db.NewContext();
+        var parent = await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == ParentDedupKey);
+        parent.Status.Should().Be("failed");
+        parent.StatusMessage.Should().Be(ProjectBuildService.AbandonedImportMessage);
+    }
+
+    [Fact]
+    public async Task A_build_stopped_during_its_parent_import_fails_that_import_instead_of_leaving_it_importing()
+    {
+        var (projectId, releaseId, _) = await SeedAsync(parentStatus: null);
+        using var cts = new CancellationTokenSource();
+
+        // Holding the import gate keeps the build waiting inside the parent import it
+        // has just started, which is where a newer push or a shutdown can stop it.
+        Task<ProjectBuildOutcome> build;
+        int parentId;
+        using (await ReleaseIngests.EnterHeavyAsync(CancellationToken.None))
+        {
+            build = BuildAsync(projectId, releaseId, ct: cts.Token);
+            parentId = await ParentCreatedAsync().WaitAsync(TimeSpan.FromMinutes(2));
+            ReleaseIngests.IsRunning(parentId).Should().BeTrue("a build waiting on it must not take it for abandoned");
+
+            await cts.CancelAsync();
+            var act = () => build;
+            await act.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        ReleaseIngests.IsRunning(parentId).Should().BeFalse();
+        await using var read = _db.NewContext();
+        var parent = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == parentId);
+        parent.Status.Should().Be("failed");
+        parent.StatusMessage.Should().Be(ProjectBuildService.StoppedImportMessage);
+    }
+
+    private async Task<int> ParentCreatedAsync()
+    {
+        while (true)
+        {
+            await using (var read = _db.NewContext())
+            {
+                var id = await read.OeReleases.AsNoTracking()
+                    .Where(r => r.DedupKey == ParentDedupKey)
+                    .Select(r => (int?)r.Id)
+                    .FirstOrDefaultAsync();
+                if (id is { } found && ReleaseIngests.IsRunning(found)) return found;
+            }
+            await Task.Delay(50);
+        }
+    }
+
     // ── Harness ────────────────────────────────────────────────────────
 
     private async Task<ProjectBuildOutcome> BuildAsync(int projectId, int releaseId,
-        BcBuildTarget target = BcBuildTarget.Current, AlCompilerProvisioner? compiler = null)
+        BcBuildTarget target = BcBuildTarget.Current, AlCompilerProvisioner? compiler = null,
+        TimeProvider? clock = null, CancellationToken ct = default)
     {
         await using var ctx = _db.NewContext();
         var translations = new TranslationImportService(ctx, _db.OrgContext,
@@ -1265,12 +1330,13 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             // Never reached: a build started with an installation token clones as the installation.
             null!,
             _tools,
-            TimeProvider.System,
+            clock ?? TimeProvider.System,
             NullLogger<ProjectBuildService>.Instance);
-        return await service.BuildAsync(projectId, releaseId, new ProjectBuildOptions(InstallationToken: "installation-token", Target: target));
+        return await service.BuildAsync(projectId, releaseId, new ProjectBuildOptions(InstallationToken: "installation-token", Target: target), ct);
     }
 
-    private async Task<(int ProjectId, int ReleaseId, int BuildId)> SeedAsync()
+    /// <param name="parentStatus">The Microsoft release the build parents onto, or null for none.</param>
+    private async Task<(int ProjectId, int ReleaseId, int BuildId)> SeedAsync(string? parentStatus = "ready")
     {
         await using var seed = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -1292,17 +1358,20 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         seed.OeProjects.Add(project);
         // The Microsoft release the build parents onto already exists, so the
         // build does not try to ingest the (empty) fake artifact.
-        seed.OeReleases.Add(new OeRelease
+        if (parentStatus is not null)
         {
-            OrganizationId = TestDb.DefaultOrgId,
-            Label = "Business Central 29.0 (DK)",
-            DedupKey = "bc-onprem:29.0:dk",
-            Kind = "first_party",
-            Status = "ready",
-            ImportedAt = now,
-            CreatedAt = now,
-            UpdatedAt = now,
-        });
+            seed.OeReleases.Add(new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Label = "Business Central 29.0 (DK)",
+                DedupKey = ParentDedupKey,
+                Kind = "first_party",
+                Status = parentStatus,
+                ImportedAt = now,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        }
         var release = new OeRelease
         {
             OrganizationId = TestDb.DefaultOrgId,

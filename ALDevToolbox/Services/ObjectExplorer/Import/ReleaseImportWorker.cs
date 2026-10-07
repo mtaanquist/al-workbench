@@ -364,7 +364,10 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                 var calImporter = scope.ServiceProvider.GetRequiredService<CalImportService>();
                 try
                 {
-                    await calImporter.ProcessReleaseAsync(job.ReleaseId, calTxt.TempPath, calTxt.EncodingName, ct).ConfigureAwait(false);
+                    using (await ReleaseIngests.EnterHeavyAsync(ct).ConfigureAwait(false))
+                    {
+                        await calImporter.ProcessReleaseAsync(job.ReleaseId, calTxt.TempPath, calTxt.EncodingName, ct).ConfigureAwait(false);
+                    }
                     jobSucceeded = true;
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -394,14 +397,17 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                     var isCal = await db.OeModuleFiles.AsNoTracking()
                         .Where(f => f.Module!.ReleaseId == job.ReleaseId)
                         .AnyAsync(f => f.Path.StartsWith("CAL/"), ct).ConfigureAwait(false);
-                    if (isCal)
+                    using (await ReleaseIngests.EnterHeavyAsync(ct).ConfigureAwait(false))
                     {
-                        var calImporter = scope.ServiceProvider.GetRequiredService<CalImportService>();
-                        await calImporter.BackfillSystemReferencesAsync(job.ReleaseId, ct).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        await importer.BackfillSystemReferencesAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                        if (isCal)
+                        {
+                            var calImporter = scope.ServiceProvider.GetRequiredService<CalImportService>();
+                            await calImporter.BackfillSystemReferencesAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await importer.BackfillSystemReferencesAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                        }
                     }
                     jobSucceeded = true;
                 }
@@ -584,7 +590,12 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
 
             try
             {
-                await importer.ProcessReleaseAsync(job.ReleaseId, uploads, job.StoreSymbolReference, ct).ConfigureAwait(false);
+                // One whole-release import at a time, shared with the builds' inline
+                // parent imports, so they never bulk-insert side by side (#1180).
+                using (await ReleaseIngests.EnterHeavyAsync(ct).ConfigureAwait(false))
+                {
+                    await importer.ProcessReleaseAsync(job.ReleaseId, uploads, job.StoreSymbolReference, ct).ConfigureAwait(false);
+                }
                 jobSucceeded = true;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
