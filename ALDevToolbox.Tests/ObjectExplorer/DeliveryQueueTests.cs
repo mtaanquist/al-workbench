@@ -61,6 +61,65 @@ public sealed class DeliveryQueueTests
         (await queue.EnqueueAsync(Job(42))).Should().BeTrue("once finished, the delivery can be re-run");
     }
 
+    [Fact]
+    public void TryEnqueue_refuses_a_full_queue_without_waiting_and_without_wedging_the_id()
+    {
+        var queue = new DeliveryQueue();
+        var id = 0;
+        while (queue.TryEnqueue(Job(++id))) { }
+
+        queue.TryEnqueue(Job(id)).Should().BeFalse("the queue is full");
+        queue.Reader.TryRead(out _).Should().BeTrue();
+        queue.TryEnqueue(Job(id)).Should().BeTrue("the refused id was not left marked as queued");
+        queue.TryEnqueue(Job(id)).Should().BeFalse("now it is queued");
+    }
+
+    [Fact]
+    public void An_environment_takes_one_deployment_at_a_time()
+    {
+        var queue = new DeliveryQueue();
+        var tenant = Guid.NewGuid();
+
+        var first = queue.TryEnterEnvironment(tenant, 7, "Production");
+        first.Should().NotBeNull();
+        queue.TryEnterEnvironment(tenant, 7, "Production").Should().BeNull("one deployment to it is running");
+        queue.TryEnterEnvironment(tenant, 7, "PRODUCTION").Should().BeNull("Business Central environment names ignore case");
+        queue.TryEnterEnvironment(tenant, 8, "Production").Should().BeNull("another solution on the same tenant deploys to the same environment");
+        queue.TryEnterEnvironment(tenant, 7, "Sandbox").Should().NotBeNull("another environment is free");
+        queue.TryEnterEnvironment(Guid.NewGuid(), 9, "Production").Should().NotBeNull("the same name in another tenant is another environment");
+
+        first!.Dispose();
+        first.Dispose();
+        var again = queue.TryEnterEnvironment(tenant, 7, "Production");
+        again.Should().NotBeNull("freed when the deployment ends");
+        first.Dispose();
+        queue.TryEnterEnvironment(tenant, 7, "Production").Should().BeNull("disposing an old lease again frees nothing it no longer holds");
+    }
+
+    [Fact]
+    public void A_solution_without_a_tenant_keys_on_itself()
+    {
+        var queue = new DeliveryQueue();
+
+        queue.TryEnterEnvironment(null, 7, "Production").Should().NotBeNull();
+        queue.TryEnterEnvironment(null, 7, "Production").Should().BeNull();
+        queue.TryEnterEnvironment(null, 8, "Production").Should().NotBeNull();
+    }
+
+    [Fact]
+    public void Each_worker_has_a_heartbeat_of_its_own()
+    {
+        var heartbeats = new WorkerHeartbeatRegistry();
+        var queue = new DeliveryQueue();
+        for (var slot = 1; slot <= DeliveryWorker.Lanes; slot++)
+        {
+            _ = new DeliveryWorker(slot, queue, new ServiceCollection().BuildServiceProvider(), new RecordingLogger(), heartbeats);
+        }
+
+        heartbeats.All().Select(h => h.Name).Should().BeEquivalentTo(
+            Enumerable.Range(1, DeliveryWorker.Lanes).Select(i => $"DeliveryWorker {i}"));
+    }
+
     /// <summary>
     /// An exception escaping a job must not tear the worker down: the default
     /// <c>BackgroundServiceExceptionBehavior</c> is StopHost, so one bad publish
@@ -76,7 +135,7 @@ public sealed class DeliveryQueueTests
         // Empty provider: GetRequiredService<DeliveryService>() throws for every job.
         var services = new ServiceCollection().BuildServiceProvider();
         var logger = new RecordingLogger();
-        var worker = new DeliveryWorker(queue, services, logger, new WorkerHeartbeatRegistry());
+        var worker = new DeliveryWorker(1, queue, services, logger, new WorkerHeartbeatRegistry());
 
         (await queue.EnqueueAsync(Job(1))).Should().BeTrue();
         (await queue.EnqueueAsync(Job(2))).Should().BeTrue();
