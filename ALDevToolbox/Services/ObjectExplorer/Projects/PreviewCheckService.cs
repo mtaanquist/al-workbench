@@ -64,7 +64,18 @@ public sealed class PreviewCheckService
         var pipelineIds = pipelines.Select(p => p.Id).ToList();
         var builds = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value))
-            .Select(b => new { PipelineId = b.PipelineId!.Value, b.BcTarget, b.Status, b.StartedAt, b.BcArtifactVersion })
+            .Select(b => new
+            {
+                PipelineId = b.PipelineId!.Value,
+                b.BcTarget,
+                b.StartedAt,
+                b.BcArtifactVersion,
+                // In flight only while its release is still ingesting, as in
+                // ProjectBuildImporter.BlocksManualBuild: nothing resets a row whose job
+                // was lost, and trusting the row alone would stop the check for good (#1111).
+                InFlight = (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building)
+                    && b.Release != null && b.Release.Status == "ingesting",
+            })
             .ToListAsync(ct).ConfigureAwait(false);
         var byPipeline = builds.ToLookup(b => b.PipelineId);
 
@@ -100,7 +111,7 @@ public sealed class PreviewCheckService
             foreach (var target in ProjectBuildTarget.Previews)
             {
                 var checks = history.Where(b => b.BcTarget == target).ToList();
-                if (checks.Any(b => b.Status is ProjectBuildStatus.Queued or ProjectBuildStatus.Building)) continue;
+                if (checks.Any(b => b.InFlight)) continue;
 
                 var last = checks.MaxBy(b => b.StartedAt);
                 if (last is not null && DateOnly.FromDateTime(last.StartedAt) == today) continue;
