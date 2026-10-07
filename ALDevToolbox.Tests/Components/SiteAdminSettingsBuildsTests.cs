@@ -66,8 +66,8 @@ public sealed class SiteAdminSettingsBuildsTests : IDisposable
             input.GetAttribute("min").Should().Be("1");
             input.GetAttribute("max").Should().Be("16");
             input.GetAttribute("value").Should().BeNullOrEmpty();
-            cut.Markup.Should().Contain("Builds that run at once");
-            cut.Markup.Should().Contain("Leave empty to use the default (currently 2).");
+            cut.Markup.Should().Contain("Pipeline builds that run at once");
+            cut.Markup.Should().Contain("Leave empty to use the default of 2.");
             cut.Markup.Should().Contain("up to <strong>2 builds</strong> run at once");
         });
     }
@@ -84,7 +84,8 @@ public sealed class SiteAdminSettingsBuildsTests : IDisposable
             var text = System.Text.RegularExpressions.Regex.Replace(cut.Find(".setting__hint").TextContent, @"\s+", " ");
             text.Should().Contain($"{capacity.MemoryGb} GB of memory.");
             text.Should().Contain($"Recommended: {capacity.Recommended}.");
-            text.Should().Contain("raising this past the recommendation makes builds slower, not faster.");
+            text.Should().Contain($"{capacity.Cores} processor");
+            text.Should().Contain("Going higher makes builds slower, not faster.");
         });
     }
 

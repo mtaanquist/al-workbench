@@ -30,22 +30,24 @@
             <form method="post" action="/site-admin/settings/builds/save" id="settings-builds-form">
                 <AntiforgeryToken />
                 <div class="setting-list">
-                    <SettingRow Name="Builds that run at once">
+                    <SettingRow Name="Pipeline builds that run at once">
                         <HintContent>
-                            This server gives AL Workbench @Plural(_capacity.Cores, "core") and
-                            @_capacity.MemoryGb GB of memory. <strong>Recommended: @_capacity.Recommended.</strong>
-                            Each build uses about one core while it compiles; raising this past the
-                            recommendation makes builds slower, not faster.
+                            Covers pipeline and pull request builds. This server gives AL Workbench
+                            @Plural(_capacity.Cores, "processor") and @_capacity.MemoryGb GB of memory. Each
+                            build uses about one processor and 1 GB while it compiles, and the app itself
+                            needs one. <strong>Recommended: @_capacity.Recommended.</strong> Going
+                            higher makes builds slower, not faster. Takes effect when you save, with
+                            no restart; running builds are never stopped.
                         </HintContent>
                         <ChildContent>
                             <span class="u-row">
                                 <input class="input input--num" type="number" name="BuildConcurrency"
                                        min="@ProjectBuildQueue.MinConcurrency" max="@ProjectBuildQueue.MaxConcurrency" step="1"
-                                       style="width: 92px" aria-label="Builds that run at once"
-                                       value="@(_view.BuildConcurrency?.ToString() ?? string.Empty)"
-                                       placeholder="@Builds.DefaultLimit.ToString()" />
+                                       style="width: 92px" aria-label="Pipeline builds that run at once"
+                                       value="@(_view.BuildConcurrency?.ToString() ?? string.Empty)" />
                                 <span class="form-actions__note">
-                                    Leave empty to use the default (currently @Builds.DefaultLimit).
+                                    From @ProjectBuildQueue.MinConcurrency to @ProjectBuildQueue.MaxConcurrency.
+                                    Leave empty to use the default of @Builds.DefaultLimit.
                                 </span>
                             </span>
                         </ChildContent>

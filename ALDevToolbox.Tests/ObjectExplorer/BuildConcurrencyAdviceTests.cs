@@ -4,7 +4,7 @@ using AwesomeAssertions;
 namespace ALDevToolbox.Tests.ObjectExplorer;
 
 /// <summary>
-/// The recommendation beside "Builds that run at once" (#1164): one build per
+/// The recommendation beside "Pipeline builds that run at once" (#1164): one build per
 /// gigabyte, one fewer than the cores, between 1 and the most the queue allows.
 /// </summary>
 public sealed class BuildConcurrencyAdviceTests

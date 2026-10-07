@@ -1,7 +1,7 @@
 namespace ALDevToolbox.Services.ObjectExplorer.Import;
 
 /// <summary>
-/// The recommendation shown beside the "Builds that run at once" setting (#1164):
+/// The recommendation shown beside the "Pipeline builds that run at once" setting (#1164):
 /// what the app container can carry, worked out from the cores and memory the
 /// runtime says it has. Advice only; nothing sets the limit from it.
 ///
@@ -9,7 +9,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// Each running build keeps about one core busy compiling and wants about a gigabyte
 /// of memory, and the rest of the app needs a core of its own. So the rule is one
 /// build per gigabyte, one fewer than the cores, never less than one and never more
-/// than <see cref="ProjectBuildQueue.MaxConcurrency"/>. See
+/// than <see cref="ProjectBuildQueue.MaxConcurrency"/>. "Cores" here are logical
+/// processors, so a hyperthread already counts as one; the second thread on a core
+/// adds far less than a second core would, so it is not counted twice. See
 /// <c>.design/deployment.md</c>, "Resource sizing".
 /// </para>
 /// </summary>
