@@ -325,8 +325,10 @@ public sealed class ProjectBuildImporter
     /// <para>Nor is a durable <c>oe_import_jobs</c> row written. A pull-request
     /// build is deliberately not resumed across a restart: by the time the process
     /// is back the head may have moved, and re-running would complete a check run
-    /// about a commit nobody is looking at any more. The next push - or GitHub's
-    /// own redelivery - is the recovery.</para>
+    /// about a commit nobody is looking at any more. After a restart
+    /// <see cref="GitHub.GitHubWebhookRecoveryScheduler"/> fails the build and
+    /// closes its check run, and the next push to the pull request is the recovery
+    /// (#1121).</para>
     /// </summary>
     public async Task<(int ReleaseId, int BuildId)> StartPullRequestBuildAsync(
         int projectId,
@@ -372,6 +374,9 @@ public sealed class ProjectBuildImporter
             Branch = headRef,
             PullRequestNumber = pullRequestNumber,
             HeadSha = headSha,
+            // Which of the solution's repositories the pull request is on, so a
+            // check run this build leaves open over a restart can be closed (#1121).
+            HeadRepositoryId = repositoryId,
             CheckRunId = checkRunId,
             StartedAt = _clock.GetUtcNow().UtcDateTime,
         };

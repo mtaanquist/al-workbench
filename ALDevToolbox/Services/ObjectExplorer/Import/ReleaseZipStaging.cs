@@ -11,6 +11,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// </summary>
 public static class ReleaseZipStaging
 {
+    /// <summary>Temp-file prefix for a nested DVD zip extracted to disk.</summary>
+    public const string NestedTempPrefix = "oe-nested-";
+
     /// <summary>
     /// Opens <paramref name="tempZipPath"/> and builds one upload per app.
     /// <paramref name="isDvd"/> picks the DVD-subset walk (Applications/ +
@@ -212,7 +215,7 @@ public static class ReleaseZipStaging
     /// </summary>
     private static ZipArchive ExtractNestedZipToSelfDeletingArchive(ZipArchiveEntry nested)
     {
-        var tempPath = Path.Combine(Path.GetTempPath(), "oe-nested-" + Guid.NewGuid().ToString("N") + ".zip");
+        var tempPath = Path.Combine(Path.GetTempPath(), NestedTempPrefix + Guid.NewGuid().ToString("N") + ".zip");
         var fs = new FileStream(tempPath, new FileStreamOptions
         {
             Mode = FileMode.Create,

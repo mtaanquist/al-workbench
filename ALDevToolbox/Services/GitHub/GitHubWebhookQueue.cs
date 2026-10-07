@@ -128,9 +128,11 @@ public sealed record GitHubMergedPullRequestJob(
 /// <em>old</em> build, which is the opposite of what the reviewer wants to
 /// see.</para>
 ///
-/// <para>All of it is in memory. A restart drops queued deliveries; GitHub's own
-/// redelivery, or the next push, is the recovery, and a check run left
-/// <c>in_progress</c> is visible as such. See
+/// <para>All of it is in memory. A restart drops queued deliveries, and GitHub
+/// does not resend them by itself: GitHub logged them as delivered, so the next
+/// push is the recovery for those. A delivery we refused or never answered is
+/// resent by <see cref="GitHubWebhookRecoveryScheduler"/>, which also closes the
+/// check run of a pull-request build a restart cut short (#1121). See
 /// <c>.design/github-integration-phase2.md</c> (#627).</para>
 /// </summary>
 public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
@@ -138,11 +140,18 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     private readonly ConcurrentDictionary<string, string> _latestSha = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _running = new(StringComparer.Ordinal);
 
+    /// <summary>How many deliveries the queue holds before the endpoint refuses more.</summary>
+    public const int Capacity = 128;
+
     // Deliveries are tiny (one record of strings) and the worker is single-reader,
     // so the bound is about how deep a backlog is worth holding rather than memory.
     // A busy organisation pushing to a hundred pull requests at once still queues;
-    // beyond that GitHub retries.
-    public GitHubWebhookQueue() : base(capacity: 128) { }
+    // beyond that the endpoint refuses, and GitHubWebhookRecoveryScheduler asks
+    // GitHub to resend once there is room (#1121).
+    public GitHubWebhookQueue() : base(capacity: Capacity) { }
+
+    /// <summary>How many deliveries are waiting for the worker right now.</summary>
+    public int Backlog => Reader.Count;
 
     /// <summary>
     /// Queues <paramref name="job"/> if there is room, and answers false when
@@ -151,7 +160,9 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     /// <para>The webhook endpoint runs on a request thread that GitHub is timing.
     /// Waiting on a full channel would hold that request open behind a backlog of
     /// builds and eventually have GitHub give up on us anyway; refusing is both
-    /// honest and cheaper, because GitHub redelivers a failed webhook.</para>
+    /// honest and cheaper. GitHub does not resend a refused delivery by itself;
+    /// <see cref="GitHubWebhookRecoveryScheduler"/> asks it to once the backlog
+    /// has drained (#1121).</para>
     /// </summary>
     public bool TryEnqueue(GitHubWebhookJob job) => Writer.TryWrite(job);
 

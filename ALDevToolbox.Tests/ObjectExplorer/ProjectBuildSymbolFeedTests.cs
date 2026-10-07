@@ -672,6 +672,35 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
 
     // ── The changelog baseline ──────────────────────────────────────────
 
+    // The build worker is shared by every build and import, so one process that never
+    // exits would stop all of them until a restart (#1132).
+    [Fact]
+    public async Task Every_process_a_build_starts_has_a_time_limit()
+    {
+        var (projectId, releaseId, _, _) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        _tools.Diffs["sales-ext"] = "sales-ext/src/Sales.Codeunit.al\n";
+        _tools.Ancestors.Add(PriorSha);
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.Requests.Should().Contain(r => r.FileName == _tools.AlcPath || r.FileName == "dotnet");
+        _tools.Requests.Should().Contain(r => r.Arguments.Contains("diff"));
+        _tools.Requests.Should().Contain(r => r.Arguments.Contains("log"));
+        _tools.Requests.Should().OnlyContain(r => r.Timeout != null && r.Timeout > TimeSpan.Zero);
+    }
+
+    [Theory]
+    [InlineData("45", 45)]
+    [InlineData(null, 30)]
+    [InlineData("", 30)]
+    [InlineData("0", 30)]
+    [InlineData("-5", 30)]
+    [InlineData("soon", 30)]
+    public void A_time_limit_override_must_be_a_positive_number_of_minutes(string? raw, int expectedMinutes)
+    {
+        ProjectBuildService.MinutesOrDefault(raw, 30).Should().Be(TimeSpan.FromMinutes(expectedMinutes));
+    }
+
     [Fact]
     public async Task The_changelog_is_measured_from_the_same_pipelines_last_build()
     {
@@ -1315,6 +1344,9 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         /// <summary>The compiler each compile ran: the apphost path, or the <c>alc.dll</c> <c>dotnet</c> was handed.</summary>
         public List<string> CompilersRun { get; } = new();
 
+        /// <summary>Every process the build started, in order.</summary>
+        public List<ProcessRunRequest> Requests { get; } = new();
+
         /// <summary>The argument list of every <c>git clone</c> run.</summary>
         public List<IReadOnlyList<string>> Clones { get; } = new();
 
@@ -1344,6 +1376,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
 
         public Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken ct = default)
         {
+            Requests.Add(request);
             if (request.FileName == AlcPath)
             {
                 CompilersRun.Add(AlcPath);

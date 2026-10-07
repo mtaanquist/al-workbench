@@ -122,7 +122,7 @@ public static class GitHubWebhookEndpoints
                     log.LogWarning(
                         "Refused a push delivery for {Repository} ({Branch}): the webhook queue is full.",
                         push.RepositoryFullName, push.Branch);
-                    return Results.Text("Busy; GitHub will retry.", "text/plain", statusCode: 503);
+                    return Results.Text("Busy; the delivery will be requested again.", "text/plain", statusCode: 503);
                 }
                 log.LogInformation(
                     "Queued a push to {Repository} ({Branch} at {HeadSha}, installation {InstallationId}, delivery {DeliveryId}).",
@@ -145,7 +145,7 @@ public static class GitHubWebhookEndpoints
                     log.LogWarning(
                         "Refused a merged pull-request delivery for {Repository}#{Number}: the webhook queue is full.",
                         merged.RepositoryFullName, merged.Number);
-                    return Results.Text("Busy; GitHub will retry.", "text/plain", statusCode: 503);
+                    return Results.Text("Busy; the delivery will be requested again.", "text/plain", statusCode: 503);
                 }
                 log.LogInformation(
                     "Queued a merged pull request {Repository}#{Number} into {Branch} (delivery {DeliveryId}).",
@@ -157,14 +157,16 @@ public static class GitHubWebhookEndpoints
             if (job is null) return Results.NoContent();
 
             // A full channel means the workbench is already behind on builds.
-            // Waiting here would hold GitHub's request open behind that backlog;
-            // saying so lets GitHub redeliver, which is what it does with a 5xx.
+            // Waiting here would hold GitHub's request open behind that backlog.
+            // GitHub does not resend a 5xx by itself: the refusal stays in the
+            // App's delivery log, and GitHubWebhookRecoveryScheduler asks GitHub
+            // to send it again once the queue has room (#1121).
             if (!queue.TryEnqueue(job))
             {
                 log.LogWarning(
                     "Refused a pull-request delivery for {Repository}#{Number}: the build queue is full.",
                     job.RepositoryFullName, job.PullRequestNumber);
-                return Results.Text("Busy; GitHub will retry.", "text/plain", statusCode: 503);
+                return Results.Text("Busy; the delivery will be requested again.", "text/plain", statusCode: 503);
             }
 
             // Announced only once the job is really queued. Announcing first would

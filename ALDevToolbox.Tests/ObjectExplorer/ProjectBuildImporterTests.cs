@@ -197,6 +197,8 @@ public sealed class ProjectBuildImporterTests : IDisposable
         build.HeadSha.Should().Be("abc123");
         build.Branch.Should().Be("feature/vat");
         build.CheckRunId.Should().Be(555);
+        build.HeadRepositoryId.Should().Be(repositoryId,
+            "a check run a restart leaves open is closed on the repository the pull request is on (#1121)");
         build.PipelineId.Should().BeNull("a pull-request build is not a run of a pipeline");
         build.StartedByUserId.Should().BeNull("nobody pressed a button - GitHub asked");
         build.RequestedAppIdsJson.Should().BeNull("with no selection to honour, every extension is compiled");

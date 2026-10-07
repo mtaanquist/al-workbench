@@ -552,8 +552,9 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     [Fact]
     public async Task A_full_queue_is_answered_with_a_retryable_503_and_nothing_is_announced()
     {
-        // The request thread is GitHub's, and GitHub redelivers a 5xx. Waiting on
-        // a full channel would hold that request open behind a build backlog.
+        // The request thread is GitHub's. Waiting on a full channel would hold that
+        // request open behind a build backlog; the refusal is asked for again later
+        // by GitHubWebhookRecoveryScheduler (#1121).
         await StoreSecretAsync();
         using var client = _factory.CreateClient();
         var queue = _factory.Services.GetRequiredService<GitHubWebhookQueue>();
@@ -565,7 +566,7 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
         using var response = await client.SendAsync(Delivery(PullRequestPayload(headSha: "deadbee"), Secret));
 
         response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        (await response.Content.ReadAsStringAsync()).Should().Contain("retry");
+        (await response.Content.ReadAsStringAsync()).Should().Contain("requested again");
         queue.IsLatest("42:cronus-dk/customer-app:7", "something-else").Should().BeTrue(
             "a delivery that was never queued must not cancel the build that is running");
     }

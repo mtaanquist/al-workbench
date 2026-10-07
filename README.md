@@ -184,6 +184,7 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `DISABLE_NOTIFICATION_DIGEST_SCHEDULER`       | `1` to stop sending the daily and weekly notification digests. Items for them wait until it is turned back on, which then drops any older than 30 days, along with in-app notifications of that age. | unset |
 | `DISABLE_DEPENDENCY_DRIFT_SCHEDULER`          | `1` to disable the nightly check of tracked repositories against their solutions' Business Central environments, and with it the update pull requests opened automatically. | unset |
 | `DISABLE_GITHUB_REPOSITORY_DISCOVERY_SCHEDULER` | `1` to disable the daily sweep that lists the connected GitHub organisation's repositories and offers the AL ones no solution tracks yet. | unset |
+| `DISABLE_GITHUB_WEBHOOK_RECOVERY_SCHEDULER` | `1` to stop asking GitHub every five minutes to resend webhook deliveries that did not get through, and to stop closing pull request checks a restart interrupted. | unset |
 | `DISABLE_TRANSLATION_MEMORY_INGEST_SCHEDULER` | `1` to disable the nightly pass that fills the translation memory from the `.xlf` files in each organisation's own repositories. | unset |
 | `DISABLE_LOGIN_ATTEMPT_PRUNE_SCHEDULER`       | `1` to disable the periodic prune of old login-attempt rows. | unset                |
 | `DISABLE_EMAIL_OUTBOX_SCHEDULER`              | `1` to stop sending queued transactional email (resets, invites, sign-in links). Messages still queue up, nothing goes out, and nothing is cleaned up - queued messages keep their encrypted bodies until sending is switched back on. | unset |
@@ -201,6 +202,7 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `BC_ARTIFACT_CDN_HOST`                        | Host serving Microsoft's Business Central artifact indexes; override for a mirror. | Microsoft's artifact CDN |
 | `BC_INSIDER_CDN_HOST`                         | Host serving Microsoft's pre-release (insider) artifact indexes, used when an organisation opts into preview builds and by builds against the next Business Central version; override for a mirror. | Microsoft's insider artifact CDN |
 | `OE_BUILD_CLONE_TIMEOUT_MINUTES`              | Ceiling, in minutes, on a project build's repository clone step. | `30`                |
+| `OE_BUILD_COMPILE_TIMEOUT_MINUTES`            | Ceiling, in minutes, on compiling one extension in a project build. | `30`                |
 | `SITE_ADDRESS` / `ACME_EMAIL`                 | Domain, and Let's Encrypt contact address, for the optional `caddy` service. Both required once it's enabled. | none |
 | `AllowedHosts`                                | Semicolon-separated host names the app answers for; a foreign `Host` is refused before any handler runs. Include `localhost` so the image `HEALTHCHECK` still passes, and make sure any proxy health probe sends the public host (the shipped `Caddyfile` does). | `*` |
 | `ASPNETCORE_URLS`                             | Standard ASP.NET Core binding.                            | `http://+:8080`        |

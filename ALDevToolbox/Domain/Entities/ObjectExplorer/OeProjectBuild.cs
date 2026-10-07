@@ -94,8 +94,9 @@ public class OeProjectBuild
     /// <summary>
     /// For a build started by a push: the solution repository that was pushed to,
     /// the one checked out at <see cref="HeadSha"/>. The solution's other
-    /// repositories are cloned at the pipeline's branch as usual. Null for every
-    /// other build. Deliberately not a foreign key: it only steers the checkout, and a
+    /// repositories are cloned at the pipeline's branch as usual. For a
+    /// pull-request build: the repository the pull request is on, which is where
+    /// its check run lives. Null for every other build. Deliberately not a foreign key: it only steers the checkout, and a
     /// repository removed while the build waits simply leaves nothing to pin.
     /// </summary>
     public int? HeadRepositoryId { get; set; }
