@@ -201,6 +201,7 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `BC_ARTIFACT_CDN_HOST`                        | Host serving Microsoft's Business Central artifact indexes; override for a mirror. | Microsoft's artifact CDN |
 | `BC_INSIDER_CDN_HOST`                         | Host serving Microsoft's pre-release (insider) artifact indexes, used when an organisation opts into preview builds and by builds against the next Business Central version; override for a mirror. | Microsoft's insider artifact CDN |
 | `OE_BUILD_CLONE_TIMEOUT_MINUTES`              | Ceiling, in minutes, on a project build's repository clone step. | `30`                |
+| `OE_BUILD_COMPILE_TIMEOUT_MINUTES`            | Ceiling, in minutes, on compiling one extension in a project build. | `30`                |
 | `SITE_ADDRESS` / `ACME_EMAIL`                 | Domain, and Let's Encrypt contact address, for the optional `caddy` service. Both required once it's enabled. | none |
 | `AllowedHosts`                                | Semicolon-separated host names the app answers for; a foreign `Host` is refused before any handler runs. Include `localhost` so the image `HEALTHCHECK` still passes, and make sure any proxy health probe sends the public host (the shipped `Caddyfile` does). | `*` |
 | `ASPNETCORE_URLS`                             | Standard ASP.NET Core binding.                            | `http://+:8080`        |

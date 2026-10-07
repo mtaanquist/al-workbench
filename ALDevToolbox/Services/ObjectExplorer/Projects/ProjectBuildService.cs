@@ -48,11 +48,30 @@ public sealed class ProjectBuildService
     private const int DefaultBuildCloneTimeoutMinutes = 30;
 
     /// <summary>The build-clone ceiling (env-overridable). git's low-speed abort (~60s) catches genuine stalls; this only backstops a stuck process.</summary>
-    private static TimeSpan BuildCloneTimeout()
-    {
-        var raw = Environment.GetEnvironmentVariable("OE_BUILD_CLONE_TIMEOUT_MINUTES");
-        return int.TryParse(raw, out var m) && m > 0 ? TimeSpan.FromMinutes(m) : TimeSpan.FromMinutes(DefaultBuildCloneTimeoutMinutes);
-    }
+    private static TimeSpan BuildCloneTimeout() =>
+        MinutesOrDefault(Environment.GetEnvironmentVariable("OE_BUILD_CLONE_TIMEOUT_MINUTES"), DefaultBuildCloneTimeoutMinutes);
+
+    /// <summary>Default ceiling for compiling one extension. Override via <c>OE_BUILD_COMPILE_TIMEOUT_MINUTES</c>.</summary>
+    private const int DefaultCompileTimeoutMinutes = 30;
+
+    /// <summary>
+    /// The ceiling for one <c>alc</c> run (env-overridable). Builds share one worker, so a
+    /// compiler that never exits would stop every build and import until a restart (#1132);
+    /// past this it is killed and that extension fails.
+    /// </summary>
+    private static TimeSpan CompileTimeout() =>
+        MinutesOrDefault(Environment.GetEnvironmentVariable("OE_BUILD_COMPILE_TIMEOUT_MINUTES"), DefaultCompileTimeoutMinutes);
+
+    /// <summary>
+    /// The ceiling for a git command that only reads or moves within the clone (diff, log,
+    /// merge-base, show, checkout). These take seconds; the bound only stops a stuck one
+    /// from holding the build worker (#1132).
+    /// </summary>
+    private static readonly TimeSpan LocalGitTimeout = TimeSpan.FromMinutes(5);
+
+    /// <summary><paramref name="raw"/> as a positive number of minutes, else <paramref name="defaultMinutes"/>.</summary>
+    internal static TimeSpan MinutesOrDefault(string? raw, int defaultMinutes) =>
+        int.TryParse(raw, out var m) && m > 0 ? TimeSpan.FromMinutes(m) : TimeSpan.FromMinutes(defaultMinutes);
 
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
@@ -619,7 +638,8 @@ public sealed class ProjectBuildService
                  folder == "." ? "." : ":(literal)" + folder],
                 app.Repo.Dir,
                 // Never prompt or fetch: the answer is in the clone's history or not at all.
-                new Dictionary<string, string> { ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_NO_LAZY_FETCH"] = "1" }), ct).ConfigureAwait(false);
+                new Dictionary<string, string> { ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_NO_LAZY_FETCH"] = "1" },
+                LocalGitTimeout), ct).ConfigureAwait(false);
             if (!diff.Succeeded)
             {
                 lines.Add($"{name}: changed (the commit build #{prior.ProjectBuildId} used, {Short(priorSha)}, could not be compared).");
@@ -1052,7 +1072,8 @@ public sealed class ProjectBuildService
             else
             {
                 var ancestry = await _processRunner.RunAsync(new ProcessRunRequest(
-                    gitPath, new[] { "-C", clone.Dir, "merge-base", "--is-ancestor", prevSha, "HEAD" }, clone.Dir), ct).ConfigureAwait(false);
+                    gitPath, new[] { "-C", clone.Dir, "merge-base", "--is-ancestor", prevSha, "HEAD" }, clone.Dir,
+                    Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
                 if (!ancestry.Succeeded)
                 {
                     rows.Add(SummaryNote(orgId, build.Id, clone.RepositoryId.Value,
@@ -1064,7 +1085,7 @@ public sealed class ProjectBuildService
                         gitPath,
                         new[] { "-C", clone.Dir, "log", "--no-merges", "-n", (ChangelogCommitCap + 1).ToString(),
                                 "--pretty=format:%h%an%cI%s", $"{prevSha}..HEAD" },
-                        clone.Dir), ct).ConfigureAwait(false);
+                        clone.Dir, Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
                     var (parsed, truncated) = ParseChangelog(log.StdOut, ChangelogCommitCap);
                     var ordering = 0;
                     foreach (var entry in parsed)
@@ -1497,7 +1518,7 @@ public sealed class ProjectBuildService
         if (outcome.Succeeded)
         {
             outcome = await _processRunner.RunAsync(new ProcessRunRequest(
-                gitPath, new[] { "-C", cloneDir, "checkout", "--detach", commitSha }, cloneDir, env), ct)
+                gitPath, new[] { "-C", cloneDir, "checkout", "--detach", commitSha }, cloneDir, env, LocalGitTimeout), ct)
                 .ConfigureAwait(false);
             if (outcome.Succeeded)
             {
@@ -1537,7 +1558,8 @@ public sealed class ProjectBuildService
         {
             // %H = full SHA, %cI = committer date (strict ISO-8601), tab-separated.
             var r = await _processRunner.RunAsync(new ProcessRunRequest(
-                gitPath, new[] { "-C", cloneDir, "show", "-s", "--format=%H%x09%cI", "HEAD" }, cloneDir), ct).ConfigureAwait(false);
+                gitPath, new[] { "-C", cloneDir, "show", "-s", "--format=%H%x09%cI", "HEAD" }, cloneDir,
+                Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
             if (!r.Succeeded) return (null, null);
             var parts = r.StdOut.Trim().Split('\t');
             var sha = parts.Length > 0 && parts[0].Trim().Length > 0 ? parts[0].Trim() : null;
@@ -1562,7 +1584,8 @@ public sealed class ProjectBuildService
         try
         {
             var r = await _processRunner.RunAsync(new ProcessRunRequest(
-                gitPath, new[] { "-C", cloneDir, "symbolic-ref", "--short", "-q", "HEAD" }, cloneDir), ct).ConfigureAwait(false);
+                gitPath, new[] { "-C", cloneDir, "symbolic-ref", "--short", "-q", "HEAD" }, cloneDir,
+                Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
             var name = r.Succeeded ? r.StdOut.Trim() : string.Empty;
             return name.Length > 0 && GitBranchName.IsValid(name) ? name : null;
         }
@@ -2000,7 +2023,7 @@ public sealed class ProjectBuildService
             ? new Dictionary<string, string> { ["DOTNET_ROLL_FORWARD"] = "LatestMajor" }
             : null;
 
-        var result = await _processRunner.RunAsync(new ProcessRunRequest(compiler.FileName, args, app.ProjectDir, env), ct).ConfigureAwait(false);
+        var result = await _processRunner.RunAsync(new ProcessRunRequest(compiler.FileName, args, app.ProjectDir, env, CompileTimeout()), ct).ConfigureAwait(false);
         // alc writes diagnostics to stdout; keep both streams for the build log.
         var log = string.Join("\n", new[] { result.StdOut, result.StdErr }.Where(s => !string.IsNullOrWhiteSpace(s))).Trim();
         if (result.Succeeded && File.Exists(outFile))
