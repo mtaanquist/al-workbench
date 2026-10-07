@@ -121,6 +121,11 @@ internal static class TenantTableCatalog
         // oe_releases, so a restore that deleted the releases would take these
         // with them and put nothing back.
         "github_repository_drift",
+        // Which Business Central versions have already been offered to each
+        // repository (#1104). Restorable content: without it the nightly run would
+        // open again every update pull request somebody had closed. Its only
+        // parent is organizations.
+        "github_update_pull_requests",
         // Which repository file each learned pair last came from, and the
         // version of it already read. Restorable content: without it a restored
         // organisation would re-read every translation file once, which costs

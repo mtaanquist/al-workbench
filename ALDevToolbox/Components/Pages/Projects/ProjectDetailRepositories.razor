@@ -170,6 +170,47 @@
     </div>
 </div>
 
+@* Automatic update pull requests (#1104). Only an existing solution with a GitHub
+   repository can have them: the pull requests go to GitHub, as the person who
+   turned this on. *@
+@if (LoadedProject is not null && (Edit.AutoUpdatePullRequests || Edit.Repos.Any(r => r.Provider == RepositoryProvider.GitHub && !r.IsBlank())))
+{
+    <div class="form-sec__head">
+        <h2 class="card__title">Business Central updates</h2>
+    </div>
+    <div class="card">
+        <div class="card__body">
+            @if (LoadedProject.AutoUpdatePullRequests && LoadedProject.AutoUpdatePullRequestsBlocked is { Length: > 0 } held)
+            {
+                <Alert Tone="AlertTone.Warn">
+                    <span>Update pull requests are not being opened automatically: @held@(CanManage ? "" : " Ask someone who manages this solution to resume it.")</span>
+                    @if (CanManage)
+                    {
+                        <button type="button" class="btn btn--sm" @onclick="ResumeAsync" disabled="@(Saving || _resuming)"
+                                title="From now on, update pull requests are opened with your GitHub account.">
+                            <span>@(_resuming ? "Saving..." : "Resume with my access")</span>
+                        </button>
+                    }
+                </Alert>
+            }
+            <div class="field">
+                <label class="@(Edit.AutoUpdatePullRequests ? "check is-checked" : "check")">
+                    <input id="pd-auto-update-prs" type="checkbox" checked="@Edit.AutoUpdatePullRequests" disabled="@(Saving || !CanManage)"
+                           @onchange="ToggleAutoUpdates" />
+                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                    <span>Open update pull requests automatically</span>
+                </label>
+                <small class="field__hint">
+                    When this solution's production environment (or its sandbox, if it has no production environment) moves to a newer Business Central,
+                    a pull request is opened every night on each GitHub repository whose app.json still asks for the older one.
+                    Each version is offered once, so a pull request you close stays closed.
+                    @OwnerHint
+                </small>
+            </div>
+        </div>
+    </div>
+}
+
 @code {
     /// <summary>Whether this person may change the solution. A viewer sees the rows read-only.</summary>
     [Parameter] public bool CanManage { get; set; }
@@ -198,6 +239,49 @@
 
     /// <summary>Raised when the list or a row changes, so the page can show "Unsaved changes".</summary>
     [Parameter] public EventCallback OnDirty { get; set; }
+
+    /// <summary>The solution as last saved, or null while it is being created - which is when the update section is hidden.</summary>
+    [Parameter] public ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject? LoadedProject { get; set; }
+
+    /// <summary>"Resume with my access": the page makes this person the one update pull requests are opened as.</summary>
+    [Parameter] public EventCallback OnResumeAutoUpdates { get; set; }
+
+    private bool _resuming;
+
+    /// <summary>Whose GitHub account the pull requests go out as, said the way the person will see it on GitHub.</summary>
+    private string OwnerHint
+    {
+        get
+        {
+            var savedOn = LoadedProject?.AutoUpdatePullRequests == true;
+            if (!Edit.AutoUpdatePullRequests || !savedOn)
+            {
+                return "They are opened with the GitHub account of whoever turns this on.";
+            }
+            return LoadedProject!.AutoUpdatePullRequestsByUser is { } owner
+                ? $"They are opened with {owner.DisplayName}'s GitHub account."
+                : "They are opened with the GitHub account of whoever turns this on.";
+        }
+    }
+
+    private async Task ToggleAutoUpdates(ChangeEventArgs e)
+    {
+        Edit.AutoUpdatePullRequests = e.Value is true;
+        await OnDirty.InvokeAsync();
+    }
+
+    private async Task ResumeAsync()
+    {
+        _resuming = true;
+        try
+        {
+            await OnResumeAutoUpdates.InvokeAsync();
+        }
+        finally
+        {
+            _resuming = false;
+        }
+    }
 
     /// <summary>
     /// The repository just picked, held for exactly one render - see

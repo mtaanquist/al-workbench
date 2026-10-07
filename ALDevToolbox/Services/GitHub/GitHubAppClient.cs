@@ -794,6 +794,27 @@ public sealed partial class GitHubAppClient
     }
 
     /// <summary>
+    /// Leaves <paramref name="comment"/> on pull request <paramref name="number"/> and
+    /// closes it, as <paramref name="credential"/>'s owner. Closing one that is already
+    /// closed or merged changes nothing on GitHub; the comment still lands.
+    /// </summary>
+    public async Task ClosePullRequestAsync(
+        string credential, string owner, string repo, int number, string comment, CancellationToken ct = default)
+    {
+        // A pull request is an issue to GitHub's comment API.
+        using (var commentRequest = NewJsonRequest(
+            HttpMethod.Post, $"{RepoPath(owner, repo)}/issues/{number}/comments", credential, new { body = comment }))
+        using (await SendAsync(commentRequest, ct))
+        {
+        }
+
+        using var close = NewJsonRequest(
+            HttpMethod.Patch, $"{RepoPath(owner, repo)}/pulls/{number}", credential, new { state = "closed" });
+        using var _ = await SendAsync(close, ct);
+        _logger.LogInformation("Closed pull request #{PullRequestNumber} on {Owner}/{Repo}.", number, owner, repo);
+    }
+
+    /// <summary>
     /// The open pull request whose head is <paramref name="headBranch"/>, or
     /// <see langword="null"/> when there is not one.
     ///

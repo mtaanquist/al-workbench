@@ -149,6 +149,7 @@ public sealed class ProjectService
             .AsNoTracking()
             .Where(c => c.Id == id && c.DeletedAt == null)
             .Include(c => c.Repositories)
+            .Include(c => c.AutoUpdatePullRequestsByUser)
             .FirstOrDefaultAsync(ct);
     }
 
@@ -277,6 +278,14 @@ public sealed class ProjectService
         else if (input.Slug is not null) project.Slug = await FreeSlugAsync(SolutionSlug.Derive(shortName ?? name), existingId: id, ct);
         project.DefaultArtifactCountry = country;
         project.UpdatedAt = DateTime.UtcNow;
+        if (input.AutoUpdatePullRequests is { } auto && auto != project.AutoUpdatePullRequests)
+        {
+            // Turning it on makes the saver the person the pull requests are opened
+            // as, the same rule as building on push (#1104).
+            project.AutoUpdatePullRequests = auto;
+            project.AutoUpdatePullRequestsByUserId = auto ? _orgContext.CurrentUserId : null;
+            project.AutoUpdatePullRequestsBlocked = null;
+        }
 
         ReconcileRepositories(project, repos, orgId);
 
@@ -287,6 +296,32 @@ public sealed class ProjectService
         // The repo set may have changed — re-warm the discovery cache in the
         // background so the pipeline editor reflects it. Best-effort.
         if (project.Repositories.Count > 0) await WarmDiscoveryAsync(project.Id, ct);
+    }
+
+    /// <summary>
+    /// Makes the acting person the one automatic update pull requests are opened as,
+    /// and clears whatever held the last run up - "Resume with my access" on the
+    /// Repositories tab (#1104). Nothing happens when the setting is off.
+    /// </summary>
+    /// <exception cref="PlanValidationException">The solution is gone.</exception>
+    /// <exception cref="ProjectAccessDeniedException">The caller may not manage this solution.</exception>
+    public async Task ResumeAutoUpdatePullRequestsAsync(int projectId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var userId = _orgContext.CurrentUserId
+            ?? throw new InvalidOperationException("No user in scope; resuming automatic update pull requests needs a signed-in person.");
+        var project = await _db.OeProjects
+            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
+            ?? throw Validation("Name", "This solution no longer exists.");
+        await _access.EnsureCanManageAsync(project.Id, project.CreatedByUserId, ct);
+        if (!project.AutoUpdatePullRequests) return;
+
+        project.AutoUpdatePullRequestsByUserId = userId;
+        project.AutoUpdatePullRequestsBlocked = null;
+        project.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation(
+            "User {UserId} took over automatic update pull requests for solution {ProjectId}.", userId, projectId);
     }
 
     /// <summary>
@@ -974,12 +1009,17 @@ public sealed class ProjectService
 /// one from the name); blank derives a fresh one from the name; anything else is used
 /// as typed, lowercased, and must be free. See <see cref="SolutionSlug"/>.
 /// </param>
+/// <param name="AutoUpdatePullRequests">
+/// Whether the nightly drift check opens update pull requests on its own (#1104). Null
+/// leaves it as it is; a create always starts with it off.
+/// </param>
 public sealed record ProjectInput(
     string Name,
     string? ShortName,
     string? DefaultArtifactCountry,
     IReadOnlyList<ProjectRepositoryInput> Repositories,
-    string? Slug = null);
+    string? Slug = null,
+    bool? AutoUpdatePullRequests = null);
 
 /// <summary>
 /// One solution as the generator's Solution picker sees it: what it searches on

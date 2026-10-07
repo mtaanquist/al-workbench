@@ -36,6 +36,9 @@ internal sealed class ProjectConfiguration : IEntityTypeConfiguration<OeProject>
         entity.Property(e => e.DiscoveredExtensionsJson).HasColumnName("discovered_extensions_json");
         entity.Property(e => e.DiscoveredAt).HasColumnName("discovered_at");
         entity.Property(e => e.DiscoveryError).HasColumnName("discovery_error");
+        entity.Property(e => e.AutoUpdatePullRequests).HasColumnName("auto_update_pull_requests").HasDefaultValue(false);
+        entity.Property(e => e.AutoUpdatePullRequestsByUserId).HasColumnName("auto_update_pull_requests_by_user_id");
+        entity.Property(e => e.AutoUpdatePullRequestsBlocked).HasColumnName("auto_update_pull_requests_blocked").HasMaxLength(500);
 
         // Customer information. See .design/solution-customer-info.md. The three enums
         // are text for the reason visibility is; all of it is optional.
@@ -72,6 +75,13 @@ internal sealed class ProjectConfiguration : IEntityTypeConfiguration<OeProject>
         entity.HasOne(e => e.CreatedByUser)
             .WithMany()
             .HasForeignKey(e => e.CreatedByUserId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        // Who automatic update pull requests are opened as. SET NULL on delete, which
+        // pauses them rather than removing the solution.
+        entity.HasOne(e => e.AutoUpdatePullRequestsByUser)
+            .WithMany()
+            .HasForeignKey(e => e.AutoUpdatePullRequestsByUserId)
             .OnDelete(DeleteBehavior.SetNull);
 
         entity.HasMany(e => e.Repositories)

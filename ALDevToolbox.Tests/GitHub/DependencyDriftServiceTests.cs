@@ -666,6 +666,160 @@ public sealed class DependencyDriftServiceTests : IDisposable
         (await service.NewestFirstPartyReleaseIdAsync()).Should().Be(shipped);
     }
 
+    // ── Opening them on their own (issue #1104) ──────────────────────────
+
+    [Fact]
+    public async Task A_pull_request_opened_by_hand_is_remembered_by_version()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        var (service, ctx) = NewService(WritableApi(RepoA));
+        await using var _ = ctx;
+
+        (await service.OpenUpdatePullRequestsAsync([RepoA])).Single().Refusal.Should().BeNull();
+
+        await using var read = _db.NewContext();
+        var record = await read.GitHubUpdatePullRequests.AsNoTracking().SingleAsync();
+        record.Repository.Should().Be(RepoA);
+        record.Version.Should().Be("28.2");
+        record.PullRequestNumber.Should().Be(77);
+        record.IsAutomatic.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task The_automatic_run_opens_the_pull_request_as_the_person_and_remembers_it()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var result = await service.OpenAutomaticPullRequestsAsync(projectId);
+
+        result.Should().Be(new AutomaticUpdatePullRequests(1, null));
+        api.Calls.Should().Contain(c => c.StartsWith("POST") && c.EndsWith($"/repos/{RepoA}/pulls"));
+        api.Credentials.Where(c => c.Call.Contains("/pulls")).Should().OnlyContain(c => c.Token == "ghu_access");
+        await using var read = _db.NewContext();
+        (await read.GitHubUpdatePullRequests.SingleAsync()).IsAutomatic.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task The_automatic_run_does_nothing_for_a_solution_that_has_it_off()
+    {
+        await ReadyAsync();
+        var projectId = await SeedSolutionAsync(RepoA);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Should().Be(new AutomaticUpdatePullRequests(0, null));
+        api.Calls.Should().NotContain(c => c.Contains("/pulls"));
+    }
+
+    [Fact]
+    public async Task A_version_already_offered_is_not_offered_again_even_when_its_branch_is_gone()
+    {
+        // Somebody closed last week's pull request and GitHub deleted its branch; only
+        // the workbench's own record says the version was offered and turned down.
+        await ReadyAsync();
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedOfferedAsync(RepoA, "28.2", 70, automatic: true);
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Should().Be(new AutomaticUpdatePullRequests(0, null));
+        api.Calls.Should().NotContain(c => c.StartsWith("POST"));
+    }
+
+    [Fact]
+    public async Task A_closed_pull_request_whose_branch_was_kept_is_not_stepped_past_by_the_automatic_run()
+    {
+        await ReadyAsync();
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        var api = WritableApi(RepoA)
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/ref/heads/aldt/bump-bc-28.2", HttpStatusCode.OK,
+                "{\"object\":{\"sha\":\"old-branch\"}}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Should().Be(new AutomaticUpdatePullRequests(0, null));
+        api.Calls.Should().NotContain(c => c.Contains("bump-bc-28.2-2"));
+        api.Calls.Should().NotContain(c => c.StartsWith("POST") && c.EndsWith("/pulls"));
+    }
+
+    [Fact]
+    public async Task A_newer_version_closes_the_older_automatic_pull_request_with_a_note()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedOfferedAsync(RepoA, "28.0", 70, automatic: true);
+        await SeedOfferedAsync(RepoA, "27.5", 60, automatic: false);
+        var api = WritableApi(RepoA)
+            .On(HttpMethod.Post, $"/repos/{RepoA}/issues/70/comments", HttpStatusCode.Created, "{\"id\":1}")
+            .On(HttpMethod.Patch, $"/repos/{RepoA}/pulls/70", HttpStatusCode.OK,
+                $"{{\"number\":70,\"html_url\":\"https://github.com/{RepoA}/pull/70\"}}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Opened.Should().Be(1);
+
+        api.Bodies.Single(b => b.Call.EndsWith("/issues/70/comments")).Body
+            .Should().Contain("Superseded by #77, which targets Business Central 28.2.");
+        api.Bodies.Single(b => b.Call.EndsWith("/pulls/70")).Body.Should().Contain("closed");
+        api.Calls.Should().NotContain(c => c.Contains("/60"), "a pull request a person opened is theirs to close");
+        await using var read = _db.NewContext();
+        var records = await read.GitHubUpdatePullRequests.AsNoTracking().ToDictionaryAsync(r => r.PullRequestNumber);
+        records[70].SupersededAt.Should().NotBeNull();
+        records[60].SupersededAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_automatic_run_says_so_when_the_person_has_no_GitHub_account_connected()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectOrganisationAsync();
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        var (service, ctx) = NewService(BaseApi());
+        await using var _ = ctx;
+
+        var result = await service.OpenAutomaticPullRequestsAsync(projectId);
+
+        result.Opened.Should().Be(0);
+        result.Blocked.Should().Contain("has not connected their GitHub account");
+    }
+
+    [Fact]
+    public async Task The_automatic_run_says_so_when_the_person_can_no_longer_manage_the_solution()
+    {
+        await ReadyAsync();
+        // A Private solution with no owner: only an admin or an assigned team manages it.
+        var projectId = await SeedSolutionAsync(RepoA, ProjectVisibility.Private);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        var (service, ctx) = NewService(BaseApi());
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Blocked
+            .Should().Be(DependencyDriftService.AutomaticNoAccessMessage);
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────
 
     private (DependencyDriftService Service, AppDbContext Context) NewService(FakeGitHubApi api)
@@ -866,6 +1020,30 @@ public sealed class DependencyDriftServiceTests : IDisposable
                 DetectedAt = now,
             });
         }
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task EnableAutoUpdatesAsync(int projectId, int userId = UserId)
+    {
+        await using var ctx = _db.NewContext();
+        await ctx.OeProjects.Where(p => p.Id == projectId).ExecuteUpdateAsync(s => s
+            .SetProperty(p => p.AutoUpdatePullRequests, true)
+            .SetProperty(p => p.AutoUpdatePullRequestsByUserId, (int?)userId));
+    }
+
+    private async Task SeedOfferedAsync(string fullName, string version, int number, bool automatic)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.GitHubUpdatePullRequests.Add(new GitHubUpdatePullRequest
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Repository = fullName.ToLowerInvariant(),
+            Version = version,
+            PullRequestNumber = number,
+            HtmlUrl = $"https://github.com/{fullName}/pull/{number}",
+            IsAutomatic = automatic,
+            OpenedAt = DateTime.UtcNow.AddDays(-7),
+        });
         await ctx.SaveChangesAsync();
     }
 
