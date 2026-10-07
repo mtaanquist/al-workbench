@@ -379,6 +379,29 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     }
 
     [Fact]
+    public async Task A_test_app_in_a_folder_of_any_name_is_not_built_and_the_log_says_why()
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        _tools.Extensions =
+        [
+            new("base-ext", "33333333-0000-0000-0000-000000000003", "CRONUS Base Extension", []),
+            // MyApp.Test is not a test folder by name; its dependency on Library Assert gives it away (#1130).
+            new("MyApp.Test", "55555555-0000-0000-0000-000000000005", "CRONUS Base Extension Tests",
+                [("33333333-0000-0000-0000-000000000003", "CRONUS Base Extension", "1.0.0.0"),
+                 ("dd0be2ea-f733-4d65-bb34-a28f4624fb14", "Library Assert", "29.0.0.0")]),
+        ];
+
+        var outcome = await BuildAsync(projectId, releaseId);
+
+        outcome.Results.Select(r => r.AppName).Should().Equal("CRONUS Base Extension");
+        _tools.SeenVersions.Keys.Should().NotContain("CRONUS Base Extension Tests");
+        await using var read = _db.NewContext();
+        var buildLog = string.Join("\n", await read.OeProjectBuildLogs.AsNoTracking()
+            .Where(l => l.ProjectBuildId == buildId && l.Section == "Build").Select(l => l.Content).ToListAsync());
+        buildLog.Should().Contain("Not built: CRONUS Base Extension Tests. It depends on Microsoft's test framework");
+    }
+
+    [Fact]
     public async Task What_a_resolved_PTE_depends_on_is_fetched_from_the_feed()
     {
         var (projectId, releaseId, buildId) = await SeedAsync();
