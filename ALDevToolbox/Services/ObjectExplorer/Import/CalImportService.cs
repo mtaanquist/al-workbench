@@ -616,8 +616,7 @@ public sealed class CalImportService
         IReadOnlyDictionary<string, (string Content, int Length, int LineCount)> pendingContent,
         CancellationToken ct)
     {
-        await OeIngestHelpers.UpsertFileContentsAsync(_db, pendingContent, ct).ConfigureAwait(false);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await OeIngestHelpers.SaveWithFileContentsAsync(_db, pendingContent, ct).ConfigureAwait(false);
         _db.ChangeTracker.Clear();
     }
 

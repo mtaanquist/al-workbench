@@ -691,6 +691,44 @@ public sealed class ProjectBuildImporterTests : IDisposable
             .Should().Contain("already being worked on");
     }
 
+    // A Retry whose request is cut off after the reopen committed must not leave a
+    // queued build with no job behind it: that blocks Build until a restart (#1181).
+    [Fact]
+    public async Task A_rebuild_that_cannot_be_queued_fails_rather_than_blocking_the_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await using (var rebuild = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"))
+        {
+            await ctx.OeReleases.Where(r => r.Id == first)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Status, "ingesting"));
+            await rebuild.CommitAsync();
+        }
+        using var cut = new CancellationTokenSource();
+        await cut.CancelAsync();
+
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).QueueRebuildAsync(first, projectId, cut.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await using (var read = _db.NewContext())
+        {
+            var build = await read.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.ReleaseId == first);
+            build.Status.Should().Be(ProjectBuildStatus.Failed);
+            build.FailureMessage.Should().Be(ProjectBuildImporter.RebuildNotQueuedMessage);
+            var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == first);
+            release.Status.Should().Be("failed");
+            release.StatusMessage.Should().Be(ProjectBuildImporter.RebuildNotQueuedMessage);
+            (await read.OeImportJobs.AnyAsync(j => j.ReleaseId == first && (j.Status == "queued" || j.Status == "running")))
+                .Should().BeFalse();
+        }
+        // The pipeline builds again straight away.
+        var next = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        next.Should().NotBe(first);
+    }
+
     private async Task FinishAsync(int releaseId)
     {
         await SetStatusAsync(releaseId, ProjectBuildStatus.Ready);
@@ -895,7 +933,8 @@ public sealed class ProjectBuildImporterTests : IDisposable
             _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new FakeGitHubApi())),
             _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance);
         return new ProjectBuildImporter(
-            importer, queue, persistedJobs, ctx, _db.OrgContext, access, credentials, TimeProvider.System,
+            importer, new ReleaseManagementService(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance),
+            queue, persistedJobs, ctx, _db.OrgContext, access, credentials, TimeProvider.System,
             NullLogger<ProjectBuildImporter>.Instance);
     }
 

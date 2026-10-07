@@ -2,6 +2,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Import;
 
@@ -244,14 +245,32 @@ public class ReleaseManagementService
     /// <c>NOT EXISTS</c> check sees ALL orgs (the EF query filter doesn't apply)
     /// — a blob still used by another tenant must survive. Returns the count
     /// reclaimed. Shared by hard-delete and retry-clear.
+    /// <para>
+    /// A blob an import is saving at that moment is locked by it
+    /// (<see cref="OeIngestHelpers.UpsertFileContentsAsync"/>) and is skipped, not
+    /// waited for: the import is about to reference it. Should an import commit its
+    /// references between this statement's snapshot and its delete, the foreign key
+    /// refuses the delete; nothing is reclaimed this time and the blobs stay, which
+    /// costs only space (#1181).
+    /// </para>
     /// </summary>
     private async Task<int> ReclaimOrphanedBlobsAsync(IReadOnlyList<string> candidateHashes, CancellationToken ct)
     {
         if (candidateHashes.Count == 0) return 0;
-        return await _db.Database.ExecuteSqlRawAsync(
-            "DELETE FROM oe_file_contents c WHERE c.content_hash = ANY({0}) " +
-            "AND NOT EXISTS (SELECT 1 FROM oe_module_files f WHERE f.content_hash = c.content_hash)",
-            new object[] { candidateHashes.ToArray() }, ct).ConfigureAwait(false);
+        try
+        {
+            return await _db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM oe_file_contents c WHERE c.content_hash IN (" +
+                "SELECT o.content_hash FROM oe_file_contents o WHERE o.content_hash = ANY({0}) " +
+                "AND NOT EXISTS (SELECT 1 FROM oe_module_files f WHERE f.content_hash = o.content_hash) " +
+                "FOR UPDATE SKIP LOCKED)",
+                new object[] { candidateHashes.ToArray() }, ct).ConfigureAwait(false);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+        {
+            _logger.LogWarning("Left {Candidates} shared content blob(s) in place: an import started using one of them.", candidateHashes.Count);
+            return 0;
+        }
     }
 
     private static PlanValidationException NotFound(int releaseId) =>

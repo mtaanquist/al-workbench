@@ -88,11 +88,19 @@ public sealed class BcArtifactCache
             {
                 _logger.LogWarning(ex, "Could not keep the Business Central artifacts for {Url}; this build uses them once.", applicationUrl);
                 Release(key);
-                TryDelete(PathOf(key, AppSuffix));
-                TryDelete(PathOf(key, PlatformSuffix));
-                TryDelete(PathOf(key, AppSuffix) + PartialSuffix);
-                TryDelete(PathOf(key, PlatformSuffix) + PartialSuffix);
-                return Uncached(fresh);
+                // A half that already moved in is no longer at its download path, so
+                // it goes back there before the cache copies are tidied away (#1181).
+                var uncached = new BcArtifactDownload(
+                    Unstore(fresh.ApplicationZipPath, PathOf(key, AppSuffix)),
+                    Unstore(fresh.PlatformZipPath, PathOf(key, PlatformSuffix)));
+                string[] kept = [uncached.ApplicationZipPath, uncached.PlatformZipPath!];
+                foreach (var suffix in new[] { AppSuffix, PlatformSuffix })
+                {
+                    var cached = PathOf(key, suffix);
+                    if (!kept.Contains(cached)) TryDelete(cached);
+                    if (!kept.Contains(cached + PartialSuffix)) TryDelete(cached + PartialSuffix);
+                }
+                return Uncached(uncached);
             }
 
             var lease = new BcArtifactLease(
@@ -129,6 +137,28 @@ public sealed class BcArtifactCache
         var partial = target + PartialSuffix;
         File.Move(source, partial, overwrite: true);
         File.Move(partial, target, overwrite: true);
+    }
+
+    // Where a download stands after a store that failed part-way: still at its download
+    // path, or moved back there from the cache (or its partial copy, when only the
+    // rename failed). Should that move fail too, the build reads it where it is.
+    private static string Unstore(string source, string target)
+    {
+        if (File.Exists(source)) return source;
+        foreach (var stored in new[] { target + PartialSuffix, target })
+        {
+            if (!File.Exists(stored)) continue;
+            try
+            {
+                File.Move(stored, source);
+                return source;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return stored;
+            }
+        }
+        return source;
     }
 
     // A set a build could not read (a corrupt download): released, then deleted unless
