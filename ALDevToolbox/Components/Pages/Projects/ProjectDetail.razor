@@ -1034,7 +1034,7 @@
         {
             await Projects.ResumeAutoUpdatePullRequestsAsync(id);
             _loadedProject = await Projects.GetProjectAsync(id) ?? _loadedProject;
-            _message = "Update pull requests will be opened with your GitHub account from now on.";
+            _message = "Pull requests will be opened with your GitHub account from now on.";
         }
         catch (ProjectAccessDeniedException)
         {

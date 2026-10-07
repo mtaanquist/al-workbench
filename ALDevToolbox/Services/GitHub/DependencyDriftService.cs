@@ -814,7 +814,13 @@ public sealed class DependencyDriftService
         foreach (var name in wanted)
         {
             ct.ThrowIfCancellationRequested();
-            results.Add(await TryOpenOneAsync(token, name, visible, automatic: false, ct));
+            var result = await TryOpenOneAsync(token, name, visible, automatic: false, ct);
+            if (result.PullRequest is { } pullRequest)
+            {
+                // A version opened by hand replaces an older automatic one just the same.
+                await SupersedeOlderAsync(token, result.Repository, pullRequest, ct);
+            }
+            results.Add(result);
         }
 
         _logger.LogInformation(
@@ -831,11 +837,11 @@ public sealed class DependencyDriftService
     /// who turned automatic update pull requests on. Run by
     /// <see cref="DependencyDriftScheduler"/> after the nightly scan.
     ///
-    /// <para>Each Business Central version is offered once per repository: one the
-    /// workbench already opened a pull request for, by hand or on its own, is left
-    /// alone even when that pull request was closed and its branch deleted, and an
-    /// open one is joined rather than doubled. Once a newer version's pull request is
-    /// open, the older ones this run opened are closed with a note pointing at it.</para>
+    /// <para>Each Business Central version is offered once per repository: while its
+    /// pull request is open, new findings are added to it; once it has been merged or
+    /// closed, the version is left alone, even when GitHub deleted the branch with it.
+    /// Once a newer version's pull request is open, the older ones the automatic run
+    /// opened are closed with a note pointing at it.</para>
     /// </summary>
     public async Task<AutomaticUpdatePullRequests> OpenAutomaticPullRequestsAsync(
         int projectId, CancellationToken ct = default)
@@ -858,15 +864,19 @@ public sealed class DependencyDriftService
             return new AutomaticUpdatePullRequests(0, AutomaticNoAccessMessage);
         }
 
-        var behind = (await _db.GitHubRepositoryDrift.AsNoTracking()
-                .Select(d => d.Repository)
-                .Distinct()
-                .ToListAsync(ct))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Keyed without case but carrying the scan's own spelling, which is GitHub's: a
+        // solution's URL is however somebody pasted it, and the findings are looked up
+        // by the stored name.
+        var behind = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var stored in await _db.GitHubRepositoryDrift.AsNoTracking()
+                     .Select(d => d.Repository).Distinct().ToListAsync(ct))
+        {
+            behind.TryAdd(stored, stored);
+        }
         var due = project.Urls
             .Select(ToFullName)
-            .Where(n => n is not null && behind.Contains(n))
-            .Select(n => n!)
+            .Where(n => n is not null && behind.ContainsKey(n))
+            .Select(n => behind[n!])
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -947,6 +957,13 @@ public sealed class DependencyDriftService
         {
             try
             {
+                // One already merged or closed has nothing left to close; it only stops
+                // being a candidate.
+                if (!await _github.IsPullRequestOpenAsync(token, owner, name, record.PullRequestNumber, ct))
+                {
+                    record.SupersededAt = _clock.GetUtcNow().UtcDateTime;
+                    continue;
+                }
                 await _github.ClosePullRequestAsync(token, owner, name, record.PullRequestNumber,
                     $"Superseded by #{current.Number}, which targets Business Central {replacing.Version}.\n\n"
                     + "Closed by AL Workbench.", ct);
@@ -1016,7 +1033,7 @@ public sealed class DependencyDriftService
         {
             await _db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException ex)
+        catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation })
         {
             _db.Entry(record).State = EntityState.Detached;
             _logger.LogInformation(ex,
@@ -1098,15 +1115,14 @@ public sealed class DependencyDriftService
             : null;
         var version = await TargetVersionAsync(rows, release, ct);
 
-        // The automatic run offers each version once (issue #1104): a pull request
-        // somebody closed is their answer, and its branch is usually gone with it.
-        if (automatic && await WasOfferedAsync(fullName, version, ct))
-        {
-            return new DependencyDriftPullRequest(fullName, null, false, 0,
-                $"An update pull request for Business Central {version} was already opened here.", IsUpToDate: true);
-        }
-
         var target = await ChooseBranchAsync(token, repo, version, automatic, ct);
+        // The automatic run offers each version once (issue #1104): an open pull
+        // request is added to, but one somebody merged or closed is their answer, and
+        // its branch is usually gone with it.
+        if (automatic && target is { ExistingPullRequest: null } && await WasOfferedAsync(fullName, version, ct))
+        {
+            target = null;
+        }
         if (target is null)
         {
             return new DependencyDriftPullRequest(fullName, null, false, 0,
@@ -1172,7 +1188,8 @@ public sealed class DependencyDriftService
             body: await BuildBodyAsync(version, edited, release, environment, ct),
             ct);
 
-        await RecordPullRequestAsync(repo.FullName, version, pullRequest, automatic, ct);
+        await RecordPullRequestAsync(
+            repo.FullName, version, pullRequest, automatic && target.ExistingPullRequest is null, ct);
 
         _logger.LogInformation(
             "Bumped {FileCount} manifest(s) in {RepoFullName} to Business Central {Version} on {Branch} as pull "

@@ -770,6 +770,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await SeedOfferedAsync(RepoA, "28.0", 70, automatic: true);
         await SeedOfferedAsync(RepoA, "27.5", 60, automatic: false);
         var api = WritableApi(RepoA)
+            .On(HttpMethod.Get, $"/repos/{RepoA}/pulls/70", HttpStatusCode.OK, "{\"number\":70,\"state\":\"open\"}")
             .On(HttpMethod.Post, $"/repos/{RepoA}/issues/70/comments", HttpStatusCode.Created, "{\"id\":1}")
             .On(HttpMethod.Patch, $"/repos/{RepoA}/pulls/70", HttpStatusCode.OK,
                 $"{{\"number\":70,\"html_url\":\"https://github.com/{RepoA}/pull/70\"}}");
@@ -786,6 +787,76 @@ public sealed class DependencyDriftServiceTests : IDisposable
         var records = await read.GitHubUpdatePullRequests.AsNoTracking().ToDictionaryAsync(r => r.PullRequestNumber);
         records[70].SupersededAt.Should().NotBeNull();
         records[60].SupersededAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task An_older_automatic_pull_request_that_was_already_merged_is_left_alone()
+    {
+        await ReadyAsync();
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedOfferedAsync(RepoA, "28.0", 70, automatic: true);
+        var api = WritableApi(RepoA)
+            .On(HttpMethod.Get, $"/repos/{RepoA}/pulls/70", HttpStatusCode.OK, "{\"number\":70,\"state\":\"closed\"}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Opened.Should().Be(1);
+
+        api.Calls.Should().NotContain(c => c.Contains("/issues/70/comments") || c.StartsWith("PATCH") && c.EndsWith("/pulls/70"));
+        await using var read = _db.NewContext();
+        (await read.GitHubUpdatePullRequests.AsNoTracking().SingleAsync(r => r.PullRequestNumber == 70))
+            .SupersededAt.Should().NotBeNull("it is no longer one to close");
+    }
+
+    [Fact]
+    public async Task A_pull_request_opened_by_hand_also_replaces_an_older_automatic_one()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync(RepoA);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedOfferedAsync(RepoA, "28.0", 70, automatic: true);
+        var api = WritableApi(RepoA)
+            .On(HttpMethod.Get, $"/repos/{RepoA}/pulls/70", HttpStatusCode.OK, "{\"number\":70,\"state\":\"open\"}")
+            .On(HttpMethod.Post, $"/repos/{RepoA}/issues/70/comments", HttpStatusCode.Created, "{\"id\":1}")
+            .On(HttpMethod.Patch, $"/repos/{RepoA}/pulls/70", HttpStatusCode.OK, "{\"number\":70}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenUpdatePullRequestsAsync([RepoA])).Single().Refusal.Should().BeNull();
+
+        api.Calls.Should().Contain(c => c.StartsWith("PATCH") && c.EndsWith("/pulls/70"));
+    }
+
+    [Fact]
+    public async Task The_automatic_run_finds_the_findings_however_the_solution_spelled_the_repository()
+    {
+        await ReadyAsync();
+        var projectId = await SeedSolutionAsync(RepoA.ToUpperInvariant());
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Should().Be(new AutomaticUpdatePullRequests(1, null));
+    }
+
+    [Fact]
+    public async Task The_automatic_run_adds_to_its_open_pull_request_rather_than_skipping_the_version()
+    {
+        await ReadyAsync();
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedOfferedAsync(RepoA, "28.2", 77, automatic: true);
+        var api = WritableApi(RepoA, openPullRequest: true);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Should().Be(new AutomaticUpdatePullRequests(0, null));
+        api.Calls.Should().Contain(c => c.StartsWith("PATCH") && c.Contains("/git/refs/heads/aldt/bump-bc-28.2"));
     }
 
     [Fact]

@@ -93,7 +93,7 @@ public sealed class DependencyDriftScheduler : PolledScheduler
             {
                 opened += await SweepOrganizationAsync(orgId, isSystem, ct).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 _logger.LogError(ex, "DependencyDriftScheduler sweep failed for org {OrgId}.", orgId);
             }
@@ -172,7 +172,7 @@ public sealed class DependencyDriftScheduler : PolledScheduler
             }
             return (result.Opened, result.Blocked, false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogError(ex,
                 "DependencyDriftScheduler could not open the update pull requests of solution {ProjectId}.", projectId);

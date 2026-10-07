@@ -38,8 +38,8 @@ public class GitHubUpdatePullRequest
     public DateTime OpenedAt { get; set; }
 
     /// <summary>
-    /// When the workbench closed it because a newer version's pull request replaced it
-    /// (UTC). Null while the workbench has not closed it, whatever happened to it on GitHub.
+    /// When a newer version's pull request replaced it (UTC): the workbench closed it then,
+    /// or found it already merged or closed. Null while it can still be closed that way.
     /// </summary>
     public DateTime? SupersededAt { get; set; }
 }
