@@ -312,8 +312,11 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
             editor.Markup.Should().Contain($"After you create it, you choose when build #{seed.OlderBuildId} installs.");
             editor.Find(".page-head__actions a.btn").GetAttribute("href").Should().Be($"/pipelines/{seed.PipelineId}");
         });
-        editor.Find("#rpe-env").Change(seed.SandboxEnvId.ToString());
-        editor.Find(".page-head .btn--primary").Click();
+        // The editor can still render once more after the fields above settle, which
+        // replaces the handlers a Find just read; a stale one throws before anything is
+        // sent, so the pair is retried until it lands on the current render.
+        editor.WaitForAssertion(() => editor.Find("#rpe-env").Change(seed.SandboxEnvId.ToString()));
+        editor.WaitForAssertion(() => editor.Find(".page-head .btn--primary").Click());
 
         // Saving carries on to deploying the build it was set up for.
         int releasePipelineId = 0;
