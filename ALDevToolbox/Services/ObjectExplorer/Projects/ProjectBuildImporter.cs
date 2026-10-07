@@ -13,7 +13,7 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// <see cref="ReleaseImportSource.ProjectBuild"/> job for the worker to clone /
 /// compile / ingest off-thread. Mirrors <see cref="ArtifactReleaseImporter"/>; the
 /// heavy lifting lives in <see cref="ProjectBuildService"/>, run by
-/// <see cref="ReleaseImportWorker"/>.
+/// a <see cref="ProjectBuildWorker"/>.
 ///
 /// <para>
 /// The Release starts with a provisional label — <c>"{Project} (building…)"</c> —
@@ -25,7 +25,7 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 public sealed class ProjectBuildImporter
 {
     private readonly ReleaseImportService _importer;
-    private readonly ReleaseImportQueue _queue;
+    private readonly ProjectBuildQueue _queue;
     private readonly PersistedImportJobs _persistedJobs;
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
@@ -36,7 +36,7 @@ public sealed class ProjectBuildImporter
 
     public ProjectBuildImporter(
         ReleaseImportService importer,
-        ReleaseImportQueue queue,
+        ProjectBuildQueue queue,
         PersistedImportJobs persistedJobs,
         AppDbContext db,
         IOrganizationContext orgContext,
@@ -347,13 +347,33 @@ public sealed class ProjectBuildImporter
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a project build");
         var source = new ReleaseImportSource.ProjectBuild(pipeline.ProjectId);
         var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
-        await _queue.EnqueueAsync(
-            new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, jobRowId), ct).ConfigureAwait(false);
+        _queue.Enqueue(new ReleaseImportJob(
+            releaseId, identity, source, StoreSymbolReference: false, jobRowId,
+            ProjectBuildOrder.For(pipelineId, bcTarget, trigger)));
 
         _logger.LogInformation(
             "Queued project build for {Project} against {BcTarget} (pipeline {PipelineId}, project {ProjectId}, release {ReleaseId}).",
             pipeline.ProjectName, bcTarget, pipelineId, pipeline.ProjectId, releaseId);
         return releaseId;
+    }
+
+    /// <summary>
+    /// Queues an existing build to run again in place (Retry, Recover symbols), after
+    /// the caller has reopened its release. It goes in line as a build somebody is
+    /// waiting on, behind any build of the same pipeline and target still running.
+    /// </summary>
+    public async Task QueueRebuildAsync(int releaseId, int projectId, CancellationToken ct = default)
+    {
+        var build = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.ReleaseId == releaseId)
+            .Select(b => new { b.PipelineId, b.BcTarget })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a rebuild");
+        var source = new ReleaseImportSource.ProjectBuild(projectId);
+        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
+        _queue.Enqueue(new ReleaseImportJob(
+            releaseId, identity, source, StoreSymbolReference: false, jobRowId,
+            ProjectBuildOrder.For(build?.PipelineId, build?.BcTarget, ProjectBuildTrigger.Manual)));
     }
 
     /// <summary>
@@ -443,9 +463,9 @@ public sealed class ProjectBuildImporter
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a pull-request build");
         var source = new ReleaseImportSource.PullRequestBuild(
             projectId, repositoryId, headSha, installationId, repositoryFullName, pullRequestNumber, forkAuthor);
-        await _queue.EnqueueAsync(
-            new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, JobRowId: 0), ct)
-            .ConfigureAwait(false);
+        _queue.Enqueue(new ReleaseImportJob(
+            releaseId, identity, source, StoreSymbolReference: false, JobRowId: 0,
+            ProjectBuildOrder.For(pipelineId: null, ProjectBuildTarget.Current, ProjectBuildTrigger.PullRequest)));
 
         _logger.LogInformation(
             "Queued pull-request build for {Project} ({Repository}#{Number} at {HeadSha}, release {ReleaseId}, build {BuildId}).",

@@ -146,7 +146,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
         await SeedSolutionTrackingTheRepositoryAsync();
         var api = ApiAnswering(HttpStatusCode.NoContent);
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
 
         await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(isMemberFork: true), CancellationToken.None);
 
@@ -172,7 +172,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
         await SeedSolutionTrackingTheRepositoryAsync();
         var api = ApiAnswering(membership);
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
 
         await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(isMemberFork: true), CancellationToken.None);
 
@@ -189,7 +189,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
         await SeedSolutionTrackingTheRepositoryAsync();
         var api = ApiAnswering(HttpStatusCode.NoContent);
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
 
         await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(), CancellationToken.None);
 
@@ -207,7 +207,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConfigureDeploymentAsync();
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
         await SeedSolutionTrackingTheRepositoryAsync();
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
 
         await NewWorker(builds: builds).RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push(commitCount: 3)), CancellationToken.None);
 
@@ -395,7 +395,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
         await SeedSolutionTrackingTheRepositoryAsync();
         var worker = NewWorker();
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
         var job = GitHubWebhookEndpoints.TryReadMergedPullRequest(
             System.Text.Encoding.UTF8.GetBytes(GitHubWebhookPayloads.MergedPullRequest(number: 12)), "delivery", NullLogger.Instance);
         job.Should().NotBeNull();
@@ -500,7 +500,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         GitHubWebhookQueue? queue = null,
         MaintenanceModeState? maintenance = null,
         FakeGitHubApi? api = null,
-        ReleaseImportQueue? builds = null)
+        ProjectBuildQueue? builds = null)
     {
         var services = new ServiceCollection();
         services.AddSingleton<IOrganizationContext>(_db.OrgContext);
@@ -520,7 +520,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         // has to reach a real OpenAsync and a real StartPullRequestBuildAsync, or
         // "it was built" is only the absence of a log line.
         services.AddScoped<GitHubCheckRunService>();
-        services.AddSingleton(builds ?? new ReleaseImportQueue());
+        services.AddSingleton(builds ?? new ProjectBuildQueue());
         services.AddScoped<ALDevToolbox.Services.Translation.TranslationMemoryService>();
         services.AddScoped<TranslationImportService>();
         services.AddScoped<CallSiteReferenceEmitter>();

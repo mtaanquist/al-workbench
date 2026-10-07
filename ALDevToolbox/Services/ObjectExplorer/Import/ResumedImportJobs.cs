@@ -2,7 +2,8 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 
 /// <summary>
 /// Puts the import jobs that survived a restart back on <see cref="ReleaseImportQueue"/>
-/// once the host has started (#1107).
+/// once the host has started (#1107). Builds go straight back on
+/// <see cref="ProjectBuildQueue"/>, which never makes a writer wait (#1137).
 ///
 /// <para>
 /// The startup reconcile runs before <c>app.Run()</c>, when no hosted service is
@@ -19,12 +20,29 @@ internal static class ResumedImportJobs
     public static void QueueWhenStarted(
         IHostApplicationLifetime lifetime,
         ReleaseImportQueue queue,
+        ProjectBuildQueue builds,
         IReadOnlyList<ReleaseImportJob> jobs,
         ILogger logger)
     {
-        if (jobs.Count == 0) return;
+        var imports = new List<ReleaseImportJob>();
+        var resumedBuilds = 0;
+        foreach (var job in jobs)
+        {
+            if (job.Source is ReleaseImportSource.ProjectBuild or ReleaseImportSource.PullRequestBuild)
+            {
+                builds.Enqueue(job);
+                resumedBuilds++;
+            }
+            else
+            {
+                imports.Add(job);
+            }
+        }
+        if (resumedBuilds > 0) logger.LogInformation("Resumed {Count} build(s) after restart.", resumedBuilds);
+
+        if (imports.Count == 0) return;
         lifetime.ApplicationStarted.Register(() =>
-            _ = EnqueueAllAsync(queue, jobs, logger, lifetime.ApplicationStopping));
+            _ = EnqueueAllAsync(queue, imports, logger, lifetime.ApplicationStopping));
     }
 
     /// <summary>Writes <paramref name="jobs"/> in order, waiting whenever the queue is full. Never throws.</summary>
@@ -40,7 +58,7 @@ internal static class ResumedImportJobs
             {
                 await queue.EnqueueAsync(job, ct).ConfigureAwait(false);
             }
-            logger.LogInformation("Resumed {Count} release import(s) and build(s) after restart.", jobs.Count);
+            logger.LogInformation("Resumed {Count} release import(s) after restart.", jobs.Count);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -48,7 +66,7 @@ internal static class ResumedImportJobs
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Resuming {Count} release import(s) and build(s) after restart failed.", jobs.Count);
+            logger.LogError(ex, "Resuming {Count} release import(s) after restart failed.", jobs.Count);
         }
     }
 }

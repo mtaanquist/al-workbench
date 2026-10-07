@@ -1420,7 +1420,9 @@
     /// <summary>
     /// How long a build took, for the run row's duration cell. A build still in
     /// flight has no duration yet - the row shows its live progress bar instead,
-    /// so an elapsed counter here would be a second, staler clock.
+    /// so an elapsed counter here would be a second, staler clock. Time spent
+    /// waiting for a free worker is not counted (#1137); older builds did not
+    /// record it apart, so theirs includes it.
     /// </summary>
     private static string Duration(BuildRow b)
     {
@@ -1429,7 +1431,7 @@
             return "";
         }
 
-        var span = done - b.StartedAt;
+        var span = done - (b.BuildingStartedAt ?? b.StartedAt);
         return span.TotalMinutes < 1
             ? $"{span.TotalSeconds:0}s"
             : $"{(int)span.TotalMinutes}m {span.Seconds:00}s";

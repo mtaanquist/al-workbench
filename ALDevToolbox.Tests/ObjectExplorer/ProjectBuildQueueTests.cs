@@ -1,0 +1,130 @@
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Services;
+using ALDevToolbox.Services.ObjectExplorer.Import;
+using AwesomeAssertions;
+
+namespace ALDevToolbox.Tests.ObjectExplorer;
+
+/// <summary>
+/// The order builds leave <see cref="ProjectBuildQueue"/> in when several workers drain
+/// it (#1137): people first, then pushes, then preview checks; one build at a time per
+/// pipeline and target, in the order they were queued.
+/// </summary>
+public sealed class ProjectBuildQueueTests
+{
+    private static readonly AmbientOrganizationScope.OrganizationIdentity Identity =
+        new(OrganizationId: 1, UserId: null, IsSiteAdmin: false, IsSystemOrganization: false);
+
+    private static ReleaseImportJob Build(int releaseId, int? pipelineId, string trigger, string target = ProjectBuildTarget.Current) =>
+        new(releaseId, Identity, new ReleaseImportSource.ProjectBuild(1),
+            BuildOrder: ProjectBuildOrder.For(pipelineId, target, trigger));
+
+    private static List<int> TakeAll(ProjectBuildQueue queue)
+    {
+        var taken = new List<int>();
+        while (queue.Reader.TryRead(out var job)) taken.Add(job.ReleaseId);
+        return taken;
+    }
+
+    [Fact]
+    public void A_build_somebody_waits_on_starts_before_pushes_and_preview_checks()
+    {
+        var queue = new ProjectBuildQueue();
+        queue.Enqueue(Build(1, pipelineId: 1, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMinor));
+        queue.Enqueue(Build(2, pipelineId: 2, ProjectBuildTrigger.Push));
+        queue.Enqueue(Build(3, pipelineId: 3, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMajor));
+        queue.Enqueue(Build(4, pipelineId: 4, ProjectBuildTrigger.Manual));
+        queue.Enqueue(Build(5, pipelineId: null, ProjectBuildTrigger.PullRequest));
+
+        TakeAll(queue).Should().Equal(4, 5, 2, 1, 3);
+    }
+
+    [Fact]
+    public void Builds_of_one_pipeline_run_one_at_a_time_in_the_order_they_were_queued()
+    {
+        var queue = new ProjectBuildQueue();
+        var first = Build(1, pipelineId: 7, ProjectBuildTrigger.Push);
+        queue.Enqueue(first);
+        queue.Enqueue(Build(2, pipelineId: 7, ProjectBuildTrigger.Push));
+        // A manual build of the same pipeline outranks a push, but not one already queued ahead of it.
+        queue.Enqueue(Build(3, pipelineId: 7, ProjectBuildTrigger.Manual));
+        queue.Enqueue(Build(4, pipelineId: 8, ProjectBuildTrigger.Push));
+
+        TakeAll(queue).Should().Equal(1, 4);
+
+        queue.Complete(first);
+        TakeAll(queue).Should().Equal(2);
+    }
+
+    [Fact]
+    public void A_preview_check_runs_beside_its_pipelines_current_build()
+    {
+        var queue = new ProjectBuildQueue();
+        queue.Enqueue(Build(1, pipelineId: 7, ProjectBuildTrigger.Manual));
+        queue.Enqueue(Build(2, pipelineId: 7, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMinor));
+
+        TakeAll(queue).Should().Equal(1, 2);
+    }
+
+    [Fact]
+    public async Task A_waiting_worker_wakes_when_a_build_of_a_busy_pipeline_may_start()
+    {
+        var queue = new ProjectBuildQueue();
+        var first = Build(1, pipelineId: 7, ProjectBuildTrigger.Manual);
+        queue.Enqueue(first);
+        queue.Enqueue(Build(2, pipelineId: 7, ProjectBuildTrigger.Push));
+        queue.Reader.TryRead(out _).Should().BeTrue();
+
+        var waiting = queue.Reader.WaitToReadAsync().AsTask();
+        await Task.Delay(50);
+        waiting.IsCompleted.Should().BeFalse("the only waiting build belongs to a pipeline that is building");
+
+        queue.Complete(first);
+        (await waiting.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+        TakeAll(queue).Should().Equal(2);
+    }
+
+    [Fact]
+    public async Task Several_workers_share_the_builds_and_none_runs_twice()
+    {
+        var queue = new ProjectBuildQueue();
+        for (var i = 1; i <= 60; i++) queue.Enqueue(Build(i, pipelineId: i % 6, ProjectBuildTrigger.Push));
+
+        var running = new HashSet<int>();
+        var seen = new System.Collections.Concurrent.ConcurrentBag<int>();
+        using var done = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var workers = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+        {
+            while (seen.Count < 60)
+            {
+                if (!await queue.Reader.WaitToReadAsync(done.Token)) return;
+                if (!queue.Reader.TryRead(out var job)) continue;
+                var pipeline = job.ReleaseId % 6;
+                lock (running) running.Add(pipeline).Should().BeTrue("a pipeline's builds never overlap");
+                await Task.Yield();
+                lock (running) running.Remove(pipeline);
+                seen.Add(job.ReleaseId);
+                queue.Complete(job);
+            }
+        })).ToList();
+
+        // Each worker exits once all 60 are seen; the last ones may still be waiting.
+        while (seen.Count < 60) await Task.Delay(10, done.Token);
+        await done.CancelAsync();
+        await Task.WhenAll(workers.Select(w => w.ContinueWith(_ => { })));
+
+        seen.Should().BeEquivalentTo(Enumerable.Range(1, 60));
+        queue.WaitingCount.Should().Be(0);
+        queue.RunningCount.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData(null, ProjectBuildQueue.DefaultConcurrency)]
+    [InlineData("", ProjectBuildQueue.DefaultConcurrency)]
+    [InlineData("four", ProjectBuildQueue.DefaultConcurrency)]
+    [InlineData("0", 1)]
+    [InlineData("4", 4)]
+    [InlineData("500", ProjectBuildQueue.MaxConcurrency)]
+    public void Concurrency_comes_from_the_setting_within_bounds(string? raw, int expected) =>
+        ProjectBuildQueue.Concurrency(raw).Should().Be(expected);
+}

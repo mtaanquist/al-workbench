@@ -202,7 +202,12 @@ public sealed class GitHubReleaseService
         GitHubReleasePublishResult result;
         try
         {
-            result = await TryPublishAsync(projectBuildId, build.RepositoryId.Value, build.RepositoryProvider, build.RepositoryUrl, ct);
+            // Builds run side by side (#1137): two of them publishing the same tag to
+            // one repository would race between finding the release and creating it.
+            using (await PublishGate.EnterAsync(build.RepositoryId.Value, ct))
+            {
+                result = await TryPublishAsync(projectBuildId, build.RepositoryId.Value, build.RepositoryProvider, build.RepositoryUrl, ct);
+            }
         }
         catch (GitHubApiException ex)
         {
@@ -226,6 +231,8 @@ public sealed class GitHubReleaseService
         await RecordOutcomeAsync(projectBuildId, result, ct);
         return result;
     }
+
+    private static readonly ALDevToolbox.Services.Workers.KeyedGate<int> PublishGate = new();
 
     private async Task<GitHubReleasePublishResult> TryPublishAsync(
         int projectBuildId, int repositoryId, RepositoryProvider? provider, string repositoryUrl, CancellationToken ct)

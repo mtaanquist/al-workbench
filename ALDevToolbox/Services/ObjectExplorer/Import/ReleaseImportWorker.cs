@@ -12,7 +12,8 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// Drains <see cref="ReleaseImportQueue"/> and runs each DVD-scale import
 /// (folder-ZIP upload, URL download) off the request thread, so the admin is
 /// returned to the releases list immediately and watches the row flip from
-/// <c>ingesting</c> to <c>ready</c> / <c>failed</c>.
+/// <c>ingesting</c> to <c>ready</c> / <c>failed</c>. Project and pull request
+/// builds run the same job code on <see cref="ProjectBuildWorker"/>s instead (#1137).
 ///
 /// <para>
 /// One job at a time (the channel is single-reader): a full DVD import is
@@ -22,7 +23,7 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// importer's org guard behave exactly as they would in the original request.
 /// </para>
 /// </summary>
-public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
+public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
 {
     private readonly IServiceProvider _services;
     private readonly ILogger<ReleaseImportWorker> _logger;
@@ -32,10 +33,21 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
         IServiceProvider services,
         ILogger<ReleaseImportWorker> logger,
         WorkerHeartbeatRegistry heartbeats)
+        : this(queue.Reader, services, logger, heartbeats, nameof(ReleaseImportWorker))
+    {
+    }
+
+    /// <summary>For a worker that runs the same jobs from another queue.</summary>
+    protected ReleaseImportWorker(
+        System.Threading.Channels.ChannelReader<ReleaseImportJob> reader,
+        IServiceProvider services,
+        ILogger<ReleaseImportWorker> logger,
+        WorkerHeartbeatRegistry heartbeats,
+        string name)
         // The active-duration ceiling is the longest legitimate single import — a fresh
         // BC base-app ingest can run 30+ minutes; 90 leaves margin while still catching
         // the hung-on-I/O case that prompted this in the first place.
-        : base(queue.Reader, logger, heartbeats, nameof(ReleaseImportWorker), TimeSpan.FromMinutes(90))
+        : base(reader, logger, heartbeats, name, TimeSpan.FromMinutes(90))
     {
         _services = services;
         _logger = logger;

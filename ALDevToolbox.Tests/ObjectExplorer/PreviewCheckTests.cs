@@ -315,7 +315,7 @@ public sealed class PreviewCheckTests : IDisposable
         services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
         _db.AddStorageServices(services);
         services.AddSingleton<IHttpClientFactory>(_cdn);
-        services.AddSingleton(new ReleaseImportQueue());
+        services.AddSingleton(new ProjectBuildQueue());
         services.AddScoped<ProjectAccess>();
         services.AddScoped<TranslationMemoryService>();
         services.AddScoped<TranslationImportService>();

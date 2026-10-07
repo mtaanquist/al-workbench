@@ -72,8 +72,11 @@ public sealed class AlSymbolFeedResolver
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILogger<AlSymbolFeedResolver> _logger;
     private readonly AlSymbolFeedOptions _options;
-    private readonly SemaphoreSlim _gate = new(1, 1);
-    // Concurrent: the version listing reads it without the build gate, which a build holds for its whole walk.
+    // Builds resolve side by side (#1137). The cache is the only thing they share: reads
+    // need no lock because a package only ever appears by an atomic folder move, and
+    // this lock covers putting one in place.
+    private readonly object _cacheWriteLock = new();
+    // Concurrent: builds and the version listing read it at the same time.
     private readonly ConcurrentDictionary<string, FeedEndpoints> _endpoints = new(StringComparer.OrdinalIgnoreCase);
 
     public AlSymbolFeedResolver(
@@ -108,70 +111,62 @@ public sealed class AlSymbolFeedResolver
             .ToList();
         if (wanted.Count == 0) return new SymbolFeedOutcome(resolved, unresolved);
 
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            var present = ScanPresent(request.TargetDirectory);
-            var failed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var queue = new Queue<Pending>(wanted.Select(d => new Pending(NormalizeId(d.AppId), d.Name, ParseVersion(d.MinVersion), null)));
-            var fetched = 0;
+        var present = ScanPresent(request.TargetDirectory);
+        var failed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var queue = new Queue<Pending>(wanted.Select(d => new Pending(NormalizeId(d.AppId), d.Name, ParseVersion(d.MinVersion), null)));
+        var fetched = 0;
 
-            while (queue.Count > 0)
+        while (queue.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            var next = queue.Dequeue();
+            if (request.ProvidedAppIds.Contains(next.AppId) || failed.Contains(next.AppId)) continue;
+            if (present.TryGetValue(next.AppId, out var have) && Satisfies(have, next.MinVersion)) continue;
+
+            if (++fetched > MaxPackagesPerBuild)
             {
-                ct.ThrowIfCancellationRequested();
-                var next = queue.Dequeue();
-                if (request.ProvidedAppIds.Contains(next.AppId) || failed.Contains(next.AppId)) continue;
-                if (present.TryGetValue(next.AppId, out var have) && Satisfies(have, next.MinVersion)) continue;
-
-                if (++fetched > MaxPackagesPerBuild)
-                {
-                    unresolved.Add(Unresolved(next, "the dependency graph was larger than a build is allowed to fetch"));
-                    failed.Add(next.AppId);
-                    continue;
-                }
-
-                var reasons = new List<string>();
-                CachedPackage? package;
-                try
-                {
-                    package = await ResolveOneAsync(next, request, reasons, ct).ConfigureAwait(false);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-                {
-                    _logger.LogWarning(ex, "Symbol feed resolution failed for app {AppId}.", next.AppId);
-                    reasons.Add($"it could not be fetched ({ex.Message})");
-                    package = null;
-                }
-
-                if (package is null)
-                {
-                    unresolved.Add(Unresolved(next, reasons.Count > 0
-                        ? string.Join("; ", reasons.Distinct())
-                        : $"it is not on the {AppSourceFeedName} or the {MicrosoftFeedName}"));
-                    failed.Add(next.AppId);
-                    continue;
-                }
-
-                var dest = Path.Combine(request.TargetDirectory, package.FileName);
-                if (!File.Exists(dest)) File.Copy(package.AppPath, dest);
-                present[next.AppId] = ParseVersion(package.Version);
-                resolved.Add(new ResolvedSymbolPackage(next.AppId, package.Name, package.Version, package.Feed, package.FileName, package.FromCache));
-                _logger.LogInformation("Resolved symbols for {App} {Version} from the {Feed}{Cached}.",
-                    package.Name, package.Version, package.Feed, package.FromCache ? " (cached)" : string.Empty);
-
-                foreach (var dep in package.Dependencies)
-                {
-                    // The package id is the only name a transitive dependency has
-                    // until it is fetched; its publisher.name part reads well enough
-                    // in a failure line ("ContiniaSoftware.ContiniaSystemApplication").
-                    var label = SymbolsPackageSuffix.Replace(dep.PackageId, string.Empty);
-                    queue.Enqueue(new Pending(dep.AppId, label, dep.MinVersion, dep.PackageId));
-                }
+                unresolved.Add(Unresolved(next, "the dependency graph was larger than a build is allowed to fetch"));
+                failed.Add(next.AppId);
+                continue;
             }
-        }
-        finally
-        {
-            _gate.Release();
+
+            var reasons = new List<string>();
+            CachedPackage? package;
+            try
+            {
+                package = await ResolveOneAsync(next, request, reasons, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger.LogWarning(ex, "Symbol feed resolution failed for app {AppId}.", next.AppId);
+                reasons.Add($"it could not be fetched ({ex.Message})");
+                package = null;
+            }
+
+            if (package is null)
+            {
+                unresolved.Add(Unresolved(next, reasons.Count > 0
+                    ? string.Join("; ", reasons.Distinct())
+                    : $"it is not on the {AppSourceFeedName} or the {MicrosoftFeedName}"));
+                failed.Add(next.AppId);
+                continue;
+            }
+
+            var dest = Path.Combine(request.TargetDirectory, package.FileName);
+            if (!File.Exists(dest)) File.Copy(package.AppPath, dest);
+            present[next.AppId] = ParseVersion(package.Version);
+            resolved.Add(new ResolvedSymbolPackage(next.AppId, package.Name, package.Version, package.Feed, package.FileName, package.FromCache));
+            _logger.LogInformation("Resolved symbols for {App} {Version} from the {Feed}{Cached}.",
+                package.Name, package.Version, package.Feed, package.FromCache ? " (cached)" : string.Empty);
+
+            foreach (var dep in package.Dependencies)
+            {
+                // The package id is the only name a transitive dependency has
+                // until it is fetched; its publisher.name part reads well enough
+                // in a failure line ("ContiniaSoftware.ContiniaSystemApplication").
+                var label = SymbolsPackageSuffix.Replace(dep.PackageId, string.Empty);
+                queue.Enqueue(new Pending(dep.AppId, label, dep.MinVersion, dep.PackageId));
+            }
         }
 
         return new SymbolFeedOutcome(resolved, unresolved);
@@ -189,8 +184,6 @@ public sealed class AlSymbolFeedResolver
     /// </summary>
     public async Task<IReadOnlyList<string>> ListMicrosoftApplicationVersionsAsync(CancellationToken ct = default)
     {
-        // Deliberately not behind the build gate: a build holds it for its whole
-        // dependency walk, and this read needs nothing a build writes.
         var http = _httpFactory.CreateClient(HttpClientName);
         var endpoints = await GetEndpointsAsync(http, _options.MicrosoftFeedUrl, ct).ConfigureAwait(false);
 
@@ -535,8 +528,14 @@ public sealed class AlSymbolFeedResolver
             File.WriteAllText(Path.Combine(scratch, CachedSourceName),
                 JsonSerializer.Serialize(new CacheSource(feedName, packageId)));
 
-            if (Directory.Exists(finalDir)) Directory.Delete(finalDir, recursive: true);
-            Directory.Move(scratch, finalDir);
+            lock (_cacheWriteLock)
+            {
+                // Another build may have cached the same package while this one
+                // downloaded it. Keep theirs: it may be being copied from right now.
+                if (TryLoadCached(finalDir, appId) is { } existing) return existing;
+                if (Directory.Exists(finalDir)) Directory.Delete(finalDir, recursive: true);
+                Directory.Move(scratch, finalDir);
+            }
             _logger.LogInformation("Cached symbol package {PackageId} {Version} from the {Feed}.", packageId, version, feedName);
             return new CachedPackage(appId, nuspec.Name, version, feedName,
                 Path.Combine(finalDir, fileName), fileName, nuspec, FromCache: false);

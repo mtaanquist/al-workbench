@@ -47,6 +47,16 @@ public static class ObjectExplorerRegistration
         // form and redirect on the outcome.
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportRequestService>();
         services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportWorker>();
+        // Builds have their own line and run OE_BUILD_CONCURRENCY at a time (#1137).
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue>();
+        var buildWorkers = ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue
+            .Concurrency(Environment.GetEnvironmentVariable("OE_BUILD_CONCURRENCY"));
+        for (var slot = 1; slot <= buildWorkers; slot++)
+        {
+            var workerSlot = slot;
+            services.AddSingleton<IHostedService>(sp =>
+                ActivatorUtilities.CreateInstance<ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildWorker>(sp, workerSlot));
+        }
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseManagementService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>();

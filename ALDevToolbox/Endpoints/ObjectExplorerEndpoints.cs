@@ -336,7 +336,6 @@ internal static class ObjectExplorerEndpoints
             ProjectService projects,
             ReleaseImportService importer,
             ReleaseManagementService management,
-            ReleaseImportRequestService imports,
             PersistedImportJobs persistedJobs,
             ProjectBuildImporter projectBuilds,
             IAntiforgery antiforgery,
@@ -382,8 +381,7 @@ internal static class ObjectExplorerEndpoints
 
                 await importer.ReopenForRebuildAsync(id, ct);
                 await management.ClearIngestedDataAsync(id, ct);
-                var source = new ReleaseImportSource.ProjectBuild(projectId);
-                await imports.EnqueueImportAsync(id, source, storeSymbolReference: false, ct);
+                await projectBuilds.QueueRebuildAsync(id, projectId, ct);
 
                 ctx.Response.Redirect($"/admin/object-explorer/release/{id}/manage?ok=recover-queued");
             }
