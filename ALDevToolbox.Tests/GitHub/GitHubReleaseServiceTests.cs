@@ -389,6 +389,9 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         staged.PipelineId.Should().BeNull();          // not a run of anything - it was downloaded
         staged.GithubReleaseTag.Should().Be("v1.0.0.0");
         staged.StartedByUserId.Should().Be(UserId);
+        // ...and the repository it came from, so another repository's pipeline refuses it (#1118).
+        staged.StagedFromRepositoryId.Should().Be(
+            (await verify.OeReleasePipelines.AsNoTracking().SingleAsync(r => r.Id == seed.ReleasePipelineId)).GithubReleaseRepositoryId);
         // The manifest inside the .app is what names the app, not the file name.
         staged.Artifacts.Should().ContainSingle()
             .Which.Should().Match<OeProjectBuildArtifact>(a => a.AppName == "CRONUS Core" && a.AppVersion == "1.0.0.0"
@@ -436,6 +439,30 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         second.Should().Be(first);
         await using var verify = _db.NewContext();
         (await verify.OeProjectBuilds.AsNoTracking().CountAsync(b => b.PipelineId == null)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Staging_again_records_the_repository_on_a_release_staged_before_it_was_recorded()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi();
+        int first;
+        await using (var ctx = _db.NewContext())
+        {
+            first = await NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+            await ctx.OeProjectBuilds.Where(b => b.Id == first)
+                .ExecuteUpdateAsync(s => s.SetProperty(b => b.StagedFromRepositoryId, (int?)null));
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0")).Should().Be(first);
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.Id == first)).StagedFromRepositoryId.Should().Be(
+            (await verify.OeReleasePipelines.AsNoTracking().SingleAsync(r => r.Id == seed.ReleasePipelineId)).GithubReleaseRepositoryId);
     }
 
     [Fact]

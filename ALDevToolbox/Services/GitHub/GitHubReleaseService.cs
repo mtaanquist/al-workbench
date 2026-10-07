@@ -457,6 +457,11 @@ public sealed class GitHubReleaseService
             .FirstOrDefaultAsync(ct);
         if (alreadyStaged is { } existingId)
         {
+            // Staged before builds recorded their repository, and its link didn't say: the
+            // release was just fetched from this repository, so now it is known.
+            await _db.OeProjectBuilds
+                .Where(b => b.Id == existingId && b.StagedFromRepositoryId == null)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.StagedFromRepositoryId, source.RepositoryId), ct);
             _logger.LogInformation(
                 "Release {Tag} on {Owner}/{Repo} is already staged as build {BuildId}.",
                 tag, source.Owner, source.Name, existingId);
@@ -474,6 +479,7 @@ public sealed class GitHubReleaseService
             Status = ProjectBuildStatus.Ready,
             GithubReleaseTag = tag,
             GithubReleaseUrl = release.HtmlUrl,
+            StagedFromRepositoryId = source.RepositoryId,
             StartedAt = now,
             FinishedAt = now,
         };
@@ -505,7 +511,7 @@ public sealed class GitHubReleaseService
     }
 
     /// <summary>A release pipeline that draws from GitHub Releases, resolved to a repository we may act on.</summary>
-    private sealed record ReleaseSource(int ProjectId, string Owner, string Name, long InstallationId);
+    private sealed record ReleaseSource(int ProjectId, int RepositoryId, string Owner, string Name, long InstallationId);
 
     /// <summary>
     /// The access gate both Release-sourced calls share: the caller must be able to
@@ -560,7 +566,7 @@ public sealed class GitHubReleaseService
                 $"{owner}/{name} is outside the connected GitHub organisation ({connection.OrgLogin}).");
         }
 
-        return new ReleaseSource(rp.ProjectId, owner, name, installationId);
+        return new ReleaseSource(rp.ProjectId, rp.GithubReleaseRepositoryId.Value, owner, name, installationId);
     }
 
     // ── Shared helpers ──────────────────────────────────────────────────────

@@ -159,6 +159,15 @@ public class OeProjectBuild
     public string? GithubReleaseUrl { get; set; }
 
     /// <summary>
+    /// For a <em>staged</em> build: the solution repository whose GitHub release it was
+    /// downloaded from, so a deployment pipeline that installs one repository's releases
+    /// refuses another's (#1118). Null for every other build, and for a staged build whose
+    /// repository could not be told from its release link. Deliberately not a foreign key,
+    /// like <see cref="HeadRepositoryId"/>: a removed repository leaves the build as it was.
+    /// </summary>
+    public int? StagedFromRepositoryId { get; set; }
+
+    /// <summary>
     /// Why the build was not published as a Release - GitHub's own refusal, for
     /// instance. A publish failure is never a build failure: the
     /// <c>.app</c> files exist and download regardless, so this is a note on a build
