@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Serialization;
 using System.Text;
 using ALDevToolbox.Data;
@@ -1667,7 +1668,8 @@ public sealed class DeliveryService
     {
         var d = await _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled
-                        && d.ScheduledByDeliveryWindow && !d.ScheduledOutsideWindow)
+                        && d.ScheduledByDeliveryWindow && !d.ScheduledOutsideWindow
+                        && d.ReleasePipeline!.DeletedAt == null)
             .Select(d => new
             {
                 d.ProjectId, d.EnvironmentName, d.ScheduledFor,
@@ -1692,7 +1694,10 @@ public sealed class DeliveryService
         if (UpdateWindow.IsWithin(window.UpdateWindowStart, window.UpdateWindowEnd, tz, startsAt)) return false;
 
         var next = UpdateWindow.NextOpeningUtc(window.UpdateWindowStart, window.UpdateWindowEnd, tz, startsAt);
-        var line = LogLine($"The delivery window had closed before this deployment's turn came, so it was moved to the next opening ({next:yyyy-MM-dd HH:mm} UTC).");
+        // In the window's own time zone, the way the environment page shows the window.
+        var nextLocal = TimeZoneInfo.ConvertTimeFromUtc(next, tz);
+        var line = LogLine(string.Create(CultureInfo.InvariantCulture,
+            $"The delivery window had closed before this deployment's turn came, so it was moved to the window's next opening, {nextLocal:yyyy-MM-dd} at {UpdateWindow.Clock(TimeOnly.FromDateTime(nextLocal))} ({tz.Id})."));
         var moved = await _db.OeProjectDeliveries
             .Where(x => x.Id == deliveryId && x.Status == ProjectDeliveryStatus.Scheduled && x.ScheduledFor == d.ScheduledFor)
             .ExecuteUpdateAsync(u => u

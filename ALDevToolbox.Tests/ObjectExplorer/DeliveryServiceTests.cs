@@ -555,6 +555,41 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_moved_deployment_lands_in_the_window_in_the_solutions_time_zone()
+    {
+        int deliveryId;
+        var tz = UpdateWindow.ResolveTimeZone("Europe/Copenhagen");
+        var localNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, tz);
+        var nowClock = new TimeOnly(localNow.Hour, localNow.Minute);
+        // Closed for the three hours around now and open the rest of the day, so on most
+        // clocks the window runs through midnight (start after end).
+        var start = nowClock.AddHours(2);
+        var end = nowClock.AddHours(-1);
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" }, deploymentSchedule: BcDeploymentSchedule.OurDeliveryWindow);
+            await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.BcTimeZone, "Europe/Copenhagen"));
+            await SetWindowAsync(ctx, seed.EnvironmentId, start, end);
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddMinutes(-90))
+                    .SetProperty(d => d.ScheduledByDeliveryWindow, true)
+                    .SetProperty(d => d.ScheduledOutsideWindow, false));
+        }
+
+        (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeFalse();
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
+        delivery.ScheduledFor.Should().BeAfter(DateTime.UtcNow);
+        var movedLocal = TimeZoneInfo.ConvertTimeFromUtc(delivery.ScheduledFor, tz);
+        new TimeOnly(movedLocal.Hour, movedLocal.Minute).Should().Be(start, "it moves to the window's opening in the solution's own time");
+        delivery.DiagnosticsLog.Should().Contain($"at {UpdateWindow.Clock(start)} (Europe/Copenhagen)");
+    }
+
+    [Fact]
     public async Task A_deployment_the_window_chose_runs_while_the_window_is_open()
     {
         int deliveryId;
