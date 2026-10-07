@@ -93,6 +93,12 @@ public abstract record ReleaseImportOutcome
 /// </summary>
 public sealed class ReleaseImportRequestService
 {
+    /// <summary>Temp-file prefix for an uploaded folder ZIP staged for the worker.</summary>
+    public const string FolderZipTempPrefix = "oe-folder-";
+
+    /// <summary>Temp-file prefix for an uploaded C/AL TXT staged for the worker.</summary>
+    public const string CalTxtTempPrefix = "oe-cal-";
+
     private readonly ReleaseImportService _importer;
     private readonly ReleaseManagementService _management;
     private readonly DvdDownloadService _dvdDownloader;
@@ -176,7 +182,7 @@ public sealed class ReleaseImportRequestService
         if (isCalImport)
         {
             var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
-            var tempPath = await TryStageAsync(releaseId, submission.CalTxtFile!, "oe-cal-", ".txt", "C/AL file", ct).ConfigureAwait(false);
+            var tempPath = await TryStageAsync(releaseId, submission.CalTxtFile!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
             if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
             var source = new ReleaseImportSource.CalTxt(tempPath, calEncoding);
             await EnqueueImportAsync(releaseId, source, storeSymbolReference: false, ct).ConfigureAwait(false);
@@ -197,7 +203,7 @@ public sealed class ReleaseImportRequestService
         if (folderZip is not null)
         {
             var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
-            var tempPath = await TryStageAsync(releaseId, folderZip, "oe-folder-", ".zip", "ZIP", ct).ConfigureAwait(false);
+            var tempPath = await TryStageAsync(releaseId, folderZip, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
             if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
             var source = new ReleaseImportSource.StagedZip(tempPath, IsDvd: false);
             await EnqueueImportAsync(releaseId, source, storeSymbolReference, ct).ConfigureAwait(false);
@@ -359,7 +365,7 @@ public sealed class ReleaseImportRequestService
         }
         else if (hasFolderZip)
         {
-            var tempPath = await TryStageAsync(releaseId, folderZip!, "oe-folder-", ".zip", "ZIP", ct).ConfigureAwait(false);
+            var tempPath = await TryStageAsync(releaseId, folderZip!, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
             if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
             // A URL-origin DVD re-uploaded as a zip is still a DVD subset;
             // otherwise honour the original staged flag (defaults to the
@@ -369,7 +375,7 @@ public sealed class ReleaseImportRequestService
         }
         else
         {
-            var tempPath = await TryStageAsync(releaseId, calTxt!, "oe-cal-", ".txt", "C/AL file", ct).ConfigureAwait(false);
+            var tempPath = await TryStageAsync(releaseId, calTxt!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
             if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
             source = new ReleaseImportSource.CalTxt(tempPath, submission.CalEncoding);
         }
@@ -459,7 +465,7 @@ public sealed class ReleaseImportRequestService
             List<Stream> openedStreams,
             CancellationToken ct)
     {
-        var tempPath = await StageUploadToTempAsync(folderZip, "oe-folder-", ".zip", ct).ConfigureAwait(false);
+        var tempPath = await StageUploadToTempAsync(folderZip, FolderZipTempPrefix, ".zip", ct).ConfigureAwait(false);
         var (uploads, archive) = ReleaseZipStaging.OpenStagedZip(tempPath, isDvd: false, openedStreams);
         return (uploads, archive, tempPath);
     }
