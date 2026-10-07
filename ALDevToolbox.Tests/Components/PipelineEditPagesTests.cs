@@ -243,6 +243,30 @@ public sealed class PipelineEditPagesTests : IDisposable
     }
 
     [Fact]
+    public async Task A_deployment_pipeline_whose_build_pipeline_was_deleted_asks_for_another_before_saving()
+    {
+        var seed = await SeedAsync();
+        var rpId = await SeedDeploymentPipelineAsync(seed);
+        await using (var db = _db.NewContext())
+        {
+            db.OePipelines.Add(new OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "main",
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+            await db.OePipelines.Where(p => p.Id == seed.PipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        }
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
+
+        cut.WaitForAssertion(() => cut.Find("#rpe-build").GetAttribute("value").Should().Be("0"));
+        cut.Find("#rpe-build").ParentElement!.ParentElement!.TextContent.Should().Contain("\"Nightly\" was deleted. Choose the build pipeline to deploy from now.");
+        cut.Find(".page-head .btn--primary").HasAttribute("disabled").Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Editing_a_deployment_pipeline_saves_over_it_and_returns_to_it()
     {
         var seed = await SeedAsync();
