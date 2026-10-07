@@ -3342,6 +3342,51 @@ public sealed class DeliveryServiceTests : IDisposable
         _apps.UploadedOrder.Should().BeEmpty("an unapproved deployment never reaches a production environment");
     }
 
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task RunDeliveryAsync_refuses_an_agent_deployment_to_an_environment_that_became_production_unless_the_organisation_allows_it(
+        bool allowed, bool refused)
+    {
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+            id = (await NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId))!.Value;
+            // Started by an AI assistant rather than by a new build: only the setting stands
+            // between it and a production environment.
+            await ctx.OeProjectDeliveries.Where(d => d.Id == id).ExecuteUpdateAsync(u => u
+                .SetProperty(d => d.DeployedWithoutApproval, false)
+                .SetProperty(d => d.StartedByAgent, true));
+            var settings = await ctx.OrganizationSettings.FirstOrDefaultAsync(s => s.OrganizationId == TestDb.DefaultOrgId);
+            if (settings is null)
+            {
+                settings = new ALDevToolbox.Domain.Entities.OrganizationSettings { OrganizationId = TestDb.DefaultOrgId };
+                ctx.OrganizationSettings.Add(settings);
+            }
+            settings.AgentsMayDeployToProduction = allowed;
+            await ctx.SaveChangesAsync();
+        }
+        DrainQueue();
+        _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Active" };
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(id);
+
+        var delivery = await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id);
+        if (refused)
+        {
+            delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+            delivery.FailureMessage.Should().Contain("does not let AI assistants deploy to production");
+            _apps.UploadedOrder.Should().BeEmpty();
+        }
+        else
+        {
+            delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+            _apps.UploadedOrder.Should().NotBeEmpty();
+        }
+    }
+
     [Fact]
     public async Task RunDeliveryAsync_falls_back_to_the_stored_type_when_the_environment_cannot_be_read()
     {

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -13,9 +14,11 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20270107000000_AgentsMayDeployToProduction")]
+    partial class AgentsMayDeployToProduction
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2839,10 +2842,6 @@ namespace ALDevToolbox.Data.Migrations
 
                     b.HasIndex("ReleaseId")
                         .HasDatabaseName("ix_oe_project_builds_release");
-
-                    b.HasIndex("StagedFromRepositoryId")
-                        .HasDatabaseName("ix_oe_project_builds_staged_from_repository")
-                        .HasFilter("staged_from_repository_id IS NOT NULL");
 
                     b.HasIndex("StartedByUserId");
 
@@ -7899,11 +7898,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasForeignKey("ReleaseId")
                         .OnDelete(DeleteBehavior.SetNull);
 
-                    b.HasOne("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectRepository", "StagedFromRepository")
-                        .WithMany()
-                        .HasForeignKey("StagedFromRepositoryId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
                     b.HasOne("ALDevToolbox.Domain.Entities.User", "StartedByUser")
                         .WithMany()
                         .HasForeignKey("StartedByUserId")
@@ -7916,8 +7910,6 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("Project");
 
                     b.Navigation("Release");
-
-                    b.Navigation("StagedFromRepository");
 
                     b.Navigation("StartedByUser");
                 });

@@ -78,7 +78,7 @@ public sealed class DeliveryTools
     }
 
     [McpServerTool(Name = "deploy_build", ReadOnly = false, Idempotent = false)]
-    [Description("Deploys a successful build to its deployment pipeline's Business Central environment NOW — uploads and installs the build's .app files. The build must be a 'ready' build of the deployment pipeline's source build pipeline, and not a preview build (isPreview true), which is check-only. A pipeline whose installs run in the environment's delivery window (deployment schedule 'OurDeliveryWindow') still deploys immediately through this tool; the deployment is recorded as outside the window when it is. Deploying runs in the background; this returns the new deployment's id immediately, which you poll with list_deployments for progress (uploading → installing → deployed/failed). The deployment uses the pipeline's own schema sync mode; this tool cannot turn on Force sync for a deployment, and there is no way to ask it to. To schedule for later, to deploy to a Production target that needs an extra confirmation, or to deploy a failed build again with Force sync for that one deployment, use the web UI. Requires permission to manage the solution.")]
+    [Description("Deploys a successful build to its deployment pipeline's Business Central environment NOW — uploads and installs the build's .app files. The build must be a 'ready' build of the deployment pipeline's source build pipeline, and not a preview build (isPreview true), which is check-only. A pipeline whose installs run in the environment's delivery window (deployment schedule 'OurDeliveryWindow') still deploys immediately through this tool; the deployment is recorded as outside the window when it is. Deploying runs in the background; this returns the new deployment's id immediately, which you poll with list_deployments for progress (uploading → installing → deployed/failed). The deployment uses the pipeline's own schema sync mode; this tool cannot turn on Force sync for a deployment, and there is no way to ask it to. A deployment pipeline whose environment is Production (or any other non-sandbox type) is refused unless the organisation allows agents to deploy to production; when it does, this tool deploys there immediately too, with no confirmation step. To schedule for later, to deploy to Production when this tool refuses it, or to deploy a failed build again with Force sync for that one deployment, use the web UI. Requires permission to manage the solution.")]
     public async Task<PublishBuildResult> PublishBuildAsync(
         [Description("Deployment pipeline id (from list_deployment_pipelines) — carries the target environment and modes.")] int deploymentPipelineId,
         [Description("Build id to deploy (from list_pipeline_builds / list_solution_builds) — must be a 'ready' build of this pipeline's source build pipeline.")] int buildId,
@@ -86,7 +86,7 @@ public sealed class DeliveryTools
     {
         try
         {
-            var deliveryId = await _deliveries.ReleaseBuildNowAsync(deploymentPipelineId, buildId, ct);
+            var deliveryId = await _deliveries.DeployNowForAgentAsync(deploymentPipelineId, buildId, ct);
             return new PublishBuildResult(
                 deliveryId,
                 "Deployment queued. Poll list_deployments with this deployment pipeline id to watch it upload, install, and deploy (or fail).");

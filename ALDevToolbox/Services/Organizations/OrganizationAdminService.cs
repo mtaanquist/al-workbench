@@ -73,7 +73,7 @@ public sealed record DefaultDeliveryWindows(
 }
 
 /// <summary>The current org's tool switches, for Administration → Tools.</summary>
-public sealed record OrgToolsView(bool McpEnabled, HashSet<ToolKey> DisabledTools, HashSet<ToolKey> StepUpTools, int StepUpWindowMinutes);
+public sealed record OrgToolsView(bool McpEnabled, HashSet<ToolKey> DisabledTools, HashSet<ToolKey> StepUpTools, int StepUpWindowMinutes, bool AgentsMayDeployToProduction = false);
 
 public sealed class OrganizationAdminService
 {
@@ -346,6 +346,37 @@ public sealed class OrganizationAdminService
     }
 
     /// <summary>
+    /// Lets (or stops) AI assistants deploying to Production and other non-sandbox environments
+    /// through the <c>deploy_build</c> MCP tool
+    /// (<see cref="OrganizationSettings.AgentsMayDeployToProduction"/>, issue #1122). When
+    /// on, such a deployment runs immediately with no confirmation step. Audited through
+    /// the interceptor like the other settings columns.
+    /// </summary>
+    public async Task SetAgentsMayDeployToProductionAsync(bool allowed, CancellationToken ct = default)
+    {
+        var orgId = RequireOrganizationId();
+        var row = await _db.OrganizationSettings.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
+        if (row is null)
+        {
+            row = new OrganizationSettings { OrganizationId = orgId };
+            _db.OrganizationSettings.Add(row);
+        }
+        if (row.AgentsMayDeployToProduction == allowed) return;
+        // Turning it on loosens a protection, so it takes a recent second factor whenever
+        // the organisation asks for one at all, as loosening the step-up rules does.
+        if (allowed && (await _db.Organizations.AsNoTracking()
+                .Where(o => o.Id == orgId).Select(o => o.StepUpTools).FirstAsync(ct)).Count > 0)
+        {
+            await RequireFreshSessionAsync(ct);
+        }
+        row.AgentsMayDeployToProduction = allowed;
+        row.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _config.InvalidateCache(orgId);
+        _logger.LogInformation("Org {OrgId} set agents_may_deploy_to_production = {Allowed}.", orgId, allowed);
+    }
+
+    /// <summary>
     /// Sets the zone every time in the app is shown in for this organisation
     /// (<see cref="OrganizationSettings.DisplayTimeZoneId"/>, issue #942). Null,
     /// blank or <c>UTC</c> clears it back to the default, UTC. Anything else must
@@ -445,7 +476,12 @@ public sealed class OrganizationAdminService
             .Where(o => o.Id == orgId)
             .Select(o => new { o.McpEnabled, o.DisabledTools, o.StepUpTools, o.StepUpWindowMinutes })
             .FirstAsync(ct);
-        return new OrgToolsView(org.McpEnabled, ToolCatalog.ParseDisabled(org.DisabledTools), ToolCatalog.ParseKeys(org.StepUpTools), org.StepUpWindowMinutes);
+        var agentsMayDeployToProduction = await _db.OrganizationSettings.AsNoTracking()
+            .Where(s => s.OrganizationId == orgId)
+            .Select(s => s.AgentsMayDeployToProduction)
+            .FirstOrDefaultAsync(ct);
+        return new OrgToolsView(org.McpEnabled, ToolCatalog.ParseDisabled(org.DisabledTools), ToolCatalog.ParseKeys(org.StepUpTools), org.StepUpWindowMinutes,
+            agentsMayDeployToProduction);
     }
 
     /// <summary>
