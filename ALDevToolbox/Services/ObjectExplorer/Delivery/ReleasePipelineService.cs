@@ -98,6 +98,7 @@ public sealed class ReleasePipelineService
                 RestrictBranch = r.RestrictBranch,
                 AllowedBranch = r.AllowedBranch,
                 NameIsCustom = r.NameIsCustom,
+                BuildPipelineDeleted = r.BuildPipeline != null && r.BuildPipeline.DeletedAt != null,
             })
             .ToListAsync(ct);
     }
@@ -729,6 +730,13 @@ public sealed record ReleasePipelineRow(
 
     /// <summary>The branch it then allows; null is the repositories' default branch.</summary>
     public string? AllowedBranch { get; init; }
+
+    /// <summary>
+    /// True when the build pipeline it draws from has been deleted, so nothing new will
+    /// ever reach it. Deleting a build pipeline in use is refused (#1123); this covers the
+    /// ones deleted before that.
+    /// </summary>
+    public bool BuildPipelineDeleted { get; init; }
 
     /// <summary>True when a person typed the name because the generated one was taken; the editor shows it for editing.</summary>
     [System.Text.Json.Serialization.JsonIgnore]

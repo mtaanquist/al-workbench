@@ -320,7 +320,12 @@
                             <span class="rp-list__source">
                                 <Icon Name="@(FromGitHub(r) ? "tag" : "rocket")" Width="15" Height="15" Css="rp-list__source-icon" />
                                 <span class="cell-stack">
-                                    @if (!FromGitHub(r) && r.BuildPipelineId is { } buildPipelineId)
+                                    @if (!FromGitHub(r) && r.BuildPipelineDeleted)
+                                    {
+                                        <span class="cell-stack__main">@SourceName(r)</span>
+                                        <span class="cell-stack__sub rp-tone--danger">Build pipeline deleted</span>
+                                    }
+                                    else if (!FromGitHub(r) && r.BuildPipelineId is { } buildPipelineId)
                                     {
                                         <span class="cell-stack__main"><a class="rp-list__quiet" href="@($"/pipelines/{buildPipelineId}")">@SourceName(r)</a></span>
                                     }
@@ -328,7 +333,10 @@
                                     {
                                         <span class="cell-stack__main">@SourceName(r)</span>
                                     }
-                                    <span class="cell-stack__sub">@(FromGitHub(r) ? "GitHub release" : "Build pipeline")</span>
+                                    @if (FromGitHub(r) || !r.BuildPipelineDeleted)
+                                    {
+                                        <span class="cell-stack__sub">@(FromGitHub(r) ? "GitHub release" : "Build pipeline")</span>
+                                    }
                                 </span>
                             </span>
                         </td>
@@ -680,6 +688,7 @@
         if (r.EnvironmentMissing) return new("Environment missing. Reconnect it in solution settings.", "rp-tone--danger");
         if (EnvironmentBroken(r)) return new("Environment failed in Business Central.", "rp-tone--danger");
         if (EnvironmentDeleting(r)) return new("Environment is being deleted.", "rp-tone--warning");
+        if (!FromGitHub(r) && r.BuildPipelineDeleted) return new("Its build pipeline was deleted. Point it at another one, or delete it.", "rp-tone--danger");
         if (r.ProposedDelivery is { } waiting && r.NextDelivery is null) return new($"Deployment of build #{waiting.BuildId} waiting for approval.", "rp-tone--warning");
         if (r.SchemaSyncMode == BcSyncMode.ForceSync) return new("Force sync: can drop columns and their data.", "rp-tone--warning");
         return null;

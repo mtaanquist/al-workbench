@@ -227,6 +227,39 @@ public sealed class PipelineServiceTests : IDisposable
         (await read.OePipelines.IgnoreQueryFilters().SingleAsync(p => p.Id == id)).DeletedAt.Should().NotBeNull();
     }
 
+    [Fact]
+    public async Task Deleting_a_pipeline_a_deployment_pipeline_draws_from_is_refused_and_names_it()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
+        await SeedDeploymentPipelineAsync(ctx, projectId, id, "main to Production");
+
+        var act = () => svc.SoftDeletePipelineAsync(id);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("Pipeline");
+        ex.Which.Errors["Pipeline"].Should().Contain("\"main to Production\"");
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == id)).DeletedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_deleted_deployment_pipeline_does_not_stop_its_source_being_deleted()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
+        await SeedDeploymentPipelineAsync(ctx, projectId, id, "main to Production", deleted: true);
+
+        await svc.SoftDeletePipelineAsync(id);
+
+        await using var read = _db.NewContext();
+        (await read.OePipelines.IgnoreQueryFilters().SingleAsync(p => p.Id == id)).DeletedAt.Should().NotBeNull();
+    }
+
     // --- Build numbers in app versions --------------------------------------
 
     [Fact]
@@ -592,6 +625,25 @@ public sealed class PipelineServiceTests : IDisposable
         ctx.OeProjectEnvironments.Add(env);
         await ctx.SaveChangesAsync();
         return env.Id;
+    }
+
+    private static async Task SeedDeploymentPipelineAsync(AppDbContext ctx, int projectId, int buildPipelineId, string name, bool deleted = false)
+    {
+        var now = DateTime.UtcNow;
+        var env = new OeProjectEnvironment
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "Production", Type = "Production", FetchedAt = now,
+        };
+        ctx.OeProjectEnvironments.Add(env);
+        await ctx.SaveChangesAsync();
+        ctx.OeReleasePipelines.Add(new OeReleasePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = name,
+            BuildPipelineId = buildPipelineId, ProjectEnvironmentId = env.Id,
+            DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
+            CreatedAt = now, UpdatedAt = now, DeletedAt = deleted ? now : null,
+        });
+        await ctx.SaveChangesAsync();
     }
 
     private static async Task<int> SeedProjectAsync(AppDbContext ctx, string? discoveredExtensionsJson = null)

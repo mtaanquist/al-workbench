@@ -136,6 +136,28 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
     }
 
     [Fact]
+    public async Task A_pipeline_whose_build_pipeline_was_deleted_says_so_instead_of_linking_to_it()
+    {
+        var s = await SeedFleetAsync();
+        int buildPipelineId;
+        await using (var db = _db.NewContext())
+        {
+            buildPipelineId = await db.OePipelines.Where(p => p.ProjectId == s.ProjectId).Select(p => p.Id).SingleAsync();
+            await db.OePipelines.Where(p => p.Id == buildPipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        }
+
+        var cut = _ctx.Render<ReleasePipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var row = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']");
+            row.TextContent.Should().Contain("Build pipeline deleted");
+            row.QuerySelectorAll($"a[href='/pipelines/{buildPipelineId}']").Should().BeEmpty("the page behind it is gone");
+        });
+    }
+
+    [Fact]
     public async Task A_scheduled_deployment_can_be_rescheduled_from_the_row_menu()
     {
         var s = await SeedFleetAsync();
