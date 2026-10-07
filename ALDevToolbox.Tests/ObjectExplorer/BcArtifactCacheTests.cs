@@ -170,6 +170,27 @@ public sealed class BcArtifactCacheTests : IDisposable
         _downloadCount.Should().Be(2);
     }
 
+    // The platform half moves in first; when the application half then cannot be stored
+    // (a full disk), the build still gets two files it can read (#1181).
+    [Fact]
+    public async Task A_set_that_cannot_be_stored_is_used_once_from_files_that_still_exist()
+    {
+        var cache = NewCache();
+        var cacheDir = Path.Combine(_root, "cache");
+        var key = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(UrlA)));
+        // Something in the way of the application half's copy makes its store fail.
+        Directory.CreateDirectory(Path.Combine(cacheDir, key + ".app.zip.partial"));
+
+        var lease = await cache.GetAsync(UrlA, Download());
+
+        File.Exists(lease.Download.ApplicationZipPath).Should().BeTrue();
+        File.Exists(lease.Download.PlatformZipPath).Should().BeTrue();
+        File.Exists(Path.Combine(cacheDir, key + ".platform.zip")).Should().BeFalse("a set that could not be kept whole is not kept");
+        lease.Dispose();
+        File.Exists(lease.Download.ApplicationZipPath).Should().BeFalse();
+        File.Exists(lease.Download.PlatformZipPath).Should().BeFalse();
+    }
+
     [Fact]
     public async Task A_cache_turned_off_downloads_every_time_and_keeps_nothing()
     {

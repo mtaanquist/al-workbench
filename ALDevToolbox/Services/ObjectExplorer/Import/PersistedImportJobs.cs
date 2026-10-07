@@ -156,7 +156,7 @@ public sealed class PersistedImportJobs
                 Job = j,
                 Build = _db.OeProjectBuilds
                     .Where(b => b.ReleaseId == j.ReleaseId)
-                    .Select(b => new { b.PipelineId, b.BcTarget, b.Trigger })
+                    .Select(b => new { b.PipelineId, b.BcTarget, b.Trigger, b.Status })
                     .FirstOrDefault(),
             })
             .ToListAsync(ct).ConfigureAwait(false);
@@ -200,6 +200,15 @@ public sealed class PersistedImportJobs
                         Source: new ReleaseImportSource.BcArtifact(row.DownloadUrl),
                         StoreSymbolReference: row.StoreSymbolReference,
                         JobRowId: row.Id));
+                    break;
+                case "project_build" when survivor.Build?.Status is ProjectBuildStatus.Ready or ProjectBuildStatus.Failed:
+                    // The build had already finished: the restart landed while it was
+                    // being announced, published or prepared for release. Running it
+                    // again would rebuild and re-index a finished build and could
+                    // publish or prepare it twice, so the row is closed instead (#1181).
+                    row.Status = survivor.Build.Status == ProjectBuildStatus.Ready ? "completed" : "failed";
+                    if (row.Status == "failed") row.ErrorMessage ??= "The build had failed before the restart.";
+                    row.CompletedAt = now;
                     break;
                 case "project_build" when row.ProjectId is int projectId:
                     // Re-clone and rebuild from scratch; nothing on disk survives

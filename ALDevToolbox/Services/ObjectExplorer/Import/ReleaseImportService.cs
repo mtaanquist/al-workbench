@@ -886,21 +886,17 @@ public class ReleaseImportService
         CancellationToken ct)
     {
         // Optionally persist the raw SymbolReference.json for resolver
-        // debugging. Upsert the content into the shared store FIRST so the
-        // module's FK on symbol_reference_content_hash is satisfied when the
-        // row is inserted below. Deduped by hash like source files, so a
-        // re-import of the same module version doesn't duplicate the blob.
+        // debugging. The content goes into the shared store with the module
+        // row, so the module's FK on symbol_reference_content_hash is
+        // satisfied. Deduped by hash like source files, so a re-import of the
+        // same module version doesn't duplicate the blob.
         string? symbolReferenceHash = null;
+        var symbolReferenceContent = new Dictionary<string, (string Content, int Length, int LineCount)>(StringComparer.Ordinal);
         if (storeSymbolReference && !string.IsNullOrEmpty(pkg.SymbolReferenceJson))
         {
             var json = pkg.SymbolReferenceJson;
             symbolReferenceHash = HashHex(json);
-            await UpsertFileContentsAsync(
-                new Dictionary<string, (string Content, int Length, int LineCount)>(StringComparer.Ordinal)
-                {
-                    [symbolReferenceHash] = (json, json.Length, CountLines(json)),
-                },
-                ct).ConfigureAwait(false);
+            symbolReferenceContent[symbolReferenceHash] = (json, json.Length, CountLines(json));
         }
 
         var module = new OeModule
@@ -927,7 +923,7 @@ public class ReleaseImportService
             CreatedAt = DateTime.UtcNow,
         };
         _db.OeModules.Add(module);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await SaveWithFileContentsAsync(symbolReferenceContent, ct).ConfigureAwait(false);
 
         // Files first so we can resolve ModuleObject.SourceFileId on the way.
         // Symbol-package ReferenceSourceFileName is the full relative path
@@ -965,16 +961,14 @@ public class ReleaseImportService
             filesPending++;
             if (filesPending >= FileChunkSize)
             {
-                await UpsertFileContentsAsync(pendingContent, ct).ConfigureAwait(false);
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                await SaveWithFileContentsAsync(pendingContent, ct).ConfigureAwait(false);
                 pendingContent.Clear();
                 filesPending = 0;
             }
         }
         if (filesPending > 0)
         {
-            await UpsertFileContentsAsync(pendingContent, ct).ConfigureAwait(false);
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await SaveWithFileContentsAsync(pendingContent, ct).ConfigureAwait(false);
         }
 
         // Build the (Kind, Name) → (File, Line) index used to link
@@ -1612,10 +1606,10 @@ public class ReleaseImportService
     // unchanged.
     private static string HashHex(string content) => OeIngestHelpers.HashHex(content);
     private static int CountLines(string content) => OeIngestHelpers.CountLines(content);
-    private Task UpsertFileContentsAsync(
+    private Task SaveWithFileContentsAsync(
         IReadOnlyDictionary<string, (string Content, int Length, int LineCount)> contents,
         CancellationToken ct)
-        => OeIngestHelpers.UpsertFileContentsAsync(_db, contents, ct);
+        => OeIngestHelpers.SaveWithFileContentsAsync(_db, contents, ct);
 
     // ── BC version inference ────────────────────────────────────────────
 

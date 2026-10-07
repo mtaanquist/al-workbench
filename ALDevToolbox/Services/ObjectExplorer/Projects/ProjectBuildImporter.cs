@@ -29,6 +29,7 @@ public sealed class ProjectBuildImporter
     public const string DisabledRefusal = "This pipeline is disabled. Enable it to build.";
 
     private readonly ReleaseImportService _importer;
+    private readonly ReleaseManagementService _management;
     private readonly ProjectBuildQueue _queue;
     private readonly PersistedImportJobs _persistedJobs;
     private readonly AppDbContext _db;
@@ -40,6 +41,7 @@ public sealed class ProjectBuildImporter
 
     public ProjectBuildImporter(
         ReleaseImportService importer,
+        ReleaseManagementService management,
         ProjectBuildQueue queue,
         PersistedImportJobs persistedJobs,
         AppDbContext db,
@@ -50,6 +52,7 @@ public sealed class ProjectBuildImporter
         ILogger<ProjectBuildImporter> logger)
     {
         _importer = importer;
+        _management = management;
         _queue = queue;
         _persistedJobs = persistedJobs;
         _db = db;
@@ -457,25 +460,74 @@ public sealed class ProjectBuildImporter
         return releaseId;
     }
 
+    /// <summary>What a rebuild that failed between its reopen and its job says on the release and the build.</summary>
+    public const string RebuildNotQueuedMessage = "The rebuild could not be started. Try again.";
+
     /// <summary>
-    /// Queues an existing build to run again in place (Retry, Recover symbols), after
-    /// the caller has reopened its release. It goes in line as a build somebody is
-    /// waiting on, behind any build of the same pipeline and target still running.
+    /// Wipes what an existing build holds and queues it to run again in place (Retry,
+    /// Recover symbols), after the caller has reopened its release under
+    /// <see cref="BeginRebuildAsync"/>. It goes in line as a build somebody is waiting
+    /// on, behind any build of the same pipeline and target still running.
+    /// <para>
+    /// The reopen has already committed the build as queued and the release as
+    /// importing, so a failure here (the request cut off during the long wipe, a failed
+    /// insert) would leave a build with no job behind it that blocks Build and Retry
+    /// until a restart. Both are failed instead, whatever the request's token says, and
+    /// the error is rethrown (#1181).
+    /// </para>
     /// </summary>
     public async Task QueueRebuildAsync(int releaseId, int projectId, CancellationToken ct = default)
     {
-        var build = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.ReleaseId == releaseId)
-            .Select(b => new { b.PipelineId, b.BcTarget })
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a rebuild");
-        var source = new ReleaseImportSource.ProjectBuild(projectId);
-        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
-        _queue.Enqueue(new ReleaseImportJob(
-            releaseId, identity, source, StoreSymbolReference: false, jobRowId,
-            ProjectBuildOrder.For(build?.PipelineId, build?.BcTarget, ProjectBuildTrigger.Manual)));
-        _logger.LogInformation("Queued a rebuild of release {ReleaseId} (project {ProjectId}, pipeline {PipelineId}).",
-            releaseId, projectId, build?.PipelineId);
+        try
+        {
+            await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
+            var build = await _db.OeProjectBuilds.AsNoTracking()
+                .Where(b => b.ReleaseId == releaseId)
+                .Select(b => new { b.PipelineId, b.BcTarget })
+                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a rebuild");
+            var source = new ReleaseImportSource.ProjectBuild(projectId);
+            var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
+            _queue.Enqueue(new ReleaseImportJob(
+                releaseId, identity, source, StoreSymbolReference: false, jobRowId,
+                ProjectBuildOrder.For(build?.PipelineId, build?.BcTarget, ProjectBuildTrigger.Manual)));
+            _logger.LogInformation("Queued a rebuild of release {ReleaseId} (project {ProjectId}, pipeline {PipelineId}).",
+                releaseId, projectId, build?.PipelineId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not queue the rebuild of release {ReleaseId}; failing it so it does not block the pipeline.", releaseId);
+            await FailUnqueuedRebuildAsync(releaseId).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    // CancellationToken.None throughout: the request's token may be why we are here.
+    private async Task FailUnqueuedRebuildAsync(int releaseId)
+    {
+        try
+        {
+            var now = _clock.GetUtcNow().UtcDateTime;
+            await _db.OeReleases
+                .Where(r => r.Id == releaseId && r.Status == "ingesting")
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(r => r.Status, "failed")
+                    .SetProperty(r => r.StatusMessage, RebuildNotQueuedMessage)
+                    .SetProperty(r => r.UpdatedAt, now), CancellationToken.None)
+                .ConfigureAwait(false);
+            await _db.OeProjectBuilds
+                .Where(b => b.ReleaseId == releaseId
+                    && (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building))
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(b => b.Status, ProjectBuildStatus.Failed)
+                    .SetProperty(b => b.FailureMessage, RebuildNotQueuedMessage)
+                    .SetProperty(b => b.FinishedAt, now), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not fail the unqueued rebuild of release {ReleaseId}.", releaseId);
+        }
     }
 
     /// <summary>

@@ -328,7 +328,7 @@ public sealed class ReleaseImportRequestService
                 await _importer.ReopenForRebuildAsync(releaseId, ct).ConfigureAwait(false);
                 await rebuild.CommitAsync(ct).ConfigureAwait(false);
             }
-            await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
+            // Wipes the previous attempt first, and fails the build if it cannot queue it.
             await _projectBuilds.QueueRebuildAsync(releaseId, retryProjectId, ct).ConfigureAwait(false);
             return new ReleaseImportOutcome.Queued(releaseId);
         }
