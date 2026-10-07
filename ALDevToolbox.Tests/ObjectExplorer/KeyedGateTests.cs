@@ -22,4 +22,21 @@ public sealed class KeyedGateTests
         first.Dispose(); // Twice is harmless: it lets in one waiter, not two.
         (await sameKey.WaitAsync(TimeSpan.FromSeconds(5))).Dispose();
     }
+
+    [Fact]
+    public async Task TryEnter_steps_aside_while_the_key_is_held()
+    {
+        var gate = new KeyedGate<int>();
+        var held = await gate.EnterAsync(1);
+
+        gate.TryEnter(1).Should().BeNull();
+        var other = gate.TryEnter(2);
+        other.Should().NotBeNull("another key is free");
+        other!.Dispose();
+
+        held.Dispose();
+        using var again = gate.TryEnter(1);
+        again.Should().NotBeNull();
+        gate.TryEnter(1).Should().BeNull();
+    }
 }

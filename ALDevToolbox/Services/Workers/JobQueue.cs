@@ -23,10 +23,11 @@ public abstract class JobQueue<TJob>
     /// Channel bound. Pick it from the cost of one queued job, not from the expected
     /// arrival rate: a full channel simply makes the writer wait.
     /// </param>
-    protected JobQueue(int capacity) =>
+    /// <param name="singleReader">False when the worker drains it with several lanes.</param>
+    protected JobQueue(int capacity, bool singleReader = true) =>
         _channel = Channel.CreateBounded<TJob>(new BoundedChannelOptions(capacity)
         {
-            SingleReader = true,
+            SingleReader = singleReader,
             FullMode = BoundedChannelFullMode.Wait,
         });
 
@@ -62,8 +63,23 @@ public abstract class JobQueue<TJob, TKey> : JobQueue<TJob>
     private readonly Func<TJob, TKey> _keySelector;
     private readonly ConcurrentDictionary<TKey, byte> _inFlight = new();
 
-    protected JobQueue(int capacity, Func<TJob, TKey> keySelector)
-        : base(capacity) => _keySelector = keySelector;
+    protected JobQueue(int capacity, Func<TJob, TKey> keySelector, bool singleReader = true)
+        : base(capacity, singleReader) => _keySelector = keySelector;
+
+    /// <summary>
+    /// Queues <paramref name="job"/> only if there is room right now, and unless one with
+    /// the same key is already queued or running. For a caller that must never wait on a
+    /// full queue because the work is picked up again later anyway. True when enqueued.
+    /// </summary>
+    public bool TryEnqueue(TJob job)
+    {
+        ArgumentNullException.ThrowIfNull(job);
+        var key = _keySelector(job);
+        if (!_inFlight.TryAdd(key, 0)) return false;
+        if (Writer.TryWrite(job)) return true;
+        _inFlight.TryRemove(key, out _);
+        return false;
+    }
 
     /// <summary>
     /// Enqueues <paramref name="job"/> unless one with the same key is already queued or

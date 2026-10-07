@@ -195,7 +195,6 @@
     {
         "BackupScheduler" => "Nightly backup",
         "DeliveryScheduler" => "Scheduled deployments to Business Central",
-        "DeliveryWorker" => "Deploying to Business Central",
         "EmailOutboxScheduler" => "Sending email",
         "LoginAttemptPruneScheduler" => "Sign-in log clean-up",
         "ObjectExplorerVacuumScheduler" => "Reclaiming Object Explorer disk space",
@@ -204,6 +203,7 @@
         "ReleaseAutoImportScheduler" => "Automatic BC release import",
         "ReleaseImportWorker" => "Importing a BC release",
         "UsageSnapshotScheduler" => "Measuring storage used",
+        _ when name.StartsWith(nameof(DeliveryWorker) + " ", StringComparison.Ordinal) => "Deploying to Business Central",
         _ => name,
     };
 
