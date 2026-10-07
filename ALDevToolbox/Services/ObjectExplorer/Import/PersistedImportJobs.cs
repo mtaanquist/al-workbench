@@ -133,7 +133,7 @@ public sealed class PersistedImportJobs
 
     /// <summary>
     /// Startup reconciliation. Returns the URL-source jobs to re-enqueue; the
-    /// caller (StartupTasks) pushes them back through <see cref="ReleaseImportQueue.EnqueueAsync"/>.
+    /// caller (StartupTasks) hands them to <see cref="ResumedImportJobs"/>, oldest first.
     /// Staged-zip jobs are flipped to <c>failed</c> in-place (their temp file
     /// is gone) along with their owning <c>oe_releases</c> row so the admin sees
     /// the failure reason on the list and can re-submit.
@@ -146,6 +146,8 @@ public sealed class PersistedImportJobs
         // every org's job rows here is the design.
         var survivors = await _db.OeImportJobs.IgnoreQueryFilters()
             .Where(j => j.Status == "queued" || j.Status == "running")
+            // Oldest first, so waiting push builds resume in the order they were pushed.
+            .OrderBy(j => j.Id)
             .ToListAsync(ct).ConfigureAwait(false);
         if (survivors.Count == 0) return Array.Empty<ReleaseImportJob>();
 

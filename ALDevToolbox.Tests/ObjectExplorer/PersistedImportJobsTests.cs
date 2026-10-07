@@ -177,6 +177,27 @@ public sealed class PersistedImportJobsTests : IDisposable
     }
 
     [Fact]
+    public async Task Reconciler_returns_surviving_jobs_oldest_first()
+    {
+        // Waiting push builds must resume in the order they were pushed (#1107).
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var ids = new List<long>();
+        for (var i = 0; i < 5; i++)
+        {
+            var release = await SeedReleaseAsync(ctx);
+            ids.Add(await svc.CreateAsync(release.Id, Identity,
+                new ReleaseImportSource.Url($"https://download.microsoft.com/{i}.zip"), storeSymbolReference: false));
+        }
+        // A running row is touched last, which must not move it in the order.
+        await svc.MarkRunningAsync(ids[0]);
+
+        var resumable = await svc.ReconcileOnStartupAsync();
+
+        resumable.Select(j => j.JobRowId).Should().Equal(ids);
+    }
+
+    [Fact]
     public async Task Reconciler_fails_staged_zip_jobs_and_their_releases()
     {
         await using var ctx = _db.NewContext();
