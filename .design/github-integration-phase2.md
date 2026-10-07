@@ -487,8 +487,12 @@ on every pull request, inline in the Files tab.
   audit; blank keeps, a clear flag wipes.
 - **`POST /github/webhook`** is anonymous, antiforgery-disabled, rate-limited, size-capped
   (1 MB; 25 MB, GitHub's own ceiling, for a `push` with a well-formed signature header,
-  whose commit file lists can be large - #1126; at most four such bodies are read at once,
-  since the body must be read before a forgery can be told apart), verifies `X-Hub-Signature-256` with a constant-time compare over the raw body,
+  whose commit file lists can be large - #1126; at most four bodies that declare more than
+  a megabyte, or no length, are read at once, since the body must be read before a forgery
+  can be told apart. A push declaring a megabyte or less never waits for those slots; one
+  that cannot get a slot within two seconds is answered 503, a slotted read that has not
+  finished within ten seconds is answered 408, and the read buffer grows with the bytes
+  that arrive rather than from the declared length - #1174), verifies `X-Hub-Signature-256` with a constant-time compare over the raw body,
   and writes a body on every response so the status-pages middleware does not rewrite a
   401 into a 400. It is on the maintenance-mode allow-list: accepting a delivery is
   enqueueing, and GitHub disables hooks that keep failing. `ping` answers 200.

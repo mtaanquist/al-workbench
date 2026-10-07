@@ -56,10 +56,12 @@ public static class GitHubWebhookEndpoints
     /// </summary>
     public const int MaxPushBodyBytes = 25 * 1024 * 1024;
 
-    /// <summary>How many push bodies past a megabyte may be read at once (#1126).</summary>
-    internal const int MaxConcurrentLargeBodies = 4;
-
-    private static readonly SemaphoreSlim LargeBodyGate = new(MaxConcurrentLargeBodies);
+    /// <summary>
+    /// Where a body read starts before it grows. The buffer follows the bytes that
+    /// have actually arrived, never the declared length, so a delivery that claims
+    /// 25 MB and then trickles costs only what it has sent (#1174).
+    /// </summary>
+    private const int InitialBodyBufferBytes = 64 * 1024;
 
     /// <summary>The pull-request actions worth a build. Everything else is a no-op we answer 204 to.</summary>
     private static readonly HashSet<string> BuildableActions =
@@ -80,6 +82,7 @@ public static class GitHubWebhookEndpoints
             HttpContext ctx,
             SystemSettingsService settings,
             GitHubWebhookQueue queue,
+            GitHubWebhookBodyGate gate,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
@@ -102,24 +105,39 @@ public static class GitHubWebhookEndpoints
             // Only a push is allowed past a megabyte, and only when it carries a
             // well-formed signature: anything else is refused below whatever its
             // size, so there is no reason to read 25 MB of it first. The body has
-            // to be read before the signature can be checked, so large reads also
-            // take a turn at LargeBodyGate: a stranger sending forged pushes in
-            // parallel cannot hold more than a few of them in memory at once.
+            // to be read before the signature can be checked, so a body that may
+            // be past a megabyte - no declared length, or a larger one - takes a
+            // slot at the gate, waits for one only briefly, and gets a deadline for
+            // arriving (#1174). An ordinary push declares a smaller length and never
+            // queues behind a stranger holding the slots.
             var signature = ctx.Request.Headers["X-Hub-Signature-256"].ToString();
             var eventName = ctx.Request.Headers["X-GitHub-Event"].ToString();
-            var large = string.Equals(eventName, "push", StringComparison.OrdinalIgnoreCase)
+            var mayBeLarge = string.Equals(eventName, "push", StringComparison.OrdinalIgnoreCase)
                 && IsWellFormedSignature(signature);
+            var declared = ctx.Request.ContentLength;
             byte[]? body;
-            if (large)
+            if (mayBeLarge && (declared is null || declared > MaxRequestBodyBytes))
             {
-                await LargeBodyGate.WaitAsync(ct);
+                if (!await gate.TryEnterAsync(ct))
+                {
+                    log.LogWarning("Refused a large push delivery: every large-body slot is in use.");
+                    return Results.Text("Busy; the delivery will be requested again.", "text/plain", statusCode: 503);
+                }
                 try
                 {
-                    body = await ReadBodyAsync(ctx.Request, MaxPushBodyBytes, ct);
+                    using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    deadline.CancelAfter(gate.ReadDeadline);
+                    body = await ReadBodyAsync(ctx.Request, MaxPushBodyBytes, deadline.Token);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    log.LogWarning(
+                        "Refused a large push delivery: the body did not arrive within {Deadline}.", gate.ReadDeadline);
+                    return Results.Text("The delivery body arrived too slowly.", "text/plain", statusCode: 408);
                 }
                 finally
                 {
-                    LargeBodyGate.Release();
+                    gate.Release();
                 }
             }
             else
@@ -232,42 +250,54 @@ public static class GitHubWebhookEndpoints
     /// Reads the whole body, or <see langword="null"/> when it exceeds
     /// <paramref name="cap"/>. The signature is over the raw bytes, so the body has
     /// to be read once and hashed before it is parsed - there is no streaming
-    /// shortcut here. With a declared length (GitHub always sends one) the bytes
-    /// land in one array of exactly that size, so a large push is held once.
+    /// shortcut here.
     /// </summary>
     private static async Task<byte[]?> ReadBodyAsync(HttpRequest request, int cap, CancellationToken ct)
     {
-        if (request.ContentLength > cap) return null;
         try
         {
-            if (request.ContentLength is { } length)
-            {
-                var exact = new byte[length];
-                var filled = 0;
-                int got;
-                while (filled < exact.Length
-                       && (got = await request.Body.ReadAsync(exact.AsMemory(filled), ct)) > 0)
-                {
-                    filled += got;
-                }
-                return filled == exact.Length ? exact : exact[..filled];
-            }
-
-            using var buffer = new MemoryStream();
-            var chunk = new byte[8192];
-            int read;
-            while ((read = await request.Body.ReadAsync(chunk, ct)) > 0)
-            {
-                if (buffer.Length + read > cap) return null;
-                buffer.Write(chunk, 0, read);
-            }
-            return buffer.ToArray();
+            return await ReadBodyAsync(request.Body, request.ContentLength, cap, ct);
         }
         catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
         {
             // The server's own limit tripped first; answer it the same way.
             return null;
         }
+    }
+
+    /// <summary>
+    /// Reads <paramref name="body"/> to its end, or <see langword="null"/> when it
+    /// declares or sends more than <paramref name="cap"/>.
+    ///
+    /// <para>The buffer starts small and doubles as bytes arrive, up to the declared
+    /// length when there is one, rather than being allocated from that length up
+    /// front: the length is only what the sender claimed, and before the signature
+    /// is checked the sender may be anybody (#1174). A body that fills its declared
+    /// length exactly is returned without a further copy.</para>
+    /// </summary>
+    internal static async Task<byte[]?> ReadBodyAsync(Stream body, long? declaredLength, int cap, CancellationToken ct)
+    {
+        if (declaredLength > cap) return null;
+
+        // With no declared length, read one byte past the cap so "more than the
+        // cap" can be told apart from "exactly the cap".
+        var limit = declaredLength ?? (long)cap + 1;
+        var buffer = new byte[(int)Math.Min(limit, InitialBodyBufferBytes)];
+        var filled = 0;
+        while (true)
+        {
+            if (filled == buffer.Length)
+            {
+                if (filled == limit) break;
+                Array.Resize(ref buffer, (int)Math.Min(limit, (long)buffer.Length * 2));
+            }
+            var got = await body.ReadAsync(buffer.AsMemory(filled), ct);
+            if (got == 0) break;
+            filled += got;
+        }
+
+        if (filled > cap) return null;
+        return filled == buffer.Length ? buffer : buffer[..filled];
     }
 
     /// <summary>Whether <paramref name="signature"/> has the shape of GitHub's header, <c>sha256=</c> and 64 hex digits.</summary>

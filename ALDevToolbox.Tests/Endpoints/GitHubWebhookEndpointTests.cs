@@ -33,6 +33,11 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     private readonly TestDb _db = new();
     private readonly EndpointFactory _factory;
 
+    private readonly GitHubWebhookBodyGate _gate = new(
+        GitHubWebhookBodyGate.DefaultSlots,
+        waitTimeout: TimeSpan.FromMilliseconds(300),
+        readDeadline: TimeSpan.FromSeconds(3));
+
     public GitHubWebhookEndpointTests()
     {
         // The real worker would drain the queue as fast as the endpoint fills it,
@@ -45,6 +50,10 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
                 d.ServiceType == typeof(IHostedService)
                 && d.ImplementationType == typeof(GitHubPullRequestBuildWorker));
             if (worker is not null) services.Remove(worker);
+
+            // The large-body slots with timings a test can wait out, and one gate
+            // per test so holding its slots cannot leak into another test (#1174).
+            services.AddSingleton(_gate);
         });
     }
 
@@ -356,6 +365,185 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
         using var response = await client.SendAsync(request);
 
         response.StatusCode.Should().Be(HttpStatusCode.RequestEntityTooLarge);
+    }
+
+    // --- The large-body slots (#1174) ----------------------------------------
+
+    /// <summary>Takes every large-body slot, as four forged slow pushes would.</summary>
+    private async Task HoldEverySlotAsync()
+    {
+        for (var i = 0; i < GitHubWebhookBodyGate.DefaultSlots; i++)
+        {
+            (await _gate.TryEnterAsync(TestContext.Current.CancellationToken)).Should().BeTrue();
+        }
+    }
+
+    private void ReleaseEverySlot()
+    {
+        for (var i = 0; i < GitHubWebhookBodyGate.DefaultSlots; i++) _gate.Release();
+    }
+
+    [Fact]
+    public async Task An_ordinary_push_is_queued_even_while_every_large_body_slot_is_held()
+    {
+        // The attack: a stranger with a well-formed header holds the slots. A push
+        // under a megabyte - nearly all of them - must not queue behind it.
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        await HoldEverySlotAsync();
+        try
+        {
+            using var response = await client.SendAsync(Delivery(
+                GitHubWebhookPayloads.Push(commitCount: 2), Secret, eventName: "push"));
+
+            response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        }
+        finally
+        {
+            ReleaseEverySlot();
+        }
+    }
+
+    [Fact]
+    public async Task A_large_push_that_cannot_get_a_slot_is_answered_with_a_retryable_503()
+    {
+        // Waiting without a limit would outlast GitHub's ten seconds and lose the
+        // delivery; a 503 is one the recovery scheduler asks for again.
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        var payload = GitHubWebhookPayloads.Push(commitCount: 20, filesPerCommit: 3000);
+        await HoldEverySlotAsync();
+        try
+        {
+            using var response = await client.SendAsync(Delivery(payload, Secret, eventName: "push"));
+
+            response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+            (await response.Content.ReadAsStringAsync()).Should().Contain("requested again");
+            _factory.Services.GetRequiredService<GitHubWebhookQueue>().Reader.TryRead(out _).Should().BeFalse();
+        }
+        finally
+        {
+            ReleaseEverySlot();
+        }
+    }
+
+    [Fact]
+    public async Task A_large_push_that_trickles_is_cut_off_at_the_deadline_and_gives_its_slot_back()
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        var request = new HttpRequestMessage(HttpMethod.Post, GitHubWebhookEndpoints.WebhookPath)
+        {
+            Content = new StreamContent(new StallingStream(Encoding.UTF8.GetBytes("{\"ref\":"))),
+        };
+        request.Content.Headers.ContentLength = 2 * GitHubWebhookEndpoints.MaxRequestBodyBytes;
+        request.Headers.Add("X-GitHub-Event", "push");
+        request.Headers.Add("X-Hub-Signature-256", "sha256=" + new string('a', 64));
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        response.StatusCode.Should().Be(HttpStatusCode.RequestTimeout);
+        _gate.Available.Should().Be(GitHubWebhookBodyGate.DefaultSlots);
+    }
+
+    [Fact]
+    public async Task A_large_push_that_is_read_gives_its_slot_back()
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        var payload = GitHubWebhookPayloads.Push(commitCount: 20, filesPerCommit: 3000);
+
+        using var accepted = await client.SendAsync(Delivery(payload, Secret, eventName: "push"));
+        using var forged = await client.SendAsync(Delivery(payload, "not-the-secret", eventName: "push"));
+
+        accepted.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        forged.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        _gate.Available.Should().Be(GitHubWebhookBodyGate.DefaultSlots);
+    }
+
+    [Fact]
+    public async Task Reading_a_body_does_not_allocate_from_the_declared_length()
+    {
+        // A sender may declare 25 MB and send ten bytes. MemoryStream completes
+        // every read synchronously, so the whole read runs on this thread and the
+        // thread's allocation counter sees all of it.
+        var sent = Encoding.UTF8.GetBytes("{\"a\":\"b\"}");
+        using var stream = new MemoryStream(sent);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+
+        var body = await GitHubWebhookEndpoints.ReadBodyAsync(
+            stream, GitHubWebhookEndpoints.MaxPushBodyBytes, GitHubWebhookEndpoints.MaxPushBodyBytes,
+            TestContext.Current.CancellationToken);
+
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        body.Should().Equal(sent);
+        allocated.Should().BeLessThan(1_000_000);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Reading_a_body_returns_every_byte_past_the_first_buffer(bool declared)
+    {
+        var sent = new byte[300_000];
+        Random.Shared.NextBytes(sent);
+        using var stream = new MemoryStream(sent);
+
+        var body = await GitHubWebhookEndpoints.ReadBodyAsync(
+            stream, declared ? sent.Length : null, GitHubWebhookEndpoints.MaxRequestBodyBytes,
+            TestContext.Current.CancellationToken);
+
+        body.Should().Equal(sent);
+    }
+
+    [Fact]
+    public async Task Reading_a_body_with_no_declared_length_refuses_one_byte_past_the_cap()
+    {
+        const int Cap = 100_000;
+        using var exactly = new MemoryStream(new byte[Cap]);
+        using var over = new MemoryStream(new byte[Cap + 1]);
+        var ct = TestContext.Current.CancellationToken;
+
+        (await GitHubWebhookEndpoints.ReadBodyAsync(exactly, null, Cap, ct)).Should().HaveCount(Cap);
+        (await GitHubWebhookEndpoints.ReadBodyAsync(over, null, Cap, ct)).Should().BeNull();
+        (await GitHubWebhookEndpoints.ReadBodyAsync(new MemoryStream(), Cap + 1, Cap, ct)).Should().BeNull();
+    }
+
+    /// <summary>
+    /// A body that sends its first bytes and then nothing more, as a forged push
+    /// trickled at the server's minimum rate looks from inside one read.
+    /// </summary>
+    private sealed class StallingStream(byte[] first) : Stream
+    {
+        private bool _sent;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (!_sent)
+            {
+                _sent = true;
+                first.CopyTo(buffer);
+                return first.Length;
+            }
+            // Stall well past the deadline, then end, so a client that waits for
+            // its upload to finish still returns.
+            await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            return 0;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
     }
 
     [Fact]
