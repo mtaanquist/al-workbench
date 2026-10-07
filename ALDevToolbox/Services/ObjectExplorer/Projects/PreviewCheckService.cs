@@ -70,7 +70,11 @@ public sealed class PreviewCheckService
                 .Select(g => new BuildHistorySummary(
                     g.Key.PipelineId,
                     g.Key.BcTarget,
-                    g.Any(b => b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building),
+                    // In flight only while its release is still ingesting, as in
+                    // ProjectBuildImporter.BlocksManualBuild: nothing resets a row whose job
+                    // was lost, and trusting the row alone would stop the check for good (#1111).
+                    g.Any(b => (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building)
+                               && b.Release != null && b.Release.Status == "ingesting"),
                     g.Max(b => b.StartedAt),
                     g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.BcArtifactVersion).First()))
                 .ToListAsync(ct).ConfigureAwait(false))
