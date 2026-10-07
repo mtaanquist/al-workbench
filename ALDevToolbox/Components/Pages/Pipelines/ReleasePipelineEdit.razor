@@ -620,10 +620,10 @@
         }
     }
 
-    /// <summary>Save is live once the required fields are chosen and any Force-Sync acknowledgement is given.</summary>
     /// <summary>The name of the deleted build pipeline this one drew from, when it did; null otherwise.</summary>
     private string? _deletedSourceName;
 
+    /// <summary>Save is live once the required fields are chosen and any Force-Sync acknowledgement is given.</summary>
     private bool CanSave =>
         _canManage && _solutionManageable && !_saving && !_loading
         && _environments is { Count: > 0 }

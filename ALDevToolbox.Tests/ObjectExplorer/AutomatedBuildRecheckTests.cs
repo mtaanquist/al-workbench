@@ -153,13 +153,37 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
         (await StatusAsync(releaseId)).Should().Be(ProjectBuildStatus.Building);
     }
 
+    [Fact]
+    public async Task Starting_a_build_stamps_when_it_left_the_queue_and_clears_the_earlier_attempts_failure()
+    {
+        var alice = await SeedUserAsync("alice@cronus.test");
+        var (projectId, pipelineId) = await SeedPipelineAsync(alice);
+        var releaseId = await SeedBuildAsync(projectId, pipelineId, ProjectBuildTrigger.Manual, alice, finished: true);
+        await using (var ctx = _db.NewContext())
+        {
+            // A retry of a build that failed: the row still carries the old reason.
+            await ctx.OeProjectBuilds.Where(b => b.ReleaseId == releaseId)
+                .ExecuteUpdateAsync(s => s.SetProperty(b => b.FailureMessage, "Compile failed."));
+        }
+        var clock = new ALDevToolbox.Tests.Auth.FakeTimeProvider(new DateTimeOffset(2026, 10, 1, 12, 30, 0, TimeSpan.Zero));
+
+        (await RefusalAsync(projectId, releaseId, alice, clock)).Should().BeNull();
+
+        await using var read = _db.NewContext();
+        var build = await read.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.ReleaseId == releaseId);
+        build.Status.Should().Be(ProjectBuildStatus.Building);
+        build.BuildingStartedAt.Should().Be(clock.GetUtcNow().UtcDateTime,
+            "the build history times the build from here, not from when it was queued (#1137)");
+        build.FailureMessage.Should().BeNull("the earlier attempt's reason is no longer the build's");
+    }
+
     /// <summary>
     /// Runs the build as <paramref name="userId"/>, the way the worker does, and returns
     /// the refusal it gave, or null when it got past the check. Past it, the build goes
     /// on to clone with dependencies this test does not provide, so whatever fails there
     /// is not a refusal.
     /// </summary>
-    private async Task<string?> RefusalAsync(int projectId, int releaseId, int userId)
+    private async Task<string?> RefusalAsync(int projectId, int releaseId, int userId, TimeProvider? clock = null)
     {
         var context = _db.OrgContext;
         context.CurrentUserId = userId;
@@ -167,7 +191,7 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
         // Never reached when the build is refused: the check runs before anything is cloned.
         var service = new ProjectBuildService(
             ctx, context, new ProjectAccess(ctx, context),
-            null!, null!, null!, null!, null!, null!, null!, TimeProvider.System, NullLogger<ProjectBuildService>.Instance);
+            null!, null!, null!, null!, null!, null!, null!, clock ?? TimeProvider.System, NullLogger<ProjectBuildService>.Instance);
         try
         {
             await service.BuildAsync(projectId, releaseId, ct: TestContext.Current.CancellationToken);

@@ -11,9 +11,16 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// <para>
 /// <c>StartupTasks</c> calls it before the workers start, and it only removes entries
 /// last written before this process started, so it can never take one from a job of this
-/// process (or from another process sharing the temp folder, such as a test run booting
-/// several hosts). Uploads staged by a request are included, because the startup
-/// reconcile fails their jobs anyway.
+/// process. Uploads staged by a request are included, because the startup reconcile
+/// fails their jobs anyway.
+/// </para>
+///
+/// <para>
+/// It does take them from any other process that shares the temp folder and started
+/// earlier: the app container has its own <c>/tmp</c>, so in production there is none,
+/// but a second instance on the same host, or a test run booting the app while another
+/// is building, loses whatever the earlier one had in flight. Run each on its own
+/// temp folder (<c>TMPDIR</c>).
 /// </para>
 /// </summary>
 internal static class LeftoverImportTempFiles

@@ -489,6 +489,34 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     }
 
     [Fact]
+    public async Task Build_history_times_a_build_from_when_it_started_building_not_from_when_it_was_queued()
+    {
+        var seed = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            // Both took two minutes from being queued; the newer one waited 90 seconds
+            // for a free worker first (#1137). The older one predates the column.
+            var newer = await ctx.OeProjectBuilds.SingleAsync(b => b.Id == seed.NewerBuildId);
+            newer.BuildingStartedAt = newer.StartedAt.AddSeconds(90);
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = RenderPage(seed);
+
+        cut.WaitForAssertion(() =>
+        {
+            DurationCell(cut, seed.NewerBuildId).Should().Be("30s");
+            DurationCell(cut, seed.OlderBuildId).Should().Be("2m 00s");
+        });
+    }
+
+    /// <summary>The Duration cell of a build's row in Build history.</summary>
+    private static string DurationCell(IRenderedComponent<PipelineBuilds> cut, int buildId) =>
+        cut.FindAll(".data-table tbody tr")
+            .Single(r => r.QuerySelector($"a[href='/artifacts/build/{buildId}/all']") is not null)
+            .QuerySelectorAll("td.data-table__num")[0].TextContent.Trim();
+
+    [Fact]
     public async Task Build_history_lists_the_newest_builds_and_shows_more_on_request()
     {
         var seed = await SeedAsync();

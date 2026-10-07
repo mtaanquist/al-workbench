@@ -353,7 +353,8 @@ public sealed class DependencyDriftService
         return stored;
     }
 
-    private static readonly ALDevToolbox.Services.Workers.KeyedGate<int> ScanGate = new();
+    /// <summary>One scan per organisation at a time, keyed by its id. Internal for tests.</summary>
+    internal static readonly ALDevToolbox.Services.Workers.KeyedGate<int> ScanGate = new();
 
     /// <summary>
     /// The newest first-party release that has finished importing, or null when

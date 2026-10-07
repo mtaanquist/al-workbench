@@ -95,6 +95,32 @@ public sealed class GitHubReleaseServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_publish_waits_while_another_build_is_publishing_to_the_same_repository()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        var api = PublishableApi(existingRelease: false);
+        int repositoryId;
+        await using (var read = _db.NewContext())
+        {
+            repositoryId = (await read.OePipelines.AsNoTracking().SingleAsync(p => p.Id == seed.PipelineId)).GithubReleaseRepositoryId!.Value;
+        }
+
+        await using var ctx = _db.NewContext();
+        Task<GitHubReleasePublishResult> publishing;
+        // Another build of the same repository between finding the release and creating it (#1137).
+        using (await GitHubReleaseService.PublishGate.EnterAsync(repositoryId, TestContext.Current.CancellationToken))
+        {
+            publishing = NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+            await Task.Delay(TimeSpan.FromMilliseconds(300), TestContext.Current.CancellationToken);
+            publishing.IsCompleted.Should().BeFalse("the repository is taken");
+            api.Calls.Should().NotContain(c => c.Contains("/releases"), "nothing is read or written on GitHub until it is free");
+        }
+
+        (await publishing.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken)).Published.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Publishing_is_an_act_of_the_organisation_so_it_rides_the_installation_token()
     {
         await ConnectOrganisationAsync();

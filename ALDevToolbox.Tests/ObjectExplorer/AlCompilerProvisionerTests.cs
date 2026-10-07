@@ -97,11 +97,11 @@ public sealed class AlCompilerProvisionerTests : IDisposable
 
         using (var lease = await provisioner.UseAsync(prerelease: true))
         {
-            lease!.Compiler.Version.Should().Be("30.0.42.11883-beta");
+            lease!.Value.Version.Should().Be("30.0.42.11883-beta");
 
             feed.Versions.Add("30.0.42.32495-beta");
             (await provisioner.ResolveAsync(prerelease: true))!.Version.Should().Be("30.0.42.32495-beta");
-            File.Exists(lease.Compiler.AlcPath).Should().BeTrue();
+            File.Exists(lease.Value.AlcPath).Should().BeTrue();
         }
 
         feed.Versions.Add("30.0.43.1-beta");

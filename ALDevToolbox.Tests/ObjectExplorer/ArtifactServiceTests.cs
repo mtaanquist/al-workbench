@@ -277,6 +277,31 @@ public sealed class ArtifactServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ListComparableBuildsAsync_offers_only_the_newest_builds_up_to_the_limit()
+    {
+        int pipelineId, oldest;
+        var first = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            pipelineId = await SeedPipelineAsync(ctx, projectId);
+            oldest = await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, first, releaseId: await SeedReleaseAsync(ctx), pipelineId: pipelineId);
+            for (var i = 1; i <= ArtifactService.ComparableBuildLimit; i++)
+            {
+                await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, first.AddHours(i), releaseId: await SeedReleaseAsync(ctx), pipelineId: pipelineId);
+            }
+        }
+
+        await using var read = _db.NewContext();
+        var comparable = await Svc(read).ListComparableBuildsAsync(pipelineId);
+
+        comparable.Should().HaveCount(ArtifactService.ComparableBuildLimit);
+        comparable.Should().BeInDescendingOrder(c => c.StartedAt);
+        comparable[0].StartedAt.Should().Be(first.AddHours(ArtifactService.ComparableBuildLimit));
+        comparable.Select(c => c.BuildId).Should().NotContain(oldest, "the oldest build is one past the limit");
+    }
+
+    [Fact]
     public async Task A_preview_check_that_indexed_nothing_cannot_be_compared_or_explored()
     {
         int pipelineId, checkOnly, current;

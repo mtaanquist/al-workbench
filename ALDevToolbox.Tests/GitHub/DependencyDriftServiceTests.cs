@@ -172,6 +172,30 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_scan_waits_while_another_scan_of_the_same_organisation_is_replacing_its_findings()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var api = ScannableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        Task<int> scanning;
+        // Another import finishing at the same time (#1137): each replaces the whole set.
+        using (await DependencyDriftService.ScanGate.EnterAsync(TestDb.DefaultOrgId, TestContext.Current.CancellationToken))
+        {
+            scanning = service.ScanForReleaseAsync(releaseId, TestContext.Current.CancellationToken);
+            await Task.Delay(TimeSpan.FromMilliseconds(300), TestContext.Current.CancellationToken);
+            scanning.IsCompleted.Should().BeFalse("the organisation's findings are being replaced");
+            api.Calls.Should().BeEmpty("nothing is read until the other scan is done");
+        }
+
+        (await scanning.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken)).Should().Be(3);
+    }
+
+    [Fact]
     public async Task A_manifest_already_on_the_new_version_is_not_proposed_anything()
     {
         await ReadyAsync();

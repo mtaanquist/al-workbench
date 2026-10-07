@@ -167,6 +167,48 @@ public sealed class PreviewCheckTests : IDisposable
     }
 
     [Fact]
+    public async Task The_startup_sweep_skips_an_organisation_still_pending_approval_like_the_other_sweeps()
+    {
+        int pendingBuild, activeBuild;
+        await using (var ctx = _db.NewContext())
+        {
+            var other = await ctx.Organizations.SingleAsync(o => o.Id == TestDb.OtherOrgId);
+            other.IsPending = true;
+            pendingBuild = await AddInterruptedBuildAsync(ctx, TestDb.OtherOrgId);
+            activeBuild = await AddInterruptedBuildAsync(ctx, TestDb.DefaultOrgId);
+        }
+
+        var failed = await InterruptedBuilds.FailAsync(NewProvider(), Tonight, TestContext.Current.CancellationToken);
+
+        failed.Should().Be(1);
+        await using var check = _db.NewContext();
+        var statuses = await check.OeProjectBuilds.IgnoreQueryFilters().AsNoTracking()
+            .Where(b => b.Id == pendingBuild || b.Id == activeBuild)
+            .ToDictionaryAsync(b => b.Id, b => b.Status);
+        statuses[activeBuild].Should().Be(ProjectBuildStatus.Failed);
+        statuses[pendingBuild].Should().Be(ProjectBuildStatus.Queued, "an organisation awaiting approval is not swept");
+
+        static async Task<int> AddInterruptedBuildAsync(AppDbContext ctx, int orgId)
+        {
+            var project = new OeProject
+            {
+                OrganizationId = orgId, Name = "CRONUS " + orgId, CreatedAt = Tonight, UpdatedAt = Tonight,
+            };
+            ctx.OeProjects.Add(project);
+            await ctx.SaveChangesAsync();
+            // Queued with no release: what a restart leaves behind.
+            var build = new OeProjectBuild
+            {
+                OrganizationId = orgId, ProjectId = project.Id, Status = ProjectBuildStatus.Queued,
+                Trigger = ProjectBuildTrigger.Manual, StartedAt = Tonight.AddHours(-1),
+            };
+            ctx.OeProjectBuilds.Add(build);
+            await ctx.SaveChangesAsync();
+            return build.Id;
+        }
+    }
+
+    [Fact]
     public async Task Nothing_changed_since_the_last_check_means_it_is_not_due()
     {
         var owner = await SeedUserAsync();

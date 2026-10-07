@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using Microsoft.EntityFrameworkCore;
+using ALDevToolbox.Services.Workers;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 
@@ -20,22 +21,14 @@ public static class InterruptedBuilds
         "The workbench restarted before this build finished. Start the build again.";
 
     /// <summary>
-    /// Marks those rows failed in every organisation. Runs at startup only, before any
+    /// Marks those rows failed in every organisation a sweep visits (see
+    /// <see cref="SweptOrganizations"/>). Runs at startup only, before any
     /// worker can pick a build up. Each organisation runs in an ambient scope of its own,
     /// so the tenant filter stays on. Returns how many rows changed.
     /// </summary>
     public static async Task<int> FailAsync(IServiceProvider services, DateTime nowUtc, CancellationToken ct)
     {
-        List<(int Id, bool IsSystem)> orgs;
-        await using (var scope = services.CreateAsyncScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            // organizations carries no tenant filter, so this needs no bypass.
-            orgs = (await db.Organizations.AsNoTracking()
-                    .Select(o => new { o.Id, o.IsSystem })
-                    .ToListAsync(ct).ConfigureAwait(false))
-                .Select(o => (o.Id, o.IsSystem)).ToList();
-        }
+        var orgs = await SweptOrganizations.ListAsync(services, ct).ConfigureAwait(false);
 
         var failed = 0;
         foreach (var (orgId, system) in orgs)

@@ -649,13 +649,13 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                @if (HistoryRows.Count == 0)
+                                @if (_builds.Count == 0)
                                 {
                                     <tr>
                                         <td colspan="8" class="u-muted">No builds yet apart from preview builds.</td>
                                     </tr>
                                 }
-                                @foreach (var b in HistoryRows)
+                                @foreach (var b in _builds)
                                 {
                                     <tr class="@RowStateIcon.RowClass(b.Status)">
                                         <td class="data-table__col-state"><RowStateIcon State="@b.Status" /></td>
@@ -968,7 +968,10 @@
 
     private PipelineHeader? _header;
 
-    /// <summary>The newest builds Build history lists, at most <see cref="_historyLimit"/> of them.</summary>
+    /// <summary>
+    /// The newest builds Build history lists, at most <see cref="_historyLimit"/> of them,
+    /// already without preview builds unless the person asked for them.
+    /// </summary>
     private List<BuildRow> _builds = new();
 
     /// <summary>How many builds the pipeline has in all, and how many are preview check builds.</summary>
@@ -991,9 +994,6 @@
     /// read the page's settings as they were then, so its answer is dropped.
     /// </summary>
     private int _loadGeneration;
-
-    /// <summary>The rows Build history lists: the builds read, already without preview builds unless asked for.</summary>
-    private List<BuildRow> HistoryRows => _builds;
 
     /// <summary>How many builds Build history would list with no limit.</summary>
     private int HistoryTotal => _listingPreview ? _counts.Total : _counts.Total - _counts.Preview;

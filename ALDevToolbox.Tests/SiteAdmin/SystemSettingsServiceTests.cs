@@ -65,10 +65,10 @@ public sealed class SystemSettingsServiceTests : IDisposable
     }
 
     [Theory]
-    [InlineData(0)]
+    [InlineData(ProjectBuildQueue.MinConcurrency - 1)]
     [InlineData(-1)]
-    [InlineData(17)]
-    public async Task Build_concurrency_outside_1_to_16_is_refused_on_its_field(int value)
+    [InlineData(ProjectBuildQueue.MaxConcurrency + 1)]
+    public async Task Build_concurrency_outside_the_queues_bounds_is_refused_on_its_field(int value)
     {
         var queue = new ProjectBuildQueue(defaultLimit: 2);
         var svc = NewService(builds: queue);
@@ -76,7 +76,9 @@ public sealed class SystemSettingsServiceTests : IDisposable
         var act = () => svc.SaveAsync(NewInput(buildConcurrency: value));
 
         (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors.Should().ContainKey("BuildConcurrency");
+            .Which.Errors["BuildConcurrency"].Should().Be(
+                $"Enter a number from {ProjectBuildQueue.MinConcurrency} to {ProjectBuildQueue.MaxConcurrency}, or leave it empty to use the default.",
+                "the message names the queue's own bounds, the ones the field enforces");
         (await NewService().GetViewAsync()).BuildConcurrency.Should().BeNull();
         queue.Limit.Should().Be(2);
     }

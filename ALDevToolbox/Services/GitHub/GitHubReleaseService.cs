@@ -232,7 +232,8 @@ public sealed class GitHubReleaseService
         return result;
     }
 
-    private static readonly ALDevToolbox.Services.Workers.KeyedGate<int> PublishGate = new();
+    /// <summary>One publish per GitHub repository at a time, keyed by its repository id. Internal for tests.</summary>
+    internal static readonly ALDevToolbox.Services.Workers.KeyedGate<int> PublishGate = new();
 
     private async Task<GitHubReleasePublishResult> TryPublishAsync(
         int projectBuildId, int repositoryId, RepositoryProvider? provider, string repositoryUrl, CancellationToken ct)

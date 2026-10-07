@@ -394,11 +394,11 @@ public sealed class SystemSettingsService
         {
             errors["IndexSizeMultiplier"] = "Multiplier must be between 0 and 10.";
         }
-        if (input.BuildConcurrency is int builds
-            && (builds < ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue.MinConcurrency
-                || builds > ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue.MaxConcurrency))
+        const int fewestBuilds = ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue.MinConcurrency;
+        const int mostBuilds = ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue.MaxConcurrency;
+        if (input.BuildConcurrency is int builds && (builds < fewestBuilds || builds > mostBuilds))
         {
-            errors["BuildConcurrency"] = "Enter a number from 1 to 16, or leave it empty to use the default.";
+            errors["BuildConcurrency"] = $"Enter a number from {fewestBuilds} to {mostBuilds}, or leave it empty to use the default.";
         }
         var normalisedAllowlist = NormaliseDomainAllowlist(
             input.SignupEmailDomainAllowlist, "SignupEmailDomainAllowlist", errors);
