@@ -1560,6 +1560,7 @@
         ProjectDeliveryResultStatus.Completed => new("succeeded", "circle-check", false, "Completed"),
         ProjectDeliveryResultStatus.Failed => new("failed", "circle-x", false, "Failed"),
         ProjectDeliveryResultStatus.Skipped => new("skipped", "circle-minus", false, "Skipped"),
+        ProjectDeliveryResultStatus.Unconfirmed => new("queued", "circle-alert", false, "Not confirmed"),
         _ => new("pending", "circle-dashed", false, status),
     };
 

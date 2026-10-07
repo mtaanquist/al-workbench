@@ -675,6 +675,59 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_deployment_interrupted_by_shutdown_is_saved_as_failed_with_the_installing_app_not_confirmed()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales" });
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        _apps.StatusByApp["CRONUS Core"] = "running";
+        using var shutdown = new CancellationTokenSource();
+        // The app stops while Business Central is installing the first app (#1115).
+        _apps.AfterUpload = shutdown.Cancel;
+
+        await using (var run = _db.NewContext())
+        {
+            var act = () => NewService(run).RunDeliveryAsync(deliveryId, shutdown.Token);
+            await act.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed, "the failure is saved although the token was cancelled");
+        delivery.FailureMessage.Should().Contain("shutting down");
+        var core = delivery.Results.Single(r => r.AppName == "CRONUS Core");
+        core.Status.Should().Be(ProjectDeliveryResultStatus.Unconfirmed, "Business Central may still install it");
+        core.Message.Should().Be(DeliveryService.InterruptedAppMessage);
+        delivery.Results.Single(r => r.AppName == "CRONUS Sales").Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
+    }
+
+    [Fact]
+    public async Task FailInterruptedDeliveriesAsync_does_not_call_an_installing_app_skipped()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales" });
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+        await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.Status, ProjectDeliveryStatus.Installing)
+                .SetProperty(d => d.ClaimedAt, DateTime.UtcNow.AddMinutes(-5)));
+        await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == deliveryId && r.AppName == "CRONUS Core")
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, ProjectDeliveryResultStatus.Installing));
+
+        await using (var sweep = _db.NewContext())
+        {
+            await NewService(sweep).FailInterruptedDeliveriesAsync(DateTime.UtcNow);
+        }
+
+        await using var read = _db.NewContext();
+        var results = await read.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == deliveryId).ToListAsync();
+        var core = results.Single(r => r.AppName == "CRONUS Core");
+        core.Status.Should().Be(ProjectDeliveryResultStatus.Unconfirmed);
+        core.Message.Should().Be(DeliveryService.InterruptedAppMessage);
+        results.Single(r => r.AppName == "CRONUS Sales").Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
+    }
+
+    [Fact]
     public async Task CancelDeliveryAsync_cancels_a_scheduled_delivery_but_refuses_a_claimed_one()
     {
         await using var ctx = _db.NewContext();
