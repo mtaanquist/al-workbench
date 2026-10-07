@@ -181,6 +181,30 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ReleaseBuildNowAsync_rejects_a_release_staged_from_another_repository_of_the_solution()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await MakeReleaseSourcedAsync(ctx, seed.ReleasePipelineId);
+        var other = new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId,
+            Provider = RepositoryProvider.GitHub, Url = "https://github.com/cronus-dk/cronus-warehouse.git",
+            DisplayName = "cronus-warehouse",
+        };
+        ctx.OeProjectRepositories.Add(other);
+        await ctx.SaveChangesAsync();
+        // A release of the solution's other repository (#1118).
+        var staged = await SeedStagedBuildAsync(ctx, seed.ProjectId, "v2.0.0.0", new[] { "CRONUS Warehouse" }, repositoryId: other.Id);
+
+        var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, staged);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Build"].Should().Contain("GitHub releases");
+        (await _db.NewContext().OeProjectDeliveries.AnyAsync(d => d.ProjectBuildId == staged)).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task ReleaseBuildNowAsync_rejects_a_staged_build_on_a_pipeline_that_releases_builds()
     {
         await using var ctx = _db.NewContext();
@@ -2915,14 +2939,20 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     /// <summary>A build staged from a GitHub release: ready, no pipeline, the tag recorded.</summary>
-    private static async Task<int> SeedStagedBuildAsync(AppDbContext ctx, int projectId, string tag, string[] appNames)
+    /// <remarks>Staged from the solution's cronus-customer repository unless <paramref name="repositoryId"/> names another.</remarks>
+    private static async Task<int> SeedStagedBuildAsync(AppDbContext ctx, int projectId, string tag, string[] appNames, int? repositoryId = null)
     {
         var now = DateTime.UtcNow;
+        repositoryId ??= await ctx.OeProjectRepositories
+            .Where(r => r.ProjectId == projectId && r.DisplayName == "cronus-customer")
+            .Select(r => (int?)r.Id)
+            .FirstOrDefaultAsync();
         var build = new OeProjectBuild
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = null,
             Status = ProjectBuildStatus.Ready, GithubReleaseTag = tag,
             GithubReleaseUrl = $"https://github.com/cronus-dk/cronus-customer/releases/tag/{tag}",
+            StagedFromRepositoryId = repositoryId,
             StartedAt = now, FinishedAt = now,
         };
         ctx.OeProjectBuilds.Add(build);
