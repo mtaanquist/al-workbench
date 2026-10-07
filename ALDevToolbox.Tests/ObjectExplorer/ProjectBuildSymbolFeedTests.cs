@@ -1245,7 +1245,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
             NullLogger<ReleaseImportService>.Instance);
         var service = new ProjectBuildService(
-            ctx, _db.OrgContext,
+            ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             new BcArtifactService(_http, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance),
             importer,
             compiler ?? new AlCompilerProvisioner(_http, NullLogger<AlCompilerProvisioner>.Instance,

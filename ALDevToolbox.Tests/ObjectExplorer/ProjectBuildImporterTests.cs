@@ -778,6 +778,34 @@ public sealed class ProjectBuildImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task A_push_never_moves_a_build_waiting_as_someone_else()
+    {
+        // Those are refused when they start once the automatic builds have changed
+        // hands (#1112), so riding on one would lose this push.
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var released = new List<int>();
+        for (var i = 0; i < ProjectBuildImporter.MaxWaitingPushBuilds; i++)
+        {
+            released.Add(await NewImporter(ctx, new ProjectBuildQueue())
+                .StartPushBuildAsync(pipelineId, 1, new string((char)('a' + i), 40)));
+        }
+        await using (var other = _db.NewContext())
+        {
+            await other.OeProjectBuilds.Where(b => b.PipelineId == pipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.StartedByUserId, (int?)null));
+        }
+
+        var releaseId = await NewImporter(ctx, new ProjectBuildQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha);
+
+        released.Should().NotContain(releaseId);
+        await using var read = _db.NewContext();
+        var newest = released[^1];
+        (await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == newest)).HeadSha.Should().Be(new string('e', 40));
+    }
+
+    [Fact]
     public async Task A_build_that_has_started_is_never_moved_onto_a_later_push()
     {
         await using var ctx = _db.NewContext();

@@ -341,10 +341,15 @@ public sealed class ProjectBuildImporter
         // adding one. Only a build still queued can move: one the worker has picked up
         // has already cloned. The update is conditional on that, so a build that starts
         // between the read and the write is left alone and this push queues its own.
+        // Only builds queued as the same person count: one queued as someone who has
+        // since handed the automatic builds over is refused when it starts (#1112), and
+        // must not take this push down with it.
         if (trigger == ProjectBuildTrigger.Push && head is { } pushed)
         {
+            var actingUserId = _orgContext.CurrentUserId;
             var waiting = _db.OeProjectBuilds
                 .Where(b => b.PipelineId == pipelineId
+                    && b.StartedByUserId == actingUserId
                     && b.Trigger == ProjectBuildTrigger.Push
                     && b.Status == ProjectBuildStatus.Queued
                     && b.Release != null && b.Release.Status == "ingesting");

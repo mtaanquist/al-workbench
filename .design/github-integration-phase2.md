@@ -862,6 +862,14 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   build onto its commit instead of adding a sixth, so a long rebase pushed piecemeal cannot
   fill the queue and the branch's latest state is still built. A build the worker has
   started is never moved.
+- **Checked again when its turn comes (#1112).** A build on push or a nightly preview
+  check that waited is refused as it starts if the pipeline has since been deleted, the
+  setting turned off, someone else has taken the automatic builds over, or the person it
+  runs as is no longer active or can no longer manage the solution
+  (`ProjectBuildService.EnsureAutomationStillOnAsync`). The build fails with that reason
+  and clones nothing. Such a refusal sends no build email and is not the build the next
+  one is compared with. Only the first run is checked: Retry or Recover symbols on a
+  finished build is a person's own choice and runs as them.
 - **What does not build.** A forced push (it may have removed others' work, so a person
   decides), a deleted branch, a push to any other branch, and a redelivery of a push whose
   commit this pipeline already built on push. A pipeline with no branch builds pushes to
