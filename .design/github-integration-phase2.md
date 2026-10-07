@@ -1145,6 +1145,10 @@ Business Central, the way Dependabot does it, instead of remembering to press th
   before one without it (then the oldest, as before). When two solutions sharing a
   repository both have it on, only the older one's run opens pull requests there; the
   other's customer is not measured for it.
+  Since #1200 a repository can only be added to one solution: adding one another active
+  solution in the organisation already has (same provider and normalised URL) is refused
+  with the other solution's name. Pairs that already shared a repository before that are
+  left alone and keep saving, so the shared-repository handling above still applies to them.
 - **Paced, and stopped by a rate limit (#1177).** The automatic run leaves a second between
   the writes it makes to GitHub (GitHub's guidance for requests that create content; its
   secondary limit is about 80 a minute per account) - closing a superseded pull request

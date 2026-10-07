@@ -351,6 +351,171 @@ public sealed class ProjectServiceTests : IDisposable
             .Which.Errors.Should().ContainKey("Url");
     }
 
+    // --- One solution per repository (#1200) --------------------------------
+
+    private static ProjectRepositoryInput Repo(string url) => new(RepositoryProvider.GitHub, url, "");
+
+    private const string ClaimedByCronus =
+        "This repository already belongs to the solution CRONUS A/S. A repository can only belong to one solution, so remove it from CRONUS A/S first.";
+
+    [Theory]
+    [InlineData("https://github.com/cronus-dk/core")]
+    [InlineData("https://github.com/cronus-dk/core.git")]
+    [InlineData("https://github.com/Cronus-DK/Core/")]
+    public async Task Adding_a_repository_another_solution_has_is_refused_naming_it(string url)
+    {
+        var svc = Svc(_db.NewContext());
+        await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        var other = await svc.CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+
+        var act = () => Svc(_db.NewContext()).AddRepositoryAsync(other, Repo(url));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().Equal(new Dictionary<string, string> { ["Url"] = ClaimedByCronus });
+        (await _db.NewContext().OeProjectRepositories.CountAsync(r => r.ProjectId == other)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Saving_a_repository_another_solution_has_is_refused_under_its_row()
+    {
+        var svc = Svc(_db.NewContext());
+        await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        var other = await svc.CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+
+        var act = () => Svc(_db.NewContext()).UpdateProjectAsync(other, NewInput("CRONUS Retail", "dk", null,
+            Repo("https://github.com/cronus-dk/retail"), Repo("https://github.com/CRONUS-DK/core.git")));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().Equal(new Dictionary<string, string> { ["Repositories[1].Url"] = ClaimedByCronus });
+    }
+
+    [Fact]
+    public async Task Changing_a_repository_url_to_one_another_solution_has_is_refused()
+    {
+        var svc = Svc(_db.NewContext());
+        await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        var other = await svc.CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+
+        var act = () => Svc(_db.NewContext()).UpdateProjectAsync(other, NewInput("CRONUS Retail", "dk", null,
+            Repo("https://github.com/cronus-dk/core")));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("Repositories[0].Url");
+    }
+
+    [Fact]
+    public async Task Creating_a_solution_with_a_repository_another_solution_has_is_refused()
+    {
+        var svc = Svc(_db.NewContext());
+        await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+
+        var act = () => Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS Retail", "dk", null,
+            Repo("https://github.com/cronus-dk/core.git")));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().Equal(new Dictionary<string, string> { ["Repositories[0].Url"] = ClaimedByCronus });
+        (await _db.NewContext().OeProjects.CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_deleted_solution_does_not_keep_its_repository()
+    {
+        var svc = Svc(_db.NewContext());
+        var gone = await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        var other = await svc.CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+        await svc.SoftDeleteProjectAsync(gone);
+
+        await Svc(_db.NewContext()).AddRepositoryAsync(other, Repo("https://github.com/cronus-dk/core"));
+
+        (await _db.NewContext().OeProjectRepositories.CountAsync(r => r.ProjectId == other)).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task A_pair_that_already_shares_a_repository_keeps_saving_until_the_row_changes()
+    {
+        var svc = Svc(_db.NewContext());
+        await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        var other = await svc.CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+        // Shared before the rule existed - written past the service, the way old data is.
+        await using (var seed = _db.NewContext())
+        {
+            seed.OeProjectRepositories.Add(new OeProjectRepository
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = other,
+                Provider = RepositoryProvider.GitHub,
+                Url = "https://github.com/cronus-dk/core",
+                DisplayName = "core",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        // An unrelated edit, with the shared row re-spelled cosmetically, still saves.
+        await Svc(_db.NewContext()).UpdateProjectAsync(other, NewInput("CRONUS Retail Renamed", "dk", null,
+            Repo("https://github.com/cronus-dk/retail"), Repo("https://github.com/cronus-dk/core.git")));
+        (await _db.NewContext().OeProjects.SingleAsync(p => p.Id == other)).Name.Should().Be("CRONUS Retail Renamed");
+
+        // Taking the shared row away and putting it back is a change, and is refused.
+        await Svc(_db.NewContext()).UpdateProjectAsync(other, NewInput("CRONUS Retail Renamed", "dk", null,
+            Repo("https://github.com/cronus-dk/retail")));
+        var act = () => Svc(_db.NewContext()).UpdateProjectAsync(other, NewInput("CRONUS Retail Renamed", "dk", null,
+            Repo("https://github.com/cronus-dk/retail"), Repo("https://github.com/cronus-dk/core")));
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("Repositories[1].Url");
+    }
+
+    [Fact]
+    public async Task A_repository_on_a_private_solution_is_refused_without_naming_it()
+    {
+        var colleague = await SeedColleagueAsync(gitHubLinked: false);
+        var hidden = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS Secret", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == hidden).ExecuteUpdateAsync(s => s
+                .SetProperty(p => p.Visibility, ProjectVisibility.Private)
+                .SetProperty(p => p.CreatedByUserId, (int?)colleague));
+        }
+        var mine = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+
+        var act = () => Svc(_db.NewContext()).AddRepositoryAsync(mine, Repo("https://github.com/cronus-dk/core"));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Url"].Should().Be(
+                "This repository already belongs to another solution. A repository can only belong to one solution, so ask an Admin to remove it from the other one first.");
+    }
+
+    [Fact]
+    public async Task A_repository_on_another_organisations_solution_is_not_claimed()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeProjects.Add(new OeProject
+            {
+                OrganizationId = TestDb.OtherOrgId,
+                Name = "CRONUS A/S",
+                DefaultArtifactCountry = "dk",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+                Repositories =
+                [
+                    new OeProjectRepository
+                    {
+                        OrganizationId = TestDb.OtherOrgId,
+                        Provider = RepositoryProvider.GitHub,
+                        Url = "https://github.com/cronus-dk/core",
+                        DisplayName = "core",
+                    },
+                ],
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var act = () => Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null,
+            Repo("https://github.com/cronus-dk/core")));
+
+        await act.Should().NotThrowAsync();
+    }
+
     [Fact]
     public async Task Create_rejects_a_blank_country()
     {

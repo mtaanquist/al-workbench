@@ -183,6 +183,7 @@ public sealed class ProjectService
     {
         var orgId = RequireOrganizationId();
         var (name, shortName, country, repos, slug) = await ValidateAsync(input, existingId: null, orgId, ct);
+        await EnsureRepositoriesUnclaimedAsync(repos, projectId: null, existing: null, ct);
 
         // The level is chosen on the create form, and it is written in the same
         // SaveChanges as the solution itself. Not a create followed by SetAccessAsync:
@@ -269,6 +270,7 @@ public sealed class ProjectService
         // Only the owner, an org Admin, or an assigned team may edit settings /
         // change the repo set.
         await _access.EnsureCanManageAsync(project.Id, project.CreatedByUserId, ct);
+        await EnsureRepositoriesUnclaimedAsync(repos, project.Id, project.Repositories, ct);
 
         project.Name = name;
         project.ShortName = shortName;
@@ -393,6 +395,10 @@ public sealed class ProjectService
             return project.Name;
         }
 
+        var claimed = await RepositoryClaimErrorsAsync(
+            [new ProjectRepositoryInput(repository.Provider, url, display)], project.Id, existing: null, ct);
+        if (claimed.TryGetValue(0, out var claimedBy)) throw Validation("Url", claimedBy);
+
         project.Repositories.Add(new OeProjectRepository
         {
             OrganizationId = orgId,
@@ -413,6 +419,91 @@ public sealed class ProjectService
         await WarmDiscoveryAsync(project.Id, ct);
         return project.Name;
     }
+
+    /// <summary>
+    /// Refuses a posted repository that another active solution in this organisation
+    /// already has (#1200), keyed <c>Repositories[i].Url</c> so the editor shows it under
+    /// the row. See <see cref="RepositoryClaimErrorsAsync"/>.
+    /// </summary>
+    private async Task EnsureRepositoriesUnclaimedAsync(
+        IReadOnlyList<ProjectRepositoryInput> repos, int? projectId,
+        ICollection<OeProjectRepository>? existing, CancellationToken ct)
+    {
+        var claimed = await RepositoryClaimErrorsAsync(repos, projectId, existing, ct);
+        if (claimed.Count > 0)
+        {
+            throw new PlanValidationException(
+                claimed.ToDictionary(c => $"Repositories[{c.Key}].Url", c => c.Value));
+        }
+    }
+
+    /// <summary>
+    /// The refusal for each of <paramref name="repos"/> (by index) that another active
+    /// solution in this organisation already has: several features resolve a repository
+    /// to one solution, so a second would be picked arbitrarily (#1200). Only a repository
+    /// this save adds - new, or its URL changed - is checked: <paramref name="existing"/>
+    /// is the solution's current set, and a pair of solutions that already shared a
+    /// repository before the rule existed keeps saving until somebody touches that row.
+    /// </summary>
+    private async Task<Dictionary<int, string>> RepositoryClaimErrorsAsync(
+        IReadOnlyList<ProjectRepositoryInput> repos, int? projectId,
+        ICollection<OeProjectRepository>? existing, CancellationToken ct)
+    {
+        var had = (existing ?? []).Select(r => RepositoryKey(r.Provider, r.Url)).ToHashSet(StringComparer.Ordinal);
+        var added = repos
+            .Select((r, i) => (Index: i, Key: RepositoryKey(r.Provider, r.Url)))
+            .Where(r => !had.Contains(r.Key))
+            .ToList();
+        var errors = new Dictionary<int, string>();
+        if (added.Count == 0) return errors;
+
+        // Read every other active solution's repositories, org-scoped by the ambient
+        // query filter. The URL is normalised in memory, which is why every row is read -
+        // an organisation has tens of repositories, not thousands.
+        var rows = await (
+                from r in _db.OeProjectRepositories.AsNoTracking()
+                join p in _db.OeProjects.AsNoTracking() on r.ProjectId equals p.Id
+                where p.DeletedAt == null && p.Id != (projectId ?? 0)
+                orderby p.Id
+                select new { r.Provider, r.Url, ProjectId = p.Id, p.Name })
+            .ToListAsync(ct);
+        var owners = new Dictionary<string, (int Id, string Name)>(StringComparer.Ordinal);
+        foreach (var row in rows) owners.TryAdd(RepositoryKey(row.Provider, row.Url), (row.ProjectId, row.Name));
+
+        var claims = added
+            .Where(a => owners.ContainsKey(a.Key))
+            .Select(a => (a.Index, Owner: owners[a.Key]))
+            .ToList();
+        if (claims.Count == 0) return errors;
+
+        // A solution private to people the caller is not among is not named, so the
+        // refusal does not give its name away.
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        var ids = claims.Select(c => c.Owner.Id).Distinct().ToList();
+        var visible = (await _db.OeProjects.AsNoTracking()
+                .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
+                .Where(p => ids.Contains(p.Id))
+                .Select(p => p.Id)
+                .ToListAsync(ct))
+            .ToHashSet();
+        foreach (var (index, owner) in claims)
+        {
+            errors[index] = RepositoryClaimedMessage(visible.Contains(owner.Id) ? owner.Name : null);
+        }
+        return errors;
+    }
+
+    private static string RepositoryClaimedMessage(string? owner) =>
+        owner is null
+            ? "This repository already belongs to another solution. A repository can only belong to one solution, so ask an Admin to remove it from the other one first."
+            : $"This repository already belongs to the solution {owner}. A repository can only belong to one solution, so remove it from {owner} first.";
+
+    /// <summary>
+    /// Repository identity: provider plus normalised URL, so the same repository typed
+    /// with and without <c>.git</c>, or in another case, is one repository.
+    /// </summary>
+    private static string RepositoryKey(RepositoryProvider provider, string url) =>
+        $"{provider}|{GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(url)}";
 
     /// <summary>The solution's GitHub repositories, keyed the way <see cref="ReconcileRepositories"/> matches them.</summary>
     private static HashSet<string> GitHubRepositoryKeys(OeProject project) =>
@@ -466,17 +557,14 @@ public sealed class ProjectService
     /// </summary>
     private void ReconcileRepositories(OeProject project, IReadOnlyList<ProjectRepositoryInput> repos, int orgId)
     {
-        static string Key(RepositoryProvider provider, string url) =>
-            $"{provider}|{GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(url)}";
-
         var existing = project.Repositories.ToList();
         var kept = new HashSet<int>();
         var wanted = new List<OeProjectRepository>(repos.Count);
 
         foreach (var repo in repos)
         {
-            var key = Key(repo.Provider, repo.Url);
-            var match = existing.FirstOrDefault(e => !kept.Contains(e.Id) && Key(e.Provider, e.Url) == key);
+            var key = RepositoryKey(repo.Provider, repo.Url);
+            var match = existing.FirstOrDefault(e => !kept.Contains(e.Id) && RepositoryKey(e.Provider, e.Url) == key);
             if (match is not null)
             {
                 kept.Add(match.Id);

@@ -143,6 +143,9 @@
                                         (dk for Denmark, w1 for the worldwide base).
                                     </small>
                                 </div>
+                                @* Another solution can take the repository between the list
+                                   being drawn and this click (#1200). *@
+                                <FieldError Field="Repositories[0].Url" Errors="_errors" />
                                 <div class="untracked-repos__actions">
                                     <button type="button" class="btn btn--sm" disabled="@_busy" @onclick="() => ConfirmTrackAsync(row)">
                                         <span>@(_creating ? "Creating..." : "Create solution")</span>
