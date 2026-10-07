@@ -131,8 +131,9 @@ public class OeReleasePipeline
 
     /// <summary>
     /// The branch <see cref="RestrictBranch"/> allows, compared with
-    /// <see cref="OeProjectBuild.Branch"/>. Null means the repositories' default branch,
-    /// which is what a build pipeline with no branch builds.
+    /// <see cref="OeProjectBuild.Branch"/> (or the default branch the build recorded, see
+    /// <c>DeploymentBranchRule</c>). Null means the repositories' default branch, which is
+    /// what a build pipeline with no branch builds.
     /// </summary>
     public string? AllowedBranch { get; set; }
 
