@@ -494,7 +494,7 @@
         _summaries = freshness.ToDictionary(f => f.PipelineId, PipelineFreshnessSummary.From);
         _canBuild = freshness.Where(f => f.CanBuild).Select(f => f.PipelineId).ToHashSet();
 
-        _rows = string.IsNullOrEmpty(_search) ? all : await Artifacts.ListPipelinesAsync(_search);
+        _rows = string.IsNullOrWhiteSpace(_search) ? all : all.Where(r => ArtifactService.MatchesSearch(r, _search)).ToList();
     }
 
     /// <summary>

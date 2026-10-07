@@ -67,13 +67,14 @@ public sealed class DeliveryTools
     }
 
     [McpServerTool(Name = "list_deployments", ReadOnly = true)]
-    [Description("Lists a deployment pipeline's deployments, newest first, with per-app outcomes. Each deployment returns its id, its number in the pipeline's history (number; the web UI calls it 'Deployment 3'), status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve or dismiss it in the web UI - nothing has been sent, and there is no tool to approve it; 'dismissed' is such a prepared deployment that a person dismissed (dismissReason says why, when they gave a reason) or a newer build replaced (replacedByBuildId), so nothing was ever sent; 'handed_off' means Business Central accepted the apps and will install them on its own schedule), the build it installed, scheduled/started/finished times, who triggered it, whether it was scheduled outside the environment's delivery window, any failure message, and each app's install result. Use it to track a deploy_build call to completion.")]
+    [Description("Lists a deployment pipeline's deployments, newest first, with per-app outcomes. Each deployment returns its id, its number in the pipeline's history (number; the web UI calls it 'Deployment 3'), status ('proposed'/'scheduled'/'claimed'/'uploading'/'installing'/'deployed'/'failed'/'cancelled'/'handed_off'/'dismissed': 'proposed' is a deployment the pipeline prepared from a new build that is waiting for a person to approve or dismiss it in the web UI - nothing has been sent, and there is no tool to approve it; 'dismissed' is such a prepared deployment that a person dismissed (dismissReason says why, when they gave a reason) or a newer build replaced (replacedByBuildId), so nothing was ever sent; 'handed_off' means Business Central accepted the apps and will install them on its own schedule), the build it installed, scheduled/started/finished times, who triggered it, whether it was scheduled outside the environment's delivery window, any failure message, and each app's install result. Use it to track a deploy_build call to completion. Returns the newest 20 unless you ask for more with limit; a number above 1 on the oldest row means there are older ones.")]
     public async Task<IReadOnlyList<DeliveryHistoryRow>> ListDeliveriesAsync(
         [Description("Deployment pipeline id (from list_deployment_pipelines).")] int deploymentPipelineId,
+        [Description(McpListLimit.Description)] int limit = McpListLimit.Default,
         CancellationToken ct = default)
     {
         await _releasePipelines.EnsureReleasePipelineExistsAsync(deploymentPipelineId, ct);
-        return await _deliveries.ListDeliveryHistoryAsync(deploymentPipelineId, ct);
+        return await _deliveries.ListDeliveryHistoryAsync(deploymentPipelineId, McpListLimit.Clamp(limit), ct);
     }
 
     [McpServerTool(Name = "deploy_build", ReadOnly = false, Idempotent = false)]

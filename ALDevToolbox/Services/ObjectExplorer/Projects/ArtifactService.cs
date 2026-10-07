@@ -75,20 +75,27 @@ public sealed class ArtifactService
         // builds are left out for the same reason: a red next-major check is not the
         // state of what the customer gets, and one can never be deployed (#994).
         var projectIds = projects.Select(p => p.Id).ToList();
-        var builds = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => projectIds.Contains(b.ProjectId) && b.PipelineId != null && b.BcTarget == ProjectBuildTarget.Current)
-            .Select(b => new
-            {
-                b.Id, b.ProjectId, b.Status, b.BcVersion, b.Branch, b.DefaultBranch, b.StartedAt, b.FinishedAt,
-                ArtifactCount = b.Artifacts.Count,
-            })
-            .ToListAsync(ct);
-        var byProject = builds.GroupBy(b => b.ProjectId).ToDictionary(g => g.Key, g => g.OrderByDescending(b => b.StartedAt).ToList());
+        var pipelineBuilds = _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => projectIds.Contains(b.ProjectId) && b.PipelineId != null && b.BcTarget == ProjectBuildTarget.Current);
+        // Picked in SQL, not by loading every build of every solution (#1138).
+        var latestByProject = (await pipelineBuilds
+                .GroupBy(b => b.ProjectId)
+                .Select(g => g
+                    .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
+                    .Select(b => new
+                    {
+                        b.Id, b.ProjectId, b.Status, b.BcVersion, b.Branch, b.DefaultBranch, b.StartedAt, b.FinishedAt,
+                        ArtifactCount = b.Artifacts.Count,
+                    })
+                    .First())
+                .ToListAsync(ct))
+            .ToDictionary(b => b.ProjectId);
+        var latestSuccessfulByProject = await LatestReadyBuildIdsAsync(pipelineBuilds, b => b.ProjectId, ct);
 
         // One representative commit per latest build for the list's "latest build"
         // cell. Builds are multi-repo, so show the first repo's commit (by display
         // name, matching the detail page's ordering).
-        var latestBuildIds = byProject.Values.Where(l => l.Count > 0).Select(l => l[0].Id).ToList();
+        var latestBuildIds = latestByProject.Values.Select(b => b.Id).ToList();
         var commitByBuild = (await _db.OeProjectBuildRepoCommits.AsNoTracking()
                 .Where(c => latestBuildIds.Contains(c.ProjectBuildId))
                 .OrderBy(c => c.RepoDisplayName)
@@ -132,9 +139,7 @@ public sealed class ArtifactService
         var rows = new List<ProjectArtifactsRow>(projects.Count);
         foreach (var p in projects)
         {
-            byProject.TryGetValue(p.Id, out var pb);
-            var latest = pb is { Count: > 0 } ? pb[0] : null;
-            var latestSuccessful = pb?.FirstOrDefault(b => b.Status == ProjectBuildStatus.Ready);
+            var latest = latestByProject.GetValueOrDefault(p.Id);
             string? commitShort = null;
             if (latest is not null && commitByBuild.TryGetValue(latest.Id, out var hash) && !string.IsNullOrEmpty(hash))
                 commitShort = hash.Length > 7 ? hash[..7] : hash;
@@ -143,7 +148,7 @@ public sealed class ArtifactService
                 Latest: latest is null ? null : new BuildSummary(
                     latest.Id, latest.Status, latest.BcVersion, latest.Branch, commitShort, latest.StartedAt, latest.FinishedAt, latest.ArtifactCount,
                     latest.DefaultBranch ?? knownDefaults.GetValueOrDefault(p.Id)),
-                LatestSuccessfulBuildId: latestSuccessful?.Id,
+                LatestSuccessfulBuildId: latestSuccessfulByProject.TryGetValue(p.Id, out var ready) ? ready : null,
                 RepoNames: p.RepoNames)
             {
                 Visibility = p.Visibility,
@@ -234,22 +239,30 @@ public sealed class ArtifactService
             })
             .ToListAsync(ct);
 
-        // The newest build per pipeline (and the newest successful one) in one query.
-        // The nightly preview check's builds are left out: the pipeline's state is
-        // what it builds for real, and the check has its own results below.
+        // The newest build per pipeline, and the newest successful one, picked in SQL:
+        // a pipeline that builds on every push gathers thousands of builds, and this
+        // list only ever shows one (#1138). The nightly preview check's builds are left
+        // out: the pipeline's state is what it builds for real, and the check has its
+        // own results below.
         var pipelineIds = pipelines.Select(p => p.Id).ToList();
-        var builds = await _db.OeProjectBuilds.AsNoTracking()
+        var current = _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId!.Value)
-                        && b.BcTarget == ProjectBuildTarget.Current)
-            .Select(b => new
-            {
-                b.Id, PipelineId = b.PipelineId!.Value, b.ProjectId, b.Status, b.BcVersion, b.Branch, b.DefaultBranch, b.StartedAt, b.FinishedAt,
-                ArtifactCount = b.Artifacts.Count,
-            })
-            .ToListAsync(ct);
-        var byPipeline = builds.GroupBy(b => b.PipelineId).ToDictionary(g => g.Key, g => g.OrderByDescending(b => b.StartedAt).ToList());
+                        && b.BcTarget == ProjectBuildTarget.Current);
+        var latestByPipeline = (await current
+                .GroupBy(b => b.PipelineId!.Value)
+                .Select(g => g
+                    .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
+                    .Select(b => new
+                    {
+                        b.Id, PipelineId = b.PipelineId!.Value, b.Status, b.BcVersion, b.Branch, b.DefaultBranch, b.StartedAt, b.FinishedAt,
+                        ArtifactCount = b.Artifacts.Count,
+                    })
+                    .First())
+                .ToListAsync(ct))
+            .ToDictionary(b => b.PipelineId);
+        var latestSuccessfulByPipeline = await LatestReadyBuildIdsAsync(current, b => b.PipelineId!.Value, ct);
 
-        var latestBuildIds = byPipeline.Values.Where(l => l.Count > 0).Select(l => l[0].Id).ToList();
+        var latestBuildIds = latestByPipeline.Values.Select(b => b.Id).ToList();
         var commitByBuild = (await _db.OeProjectBuildRepoCommits.AsNoTracking()
                 .Where(c => latestBuildIds.Contains(c.ProjectBuildId))
                 .OrderBy(c => c.RepoDisplayName)
@@ -266,9 +279,7 @@ public sealed class ArtifactService
         var rows = new List<PipelineArtifactsRow>(pipelines.Count);
         foreach (var p in pipelines)
         {
-            byPipeline.TryGetValue(p.Id, out var pb);
-            var latest = pb is { Count: > 0 } ? pb[0] : null;
-            var latestSuccessful = pb?.FirstOrDefault(b => b.Status == ProjectBuildStatus.Ready);
+            var latest = latestByPipeline.GetValueOrDefault(p.Id);
             string? commitShort = null;
             if (latest is not null && commitByBuild.TryGetValue(latest.Id, out var hash) && !string.IsNullOrEmpty(hash))
                 commitShort = hash.Length > 7 ? hash[..7] : hash;
@@ -277,7 +288,7 @@ public sealed class ArtifactService
                 Latest: latest is null ? null : new BuildSummary(
                     latest.Id, latest.Status, latest.BcVersion, latest.Branch, commitShort, latest.StartedAt, latest.FinishedAt, latest.ArtifactCount,
                     latest.DefaultBranch ?? knownDefaults.GetValueOrDefault(p.ProjectId)),
-                LatestSuccessfulBuildId: latestSuccessful?.Id,
+                LatestSuccessfulBuildId: latestSuccessfulByPipeline.TryGetValue(p.Id, out var ready) ? ready : null,
                 PreviewCheck: p.PreviewCheck,
                 PreviewChecks: previewChecks.GetValueOrDefault(p.Id, []),
                 PreviewCheckBlocked: p.PreviewCheck ? p.PreviewCheckBlocked : null,
@@ -287,18 +298,26 @@ public sealed class ArtifactService
 
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var term = search.Trim();
-            rows = rows.Where(r =>
-                    r.Name.Contains(term, StringComparison.OrdinalIgnoreCase)
-                    || r.ProjectName.Contains(term, StringComparison.OrdinalIgnoreCase)
-                    || (r.OwnerName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false))
-                .ToList();
+            rows = rows.Where(r => MatchesSearch(r, search)).ToList();
         }
 
         return rows
             .OrderBy(r => r.ProjectName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    /// <summary>
+    /// Whether a pipeline row matches a search the way <see cref="ListPipelinesAsync"/>
+    /// filters: by pipeline, solution or owner name. For a page that already holds the
+    /// whole list and would otherwise read it twice.
+    /// </summary>
+    public static bool MatchesSearch(PipelineArtifactsRow r, string search)
+    {
+        var term = search.Trim();
+        return r.Name.Contains(term, StringComparison.OrdinalIgnoreCase)
+               || r.ProjectName.Contains(term, StringComparison.OrdinalIgnoreCase)
+               || (r.OwnerName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false);
     }
 
     /// <summary>
@@ -337,19 +356,20 @@ public sealed class ArtifactService
     {
         if (pipelineIds.Count == 0) return [];
 
-        var builds = await _db.OeProjectBuilds.AsNoTracking()
+        // The newest per pipeline and target, picked in SQL (#1138).
+        var latest = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value)
                         && b.BcTarget != ProjectBuildTarget.Current)
-            .Select(b => new
-            {
-                b.Id, PipelineId = b.PipelineId!.Value, b.BcTarget, b.Status, b.ReleaseId,
-                b.BcArtifactVersion, b.StartedAt, b.FinishedAt,
-            })
+            .GroupBy(b => new { PipelineId = b.PipelineId!.Value, b.BcTarget })
+            .Select(g => g
+                .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
+                .Select(b => new
+                {
+                    b.Id, PipelineId = b.PipelineId!.Value, b.BcTarget, b.Status, b.ReleaseId,
+                    b.BcArtifactVersion, b.StartedAt, b.FinishedAt,
+                })
+                .First())
             .ToListAsync(ct);
-        var latest = builds
-            .GroupBy(b => (b.PipelineId, b.BcTarget))
-            .Select(g => g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).First())
-            .ToList();
 
         // A build with some failed extensions still goes ready, so "passed" has to
         // look at the per-extension results too.
@@ -375,12 +395,58 @@ public sealed class ArtifactService
 
     // ── Build history + detail ──────────────────────────────────────────
 
-    /// <summary>One pipeline's builds, newest first — the pipeline detail page's build history.</summary>
-    public async Task<List<BuildRow>> ListBuildsAsync(int pipelineId, CancellationToken ct = default)
+    /// <summary>
+    /// One pipeline's builds, newest first — the pipeline detail page's build history.
+    /// <paramref name="limit"/> keeps it to the newest few (#1138): a pipeline that builds
+    /// on every push gathers thousands, and the page re-reads this while a build runs.
+    /// <paramref name="includePreview"/> false leaves the nightly preview check's builds out.
+    /// </summary>
+    public async Task<List<BuildRow>> ListBuildsAsync(
+        int pipelineId, int? limit = null, bool includePreview = true, CancellationToken ct = default)
     {
         await EnsureCanViewPipelineAsync(pipelineId, ct);
-        return await ListBuildsCoreAsync(_db.OeProjectBuilds.AsNoTracking().Where(b => b.PipelineId == pipelineId), ct);
+        var builds = _db.OeProjectBuilds.AsNoTracking().Where(b => b.PipelineId == pipelineId);
+        if (!includePreview) builds = builds.Where(b => b.BcTarget == ProjectBuildTarget.Current);
+        return await ListBuildsCoreAsync(builds, limit, ct);
     }
+
+    /// <summary>One of a pipeline's builds as the history lists it, or null when it isn't that pipeline's.</summary>
+    public async Task<BuildRow?> GetPipelineBuildRowAsync(int pipelineId, int buildId, CancellationToken ct = default)
+    {
+        await EnsureCanViewPipelineAsync(pipelineId, ct);
+        var rows = await ListBuildsCoreAsync(_db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.Id == buildId && b.PipelineId == pipelineId), null, ct);
+        return rows.FirstOrDefault();
+    }
+
+    /// <summary>How many builds a pipeline has, and how many of them are preview check builds.</summary>
+    public async Task<BuildCounts> CountBuildsAsync(int pipelineId, CancellationToken ct = default)
+    {
+        await EnsureCanViewPipelineAsync(pipelineId, ct);
+        var counts = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.PipelineId == pipelineId)
+            .GroupBy(_ => 1)
+            .Select(g => new { Total = g.Count(), Preview = g.Count(b => b.BcTarget != ProjectBuildTarget.Current) })
+            .FirstOrDefaultAsync(ct);
+        return new BuildCounts(counts?.Total ?? 0, counts?.Preview ?? 0);
+    }
+
+    /// <summary>
+    /// The builds a deployment can pick from: a pipeline's newest successful builds that
+    /// are not preview check builds, newest first, at most <paramref name="limit"/>. Older
+    /// ones are still deployable from the build's own page and by agents; the picker is
+    /// for what someone is likely to ship (#1138).
+    /// </summary>
+    public async Task<List<BuildRow>> ListDeployableBuildsAsync(int pipelineId, int limit = DeployableBuildLimit, CancellationToken ct = default)
+    {
+        await EnsureCanViewPipelineAsync(pipelineId, ct);
+        return await ListBuildsCoreAsync(_db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.PipelineId == pipelineId && b.Status == ProjectBuildStatus.Ready && b.BcTarget == ProjectBuildTarget.Current),
+            limit, ct);
+    }
+
+    /// <summary>How many successful builds the deploy pickers offer.</summary>
+    public const int DeployableBuildLimit = 20;
 
     /// <summary>
     /// The apps (name + version) each of a pipeline's builds would install, keyed by
@@ -388,11 +454,13 @@ public sealed class ArtifactService
     /// this so a consultant can see what is about to go into a customer's tenant
     /// before confirming. See <c>.design/saas-delivery.md</c>.
     /// </summary>
-    public async Task<Dictionary<int, List<BuildAppRow>>> ListBuildAppsAsync(int pipelineId, CancellationToken ct = default)
+    public async Task<Dictionary<int, List<BuildAppRow>>> ListBuildAppsAsync(
+        int pipelineId, IReadOnlyCollection<int> buildIds, CancellationToken ct = default)
     {
         await EnsureCanViewPipelineAsync(pipelineId, ct);
+        if (buildIds.Count == 0) return [];
         var rows = await _db.OeProjectBuildArtifacts.AsNoTracking()
-            .Where(a => a.ProjectBuild!.PipelineId == pipelineId)
+            .Where(a => a.ProjectBuild!.PipelineId == pipelineId && buildIds.Contains(a.ProjectBuildId))
             .OrderBy(a => a.AppName)
             .Select(a => new { a.ProjectBuildId, a.AppName, a.AppVersion })
             .ToListAsync(ct);
@@ -402,11 +470,14 @@ public sealed class ArtifactService
             .ToDictionary(g => g.Key, g => g.Select(a => new BuildAppRow(a.AppName, a.AppVersion)).ToList());
     }
 
-    /// <summary>All of a project's builds across its pipelines, newest first — the MCP <c>list_solution_builds</c> surface.</summary>
-    public async Task<List<BuildRow>> ListBuildsForProjectAsync(int projectId, CancellationToken ct = default)
+    /// <summary>
+    /// A project's builds across its pipelines, newest first, at most <paramref name="limit"/>
+    /// when given — the MCP <c>list_solution_builds</c> surface.
+    /// </summary>
+    public async Task<List<BuildRow>> ListBuildsForProjectAsync(int projectId, int? limit = null, CancellationToken ct = default)
     {
         await _access.EnsureCanViewAsync(projectId, ct);
-        return await ListBuildsCoreAsync(_db.OeProjectBuilds.AsNoTracking().Where(b => b.ProjectId == projectId), ct);
+        return await ListBuildsCoreAsync(_db.OeProjectBuilds.AsNoTracking().Where(b => b.ProjectId == projectId), limit, ct);
     }
 
     /// <summary>
@@ -423,14 +494,14 @@ public sealed class ArtifactService
         if (projectId is not { } pid) return null;
         await _access.EnsureCanViewAsync(pid, ct);
 
-        var rows = await ListBuildsCoreAsync(_db.OeProjectBuilds.AsNoTracking().Where(b => b.Id == buildId), ct);
+        var rows = await ListBuildsCoreAsync(_db.OeProjectBuilds.AsNoTracking().Where(b => b.Id == buildId), null, ct);
         return rows.FirstOrDefault();
     }
 
-    private async Task<List<BuildRow>> ListBuildsCoreAsync(IQueryable<OeProjectBuild> filtered, CancellationToken ct)
+    private async Task<List<BuildRow>> ListBuildsCoreAsync(IQueryable<OeProjectBuild> filtered, int? limit, CancellationToken ct)
     {
-        var builds = await filtered
-            .OrderByDescending(b => b.StartedAt)
+        var ordered = filtered.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id);
+        var builds = await (limit is { } take ? ordered.Take(take) : ordered)
             .Select(b => new
             {
                 b.Id, b.ProjectId, b.ReleaseId, b.Status, b.BcVersion, b.Branch, b.DefaultBranch, b.Trigger,
@@ -510,6 +581,19 @@ public sealed class ArtifactService
                 BuildingStartedAt: b.BuildingStartedAt);
         }).ToList();
     }
+
+    /// <summary>
+    /// The newest successful build's id per <paramref name="key"/> (a pipeline or a
+    /// solution) among <paramref name="builds"/>, picked in SQL.
+    /// </summary>
+    private static async Task<Dictionary<int, int>> LatestReadyBuildIdsAsync(
+        IQueryable<OeProjectBuild> builds, System.Linq.Expressions.Expression<Func<OeProjectBuild, int>> key, CancellationToken ct) =>
+        (await builds
+            .Where(b => b.Status == ProjectBuildStatus.Ready)
+            .GroupBy(key)
+            .Select(g => new { Key = g.Key, Id = g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.Id).First() })
+            .ToListAsync(ct))
+        .ToDictionary(r => r.Key, r => r.Id);
 
     /// <summary>
     /// Each solution's default branch as GitHub last reported it on a push, for builds
@@ -663,6 +747,9 @@ public sealed class ArtifactService
 
     // ── Project-scoped compare ──────────────────────────────────────────
 
+    /// <summary>How many builds the compare pickers offer, newest first.</summary>
+    public const int ComparableBuildLimit = 50;
+
     /// <summary>
     /// The builds of one pipeline that can be compared — those that produced a
     /// navigable Release (ready, with a ReleaseId), newest first. The picker is
@@ -674,7 +761,9 @@ public sealed class ArtifactService
         await EnsureCanViewPipelineAsync(pipelineId, ct);
         return await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId == pipelineId && b.Status == ProjectBuildStatus.Ready && b.ReleaseId != null)
-            .OrderByDescending(b => b.StartedAt)
+            .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
+            // The newest only: the page re-reads this while a build runs (#1138).
+            .Take(ComparableBuildLimit)
             .Select(b => new ComparableBuildRow(b.Id, b.ReleaseId!.Value, b.BcVersion, b.StartedAt, b.BcTarget))
             .ToListAsync(ct);
     }
@@ -988,6 +1077,9 @@ public sealed record ArtifactRow(int Id, string FileName, string AppName, string
 
 /// <summary>One app a build produced — its display name and version.</summary>
 public sealed record BuildAppRow(string AppName, string AppVersion);
+
+/// <summary>How many builds a pipeline has in all, and how many of those are preview check builds.</summary>
+public sealed record BuildCounts(int Total, int Preview);
 
 /// <summary>One captured log section.</summary>
 public sealed record LogSectionRow(string Section, string Content);
