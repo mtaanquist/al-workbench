@@ -179,6 +179,7 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
         text.Should().StartWith("Disable \"main to Production\"? Nothing deploys through it until someone enables it again.");
         text.Should().Contain("2 deployments are waiting to run and will be cancelled.");
         text.Should().Contain("1 deployment is already booked in Business Central and will still install");
+        text.Should().EndWith("Enabling the pipeline again won't bring them back; schedule them again afterwards.");
     }
 
     [Fact]
@@ -196,7 +197,7 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             var row = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']");
-            row.TextContent.Should().Contain("Disabled").And.Contain("Enable it to deploy again");
+            row.TextContent.Should().Contain("Disabled").And.Contain("Nothing deploys through it");
             var items = row.QuerySelectorAll(".menu__item").Select(i => i.TextContent.Trim()).ToList();
             items.Should().Contain("Enable").And.NotContain("Disable").And.Contain("Delete", "an admin can still delete it");
             cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Failed}']").QuerySelectorAll(".menu__item")
@@ -237,6 +238,36 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
             var items = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']").QuerySelectorAll(".menu__item")
                 .Select(i => i.TextContent.Trim()).ToList();
             items.Should().Contain("Disable").And.NotContain("Delete");
+        });
+    }
+
+    [Fact]
+    public async Task Someone_who_cannot_manage_the_solution_is_offered_neither_disable_nor_enable()
+    {
+        var s = await SeedFleetAsync();
+        const int outsiderId = 74_002;
+        await using (var db = _db.NewContext())
+        {
+            db.Users.Add(new ALDevToolbox.Domain.Entities.User
+            {
+                Id = outsiderId, OrganizationId = TestDb.DefaultOrgId, Email = "outsider@cronus.test",
+                PasswordHash = "x", DisplayName = "Outsider",
+                Role = ALDevToolbox.Domain.Entities.UserRole.User, Status = ALDevToolbox.Domain.Entities.UserStatus.Active,
+            });
+            await db.SaveChangesAsync();
+            await db.OeProjects.Where(p => p.Id == s.ProjectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.ReadOnly));
+        }
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = outsiderId;
+
+        var cut = _ctx.Render<ReleasePipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var items = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']").QuerySelectorAll(".menu__item")
+                .Select(i => i.TextContent.Trim()).ToList();
+            items.Should().NotBeEmpty().And.NotContain("Disable").And.NotContain("Enable").And.NotContain("Delete");
         });
     }
 

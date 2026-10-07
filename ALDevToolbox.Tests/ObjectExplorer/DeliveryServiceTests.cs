@@ -837,6 +837,28 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_prepared_deployment_on_a_disabled_pipeline_cannot_be_approved_and_the_sweep_dismisses_it()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        var proposedId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+        // Disabled behind the service's back: what a proposal racing the disable leaves behind.
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(x => x.SetProperty(r => r.DisabledAt, DateTime.UtcNow));
+
+        var approve = () => NewService(_db.NewContext()).ApproveProposalAsync(proposedId);
+        (await approve.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ReleasePipeline"]
+            .Should().Be(DeliveryService.DisabledRefusal);
+
+        await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow);
+
+        var row = await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == proposedId);
+        row.Status.Should().Be(ProjectDeliveryStatus.Dismissed);
+        row.DismissReason.Should().Be(ReleasePipelineService.DisabledPipelineReason);
+    }
+
+    [Fact]
     public async Task Someone_who_manages_the_solution_can_disable_a_deployment_pipeline_but_only_an_admin_can_delete_it()
     {
         await using var ctx = _db.NewContext();
@@ -2938,6 +2960,22 @@ public sealed class DeliveryServiceTests : IDisposable
 
         (await NewService(_db.NewContext()).ListDeploymentsWithoutApprovalAsync(seed.BuildId))
             .Should().Equal(new DeploymentWithoutApproval(seed.ReleasePipelineId, userId));
+    }
+
+    [Fact]
+    public async Task A_disabled_pipeline_neither_deploys_without_approval_nor_is_listed_for_it()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.DisabledAt, DateTime.UtcNow));
+
+        (await NewService(_db.NewContext()).ListDeploymentsWithoutApprovalAsync(seed.BuildId)).Should().BeEmpty();
+        var act = () => NewService(_db.NewContext()).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId);
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ReleasePipeline"]
+            .Should().Be(DeliveryService.DisabledRefusal);
     }
 
     [Fact]

@@ -57,6 +57,23 @@ public sealed class ReleasePipelineService
     }
 
     /// <summary>
+    /// Of <paramref name="projectIds"/>, the ones the current user may manage: what the
+    /// deployment pipelines list asks once, so it offers Disable and Enable only on rows
+    /// the person can act on. The service re-checks on every write.
+    /// </summary>
+    public async Task<HashSet<int>> ListManageableProjectIdsAsync(IReadOnlyCollection<int> projectIds, CancellationToken ct = default)
+    {
+        if (projectIds.Count == 0) return [];
+        var manageable = ProjectAccess.ManageProjectPredicate(await _access.GetSnapshotAsync(ct));
+        var ids = await _db.OeProjects.AsNoTracking()
+            .Where(p => projectIds.Contains(p.Id))
+            .Where(manageable)
+            .Select(p => p.Id)
+            .ToListAsync(ct);
+        return ids.ToHashSet();
+    }
+
+    /// <summary>
     /// True when the current user may delete deployment pipelines: an org Admin or a
     /// SiteAdmin. Everyone else who manages a solution disables them instead (#1131).
     /// </summary>

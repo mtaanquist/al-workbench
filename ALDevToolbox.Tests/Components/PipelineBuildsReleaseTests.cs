@@ -430,10 +430,12 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             var labels = cut.Find(".page.pb-page > .detail-head > .page-head__actions").Children.Select(c => c.TextContent.Trim()).ToList();
-            labels.Should().Contain("Disable").And.NotContain("Delete", "the owner is not an admin");
+            labels.Should().Contain("Disable pipeline").And.NotContain("Delete", "the owner is not an admin");
         });
 
-        cut.FindAll(".page-head__actions button").Single(b => b.TextContent.Trim() == "Disable").Click();
+        cut.FindAll(".page-head__actions button").Single(b => b.TextContent.Trim() == "Disable pipeline").Click();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("A build that's already running finishes."));
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Disable pipeline" && b.Closest(".page-head__actions") is null).Click();
 
         cut.WaitForAssertion(() =>
         {

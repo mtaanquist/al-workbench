@@ -497,7 +497,7 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         cut.WaitForAssertion(() =>
         {
             cut.FindAll(".status-pill").Select(p => p.TextContent.Trim()).Should().Contain("Disabled");
-            cut.Markup.Should().Contain("This deployment pipeline is disabled.");
+            cut.Markup.Should().Contain("This deployment pipeline is disabled, so nothing deploys through it.");
             cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Trim().Should().Be("Enable pipeline");
             cut.FindAll("button").Select(b => b.TextContent.Trim()).Should().NotContain("Deploy");
         });
@@ -505,7 +505,7 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         cut.FindAll(".btn--primary").Single().Click();
 
         cut.WaitForAssertion(() =>
-            cut.FindAll("button").Select(b => b.TextContent.Trim()).Should().Contain("Disable").And.Contain("Deploy"));
+            cut.FindAll("button").Select(b => b.TextContent.Trim()).Should().Contain("Disable pipeline").And.Contain("Deploy"));
         (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId)).DisabledAt.Should().BeNull();
     }
 

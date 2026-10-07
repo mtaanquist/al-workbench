@@ -111,7 +111,7 @@
         {
             <button type="button" class="btn" @onclick="() => SetDisabledAsync(true)" disabled="@_switching"
                     title="Stop deployments through this pipeline for now. You can enable it again later.">
-                <Icon Name="circle-pause" Width="15" Height="15" /><span>Disable</span>
+                <Icon Name="circle-pause" Width="15" Height="15" /><span>Disable pipeline</span>
             </button>
             @* The one primary. When there is nothing to list it moves into the empty
                state, and the head keeps an outline copy so the action never vanishes. *@
@@ -133,7 +133,10 @@
         @if (Disabled)
         {
             <Alert Tone="AlertTone.Info">
-                <span>This deployment pipeline is disabled. Nothing deploys through it until someone who manages the solution enables it again.</span>
+                <span>
+                    This deployment pipeline is disabled, so nothing deploys through it.
+                    @(_canManage ? "Enable it to deploy again." : "Ask someone who manages this solution to enable it.")
+                </span>
             </Alert>
         }
         else if (BuildPipelineDisabled)

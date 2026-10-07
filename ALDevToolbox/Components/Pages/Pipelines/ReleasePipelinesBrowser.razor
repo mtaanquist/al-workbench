@@ -461,6 +461,8 @@
     private string? _error;
     // Only admins delete; everyone who manages a solution disables instead (#1131).
     private bool _canDelete;
+    // The solutions this person manages: Disable and Enable are offered only on their rows.
+    private HashSet<int> _manageable = [];
 
     // The filters. All of them work on the rows already loaded: the list is one
     // organisation's pipelines, which is tens, not thousands.
@@ -502,6 +504,7 @@
         _projectOptions = projects.Select(p => new PipelineProjectOption(p.Id, p.Name)).ToList();
         _rows = await Releases.ListReleasePipelineOverviewAsync();
         _canDelete = await Releases.CanDeleteAsync();
+        _manageable = await Releases.ListManageableProjectIdsAsync(_rows.Select(r => r.ProjectId).Distinct().ToList());
         EnsurePolling();
     }
 
@@ -696,7 +699,7 @@
     /// <summary>The line the phone card adds for something wrong with the target or the settings.</summary>
     private static Toned? WarningOf(ReleasePipelineRow r)
     {
-        if (r.Disabled) return new("Disabled. Enable it to deploy again.", "rp-list__none");
+        if (r.Disabled) return new("Disabled. Nothing deploys through it.", "rp-list__none");
         if (r.EnvironmentMissing) return new("Environment missing. Reconnect it in solution settings.", "rp-tone--danger");
         if (EnvironmentBroken(r)) return new("Environment failed in Business Central.", "rp-tone--danger");
         if (EnvironmentDeleting(r)) return new("Environment is being deleted.", "rp-tone--warning");
@@ -715,7 +718,7 @@
     /// </summary>
     private static NextRelease NextOf(ReleasePipelineRow r)
     {
-        if (r.Disabled) return new("Disabled", "rp-list__none rp-list__strong", "Enable it to deploy again", Title: "Nothing deploys through this pipeline until someone enables it");
+        if (r.Disabled) return new("Disabled", "rp-list__none rp-list__strong", "Nothing deploys through it", Title: "Enable it from the pipeline's actions menu or its page");
         if (r.EnvironmentMissing) return new("Blocked", "rp-tone--danger rp-list__strong", "Environment not found", SubHref: $"/solutions/{r.ProjectId}/bc", Title: "Reconnect it on the solution's Business Central tab");
         if (EnvironmentBroken(r)) return new("Blocked", "rp-tone--danger rp-list__strong", "Environment failed in Business Central", SubHref: $"/solutions/{r.ProjectId}/bc", Title: "Sort it out in the Business Central admin center, or point this pipeline at another environment");
 
@@ -775,14 +778,15 @@
                 <Icon Name="ellipsis-vertical" Width="17" Height="17" />
             </button>
             <div class="ra__menu menu" role="menu">
-                @if (r.NextDelivery is { } nextDelivery)
+                @* Nothing on a disabled pipeline can be moved: every deployment is refused. *@
+                @if (!r.Disabled && r.NextDelivery is { } nextDelivery)
                 {
                     <button type="button" class="menu__item" @onclick="() => OpenRescheduleAsync(nextDelivery.DeliveryId)" role="menuitem">
                         <Icon Name="calendar" Width="15" Height="15" />
                         <span>Reschedule next deployment</span>
                     </button>
                 }
-                else if (r.LiveDelivery is null && r.LastDelivery is { StillHeld: true } held)
+                else if (!r.Disabled && r.LiveDelivery is null && r.LastDelivery is { StillHeld: true } held)
                 {
                     @* Business Central is holding it for its update; moving it re-uploads the build. *@
                     <button type="button" class="menu__item" @onclick="() => OpenRescheduleAsync(held.DeliveryId)" role="menuitem">
@@ -799,19 +803,22 @@
                     <span>Solution settings</span>
                 </a>
                 <div class="menu__sep"></div>
-                @if (r.Disabled)
+                @if (_manageable.Contains(r.ProjectId))
                 {
-                    <button type="button" class="menu__item" @onclick="() => SetDisabledAsync(r, false)" role="menuitem">
-                        <Icon Name="circle-play" Width="15" Height="15" />
-                        <span>Enable</span>
-                    </button>
-                }
-                else
-                {
-                    <button type="button" class="menu__item" @onclick="() => SetDisabledAsync(r, true)" role="menuitem">
-                        <Icon Name="circle-pause" Width="15" Height="15" />
-                        <span>Disable</span>
-                    </button>
+                    @if (r.Disabled)
+                    {
+                        <button type="button" class="menu__item" @onclick="() => SetDisabledAsync(r, false)" role="menuitem">
+                            <Icon Name="circle-play" Width="15" Height="15" />
+                            <span>Enable</span>
+                        </button>
+                    }
+                    else
+                    {
+                        <button type="button" class="menu__item" @onclick="() => SetDisabledAsync(r, true)" role="menuitem">
+                            <Icon Name="circle-pause" Width="15" Height="15" />
+                            <span>Disable</span>
+                        </button>
+                    }
                 }
                 @if (_canDelete)
                 {
@@ -956,7 +963,14 @@
     internal static string DisableMessage(string name, WaitingDeploymentCounts waiting)
     {
         var text = $"Disable \"{name}\"? Nothing deploys through it until someone enables it again. Its settings and history are kept.";
-        return text + WaitingSentences(waiting);
+        text += WaitingSentences(waiting);
+        if (waiting.Waiting > 0)
+        {
+            text += waiting.Waiting == 1
+                ? " Enabling the pipeline again won't bring it back; schedule it again afterwards."
+                : " Enabling the pipeline again won't bring them back; schedule them again afterwards.";
+        }
+        return text;
     }
 
     /// <summary>What disabling or deleting does to the deployments still waiting.</summary>

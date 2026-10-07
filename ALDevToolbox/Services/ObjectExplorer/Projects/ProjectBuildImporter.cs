@@ -186,6 +186,14 @@ public sealed class ProjectBuildImporter
         }
         if (missing.Count > 0) throw Refuse(string.Join(" ", missing));
 
+        // A rebuild is a build by hand, so a disabled pipeline refuses it like Build does (#1131).
+        if (build is { PipelineId: { } disabledCheckId }
+            && await _db.OePipelines.AsNoTracking()
+                .AnyAsync(p => p.Id == disabledCheckId && p.DisabledAt != null, ct).ConfigureAwait(false))
+        {
+            throw Refuse(DisabledRefusal);
+        }
+
         var tx = build is { PipelineId: { } lockedPipelineId }
             ? await LockPipelineForManualBuildAsync(lockedPipelineId, ct).ConfigureAwait(false)
             : await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
