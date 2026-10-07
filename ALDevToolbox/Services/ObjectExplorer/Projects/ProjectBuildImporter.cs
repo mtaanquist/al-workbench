@@ -131,6 +131,31 @@ public sealed class ProjectBuildImporter
         && b.BcTarget == ProjectBuildTarget.Current
         && b.Release != null && b.Release.Status == "ingesting";
 
+    /// <summary>The advisory-lock namespace for manual builds, keyed per pipeline id ("PBLD").</summary>
+    private const int ManualBuildLockClass = 0x50_42_4C_44;
+
+    /// <summary>
+    /// Opens a transaction holding a lock on <paramref name="pipelineId"/> that a second
+    /// manual build of the same pipeline waits for, so its running check sees the first
+    /// one's build. Released when the transaction commits or is disposed.
+    /// </summary>
+    private async Task<Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction> LockPipelineForManualBuildAsync(
+        int pipelineId, CancellationToken ct)
+    {
+        var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _db.Database.ExecuteSqlAsync(
+                $"SELECT pg_advisory_xact_lock({ManualBuildLockClass}, {pipelineId})", ct).ConfigureAwait(false);
+            return tx;
+        }
+        catch
+        {
+            await tx.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
     private async Task<int> StartPipelineBuildAsync(
         int pipelineId, string bcTarget, string trigger, CancellationToken ct, (int RepositoryId, string Sha)? head = null)
     {
@@ -163,21 +188,6 @@ public sealed class ProjectBuildImporter
             });
         }
 
-        // One manual build at a time per pipeline. The page disables Build while one
-        // is running, but its state can be stale (another tab, another person, the
-        // list page), so the refusal lives here too.
-        if (trigger == ProjectBuildTrigger.Manual
-            && await _db.OeProjectBuilds.AsNoTracking()
-                .Where(b => b.PipelineId == pipelineId)
-                .AnyAsync(BlocksManualBuild, ct)
-                .ConfigureAwait(false))
-        {
-            throw new PlanValidationException(new Dictionary<string, string>
-            {
-                ["Pipeline"] = "A build of this pipeline is already running. Wait for it to finish before starting another.",
-            });
-        }
-
         // A manual build clones as the person who pressed Build. Without a credential
         // for one of the repositories it would be skipped and the build would fail
         // with nothing to compile, so refuse before a build exists and say what to set
@@ -205,6 +215,26 @@ public sealed class ProjectBuildImporter
                     ["Pipeline"] = string.Join(" ", missing),
                 });
             }
+        }
+
+        // One manual build at a time per pipeline. The page disables Build while one
+        // is running, but its state can be stale (another tab, another person, the
+        // list page), so the refusal lives here too. Two clicks at once would both pass
+        // a plain read, so a manual build checks and inserts under a lock on its
+        // pipeline, held until the build row is committed (#1119).
+        await using var manualBuildLock = trigger == ProjectBuildTrigger.Manual
+            ? await LockPipelineForManualBuildAsync(pipelineId, ct).ConfigureAwait(false)
+            : null;
+        if (trigger == ProjectBuildTrigger.Manual
+            && await _db.OeProjectBuilds.AsNoTracking()
+                .Where(b => b.PipelineId == pipelineId)
+                .AnyAsync(BlocksManualBuild, ct)
+                .ConfigureAwait(false))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Pipeline"] = "A build of this pipeline is already running. Wait for it to finish before starting another.",
+            });
         }
 
         // A push past the waiting limit rides on the newest waiting build rather than
@@ -290,6 +320,7 @@ public sealed class ProjectBuildImporter
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a project build");
         var source = new ReleaseImportSource.ProjectBuild(pipeline.ProjectId);
         var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
+        if (manualBuildLock is not null) await manualBuildLock.CommitAsync(ct).ConfigureAwait(false);
         await _queue.EnqueueAsync(
             new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, jobRowId), ct).ConfigureAwait(false);
 

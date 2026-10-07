@@ -377,6 +377,48 @@ public sealed class ProjectBuildImporterTests : IDisposable
         queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
+    // Two tabs or two people pressing Build together both passed the running check
+    // before either build existed (#1119).
+    [Fact]
+    public async Task Builds_started_at_the_same_moment_queue_only_one()
+    {
+        int pipelineId;
+        await using (var seed = _db.NewContext())
+        {
+            var projectId = await SeedProjectWithRepoAsync(seed);
+            pipelineId = await SeedPipelineAsync(seed, projectId, "Production", requestedAppIdsJson: null);
+        }
+        var queue = new ReleaseImportQueue();
+        var contexts = Enumerable.Range(0, 6).Select(_ => _db.NewContext()).ToList();
+        try
+        {
+            using var go = new ManualResetEventSlim();
+            var starts = contexts.Select(ctx => Task.Run(async () =>
+            {
+                var importer = NewImporter(ctx, queue);
+                go.Wait();
+                try
+                {
+                    await importer.StartBuildAsync(pipelineId);
+                    return true;
+                }
+                catch (PlanValidationException ex) when (ex.Errors["Pipeline"].Contains("already running"))
+                {
+                    return false;
+                }
+            })).ToList();
+            go.Set();
+
+            (await Task.WhenAll(starts)).Count(started => started).Should().Be(1);
+        }
+        finally
+        {
+            foreach (var ctx in contexts) await ctx.DisposeAsync();
+        }
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(1);
+    }
+
     [Theory]
     [InlineData(ProjectBuildStatus.Ready)]
     [InlineData(ProjectBuildStatus.Failed)]
