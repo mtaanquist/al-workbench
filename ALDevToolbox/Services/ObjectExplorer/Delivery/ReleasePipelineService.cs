@@ -358,7 +358,15 @@ public sealed class ReleasePipelineService
         _logger.LogInformation("Updated deployment pipeline {ReleasePipelineId} ({Name}).", pipeline.Id, v.Name);
     }
 
-    /// <summary>Soft-deletes a deployment pipeline.</summary>
+    /// <summary>
+    /// Soft-deletes a deployment pipeline and sets aside what it still had waiting:
+    /// scheduled deployments are cancelled and prepared ones dismissed, each by
+    /// compare-and-set so a deployment a worker already claimed runs on (#1108). People
+    /// delete a pipeline to stop it, so leaving tonight's install booked would do the
+    /// opposite of what they asked. Deployments already handed to Business Central are
+    /// held there and stay booked; <see cref="CountWaitingDeploymentsAsync"/> lets the
+    /// confirmation say so.
+    /// </summary>
     public async Task SoftDeleteReleasePipelineAsync(int id, CancellationToken ct = default)
     {
         RequireOrganizationId();
@@ -372,17 +380,97 @@ public sealed class ReleasePipelineService
             .FirstOrDefaultAsync(ct);
         await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
 
-        pipeline.DeletedAt = DateTime.UtcNow;
-        pipeline.UpdatedAt = pipeline.DeletedAt.Value;
+        var userId = _orgContext.CurrentUserId;
+        var now = DateTime.UtcNow;
+        var line = now.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
+                   + "  " + DeletedPipelineReason + "." + Environment.NewLine;
+
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        pipeline.DeletedAt = now;
+        pipeline.UpdatedAt = now;
         await _db.SaveChangesAsync(ct);
-        // A deployment waiting on a deleted pipeline can no longer be approved from anywhere.
-        var waiting = await _db.OeProjectDeliveries.AsNoTracking()
+
+        var cancelled = await _db.OeProjectDeliveries
+            .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.Scheduled)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        cancelled = await SetAsideAsync(cancelled, ProjectDeliveryStatus.Scheduled, ProjectDeliveryStatus.Cancelled, ct);
+
+        var dismissed = await _db.OeProjectDeliveries
             .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.Proposed)
             .Select(d => d.Id)
             .ToListAsync(ct);
+        dismissed = await SetAsideAsync(dismissed, ProjectDeliveryStatus.Proposed, ProjectDeliveryStatus.Dismissed, ct);
+
+        var setAside = cancelled.Concat(dismissed).ToList();
+        if (setAside.Count > 0)
+        {
+            await _db.OeProjectDeliveryResults
+                .Where(r => setAside.Contains(r.ProjectDeliveryId) && r.Status == ProjectDeliveryResultStatus.Pending)
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(r => r.Status, ProjectDeliveryResultStatus.Skipped)
+                    .SetProperty(r => r.Message, "Not sent: " + DeletedPipelineReason.ToLowerInvariant() + ".")
+                    .SetProperty(r => r.UpdatedAt, now), ct);
+        }
+        await tx.CommitAsync(ct);
+
+        // A deployment waiting on a deleted pipeline can no longer be approved from anywhere.
         await NotificationSubject.MarkDoneAsync(
-            _db, waiting.Select(NotificationSubject.Delivery).ToList(), pipeline.UpdatedAt, _logger, ct);
+            _db, dismissed.Select(NotificationSubject.Delivery).ToList(), now, _logger, ct);
+        foreach (var deliveryId in cancelled)
+        {
+            _logger.LogInformation("Cancelled scheduled delivery {DeliveryId} because its deployment pipeline {ReleasePipelineId} was deleted.", deliveryId, id);
+        }
+        foreach (var deliveryId in dismissed)
+        {
+            _logger.LogInformation("Dismissed prepared delivery {DeliveryId} because its deployment pipeline {ReleasePipelineId} was deleted.", deliveryId, id);
+        }
         _logger.LogInformation("Soft-deleted deployment pipeline {ReleasePipelineId}.", id);
+
+        // Each one moves only if it is still in the state it was read in, so a deployment
+        // a worker claimed in between runs on rather than being cancelled under it.
+        async Task<List<int>> SetAsideAsync(List<int> ids, string from, string to, CancellationToken token)
+        {
+            var moved = new List<int>(ids.Count);
+            foreach (var deliveryId in ids)
+            {
+                var changed = await _db.OeProjectDeliveries
+                    .Where(d => d.Id == deliveryId && d.Status == from)
+                    .ExecuteUpdateAsync(u => u
+                        .SetProperty(d => d.Status, to)
+                        .SetProperty(d => d.CancelledByUserId, userId)
+                        .SetProperty(d => d.DismissReason, to == ProjectDeliveryStatus.Dismissed ? DeletedPipelineReason : null)
+                        .SetProperty(d => d.FinishedAt, now)
+                        .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line)
+                        .SetProperty(d => d.UpdatedAt, now), token);
+                if (changed > 0) moved.Add(deliveryId);
+            }
+            return moved;
+        }
+    }
+
+    /// <summary>Why a deployment was set aside when its pipeline was deleted, for its history.</summary>
+    internal const string DeletedPipelineReason = "The deployment pipeline was deleted";
+
+    /// <summary>
+    /// What deleting this deployment pipeline would affect: deployments waiting to run here
+    /// (scheduled or prepared), which the delete sets aside, and deployments already handed
+    /// to Business Central, which it can't reach. For the delete confirmation.
+    /// </summary>
+    public async Task<WaitingDeploymentCounts> CountWaitingDeploymentsAsync(int id, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var counts = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.ReleasePipelineId == id
+                        && (d.Status == ProjectDeliveryStatus.Scheduled
+                            || d.Status == ProjectDeliveryStatus.Proposed
+                            || d.Status == ProjectDeliveryStatus.HandedOff))
+            .GroupBy(d => d.Status == ProjectDeliveryStatus.HandedOff)
+            .Select(g => new { HeldByBc = g.Key, Count = g.Count() })
+            .ToListAsync(ct);
+        return new WaitingDeploymentCounts(
+            counts.Where(c => !c.HeldByBc).Sum(c => c.Count),
+            counts.Where(c => c.HeldByBc).Sum(c => c.Count));
     }
 
     /// <summary>
@@ -850,3 +938,10 @@ public sealed record ReleasePipelineProposedDelivery(int DeliveryId, int BuildId
 /// <param name="Version">The version it moves to, e.g. <c>27.6</c>.</param>
 /// <param name="Type">The API's target version type (major / minor), verbatim.</param>
 public sealed record EnvironmentNextUpdate(DateTime? Date, string Version, string? Type);
+
+/// <summary>
+/// Deployments a deployment pipeline still has waiting: <paramref name="Waiting"/> here
+/// (scheduled or prepared) and <paramref name="HeldByBusinessCentral"/> already handed to
+/// Business Central. See <see cref="ReleasePipelineService.CountWaitingDeploymentsAsync"/>.
+/// </summary>
+public sealed record WaitingDeploymentCounts(int Waiting, int HeldByBusinessCentral);

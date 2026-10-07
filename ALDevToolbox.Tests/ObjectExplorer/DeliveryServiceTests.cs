@@ -425,6 +425,108 @@ public sealed class DeliveryServiceTests : IDisposable
         enqueued.Should().Be(1);
     }
 
+    // ── Deleting a deployment pipeline (#1108) ────────────────────────────────
+
+    [Fact]
+    public async Task Deleting_the_pipeline_cancels_its_scheduled_and_dismisses_its_prepared_deployments()
+    {
+        int scheduledId, proposedId;
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+            proposedId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+            scheduledId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            DrainQueue();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var counts = await NewReleasePipelineService(ctx).CountWaitingDeploymentsAsync(seed.ReleasePipelineId);
+            counts.Should().Be(new WaitingDeploymentCounts(2, 0));
+            await NewReleasePipelineService(ctx).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+        }
+
+        // The time comes: neither the sweep nor a stale queue entry runs it.
+        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow.AddHours(2))).Should().Be(0);
+        (await NewService(_db.NewContext()).RunDeliveryAsync(scheduledId)).Should().BeFalse();
+        _apps.UploadedOrder.Should().BeEmpty();
+
+        await using var read = _db.NewContext();
+        var rows = await read.OeProjectDeliveries.Include(d => d.Results)
+            .Where(d => d.Id == scheduledId || d.Id == proposedId)
+            .ToDictionaryAsync(d => d.Id);
+        rows[scheduledId].Status.Should().Be(ProjectDeliveryStatus.Cancelled);
+        rows[scheduledId].FinishedAt.Should().NotBeNull();
+        rows[scheduledId].DiagnosticsLog.Should().Contain("The deployment pipeline was deleted");
+        rows[proposedId].Status.Should().Be(ProjectDeliveryStatus.Dismissed);
+        rows[proposedId].DismissReason.Should().Be("The deployment pipeline was deleted");
+        rows.Values.SelectMany(d => d.Results).Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
+    }
+
+    [Fact]
+    public async Task Deleting_the_pipeline_leaves_a_deployment_already_running_alone()
+    {
+        int deliveryId;
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.Installing));
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewReleasePipelineService(ctx).CountWaitingDeploymentsAsync(seed.ReleasePipelineId))
+                .Should().Be(new WaitingDeploymentCounts(0, 0));
+            await NewReleasePipelineService(ctx).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+        }
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status
+            .Should().Be(ProjectDeliveryStatus.Installing, "a deployment already under way is not cancelled under the worker");
+    }
+
+    [Fact]
+    public async Task CountWaitingDeploymentsAsync_counts_deployments_business_central_holds_separately()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var held = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+        await ctx.OeProjectDeliveries.Where(d => d.Id == held)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.HandedOff));
+        await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(3));
+
+        var counts = await NewReleasePipelineService(_db.NewContext()).CountWaitingDeploymentsAsync(seed.ReleasePipelineId);
+
+        counts.Should().Be(new WaitingDeploymentCounts(1, 1));
+    }
+
+    [Fact]
+    public async Task A_scheduled_deployment_of_a_deleted_pipeline_is_neither_queued_nor_claimed()
+    {
+        int deliveryId;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddMinutes(-1));
+            DrainQueue();
+            // Deleted some other way than the service's delete: the claim is the backstop.
+            await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+        }
+
+        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow)).Should().Be(0);
+        (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeFalse();
+
+        _apps.UploadedOrder.Should().BeEmpty();
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+    }
+
     [Fact]
     public async Task FailInterruptedDeliveriesAsync_fails_orphaned_in_progress_runs()
     {
@@ -2557,6 +2659,9 @@ public sealed class DeliveryServiceTests : IDisposable
                 .SetProperty(e => e.UpdateWindowStart, start)
                 .SetProperty(e => e.UpdateWindowEnd, end));
     }
+
+    private ReleasePipelineService NewReleasePipelineService(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleasePipelineService>.Instance);
 
     private DeliveryService NewService(AppDbContext ctx)
     {

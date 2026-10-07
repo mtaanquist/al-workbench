@@ -84,6 +84,20 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
         _db.Dispose();
     }
 
+    [Theory]
+    [InlineData(0, 0, null, null)]
+    [InlineData(1, 0, "1 deployment is waiting to run and will be cancelled.", null)]
+    [InlineData(3, 0, "3 deployments are waiting to run and will be cancelled.", null)]
+    [InlineData(0, 2, null, "2 deployments are already booked in Business Central and will still install")]
+    public void The_delete_confirmation_says_what_happens_to_waiting_deployments(int waiting, int held, string? cancelText, string? heldText)
+    {
+        var text = ReleasePipelinesBrowser.DeleteMessage("main to Production", new WaitingDeploymentCounts(waiting, held));
+
+        text.Should().StartWith("Delete \"main to Production\"?");
+        if (cancelText is null) text.Should().NotContain("cancelled"); else text.Should().Contain(cancelText);
+        if (heldText is null) text.Should().NotContain("Business Central"); else text.Should().Contain(heldText);
+    }
+
     [Fact]
     public void An_org_with_no_solutions_is_sent_to_create_one_first()
     {

@@ -1505,7 +1505,9 @@ public sealed class DeliveryService
     public async Task<int> EnqueueDueDeliveriesAsync(DateTime nowUtc, CancellationToken ct = default)
     {
         var due = await _db.OeProjectDeliveries.AsNoTracking()
-            .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= nowUtc)
+            // A deleted pipeline's deployments are cancelled with it (#1108); this is the backstop.
+            .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= nowUtc
+                        && d.ReleasePipeline!.DeletedAt == null)
             .Select(d => new { d.Id, d.OrganizationId, d.TriggeredByUserId })
             .ToListAsync(ct);
 
@@ -1563,7 +1565,8 @@ public sealed class DeliveryService
 
     /// <summary>
     /// Claims the delivery (atomic <c>scheduled → claimed</c>) and runs the publish.
-    /// Returns false if the row was already taken or cancelled, or is not due yet - a job
+    /// Returns false if the row was already taken or cancelled, its pipeline was deleted, or
+    /// it is not due yet - a job
     /// still waiting in the queue for a delivery that was since rescheduled to later must
     /// not run it; the scheduler queues it again when it is due - and true once this call
     /// ran it. All failures are recorded on the row; this method does not throw on a publish
@@ -1574,14 +1577,15 @@ public sealed class DeliveryService
         var claimedAt = DateTime.UtcNow;
         var dueBy = claimedAt + ClaimEarlySlack;
         var claimed = await _db.OeProjectDeliveries
-            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy)
+            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy
+                        && d.ReleasePipeline!.DeletedAt == null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.Status, ProjectDeliveryStatus.Claimed)
                 .SetProperty(d => d.ClaimedAt, claimedAt)
                 .SetProperty(d => d.UpdatedAt, claimedAt), ct);
         if (claimed == 0)
         {
-            _logger.LogInformation("Delivery {DeliveryId} was already claimed, cancelled or moved to later; skipping.", deliveryId);
+            _logger.LogInformation("Delivery {DeliveryId} was already claimed, cancelled, moved to later or its pipeline deleted; skipping.", deliveryId);
             return false;
         }
 
