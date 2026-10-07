@@ -71,6 +71,10 @@
         <span>@_header!.Name</span>
     </Crumbs>
     <TitleRow>
+        @if (_header!.Disabled)
+        {
+            <StatusPill Tone="muted"><span>Disabled</span></StatusPill>
+        }
         @if (_latest is not null)
         {
             <StatusPill Tone="@RowStateIcon.PillTone(_latest.Status)">
@@ -92,21 +96,43 @@
     <Actions>
         @if (_canManage)
         {
-            @* One build at a time per pipeline: while one runs the button says so
-               instead of queuing a second. The status poll clears it when the build
-               finishes; StartBuildAsync refuses a click from a stale page. *@
-            <button type="button" class="btn btn--primary" @onclick="RunBuildAsync" disabled="@(_starting || _buildRunning)">
-                <Icon Name="hammer" Width="15" Height="15" />
-                <span>@(_starting ? "Starting..." : _buildRunning ? "Build running" : "Build")</span>
-            </button>
+            @if (_header!.Disabled)
+            {
+                @* A disabled pipeline builds nothing, so the way back is the action. *@
+                <button type="button" class="btn btn--primary" @onclick="() => SetDisabledAsync(false)" disabled="@_switching">
+                    <Icon Name="circle-play" Width="15" Height="15" />
+                    <span>@(_switching ? "Enabling..." : "Enable pipeline")</span>
+                </button>
+            }
+            else
+            {
+                @* One build at a time per pipeline: while one runs the button says so
+                   instead of queuing a second. The status poll clears it when the build
+                   finishes; StartBuildAsync refuses a click from a stale page. *@
+                <button type="button" class="btn btn--primary" @onclick="RunBuildAsync" disabled="@(_starting || _buildRunning)">
+                    <Icon Name="hammer" Width="15" Height="15" />
+                    <span>@(_starting ? "Starting..." : _buildRunning ? "Build running" : "Build")</span>
+                </button>
+            }
             <a class="btn" href="@($"/pipelines/{PipelineId}/edit")">
                 <Icon Name="settings" Width="15" Height="15" />
                 <span>Edit pipeline</span>
             </a>
-            <button type="button" class="btn" @onclick="DeletePipelineAsync">
-                <Icon Name="trash-2" Width="15" Height="15" />
-                <span>Delete</span>
-            </button>
+            @if (!_header!.Disabled)
+            {
+                <button type="button" class="btn" @onclick="() => SetDisabledAsync(true)" disabled="@_switching"
+                        title="Stop this pipeline building, without losing its settings or builds.">
+                    <Icon Name="circle-pause" Width="15" Height="15" />
+                    <span>@(_switching ? "Disabling..." : "Disable pipeline")</span>
+                </button>
+            }
+            @if (_canDelete)
+            {
+                <button type="button" class="btn" @onclick="DeletePipelineAsync">
+                    <Icon Name="trash-2" Width="15" Height="15" />
+                    <span>Delete</span>
+                </button>
+            }
         }
         @if (_latest is not null && _latestDetail is { Artifacts.Count: > 0 })
         {
@@ -167,6 +193,16 @@
             <Alert Tone="AlertTone.Danger"><span>@be</span></Alert>
         }
 
+        @if (_header!.Disabled)
+        {
+            <Alert Tone="AlertTone.Info">
+                <span>
+                    This pipeline is disabled. It won't build: not on new commits, not for the nightly preview check, and not by hand.
+                    @(_canManage ? "Enable it to start building again." : "Ask someone who manages this solution to enable it.")
+                </span>
+            </Alert>
+        }
+
         @if (_header!.PreviewCheckBlocked is { Length: > 0 } paused)
         {
             <Alert Tone="AlertTone.Warn">
@@ -209,7 +245,7 @@
             <div class="empty-state">
                 <span class="empty-state__icon"><Icon Name="box" Width="21" Height="21" /></span>
                 <div class="empty-state__title">No builds yet</div>
-                @if (_canManage)
+                @if (_canManage && !_header!.Disabled)
                 {
                     @* The empty state is the one screen with nothing else to do, so it
                        carries the action itself rather than pointing at a button. *@
@@ -223,6 +259,10 @@
                         <Icon Name="hammer" Width="15" Height="15" />
                         <span>@(_starting ? "Starting..." : "Build")</span>
                     </button>
+                }
+                else if (_header!.Disabled)
+                {
+                    <p class="empty-state__text">This pipeline is disabled, so it won't build.@(_canManage ? " Enable it to start building." : "")</p>
                 }
                 else
                 {
@@ -904,6 +944,8 @@
     /// <summary>A build that blocks the next one is running; narrower than <see cref="_inFlight"/>, which also counts preview checks.</summary>
     private bool _buildRunning;
     private bool _canManage;
+    private bool _canDelete;
+    private bool _switching;
     private bool _starting;
     private string? _buildError;
 
@@ -1079,7 +1121,8 @@
         List<ComparableBuildRow> Comparable,
         bool InFlight,
         PipelineFreshness? Freshness = null,
-        bool BuildRunning = false);
+        bool BuildRunning = false,
+        bool CanDelete = false);
 
     /// <summary>The user-driven load: reads through the circuit's own services.</summary>
     private async Task LoadAsync()
@@ -1104,6 +1147,7 @@
                 return NotFoundState;
 
             var canManage = await pipelines.CanManageAsync(PipelineId, ct);
+            var canDelete = canManage && await pipelines.CanDeleteAsync(ct);
             var counts = await artifacts.CountBuildsAsync(PipelineId, ct);
             // The build asked for may be older than the history lists; it is read on its own.
             var requested = BuildId is { } id ? await artifacts.GetPipelineBuildRowAsync(PipelineId, id, ct) : null;
@@ -1126,7 +1170,7 @@
             var running = inFlight && await artifacts.IsBuildRunningAsync(PipelineId, ct);
             var fresh = await freshness.GetAsync(PipelineId, ct);
             return new PageState(header, false, canManage, builds, latest, showingOther, counts, showPreview,
-                latestDetail, comparable, inFlight, fresh, running);
+                latestDetail, comparable, inFlight, fresh, running, canDelete);
         }
         catch (ProjectAccessDeniedException)
         {
@@ -1144,6 +1188,7 @@
         if (s.NotFound) { _notFound = true; return; }
         _header = s.Header;
         _canManage = s.CanManage;
+        _canDelete = s.CanDelete;
         _builds = s.Builds;
         _counts = s.Counts;
         _listingPreview = s.ShowPreview;
@@ -1195,7 +1240,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _buildError = "Only the solution owner or an admin can build this solution.";
+            _buildError = "Only people who manage the solution can build this solution.";
         }
         catch (Exception ex)
         {
@@ -1233,7 +1278,7 @@
         try
         {
             var targets = (await Releases.ListReleasePipelinesAsync(_header.ProjectId))
-                .Where(r => r.BuildPipelineId == PipelineId && r.ArtifactSource == ReleaseArtifactSource.Build)
+                .Where(r => r.BuildPipelineId == PipelineId && r.ArtifactSource == ReleaseArtifactSource.Build && !r.Disabled)
                 .ToList();
             if (targets.Count == 1)
             {
@@ -1246,7 +1291,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _buildError = "Only the solution owner or an admin can deploy this solution's builds.";
+            _buildError = "Only people who manage the solution can deploy this solution's builds.";
         }
         catch (Exception ex)
         {
@@ -1351,7 +1396,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _buildError = "Only the solution owner or an admin can deploy this solution's builds.";
+            _buildError = "Only people who manage the solution can deploy this solution's builds.";
         }
         catch (Exception ex)
         {
@@ -1384,12 +1429,52 @@
             : $"Installs into {env}";
     }
 
+    private async Task SetDisabledAsync(bool disabled)
+    {
+        if (_switching) return;
+        if (disabled)
+        {
+            if (_deleteConfirm is null) return;
+            var confirmed = await _deleteConfirm.OpenAsync(
+                "Disable pipeline?",
+                $"Disable \"{_header?.Name}\"? Nothing builds it until someone enables it again: not new commits, not the nightly preview check, not the Build button. "
+                + "A build that's already running finishes. Its settings and builds are kept. "
+                + "Deployment pipelines that install from it get no new builds, but can still deploy the builds it already made.",
+                "Disable pipeline", "btn--primary", "circle-pause");
+            if (!confirmed) return;
+        }
+        _switching = true;
+        _buildError = null;
+        try
+        {
+            await Pipelines.SetPipelineDisabledAsync(PipelineId, disabled);
+            await LoadAsync();
+        }
+        catch (PlanValidationException ex)
+        {
+            _buildError = ex.Errors.Values.FirstOrDefault();
+        }
+        catch (ProjectAccessDeniedException ex)
+        {
+            _buildError = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Failed to {Action} pipeline {PipelineId}.", disabled ? "disable" : "enable", PipelineId);
+            _buildError = disabled ? "Could not disable the pipeline." : "Could not enable the pipeline.";
+        }
+        finally
+        {
+            _switching = false;
+        }
+    }
+
     private async Task DeletePipelineAsync()
     {
         if (_deleteConfirm is null) return;
         var confirmed = await _deleteConfirm.OpenAsync(
             "Delete pipeline?",
-            $"Delete \"{_header?.Name}\"? It stops building, and its builds no longer show in Pipelines.",
+            $"Delete \"{_header?.Name}\"? It stops building, and its builds no longer show in Pipelines. To stop it for now and keep it, disable it instead.",
             "Delete pipeline", "btn--danger", "trash-2");
         if (!confirmed) return;
         try
@@ -1400,6 +1485,10 @@
         catch (PlanValidationException ex)
         {
             _buildError = ex.Errors.Values.FirstOrDefault() ?? "Could not delete the pipeline.";
+        }
+        catch (ProjectAccessDeniedException ex)
+        {
+            _buildError = ex.Message;
         }
         catch (Exception ex)
         {

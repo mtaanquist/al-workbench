@@ -106,12 +106,164 @@ public sealed class ProjectServiceTests : IDisposable
             .SetProperty(p => p.AutoUpdatePullRequests, true)
             .SetProperty(p => p.AutoUpdatePullRequestsByUserId, (int?)null)
             .SetProperty(p => p.AutoUpdatePullRequestsBlocked, "the person they are opened as no longer has an active account."));
+        await LinkGitHubAsync(OwnerUserId);
 
         await Svc(_db.NewContext()).ResumeAutoUpdatePullRequestsAsync(id);
 
         var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
         saved.AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId);
         saved.AutoUpdatePullRequestsBlocked.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Resuming_without_a_GitHub_account_is_refused_and_keeps_the_warning()
+    {
+        await using var ctx = _db.NewContext();
+        var id = await Svc(ctx).CreateProjectAsync(NewInput("CRONUS A/S"));
+        const string held = "the person they are opened as no longer has an active account.";
+        await ctx.OeProjects.Where(p => p.Id == id).ExecuteUpdateAsync(s => s
+            .SetProperty(p => p.AutoUpdatePullRequests, true)
+            .SetProperty(p => p.AutoUpdatePullRequestsByUserId, (int?)null)
+            .SetProperty(p => p.AutoUpdatePullRequestsBlocked, held));
+
+        var act = () => Svc(_db.NewContext()).ResumeAutoUpdatePullRequestsAsync(id);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Values
+            .Should().ContainSingle(ALDevToolbox.Services.GitHub.DependencyDriftService.NotLinkedRefusal);
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequestsByUserId.Should().BeNull();
+        saved.AutoUpdatePullRequestsBlocked.Should().Be(held);
+    }
+
+    /// <summary>Connects a GitHub account for <paramref name="userId"/>, as the account page would leave it.</summary>
+    private async Task LinkGitHubAsync(int userId)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.UserExternalLogins.Add(new UserExternalLogin
+        {
+            UserId = userId,
+            Provider = ALDevToolbox.Services.GitHub.GitHubAccessService.ProviderName,
+            Issuer = "https://github.com",
+            Subject = $"gh-{userId}",
+            DisplayIdentity = $"user-{userId}",
+            CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>A second person who manages the (Public) solution, optionally with a GitHub account connected.</summary>
+    private async Task<int> SeedColleagueAsync(bool gitHubLinked)
+    {
+        await using var ctx = _db.NewContext();
+        var colleague = new User
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Email = "colleague@cronus.example",
+            PasswordHash = "x",
+            DisplayName = "Colleague",
+            Role = UserRole.Editor,
+            Status = UserStatus.Active,
+            CreatedAt = DateTime.UtcNow,
+        };
+        ctx.Users.Add(colleague);
+        await ctx.SaveChangesAsync();
+        if (gitHubLinked) await LinkGitHubAsync(colleague.Id);
+        return colleague.Id;
+    }
+
+    [Fact]
+    public async Task Someone_else_only_removing_a_repository_leaves_automatic_update_pull_requests_alone()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core, Payments));
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == id).ExecuteUpdateAsync(s => s
+                .SetProperty(p => p.AutoUpdatePullRequests, true)
+                .SetProperty(p => p.AutoUpdatePullRequestsByUserId, (int?)OwnerUserId));
+        }
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: false);
+
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core));
+
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId, "a repository taken away is nowhere new to write");
+        saved.AutoUpdatePullRequestsBlocked.Should().BeNull();
+    }
+
+    /// <summary>A solution with automatic update pull requests on, opened as the owner.</summary>
+    private async Task<int> SeedAutoUpdatingSolutionAsync()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S"));
+        await using var ctx = _db.NewContext();
+        await ctx.OeProjects.Where(p => p.Id == id).ExecuteUpdateAsync(s => s
+            .SetProperty(p => p.AutoUpdatePullRequests, true)
+            .SetProperty(p => p.AutoUpdatePullRequestsByUserId, (int?)OwnerUserId));
+        return id;
+    }
+
+    private static readonly ProjectRepositoryInput Core =
+        new(RepositoryProvider.GitHub, "https://github.com/acme/core", "Core");
+
+    private static readonly ProjectRepositoryInput Payments =
+        new(RepositoryProvider.GitHub, "https://github.com/cronus-dk/payment-import", "Payments");
+
+    [Theory]
+    [InlineData(true, null)]
+    [InlineData(false, ALDevToolbox.Services.GitHub.DependencyDriftService.AutomaticNotLinkedMessage)]
+    public async Task Someone_else_changing_the_repositories_takes_over_automatic_update_pull_requests(
+        bool gitHubLinked, string? expectedBlocked)
+    {
+        var id = await SeedAutoUpdatingSolutionAsync();
+        var colleagueId = await SeedColleagueAsync(gitHubLinked);
+        _db.OrgContext.CurrentUserId = colleagueId;
+
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core, Payments));
+
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequests.Should().BeTrue();
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(colleagueId,
+            "the repository they added must not be written to with the owner's GitHub account");
+        saved.AutoUpdatePullRequestsBlocked.Should().Be(expectedBlocked);
+    }
+
+    [Fact]
+    public async Task Someone_else_saving_without_changing_the_repositories_leaves_automatic_update_pull_requests_alone()
+    {
+        var id = await SeedAutoUpdatingSolutionAsync();
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+
+        // A rename, and the one repository re-spelled with .git, is not a change to the set.
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S Denmark", "dk", null,
+            Core with { Url = "https://github.com/acme/core.git" }));
+
+        (await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id))
+            .AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId);
+    }
+
+    [Fact]
+    public async Task The_person_they_are_opened_as_changing_the_repositories_stays_that_person()
+    {
+        var id = await SeedAutoUpdatingSolutionAsync();
+
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core, Payments));
+
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId);
+        saved.AutoUpdatePullRequestsBlocked.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Someone_else_adding_one_repository_takes_over_automatic_update_pull_requests()
+    {
+        var id = await SeedAutoUpdatingSolutionAsync();
+        var colleagueId = await SeedColleagueAsync(gitHubLinked: false);
+        _db.OrgContext.CurrentUserId = colleagueId;
+
+        await Svc(_db.NewContext()).AddRepositoryAsync(id, Payments);
+
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(colleagueId);
+        saved.AutoUpdatePullRequestsBlocked.Should().Be(ALDevToolbox.Services.GitHub.DependencyDriftService.AutomaticNotLinkedMessage);
     }
 
     [Fact]

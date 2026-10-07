@@ -233,7 +233,7 @@ public sealed class ArtifactService
             .Where(p => _db.OeProjects.Where(visible).Any(v => v.Id == p.ProjectId))
             .Select(p => new
             {
-                p.Id, p.Name, p.ProjectId, p.PreviewCheck, p.PreviewCheckBlocked, p.AutoVersion, p.ChangedAppsOnly,
+                p.Id, p.Name, p.ProjectId, p.PreviewCheck, p.PreviewCheckBlocked, p.AutoVersion, p.ChangedAppsOnly, p.DisabledAt,
                 ProjectName = p.Project!.Name,
                 OwnerName = p.Project.CreatedByUser != null ? p.Project.CreatedByUser.DisplayName : null,
             })
@@ -293,7 +293,8 @@ public sealed class ArtifactService
                 PreviewChecks: previewChecks.GetValueOrDefault(p.Id, []),
                 PreviewCheckBlocked: p.PreviewCheck ? p.PreviewCheckBlocked : null,
                 AutoVersion: p.AutoVersion,
-                ChangedAppsOnly: p.ChangedAppsOnly));
+                ChangedAppsOnly: p.ChangedAppsOnly,
+                Disabled: p.DisabledAt != null));
         }
 
         if (!string.IsNullOrWhiteSpace(search))
@@ -337,7 +338,8 @@ public sealed class ArtifactService
                 p.PreviewCheck ? p.PreviewCheckBlocked : null,
                 null,
                 p.BuildOnPush,
-                p.BuildOnPush ? p.BuildOnPushBlocked : null))
+                p.BuildOnPush ? p.BuildOnPushBlocked : null,
+                p.DisabledAt))
             .FirstOrDefaultAsync(ct);
         if (header is null || !header.PreviewCheck) return header;
 
@@ -933,7 +935,9 @@ public sealed record PipelineArtifactsRow(
     /// <summary>Whether the pipeline's builds add their build number to each app's version.</summary>
     bool AutoVersion = true,
     /// <summary>Whether the pipeline's builds publish only the extensions that changed since it last produced them.</summary>
-    bool ChangedAppsOnly = true);
+    bool ChangedAppsOnly = true,
+    /// <summary>Whether the pipeline is disabled, so it starts no build (#1131).</summary>
+    bool Disabled = false);
 
 /// <summary>
 /// A pipeline's header for the pipeline detail page (its project + owner drive the
@@ -944,7 +948,12 @@ public sealed record PipelineHeader(int Id, string Name, int ProjectId, string P
     string? PreviewCheckBlocked = null,
     IReadOnlyList<PreviewCheckResult>? PreviewChecks = null,
     bool BuildOnPush = false,
-    string? BuildOnPushBlocked = null);
+    string? BuildOnPushBlocked = null,
+    DateTime? DisabledAt = null)
+{
+    /// <summary>True while the pipeline is disabled: it starts no build (#1131).</summary>
+    public bool Disabled => DisabledAt is not null;
+}
 
 /// <summary>
 /// The newest build of the nightly preview check for one preview target. See

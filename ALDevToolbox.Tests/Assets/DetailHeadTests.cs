@@ -197,8 +197,9 @@ public sealed class DetailHeadTests
             because: "the build's state belongs beside the page title, where the archetype "
                    + "puts it. The Latest-build card had a second pill saying the same word, "
                    + "which reads as two different facts until you look twice");
-        Regex.Matches(markup, @"<StatusPill\s").Count.Should().Be(2,
-            because: "the only other pill is the Preview build one beside the state");
+        // The "Disabled" pill (#1131) says something about the pipeline, not the build.
+        Regex.Matches(markup, @"<StatusPill\s").Count.Should().Be(3,
+            because: "the only other pills are the Preview build one beside the state and the pipeline's Disabled one");
     }
 
     [Fact]

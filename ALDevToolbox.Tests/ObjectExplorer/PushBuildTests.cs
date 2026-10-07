@@ -69,6 +69,20 @@ public sealed class PushBuildTests : IDisposable
         (await ListDueAsync(Push())).Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task A_push_to_a_disabled_pipeline_is_not_due()
+    {
+        var owner = await SeedUserAsync();
+        var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OePipelines.Where(p => p.Id == pipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+        }
+
+        (await ListDueAsync(Push())).Should().BeEmpty();
+    }
+
     [Theory]
     [InlineData(true, false)]
     [InlineData(false, true)]

@@ -75,7 +75,7 @@
         @if (!_canManage)
         {
             <Alert Tone="AlertTone.Warn">
-                <span>Only the solution owner or an admin can change this solution's deployment pipelines.</span>
+                <span>Only people who manage the solution can change this solution's deployment pipelines.</span>
             </Alert>
         }
         else if (!_editing && _projectOptions is { Count: 0 })
@@ -132,7 +132,7 @@
                         else if (!_solutionManageable)
                         {
                             <Alert Tone="AlertTone.Warn">
-                                <span>Only the solution owner or an admin can add deployment pipelines to @(_projectName ?? "this solution").</span>
+                                <span>Only people who manage the solution can add deployment pipelines to @(_projectName ?? "this solution").</span>
                             </Alert>
                         }
                         else if (_buildPipelines is { Count: 0 } && _releaseRepositories is not { Count: > 0 })
@@ -845,7 +845,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _saveError = "Only the solution owner or an admin can manage this solution's deployment pipelines.";
+            _saveError = "Only people who manage the solution can manage this solution's deployment pipelines.";
             _buildPipelines = new();
             _environments = new();
             _releaseRepositories = null;
@@ -915,7 +915,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _saveError = "Only the solution owner or an admin can manage this solution's deployment pipelines.";
+            _saveError = "Only people who manage the solution can manage this solution's deployment pipelines.";
         }
         catch (Exception ex)
         {

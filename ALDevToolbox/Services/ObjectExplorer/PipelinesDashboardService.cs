@@ -74,7 +74,7 @@ public sealed class PipelinesDashboardService
         var pipelines = await _db.OePipelines.AsNoTracking()
             .Where(p => p.DeletedAt == null)
             .Where(p => _db.OeProjects.Where(visible).Any(v => v.Id == p.ProjectId))
-            .Select(p => new { p.Id, p.Name, p.ProjectId, ProjectName = p.Project!.Name, p.PreviewCheck })
+            .Select(p => new { p.Id, p.Name, p.ProjectId, ProjectName = p.Project!.Name, p.PreviewCheck, Disabled = p.DisabledAt != null })
             .ToListAsync(ct);
         var pipelineIds = pipelines.Select(p => p.Id).ToList();
         var pipelineById = pipelines.ToDictionary(p => p.Id);
@@ -110,8 +110,8 @@ public sealed class PipelinesDashboardService
         // pass (#994): a failed build, or a ready one with an extension that did not
         // compile.
         // Only pipelines that still run the check, as the Builds list does: a check
-        // turned off is not failing any more.
-        var checkedPipelineIds = pipelines.Where(p => p.PreviewCheck).Select(p => p.Id).ToList();
+        // turned off is not failing any more, and a disabled pipeline runs no check (#1131).
+        var checkedPipelineIds = pipelines.Where(p => p.PreviewCheck && !p.Disabled).Select(p => p.Id).ToList();
         var previewChecks = checkedPipelineIds.Count == 0
             ? []
             : await builds
