@@ -130,6 +130,43 @@ public sealed class ProjectBuildPipelineTests : IDisposable
             .Which.ProjectId.Should().Be(77);
     }
 
+    // A resumed build goes back in its place in the build queue: a preview check
+    // behind the builds people wait on (#1137).
+    [Fact]
+    public async Task ReconcileOnStartup_resumes_a_build_in_its_place_in_line()
+    {
+        var releaseId = await SeedProjectReleaseAsync(status: "ingesting");
+        await using (var ctx = _db.NewContext())
+        {
+            var project = new OeProject
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Name = "CRONUS " + Guid.NewGuid().ToString("N"),
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            };
+            ctx.OeProjects.Add(project);
+            await ctx.SaveChangesAsync();
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = project.Id,
+                ReleaseId = releaseId,
+                Trigger = ProjectBuildTrigger.PreviewCheck,
+                BcTarget = ProjectBuildTarget.NextMinor,
+                StartedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+            await new PersistedImportJobs(ctx, TimeProvider.System)
+                .CreateAsync(releaseId, Identity(), new ReleaseImportSource.ProjectBuild(project.Id), storeSymbolReference: false);
+        }
+
+        await using var reconcileCtx = _db.NewContext();
+        var resumed = await new PersistedImportJobs(reconcileCtx, TimeProvider.System).ReconcileOnStartupAsync();
+
+        resumed.Should().ContainSingle().Which.BuildOrder.Should().Be(new ProjectBuildOrder(2, null));
+    }
+
     // ── Build report (manage page surface) ──────────────────────────────
 
     [Fact]

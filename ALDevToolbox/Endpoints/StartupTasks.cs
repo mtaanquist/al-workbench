@@ -163,10 +163,12 @@ internal static class StartupTasks
 
         var persistedJobs = scope.ServiceProvider.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Import.PersistedImportJobs>();
         var queue = scope.ServiceProvider.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportQueue>();
+        var buildQueue = scope.ServiceProvider.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue>();
         var resumable = await persistedJobs.ReconcileOnStartupAsync(stopping);
-        // Not enqueued here: this runs before app.Run(), so the worker that drains the
-        // bounded queue has not started yet and a 17th job would wait forever (#1107).
-        ALDevToolbox.Services.ObjectExplorer.Import.ResumedImportJobs.QueueWhenStarted(app.Lifetime, queue, resumable, logger);
+        // Imports are not enqueued here: this runs before app.Run(), so the worker that
+        // drains the bounded queue has not started yet and a 17th job would wait forever
+        // (#1107). Builds go back on their own queue at once; it never waits.
+        ALDevToolbox.Services.ObjectExplorer.Import.ResumedImportJobs.QueueWhenStarted(app.Lifetime, queue, buildQueue, resumable, logger);
 
         // Belt-and-suspenders: any OeRelease row still left in "ingesting"
         // WITHOUT a re-queued durable job (synchronous individual-file imports

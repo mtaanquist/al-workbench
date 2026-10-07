@@ -79,9 +79,11 @@ internal static class OeIngestHelpers
             lines[i] = v.LineCount;
             i++;
         }
+        // Sorted, so two imports running at once take the same hashes in the same
+        // order and wait on each other rather than deadlock (#1137).
         await db.Database.ExecuteSqlRawAsync(
             "INSERT INTO oe_file_contents (content_hash, content, content_length, line_count) " +
-            "SELECT * FROM unnest({0}::text[], {1}::text[], {2}::int[], {3}::int[]) " +
+            "SELECT * FROM unnest({0}::text[], {1}::text[], {2}::int[], {3}::int[]) ORDER BY 1 " +
             "ON CONFLICT (content_hash) DO NOTHING",
             new object[] { hashes, bodies, lengths, lines }, ct).ConfigureAwait(false);
     }

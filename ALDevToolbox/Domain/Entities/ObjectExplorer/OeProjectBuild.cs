@@ -166,7 +166,14 @@ public class OeProjectBuild
     /// </summary>
     public string? GithubReleaseError { get; set; }
 
+    /// <summary>When the build was queued. Despite the name, this includes the wait for a free worker.</summary>
     public DateTime StartedAt { get; set; }
+
+    /// <summary>
+    /// When a worker picked the build up, so a build's own time and its wait show apart
+    /// (#1137). Null while queued, and for builds made before it was recorded.
+    /// </summary>
+    public DateTime? BuildingStartedAt { get; set; }
 
     /// <summary>When the build reached a terminal state (<c>ready</c> / <c>failed</c>); null while in flight.</summary>
     public DateTime? FinishedAt { get; set; }
