@@ -59,7 +59,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         // The Build button's service. Nothing here builds, so only what it keeps
         // for itself is real.
         _ctx.Services.AddScoped(sp => new ProjectBuildImporter(
-            null!, new ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportQueue(), null!,
+            null!, new ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue(), null!,
             sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>(), _db.OrgContext,
             sp.GetRequiredService<ProjectAccess>(), null!, TimeProvider.System,
             NullLogger<ProjectBuildImporter>.Instance));

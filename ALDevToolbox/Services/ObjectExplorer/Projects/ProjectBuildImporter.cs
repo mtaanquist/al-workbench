@@ -14,7 +14,7 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// <see cref="ReleaseImportSource.ProjectBuild"/> job for the worker to clone /
 /// compile / ingest off-thread. Mirrors <see cref="ArtifactReleaseImporter"/>; the
 /// heavy lifting lives in <see cref="ProjectBuildService"/>, run by
-/// <see cref="ReleaseImportWorker"/>.
+/// a <see cref="ProjectBuildWorker"/>.
 ///
 /// <para>
 /// The Release starts with a provisional label — <c>"{Project} (building…)"</c> —
@@ -26,7 +26,7 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 public sealed class ProjectBuildImporter
 {
     private readonly ReleaseImportService _importer;
-    private readonly ReleaseImportQueue _queue;
+    private readonly ProjectBuildQueue _queue;
     private readonly PersistedImportJobs _persistedJobs;
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
@@ -37,7 +37,7 @@ public sealed class ProjectBuildImporter
 
     public ProjectBuildImporter(
         ReleaseImportService importer,
-        ReleaseImportQueue queue,
+        ProjectBuildQueue queue,
         PersistedImportJobs persistedJobs,
         AppDbContext db,
         IOrganizationContext orgContext,
@@ -197,6 +197,18 @@ public sealed class ProjectBuildImporter
                 throw Refuse("Another build of this pipeline is running. Wait for it to finish, then try again.");
             }
 
+            // Whatever the pipeline, one job at a time per release: a second Retry, or a
+            // maintenance job on the same release, would otherwise run beside this one now
+            // that builds and imports have workers of their own (#1137).
+            await _db.Database.ExecuteSqlAsync(
+                $"SELECT pg_advisory_xact_lock({RebuildLockClass}, {releaseId})", ct).ConfigureAwait(false);
+            if (await _db.OeImportJobs.AsNoTracking()
+                    .AnyAsync(j => j.ReleaseId == releaseId && (j.Status == "queued" || j.Status == "running"), ct)
+                    .ConfigureAwait(false))
+            {
+                throw Refuse("This build is already being worked on. Wait for that to finish, then try again.");
+            }
+
             if (build is not null)
             {
                 await _db.OeProjectBuilds
@@ -218,6 +230,9 @@ public sealed class ProjectBuildImporter
 
     /// <summary>The advisory-lock namespace for manual builds, keyed per pipeline id ("PBLD").</summary>
     private const int ManualBuildLockClass = 0x50_42_4C_44;
+
+    // "PBRL": one rebuild or maintenance job per release at a time.
+    private const int RebuildLockClass = 0x50_42_52_4C;
 
     /// <summary>
     /// Opens a transaction holding a lock on <paramref name="pipelineId"/> that a second
@@ -406,13 +421,35 @@ public sealed class ProjectBuildImporter
         var source = new ReleaseImportSource.ProjectBuild(pipeline.ProjectId);
         var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
         if (manualBuildLock is not null) await manualBuildLock.CommitAsync(ct).ConfigureAwait(false);
-        await _queue.EnqueueAsync(
-            new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, jobRowId), ct).ConfigureAwait(false);
+        _queue.Enqueue(new ReleaseImportJob(
+            releaseId, identity, source, StoreSymbolReference: false, jobRowId,
+            ProjectBuildOrder.For(pipelineId, bcTarget, trigger)));
 
         _logger.LogInformation(
             "Queued project build for {Project} against {BcTarget} (pipeline {PipelineId}, project {ProjectId}, release {ReleaseId}).",
             pipeline.ProjectName, bcTarget, pipelineId, pipeline.ProjectId, releaseId);
         return releaseId;
+    }
+
+    /// <summary>
+    /// Queues an existing build to run again in place (Retry, Recover symbols), after
+    /// the caller has reopened its release. It goes in line as a build somebody is
+    /// waiting on, behind any build of the same pipeline and target still running.
+    /// </summary>
+    public async Task QueueRebuildAsync(int releaseId, int projectId, CancellationToken ct = default)
+    {
+        var build = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.ReleaseId == releaseId)
+            .Select(b => new { b.PipelineId, b.BcTarget })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a rebuild");
+        var source = new ReleaseImportSource.ProjectBuild(projectId);
+        var jobRowId = await _persistedJobs.CreateAsync(releaseId, identity, source, storeSymbolReference: false, ct).ConfigureAwait(false);
+        _queue.Enqueue(new ReleaseImportJob(
+            releaseId, identity, source, StoreSymbolReference: false, jobRowId,
+            ProjectBuildOrder.For(build?.PipelineId, build?.BcTarget, ProjectBuildTrigger.Manual)));
+        _logger.LogInformation("Queued a rebuild of release {ReleaseId} (project {ProjectId}, pipeline {PipelineId}).",
+            releaseId, projectId, build?.PipelineId);
     }
 
     /// <summary>
@@ -502,9 +539,9 @@ public sealed class ProjectBuildImporter
         var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "queuing a pull-request build");
         var source = new ReleaseImportSource.PullRequestBuild(
             projectId, repositoryId, headSha, installationId, repositoryFullName, pullRequestNumber, forkAuthor);
-        await _queue.EnqueueAsync(
-            new ReleaseImportJob(releaseId, identity, source, StoreSymbolReference: false, JobRowId: 0), ct)
-            .ConfigureAwait(false);
+        _queue.Enqueue(new ReleaseImportJob(
+            releaseId, identity, source, StoreSymbolReference: false, JobRowId: 0,
+            ProjectBuildOrder.For(pipelineId: null, ProjectBuildTarget.Current, ProjectBuildTrigger.PullRequest)));
 
         _logger.LogInformation(
             "Queued pull-request build for {Project} ({Repository}#{Number} at {HeadSha}, release {ReleaseId}, build {BuildId}).",

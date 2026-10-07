@@ -145,10 +145,20 @@ public sealed class PersistedImportJobs
         // migration / seed / interrupted-release reconciliation already
         // sits in (see StartupTasks). No user in scope at startup; reading
         // every org's job rows here is the design.
+        // A build's row comes along so it resumes in its place in the build queue (#1137).
+        // The filter is off for that read too; it is pinned to b.ReleaseId == j.ReleaseId.
         var survivors = await _db.OeImportJobs.IgnoreQueryFilters()
             .Where(j => j.Status == "queued" || j.Status == "running")
             // Oldest first, so waiting push builds resume in the order they were pushed.
             .OrderBy(j => j.Id)
+            .Select(j => new
+            {
+                Job = j,
+                Build = _db.OeProjectBuilds
+                    .Where(b => b.ReleaseId == j.ReleaseId)
+                    .Select(b => new { b.PipelineId, b.BcTarget, b.Trigger })
+                    .FirstOrDefault(),
+            })
             .ToListAsync(ct).ConfigureAwait(false);
         if (survivors.Count == 0) return Array.Empty<ReleaseImportJob>();
 
@@ -158,8 +168,9 @@ public sealed class PersistedImportJobs
         // the right thing (a ZIP vs a C/AL file).
         var lostReleases = new Dictionary<int, string>();
 
-        foreach (var row in survivors)
+        foreach (var survivor in survivors)
         {
+            var row = survivor.Job;
             switch (row.Kind)
             {
                 case "url" when !string.IsNullOrEmpty(row.DownloadUrl):
@@ -202,7 +213,10 @@ public sealed class PersistedImportJobs
                             row.OrganizationId, row.UserId, row.IsSiteAdmin, row.IsSystemOrganization),
                         Source: new ReleaseImportSource.ProjectBuild(projectId),
                         StoreSymbolReference: row.StoreSymbolReference,
-                        JobRowId: row.Id));
+                        JobRowId: row.Id,
+                        BuildOrder: survivor.Build is { } build
+                            ? ProjectBuildOrder.For(build.PipelineId, build.BcTarget, build.Trigger)
+                            : ProjectBuildOrder.Unordered));
                     break;
                 case "backfill_system_references":
                     // A maintenance backfill interrupted by a restart. The

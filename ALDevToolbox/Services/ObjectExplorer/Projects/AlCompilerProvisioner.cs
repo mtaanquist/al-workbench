@@ -49,6 +49,11 @@ public sealed class AlCompilerProvisioner
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILogger<AlCompilerProvisioner> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    // Compilers a running build is using, by version, so a prune never deletes one
+    // under it now that builds run side by side (#1137). Taking a lease and pruning
+    // both hold this lock, so a lease either sees the folder gone or keeps it.
+    private readonly object _inUseLock = new();
+    private readonly Dictionary<string, int> _inUse = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly string _installDir;
     private readonly string? _versionPin;
@@ -158,6 +163,39 @@ public sealed class AlCompilerProvisioner
         .Select(Installed)
         .FirstOrDefault(i => i is not null);
 
+    /// <summary>
+    /// <see cref="ResolveAsync"/> for a build: the compiler comes with a lease that
+    /// keeps its folder on the volume until the lease is disposed. Null when there is
+    /// no compiler.
+    /// </summary>
+    public async Task<AlCompilerLease?> UseAsync(bool prerelease = false, CancellationToken ct = default)
+    {
+        // A newer beta can replace the one just resolved before the lease is taken;
+        // resolving again finds the newer one.
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var compiler = await ResolveAsync(prerelease, ct).ConfigureAwait(false);
+            if (compiler is null) return null;
+            lock (_inUseLock)
+            {
+                if (!File.Exists(compiler.AlcPath)) continue;
+                _inUse[compiler.Version] = _inUse.GetValueOrDefault(compiler.Version) + 1;
+            }
+            return new AlCompilerLease(compiler, () => Release(compiler.Version));
+        }
+        return null;
+    }
+
+    private void Release(string version)
+    {
+        lock (_inUseLock)
+        {
+            if (!_inUse.TryGetValue(version, out var count)) return;
+            if (count <= 1) _inUse.Remove(version);
+            else _inUse[version] = count - 1;
+        }
+    }
+
     /// <summary>The newest prerelease compiler, provisioned when needed, or null when the stable line should answer instead.</summary>
     private async Task<AlCompilerInfo?> ResolvePrereleaseAsync(CancellationToken ct)
     {
@@ -239,22 +277,26 @@ public sealed class AlCompilerProvisioner
     /// Drops every installed prerelease but <paramref name="keep"/> (and the pin,
     /// if an operator pinned a beta), so weekly betas do not pile up on the
     /// volume. Best-effort; runs under the gate after a new beta is in place.
-    /// Builds run one at a time, so no compile is using the folders being removed.
+    /// A beta a running build holds a lease on stays; a later prune removes it.
     /// </summary>
     private void PruneOtherPrereleases(string keep)
     {
-        foreach (var version in InstalledVersions().Where(IsPrerelease))
+        lock (_inUseLock)
         {
-            if (string.Equals(version, keep, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(version, _versionPin, StringComparison.OrdinalIgnoreCase)) continue;
-            try
+            foreach (var version in InstalledVersions().Where(IsPrerelease))
             {
-                Directory.Delete(VersionDir(version), recursive: true);
-                _logger.LogInformation("Removed AL compiler {Version}; {Keep} replaces it for next-major builds.", version, keep);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Could not remove the older AL compiler {Version}.", version);
+                if (string.Equals(version, keep, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(version, _versionPin, StringComparison.OrdinalIgnoreCase)
+                    || _inUse.ContainsKey(version)) continue;
+                try
+                {
+                    Directory.Delete(VersionDir(version), recursive: true);
+                    _logger.LogInformation("Removed AL compiler {Version}; {Keep} replaces it for next-major builds.", version, keep);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not remove the older AL compiler {Version}.", version);
+                }
             }
         }
     }
@@ -673,6 +715,16 @@ public sealed class AlCompilerPackageException(string message, Exception? inner 
 /// <c>.../alc.dll</c>, which the host's <c>dotnet</c> runs; <see cref="FileName"/>
 /// and <see cref="LeadingArguments"/> hide that difference from the build.
 /// </summary>
+/// <summary>A compiler a build is using, kept on the volume until disposed. See <see cref="AlCompilerProvisioner.UseAsync"/>.</summary>
+public sealed class AlCompilerLease(AlCompilerInfo compiler, Action release) : IDisposable
+{
+    private Action? _release = release;
+
+    public AlCompilerInfo Compiler { get; } = compiler;
+
+    public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
+}
+
 public sealed record AlCompilerInfo(string AlcPath, bool NeedsRollForward, string Version)
 {
     public bool IsFrameworkDependent => AlcPath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);

@@ -91,4 +91,10 @@ public static class ProjectDeliveryResultStatus
 
     /// <summary>Not attempted because an earlier app in the run failed.</summary>
     public const string Skipped = "skipped";
+
+    /// <summary>
+    /// Was uploading or installing when the run stopped (a shutdown or restart), so whether
+    /// Business Central installed it is not known (#1115).
+    /// </summary>
+    public const string Unconfirmed = "unconfirmed";
 }

@@ -18,7 +18,7 @@ public sealed class ResumedImportJobsTests
 
     private static List<ReleaseImportJob> Jobs(int count) =>
         Enumerable.Range(1, count)
-            .Select(i => new ReleaseImportJob(i, Identity, new ReleaseImportSource.ProjectBuild(i), JobRowId: i))
+            .Select(i => new ReleaseImportJob(i, Identity, new ReleaseImportSource.Url($"https://example.com/{i}.zip"), JobRowId: i))
             .ToList();
 
     [Fact]
@@ -29,7 +29,7 @@ public sealed class ResumedImportJobsTests
         var jobs = Jobs(40);
 
         // Returns at once: nothing is written before the host has started.
-        ResumedImportJobs.QueueWhenStarted(lifetime, queue, jobs, NullLogger.Instance);
+        ResumedImportJobs.QueueWhenStarted(lifetime, queue, new ProjectBuildQueue(), jobs, NullLogger.Instance);
         queue.Reader.TryRead(out _).Should().BeFalse();
 
         lifetime.Start();
@@ -42,6 +42,24 @@ public sealed class ResumedImportJobsTests
             drained.Add(job.ReleaseId);
         }
         drained.Should().Equal(jobs.Select(j => j.ReleaseId));
+    }
+
+    // Builds have their own queue, which never makes a writer wait, so they go back
+    // on it before the host has started (#1137).
+    [Fact]
+    public void Builds_go_back_on_the_build_queue_at_once()
+    {
+        var queue = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
+        var jobs = Enumerable.Range(1, 40)
+            .Select(i => new ReleaseImportJob(i, Identity, new ReleaseImportSource.ProjectBuild(i), JobRowId: i))
+            .Append(new ReleaseImportJob(99, Identity, new ReleaseImportSource.Url("https://example.com/dvd.zip"), JobRowId: 99))
+            .ToList();
+
+        ResumedImportJobs.QueueWhenStarted(new FakeLifetime(), queue, builds, jobs, NullLogger.Instance);
+
+        builds.WaitingCount.Should().Be(40);
+        queue.Reader.TryRead(out _).Should().BeFalse("imports still wait for the host to start");
     }
 
     [Fact]

@@ -35,6 +35,7 @@ internal sealed class ProjectBuildConfiguration : IEntityTypeConfiguration<OePro
         entity.Property(e => e.GithubReleaseUrl).HasColumnName("github_release_url").HasMaxLength(500);
         entity.Property(e => e.GithubReleaseError).HasColumnName("github_release_error").HasMaxLength(2000);
         entity.Property(e => e.StartedAt).HasColumnName("started_at").IsRequired();
+        entity.Property(e => e.BuildingStartedAt).HasColumnName("building_started_at");
         entity.Property(e => e.FinishedAt).HasColumnName("finished_at");
 
         entity.HasOne(e => e.Organization)

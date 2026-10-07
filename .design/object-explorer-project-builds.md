@@ -83,7 +83,7 @@ The Release itself reuses the existing `oe_releases` schema (per `object-explore
 
 ## Build pipeline
 
-The build is a new `ReleaseImportSource.ProjectBuild` job, drained by the existing `ReleaseImportWorker` alongside the `BcArtifact` case. A coordinator `ProjectReleaseImporter` (mirroring `ArtifactReleaseImporter`) creates the `ingesting` Release, captures the org identity, and enqueues the durable job (`PersistedImportJobs` + `ReleaseImportQueue`, so it survives a restart). The build logic lives in a new `ProjectBuildService` whose output is the `List<AppFileUpload>` the importer already consumes, plus a per-extension result list.
+The build is a `ReleaseImportSource.ProjectBuild` job, run by the same job code as the `BcArtifact` import. A coordinator `ProjectReleaseImporter` (mirroring `ArtifactReleaseImporter`) creates the `ingesting` Release, captures the org identity, and enqueues the durable job (`PersistedImportJobs`, so it survives a restart). Builds have their own queue, `ProjectBuildQueue`, drained by `OE_BUILD_CONCURRENCY` `ProjectBuildWorker`s side by side (#1137): builds a person is waiting on first, then builds on push, then preview checks, and one build at a time per pipeline and Business Central target, in order. The shared pieces a build touches are guarded for that: the symbol cache only locks the moment a package is moved into place, a compiler a build is using is never pruned under it, and a build that finds its parent release still importing waits for it rather than resolving references against half of it. The build logic lives in a new `ProjectBuildService` whose output is the `List<AppFileUpload>` the importer already consumes, plus a per-extension result list.
 
 ### 1. Clone
 

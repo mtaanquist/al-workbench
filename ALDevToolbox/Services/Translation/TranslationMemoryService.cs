@@ -200,8 +200,16 @@ public sealed class TranslationMemoryService
                 inserted++;
             }
 
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-            _db.ChangeTracker.Clear();
+            try
+            {
+                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Also on failure: two imports can add the same pair at once, and the
+                // loser's rows must not stay tracked to fail every later save (#1137).
+                _db.ChangeTracker.Clear();
+            }
         }
 
         _logger.LogInformation(

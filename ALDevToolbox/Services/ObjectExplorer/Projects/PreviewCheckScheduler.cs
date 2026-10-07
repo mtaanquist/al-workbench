@@ -44,7 +44,7 @@ public sealed class PreviewCheckScheduler : PolledScheduler
         ILogger<PreviewCheckScheduler> logger,
         WorkerHeartbeatRegistry heartbeats)
         // A sweep reads Microsoft's preview index once per country and queues builds
-        // (the builds run on ReleaseImportWorker), so ten minutes is ample.
+        // (the builds run on the ProjectBuildWorkers), so ten minutes is ample.
         : base(logger, heartbeats, nameof(PreviewCheckScheduler),
             pollInterval: PollInterval,
             maxActiveDuration: TimeSpan.FromMinutes(10),

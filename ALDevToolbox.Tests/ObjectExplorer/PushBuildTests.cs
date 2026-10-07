@@ -148,7 +148,7 @@ public sealed class PushBuildTests : IDisposable
         var owner = await SeedUserAsync();
         await GiveTokenAsync(owner);
         var (repositoryId, pipelineId) = await SeedSolutionAsync(owner, branch: "main", blocked: "an old reason.");
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
 
         await NewWorker(builds).RunOneAsync(Push(), CancellationToken.None);
 
@@ -171,7 +171,7 @@ public sealed class PushBuildTests : IDisposable
         var owner = await SeedUserAsync();
         await GiveTokenAsync(owner);
         var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
-        var worker = NewWorker(new ReleaseImportQueue());
+        var worker = NewWorker(new ProjectBuildQueue());
         var second = GitHubWebhookPayloads.Sha(77);
 
         await worker.RunOneAsync(Push(), CancellationToken.None);
@@ -189,7 +189,7 @@ public sealed class PushBuildTests : IDisposable
         var owner = await SeedUserAsync();
         var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
 
-        await NewWorker(new ReleaseImportQueue()).RunOneAsync(Push(), CancellationToken.None);
+        await NewWorker(new ProjectBuildQueue()).RunOneAsync(Push(), CancellationToken.None);
 
         await using var read = _db.NewContext();
         (await read.OeProjectBuilds.AnyAsync()).Should().BeFalse();
@@ -206,7 +206,7 @@ public sealed class PushBuildTests : IDisposable
         await GiveTokenAsync(former);
         var (_, pipelineId) = await SeedSolutionAsync(former, branch: "main", projectOwner: solutionOwner);
 
-        await NewWorker(new ReleaseImportQueue()).RunOneAsync(Push(), CancellationToken.None);
+        await NewWorker(new ProjectBuildQueue()).RunOneAsync(Push(), CancellationToken.None);
 
         await using var read = _db.NewContext();
         (await read.OeProjectBuilds.AnyAsync()).Should().BeFalse();
@@ -224,7 +224,7 @@ public sealed class PushBuildTests : IDisposable
         var (_, refused) = await SeedSolutionAsync(withoutToken, branch: "main");
         var (_, built) = await SeedSolutionAsync(withToken, branch: "main");
 
-        await NewWorker(new ReleaseImportQueue()).RunOneAsync(Push(), CancellationToken.None);
+        await NewWorker(new ProjectBuildQueue()).RunOneAsync(Push(), CancellationToken.None);
 
         await using var read = _db.NewContext();
         (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == built)).Should().Be(1);
@@ -347,7 +347,7 @@ public sealed class PushBuildTests : IDisposable
     /// the organisation and the acting person come only from the ambient scope the
     /// worker enters, which is what makes "runs as the person who turned it on" real.
     /// </summary>
-    private GitHubPullRequestBuildWorker NewWorker(ReleaseImportQueue builds)
+    private GitHubPullRequestBuildWorker NewWorker(ProjectBuildQueue builds)
     {
         var services = new ServiceCollection();
         services.AddSingleton<IOrganizationContext>(new AmbientOnlyOrganizationContext());

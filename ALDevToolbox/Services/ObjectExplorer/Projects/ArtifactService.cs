@@ -505,7 +505,7 @@ public sealed class ArtifactService
             .Select(b => new
             {
                 b.Id, b.ProjectId, b.ReleaseId, b.Status, b.BcVersion, b.Branch, b.DefaultBranch, b.Trigger,
-                b.StartedAt, b.FinishedAt, b.FailureMessage,
+                b.StartedAt, b.BuildingStartedAt, b.FinishedAt, b.FailureMessage,
                 b.GithubReleaseTag, b.GithubReleaseUrl, b.GithubReleaseError,
                 b.BcTarget, b.BcArtifactVersion,
                 StartedByName = b.StartedByUser != null ? b.StartedByUser.DisplayName : null,
@@ -577,7 +577,8 @@ public sealed class ArtifactService
                 DefaultBranch: b.Branch is not null || b.Trigger == ProjectBuildTrigger.PullRequest
                     ? null
                     : b.DefaultBranch ?? knownDefaults.GetValueOrDefault(b.ProjectId),
-                FromPush: b.Trigger == ProjectBuildTrigger.Push);
+                FromPush: b.Trigger == ProjectBuildTrigger.Push,
+                BuildingStartedAt: b.BuildingStartedAt);
         }).ToList();
     }
 
@@ -1013,7 +1014,9 @@ public sealed record BuildRow(
     /// <summary>When <see cref="Branch"/> is null, the default branch the build was made from, as best known. Display only.</summary>
     string? DefaultBranch = null,
     /// <summary>True when a push to the pipeline's branch started the build rather than a person.</summary>
-    bool FromPush = false)
+    bool FromPush = false,
+    /// <summary>When a worker picked the build up; <see cref="StartedAt"/> is when it was queued. Null for older builds.</summary>
+    DateTime? BuildingStartedAt = null)
 {
     /// <summary>The branch to show: the one built, its default branch's name, or a plain "(default branch)".</summary>
     [JsonIgnore]

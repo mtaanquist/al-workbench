@@ -211,6 +211,9 @@ public sealed class DependencyDriftService
     public async Task<int> ScanForReleaseAsync(int releaseId, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
+        // Two imports can finish at once now that builds run side by side (#1137), and
+        // each replaces the organisation's whole set of findings.
+        using var scanning = await ScanGate.EnterAsync(orgId, ct);
         var release = await _db.OeReleases.AsNoTracking().FirstOrDefaultAsync(r => r.Id == releaseId, ct);
         if (release is null || release.Kind != "first_party" || release.IsPrerelease)
         {
@@ -305,6 +308,8 @@ public sealed class DependencyDriftService
             findings.Select(f => f.Repository).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         return stored;
     }
+
+    private static readonly ALDevToolbox.Services.Workers.KeyedGate<int> ScanGate = new();
 
     /// <summary>
     /// The newest first-party release that has finished importing, or null when
