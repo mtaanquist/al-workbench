@@ -115,6 +115,29 @@
                     </SettingRow>
                 }
             </div>
+            @* What an AI assistant may do once it is connected. Only shown while MCP is
+               on site-wide, because without it there is no assistant to allow anything. *@
+            @if (_enabled.ContainsKey(ToolKey.Mcp))
+            {
+                <div class="card__head">
+                    <div>
+                        <h2 class="card__title">AI assistants</h2>
+                        <p class="card__sub">What a connected AI assistant may do on its own.</p>
+                    </div>
+                </div>
+                <div class="setting-list">
+                    <SettingRow Name="Let AI assistants deploy to production environments"
+                                Hint="@(_enabled[ToolKey.Mcp] ? AgentsHint : "Switch the tool on above to change this.")">
+                        <Switch Name="agents-deploy-production"
+                                Checked="_agentsMayDeployToProduction"
+                                CheckedChanged="@(v => _agentsMayDeployToProduction = v)"
+                                Disabled="@(_saving || !_enabled[ToolKey.Mcp])"
+                                Label="@(_agentsMayDeployToProduction ? "Allowed" : "Not allowed")"
+                                AriaLabel="Let AI assistants deploy to production environments" />
+                    </SettingRow>
+                </div>
+            }
+
             @if (_visible.Any(t => _enabled[t.Key] && _stepUp[t.Key]))
             {
                 <Alert Tone="AlertTone.Warn">
@@ -171,6 +194,12 @@
     private readonly Dictionary<ToolKey, bool> _stepUp = new();
     private Dictionary<ToolKey, bool> _stepUpBaseline = new();
     private HashSet<ToolKey> _storedStepUp = new();
+    private const string AgentsHint =
+        "Off: AI assistants can only deploy to sandboxes. A deployment to production has to be confirmed by a person on the pipeline's page. "
+        + "On: when an AI assistant deploys to production, it starts straight away, with no confirmation.";
+
+    private bool _agentsMayDeployToProduction;
+    private bool _agentsBaseline;
     private int _windowMinutes = 15;
     private int _windowBaseline = 15;
     // The org's stored disabled set as loaded — used to preserve entries for
@@ -184,6 +213,7 @@
         _storedDisabled = org.DisabledTools;
         _storedStepUp = org.StepUpTools;
         _windowMinutes = _windowBaseline = org.StepUpWindowMinutes;
+        _agentsMayDeployToProduction = _agentsBaseline = org.AgentsMayDeployToProduction;
         _visible = ToolCatalog.All.Where(t => ToolAvailability.IsSiteEnabled(t.Key)).ToList();
         foreach (var tool in _visible)
         {
@@ -199,6 +229,7 @@
 
     private bool IsDirty() =>
         _windowMinutes != _windowBaseline
+        || _agentsMayDeployToProduction != _agentsBaseline
         || _visible.Any(t => _enabled[t.Key] != _baseline[t.Key] || _stepUp[t.Key] != _stepUpBaseline[t.Key]);
 
     // The tools with something outside the workbench to protect: a GitHub
@@ -252,6 +283,11 @@
             await OrgAdmin.SetStepUpToolsAsync(stepUp);
             await OrgAdmin.SetStepUpWindowAsync(_windowMinutes);
             _windowBaseline = _windowMinutes;
+            if (_enabled.ContainsKey(ToolKey.Mcp))
+            {
+                await OrgAdmin.SetAgentsMayDeployToProductionAsync(_agentsMayDeployToProduction);
+                _agentsBaseline = _agentsMayDeployToProduction;
+            }
 
             _storedDisabled = ToolCatalog.ParseDisabled(ToolCatalog.Format(disabled));
             _storedStepUp = ToolCatalog.ParseKeys(ToolCatalog.Format(stepUp));

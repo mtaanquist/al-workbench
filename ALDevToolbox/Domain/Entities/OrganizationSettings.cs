@@ -174,6 +174,15 @@ public class OrganizationSettings
     public bool AutoImportPreviewsEnabled { get; set; }
 
     /// <summary>
+    /// When <see langword="true"/>, the <c>deploy_build</c> MCP tool may deploy to a
+    /// Production (or any other non-sandbox) environment, immediately and with no
+    /// confirmation step. Off by default: an agent is then refused anything but a
+    /// sandbox, and Production deployments are made on the deployment pipeline's page,
+    /// where a person confirms them (#1122). See <c>.design/saas-delivery.md</c>.
+    /// </summary>
+    public bool AgentsMayDeployToProduction { get; set; }
+
+    /// <summary>
     /// When the daily auto-import sweep last ran for this org (UTC), stamped by
     /// <c>ReleaseAutoImportScheduler</c> after each per-org pass — including
     /// passes that found nothing new. Null until the first sweep; shown on the
