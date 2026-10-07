@@ -1696,7 +1696,7 @@ public sealed class DeliveryService
             return await _db.OeProjectDeliveries.AsNoTracking().AnyAsync(d =>
                 d.ProjectId == target.ProjectId && d.EnvironmentName == target.EnvironmentName
                 && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy
-                && d.ReleasePipeline!.DeletedAt == null
+                && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null
                 && (d.ScheduledFor < target.ScheduledFor || (d.ScheduledFor == target.ScheduledFor && d.Id < deliveryId)), ct);
         }
         if (await EarlierOneWaitsAsync())

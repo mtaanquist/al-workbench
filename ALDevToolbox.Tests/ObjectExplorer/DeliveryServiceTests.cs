@@ -463,6 +463,7 @@ public sealed class DeliveryServiceTests : IDisposable
     [InlineData("not due yet")]
     [InlineData("waiting for approval")]
     [InlineData("pipeline deleted")]
+    [InlineData("pipeline disabled")]
     public async Task RunDeliveryAsync_does_not_wait_for_an_earlier_deployment_that_cannot_run_now(string why)
     {
         await using var ctx = _db.NewContext();
@@ -483,13 +484,18 @@ public sealed class DeliveryServiceTests : IDisposable
                     .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.Proposed));
                 break;
             case "pipeline deleted":
+            case "pipeline disabled":
                 // Only the earlier one's pipeline: give the later one a pipeline of its own.
                 var other = await NewReleasePipelineService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
                     seed.ProjectId, null, seed.BuildPipelineId, seed.EnvironmentId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
                 await ctx.OeProjectDeliveries.Where(d => d.Id == later)
                     .ExecuteUpdateAsync(s => s.SetProperty(d => d.ReleasePipelineId, other));
-                await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
-                    .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+                if (why == "pipeline deleted")
+                    await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                        .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+                else
+                    await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                        .ExecuteUpdateAsync(s => s.SetProperty(r => r.DisabledAt, DateTime.UtcNow));
                 break;
         }
 
