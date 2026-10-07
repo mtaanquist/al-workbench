@@ -63,9 +63,9 @@ public sealed class ProjectBuildService
         MinutesOrDefault(Environment.GetEnvironmentVariable("OE_BUILD_COMPILE_TIMEOUT_MINUTES"), DefaultCompileTimeoutMinutes);
 
     /// <summary>
-    /// The ceiling for a git command that only reads or moves within the clone (diff, log,
-    /// merge-base, show, checkout). These take seconds; the bound only stops a stuck one
-    /// from holding the build worker (#1132).
+    /// The ceiling for a git command that only reads the clone (diff, log, merge-base,
+    /// show, symbolic-ref). These take seconds; the bound only stops a stuck one from
+    /// holding the build worker (#1132).
     /// </summary>
     private static readonly TimeSpan LocalGitTimeout = TimeSpan.FromMinutes(5);
 
@@ -1518,7 +1518,10 @@ public sealed class ProjectBuildService
         if (outcome.Succeeded)
         {
             outcome = await _processRunner.RunAsync(new ProcessRunRequest(
-                gitPath, new[] { "-C", cloneDir, "checkout", "--detach", commitSha }, cloneDir, env, LocalGitTimeout), ct)
+                gitPath, new[] { "-C", cloneDir, "checkout", "--detach", commitSha }, cloneDir, env,
+                // The clone is blobless, so the checkout downloads the commit's files:
+                // it gets the clone's limit, not the local one.
+                BuildCloneTimeout()), ct)
                 .ConfigureAwait(false);
             if (outcome.Succeeded)
             {
