@@ -18,10 +18,32 @@ namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 /// restart interrupted. The in-memory dedupe keyed on delivery id stops the scheduler
 /// and a double-click from enqueuing the same delivery twice.
 /// </para>
+/// <para>
+/// Every caller uses <see cref="JobQueue{TJob,TKey}.TryEnqueue"/>: a due row stays
+/// <c>scheduled</c> in the database, so one that doesn't fit is picked up by the
+/// scheduler's next sweep, and neither a request nor the sweep ever waits on a full
+/// queue (#1139). Several workers drain it, so it also holds the per-environment gate
+/// that keeps two of them from deploying to one environment at once.
+/// </para>
 /// </summary>
 public sealed class DeliveryQueue : JobQueue<DeliveryJob, int>
 {
-    public DeliveryQueue() : base(capacity: 64, keySelector: job => job.DeliveryId) { }
+    private readonly KeyedGate<(string Tenant, string Environment)> _environments = new();
+
+    public DeliveryQueue() : base(capacity: 64, keySelector: job => job.DeliveryId, singleReader: false) { }
+
+    /// <summary>
+    /// Claims the environment for one deployment, or null when another deployment to it is
+    /// running in this process. Disposing the result frees it. The environment is the one in
+    /// Business Central: two solutions connected to the same tenant share it, and the name is
+    /// matched ignoring case, as the environment list is. A solution with no tenant yet keys
+    /// on itself.
+    /// </summary>
+    public IDisposable? TryEnterEnvironment(Guid? tenantId, int projectId, string environmentName)
+    {
+        var key = (tenantId?.ToString() ?? $"solution:{projectId}", environmentName.ToUpperInvariant());
+        return _environments.TryEnter(key);
+    }
 }
 
 /// <summary>

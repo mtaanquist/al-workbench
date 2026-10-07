@@ -3,8 +3,9 @@ using System.Threading.Channels;
 namespace ALDevToolbox.Services.Workers;
 
 /// <summary>
-/// Drains a <see cref="JobQueue{TJob}"/> one job at a time (the channel is
-/// single-reader) and runs each job off the request thread. Subclasses supply only
+/// Drains a <see cref="JobQueue{TJob}"/> one job at a time and runs each job off the
+/// request thread; work that runs side by side registers several of these over one
+/// multi-reader queue (the build and delivery workers). Subclasses supply only
 /// <see cref="RunJobAsync"/>; this base owns the loop, the heartbeat bracket, the
 /// last-resort try/catch that keeps one bad job from killing the worker, and the
 /// in-flight release in <c>finally</c>.
