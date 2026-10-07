@@ -51,6 +51,9 @@ public static class BackgroundWorkerRegistration
         // no solution tracks yet, so the Solutions page can offer them without probing
         // GitHub on a page render. See .design/github-integration-phase2.md.
         services.AddHostedService<ALDevToolbox.Services.GitHub.RepositoryDiscoveryScheduler>();
+        // Asks GitHub to resend webhook deliveries the endpoint refused or never
+        // answered, and closes pull-request builds a restart cut short (#1121).
+        services.AddHostedService<ALDevToolbox.Services.GitHub.GitHubWebhookRecoveryScheduler>();
         // Periodic prune of old login_attempts rows so the table doesn't grow
         // unbounded (the rate-limiter only reads a ~15-minute window). See issue #403.
         services.AddHostedService<ALDevToolbox.Services.Account.LoginAttemptPruneScheduler>();

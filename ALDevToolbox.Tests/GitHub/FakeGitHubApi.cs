@@ -84,6 +84,25 @@ public sealed class FakeGitHubApi : HttpMessageHandler
         return this;
     }
 
+    /// <summary>
+    /// Registers a reply computed from the request that may also carry headers - a
+    /// <c>Link</c> header, say, which is how GitHub's cursor-paged routes name the
+    /// next page.
+    /// </summary>
+    public FakeGitHubApi OnWithHeaders(
+        HttpMethod method, string path,
+        Func<HttpRequestMessage, (HttpStatusCode Status, string Json, (string Name, string Value)[] Headers)> reply)
+    {
+        _routes.Add((method.Method, Normalise(path), request =>
+        {
+            var (status, json, headers) = reply(request);
+            var response = Respond(status, json);
+            foreach (var (name, value) in headers) response.Headers.TryAddWithoutValidation(name, value);
+            return response;
+        }));
+        return this;
+    }
+
     /// <summary>Registers a reply carrying raw bytes - a Release asset, say, rather than JSON.</summary>
     public FakeGitHubApi OnBytes(HttpMethod method, string path, byte[] content)
     {

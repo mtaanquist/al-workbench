@@ -95,7 +95,8 @@ public sealed class GitHubCheckRunService
 
     /// <summary>
     /// Completes an open check run as <c>neutral</c> when the build behind it never
-    /// started, so the pull request is not left with a tick spinning forever.
+    /// started, or never finished because the workbench restarted under it (#1121),
+    /// so the pull request is not left with a tick spinning forever.
     ///
     /// <para><c>neutral</c> rather than <c>failure</c> for the same reason as
     /// everywhere else here: nothing was learned about the code. Best-effort, like
@@ -107,7 +108,8 @@ public sealed class GitHubCheckRunService
         string repositoryFullName,
         long checkRunId,
         string reason,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string title = "The build could not be started")
     {
         var parts = repositoryFullName.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length != 2) return;
@@ -119,7 +121,7 @@ public sealed class GitHubCheckRunService
                 token, parts[0], parts[1], checkRunId,
                 status: "completed",
                 conclusion: GitHubCheckConclusion.Neutral,
-                title: "The build could not be started",
+                title: title,
                 summary: reason,
                 ct: ct);
         }
