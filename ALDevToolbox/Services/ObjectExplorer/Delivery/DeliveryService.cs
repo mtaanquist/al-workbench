@@ -1695,7 +1695,7 @@ public sealed class DeliveryService
         // deployment steps aside without taking the gate from the earlier one it waits for.
         async Task<bool> EarlierOneWaitsAsync()
         {
-            var dueBy = DateTime.UtcNow + ClaimEarlySlack;
+            var dueBy = _clock.GetUtcNow().UtcDateTime + ClaimEarlySlack;
             return await _db.OeProjectDeliveries.AsNoTracking().AnyAsync(d =>
                 d.ProjectId == target.ProjectId && d.EnvironmentName == target.EnvironmentName
                 && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy
@@ -1724,7 +1724,7 @@ public sealed class DeliveryService
             return false;
         }
 
-        var claimedAt = DateTime.UtcNow;
+        var claimedAt = _clock.GetUtcNow().UtcDateTime;
         var claimBy = claimedAt + ClaimEarlySlack;
         var runAs = _orgContext.CurrentUserId;
         var claimed = await _db.OeProjectDeliveries
@@ -2591,7 +2591,7 @@ public sealed class DeliveryService
 
     private async Task FailAsync(OeProjectDelivery delivery, StringBuilder log, string message, CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         delivery.Status = ProjectDeliveryStatus.Failed;
         delivery.FailureMessage = message;
         delivery.FinishedAt = now;

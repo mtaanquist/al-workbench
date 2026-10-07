@@ -1,3 +1,6 @@
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Services.ObjectExplorer.Bc;
+using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using ALDevToolbox.Services;
 using ALDevToolbox.Tests.Infrastructure;
@@ -155,6 +158,52 @@ public sealed class DeliveryQueueTests
         // ...and the finally cleared both flags, so neither delivery id is wedged.
         (await queue.EnqueueAsync(Job(1))).Should().BeTrue("a failed delivery must be re-runnable");
         (await queue.EnqueueAsync(Job(2))).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A deployment cut off by a shutdown is failed, and its person hears about it before
+    /// the process goes: the check after the restart only fails deployments still in
+    /// progress, so nothing else would tell them (#1179).
+    /// </summary>
+    [Fact]
+    public async Task A_deployment_stopped_by_shutdown_is_still_announced()
+    {
+        using var db = new TestDb();
+        var seed = await DeliveryHost.SeedAsync(db, DateTime.UtcNow);
+        var deliveryId = await DeliveryHost.AddDeliveryAsync(db, seed, ProjectDeliveryStatus.Scheduled, DateTime.UtcNow.AddMinutes(-1));
+        var tokens = new TokensUntilShutdown();
+        var queue = new DeliveryQueue();
+        await using var services = DeliveryHost.Build(db, TimeProvider.System, () => tokens, queue);
+        var worker = new DeliveryWorker(1, queue, services, new RecordingLogger(), new WorkerHeartbeatRegistry());
+        // Queued by the scheduler: nobody started it, so it runs as nobody and is
+        // announced to the pipeline's creator.
+        queue.TryEnqueue(new DeliveryJob(deliveryId,
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: false))).Should().BeTrue();
+
+        await worker.StartAsync(CancellationToken.None);
+        await tokens.Asked.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        await worker.StopAsync(CancellationToken.None);
+
+        (await DeliveryHost.StatusAsync(db, deliveryId)).Should().Be(ProjectDeliveryStatus.Failed);
+        await using var ctx = db.NewContext();
+        var told = await ctx.UserNotifications.AsNoTracking().Where(n => n.UserId == seed.PipelineCreatorId).ToListAsync();
+        told.Should().ContainSingle().Which.Title.Should().StartWith("Deployment failed");
+    }
+
+    /// <summary>Holds the run at its first call to Business Central until the worker is stopped.</summary>
+    private sealed class TokensUntilShutdown : IDeliveryTokenSource
+    {
+        public TaskCompletionSource Asked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, CancellationToken ct = default)
+        {
+            Asked.TrySetResult();
+            await Task.Delay(Timeout.Infinite, ct);
+            throw new InvalidOperationException("Unreachable.");
+        }
+
+        public Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, bool forceRefresh, CancellationToken ct = default) =>
+            AcquireDeliveryContextAsync(projectId, ct);
     }
 
     /// <summary>Captures the worker's error log so a drained-past-a-failure can be awaited deterministically.</summary>
