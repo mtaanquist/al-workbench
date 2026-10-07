@@ -93,7 +93,7 @@ public sealed class PipelineService
     public async Task<int> CreatePipelineAsync(PipelineInput input, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var (name, nameIsCustom, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input, existingId: null, ct);
+        var (name, nameIsCustom, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input, existing: null, ct);
 
         var now = DateTime.UtcNow;
         var pipeline = new OePipeline
@@ -127,7 +127,9 @@ public sealed class PipelineService
     /// Updates a pipeline's extension selection, publishing target, branch, nightly
     /// preview check and building on push, and the name that follows from them. Saving with the check or
     /// building on push on makes the caller the person those builds run as. A new name
-    /// carries through to the deployment pipelines named after this one.
+    /// carries through to the deployment pipelines named after this one. A typed name
+    /// left as it was while the branch or extensions change goes back to the generated
+    /// one (#1135).
     /// </summary>
     public async Task UpdatePipelineAsync(int id, PipelineInput input, CancellationToken ct = default)
     {
@@ -138,7 +140,7 @@ public sealed class PipelineService
 
         // Validate against the pipeline's own project (input.ProjectId is ignored on
         // update — a pipeline can't move between projects).
-        var (name, nameIsCustom, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
+        var (name, nameIsCustom, selectionJson, releaseRepositoryId, branch) = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existing: pipeline, ct);
 
         var oldName = pipeline.Name;
         pipeline.Name = name;
@@ -286,11 +288,14 @@ public sealed class PipelineService
     /// and the per-project name uniqueness rule. Returns the name (generated from the
     /// branch and selection, unless the person typed one) and the selection serialised
     /// to JSON (null = build everything). Throws <see cref="PlanValidationException"/>
-    /// with field-keyed errors otherwise.
+    /// with field-keyed errors otherwise. <paramref name="existing"/> is the pipeline
+    /// being updated (null on create), whose typed name is dropped when the branch or
+    /// selection changes under it (#1135).
     /// </summary>
     private async Task<(string Name, bool NameIsCustom, string? SelectionJson, int? GithubReleaseRepositoryId, string? Branch)> ValidateAsync(
-        PipelineInput input, int? existingId, CancellationToken ct)
+        PipelineInput input, OePipeline? existing, CancellationToken ct)
     {
+        var existingId = existing?.Id;
         var errors = new Dictionary<string, string>();
 
         // The parent project must exist in this org and be manageable by the user.
@@ -339,6 +344,22 @@ public sealed class PipelineService
             branch, input.SelectedAppIds, ExtensionNames(owner.DiscoveredExtensionsJson));
         var custom = string.IsNullOrWhiteSpace(input.CustomName) ? null : input.CustomName.Trim();
         if (custom is not null && string.Equals(custom, generated, StringComparison.Ordinal)) custom = null;
+        // A typed name was given for the branch and extensions it was typed under. A
+        // save that changes either and leaves the typed name exactly as it was goes back
+        // to the generated name (#1135); a name typed afresh in the same save is kept.
+        // When the generated name is taken the typed one stays, since asking for a name
+        // here would only be answered by the same typed name and dropped again.
+        if (custom is not null
+            && existing is { NameIsCustom: true }
+            && string.Equals(custom, existing.Name, StringComparison.Ordinal)
+            && !errors.ContainsKey("Branch")
+            && (!string.Equals(branch, existing.Branch, StringComparison.Ordinal)
+                || !SameSelection(input.SelectedAppIds, existing.RequestedAppIdsJson))
+            && generated.Length <= PipelineNames.MaxLength
+            && !await NameTakenAsync(input.ProjectId, existing.Id, generated, ct))
+        {
+            custom = null;
+        }
         var name = custom ?? generated;
         if (name.Length > PipelineNames.MaxLength)
         {
@@ -348,12 +369,7 @@ public sealed class PipelineService
         {
             // Per-project name uniqueness among active rows (the DB enforces it via a
             // case-insensitive lower(name) index too); pre-check for a friendly error.
-            var clash = await _db.OePipelines.AsNoTracking()
-                .AnyAsync(p => p.DeletedAt == null
-                               && p.ProjectId == input.ProjectId
-                               && p.Id != (existingId ?? 0)
-                               && p.Name.ToLower() == name.ToLower(), ct);
-            if (clash) errors["Name"] = NameTakenMessage(name);
+            if (await NameTakenAsync(input.ProjectId, existingId ?? 0, name, ct)) errors["Name"] = NameTakenMessage(name);
         }
 
         if (errors.Count > 0) throw new PlanValidationException(errors);
@@ -363,6 +379,112 @@ public sealed class PipelineService
             ? JsonSerializer.Serialize(input.SelectedAppIds)
             : null;
         return (name, custom is not null, selectionJson, releaseRepositoryId, branch);
+    }
+
+    /// <summary>
+    /// Whether another active pipeline in the project already has <paramref name="name"/>,
+    /// compared the way the case-insensitive unique index compares it.
+    /// </summary>
+    private Task<bool> NameTakenAsync(int projectId, int exceptId, string name, CancellationToken ct) =>
+        _db.OePipelines.AsNoTracking()
+            .AnyAsync(p => p.DeletedAt == null
+                           && p.ProjectId == projectId
+                           && p.Id != exceptId
+                           && p.Name.ToLower() == name.ToLower(), ct);
+
+    /// <summary>
+    /// Whether <paramref name="selected"/> picks the same extensions as the stored
+    /// <paramref name="storedJson"/>, ignoring order and how the ids are written.
+    /// Null or empty on either side means every extension.
+    /// </summary>
+    internal static bool SameSelection(IReadOnlyCollection<string>? selected, string? storedJson)
+    {
+        var before = Normalized(ReadSelection(storedJson));
+        var after = Normalized(selected);
+        return before.SetEquals(after);
+
+        static HashSet<string> Normalized(IEnumerable<string>? ids) =>
+            (ids ?? []).Where(id => !string.IsNullOrWhiteSpace(id))
+                .Select(ProjectBuildService.NormalizeAppId)
+                .ToHashSet(StringComparer.Ordinal);
+    }
+
+    /// <summary>The stored extension selection; null (every extension) when unset or unreadable.</summary>
+    private static List<string>? ReadSelection(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(json);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Gives the solution's build pipelines whose names were generated the name their
+    /// branch and extensions now call for, and carries a new name through to the
+    /// deployment pipelines named after them. Run after discovery refreshes the
+    /// discovered-extensions cache, since a one-extension pipeline is named after its
+    /// extension and the extension may have been renamed (#1135). A typed name is left
+    /// alone. A pipeline whose new name another pipeline already has keeps its old one
+    /// and says so in the log: this runs in the background, where there is nobody to
+    /// ask for a name. Has no access check: the caller (discovery) owns that.
+    /// </summary>
+    public async Task RefreshGeneratedNamesAsync(int projectId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var discoveredJson = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == projectId && p.DeletedAt == null)
+            .Select(p => p.DiscoveredExtensionsJson)
+            .FirstOrDefaultAsync(ct);
+        var extensionNames = ExtensionNames(discoveredJson);
+
+        var pipelines = await _db.OePipelines
+            .Where(p => p.ProjectId == projectId && p.DeletedAt == null)
+            .OrderBy(p => p.Id)
+            .ToListAsync(ct);
+        // Old names stay in the set, as in RenameDeploymentPipelinesAsync, so no two
+        // pipelines swap names in one save.
+        var taken = pipelines.Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var now = DateTime.UtcNow;
+        var renamed = 0;
+        foreach (var pipeline in pipelines)
+        {
+            if (pipeline.NameIsCustom) continue;
+            var generated = PipelineNames.ForBuildPipeline(
+                pipeline.Branch, ReadSelection(pipeline.RequestedAppIdsJson), extensionNames);
+            if (string.Equals(generated, pipeline.Name, StringComparison.Ordinal)) continue;
+            if (!string.Equals(generated, pipeline.Name, StringComparison.OrdinalIgnoreCase) && taken.Contains(generated))
+            {
+                _logger.LogWarning(
+                    "Pipeline {PipelineId} keeps its name {Name}: {NewName} is taken in project {ProjectId}.",
+                    pipeline.Id, pipeline.Name, generated, projectId);
+                continue;
+            }
+            taken.Add(generated);
+            _logger.LogInformation("Renaming pipeline {PipelineId} from {Name} to {NewName} after its extensions changed.",
+                pipeline.Id, pipeline.Name, generated);
+            pipeline.Name = generated;
+            pipeline.UpdatedAt = now;
+            await RenameDeploymentPipelinesAsync(pipeline, ct);
+            renamed++;
+        }
+        if (renamed == 0) return;
+
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
+        {
+            // A save that raced this one took a name first. The names are only cosmetic
+            // here, so the next discovery tries again rather than failing this one.
+            _db.ChangeTracker.Clear();
+            _logger.LogWarning(ex, "Pipeline names in project {ProjectId} were left as they were: a name was taken while renaming.", projectId);
+        }
     }
 
     /// <summary>

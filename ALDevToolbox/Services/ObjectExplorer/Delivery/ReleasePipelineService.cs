@@ -323,7 +323,7 @@ public sealed class ReleasePipelineService
     public async Task<int> CreateReleasePipelineAsync(ReleasePipelineInput input, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var v = await ValidateAsync(input, existingId: null, ct);
+        var v = await ValidateAsync(input, existing: null, ct);
 
         if (v.DeployWithoutApproval) await EnsureStepUpToDeployWithoutApprovalAsync(ct);
 
@@ -366,7 +366,7 @@ public sealed class ReleasePipelineService
             ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
 
         // A deployment pipeline can't move between projects; validate against its own.
-        var v = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
+        var v = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existing: pipeline, ct);
         if (v.DeployWithoutApproval) await EnsureStepUpToDeployWithoutApprovalAsync(ct);
 
         pipeline.Name = v.Name;
@@ -579,10 +579,13 @@ public sealed class ReleasePipelineService
     /// environment (both must belong to the same project, and the environment's status
     /// must not block installs), and the deployment schedule and schema-sync mode. Returns the normalised values. Throws
     /// <see cref="PlanValidationException"/> with field-keyed errors otherwise.
+    /// <paramref name="existing"/> is the pipeline being updated (null on create), whose
+    /// typed name is dropped when its source or environment changes under it (#1135).
     /// </summary>
     private async Task<ValidatedReleasePipeline> ValidateAsync(
-        ReleasePipelineInput input, int? existingId, CancellationToken ct)
+        ReleasePipelineInput input, OeReleasePipeline? existing, CancellationToken ct)
     {
+        var existingId = existing?.Id;
         // The parent project must exist in this org and be manageable by the user.
         var owner = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == input.ProjectId && p.DeletedAt == null)
@@ -717,6 +720,23 @@ public sealed class ReleasePipelineService
                 ? PipelineNames.ForDeploymentFromBuild(sourceName, environment.Name)
                 : PipelineNames.ForDeploymentFromReleases(sourceName, environment.Name);
             if (custom is not null && string.Equals(custom, generated, StringComparison.Ordinal)) custom = null;
+            // A typed name was given for the source and environment it was typed under.
+            // A save that changes either and leaves the typed name exactly as it was goes
+            // back to the generated name (#1135); a name typed afresh in the same save is
+            // kept. When the generated name is taken the typed one stays, since asking
+            // for a name would only be answered by the same typed name.
+            if (custom is not null
+                && existing is { NameIsCustom: true }
+                && string.Equals(custom, existing.Name, StringComparison.Ordinal)
+                && (artifactSource != existing.ArtifactSource
+                    || buildPipelineId != existing.BuildPipelineId
+                    || releaseRepositoryId != existing.GithubReleaseRepositoryId
+                    || input.ProjectEnvironmentId != existing.ProjectEnvironmentId)
+                && generated.Length <= PipelineNames.MaxLength
+                && !await NameTakenAsync(input.ProjectId, existing.Id, generated, ct))
+            {
+                custom = null;
+            }
             name = custom ?? generated;
         }
         if (name is null)
@@ -729,12 +749,7 @@ public sealed class ReleasePipelineService
         }
         else
         {
-            var clash = await _db.OeReleasePipelines.AsNoTracking()
-                .AnyAsync(r => r.DeletedAt == null
-                               && r.ProjectId == input.ProjectId
-                               && r.Id != (existingId ?? 0)
-                               && r.Name.ToLower() == name.ToLower(), ct);
-            if (clash)
+            if (await NameTakenAsync(input.ProjectId, existingId ?? 0, name, ct))
             {
                 errors["Name"] = $"Another deployment pipeline in this solution is already called '{name}'. Type a different name for this one.";
             }
@@ -758,6 +773,17 @@ public sealed class ReleasePipelineService
             name!, custom is not null, deploymentSchedule, schemaSyncMode, artifactSource, buildPipelineId, releaseRepositoryId,
             prepare, deployWithoutApproval, restrictBranch, allowedBranch);
     }
+
+    /// <summary>
+    /// Whether another active deployment pipeline in the project already has
+    /// <paramref name="name"/>, compared the way the case-insensitive unique index compares it.
+    /// </summary>
+    private Task<bool> NameTakenAsync(int projectId, int exceptId, string name, CancellationToken ct) =>
+        _db.OeReleasePipelines.AsNoTracking()
+            .AnyAsync(r => r.DeletedAt == null
+                           && r.ProjectId == projectId
+                           && r.Id != exceptId
+                           && r.Name.ToLower() == name.ToLower(), ct);
 
     /// <summary>The normalised values a validated deployment-pipeline input settles on.</summary>
     private sealed record ValidatedReleasePipeline(

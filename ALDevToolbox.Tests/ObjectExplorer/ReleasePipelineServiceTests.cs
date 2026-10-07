@@ -129,6 +129,84 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Changing_the_environment_drops_a_typed_name_left_as_it_was()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId, "main");
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var test = await SeedEnvironmentAsync(ctx, projectId, "Test");
+        var svc = NewService(ctx);
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, "main - hotfixes", buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await svc.UpdateReleasePipelineAsync(id, new ReleasePipelineInput(projectId, "main - hotfixes", buildId, test, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.Name.Should().Be("main to Test");
+        rp.NameIsCustom.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Changing_the_source_drops_a_typed_name_left_as_it_was()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var main = await SeedBuildPipelineAsync(ctx, projectId, "main");
+        var release = await SeedBuildPipelineAsync(ctx, projectId, "release/26");
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var svc = NewService(ctx);
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, "main - hotfixes", main, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await svc.UpdateReleasePipelineAsync(id, new ReleasePipelineInput(projectId, "main - hotfixes", release, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.Name.Should().Be("release/26 to Production");
+        rp.NameIsCustom.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_name_typed_in_the_same_save_as_an_environment_change_is_kept()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId, "main");
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var test = await SeedEnvironmentAsync(ctx, projectId, "Test");
+        var svc = NewService(ctx);
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, "main - hotfixes", buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await svc.UpdateReleasePipelineAsync(id, new ReleasePipelineInput(projectId, "main - hotfixes to Test", buildId, test, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.Name.Should().Be("main - hotfixes to Test");
+        rp.NameIsCustom.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_typed_name_stays_when_the_generated_name_for_the_new_environment_is_taken()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId, "main");
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var test = await SeedEnvironmentAsync(ctx, projectId, "Test");
+        var svc = NewService(ctx);
+        await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, null, buildId, test, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, "main - hotfixes", buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await svc.UpdateReleasePipelineAsync(id, new ReleasePipelineInput(projectId, "main - hotfixes", buildId, test, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.Name.Should().Be("main - hotfixes");
+        rp.NameIsCustom.Should().BeTrue();
+        rp.ProjectEnvironmentId.Should().Be(test);
+    }
+
+    [Fact]
     public async Task CreateReleasePipelineAsync_rejects_a_duplicate_name_in_the_same_project_case_insensitively()
     {
         await using var ctx = _db.NewContext();
