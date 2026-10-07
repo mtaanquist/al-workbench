@@ -407,7 +407,10 @@
                                         {
                                             <FieldError Message="@_nameError" />
                                         }
-                                        <small class="field__hint" id="rpe-name-hint">If you change where the apps come from or the target environment, this name is replaced with the automatic one. Leave it blank to use the automatic name now.</small>
+                                        else
+                                        {
+                                            <small class="field__hint" id="rpe-name-hint">If you change where the apps come from or the target environment, this name is replaced with the automatic one. Leave it blank to use the automatic name now.</small>
+                                        }
                                     </div>
                                 }
                                 else

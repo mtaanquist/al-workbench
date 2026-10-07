@@ -238,6 +238,66 @@ public sealed class PipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task An_extension_missing_from_a_partial_discovery_does_not_rename_its_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, Discovered());
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, null, [SalesId], Branch: "main"));
+
+        // The repository holding CRONUS Sales failed to clone this time.
+        await RediscoverAsync(projectId, JsonSerializer.Serialize(new[]
+        {
+            new DiscoveredExtension(BaseId, "CRONUS Base", "CRONUS", "1.0.0.0", "", ""),
+        }));
+
+        (await _db.NewContext().OePipelines.SingleAsync(p => p.Id == id)).Name.Should().Be("main (CRONUS Sales)");
+    }
+
+    [Fact]
+    public async Task Refreshing_a_deleted_or_undiscovered_solution_renames_nothing()
+    {
+        await using var ctx = _db.NewContext();
+        var deletedId = await SeedProjectAsync(ctx, Discovered());
+        var deletedPipeline = await NewService(ctx).CreatePipelineAsync(new PipelineInput(deletedId, null, [SalesId], Branch: "main"));
+        await ctx.OeProjects.Where(p => p.Id == deletedId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        var undiscoveredId = await SeedProjectAsync(ctx, Discovered());
+        var undiscoveredPipeline = await NewService(ctx).CreatePipelineAsync(new PipelineInput(undiscoveredId, null, [SalesId], Branch: "main"));
+        await ctx.OeProjects.Where(p => p.Id == undiscoveredId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DiscoveredExtensionsJson, (string?)null));
+
+        await NewService(_db.NewContext()).RefreshGeneratedNamesAsync(deletedId);
+        await NewService(_db.NewContext()).RefreshGeneratedNamesAsync(undiscoveredId);
+
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == deletedPipeline)).Name.Should().Be("main (CRONUS Sales)");
+        (await read.OePipelines.SingleAsync(p => p.Id == undiscoveredPipeline)).Name.Should().Be("main (CRONUS Sales)");
+    }
+
+    [Fact]
+    public async Task Discovery_renames_a_build_pipeline_but_leaves_a_typed_deployment_name_and_a_deleted_pipeline_alone()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, Discovered());
+        var svc = NewService(ctx);
+        var buildId = await svc.CreatePipelineAsync(new PipelineInput(projectId, null, [SalesId], Branch: "main"));
+        var deletedId = await svc.CreatePipelineAsync(new PipelineInput(projectId, null, [SalesId], Branch: "test"));
+        await ctx.OePipelines.Where(p => p.Id == deletedId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var deployments = new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
+        var typed = await deployments.CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, "Sales hotfixes", buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await RediscoverAsync(projectId, Discovered(salesName: "CRONUS Sales and Marketing"));
+
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == buildId)).Name.Should().Be("main (CRONUS Sales and Marketing)");
+        (await read.OePipelines.IgnoreQueryFilters().SingleAsync(p => p.Id == deletedId)).Name.Should().Be("test (CRONUS Sales)");
+        (await read.OeReleasePipelines.SingleAsync(r => r.Id == typed)).Name.Should().Be("Sales hotfixes");
+    }
+
+    [Fact]
     public async Task Changing_the_branch_drops_a_typed_name_left_as_it_was()
     {
         await using var ctx = _db.NewContext();

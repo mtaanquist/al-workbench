@@ -5,6 +5,7 @@ using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 
@@ -436,54 +437,86 @@ public sealed class PipelineService
     public async Task RefreshGeneratedNamesAsync(int projectId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var discoveredJson = await _db.OeProjects.AsNoTracking()
+        // A solution deleted since the job was queued, or one never discovered, has no
+        // extension names to go by; renaming from nothing would only say "1 extension".
+        var project = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == projectId && p.DeletedAt == null)
-            .Select(p => p.DiscoveredExtensionsJson)
+            .Select(p => new { p.DiscoveredExtensionsJson })
             .FirstOrDefaultAsync(ct);
-        var extensionNames = ExtensionNames(discoveredJson);
+        if (project?.DiscoveredExtensionsJson is null) return;
+        var extensionNames = ExtensionNames(project.DiscoveredExtensionsJson);
 
-        var pipelines = await _db.OePipelines
-            .Where(p => p.ProjectId == projectId && p.DeletedAt == null)
+        var pipelines = await _db.OePipelines.AsNoTracking()
+            .Where(p => p.ProjectId == projectId && p.DeletedAt == null && !p.NameIsCustom)
             .OrderBy(p => p.Id)
             .ToListAsync(ct);
         // Old names stay in the set, as in RenameDeploymentPipelinesAsync, so no two
-        // pipelines swap names in one save.
-        var taken = pipelines.Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var now = DateTime.UtcNow;
-        var renamed = 0;
+        // pipelines swap names in one pass.
+        var taken = await _db.OePipelines.AsNoTracking()
+            .Where(p => p.ProjectId == projectId && p.DeletedAt == null)
+            .Select(p => p.Name)
+            .ToListAsync(ct);
+        var takenSet = taken.ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var pipeline in pipelines)
         {
-            if (pipeline.NameIsCustom) continue;
-            var generated = PipelineNames.ForBuildPipeline(
-                pipeline.Branch, ReadSelection(pipeline.RequestedAppIdsJson), extensionNames);
+            var selection = ReadSelection(pipeline.RequestedAppIdsJson);
+            // Only a one-extension pipeline is named after discovery. When its extension is
+            // missing - a repository that failed to clone this time - it keeps its name
+            // rather than flipping to "1 extension" until the next discovery.
+            if (selection is not { Count: 1 }
+                || !extensionNames.ContainsKey(ProjectBuildService.NormalizeAppId(selection.First())))
+            {
+                continue;
+            }
+            var generated = PipelineNames.ForBuildPipeline(pipeline.Branch, selection, extensionNames);
             if (string.Equals(generated, pipeline.Name, StringComparison.Ordinal)) continue;
-            if (!string.Equals(generated, pipeline.Name, StringComparison.OrdinalIgnoreCase) && taken.Contains(generated))
+            if (!string.Equals(generated, pipeline.Name, StringComparison.OrdinalIgnoreCase) && takenSet.Contains(generated))
             {
                 _logger.LogWarning(
                     "Pipeline {PipelineId} keeps its name {Name}: {NewName} is taken in project {ProjectId}.",
                     pipeline.Id, pipeline.Name, generated, projectId);
                 continue;
             }
-            taken.Add(generated);
-            _logger.LogInformation("Renaming pipeline {PipelineId} from {Name} to {NewName} after its extensions changed.",
+
+            // Only if nobody saved the pipeline since it was read: a save in between has
+            // already named it from newer settings, or given it a name of its own.
+            var now = DateTime.UtcNow;
+            int changed;
+            try
+            {
+                changed = await _db.OePipelines
+                    .Where(p => p.Id == pipeline.Id && p.DeletedAt == null && !p.NameIsCustom
+                                && p.Name == pipeline.Name && p.Branch == pipeline.Branch
+                                && p.RequestedAppIdsJson == pipeline.RequestedAppIdsJson)
+                    .ExecuteUpdateAsync(u => u
+                        .SetProperty(p => p.Name, generated)
+                        .SetProperty(p => p.UpdatedAt, now), ct);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+            {
+                // A save that raced this one took the name first. The names are only
+                // cosmetic here, so the next discovery tries again.
+                _logger.LogWarning(ex, "Pipeline {PipelineId} keeps its name {Name}: {NewName} was taken while renaming.",
+                    pipeline.Id, pipeline.Name, generated);
+                continue;
+            }
+            if (changed == 0) continue;
+
+            takenSet.Add(generated);
+            _logger.LogInformation("Renamed pipeline {PipelineId} from {Name} to {NewName} after its extensions changed.",
                 pipeline.Id, pipeline.Name, generated);
             pipeline.Name = generated;
             pipeline.UpdatedAt = now;
             await RenameDeploymentPipelinesAsync(pipeline, ct);
-            renamed++;
-        }
-        if (renamed == 0) return;
-
-        try
-        {
-            await _db.SaveChangesAsync(ct);
-        }
-        catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
-        {
-            // A save that raced this one took a name first. The names are only cosmetic
-            // here, so the next discovery tries again rather than failing this one.
-            _db.ChangeTracker.Clear();
-            _logger.LogWarning(ex, "Pipeline names in project {ProjectId} were left as they were: a name was taken while renaming.", projectId);
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
+            {
+                _db.ChangeTracker.Clear();
+                _logger.LogWarning(ex, "Deployment pipelines named after pipeline {PipelineId} kept their names: a name was taken while renaming.", pipeline.Id);
+            }
         }
     }
 
