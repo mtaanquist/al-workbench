@@ -126,12 +126,17 @@
 
     private string ZoneName => Zone.Zone.Id == TimeZoneInfo.Utc.Id ? "UTC" : Zone.Zone.Id;
 
-    /// <summary>Opens the dialog empty, with the newest offered version picked.</summary>
-    public async Task OpenAsync()
+    /// <summary>
+    /// Opens the dialog empty, with the newest offered version picked. The page passes the
+    /// versions it holds now: when it has just read them for this click, the
+    /// <see cref="Versions"/> parameter still holds the earlier list until the page redraws.
+    /// </summary>
+    public async Task OpenAsync(IReadOnlyList<string>? versions = null)
     {
         await Zone.EnsureLoadedAsync();
+        versions ??= Versions;
         _name = string.Empty;
-        _target = Versions.Count > 0 ? Versions[0] : string.Empty;
+        _target = versions.Count > 0 ? versions[0] : string.Empty;
         _date = string.Empty;
         _time = string.Empty;
         _note = string.Empty;

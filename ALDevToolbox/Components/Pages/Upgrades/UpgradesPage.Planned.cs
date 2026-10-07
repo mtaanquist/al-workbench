@@ -265,7 +265,7 @@ public partial class UpgradesPage
         if (_newUpgrade is null) return;
         // The fleet's offered versions, read now if this view never drew the fleet.
         if (_fleetCount is null) await CountFleetAsync();
-        await _newUpgrade.OpenAsync();
+        await _newUpgrade.OpenAsync(_offeredVersions);
     }
 
     /// <summary>The upgrade exists; its page is where environments go on it and the slot is refined.</summary>
