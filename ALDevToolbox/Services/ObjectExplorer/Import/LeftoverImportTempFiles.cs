@@ -9,9 +9,11 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// <c>/tmp</c>: build clones and downloaded artifact or DVD zips run to about 1 GB each.
 ///
 /// <para>
-/// Only safe before the workers start, which is when <c>StartupTasks</c> calls it: every
-/// entry with these prefixes belongs to a job of the previous process. Uploads staged by
-/// a request are included, because the startup reconcile fails their jobs anyway.
+/// <c>StartupTasks</c> calls it before the workers start, and it only removes entries
+/// last written before this process started, so it can never take one from a job of this
+/// process (or from another process sharing the temp folder, such as a test run booting
+/// several hosts). Uploads staged by a request are included, because the startup
+/// reconcile fails their jobs anyway.
 /// </para>
 /// </summary>
 internal static class LeftoverImportTempFiles
@@ -26,8 +28,11 @@ internal static class LeftoverImportTempFiles
         ReleaseImportRequestService.CalTxtTempPrefix,
     ];
 
-    /// <summary>Deletes every leftover under <paramref name="tempRoot"/>. Returns how many entries went. Never throws.</summary>
-    public static int Sweep(string tempRoot, ILogger logger)
+    /// <summary>
+    /// Deletes every leftover under <paramref name="tempRoot"/> last written before
+    /// <paramref name="startedAtUtc"/>. Returns how many entries went. Never throws.
+    /// </summary>
+    public static int Sweep(string tempRoot, DateTime startedAtUtc, ILogger logger)
     {
         var removed = 0;
         IEnumerable<string> entries;
@@ -47,6 +52,7 @@ internal static class LeftoverImportTempFiles
             if (!Prefixes.Any(p => name.StartsWith(p, StringComparison.Ordinal))) continue;
             try
             {
+                if (Directory.GetLastWriteTimeUtc(path) >= startedAtUtc) continue;
                 // A link is removed as itself, never followed: File.Delete unlinks it, and
                 // Directory.Delete does not descend into linked folders.
                 if (Directory.Exists(path) && new DirectoryInfo(path).LinkTarget is null)

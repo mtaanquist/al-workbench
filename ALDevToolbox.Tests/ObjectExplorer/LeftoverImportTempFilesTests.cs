@@ -12,6 +12,9 @@ public sealed class LeftoverImportTempFilesTests : IDisposable
 {
     private readonly string _root = Directory.CreateTempSubdirectory("leftover-sweep-").FullName;
 
+    /// <summary>A start time after everything the tests write, so every entry counts as left over.</summary>
+    private static readonly DateTime Now = DateTime.UtcNow.AddHours(1);
+
     [Fact]
     public void Removes_leftover_build_folders_and_downloads()
     {
@@ -24,7 +27,7 @@ public sealed class LeftoverImportTempFilesTests : IDisposable
             File.WriteAllText(Path.Combine(_root, file), "x");
         }
 
-        var removed = LeftoverImportTempFiles.Sweep(_root, NullLogger.Instance);
+        var removed = LeftoverImportTempFiles.Sweep(_root, Now, NullLogger.Instance);
 
         removed.Should().Be(7);
         Directory.EnumerateFileSystemEntries(_root).Should().BeEmpty();
@@ -37,7 +40,7 @@ public sealed class LeftoverImportTempFilesTests : IDisposable
         File.WriteAllText(Path.Combine(_root, "someone-else.zip"), "x");
         File.WriteAllText(Path.Combine(_root, "notoe-build-1"), "x");
 
-        LeftoverImportTempFiles.Sweep(_root, NullLogger.Instance).Should().Be(0);
+        LeftoverImportTempFiles.Sweep(_root, Now, NullLogger.Instance).Should().Be(0);
 
         Directory.EnumerateFileSystemEntries(_root).Should().HaveCount(3);
     }
@@ -55,7 +58,7 @@ public sealed class LeftoverImportTempFilesTests : IDisposable
             Directory.CreateDirectory(clone);
             Directory.CreateSymbolicLink(Path.Combine(clone, "escape"), outside);
 
-            LeftoverImportTempFiles.Sweep(_root, NullLogger.Instance).Should().Be(2);
+            LeftoverImportTempFiles.Sweep(_root, Now, NullLogger.Instance).Should().Be(2);
 
             Directory.EnumerateFileSystemEntries(_root).Should().BeEmpty();
             File.Exists(Path.Combine(outside, "keep.txt")).Should().BeTrue();
@@ -67,9 +70,26 @@ public sealed class LeftoverImportTempFilesTests : IDisposable
     }
 
     [Fact]
+    public void Keeps_entries_written_since_this_process_started()
+    {
+        // Another job of this process, or another host sharing the temp folder.
+        var started = DateTime.UtcNow.AddMinutes(-5);
+        var old = Path.Combine(_root, "oe-build-old");
+        Directory.CreateDirectory(old);
+        Directory.SetLastWriteTimeUtc(old, started.AddHours(-1));
+        Directory.CreateDirectory(Path.Combine(_root, "oe-build-current"));
+        File.WriteAllText(Path.Combine(_root, "oe-dvd-current.zip"), "x");
+
+        LeftoverImportTempFiles.Sweep(_root, started, NullLogger.Instance).Should().Be(1);
+
+        Directory.EnumerateFileSystemEntries(_root).Select(Path.GetFileName)
+            .Should().BeEquivalentTo(["oe-build-current", "oe-dvd-current.zip"]);
+    }
+
+    [Fact]
     public void A_missing_temp_folder_is_not_an_error()
     {
-        LeftoverImportTempFiles.Sweep(Path.Combine(_root, "missing"), NullLogger.Instance).Should().Be(0);
+        LeftoverImportTempFiles.Sweep(Path.Combine(_root, "missing"), Now, NullLogger.Instance).Should().Be(0);
     }
 
     public void Dispose()

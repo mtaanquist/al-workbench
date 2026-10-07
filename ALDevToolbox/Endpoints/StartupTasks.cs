@@ -158,7 +158,8 @@ internal static class StartupTasks
         // so the worker picks them up like a fresh submission.
         // Before anything is resumed: no worker is running yet, so every build clone and
         // download in the temp folder belongs to a job the last process never finished (#1133).
-        ALDevToolbox.Services.ObjectExplorer.Import.LeftoverImportTempFiles.Sweep(Path.GetTempPath(), logger);
+        ALDevToolbox.Services.ObjectExplorer.Import.LeftoverImportTempFiles.Sweep(
+            Path.GetTempPath(), System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime(), logger);
 
         var persistedJobs = scope.ServiceProvider.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Import.PersistedImportJobs>();
         var queue = scope.ServiceProvider.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportQueue>();
