@@ -779,6 +779,84 @@ public sealed class DeliveryServiceTests : IDisposable
         rows.Values.SelectMany(d => d.Results).Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
     }
 
+    // ── Disabling a deployment pipeline (#1131) ───────────────────────────────
+
+    [Fact]
+    public async Task Disabling_the_pipeline_cancels_what_waits_and_refuses_new_deployments_until_enabled()
+    {
+        int scheduledId, proposedId;
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+            proposedId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+            scheduledId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            DrainQueue();
+        }
+
+        await NewReleasePipelineService(_db.NewContext()).SetReleasePipelineDisabledAsync(seed.ReleasePipelineId, true);
+
+        await using (var read = _db.NewContext())
+        {
+            var rows = await read.OeProjectDeliveries.Where(d => d.Id == scheduledId || d.Id == proposedId).ToDictionaryAsync(d => d.Id);
+            rows[scheduledId].Status.Should().Be(ProjectDeliveryStatus.Cancelled);
+            rows[scheduledId].DiagnosticsLog.Should().Contain(ReleasePipelineService.DisabledPipelineReason);
+            rows[proposedId].Status.Should().Be(ProjectDeliveryStatus.Dismissed);
+            rows[proposedId].DismissReason.Should().Be(ReleasePipelineService.DisabledPipelineReason);
+            (await read.OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId)).DisabledAt.Should().NotBeNull();
+        }
+
+        var deploy = () => NewService(_db.NewContext()).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+        (await deploy.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ReleasePipeline"]
+            .Should().Be(DeliveryService.DisabledRefusal);
+        (await NewService(_db.NewContext()).ProposeReleasesForBuildAsync(seed.BuildId)).Should().BeEmpty("a disabled pipeline prepares nothing");
+
+        await NewReleasePipelineService(_db.NewContext()).SetReleasePipelineDisabledAsync(seed.ReleasePipelineId, false);
+
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId)).DisabledAt.Should().BeNull();
+        (await NewService(_db.NewContext()).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1)))
+            .Should().BeGreaterThan(0);
+    }
+
+    [Fact]
+    public async Task The_sweep_cancels_a_scheduled_deployment_of_a_disabled_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+        // Disabled behind the service's back: what a disable racing the schedule leaves behind.
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(x => x.SetProperty(r => r.DisabledAt, DateTime.UtcNow));
+
+        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow.AddHours(2))).Should().Be(0);
+
+        var row = await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
+        row.Status.Should().Be(ProjectDeliveryStatus.Cancelled);
+        row.DiagnosticsLog.Should().Contain(ReleasePipelineService.DisabledPipelineReason);
+    }
+
+    [Fact]
+    public async Task Someone_who_manages_the_solution_can_disable_a_deployment_pipeline_but_only_an_admin_can_delete_it()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("Team Member");
+
+        var svc = NewReleasePipelineService(_db.NewContext());
+        (await svc.CanManageAsync(seed.ReleasePipelineId)).Should().BeTrue("the solution is open to everyone in the organisation");
+        (await svc.CanDeleteAsync()).Should().BeFalse();
+        await svc.SetReleasePipelineDisabledAsync(seed.ReleasePipelineId, true);
+
+        var delete = () => NewReleasePipelineService(_db.NewContext()).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+
+        await delete.Should().ThrowAsync<ProjectAccessDeniedException>();
+        var rp = await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId);
+        rp.DeletedAt.Should().BeNull();
+        rp.DisabledAt.Should().NotBeNull();
+    }
+
     [Fact]
     public async Task Deleting_the_pipeline_leaves_a_deployment_already_running_alone()
     {

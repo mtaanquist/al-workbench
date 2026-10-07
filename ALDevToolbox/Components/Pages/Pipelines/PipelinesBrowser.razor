@@ -228,7 +228,11 @@
                             <div class="pl-name">
                                 <div class="cell-stack">
                                     <span class="cell-stack__main"><a href="@($"/pipelines/{p.Id}")"><strong>@p.Name</strong></a></span>
-                                    @if (fresh is { Headline: not PipelineFreshnessHeadline.None })
+                                    @if (p.Disabled)
+                                    {
+                                        <span class="cell-stack__sub"><StatusPill Tone="muted"><span>Disabled</span></StatusPill></span>
+                                    }
+                                    else if (fresh is { Headline: not PipelineFreshnessHeadline.None })
                                     {
                                         <span class="cell-stack__sub"><FreshnessLine Summary="@fresh" /></span>
                                     }
@@ -239,7 +243,7 @@
                                         </span>
                                     }
                                 </div>
-                                @if (ready && _canBuild.Contains(p.Id))
+                                @if (ready && !p.Disabled && _canBuild.Contains(p.Id))
                                 {
                                     <button type="button" class="btn btn--sm" @onclick="() => BuildAsync(p)"
                                             disabled="@(_starting == p.Id)" aria-label="@($"Build {p.Name}")">
@@ -545,7 +549,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _buildError = $"Only the owner of {p.ProjectName} or an admin can build {p.Name}.";
+            _buildError = $"You can't build {p.Name}. Ask someone who manages {p.ProjectName}.";
         }
         catch (Exception ex)
         {

@@ -25,6 +25,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 /// </summary>
 public sealed class DeliveryService
 {
+    /// <summary>Why a deployment through a disabled deployment pipeline is refused (#1131).</summary>
+    public const string DisabledRefusal = "This deployment pipeline is disabled. Enable it to deploy.";
+
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
@@ -345,6 +348,7 @@ public sealed class DeliveryService
                 r.RestrictBranch,
                 r.AllowedBranch,
                 r.ProjectEnvironmentId,
+                r.DisabledAt,
                 OwnerId = r.Project!.CreatedByUserId,
                 TimeZone = r.Project.BcTimeZone,
                 EnvName = r.ProjectEnvironment!.Name,
@@ -359,6 +363,12 @@ public sealed class DeliveryService
         if (checkAccess)
         {
             await _access.EnsureCanManageAsync(rp.ProjectId, rp.OwnerId, ct);
+        }
+
+        // A disabled pipeline deploys nothing: not by hand, not by approval, not on its own (#1131).
+        if (rp.DisabledAt is not null)
+        {
+            throw Validation("ReleasePipeline", DisabledRefusal);
         }
 
         if (rp.EnvMissing)
@@ -579,6 +589,7 @@ public sealed class DeliveryService
 
         var pipelineIds = await _db.OeReleasePipelines.AsNoTracking()
             .Where(r => r.DeletedAt == null
+                        && r.DisabledAt == null
                         && r.PrepareReleaseOnNewBuild
                         && r.ArtifactSource == ReleaseArtifactSource.Build
                         && r.BuildPipelineId == buildPipelineId)
@@ -729,6 +740,7 @@ public sealed class DeliveryService
         }
         return await _db.OeReleasePipelines.AsNoTracking()
             .Where(r => r.DeletedAt == null
+                        && r.DisabledAt == null
                         && r.PrepareReleaseOnNewBuild
                         && r.DeployWithoutApproval
                         && r.ArtifactSource == ReleaseArtifactSource.Build
@@ -765,6 +777,7 @@ public sealed class DeliveryService
                 r.PrepareReleaseOnNewBuild,
                 r.DeployWithoutApproval,
                 r.DeployWithoutApprovalByUserId,
+                r.DisabledAt,
                 EnvName = r.ProjectEnvironment!.Name,
                 EnvType = r.ProjectEnvironment.Type,
             })
@@ -782,6 +795,10 @@ public sealed class DeliveryService
             return null;
         }
 
+        if (rp.DisabledAt is not null)
+        {
+            throw Validation("ReleasePipeline", DisabledRefusal);
+        }
         if (!rp.PrepareReleaseOnNewBuild || !rp.DeployWithoutApproval)
         {
             throw Validation("DeployWithoutApproval", "This deployment pipeline no longer deploys without approval.");
@@ -1519,11 +1536,11 @@ public sealed class DeliveryService
     /// </summary>
     public async Task<int> EnqueueDueDeliveriesAsync(DateTime nowUtc, CancellationToken ct = default)
     {
-        await CancelDeletedPipelinesDeliveriesAsync(ct);
+        await CancelStoppedPipelinesDeliveriesAsync(ct);
         var due = await _db.OeProjectDeliveries.AsNoTracking()
             // A deleted pipeline's deployments are cancelled with it (#1108); this is the backstop.
             .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= nowUtc
-                        && d.ReleasePipeline!.DeletedAt == null)
+                        && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null)
             .Select(d => new { d.Id, d.OrganizationId, d.TriggeredByUserId })
             .ToListAsync(ct);
 
@@ -1537,31 +1554,32 @@ public sealed class DeliveryService
     }
 
     /// <summary>
-    /// Cancels scheduled deliveries whose deployment pipeline is deleted (#1108). The delete
-    /// cancels them itself; this catches one made while the delete was committing, and
-    /// those left behind by deletes from before it did. Compare-and-set, like every cancel.
+    /// Cancels scheduled deliveries whose deployment pipeline is deleted (#1108) or
+    /// disabled (#1131). The delete or disable cancels them itself; this catches one made
+    /// while it was committing, and those left behind by deletes from before it did. Compare-and-set, like every cancel.
     /// </summary>
-    private async Task CancelDeletedPipelinesDeliveriesAsync(CancellationToken ct)
+    private async Task CancelStoppedPipelinesDeliveriesAsync(CancellationToken ct)
     {
-        var ids = await _db.OeProjectDeliveries.AsNoTracking()
-            .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ReleasePipeline!.DeletedAt != null)
-            .Select(d => d.Id)
+        var stopped = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.Status == ProjectDeliveryStatus.Scheduled
+                        && (d.ReleasePipeline!.DeletedAt != null || d.ReleasePipeline.DisabledAt != null))
+            .Select(d => new { d.Id, Deleted = d.ReleasePipeline!.DeletedAt != null })
             .ToListAsync(ct);
-        if (ids.Count == 0) return;
-        var line = LogLine(ReleasePipelineService.DeletedPipelineReason + ".");
-        foreach (var id in ids)
+        foreach (var d in stopped)
         {
+            var reason = d.Deleted ? ReleasePipelineService.DeletedPipelineReason : ReleasePipelineService.DisabledPipelineReason;
+            var line = LogLine(reason + ".");
             var now = DateTime.UtcNow;
             var changed = await _db.OeProjectDeliveries
-                .Where(d => d.Id == id && d.Status == ProjectDeliveryStatus.Scheduled)
+                .Where(x => x.Id == d.Id && x.Status == ProjectDeliveryStatus.Scheduled)
                 .ExecuteUpdateAsync(s => s
-                    .SetProperty(d => d.Status, ProjectDeliveryStatus.Cancelled)
-                    .SetProperty(d => d.FinishedAt, now)
-                    .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line)
-                    .SetProperty(d => d.UpdatedAt, now), ct);
+                    .SetProperty(x => x.Status, ProjectDeliveryStatus.Cancelled)
+                    .SetProperty(x => x.FinishedAt, now)
+                    .SetProperty(x => x.DiagnosticsLog, x => (x.DiagnosticsLog ?? string.Empty) + line)
+                    .SetProperty(x => x.UpdatedAt, now), ct);
             if (changed == 0) continue;
-            await MarkAppsNotSentAsync(id, "Not sent: the deployment pipeline was deleted.", ct);
-            _logger.LogInformation("Cancelled scheduled delivery {DeliveryId} because its deployment pipeline was deleted.", id);
+            await MarkAppsNotSentAsync(d.Id, "Not sent: " + reason.ToLowerInvariant() + ".", ct);
+            _logger.LogInformation("Cancelled scheduled delivery {DeliveryId}: {Reason}.", d.Id, reason);
         }
     }
 

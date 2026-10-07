@@ -165,7 +165,7 @@ public sealed class PipelineEditPagesTests : IDisposable
 
         var cut = _ctx.Render<PipelineEdit>(p => p.Add(x => x.PipelineId, seed.PipelineId));
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can change this solution's pipelines."));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only people who manage the solution can change this solution's pipelines."));
         cut.FindAll("form").Should().BeEmpty();
         cut.FindAll(".btn--primary").Should().BeEmpty();
     }
@@ -179,7 +179,7 @@ public sealed class PipelineEditPagesTests : IDisposable
         Nav.NavigateTo($"/pipelines/new?solution={seed.ProjectId}");
         var cut = _ctx.Render<PipelineEdit>();
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can add pipelines to CRONUS A/S."));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only people who manage the solution can add pipelines to CRONUS A/S."));
         cut.FindAll(".pe-picker").Should().BeEmpty();
         cut.FindAll("#pe-branch").Should().BeEmpty("there is nothing to fill in that could be saved");
         cut.FindAll(".edit-col > .card .card__title").Select(t => t.TextContent.Trim()).Should().Equal("Source", "Extensions");
@@ -344,7 +344,7 @@ public sealed class PipelineEditPagesTests : IDisposable
         Nav.NavigateTo($"/pipelines/deployments/new?solution={seed.ProjectId}");
         var cut = _ctx.Render<ReleasePipelineEdit>();
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can add deployment pipelines to CRONUS A/S."));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only people who manage the solution can add deployment pipelines to CRONUS A/S."));
         cut.FindAll("#rpe-env").Should().BeEmpty();
         cut.FindAll(".btn--primary").Should().BeEmpty();
     }
@@ -358,7 +358,7 @@ public sealed class PipelineEditPagesTests : IDisposable
 
         var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can change this solution's deployment pipelines."));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only people who manage the solution can change this solution's deployment pipelines."));
         cut.FindAll("form").Should().BeEmpty();
         cut.FindAll(".btn--primary").Should().BeEmpty();
     }

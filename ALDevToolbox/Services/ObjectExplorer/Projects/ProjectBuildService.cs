@@ -1039,6 +1039,7 @@ public sealed class ProjectBuildService
     }
 
     private const string PipelineDeletedRefusal = "The pipeline was deleted before this build started.";
+    private const string PipelineDisabledRefusal = "The pipeline was disabled before this build started.";
     private const string PushTurnedOffRefusal = "Building automatically on push was turned off before this build started.";
     private const string PreviewCheckTurnedOffRefusal = "The nightly preview check was turned off before this build started.";
     private const string TakenOverRefusal = "Someone else took over this pipeline's automatic builds before this build started.";
@@ -1052,7 +1053,7 @@ public sealed class ProjectBuildService
     /// </summary>
     public static readonly IReadOnlyList<string> AutomationRefusals =
     [
-        PipelineDeletedRefusal, PushTurnedOffRefusal, PreviewCheckTurnedOffRefusal,
+        PipelineDeletedRefusal, PipelineDisabledRefusal, PushTurnedOffRefusal, PreviewCheckTurnedOffRefusal,
         TakenOverRefusal, InactiveRefusal, NoAccessRefusal,
     ];
 
@@ -1060,7 +1061,7 @@ public sealed class ProjectBuildService
     /// Refuses a build the pipeline started on its own once that is no longer what the
     /// pipeline asks for. Pipeline state and access are checked when the build is
     /// queued, but up to five can wait behind a running one (#1112): in the meantime the
-    /// pipeline may have been deleted, the setting turned off, someone else may have
+    /// pipeline may have been deleted or disabled, the setting turned off, someone else may have
     /// taken the automatic builds over, or the person they run as may have lost access.
     /// None of those should still clone with that person's credentials, publish a
     /// release or prepare a deployment. The worker fails the build with the reason.
@@ -1074,12 +1075,15 @@ public sealed class ProjectBuildService
             {
                 On = push ? p.BuildOnPush : p.PreviewCheck,
                 RunsAs = push ? p.BuildOnPushByUserId : p.PreviewCheckByUserId,
+                Disabled = p.DisabledAt != null,
             })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
 
         string? reason;
         if (pipeline is null)
             reason = PipelineDeletedRefusal;
+        else if (pipeline.Disabled)
+            reason = PipelineDisabledRefusal;
         else if (!pipeline.On)
             reason = push ? PushTurnedOffRefusal : PreviewCheckTurnedOffRefusal;
         else if (pipeline.RunsAs != build.StartedByUserId)

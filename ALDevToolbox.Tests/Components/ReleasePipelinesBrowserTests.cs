@@ -172,6 +172,75 @@ public sealed class ReleasePipelinesBrowserTests : IDisposable
     }
 
     [Fact]
+    public void The_disable_confirmation_says_what_stops_and_what_is_cancelled()
+    {
+        var text = ReleasePipelinesBrowser.DisableMessage("main to Production", new WaitingDeploymentCounts(2, 1));
+
+        text.Should().StartWith("Disable \"main to Production\"? Nothing deploys through it until someone enables it again.");
+        text.Should().Contain("2 deployments are waiting to run and will be cancelled.");
+        text.Should().Contain("1 deployment is already booked in Business Central and will still install");
+    }
+
+    [Fact]
+    public async Task A_disabled_pipeline_says_so_and_its_menu_offers_enable()
+    {
+        var s = await SeedFleetAsync();
+        await using (var db = _db.NewContext())
+        {
+            await db.OeReleasePipelines.Where(r => r.Id == s.Quiet)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.DisabledAt, DateTime.UtcNow));
+        }
+
+        var cut = _ctx.Render<ReleasePipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var row = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']");
+            row.TextContent.Should().Contain("Disabled").And.Contain("Enable it to deploy again");
+            var items = row.QuerySelectorAll(".menu__item").Select(i => i.TextContent.Trim()).ToList();
+            items.Should().Contain("Enable").And.NotContain("Disable").And.Contain("Delete", "an admin can still delete it");
+            cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Failed}']").QuerySelectorAll(".menu__item")
+                .Select(i => i.TextContent.Trim()).Should().Contain("Disable");
+        });
+
+        cut.FindAll($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}'] .menu__item")
+            .Single(i => i.TextContent.Trim() == "Enable").Click();
+
+        cut.WaitForAssertion(() =>
+            cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']").QuerySelectorAll(".menu__item")
+                .Select(i => i.TextContent.Trim()).Should().Contain("Disable"));
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == s.Quiet)).DisabledAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Someone_who_is_not_an_admin_is_offered_disable_but_not_delete()
+    {
+        var s = await SeedFleetAsync();
+        const int memberId = 74_001;
+        await using (var db = _db.NewContext())
+        {
+            db.Users.Add(new ALDevToolbox.Domain.Entities.User
+            {
+                Id = memberId, OrganizationId = TestDb.DefaultOrgId, Email = "member@cronus.test",
+                PasswordHash = "x", DisplayName = "Team Member",
+                Role = ALDevToolbox.Domain.Entities.UserRole.User, Status = ALDevToolbox.Domain.Entities.UserStatus.Active,
+            });
+            await db.SaveChangesAsync();
+        }
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = memberId;
+
+        var cut = _ctx.Render<ReleasePipelinesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var items = cut.Find($"table.rp-list__wide tbody tr[data-pipeline='{s.Quiet}']").QuerySelectorAll(".menu__item")
+                .Select(i => i.TextContent.Trim()).ToList();
+            items.Should().Contain("Disable").And.NotContain("Delete");
+        });
+    }
+
+    [Fact]
     public async Task A_scheduled_deployment_can_be_rescheduled_from_the_row_menu()
     {
         var s = await SeedFleetAsync();

@@ -422,6 +422,31 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     }
 
     [Fact]
+    public async Task The_owner_can_disable_the_pipeline_but_only_an_admin_sees_delete()
+    {
+        var seed = await SeedAsync();
+        var cut = RenderPage(seed);
+
+        cut.WaitForAssertion(() =>
+        {
+            var labels = cut.Find(".page.pb-page > .detail-head > .page-head__actions").Children.Select(c => c.TextContent.Trim()).ToList();
+            labels.Should().Contain("Disable").And.NotContain("Delete", "the owner is not an admin");
+        });
+
+        cut.FindAll(".page-head__actions button").Single(b => b.TextContent.Trim() == "Disable").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            var actions = cut.Find(".page.pb-page > .detail-head > .page-head__actions");
+            actions.Children[0].TextContent.Trim().Should().Be("Enable pipeline");
+            actions.Children[0].ClassList.Should().Contain("btn--primary");
+            actions.Children.Select(c => c.TextContent.Trim()).Should().NotContain("Build");
+            cut.FindAll(".status-pill").Select(p => p.TextContent.Trim()).Should().Contain("Disabled");
+        });
+        (await _db.NewContext().OePipelines.SingleAsync(p => p.Id == seed.PipelineId)).DisabledAt.Should().NotBeNull();
+    }
+
+    [Fact]
     public async Task Someone_who_cannot_manage_the_solution_gets_no_release_action()
     {
         var seed = await SeedAsync(ProjectVisibility.ReadOnly);

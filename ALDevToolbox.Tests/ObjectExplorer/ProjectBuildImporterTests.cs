@@ -356,6 +356,24 @@ public sealed class ProjectBuildImporterTests : IDisposable
             .Should().Be(ProjectBuildTrigger.PreviewCheck);
     }
 
+    [Fact]
+    public async Task StartBuildAsync_refuses_a_disabled_pipeline_before_a_build_exists()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        await ctx.OePipelines.Where(p => p.Id == pipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+        var queue = new ProjectBuildQueue();
+
+        var act = () => NewImporter(_db.NewContext(), queue).StartBuildAsync(pipelineId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
+            .Should().Be(ProjectBuildImporter.DisabledRefusal);
+        (await _db.NewContext().OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(0);
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
     [Theory]
     [InlineData(ProjectBuildStatus.Queued)]
     [InlineData(ProjectBuildStatus.Building)]

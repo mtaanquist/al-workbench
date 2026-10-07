@@ -143,6 +143,14 @@ public class OePipeline
     /// </summary>
     public bool ChangedAppsOnly { get; set; } = true;
 
+    /// <summary>
+    /// When the pipeline was disabled; null while it is enabled. A disabled pipeline
+    /// keeps its settings and builds but starts no new build: Build is refused, and
+    /// pushes and the nightly preview check pass it by. Anyone who may manage the
+    /// solution can disable or enable it; deleting is for admins only (#1131).
+    /// </summary>
+    public DateTime? DisabledAt { get; set; }
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 

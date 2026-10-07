@@ -305,6 +305,27 @@ public sealed class ProjectAccess
         }
     }
 
+    /// <summary>
+    /// True when the current user may delete a build or deployment pipeline: an org
+    /// Admin or a SiteAdmin. Stricter than deleting the solution itself, because a
+    /// deleted deployment pipeline takes its waiting deployments with it; everyone who
+    /// may manage the solution can disable a pipeline instead (#1131).
+    /// </summary>
+    public Task<bool> CanDeletePipelinesAsync(CancellationToken ct = default) => IsOrganizationAdminAsync(ct);
+
+    /// <summary>
+    /// Throws <see cref="ProjectAccessDeniedException"/> unless the current user may
+    /// delete pipelines (<see cref="CanDeletePipelinesAsync"/>).
+    /// </summary>
+    public async Task EnsureCanDeletePipelinesAsync(CancellationToken ct = default)
+    {
+        if (!await CanDeletePipelinesAsync(ct).ConfigureAwait(false))
+        {
+            throw new ProjectAccessDeniedException(
+                "Only an admin can delete a pipeline. Disable it instead to stop it running.");
+        }
+    }
+
     // ── View axis ───────────────────────────────────────────────────────
 
     /// <summary>

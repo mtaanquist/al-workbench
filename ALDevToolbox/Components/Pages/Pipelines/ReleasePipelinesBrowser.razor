@@ -333,7 +333,11 @@
                                     {
                                         <span class="cell-stack__main">@SourceName(r)</span>
                                     }
-                                    @if (FromGitHub(r) || !r.BuildPipelineDeleted)
+                                    @if (!FromGitHub(r) && !r.BuildPipelineDeleted && r.BuildPipelineDisabled)
+                                    {
+                                        <span class="cell-stack__sub rp-tone--warning">Build pipeline disabled</span>
+                                    }
+                                    else if (FromGitHub(r) || !r.BuildPipelineDeleted)
                                     {
                                         <span class="cell-stack__sub">@(FromGitHub(r) ? "GitHub release" : "Build pipeline")</span>
                                     }
@@ -446,11 +450,17 @@
 <ConfirmDialog @ref="_deleteConfirm" Title="Delete deployment pipeline?"
                ConfirmLabel="Delete deployment pipeline" ConfirmButtonClass="btn--danger" ConfirmIcon="trash-2" />
 
+<ConfirmDialog @ref="_disableConfirm" Title="Disable deployment pipeline?"
+               ConfirmLabel="Disable deployment pipeline" ConfirmButtonClass="btn--primary" ConfirmIcon="circle-pause" />
+
 @code {
     private List<ReleasePipelineRow>? _rows;
     private List<PipelineProjectOption> _projectOptions = new();
     private ConfirmDialog? _deleteConfirm;
+    private ConfirmDialog? _disableConfirm;
     private string? _error;
+    // Only admins delete; everyone who manages a solution disables instead (#1131).
+    private bool _canDelete;
 
     // The filters. All of them work on the rows already loaded: the list is one
     // organisation's pipelines, which is tens, not thousands.
@@ -491,6 +501,7 @@
         var projects = await Projects.ListProjectsAsync();
         _projectOptions = projects.Select(p => new PipelineProjectOption(p.Id, p.Name)).ToList();
         _rows = await Releases.ListReleasePipelineOverviewAsync();
+        _canDelete = await Releases.CanDeleteAsync();
         EnsurePolling();
     }
 
@@ -565,7 +576,7 @@
     /// or a deployment prepared from a new build is waiting for someone to approve it.
     /// </summary>
     private static bool NeedsAttention(ReleasePipelineRow r) =>
-        r.LiveDelivery is null
+        r.LiveDelivery is null && !r.Disabled
         && (EnvironmentBroken(r) || EnvironmentDeleting(r) || r.LastDelivery?.Status == ProjectDeliveryStatus.Failed
             || r.ProposedDelivery is not null);
 
@@ -685,6 +696,7 @@
     /// <summary>The line the phone card adds for something wrong with the target or the settings.</summary>
     private static Toned? WarningOf(ReleasePipelineRow r)
     {
+        if (r.Disabled) return new("Disabled. Enable it to deploy again.", "rp-list__none");
         if (r.EnvironmentMissing) return new("Environment missing. Reconnect it in solution settings.", "rp-tone--danger");
         if (EnvironmentBroken(r)) return new("Environment failed in Business Central.", "rp-tone--danger");
         if (EnvironmentDeleting(r)) return new("Environment is being deleted.", "rp-tone--warning");
@@ -703,6 +715,7 @@
     /// </summary>
     private static NextRelease NextOf(ReleasePipelineRow r)
     {
+        if (r.Disabled) return new("Disabled", "rp-list__none rp-list__strong", "Enable it to deploy again", Title: "Nothing deploys through this pipeline until someone enables it");
         if (r.EnvironmentMissing) return new("Blocked", "rp-tone--danger rp-list__strong", "Environment not found", SubHref: $"/solutions/{r.ProjectId}/bc", Title: "Reconnect it on the solution's Business Central tab");
         if (EnvironmentBroken(r)) return new("Blocked", "rp-tone--danger rp-list__strong", "Environment failed in Business Central", SubHref: $"/solutions/{r.ProjectId}/bc", Title: "Sort it out in the Business Central admin center, or point this pipeline at another environment");
 
@@ -786,10 +799,27 @@
                     <span>Solution settings</span>
                 </a>
                 <div class="menu__sep"></div>
-                <button type="button" class="menu__item menu__item--danger" @onclick="() => DeleteAsync(r)" role="menuitem">
-                    <Icon Name="trash-2" Width="15" Height="15" />
-                    <span>Delete</span>
-                </button>
+                @if (r.Disabled)
+                {
+                    <button type="button" class="menu__item" @onclick="() => SetDisabledAsync(r, false)" role="menuitem">
+                        <Icon Name="circle-play" Width="15" Height="15" />
+                        <span>Enable</span>
+                    </button>
+                }
+                else
+                {
+                    <button type="button" class="menu__item" @onclick="() => SetDisabledAsync(r, true)" role="menuitem">
+                        <Icon Name="circle-pause" Width="15" Height="15" />
+                        <span>Disable</span>
+                    </button>
+                }
+                @if (_canDelete)
+                {
+                    <button type="button" class="menu__item menu__item--danger" @onclick="() => DeleteAsync(r)" role="menuitem">
+                        <Icon Name="trash-2" Width="15" Height="15" />
+                        <span>Delete</span>
+                    </button>
+                }
             </div>
         </span>;
 
@@ -831,7 +861,7 @@
         catch (ProjectAccessDeniedException)
         {
             // Not this person's to move: say so rather than leave the click doing nothing.
-            _notice = "Only the solution's owner or an Admin can reschedule its deployments.";
+            _notice = "You can't reschedule this deployment. Ask someone who manages the solution.";
         }
         catch (Exception ex)
         {
@@ -864,6 +894,10 @@
             await Releases.SoftDeleteReleasePipelineAsync(row.Id);
             await ReloadAsync();
         }
+        catch (ProjectAccessDeniedException)
+        {
+            _error = "Only an admin can delete a deployment pipeline. Disable it instead to stop it deploying.";
+        }
         catch (Exception ex)
         {
             // Silently logging left the row on screen with no explanation - the person
@@ -874,12 +908,61 @@
     }
 
     /// <summary>
-    /// The delete confirmation, saying what happens to deployments still waiting: the
-    /// delete cancels them (#1108), except ones Business Central already holds.
+    /// Disables or enables a deployment pipeline (#1131). Disabling cancels the deployments
+    /// still waiting, so it asks first and says how many; enabling just does it.
     /// </summary>
-    internal static string DeleteMessage(string name, WaitingDeploymentCounts waiting)
+    private async Task SetDisabledAsync(ReleasePipelineRow row, bool disabled)
     {
-        var text = $"Delete \"{name}\"? This removes the deployment target. Build pipelines and past builds are untouched.";
+        if (disabled)
+        {
+            if (_disableConfirm is null) return;
+            WaitingDeploymentCounts waiting;
+            try
+            {
+                waiting = await Releases.CountWaitingDeploymentsAsync(row.Id);
+            }
+            catch (Exception ex)
+            {
+                Log.LogError(ex, "Failed to count waiting deployments of deployment pipeline {ReleasePipelineId}.", row.Id);
+                waiting = new WaitingDeploymentCounts(0, 0);
+            }
+            if (!await _disableConfirm.OpenAsync("Disable deployment pipeline?", DisableMessage(row.Name, waiting), "Disable deployment pipeline"))
+            {
+                return;
+            }
+        }
+
+        _error = null;
+        try
+        {
+            await Releases.SetReleasePipelineDisabledAsync(row.Id, disabled);
+            await ReloadAsync();
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _error = $"You can't change \"{row.Name}\". Ask someone who manages {row.ProjectName}.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Failed to set deployment pipeline {ReleasePipelineId} disabled={Disabled}.", row.Id, disabled);
+            _error = $"Couldn't {(disabled ? "disable" : "enable")} \"{row.Name}\". Try again, and if it keeps failing tell an administrator.";
+        }
+    }
+
+    /// <summary>
+    /// The disable confirmation: what stops, what is cancelled, and that enabling brings it back.
+    /// Deployments Business Central already holds still install, as with delete.
+    /// </summary>
+    internal static string DisableMessage(string name, WaitingDeploymentCounts waiting)
+    {
+        var text = $"Disable \"{name}\"? Nothing deploys through it until someone enables it again. Its settings and history are kept.";
+        return text + WaitingSentences(waiting);
+    }
+
+    /// <summary>What disabling or deleting does to the deployments still waiting.</summary>
+    private static string WaitingSentences(WaitingDeploymentCounts waiting)
+    {
+        var text = string.Empty;
         if (waiting.Waiting > 0)
         {
             text += waiting.Waiting == 1
@@ -893,6 +976,16 @@
                 : $" {waiting.HeldByBusinessCentral} deployments are already booked in Business Central and will still install; cancel them from the environment's page if you don't want them.";
         }
         return text;
+    }
+
+    /// <summary>
+    /// The delete confirmation, saying what happens to deployments still waiting: the
+    /// delete cancels them (#1108), except ones Business Central already holds.
+    /// </summary>
+    internal static string DeleteMessage(string name, WaitingDeploymentCounts waiting)
+    {
+        var text = $"Delete \"{name}\"? This removes the deployment target. Build pipelines and past builds are untouched.";
+        return text + WaitingSentences(waiting);
     }
 
     // ── Live polling while something ships ───────────────────────────────────

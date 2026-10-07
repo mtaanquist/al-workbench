@@ -51,6 +51,21 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
         (await StatusAsync(releaseId)).Should().Be(ProjectBuildStatus.Queued, "the worker fails it with the reason");
     }
 
+    [Theory]
+    [InlineData(ProjectBuildTrigger.Push)]
+    [InlineData(ProjectBuildTrigger.PreviewCheck)]
+    public async Task A_disabled_pipeline_refuses_its_waiting_builds(string trigger)
+    {
+        var alice = await SeedUserAsync("alice@cronus.test");
+        var (projectId, pipelineId) = await SeedPipelineAsync(alice);
+        var releaseId = await SeedBuildAsync(projectId, pipelineId, trigger, alice);
+        await UpdatePipelineAsync(pipelineId, p => p.DisabledAt = DateTime.UtcNow);
+
+        var refusal = await RefusalAsync(projectId, releaseId, alice);
+
+        refusal.Should().Be("The pipeline was disabled before this build started.");
+    }
+
     [Fact]
     public async Task Turning_building_on_push_off_refuses_the_waiting_push_builds()
     {

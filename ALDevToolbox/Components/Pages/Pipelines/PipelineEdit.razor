@@ -70,7 +70,7 @@
         @if (!_canManage)
         {
             <Alert Tone="AlertTone.Warn">
-                <span>Only the solution owner or an admin can change this solution's pipelines.</span>
+                <span>Only people who manage the solution can change this solution's pipelines.</span>
             </Alert>
         }
         else if (!_editing && _projectOptions is { Count: 0 })
@@ -138,7 +138,7 @@
                         else if (!_solutionManageable)
                         {
                             <Alert Tone="AlertTone.Warn">
-                                <span>Only the solution owner or an admin can add pipelines to @(_projectName ?? "this solution").</span>
+                                <span>Only people who manage the solution can add pipelines to @(_projectName ?? "this solution").</span>
                             </Alert>
                         }
                         else if (IsDiscovering || _extensions is null)
@@ -615,7 +615,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _discoverError = "Only the solution owner or an admin can manage this solution's pipelines.";
+            _discoverError = "Only people who manage the solution can manage this solution's pipelines.";
         }
         catch (Exception ex)
         {
@@ -645,7 +645,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _discoverError = "Only the solution owner or an admin can manage this solution's pipelines.";
+            _discoverError = "Only people who manage the solution can manage this solution's pipelines.";
         }
         catch (PlanValidationException ex)
         {
@@ -879,7 +879,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _saveError = "Only the solution owner or an admin can manage this solution's pipelines.";
+            _saveError = "Only people who manage the solution can manage this solution's pipelines.";
         }
         catch (Exception ex)
         {

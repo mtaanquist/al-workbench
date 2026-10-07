@@ -57,6 +57,12 @@ public sealed class ReleasePipelineService
     }
 
     /// <summary>
+    /// True when the current user may delete deployment pipelines: an org Admin or a
+    /// SiteAdmin. Everyone else who manages a solution disables them instead (#1131).
+    /// </summary>
+    public Task<bool> CanDeleteAsync(CancellationToken ct = default) => _access.CanDeletePipelinesAsync(ct);
+
+    /// <summary>
     /// Active deployment pipelines for the current org, optionally scoped to one project,
     /// each with its target environment and source build-pipeline name resolved for
     /// display. Ordered by name.
@@ -102,6 +108,8 @@ public sealed class ReleasePipelineService
                 AllowedBranch = r.AllowedBranch,
                 NameIsCustom = r.NameIsCustom,
                 BuildPipelineDeleted = r.BuildPipeline != null && r.BuildPipeline.DeletedAt != null,
+                Disabled = r.DisabledAt != null,
+                BuildPipelineDisabled = r.BuildPipeline != null && r.BuildPipeline.DisabledAt != null,
             })
             .ToListAsync(ct);
     }
@@ -381,9 +389,31 @@ public sealed class ReleasePipelineService
     /// delete a pipeline to stop it, so leaving tonight's install booked would do the
     /// opposite of what they asked. Deployments already handed to Business Central are
     /// held there and stay booked; <see cref="CountWaitingDeploymentsAsync"/> lets the
-    /// confirmation say so.
+    /// confirmation say so. Admins only: anyone else who manages the solution can
+    /// disable it instead (#1131).
     /// </summary>
     public async Task SoftDeleteReleasePipelineAsync(int id, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var pipeline = await _db.OeReleasePipelines
+            .FirstOrDefaultAsync(r => r.Id == id && r.DeletedAt == null, ct)
+            ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
+
+        await _access.EnsureCanDeletePipelinesAsync(ct);
+
+        await StopAsync(pipeline, (p, now) => p.DeletedAt = now, DeletedPipelineReason, "deleted", ct);
+        _logger.LogInformation("Soft-deleted deployment pipeline {ReleasePipelineId}.", id);
+    }
+
+    /// <summary>
+    /// Disables or enables a deployment pipeline. A disabled pipeline deploys nothing: no
+    /// deployment can be made or approved through it, new builds are neither prepared nor
+    /// deployed, and what it still had waiting is set aside the way deleting does, so a
+    /// booked install does not run the moment it is enabled again. Its settings and history
+    /// stay (#1131). Anyone who may manage the solution may do it. Doing it twice changes
+    /// nothing.
+    /// </summary>
+    public async Task SetReleasePipelineDisabledAsync(int id, bool disabled, CancellationToken ct = default)
     {
         RequireOrganizationId();
         var pipeline = await _db.OeReleasePipelines
@@ -396,13 +426,36 @@ public sealed class ReleasePipelineService
             .FirstOrDefaultAsync(ct);
         await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
 
+        if ((pipeline.DisabledAt is not null) == disabled) return;
+        if (disabled)
+        {
+            await StopAsync(pipeline, (p, now) => p.DisabledAt = now, DisabledPipelineReason, "disabled", ct);
+        }
+        else
+        {
+            pipeline.DisabledAt = null;
+            pipeline.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync(ct);
+        }
+        _logger.LogInformation("{Action} deployment pipeline {ReleasePipelineId} as user {UserId}.",
+            disabled ? "Disabled" : "Enabled", id, _orgContext.CurrentUserId);
+    }
+
+    /// <summary>
+    /// Marks <paramref name="pipeline"/> stopped (deleted or disabled) and sets aside what
+    /// it still had waiting, in one transaction. See <see cref="SoftDeleteReleasePipelineAsync"/>.
+    /// </summary>
+    private async Task StopAsync(
+        OeReleasePipeline pipeline, Action<OeReleasePipeline, DateTime> mark, string reason, string verb, CancellationToken ct)
+    {
+        var id = pipeline.Id;
         var userId = _orgContext.CurrentUserId;
         var now = DateTime.UtcNow;
         var line = now.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
-                   + "  " + DeletedPipelineReason + "." + Environment.NewLine;
+                   + "  " + reason + "." + Environment.NewLine;
 
         await using var tx = await _db.Database.BeginTransactionAsync(ct);
-        pipeline.DeletedAt = now;
+        mark(pipeline, now);
         pipeline.UpdatedAt = now;
         await _db.SaveChangesAsync(ct);
 
@@ -428,23 +481,22 @@ public sealed class ReleasePipelineService
                 .Where(r => setAside.Contains(r.ProjectDeliveryId) && r.Status == ProjectDeliveryResultStatus.Pending)
                 .ExecuteUpdateAsync(u => u
                     .SetProperty(r => r.Status, ProjectDeliveryResultStatus.Skipped)
-                    .SetProperty(r => r.Message, "Not sent: " + DeletedPipelineReason.ToLowerInvariant() + ".")
+                    .SetProperty(r => r.Message, "Not sent: " + reason.ToLowerInvariant() + ".")
                     .SetProperty(r => r.UpdatedAt, now), ct);
         }
         await tx.CommitAsync(ct);
 
-        // A deployment waiting on a deleted pipeline can no longer be approved from anywhere.
+        // A deployment waiting on a stopped pipeline can no longer be approved from anywhere.
         await NotificationSubject.MarkDoneAsync(
             _db, dismissed.Select(NotificationSubject.Delivery).ToList(), now, _logger, ct);
         foreach (var deliveryId in cancelled)
         {
-            _logger.LogInformation("Cancelled scheduled delivery {DeliveryId} because its deployment pipeline {ReleasePipelineId} was deleted.", deliveryId, id);
+            _logger.LogInformation("Cancelled scheduled delivery {DeliveryId} because its deployment pipeline {ReleasePipelineId} was {Verb}.", deliveryId, id, verb);
         }
         foreach (var deliveryId in dismissed)
         {
-            _logger.LogInformation("Dismissed prepared delivery {DeliveryId} because its deployment pipeline {ReleasePipelineId} was deleted.", deliveryId, id);
+            _logger.LogInformation("Dismissed prepared delivery {DeliveryId} because its deployment pipeline {ReleasePipelineId} was {Verb}.", deliveryId, id, verb);
         }
-        _logger.LogInformation("Soft-deleted deployment pipeline {ReleasePipelineId}.", id);
 
         // Each one moves only if it is still in the state it was read in, so a deployment
         // a worker claimed in between runs on rather than being cancelled under it.
@@ -458,7 +510,7 @@ public sealed class ReleasePipelineService
                     .ExecuteUpdateAsync(u => u
                         .SetProperty(d => d.Status, to)
                         .SetProperty(d => d.CancelledByUserId, userId)
-                        .SetProperty(d => d.DismissReason, to == ProjectDeliveryStatus.Dismissed ? DeletedPipelineReason : null)
+                        .SetProperty(d => d.DismissReason, to == ProjectDeliveryStatus.Dismissed ? reason : null)
                         .SetProperty(d => d.FinishedAt, now)
                         .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line)
                         .SetProperty(d => d.UpdatedAt, now), token);
@@ -470,6 +522,9 @@ public sealed class ReleasePipelineService
 
     /// <summary>Why a deployment was set aside when its pipeline was deleted, for its history.</summary>
     internal const string DeletedPipelineReason = "The deployment pipeline was deleted";
+
+    /// <summary>Why a deployment was set aside when its pipeline was disabled, for its history.</summary>
+    internal const string DisabledPipelineReason = "The deployment pipeline was disabled";
 
     /// <summary>
     /// What deleting this deployment pipeline would affect: deployments waiting to run here
@@ -852,6 +907,12 @@ public sealed record ReleasePipelineRow(
     /// ones deleted before that.
     /// </summary>
     public bool BuildPipelineDeleted { get; init; }
+
+    /// <summary>True when the pipeline is disabled, so it deploys nothing (#1131).</summary>
+    public bool Disabled { get; init; }
+
+    /// <summary>True when the build pipeline it draws from is disabled, so no new builds reach it for now.</summary>
+    public bool BuildPipelineDisabled { get; init; }
 
     /// <summary>True when a person typed the name because the generated one was taken; the editor shows it for editing.</summary>
     [System.Text.Json.Serialization.JsonIgnore]

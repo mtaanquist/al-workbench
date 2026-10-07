@@ -139,6 +139,15 @@ public class OeReleasePipeline
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
+    /// <summary>
+    /// When the deployment pipeline was disabled; null while it is enabled. A disabled
+    /// pipeline keeps its settings and history but deploys nothing: no deployment can
+    /// be made or approved, new builds are not prepared or deployed, and disabling it
+    /// sets aside the deployments still waiting, as deleting does. Anyone who may
+    /// manage the solution can disable or enable it; deleting is for admins only (#1131).
+    /// </summary>
+    public DateTime? DisabledAt { get; set; }
+
     /// <summary>Soft-delete marker. Hidden from lists unless restored.</summary>
     public DateTime? DeletedAt { get; set; }
 }
