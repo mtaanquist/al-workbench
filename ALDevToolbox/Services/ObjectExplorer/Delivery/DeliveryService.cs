@@ -388,7 +388,7 @@ public sealed class DeliveryService
 
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.Id == projectBuildId)
-            .Select(b => new { b.Id, b.ProjectId, b.PipelineId, b.Status, b.GithubReleaseTag, b.StagedFromRepositoryId, b.BcTarget, b.Branch })
+            .Select(b => new { b.Id, b.ProjectId, b.PipelineId, b.Status, b.GithubReleaseTag, b.StagedFromRepositoryId, b.BcTarget, b.Branch, b.DefaultBranch })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("Build", "That build no longer exists.");
 
@@ -431,12 +431,16 @@ public sealed class DeliveryService
         // build pipeline whose branch was changed. Only a build pipeline's builds carry a
         // branch; a pipeline that installs GitHub releases has none to compare. See
         // .design/saas-delivery.md, "Which branch may reach an environment".
+        var recordedDefaults = DeploymentBranchRule.SplitRecorded(build.DefaultBranch);
         if (rp.ArtifactSource == ReleaseArtifactSource.Build
             && rp.RestrictBranch
-            && !DeploymentBranchRule.Allows(rp.AllowedBranch, build.Branch))
+            && !DeploymentBranchRule.Allows(rp.AllowedBranch, build.Branch)
+            && !DeploymentBranchRule.Allows(rp.AllowedBranch, build.Branch,
+                recordedDefaults, await SolutionDefaultBranchesAsync(rp.ProjectId, ct)))
         {
+            var built = DeploymentBranchRule.DescribeBuild(build.Branch, recordedDefaults);
             throw Validation("Build",
-                $"Build #{build.Id} was built from {DeploymentBranchRule.Describe(build.Branch)}, but this deployment pipeline only deploys builds from "
+                $"Build #{build.Id} was built from {built}, but this deployment pipeline only deploys builds from "
                 + $"{DeploymentBranchRule.Describe(rp.AllowedBranch)}. Deploy a build made from that branch, or edit this deployment pipeline to allow {DeploymentBranchRule.Describe(build.Branch)}.");
         }
 
@@ -526,6 +530,27 @@ public sealed class DeliveryService
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// Each of the solution's repositories' default branch, as GitHub last reported it on a
+    /// push. Empty unless every repository has reported exactly one, which leaves the branch
+    /// rule comparing names as written: a repository that never reported could have another.
+    /// </summary>
+    private async Task<List<string>> SolutionDefaultBranchesAsync(int projectId, CancellationToken ct)
+    {
+        var repositories = await _db.OeProjectRepositories.AsNoTracking()
+            .CountAsync(r => r.ProjectId == projectId, ct);
+        var defaults = await _db.OeRepositoryBranchHeads.AsNoTracking()
+            .Where(h => h.ProjectRepository!.ProjectId == projectId && h.IsDefaultBranch && h.DeletedAt == null)
+            .Select(h => new { h.ProjectRepositoryId, h.Branch })
+            .ToListAsync(ct);
+        var perRepository = defaults.GroupBy(h => h.ProjectRepositoryId).ToList();
+        if (repositories == 0 || perRepository.Count != repositories || perRepository.Any(g => g.Count() != 1))
+        {
+            return [];
+        }
+        return defaults.Select(h => h.Branch).Distinct(StringComparer.Ordinal).ToList();
     }
 
     /// <summary>A deployment checked and ready to be written: see <see cref="ResolveReleaseAsync"/>.</summary>
