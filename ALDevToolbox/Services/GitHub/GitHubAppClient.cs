@@ -811,15 +811,20 @@ public sealed partial class GitHubAppClient
     /// Closes pull request <paramref name="number"/> and then leaves
     /// <paramref name="comment"/> on it, as <paramref name="credential"/>'s owner. Closed
     /// first, so a comment saying it was closed never sits on one that is still open.
+    /// <paramref name="beforeComment"/> runs between the two writes, for a caller that
+    /// spaces out its writes to GitHub.
     /// </summary>
     public async Task ClosePullRequestAsync(
-        string credential, string owner, string repo, int number, string comment, CancellationToken ct = default)
+        string credential, string owner, string repo, int number, string comment, CancellationToken ct = default,
+        Func<CancellationToken, Task>? beforeComment = null)
     {
         using (var close = NewJsonRequest(
             HttpMethod.Patch, $"{RepoPath(owner, repo)}/pulls/{number}", credential, new { state = "closed" }))
         using (await SendAsync(close, ct))
         {
         }
+
+        if (beforeComment is not null) await beforeComment(ct);
 
         // A pull request is an issue to GitHub's comment API.
         using var commentRequest = NewJsonRequest(

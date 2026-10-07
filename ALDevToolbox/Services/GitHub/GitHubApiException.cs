@@ -39,6 +39,18 @@ public sealed class GitHubApiException : Exception
     public bool IsRuleViolation =>
         StatusCode == HttpStatusCode.UnprocessableEntity
         && Message.Contains("rule violation", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when GitHub refused the call because the credential is making too many -
+    /// a 429, or a 403 whose message names a rate limit ("You have exceeded a secondary
+    /// rate limit", "API rate limit exceeded"). Every further call on the same
+    /// credential is refused too until it cools down, so a caller working through a
+    /// list stops rather than spending the rest of it on refusals.
+    /// </summary>
+    public bool IsRateLimited =>
+        StatusCode == HttpStatusCode.TooManyRequests
+        || (StatusCode == HttpStatusCode.Forbidden
+            && Message.Contains("rate limit", StringComparison.OrdinalIgnoreCase));
 }
 
 /// <summary>
