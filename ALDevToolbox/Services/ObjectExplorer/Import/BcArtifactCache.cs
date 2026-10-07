@@ -33,8 +33,7 @@ public sealed class BcArtifactCache
     private readonly BcArtifactCacheOptions _options;
     private readonly ILogger<BcArtifactCache> _logger;
     private readonly KeyedGate<string> _downloads = new();
-    private readonly object _inUseLock = new();
-    private readonly Dictionary<string, int> _inUse = [];
+    private readonly InUseLeases<string> _inUse = new();
 
     public BcArtifactCache(BcArtifactCacheOptions options, ILogger<BcArtifactCache> logger)
     {
@@ -48,7 +47,7 @@ public sealed class BcArtifactCache
     /// set that could not be cached (the cache is off, or the platform half is missing)
     /// is deleted then.
     /// </summary>
-    public async Task<BcArtifactLease> GetAsync(
+    public async Task<InUseLease<BcArtifactDownload>> GetAsync(
         string applicationUrl,
         Func<CancellationToken, Task<BcArtifactDownload>> download,
         CancellationToken ct = default)
@@ -73,7 +72,8 @@ public sealed class BcArtifactCache
             if (fresh.PlatformZipPath is null) return Uncached(fresh);
             // Held before the files land, so a concurrent eviction never takes a set
             // that is being stored.
-            Hold(key);
+            var lease = _inUse.Hold(
+                key, new BcArtifactDownload(PathOf(key, AppSuffix), PathOf(key, PlatformSuffix)), () => Discard(key));
             try
             {
                 Directory.CreateDirectory(_options.Directory);
@@ -87,7 +87,7 @@ public sealed class BcArtifactCache
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 _logger.LogWarning(ex, "Could not keep the Business Central artifacts for {Url}; this build uses them once.", applicationUrl);
-                Release(key);
+                lease.Dispose();
                 TryDelete(PathOf(key, AppSuffix));
                 TryDelete(PathOf(key, PlatformSuffix));
                 TryDelete(PathOf(key, AppSuffix) + PartialSuffix);
@@ -95,33 +95,24 @@ public sealed class BcArtifactCache
                 return Uncached(fresh);
             }
 
-            var lease = new BcArtifactLease(
-                new BcArtifactDownload(PathOf(key, AppSuffix), PathOf(key, PlatformSuffix)), () => Release(key), () => Discard(key));
             Evict();
             return lease;
         }
     }
 
     // Caller holds the key's download gate, so nothing else adds or replaces this set.
-    private BcArtifactLease? TryLease(string key)
+    private InUseLease<BcArtifactDownload>? TryLease(string key)
     {
         var app = PathOf(key, AppSuffix);
         var platform = PathOf(key, PlatformSuffix);
-        lock (_inUseLock)
-        {
-            if (!File.Exists(app) || !File.Exists(platform)) return null;
-            _inUse[key] = _inUse.GetValueOrDefault(key) + 1;
-        }
+        var lease = _inUse.TryHold(
+            key, () => File.Exists(app) && File.Exists(platform), new BcArtifactDownload(app, platform), () => Discard(key));
+        if (lease is null) return null;
         // Last use is the eviction order, so a set read every night stays.
         var now = DateTime.UtcNow;
         TryTouch(app, now);
         TryTouch(platform, now);
-        return new BcArtifactLease(new BcArtifactDownload(app, platform), () => Release(key), () => Discard(key));
-    }
-
-    private void Hold(string key)
-    {
-        lock (_inUseLock) _inUse[key] = _inUse.GetValueOrDefault(key) + 1;
+        return lease;
     }
 
     private static void Store(string source, string target)
@@ -135,24 +126,16 @@ public sealed class BcArtifactCache
     // another build still holds it, so the next build downloads it again.
     private void Discard(string key)
     {
-        lock (_inUseLock)
+        var removed = false;
+        _inUse.Locked(isHeld =>
         {
-            Release(key);
-            if (_inUse.ContainsKey(key)) return;
+            _inUse.Release(key);
+            if (isHeld(key)) return;
             TryDelete(PathOf(key, AppSuffix));
             TryDelete(PathOf(key, PlatformSuffix));
-        }
-        _logger.LogWarning("Removed cached Business Central artifacts {Key}: a build could not read them.", key);
-    }
-
-    private void Release(string key)
-    {
-        lock (_inUseLock)
-        {
-            if (!_inUse.TryGetValue(key, out var count)) return;
-            if (count <= 1) _inUse.Remove(key);
-            else _inUse[key] = count - 1;
-        }
+            removed = true;
+        });
+        if (removed) _logger.LogWarning("Removed cached Business Central artifacts {Key}: a build could not read them.", key);
     }
 
     /// <summary>
@@ -179,7 +162,7 @@ public sealed class BcArtifactCache
         {
             if (DateTime.UtcNow - File.GetLastWriteTimeUtc(partial) > AbandonedPartialAge) TryDelete(partial);
         }
-        lock (_inUseLock)
+        _inUse.Locked(isHeld =>
         {
             var sets = Directory.EnumerateFiles(_options.Directory, "*.zip")
                 .Select(path => new FileInfo(path))
@@ -199,16 +182,16 @@ public sealed class BcArtifactCache
             var total = sets.Sum(s => s.Bytes);
             foreach (var set in sets.OrderBy(s => s.Complete).ThenBy(s => s.LastUsed))
             {
-                if (_inUse.ContainsKey(set.Key)) continue;
+                if (isHeld(set.Key)) continue;
                 if (set.Complete && total <= _options.MaxBytes) break;
                 foreach (var file in set.Files) TryDelete(file.FullName);
                 total -= set.Bytes;
                 _logger.LogInformation("Removed cached Business Central artifacts {Key} ({Bytes} bytes) to stay within the cache size.", set.Key, set.Bytes);
             }
-        }
+        });
     }
 
-    private static BcArtifactLease Uncached(BcArtifactDownload download) => new(download, () =>
+    private static InUseLease<BcArtifactDownload> Uncached(BcArtifactDownload download) => new(download, () =>
     {
         TryDelete(download.ApplicationZipPath);
         if (download.PlatformZipPath is not null) TryDelete(download.PlatformZipPath);
@@ -237,36 +220,4 @@ public sealed class BcArtifactCache
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
-}
-
-/// <summary>
-/// A build's hold on one artifact set: the paths stay readable, and the set stays in
-/// the cache, until it is disposed.
-/// </summary>
-public sealed class BcArtifactLease : IDisposable
-{
-    private Action? _release;
-    private readonly Action? _discard;
-
-    public BcArtifactLease(BcArtifactDownload download, Action release, Action? discard = null)
-    {
-        Download = download;
-        _release = release;
-        _discard = discard;
-    }
-
-    public BcArtifactDownload Download { get; }
-
-    /// <summary>
-    /// Releases the set and drops it from the cache: the files could not be read, so
-    /// the next build must download them again rather than fail on them too.
-    /// </summary>
-    public void Discard()
-    {
-        var release = Interlocked.Exchange(ref _release, null);
-        if (release is null) return;
-        (_discard ?? release)();
-    }
-
-    public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
 }

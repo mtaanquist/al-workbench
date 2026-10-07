@@ -143,10 +143,25 @@ public partial class UpgradesPage
 
     private async Task CountArchiveAsync() => _archiveCount = await Upgrades.CountArchivedAsync();
 
-    /// <summary>The Fleet tab's count, and the versions a new upgrade can aim at, without drawing the fleet.</summary>
+    /// <summary>
+    /// The Fleet tab's count, and the versions a new upgrade can aim at, without drawing
+    /// the fleet. Read on a DI scope of its own: the page's first load reads it, and New
+    /// upgrade reads it again when that load has not got this far, so a click while the
+    /// page is still loading would otherwise start a second query on the circuit's one
+    /// context. Same as the history and the poll (#1069).
+    /// </summary>
     private async Task CountFleetAsync()
     {
-        var fleet = await Fleet.ListFleetAsync();
+        List<UpgradeFleetRow> fleet;
+        try
+        {
+            await using var scope = ScopeFactory.CreateAsyncScope();
+            fleet = await scope.ServiceProvider.GetRequiredService<UpgradeFleetService>().ListFleetAsync(ct: _gone.Token);
+        }
+        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        {
+            return; // the page went while the read was out
+        }
         _fleetCount = fleet.Count;
         _offeredVersions = OfferedVersionNames(fleet);
     }

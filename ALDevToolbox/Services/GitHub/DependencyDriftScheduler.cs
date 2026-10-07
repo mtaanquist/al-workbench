@@ -73,18 +73,7 @@ public sealed class DependencyDriftScheduler : PolledScheduler
     /// </summary>
     internal async Task<int> SweepAsync(CancellationToken ct)
     {
-        List<(int Id, bool IsSystem)> orgs;
-        await using (var scope = _services.CreateAsyncScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            // The one cross-org read: which orgs to sweep. The system org is swept
-            // too, since in single-tenant deployments it is the working org.
-            var rows = await db.Organizations.AsNoTracking()
-                .Where(o => !o.IsPending)
-                .Select(o => new { o.Id, o.IsSystem })
-                .ToListAsync(ct).ConfigureAwait(false);
-            orgs = rows.Select(o => (o.Id, o.IsSystem)).ToList();
-        }
+        var orgs = await SweptOrganizations.ListAsync(_services, ct).ConfigureAwait(false);
 
         var opened = 0;
         foreach (var (orgId, isSystem) in orgs)

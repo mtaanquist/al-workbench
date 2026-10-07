@@ -547,6 +547,34 @@ public sealed class GitHubWebhookRecoverySchedulerTests : IDisposable
         patch.GetProperty("output").GetProperty("title").GetString().Should().Be("The build was interrupted");
     }
 
+    [Fact]
+    public async Task A_build_from_before_its_repository_was_recorded_closes_its_run_only_when_the_solution_has_one_repository()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync();
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
+                HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson("ghs_installation"))
+            .On(new HttpMethod("PATCH"), $"/repos/{Repository}/check-runs/555", HttpStatusCode.OK, "{\"id\":555}")
+            .On(new HttpMethod("PATCH"), $"/repos/{Repository}/check-runs/556", HttpStatusCode.OK, "{\"id\":556}");
+        var before = DateTime.UtcNow.AddMinutes(-10);
+        // No repository on either build row: the fallback is all there is to go on.
+        var (single, _) = await SeedProjectAsync(secondRepository: false, name: "CRONUS Retail Single");
+        var (several, _) = await SeedProjectAsync();
+        var known = await SeedBuildAsync(single, null, ProjectBuildTrigger.PullRequest, ProjectBuildStatus.Building, before, 555);
+        var unknown = await SeedBuildAsync(several, null, ProjectBuildTrigger.PullRequest, ProjectBuildStatus.Building, before, 556);
+
+        await using var provider = BuildProvider(api);
+        (await NewScheduler(provider).CloseOrphanedPullRequestBuildsAsync(CancellationToken.None)).Should().Be(2);
+
+        api.Calls.Where(c => c.StartsWith("PATCH")).Should().ContainSingle()
+            .Which.Should().EndWith("/check-runs/555", "with several repositories there is no telling which one holds run 556");
+        await using var ctx = _db.NewContext();
+        var statuses = await ctx.OeProjectBuilds.AsNoTracking().ToDictionaryAsync(b => b.Id, b => b.Status);
+        statuses[known].Should().Be(ProjectBuildStatus.Failed);
+        statuses[unknown].Should().Be(ProjectBuildStatus.Failed, "the build is closed even when its run is left open");
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────
 
     private GitHubWebhookRecoveryScheduler NewScheduler(IServiceProvider provider) =>
@@ -674,14 +702,14 @@ public sealed class GitHubWebhookRecoverySchedulerTests : IDisposable
             ["repository_id"] = 1,
         });
 
-    private async Task<(int ProjectId, int RepositoryId)> SeedProjectAsync()
+    private async Task<(int ProjectId, int RepositoryId)> SeedProjectAsync(bool secondRepository = true, string name = "CRONUS Retail")
     {
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
         var project = new OeProject
         {
             OrganizationId = TestDb.DefaultOrgId,
-            Name = "CRONUS Retail",
+            Name = name,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -697,14 +725,17 @@ public sealed class GitHubWebhookRecoverySchedulerTests : IDisposable
         };
         ctx.OeProjectRepositories.Add(repository);
         // A second repository, so the check run can only be found by the one the build names.
-        ctx.OeProjectRepositories.Add(new OeProjectRepository
+        if (secondRepository)
         {
-            OrganizationId = TestDb.DefaultOrgId,
-            ProjectId = project.Id,
-            Provider = RepositoryProvider.GitHub,
-            Url = "https://github.com/cronus-dk/shared-library.git",
-            DisplayName = "shared-library",
-        });
+            ctx.OeProjectRepositories.Add(new OeProjectRepository
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = project.Id,
+                Provider = RepositoryProvider.GitHub,
+                Url = "https://github.com/cronus-dk/shared-library.git",
+                DisplayName = "shared-library",
+            });
+        }
         await ctx.SaveChangesAsync();
         return (project.Id, repository.Id);
     }

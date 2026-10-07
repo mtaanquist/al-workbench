@@ -1,5 +1,6 @@
 using ALDevToolbox.Services.Configuration;
 using ALDevToolbox.Services.ObjectExplorer.Import;
+using ALDevToolbox.Services.Workers;
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -58,13 +59,13 @@ public sealed class BcArtifactCacheTests : IDisposable
 
         using (var first = await cache.GetAsync(UrlA, Download()))
         {
-            File.Exists(first.Download.ApplicationZipPath).Should().BeTrue();
+            File.Exists(first.Value.ApplicationZipPath).Should().BeTrue();
         }
         using var second = await cache.GetAsync(UrlA, Download());
 
         _downloadCount.Should().Be(1);
-        File.Exists(second.Download.ApplicationZipPath).Should().BeTrue();
-        File.Exists(second.Download.PlatformZipPath).Should().BeTrue();
+        File.Exists(second.Value.ApplicationZipPath).Should().BeTrue();
+        File.Exists(second.Value.PlatformZipPath).Should().BeTrue();
         Directory.EnumerateFiles(_downloads).Should().BeEmpty("the downloaded files were moved into the cache");
     }
 
@@ -76,14 +77,14 @@ public sealed class BcArtifactCacheTests : IDisposable
         var leases = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => cache.GetAsync(UrlA, Download())));
 
         _downloadCount.Should().Be(1);
-        leases.Select(l => l.Download.ApplicationZipPath).Distinct().Should().ContainSingle();
+        leases.Select(l => l.Value.ApplicationZipPath).Distinct().Should().ContainSingle();
         foreach (var lease in leases) lease.Dispose();
     }
 
-    private static void Age(BcArtifactLease lease, int days)
+    private static void Age(InUseLease<BcArtifactDownload> lease, int days)
     {
-        File.SetLastWriteTimeUtc(lease.Download.ApplicationZipPath, DateTime.UtcNow.AddDays(-days));
-        File.SetLastWriteTimeUtc(lease.Download.PlatformZipPath!, DateTime.UtcNow.AddDays(-days));
+        File.SetLastWriteTimeUtc(lease.Value.ApplicationZipPath, DateTime.UtcNow.AddDays(-days));
+        File.SetLastWriteTimeUtc(lease.Value.PlatformZipPath!, DateTime.UtcNow.AddDays(-days));
     }
 
     [Fact]
@@ -102,9 +103,9 @@ public sealed class BcArtifactCacheTests : IDisposable
 
         using var c = await cache.GetAsync(UrlC, Download());
 
-        File.Exists(b.Download.ApplicationZipPath).Should().BeFalse();
-        File.Exists(a.Download.ApplicationZipPath).Should().BeTrue();
-        File.Exists(c.Download.ApplicationZipPath).Should().BeTrue();
+        File.Exists(b.Value.ApplicationZipPath).Should().BeFalse();
+        File.Exists(a.Value.ApplicationZipPath).Should().BeTrue();
+        File.Exists(c.Value.ApplicationZipPath).Should().BeTrue();
         _downloadCount.Should().Be(3);
     }
 
@@ -120,8 +121,8 @@ public sealed class BcArtifactCacheTests : IDisposable
 
         using var c = await cache.GetAsync(UrlC, Download());
 
-        File.Exists(held.Download.ApplicationZipPath).Should().BeTrue("a build is still reading it, though it is the oldest");
-        File.Exists(b.Download.ApplicationZipPath).Should().BeFalse();
+        File.Exists(held.Value.ApplicationZipPath).Should().BeTrue("a build is still reading it, though it is the oldest");
+        File.Exists(b.Value.ApplicationZipPath).Should().BeFalse();
         held.Dispose();
     }
 
@@ -133,7 +134,7 @@ public sealed class BcArtifactCacheTests : IDisposable
 
         lease.Discard();
 
-        File.Exists(lease.Download.ApplicationZipPath).Should().BeFalse();
+        File.Exists(lease.Value.ApplicationZipPath).Should().BeFalse();
         (await cache.GetAsync(UrlA, Download())).Dispose();
         _downloadCount.Should().Be(2);
     }
@@ -162,7 +163,7 @@ public sealed class BcArtifactCacheTests : IDisposable
         var cache = NewCache();
 
         var lease = await cache.GetAsync(UrlA, Download(withPlatform: false));
-        var path = lease.Download.ApplicationZipPath;
+        var path = lease.Value.ApplicationZipPath;
         lease.Dispose();
 
         File.Exists(path).Should().BeFalse();
@@ -180,7 +181,7 @@ public sealed class BcArtifactCacheTests : IDisposable
         (await cache.GetAsync(UrlA, Download())).Dispose();
 
         _downloadCount.Should().Be(2);
-        File.Exists(lease.Download.ApplicationZipPath).Should().BeFalse();
+        File.Exists(lease.Value.ApplicationZipPath).Should().BeFalse();
         Directory.Exists(Path.Combine(_root, "cache")).Should().BeFalse();
     }
 

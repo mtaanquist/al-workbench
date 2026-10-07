@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 
 using ALDevToolbox.Services.Configuration;
+using ALDevToolbox.Services.Workers;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 
@@ -50,10 +51,8 @@ public sealed class AlCompilerProvisioner
     private readonly ILogger<AlCompilerProvisioner> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
     // Compilers a running build is using, by version, so a prune never deletes one
-    // under it now that builds run side by side (#1137). Taking a lease and pruning
-    // both hold this lock, so a lease either sees the folder gone or keeps it.
-    private readonly object _inUseLock = new();
-    private readonly Dictionary<string, int> _inUse = new(StringComparer.OrdinalIgnoreCase);
+    // under it now that builds run side by side (#1137).
+    private readonly InUseLeases<string> _inUse = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly string _installDir;
     private readonly string? _versionPin;
@@ -168,7 +167,7 @@ public sealed class AlCompilerProvisioner
     /// keeps its folder on the volume until the lease is disposed. Null when there is
     /// no compiler.
     /// </summary>
-    public async Task<AlCompilerLease?> UseAsync(bool prerelease = false, CancellationToken ct = default)
+    public async Task<InUseLease<AlCompilerInfo>?> UseAsync(bool prerelease = false, CancellationToken ct = default)
     {
         // A newer beta can replace the one just resolved before the lease is taken;
         // resolving again finds the newer one.
@@ -176,24 +175,9 @@ public sealed class AlCompilerProvisioner
         {
             var compiler = await ResolveAsync(prerelease, ct).ConfigureAwait(false);
             if (compiler is null) return null;
-            lock (_inUseLock)
-            {
-                if (!File.Exists(compiler.AlcPath)) continue;
-                _inUse[compiler.Version] = _inUse.GetValueOrDefault(compiler.Version) + 1;
-            }
-            return new AlCompilerLease(compiler, () => Release(compiler.Version));
+            if (_inUse.TryHold(compiler.Version, () => File.Exists(compiler.AlcPath), compiler) is { } lease) return lease;
         }
         return null;
-    }
-
-    private void Release(string version)
-    {
-        lock (_inUseLock)
-        {
-            if (!_inUse.TryGetValue(version, out var count)) return;
-            if (count <= 1) _inUse.Remove(version);
-            else _inUse[version] = count - 1;
-        }
     }
 
     /// <summary>The newest prerelease compiler, provisioned when needed, or null when the stable line should answer instead.</summary>
@@ -281,13 +265,13 @@ public sealed class AlCompilerProvisioner
     /// </summary>
     private void PruneOtherPrereleases(string keep)
     {
-        lock (_inUseLock)
+        _inUse.Locked(isHeld =>
         {
             foreach (var version in InstalledVersions().Where(IsPrerelease))
             {
                 if (string.Equals(version, keep, StringComparison.OrdinalIgnoreCase)
                     || string.Equals(version, _versionPin, StringComparison.OrdinalIgnoreCase)
-                    || _inUse.ContainsKey(version)) continue;
+                    || isHeld(version)) continue;
                 try
                 {
                     Directory.Delete(VersionDir(version), recursive: true);
@@ -298,7 +282,7 @@ public sealed class AlCompilerProvisioner
                     _logger.LogWarning(ex, "Could not remove the older AL compiler {Version}.", version);
                 }
             }
-        }
+        });
     }
 
     /// <summary>
@@ -715,16 +699,6 @@ public sealed class AlCompilerPackageException(string message, Exception? inner 
 /// <c>.../alc.dll</c>, which the host's <c>dotnet</c> runs; <see cref="FileName"/>
 /// and <see cref="LeadingArguments"/> hide that difference from the build.
 /// </summary>
-/// <summary>A compiler a build is using, kept on the volume until disposed. See <see cref="AlCompilerProvisioner.UseAsync"/>.</summary>
-public sealed class AlCompilerLease(AlCompilerInfo compiler, Action release) : IDisposable
-{
-    private Action? _release = release;
-
-    public AlCompilerInfo Compiler { get; } = compiler;
-
-    public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
-}
-
 public sealed record AlCompilerInfo(string AlcPath, bool NeedsRollForward, string Version)
 {
     public bool IsFrameworkDependent => AlcPath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);

@@ -56,9 +56,9 @@ public sealed class ProjectBuildService
     private const int DefaultCompileTimeoutMinutes = 30;
 
     /// <summary>
-    /// The ceiling for one <c>alc</c> run (env-overridable). Builds share one worker, so a
-    /// compiler that never exits would stop every build and import until a restart (#1132);
-    /// past this it is killed and that extension fails.
+    /// The ceiling for one <c>alc</c> run (env-overridable). A compiler that never exits
+    /// would hold one of the build workers, and the build slot with it, until a restart
+    /// (#1132, #1137); past this it is killed and that extension fails.
     /// </summary>
     private static TimeSpan CompileTimeout() =>
         MinutesOrDefault(Environment.GetEnvironmentVariable("OE_BUILD_COMPILE_TIMEOUT_MINUTES"), DefaultCompileTimeoutMinutes);
@@ -66,7 +66,7 @@ public sealed class ProjectBuildService
     /// <summary>
     /// The ceiling for a git command that only reads the clone (diff, log, merge-base,
     /// show, symbolic-ref). These take seconds; the bound only stops a stuck one from
-    /// holding the build worker (#1132).
+    /// holding a build worker (#1132).
     /// </summary>
     private static readonly TimeSpan LocalGitTimeout = TimeSpan.FromMinutes(5);
 
@@ -236,7 +236,7 @@ public sealed class ProjectBuildService
         using var compilerLease = await _compiler.UseAsync(prerelease: options.Target == BcBuildTarget.NextMajor, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException(
                 "The AL compiler isn't available yet. It's downloaded from NuGet on first use — check the server has outbound access, then retry.");
-        var compiler = compilerLease.Compiler;
+        var compiler = compilerLease.Value;
 
         var buildRoot = Path.Combine(Path.GetTempPath(), TempPrefix + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(buildRoot);
@@ -402,7 +402,7 @@ public sealed class ProjectBuildService
                 resolved.ApplicationUrl,
                 token => _artifacts.DownloadArtifactSetAsync(resolved.ApplicationUrl, token),
                 ct).ConfigureAwait(false);
-            var download = artifactLease.Download;
+            var download = artifactLease.Value;
             int? parentReleaseId;
             IReadOnlyList<ResolvedSymbolPackage> fromFeeds = [];
             try
@@ -1956,12 +1956,6 @@ public sealed class ProjectBuildService
         }
     }
 
-    /// <summary>
-    /// Ensures a non-deleted first-party Release exists for the resolved artifact
-    /// (so the project Release's <c>ParentReleaseId</c> can point at it), importing
-    /// it inline from the already-downloaded zips when absent. Best-effort: a failed
-    /// parent import logs and returns null rather than sinking the project build.
-    /// </summary>
     /// <summary>The catalogue's ready release for <paramref name="resolved"/>, or null; never imports one.</summary>
     private Task<int?> ExistingParentReleaseAsync(ResolvedArtifact resolved, CancellationToken ct) =>
         _db.OeReleases.AsNoTracking()
@@ -1969,6 +1963,12 @@ public sealed class ProjectBuildService
             .Select(r => (int?)r.Id)
             .FirstOrDefaultAsync(ct);
 
+    /// <summary>
+    /// Ensures a non-deleted first-party Release exists for the resolved artifact
+    /// (so the project Release's <c>ParentReleaseId</c> can point at it), importing
+    /// it inline from the already-downloaded zips when absent. Best-effort: a failed
+    /// parent import logs and returns null rather than sinking the project build.
+    /// </summary>
     private async Task<int?> EnsureParentReleaseAsync(
         ResolvedArtifact resolved, BcArtifactDownload download, int buildReleaseId, CancellationToken ct)
     {
