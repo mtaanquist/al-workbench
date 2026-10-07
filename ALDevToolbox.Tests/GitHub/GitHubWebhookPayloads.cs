@@ -31,7 +31,8 @@ internal static class GitHubWebhookPayloads
         long installationId = 42,
         string cloneUrl = "https://github.com/cronus-dk/customer-app.git",
         string defaultBranch = "main",
-        long pushedAt = 1_790_000_000)
+        long pushedAt = 1_790_000_000,
+        int filesPerCommit = 1)
     {
         var commits = Enumerable.Range(1, deleted ? 0 : commitCount)
             .Select(i => new
@@ -42,7 +43,9 @@ internal static class GitHubWebhookPayloads
                 author = new { name = "Erik", email = "erik@cronus.example", username = "erik" },
                 added = Array.Empty<string>(),
                 removed = Array.Empty<string>(),
-                modified = new[] { "app/src/Vat.Codeunit.al" },
+                modified = filesPerCommit == 1
+                    ? new[] { "app/src/Vat.Codeunit.al" }
+                    : Enumerable.Range(1, filesPerCommit).Select(f => $"app/src/Generated/Object{f:D5}.Table.al").ToArray(),
             })
             .ToList();
 
