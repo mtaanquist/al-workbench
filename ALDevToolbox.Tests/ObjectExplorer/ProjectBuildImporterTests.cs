@@ -377,6 +377,48 @@ public sealed class ProjectBuildImporterTests : IDisposable
         queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
+    // Two tabs or two people pressing Build together both passed the running check
+    // before either build existed (#1119).
+    [Fact]
+    public async Task Builds_started_at_the_same_moment_queue_only_one()
+    {
+        int pipelineId;
+        await using (var seed = _db.NewContext())
+        {
+            var projectId = await SeedProjectWithRepoAsync(seed);
+            pipelineId = await SeedPipelineAsync(seed, projectId, "Production", requestedAppIdsJson: null);
+        }
+        var queue = new ProjectBuildQueue();
+        var contexts = Enumerable.Range(0, 6).Select(_ => _db.NewContext()).ToList();
+        try
+        {
+            using var go = new ManualResetEventSlim();
+            var starts = contexts.Select(ctx => Task.Run(async () =>
+            {
+                var importer = NewImporter(ctx, queue);
+                go.Wait();
+                try
+                {
+                    await importer.StartBuildAsync(pipelineId);
+                    return true;
+                }
+                catch (PlanValidationException ex) when (ex.Errors["Pipeline"].Contains("already running"))
+                {
+                    return false;
+                }
+            })).ToList();
+            go.Set();
+
+            (await Task.WhenAll(starts)).Count(started => started).Should().Be(1);
+        }
+        finally
+        {
+            foreach (var ctx in contexts) await ctx.DisposeAsync();
+        }
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(1);
+    }
+
     [Theory]
     [InlineData(ProjectBuildStatus.Ready)]
     [InlineData(ProjectBuildStatus.Failed)]
@@ -468,7 +510,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
         await FinishAsync(first);
 
-        var act = () => NewImporter(ctx, new ProjectBuildQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
 
         await act.Should().NotThrowAsync();
     }
@@ -483,7 +525,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await FinishAsync(first);
         await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
-        var act = () => NewImporter(ctx, new ProjectBuildQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Retry");
     }
@@ -511,7 +553,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         _db.OrgContext.IsSiteAdmin = false;
         _db.OrgContext.CurrentUserId = 9631;
 
-        var act = () => NewImporter(ctx, new ProjectBuildQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
 
         await act.Should().ThrowAsync<ProjectAccessDeniedException>();
     }
@@ -526,10 +568,72 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await FinishAsync(first);
         await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, null, clear: true);
 
-        var act = () => NewImporter(ctx, new ProjectBuildQueue()).EnsureCanRebuildAsync(first, projectId, "Symbols");
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Symbols"); };
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Symbols"]
             .Should().Be(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.GitHub));
+    }
+
+    // Retry and Build pressed together: the retried build is marked queued under the
+    // pipeline's lock, so Build sees it once the release is reopened (#1119).
+    [Fact]
+    public async Task A_build_being_retried_holds_up_a_new_build_of_its_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+
+        await using (var rebuild = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"))
+        {
+            // What reopening the release does.
+            await ctx.OeReleases.Where(r => r.Id == first)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Status, "ingesting"));
+            await rebuild.CommitAsync();
+        }
+
+        await using var other = _db.NewContext();
+        var act = () => NewImporter(other, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
+            .Should().Contain("already running");
+    }
+
+    [Fact]
+    public async Task A_refused_rebuild_leaves_the_build_as_it_was()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+
+        await using (await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"))
+        {
+            // Disposed without a commit, as when reopening the release fails.
+        }
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == first)).Status.Should().Be(ProjectBuildStatus.Ready);
+    }
+
+    // Builds go in line by who is waiting on them (#1137): a retried build is somebody's.
+    [Fact]
+    public async Task A_rebuild_goes_in_line_as_a_build_somebody_waits_on_behind_its_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+
+        var queue = new ProjectBuildQueue();
+        await NewImporter(ctx, queue).QueueRebuildAsync(first, projectId);
+
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.ReleaseId.Should().Be(first);
+        job.BuildOrder.Should().Be(new ProjectBuildOrder(0, $"{pipelineId}:{ProjectBuildTarget.Current}"));
+        job.JobRowId.Should().NotBe(0, "the rebuild resumes after a restart like any build");
     }
 
     private async Task FinishAsync(int releaseId)

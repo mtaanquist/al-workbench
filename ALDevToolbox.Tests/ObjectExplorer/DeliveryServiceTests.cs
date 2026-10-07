@@ -285,6 +285,87 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task RunDeliveryAsync_fetches_a_new_token_when_it_expires_between_apps()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales", "CRONUS Service" });
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        // Each install takes long enough for the token in hand to run out; the token
+        // source then has a fresh one (#1113).
+        _apps.AfterUpload = () =>
+        {
+            _apps.ExpiredTokens.Add(_tokens.Token);
+            _tokens.Token = "token-" + _tokens.Acquired;
+        };
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
+        delivery.Results.Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Completed);
+        _apps.UploadedOrder.Should().Equal("CRONUS Core", "CRONUS Sales", "CRONUS Service");
+    }
+
+    [Fact]
+    public async Task RunDeliveryAsync_keeps_waiting_with_a_new_token_when_it_expires_during_an_install()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        _apps.AfterUpload = () =>
+        {
+            _apps.ExpiredTokens.Add(_tokens.Token);
+            _tokens.Token = "fresh-token";
+        };
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status
+            .Should().Be(ProjectDeliveryStatus.Deployed, "a 401 while waiting is the token running out, not the install failing");
+    }
+
+    [Fact]
+    public async Task A_401_while_waiting_asks_for_a_token_past_the_cache()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        _apps.AfterUpload = () =>
+        {
+            _apps.ExpiredTokens.Add(_tokens.Token);
+            _tokens.Token = "fresh-token";
+        };
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        _tokens.Forced.Should().Be(1, "the cached token was just refused, so the cache can't be trusted for the next one");
+    }
+
+    [Fact]
+    public async Task When_signing_in_again_fails_partway_the_reason_is_kept_and_the_rest_are_skipped()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales", "CRONUS Service" });
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        // The secret expires while the first app installs.
+        _apps.AfterUpload = () => _tokens.Throw = new BcApiException(null, "This solution's own Business Central client secret has expired.");
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
+        results[0].Status.Should().Be(ProjectDeliveryResultStatus.Completed);
+        results[1].Status.Should().Be(ProjectDeliveryResultStatus.Failed);
+        results[1].Message.Should().Contain("client secret has expired");
+        results[2].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
+        _apps.UploadedOrder.Should().Equal("CRONUS Core");
+    }
+
+    [Fact]
     public async Task RunDeliveryAsync_is_a_noop_when_the_delivery_is_not_scheduled()
     {
         await using var ctx = _db.NewContext();
@@ -2817,8 +2898,20 @@ public sealed class DeliveryServiceTests : IDisposable
         public string Token = "fake-token";
         public Guid TenantId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         public Exception? Throw;
+        /// <summary>How many times a token was asked for.</summary>
+        public int Acquired;
         public Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, CancellationToken ct = default)
-            => Throw is not null ? throw Throw : Task.FromResult(new BcDeliveryContext(Token, TenantId));
+        {
+            Acquired++;
+            return Throw is not null ? throw Throw : Task.FromResult(new BcDeliveryContext(Token, TenantId));
+        }
+        /// <summary>How many times a new token was demanded past the cache.</summary>
+        public int Forced;
+        public Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, bool forceRefresh, CancellationToken ct = default)
+        {
+            if (forceRefresh) Forced++;
+            return AcquireDeliveryContextAsync(projectId, ct);
+        }
     }
 
     /// <summary>
@@ -2908,6 +3001,20 @@ public sealed class DeliveryServiceTests : IDisposable
 
         private readonly Dictionary<Guid, string> _appNameByAppId = new();
 
+        /// <summary>Tokens Business Central answers with 401, as it does once one has expired.</summary>
+        public HashSet<string> ExpiredTokens { get; } = new();
+
+        /// <summary>Runs after each upload is accepted, so a test can let time pass.</summary>
+        public Action? AfterUpload { get; set; }
+
+        private void Authorize(string accessToken)
+        {
+            if (ExpiredTokens.Contains(accessToken))
+            {
+                throw new BcApiException(System.Net.HttpStatusCode.Unauthorized, "The access token has expired.");
+            }
+        }
+
         public Task<IReadOnlyList<BcInstalledApp>> ListInstalledAppsAsync(
             string accessToken, string applicationFamily, string environmentName, CancellationToken ct = default)
         {
@@ -2920,6 +3027,7 @@ public sealed class DeliveryServiceTests : IDisposable
             string deploymentSchedule, string syncMode, string languageId, bool installOrUpdateNeededDependencies,
             CancellationToken ct = default)
         {
+            Authorize(accessToken);
             // The seed names artifacts "<App Name>_<version>.app".
             var appName = fileName[..fileName.LastIndexOf('_')];
             UploadedOrder.Add(appName);
@@ -2931,6 +3039,7 @@ public sealed class DeliveryServiceTests : IDisposable
             var appId = Guid.NewGuid();
             _appNameByAppId[appId] = appName;
             var status = BcDeploymentSchedule.IsDeferred(deploymentSchedule) ? "scheduled" : "running";
+            AfterUpload?.Invoke();
             return Task.FromResult(Operation(appId, status));
         }
 
@@ -2938,6 +3047,7 @@ public sealed class DeliveryServiceTests : IDisposable
             string accessToken, string applicationFamily, string environmentName, Guid appId, Guid operationId,
             CancellationToken ct = default)
         {
+            Authorize(accessToken);
             var name = _appNameByAppId.GetValueOrDefault(appId, string.Empty);
             var status = StatusByApp.GetValueOrDefault(name, "succeeded");
             var operation = Operation(appId, status, operationId);

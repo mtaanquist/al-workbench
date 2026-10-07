@@ -121,6 +121,14 @@ public sealed class AlSymbolFeedResolver
             ct.ThrowIfCancellationRequested();
             var next = queue.Dequeue();
             if (request.ProvidedAppIds.Contains(next.AppId) || failed.Contains(next.AppId)) continue;
+            // The id comes from a repository's app.json and goes into a cache path and a
+            // feed URL, so anything that is not an app id stops here (#1136).
+            if (!Guid.TryParse(next.AppId, out _))
+            {
+                unresolved.Add(Unresolved(next, "its id in app.json is not a valid app id (a GUID)"));
+                failed.Add(next.AppId);
+                continue;
+            }
             if (present.TryGetValue(next.AppId, out var have) && Satisfies(have, next.MinVersion)) continue;
 
             if (++fetched > MaxPackagesPerBuild)

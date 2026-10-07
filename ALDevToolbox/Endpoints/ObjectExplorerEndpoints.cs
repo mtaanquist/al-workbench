@@ -373,13 +373,16 @@ internal static class ObjectExplorerEndpoints
                     uploads.Add(new SupplementalSymbolUpload(SanitiseFileName(file.FileName), buffer.ToArray()));
                 }
 
-                // Persist the symbols first so they survive even if the rebuild
-                // can't be queued, and so every later build of this project
-                // benefits. Then rebuild this release in place.
-                await projectBuilds.EnsureCanRebuildAsync(id, projectId, "Symbols", ct);
-                await projects.AddSupplementalSymbolsAsync(projectId, uploads, ct);
-
-                await importer.ReopenForRebuildAsync(id, ct);
+                // Store the symbols, so every later build of this project benefits,
+                // then rebuild this release in place. The checks, the stored symbols
+                // and the reopen commit together under the pipeline's build lock
+                // (#1119), so a refused rebuild stores nothing.
+                await using (var rebuild = await projectBuilds.BeginRebuildAsync(id, projectId, "Symbols", ct))
+                {
+                    await projects.AddSupplementalSymbolsAsync(projectId, uploads, ct);
+                    await importer.ReopenForRebuildAsync(id, ct);
+                    await rebuild.CommitAsync(ct);
+                }
                 await management.ClearIngestedDataAsync(id, ct);
                 await projectBuilds.QueueRebuildAsync(id, projectId, ct);
 

@@ -318,9 +318,13 @@ public sealed class ReleaseImportRequestService
             // transient. See issue #433.
             // Held to the same rules as pressing Build: the person must be able to
             // manage the solution, and no other build of its pipeline may be running.
-            // The rerun builds the commits the first run did (#1110).
-            await _projectBuilds.EnsureCanRebuildAsync(releaseId, retryProjectId, "Retry", ct).ConfigureAwait(false);
-            await _importer.ReopenForRebuildAsync(releaseId, ct).ConfigureAwait(false);
+            // The rerun builds the commits the first run did (#1110). The check and the
+            // reopen happen under the pipeline's build lock (#1119).
+            await using (var rebuild = await _projectBuilds.BeginRebuildAsync(releaseId, retryProjectId, "Retry", ct).ConfigureAwait(false))
+            {
+                await _importer.ReopenForRebuildAsync(releaseId, ct).ConfigureAwait(false);
+                await rebuild.CommitAsync(ct).ConfigureAwait(false);
+            }
             await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
             await _projectBuilds.QueueRebuildAsync(releaseId, retryProjectId, ct).ConfigureAwait(false);
             return new ReleaseImportOutcome.Queued(releaseId);
