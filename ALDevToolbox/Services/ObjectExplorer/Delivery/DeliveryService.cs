@@ -25,6 +25,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 /// </summary>
 public sealed class DeliveryService
 {
+    /// <summary>Why a deployment through a disabled deployment pipeline is refused (#1131).</summary>
+    public const string DisabledRefusal = "This deployment pipeline is disabled. Enable it to deploy.";
+
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
@@ -348,6 +351,7 @@ public sealed class DeliveryService
                 r.RestrictBranch,
                 r.AllowedBranch,
                 r.ProjectEnvironmentId,
+                r.DisabledAt,
                 OwnerId = r.Project!.CreatedByUserId,
                 TimeZone = r.Project.BcTimeZone,
                 EnvName = r.ProjectEnvironment!.Name,
@@ -362,6 +366,12 @@ public sealed class DeliveryService
         if (checkAccess)
         {
             await _access.EnsureCanManageAsync(rp.ProjectId, rp.OwnerId, ct);
+        }
+
+        // A disabled pipeline deploys nothing: not by hand, not by approval, not on its own (#1131).
+        if (rp.DisabledAt is not null)
+        {
+            throw Validation("ReleasePipeline", DisabledRefusal);
         }
 
         if (rp.EnvMissing)
@@ -607,6 +617,7 @@ public sealed class DeliveryService
 
         var pipelineIds = await _db.OeReleasePipelines.AsNoTracking()
             .Where(r => r.DeletedAt == null
+                        && r.DisabledAt == null
                         && r.PrepareReleaseOnNewBuild
                         && r.ArtifactSource == ReleaseArtifactSource.Build
                         && r.BuildPipelineId == buildPipelineId)
@@ -757,6 +768,7 @@ public sealed class DeliveryService
         }
         return await _db.OeReleasePipelines.AsNoTracking()
             .Where(r => r.DeletedAt == null
+                        && r.DisabledAt == null
                         && r.PrepareReleaseOnNewBuild
                         && r.DeployWithoutApproval
                         && r.ArtifactSource == ReleaseArtifactSource.Build
@@ -793,6 +805,7 @@ public sealed class DeliveryService
                 r.PrepareReleaseOnNewBuild,
                 r.DeployWithoutApproval,
                 r.DeployWithoutApprovalByUserId,
+                r.DisabledAt,
                 EnvName = r.ProjectEnvironment!.Name,
                 EnvType = r.ProjectEnvironment.Type,
             })
@@ -810,6 +823,10 @@ public sealed class DeliveryService
             return null;
         }
 
+        if (rp.DisabledAt is not null)
+        {
+            throw Validation("ReleasePipeline", DisabledRefusal);
+        }
         if (!rp.PrepareReleaseOnNewBuild || !rp.DeployWithoutApproval)
         {
             throw Validation("DeployWithoutApproval", "This deployment pipeline no longer deploys without approval.");
@@ -1151,7 +1168,7 @@ public sealed class DeliveryService
             .Where(d => d.ProjectId == projectId
                 && d.ReleasePipeline!.ProjectEnvironmentId == environmentId
                 && d.EnvironmentName == envName
-                && ((d.Status == ProjectDeliveryStatus.Scheduled && d.ReleasePipeline!.DeletedAt == null)
+                && ((d.Status == ProjectDeliveryStatus.Scheduled && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null)
                     || (d.Status == ProjectDeliveryStatus.HandedOff
                         && !_db.OeProjectDeliveries.Any(o => o.ReleasePipelineId == d.ReleasePipelineId
                             && o.EnvironmentName == envName
@@ -1559,11 +1576,11 @@ public sealed class DeliveryService
     /// </summary>
     public async Task<int> EnqueueDueDeliveriesAsync(DateTime nowUtc, CancellationToken ct = default)
     {
-        await CancelDeletedPipelinesDeliveriesAsync(ct);
+        await CancelStoppedPipelinesDeliveriesAsync(ct);
         var due = await _db.OeProjectDeliveries.AsNoTracking()
             // A deleted pipeline's deployments are cancelled with it (#1108); this is the backstop.
             .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= nowUtc
-                        && d.ReleasePipeline!.DeletedAt == null)
+                        && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null)
             .OrderBy(d => d.ScheduledFor).ThenBy(d => d.Id)
             .Select(d => new { d.Id, d.OrganizationId, d.TriggeredByUserId })
             .ToListAsync(ct);
@@ -1574,39 +1591,37 @@ public sealed class DeliveryService
     }
 
     /// <summary>
-    /// Sets aside the deliveries still waiting on a deleted deployment pipeline (#1108):
-    /// scheduled ones are cancelled and prepared ones dismissed, with their approval
-    /// requests closed. The delete does this itself; this catches one made or prepared while
-    /// the delete was committing, and those left behind by deletes from before it did (#1179).
-    /// Compare-and-set, like every cancel.
+    /// Sets aside the deliveries still waiting on a stopped deployment pipeline: scheduled
+    /// ones are cancelled and prepared ones dismissed, with their approval requests closed,
+    /// when the pipeline is deleted (#1108) or disabled (#1131). The delete or disable does
+    /// this itself; this catches one made or prepared while it was committing, and those
+    /// left behind by deletes from before it did. It writes through the same helper, so
+    /// both leave the same record (#1179). Compare-and-set, like every cancel.
     /// </summary>
-    private async Task CancelDeletedPipelinesDeliveriesAsync(CancellationToken ct)
+    private async Task CancelStoppedPipelinesDeliveriesAsync(CancellationToken ct)
     {
-        var waiting = await _db.OeProjectDeliveries.AsNoTracking()
+        var stopped = await _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => (d.Status == ProjectDeliveryStatus.Scheduled || d.Status == ProjectDeliveryStatus.Proposed)
-                        && d.ReleasePipeline!.DeletedAt != null)
-            .Select(d => new { d.Id, d.Status })
+                        && (d.ReleasePipeline!.DeletedAt != null || d.ReleasePipeline.DisabledAt != null))
+            .Select(d => new { d.Id, d.Status, Deleted = d.ReleasePipeline!.DeletedAt != null })
             .ToListAsync(ct);
-        if (waiting.Count == 0) return;
+        if (stopped.Count == 0) return;
 
         var now = DateTime.UtcNow;
-        var dismissed = await ReleasePipelineService.SetAsideForDeletedPipelineAsync(_db,
-            waiting.Where(d => d.Status == ProjectDeliveryStatus.Proposed).Select(d => d.Id).ToList(),
-            ProjectDeliveryStatus.Proposed, byUserId: null, now, ct);
-        var cancelled = await ReleasePipelineService.SetAsideForDeletedPipelineAsync(_db,
-            waiting.Where(d => d.Status == ProjectDeliveryStatus.Scheduled).Select(d => d.Id).ToList(),
-            ProjectDeliveryStatus.Scheduled, byUserId: null, now, ct);
-
-        // Nobody can approve a deployment of a deleted pipeline any more.
+        var dismissed = new List<int>();
+        foreach (var group in stopped.GroupBy(d => (d.Status, d.Deleted)))
+        {
+            var reason = group.Key.Deleted ? ReleasePipelineService.DeletedPipelineReason : ReleasePipelineService.DisabledPipelineReason;
+            var moved = await ReleasePipelineService.SetAsideForStoppedPipelineAsync(
+                _db, group.Select(d => d.Id).ToList(), group.Key.Status, reason, byUserId: null, now, ct);
+            if (group.Key.Status == ProjectDeliveryStatus.Proposed) dismissed.AddRange(moved);
+            foreach (var id in moved)
+            {
+                _logger.LogInformation("Set aside {Status} delivery {DeliveryId}: {Reason}.", group.Key.Status, id, reason);
+            }
+        }
+        // Nobody can approve them any more, so their approval asks are done.
         await NotificationSubject.MarkDoneAsync(_db, dismissed.Select(NotificationSubject.Delivery).ToList(), now, _logger, ct);
-        foreach (var id in cancelled)
-        {
-            _logger.LogInformation("Cancelled scheduled delivery {DeliveryId} because its deployment pipeline was deleted.", id);
-        }
-        foreach (var id in dismissed)
-        {
-            _logger.LogInformation("Dismissed prepared delivery {DeliveryId} because its deployment pipeline was deleted.", id);
-        }
     }
 
     /// <summary>
@@ -1714,14 +1729,15 @@ public sealed class DeliveryService
         var runAs = _orgContext.CurrentUserId;
         var claimed = await _db.OeProjectDeliveries
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= claimBy
-                        && d.ReleasePipeline!.DeletedAt == null && d.TriggeredByUserId == runAs)
+                        && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null
+                        && d.TriggeredByUserId == runAs)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.Status, ProjectDeliveryStatus.Claimed)
                 .SetProperty(d => d.ClaimedAt, claimedAt)
                 .SetProperty(d => d.UpdatedAt, claimedAt), ct);
         if (claimed == 0)
         {
-            _logger.LogInformation("Delivery {DeliveryId} was already claimed, cancelled, moved to later, handed to someone else or its pipeline deleted; skipping.", deliveryId);
+            _logger.LogInformation("Delivery {DeliveryId} was already claimed, cancelled, moved to later, handed to someone else or its pipeline deleted or disabled; skipping.", deliveryId);
             return false;
         }
 
@@ -1810,7 +1826,7 @@ public sealed class DeliveryService
         var d = await _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled
                         && d.ScheduledByDeliveryWindow && !d.ScheduledOutsideWindow
-                        && d.ReleasePipeline!.DeletedAt == null)
+                        && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null)
             .Select(d => new
             {
                 d.ProjectId, d.EnvironmentName, d.ScheduledFor,

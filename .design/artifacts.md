@@ -133,6 +133,14 @@ Build **trigger** (the **New build** action with its extension picker) is a Pipe
   owner, an org **Admin**, a SiteAdmin, or a member of a team assigned to the project.
 - **Deleting** is deliberately stricter: owner, org Admin, SiteAdmin only. A team grant is about
   doing the work on a project, not about ending it.
+- **Pipelines are disabled, not deleted** (#1131). Anyone who manages the solution can disable or
+  enable a build pipeline or a deployment pipeline (`disabled_at`); only an org Admin or a
+  SiteAdmin can delete one. A disabled build pipeline refuses a Build and is skipped by building on
+  push and the nightly preview check, and a push or preview build that was already waiting fails
+  with the reason when the worker reaches it; a manual build already queued still runs. A disabled
+  deployment pipeline refuses Deploy and the agent's deploy tool, prepares nothing from new builds,
+  and disabling it cancels its scheduled deployments and dismisses its prepared ones, as a delete
+  does. Enabling puts it back as it was; nothing that was cancelled comes back.
 - Enforced in the service layer (source of truth, via `ProjectAccess`) and mirrored in the UI —
   the affordances are hidden for everyone else, but hiding a button is a courtesy, not the gate.
 - No new role: "Admin" is the existing org `Admin`. Teams are not a role; they are a named group

@@ -25,6 +25,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// </summary>
 public sealed class ProjectBuildImporter
 {
+    /// <summary>Why a build of a disabled pipeline is refused (#1131).</summary>
+    public const string DisabledRefusal = "This pipeline is disabled. Enable it to build.";
+
     private readonly ReleaseImportService _importer;
     private readonly ProjectBuildQueue _queue;
     private readonly PersistedImportJobs _persistedJobs;
@@ -183,6 +186,14 @@ public sealed class ProjectBuildImporter
         }
         if (missing.Count > 0) throw Refuse(string.Join(" ", missing));
 
+        // A rebuild is a build by hand, so a disabled pipeline refuses it like Build does (#1131).
+        if (build is { PipelineId: { } disabledCheckId }
+            && await _db.OePipelines.AsNoTracking()
+                .AnyAsync(p => p.Id == disabledCheckId && p.DisabledAt != null, ct).ConfigureAwait(false))
+        {
+            throw Refuse(DisabledRefusal);
+        }
+
         var tx = build is { PipelineId: { } lockedPipelineId }
             ? await LockPipelineForManualBuildAsync(lockedPipelineId, ct).ConfigureAwait(false)
             : await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
@@ -266,6 +277,7 @@ public sealed class ProjectBuildImporter
                 p.ProjectId,
                 p.RequestedAppIdsJson,
                 p.Branch,
+                p.DisabledAt,
                 ProjectName = p.Project!.Name,
                 OwnerId = p.Project.CreatedByUserId,
                 RepoCount = p.Project.Repositories.Count,
@@ -279,6 +291,15 @@ public sealed class ProjectBuildImporter
 
         // Only the owner or an org Admin may trigger a build. See .design/artifacts.md.
         await _access.EnsureCanManageAsync(pipeline.ProjectId, pipeline.OwnerId, ct).ConfigureAwait(false);
+
+        // A disabled pipeline builds nothing, whoever or whatever asks (#1131).
+        if (pipeline.DisabledAt is not null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Pipeline"] = DisabledRefusal,
+            });
+        }
 
         if (pipeline.RepoCount == 0)
         {

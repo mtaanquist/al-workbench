@@ -483,6 +483,33 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_disabled_pipeline_offers_enable_as_its_one_primary_and_no_deploy()
+    {
+        var seed = await SeedAsync();
+        await using (var db = _db.NewContext())
+        {
+            await db.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.DisabledAt, DateTime.UtcNow));
+        }
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".status-pill").Select(p => p.TextContent.Trim()).Should().Contain("Disabled");
+            cut.Markup.Should().Contain("This deployment pipeline is disabled, so nothing deploys through it.");
+            cut.FindAll(".btn--primary").Should().ContainSingle().Which.TextContent.Trim().Should().Be("Enable pipeline");
+            cut.FindAll("button").Select(b => b.TextContent.Trim()).Should().NotContain("Deploy");
+        });
+
+        cut.FindAll(".btn--primary").Single().Click();
+
+        cut.WaitForAssertion(() =>
+            cut.FindAll("button").Select(b => b.TextContent.Trim()).Should().Contain("Disable pipeline").And.Contain("Deploy"));
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId)).DisabledAt.Should().BeNull();
+    }
+
+    [Fact]
     public async Task With_no_releases_the_one_primary_moves_into_the_empty_state()
     {
         var seed = await SeedAsync();

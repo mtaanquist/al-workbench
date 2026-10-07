@@ -397,6 +397,50 @@ public sealed class PipelineServiceTests : IDisposable
         pipeline.BuildOnPushBlocked.Should().BeNull();
     }
 
+    // --- Disable and enable (#1131) -----------------------------------------
+
+    [Fact]
+    public async Task Someone_who_manages_the_solution_can_disable_and_enable_a_pipeline_but_not_delete_it()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
+        _db.OrgContext.IsSiteAdmin = false;
+        var member = await SeedUserAsync(ctx, "member@cronus.test");
+        await ctx.Users.Where(u => u.Id == member)
+            .ExecuteUpdateAsync(u => u.SetProperty(x => x.Role, ALDevToolbox.Domain.Entities.UserRole.User));
+        _db.OrgContext.CurrentUserId = member;
+
+        var svc = NewService(_db.NewContext());
+        (await svc.CanDeleteAsync()).Should().BeFalse();
+        await svc.SetPipelineDisabledAsync(id, true);
+        (await _db.NewContext().OePipelines.SingleAsync(p => p.Id == id)).DisabledAt.Should().NotBeNull();
+
+        var delete = () => NewService(_db.NewContext()).SoftDeletePipelineAsync(id);
+        await delete.Should().ThrowAsync<ProjectAccessDeniedException>();
+
+        await NewService(_db.NewContext()).SetPipelineDisabledAsync(id, false);
+        var pipeline = await _db.NewContext().OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.DisabledAt.Should().BeNull();
+        pipeline.DeletedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task An_admin_can_delete_a_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Production", null));
+        _db.OrgContext.IsSiteAdmin = false;
+        var admin = await SeedUserAsync(ctx, "admin@cronus.test");
+        _db.OrgContext.CurrentUserId = admin;
+
+        (await NewService(_db.NewContext()).CanDeleteAsync()).Should().BeTrue();
+        await NewService(_db.NewContext()).SoftDeletePipelineAsync(id);
+
+        (await _db.NewContext().OePipelines.IgnoreQueryFilters().SingleAsync(p => p.Id == id)).DeletedAt.Should().NotBeNull();
+    }
+
     // --- Nightly preview check (#994) ---------------------------------------
 
     [Fact]

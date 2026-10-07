@@ -29,6 +29,7 @@ internal sealed class ReleasePipelineConfiguration : IEntityTypeConfiguration<Oe
         entity.Property(e => e.AllowedBranch).HasColumnName("allowed_branch").HasMaxLength(255);
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").IsRequired();
+        entity.Property(e => e.DisabledAt).HasColumnName("disabled_at");
         entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");
 
         entity.HasOne(e => e.Organization)
