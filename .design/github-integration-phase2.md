@@ -498,6 +498,28 @@ on every pull request, inline in the Files tab.
   and writes a body on every response so the status-pages middleware does not rewrite a
   401 into a 400. It is on the maintenance-mode allow-list: accepting a delivery is
   enqueueing, and GitHub disables hooks that keep failing. `ping` answers 200.
+- **Only GitHub's webhook addresses may deliver (#1201).** The slots above bound what
+  one address can hold, but someone with many addresses could still hold them all with
+  forged slow pushes. So the first thing the endpoint does, before it reads the body or
+  takes a slot, is check the sender against the `hooks` ranges of `GET /meta`, and answer
+  anything else 403 with a short text. `GitHubHookAddressRefreshScheduler` reads that list
+  (unauthenticated, through the App's API client) about twenty seconds after start-up and
+  then daily, into the singleton `GitHubHookAddressAllowList`; a failed or empty refresh
+  keeps the list in use. Until a list has loaded once the check **fails open** - every
+  sender is let through, with a rate-limited warning - so a GitHub outage or a host with
+  no outbound route does not lose deliveries; `DISABLE_GITHUB_HOOK_ADDRESS_REFRESH=1`
+  keeps it that way for good. An IPv4 sender reported as IPv4-mapped IPv6 is matched as
+  IPv4; a request with no address at all is refused once a list is loaded. Redeliveries
+  the recovery sweep asks for come from the same ranges, so they pass.
+  **The check depends on the trusted-proxy setting.** The sender is
+  `HttpContext.Connection.RemoteIpAddress` after `UseForwardedHeaders`, which takes the
+  `X-Forwarded-For` value only from a peer listed in `TRUSTED_PROXIES` (or loopback),
+  and only the last hop (`ForwardLimit` 1). Behind a proxy that is not listed, every
+  delivery looks like it came from the proxy and is refused; the refusal warning (at most
+  one every five minutes, with a count of the ones it skipped) names the address and
+  points at `TRUSTED_PROXIES`. A client cannot talk its way in with its own
+  `X-Forwarded-For`: from an untrusted peer the header is ignored, and a trusted proxy
+  appends the peer it saw last.
   `pull_request` with action `opened`, `synchronize` or `reopened` enqueues; everything
   else is 204. Since #963 it also takes `push`, and a `pull_request` `closed` with
   `merged: true`: both are parsed, enqueued and answered 202 behind exactly the same

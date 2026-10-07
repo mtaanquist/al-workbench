@@ -80,7 +80,8 @@ services:
       # ignores those headers from anything but loopback, so per-IP rate limits
       # and the login audit see the real connection address. Uncomment when you
       # enable the `caddy` service below (or any other proxy) — it sits on the
-      # compose bridge network, so trust that subnet:
+      # compose bridge network, so trust that subnet. Without it the GitHub
+      # webhook sees every delivery as coming from the proxy and refuses it:
       # TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12}
       # The public address this install is reached on. Credential email links
       # (password reset, magic link, invite, email verification) are built from
@@ -140,6 +141,7 @@ services:
       # DISABLE_USAGE_SNAPSHOT_SCHEDULER: "1"   # 15-min storage-usage snapshots (StorageBar)
       # DISABLE_DEPENDENCY_DRIFT_SCHEDULER: "1" # app.json dependency drift checks after BC releases
       # DISABLE_GITHUB_WEBHOOK_RECOVERY_SCHEDULER: "1" # resend failed GitHub deliveries, close interrupted PR builds
+      # DISABLE_GITHUB_HOOK_ADDRESS_REFRESH: "1" # daily read of GitHub's webhook addresses; unset, other senders are refused
       # DISABLE_BUILD_RESOURCE_MONITOR: "1"     # warn when running builds are short of CPU or memory
       #
       # Pipeline builds. OE_BUILD_CONCURRENCY is how many run at once (1-16,

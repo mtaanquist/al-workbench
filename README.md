@@ -185,6 +185,7 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `DISABLE_NOTIFICATION_DIGEST_SCHEDULER`       | `1` to stop sending the daily and weekly notification digests. Items for them wait until it is turned back on, which then drops any older than 30 days, along with in-app notifications of that age. | unset |
 | `DISABLE_DEPENDENCY_DRIFT_SCHEDULER`          | `1` to disable the nightly check of tracked repositories against their solutions' Business Central environments, and with it the update pull requests opened automatically. | unset |
 | `DISABLE_GITHUB_REPOSITORY_DISCOVERY_SCHEDULER` | `1` to disable the daily sweep that lists the connected GitHub organisation's repositories and offers the AL ones no solution tracks yet. | unset |
+| `DISABLE_GITHUB_HOOK_ADDRESS_REFRESH` | `1` to stop reading the addresses GitHub sends webhooks from. With it set, webhook deliveries are accepted from any address (the signature check still applies). | unset |
 | `DISABLE_GITHUB_WEBHOOK_RECOVERY_SCHEDULER` | `1` to stop asking GitHub every five minutes to resend webhook deliveries that did not get through, and to stop closing pull request checks a restart interrupted. | unset |
 | `DISABLE_TRANSLATION_MEMORY_INGEST_SCHEDULER` | `1` to disable the nightly pass that fills the translation memory from the `.xlf` files in each organisation's own repositories. | unset |
 | `DISABLE_LOGIN_ATTEMPT_PRUNE_SCHEDULER`       | `1` to disable the periodic prune of old login-attempt rows. | unset                |
@@ -258,6 +259,8 @@ To build the image locally instead of pulling it, comment out `image:` and uncom
 5. `docker compose up -d`. Caddy issues a cert for `SITE_ADDRESS`, reverse-proxies to the app, and gates traffic on `/readyz` until startup finishes. The proxy config lives in the repo's [`Caddyfile`](./Caddyfile).
 
 No public domain handy? Set `SITE_ADDRESS=localhost` (Caddy mints an internal-CA cert, so your browser will warn) or `SITE_ADDRESS=:80` (plain HTTP) to exercise the same service locally.
+
+**GitHub webhooks.** The webhook accepts deliveries only from the addresses GitHub publishes for its webhooks, read from GitHub once a day. Behind Caddy that check sees Caddy's address unless the app trusts it as a proxy, so set `TRUSTED_PROXIES` when you enable the `caddy` service (the commented default in `compose.yaml`, `172.16.0.0/12`, covers the compose network). If it is missing, every delivery is refused with 403 and the log warns about it, naming the proxy's address.
 
 **Email links and passkeys.** Links in outbound emails are built from the request host; Caddy preserves it while the app honours `X-Forwarded-Proto`, so they render as `https://<your-domain>/`. Make sure users reach the app through the domain, not the raw `:8080` host port. To enable passkeys on the domain, set `AUTH_WEBAUTHN_RP_ID` to it and `AUTH_WEBAUTHN_ORIGINS` to `https://<your-domain>`.
 

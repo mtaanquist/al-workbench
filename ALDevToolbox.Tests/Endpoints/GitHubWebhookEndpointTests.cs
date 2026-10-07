@@ -38,6 +38,13 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
         waitTimeout: TimeSpan.FromMilliseconds(300),
         readDeadline: TimeSpan.FromSeconds(3));
 
+    /// <summary>
+    /// GitHub's webhook ranges, loaded as the daily refresh would (#1201), so every
+    /// test below runs with the address check in force. A test that needs the list
+    /// unloaded swaps the field before its first request.
+    /// </summary>
+    private GitHubHookAddressAllowList _senders = LoadedSenders();
+
     public GitHubWebhookEndpointTests()
     {
         // The real worker would drain the queue as fast as the endpoint fills it,
@@ -50,6 +57,14 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
                 d.ServiceType == typeof(IHostedService)
                 && d.ImplementationType == typeof(GitHubPullRequestBuildWorker));
             if (worker is not null) services.Remove(worker);
+
+            // The address list comes from the test, never from GitHub (#1201).
+            var refresh = services.FirstOrDefault(d =>
+                d.ServiceType == typeof(IHostedService)
+                && d.ImplementationType == typeof(GitHubHookAddressRefreshScheduler));
+            if (refresh is not null) services.Remove(refresh);
+            services.AddSingleton(_ => _senders);
+            services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, SenderAddressFilter>();
 
             // The large-body slots with timings a test can wait out, and one gate
             // per test so holding its slots cannot leak into another test (#1174).
@@ -490,6 +505,146 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     /// The in-memory test server has no minimum data rate, so this puts in front of
     /// the pipeline the exception Kestrel raises when a body arrives too slowly.
     /// </summary>
+    // --- Who may deliver (#1201) -----------------------------------------------
+
+    /// <summary>The connection address a request arrives from, when a test names one.</summary>
+    private const string SenderHeader = "X-Test-Connection-Address";
+
+    /// <summary>Inside GitHub's 192.30.252.0/22, and the address every other test delivers from.</summary>
+    private const string GitHubSender = "192.30.252.10";
+
+    private static GitHubHookAddressAllowList LoadedSenders()
+    {
+        var list = new GitHubHookAddressAllowList(TimeProvider.System);
+        list.Replace(GitHubHookAddressAllowList.Parse(GitHubHookAddressAllowListTests.HookRanges).Ranges);
+        return list;
+    }
+
+    private static HttpRequestMessage From(HttpRequestMessage request, string address)
+    {
+        request.Headers.Add(SenderHeader, address);
+        return request;
+    }
+
+    [Theory]
+    [InlineData("140.82.115.20")]
+    [InlineData("2606:50c0::17")]
+    [InlineData("::ffff:192.30.252.10")]
+    public async Task A_delivery_from_a_published_GitHub_address_is_accepted(string address)
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+
+        using var response = await client.SendAsync(From(Delivery(PullRequestPayload(), Secret), address));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+    }
+
+    [Theory]
+    [InlineData("203.0.113.7")]
+    [InlineData("2001:db8::1")]
+    [InlineData("::ffff:203.0.113.7")]
+    public async Task A_correctly_signed_delivery_from_any_other_address_is_refused_as_403(string address)
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+
+        using var response = await client.SendAsync(From(Delivery(PullRequestPayload(), Secret), address));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await response.Content.ReadAsStringAsync()).Should().NotBeEmpty();
+        _factory.Services.GetRequiredService<GitHubWebhookQueue>().Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_stranger_is_refused_before_the_body_is_read()
+    {
+        // The body would throw the moment it is read (408); a 403 means it never was.
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        using var request = From(Delivery(GitHubWebhookPayloads.Push(commitCount: 2), Secret, eventName: "push"), "203.0.113.7");
+        request.Headers.Add(SlowBodyHeader, "1");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+    }
+
+    [Fact]
+    public async Task A_stranger_is_refused_before_it_can_wait_for_a_large_body_slot()
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        await HoldEverySlotAsync();
+        try
+        {
+            var payload = GitHubWebhookPayloads.Push(commitCount: 20, filesPerCommit: 3000);
+            using var response = await client.SendAsync(
+                From(Delivery(payload, Secret, eventName: "push"), "203.0.113.200"), TestContext.Current.CancellationToken);
+
+            response.StatusCode.Should().Be(HttpStatusCode.Forbidden, "a 503 would mean it reached the slots");
+        }
+        finally
+        {
+            ReleaseEverySlot();
+        }
+    }
+
+    [Fact]
+    public async Task A_forwarded_address_counts_only_when_the_proxy_is_trusted()
+    {
+        // No TRUSTED_PROXIES here, so only loopback may forward. A stranger naming a
+        // GitHub address in X-Forwarded-For is judged by its own address; loopback
+        // forwarding the same header - a proxy on the same host - is believed.
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+
+        using var spoofed = From(Delivery(PullRequestPayload(), Secret), "203.0.113.7");
+        spoofed.Headers.Add("X-Forwarded-For", GitHubSender);
+        using var refused = await client.SendAsync(spoofed);
+
+        using var proxied = From(Delivery(PullRequestPayload(number: 8), Secret), "127.0.0.1");
+        proxied.Headers.Add("X-Forwarded-For", GitHubSender);
+        using var accepted = await client.SendAsync(proxied);
+
+        refused.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        accepted.StatusCode.Should().Be(HttpStatusCode.Accepted);
+    }
+
+    [Fact]
+    public async Task Until_a_list_is_loaded_every_address_may_deliver()
+    {
+        // Fail open: refusing before GitHub's list could be read would lose deliveries
+        // to a GitHub outage or a host with no way out.
+        _senders = new GitHubHookAddressAllowList(TimeProvider.System);
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+
+        using var response = await client.SendAsync(From(Delivery(PullRequestPayload(), Secret), "203.0.113.7"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+    }
+
+    /// <summary>
+    /// Gives each request a connection address, which the test server leaves empty:
+    /// the one named in <see cref="SenderHeader"/>, else <see cref="GitHubSender"/>.
+    /// Runs ahead of the app's own pipeline, so forwarded headers still apply after it.
+    /// </summary>
+    private sealed class SenderAddressFilter : Microsoft.AspNetCore.Hosting.IStartupFilter
+    {
+        public Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> Configure(
+            Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> next) => app =>
+        {
+            app.Use(nextMiddleware => ctx =>
+            {
+                var named = ctx.Request.Headers[SenderHeader].ToString();
+                ctx.Connection.RemoteIpAddress = IPAddress.Parse(named.Length > 0 ? named : GitHubSender);
+                return nextMiddleware(ctx);
+            });
+            next(app);
+        };
+    }
+
     private sealed class SlowBodyFilter : Microsoft.AspNetCore.Hosting.IStartupFilter
     {
         public Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> Configure(
