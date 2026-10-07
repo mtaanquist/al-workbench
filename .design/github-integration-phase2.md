@@ -1058,18 +1058,54 @@ year's Business Central after a new release lands in the Object Explorer.
   environment it was measured against, the pull request names it in its body (only
   when the person can see its solution), and the release compare link is given only
   when that release is the version being moved to. Environment refreshes do not
-  rescan; Check again does.
+  rescan by themselves; Check again does, and so does the nightly pass below.
 - **`AppJsonDependency` gained `Version` as an optional positional parameter**,
   so every existing caller compiles unchanged.
 - **No MCP tool.** `list_dependency_drift` was optional in the brief and is not
   here: the GitHub MCP surface is #633's, and adding a tool to it from this
   issue would have meant editing the same files that issue is rewriting. The
   service method it would wrap (`GetSummaryAsync`) is ready for it.
-- **Left out.** No scheduler: the scan runs when a release lands and when
-  somebody presses Check again, which is when the answer can have changed. No
-  per-repository dismissal - drift is a fact, not a proposal, and it disappears
+- **Left out.** No per-repository dismissal - drift is a fact, not a proposal, and it disappears
   when it is fixed. No auto-merge, no compile before opening, no bump of
   anything the catalogue has no default for.
+
+### Opening update pull requests on their own (#1104)
+
+Named user: a consultant responsible for a handful of customers who wants the update
+pull request waiting in GitHub the morning after a customer's environment moves to a new
+Business Central, the way Dependabot does it, instead of remembering to press the button.
+
+- **Per solution, off by default.** "Open update pull requests automatically" sits on the
+  solution's Repositories tab, saved with the rest of the solution, and only shows once
+  the solution exists and has a GitHub repository. Per solution because the yardstick is
+  already the solution's environment, and customers differ in how they want to be moved.
+- **Opened as the person who turned it on**, with their GitHub account - the same rule as
+  building on push and the nightly preview check (`oe_projects.auto_update_pull_requests_by_user_id`,
+  `SET NULL` on delete). There is no GitHub App fallback. When that person is gone, can no
+  longer manage the solution, or has no GitHub account connected, the solution says so
+  (`auto_update_pull_requests_blocked`) with "Resume with my access", which makes whoever
+  presses it the new person. A repository GitHub refused shows the same way; the next
+  night tries again either way.
+- **`DependencyDriftScheduler` runs once a night at 05:00 UTC**, after the environment
+  refresh, for every organisation with an imported first-party release: it rescans (so a
+  customer moved to a new version during the day is measured against it, and the
+  Solutions panel stays current with nobody pressing Check again), then for each solution
+  with the setting on, opens the pull requests of its repositories that are behind, in a
+  scope signed in as that person. Opt out with `DISABLE_DEPENDENCY_DRIFT_SCHEDULER=1`.
+- **Each version is offered once per repository.** Every update pull request the
+  workbench opens or joins, by hand or not, is recorded in `github_update_pull_requests`
+  (repository, version, number, whether it was automatic). The automatic run skips a
+  version that has a row, because a closed pull request is somebody's answer and GitHub
+  usually deletes its branch with it. For the same reason it does not step past an
+  `aldt/bump-bc-<version>` branch that exists with no open pull request, as the button
+  does. An open one is joined, never doubled. The button is unaffected: a person can
+  always ask again.
+- **A newer version supersedes the older automatic pull request.** Once the pull request
+  for, say, 29.0 is open, the automatic ones for older versions on the same repository are
+  closed with a comment naming the new one, since both edit the same lines. A pull request
+  a person opened is theirs to close.
+- **Left out.** No email or in-app notification: GitHub already tells the people watching
+  the repository. No auto-merge.
 
 ## #633 MCP parity for the GitHub workflows
 

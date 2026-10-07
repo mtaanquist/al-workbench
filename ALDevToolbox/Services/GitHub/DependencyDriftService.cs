@@ -72,12 +72,25 @@ public sealed record DependencyDriftSummary(
 
 /// <summary>What "Open update pull requests" did to one repository.</summary>
 /// <param name="Refusal">Why nothing was opened, in words the person can act on. Null when one was.</param>
+/// <param name="IsUpToDate">
+/// True when the refusal only means there was nothing left to change - the repository
+/// has caught up since the scan - rather than something somebody has to fix.
+/// </param>
 public sealed record DependencyDriftPullRequest(
     string Repository,
     GitHubPullRequest? PullRequest,
     bool IsNewPullRequest,
     int FileCount,
-    string? Refusal);
+    string? Refusal,
+    bool IsUpToDate = false);
+
+/// <summary>What one solution's automatic run did (issue #1104).</summary>
+/// <param name="Opened">How many pull requests it opened.</param>
+/// <param name="Blocked">
+/// What stopped it, worded to follow "Update pull requests are not being opened
+/// automatically:" on the solution. Null when nothing did.
+/// </param>
+public sealed record AutomaticUpdatePullRequests(int Opened, string? Blocked);
 
 /// <summary>
 /// Which tracked repositories still target last year's Business Central, and
@@ -789,19 +802,10 @@ public sealed class DependencyDriftService
             .ToList();
         if (wanted.Count == 0) return [];
 
-        // Why-not before what, as everywhere else: "that is not a repository we
-        // can offer you" is a poor way to say "connect your GitHub account".
-        var access = await _repositories.GetAccessAsync(ct);
-        if (!access.IsReady)
-        {
-            var reason = ReadinessRefusal(access.Readiness);
-            return wanted.Select(r => new DependencyDriftPullRequest(r, null, false, 0, reason)).ToList();
-        }
-
-        var token = await _access.ResolveUserTokenAsync(userId, ct);
+        var (token, readiness) = await ResolveWriteTokenAsync(userId, ct);
         if (token is null)
         {
-            var reason = ReadinessRefusal(GitHubRepositoryReadiness.NotLinked);
+            var reason = ReadinessRefusal(readiness);
             return wanted.Select(r => new DependencyDriftPullRequest(r, null, false, 0, reason)).ToList();
         }
 
@@ -810,22 +814,13 @@ public sealed class DependencyDriftService
         foreach (var name in wanted)
         {
             ct.ThrowIfCancellationRequested();
-            try
+            var result = await TryOpenOneAsync(token, name, visible, automatic: false, ct);
+            if (result.PullRequest is { } pullRequest)
             {
-                results.Add(await OpenOneAsync(token, name, visible, ct));
+                // A version opened by hand replaces an older automatic one just the same.
+                await SupersedeOlderAsync(token, result.Repository, pullRequest, ct);
             }
-            catch (PlanValidationException ex)
-            {
-                results.Add(new DependencyDriftPullRequest(
-                    name, null, false, 0, ex.Errors.Values.FirstOrDefault() ?? "The pull request was refused."));
-            }
-            catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException or TaskCanceledException)
-            {
-                _logger.LogWarning(ex, "Could not open the update pull request on {RepoFullName}.", name);
-                results.Add(new DependencyDriftPullRequest(
-                    name, null, false, 0,
-                    "GitHub would not take the change to this repository just now. Try again in a moment."));
-            }
+            results.Add(result);
         }
 
         _logger.LogInformation(
@@ -834,8 +829,257 @@ public sealed class DependencyDriftService
         return results;
     }
 
+    // ── Opening them on their own (issue #1104) ──────────────────────────
+
+    /// <summary>
+    /// Opens the update pull request on each of <paramref name="projectId"/>'s GitHub
+    /// repositories that the last scan found behind, as the person in scope - the one
+    /// who turned automatic update pull requests on. Run by
+    /// <see cref="DependencyDriftScheduler"/> after the nightly scan.
+    ///
+    /// <para>Each Business Central version is offered once per repository: while its
+    /// pull request is open, new findings are added to it; once it has been merged or
+    /// closed, the version is left alone, even when GitHub deleted the branch with it.
+    /// Once a newer version's pull request is open, the older ones the automatic run
+    /// opened are closed with a note pointing at it.</para>
+    /// </summary>
+    public async Task<AutomaticUpdatePullRequests> OpenAutomaticPullRequestsAsync(
+        int projectId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var userId = RequireUserId();
+        var project = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == projectId && p.DeletedAt == null)
+            .Select(p => new
+            {
+                p.Id,
+                p.CreatedByUserId,
+                p.AutoUpdatePullRequests,
+                Urls = p.Repositories.Where(r => r.Provider == RepositoryProvider.GitHub).Select(r => r.Url).ToList(),
+            })
+            .FirstOrDefaultAsync(ct);
+        if (project is null || !project.AutoUpdatePullRequests) return new AutomaticUpdatePullRequests(0, null);
+        if (!await _projectAccess.CanManageAsync(project.Id, project.CreatedByUserId, ct))
+        {
+            return new AutomaticUpdatePullRequests(0, AutomaticNoAccessMessage);
+        }
+
+        // Keyed without case but carrying the scan's own spelling, which is GitHub's: a
+        // solution's URL is however somebody pasted it, and the findings are looked up
+        // by the stored name.
+        var behind = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var stored in await _db.GitHubRepositoryDrift.AsNoTracking()
+                     .Select(d => d.Repository).Distinct().ToListAsync(ct))
+        {
+            behind.TryAdd(stored, stored);
+        }
+        var due = project.Urls
+            .Select(ToFullName)
+            .Where(n => n is not null && behind.ContainsKey(n))
+            .Select(n => behind[n!])
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (due.Count == 0) return new AutomaticUpdatePullRequests(0, null);
+
+        var (token, readiness) = await ResolveWriteTokenAsync(userId, ct);
+        if (token is null) return new AutomaticUpdatePullRequests(0, AutomaticReadinessRefusal(readiness));
+
+        var visible = await VisibleRepositoryNamesAsync(ct);
+        var opened = 0;
+        string? blocked = null;
+        foreach (var name in due)
+        {
+            ct.ThrowIfCancellationRequested();
+            var result = await TryOpenOneAsync(token, name, visible, automatic: true, ct);
+            if (result.PullRequest is { } pullRequest)
+            {
+                if (result.IsNewPullRequest) opened++;
+                await SupersedeOlderAsync(token, result.Repository, pullRequest, ct);
+            }
+            else if (!result.IsUpToDate)
+            {
+                // One repository's trouble does not stop the others; the first one is
+                // what the solution shows, and tomorrow night tries again.
+                blocked ??= $"{name}: {result.Refusal}";
+            }
+        }
+
+        _logger.LogInformation(
+            "Automatic update pull requests for solution {ProjectId} as user {UserId}: {DueCount} repositories behind, {OpenedCount} pull requests opened.",
+            projectId, userId, due.Count, opened);
+        return new AutomaticUpdatePullRequests(opened, blocked);
+    }
+
+    /// <summary>The pause when the person automatic update pull requests are opened as can no longer manage the solution.</summary>
+    public const string AutomaticNoAccessMessage =
+        "the person they are opened as can no longer manage this solution.";
+
+    /// <summary>The pause when that person no longer has an active account.</summary>
+    public const string AutomaticNoOwnerMessage =
+        "the person they are opened as no longer has an active account.";
+
+    private static string AutomaticReadinessRefusal(GitHubRepositoryReadiness readiness) => readiness switch
+    {
+        GitHubRepositoryReadiness.NotConfigured => "GitHub is not set up on this server.",
+        GitHubRepositoryReadiness.NotConnected =>
+            "your organisation has not connected a GitHub organisation. An administrator connects one under "
+            + "Administration -> Repositories.",
+        _ =>
+            "the person they are opened as has not connected their GitHub account. They connect it on their "
+            + "account page under Repository access.",
+    };
+
+    /// <summary>
+    /// Closes the older automatic pull requests on <paramref name="repository"/> that
+    /// <paramref name="current"/> replaces, the way Dependabot does: two pull requests
+    /// moving the same lines to different versions only conflict with each other. A
+    /// pull request a person opened is theirs to close.
+    /// </summary>
+    private async Task SupersedeOlderAsync(
+        string token, string repository, GitHubPullRequest current, CancellationToken ct)
+    {
+        var key = repository.ToLowerInvariant();
+        var records = await _db.GitHubUpdatePullRequests
+            .Where(r => r.Repository == key && r.SupersededAt == null)
+            .ToListAsync(ct);
+        var replacing = records.FirstOrDefault(r => r.PullRequestNumber == current.Number);
+        if (replacing is null) return;
+
+        var older = records
+            .Where(r => r.IsAutomatic && r.PullRequestNumber != current.Number
+                        && BcVersionComparer.Instance.Compare(r.Version, replacing.Version) < 0)
+            .ToList();
+        if (older.Count == 0) return;
+
+        var (owner, name) = (repository.Split('/')[0], repository.Split('/')[1]);
+        foreach (var record in older)
+        {
+            try
+            {
+                // One already merged or closed has nothing left to close; it only stops
+                // being a candidate.
+                if (!await _github.IsPullRequestOpenAsync(token, owner, name, record.PullRequestNumber, ct))
+                {
+                    record.SupersededAt = _clock.GetUtcNow().UtcDateTime;
+                    continue;
+                }
+                await _github.ClosePullRequestAsync(token, owner, name, record.PullRequestNumber,
+                    $"Superseded by #{current.Number}, which targets Business Central {replacing.Version}.\n\n"
+                    + "Closed by AL Workbench.", ct);
+                record.SupersededAt = _clock.GetUtcNow().UtcDateTime;
+            }
+            catch (Exception ex) when (ex is GitHubApiException or HttpRequestException
+                                       || (ex is TaskCanceledException && !ct.IsCancellationRequested))
+            {
+                _logger.LogWarning(ex,
+                    "Could not close pull request #{PullRequestNumber} on {RepoFullName}, which #{Replacement} replaces; it stays open.",
+                    record.PullRequestNumber, repository, current.Number);
+            }
+        }
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// The Business Central version a repository's findings move it to, as
+    /// <c>major.minor</c>. Without an application finding (only the platform or a
+    /// dependency moved), it is the version the repository was measured against.
+    /// </summary>
+    private async Task<string> TargetVersionAsync(
+        IReadOnlyList<GitHubRepositoryDrift> rows, OeRelease? release, CancellationToken ct)
+    {
+        var environmentId = rows.Select(r => r.EnvironmentId).FirstOrDefault(id => id != null);
+        return BcArtifactIndex.ToMajorMinor(
+            rows.Where(r => r.Field == ApplicationField).Select(r => r.Proposed).FirstOrDefault()
+            ?? (environmentId is { } measuredId ? await EnvironmentVersionAsync(measuredId, ct) : null)
+            ?? release?.BcVersion
+            ?? "0.0");
+    }
+
+    /// <summary>Whether the workbench has opened an update pull request for <paramref name="version"/> on this repository before.</summary>
+    private Task<bool> WasOfferedAsync(string repository, string version, CancellationToken ct)
+    {
+        var key = repository.ToLowerInvariant();
+        return _db.GitHubUpdatePullRequests.AsNoTracking()
+            .AnyAsync(r => r.Repository == key && r.Version == version, ct);
+    }
+
+    /// <summary>
+    /// Remembers an update pull request the workbench opened or joined, once per pull
+    /// request. Losing the race to another run saving the same one is harmless.
+    /// </summary>
+    private async Task RecordPullRequestAsync(
+        string repository, string version, GitHubPullRequest pullRequest, bool automatic, CancellationToken ct)
+    {
+        var key = repository.ToLowerInvariant();
+        if (await _db.GitHubUpdatePullRequests.AsNoTracking()
+                .AnyAsync(r => r.Repository == key && r.PullRequestNumber == pullRequest.Number, ct))
+        {
+            return;
+        }
+
+        var record = new GitHubUpdatePullRequest
+        {
+            OrganizationId = RequireOrganizationId(),
+            Repository = key,
+            Version = version,
+            PullRequestNumber = pullRequest.Number,
+            HtmlUrl = pullRequest.HtmlUrl,
+            IsAutomatic = automatic,
+            OpenedAt = _clock.GetUtcNow().UtcDateTime,
+        };
+        _db.GitHubUpdatePullRequests.Add(record);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation })
+        {
+            _db.Entry(record).State = EntityState.Detached;
+            _logger.LogInformation(ex,
+                "Pull request #{PullRequestNumber} on {RepoFullName} was already recorded.", pullRequest.Number, repository);
+        }
+    }
+
+    /// <summary>
+    /// The acting person's GitHub token, or why there is none. Why-not before what, as
+    /// everywhere else: "that is not a repository we can offer you" is a poor way to
+    /// say "connect your GitHub account".
+    /// </summary>
+    private async Task<(string? Token, GitHubRepositoryReadiness Readiness)> ResolveWriteTokenAsync(
+        int userId, CancellationToken ct)
+    {
+        var access = await _repositories.GetAccessAsync(ct);
+        if (!access.IsReady) return (null, access.Readiness);
+        var token = await _access.ResolveUserTokenAsync(userId, ct);
+        return token is null ? (null, GitHubRepositoryReadiness.NotLinked) : (token, access.Readiness);
+    }
+
+    /// <summary><see cref="OpenOneAsync"/>, with every refusal turned into an answer rather than an exception.</summary>
+    private async Task<DependencyDriftPullRequest> TryOpenOneAsync(
+        string token, string name, IReadOnlySet<string> visible, bool automatic, CancellationToken ct)
+    {
+        try
+        {
+            return await OpenOneAsync(token, name, visible, automatic, ct);
+        }
+        catch (PlanValidationException ex)
+        {
+            return new DependencyDriftPullRequest(
+                name, null, false, 0, ex.Errors.Values.FirstOrDefault() ?? "The pull request was refused.");
+        }
+        catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException or TaskCanceledException
+                                   && !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Could not open the update pull request on {RepoFullName}.", name);
+            return new DependencyDriftPullRequest(
+                name, null, false, 0,
+                "GitHub would not take the change to this repository just now. Try again in a moment.");
+        }
+    }
+
     private async Task<DependencyDriftPullRequest> OpenOneAsync(
-        string token, string fullName, IReadOnlySet<string> visible, CancellationToken ct)
+        string token, string fullName, IReadOnlySet<string> visible, bool automatic, CancellationToken ct)
     {
         if (!visible.Contains(fullName))
         {
@@ -850,7 +1094,8 @@ public sealed class DependencyDriftService
         if (rows.Count == 0)
         {
             return new DependencyDriftPullRequest(fullName, null, false, 0,
-                "There is nothing left to change in this repository. Check again to see where it stands now.");
+                "There is nothing left to change in this repository. Check again to see where it stands now.",
+                IsUpToDate: true);
         }
 
         var repo = await _repositories.ResolveAsync(fullName, ct);
@@ -868,15 +1113,22 @@ public sealed class DependencyDriftService
         var environment = environmentId is { } envId
             ? await EnvironmentForBodyAsync(envId, ct)
             : null;
-        // Without an application finding (only the platform or a dependency moved),
-        // the version is the one the repository was measured against.
-        var version = BcArtifactIndex.ToMajorMinor(
-            rows.Where(r => r.Field == ApplicationField).Select(r => r.Proposed).FirstOrDefault()
-            ?? (environmentId is { } measuredId ? await EnvironmentVersionAsync(measuredId, ct) : null)
-            ?? release?.BcVersion
-            ?? "0.0");
+        var version = await TargetVersionAsync(rows, release, ct);
 
-        var target = await ChooseBranchAsync(token, repo, version, ct);
+        var target = await ChooseBranchAsync(token, repo, version, automatic, ct);
+        // The automatic run offers each version once (issue #1104): an open pull
+        // request is added to, but one somebody merged or closed is their answer, and
+        // its branch is usually gone with it.
+        if (automatic && target is { ExistingPullRequest: null } && await WasOfferedAsync(fullName, version, ct))
+        {
+            target = null;
+        }
+        if (target is null)
+        {
+            return new DependencyDriftPullRequest(fullName, null, false, 0,
+                $"An update pull request for Business Central {version} was already opened here and closed.",
+                IsUpToDate: true);
+        }
 
         var blobs = new List<(string Path, string BlobSha)>();
         var edited = new List<(string Path, IReadOnlyList<GitHubRepositoryDrift> Changes)>();
@@ -904,7 +1156,7 @@ public sealed class DependencyDriftService
         {
             return new DependencyDriftPullRequest(fullName, null, false, 0,
                 "Every value the workbench would have changed here is already up to date. Check again to refresh "
-                + "what it knows.");
+                + "what it knows.", IsUpToDate: true);
         }
 
         var baseTree = await _github.GetCommitTreeShaAsync(token, repo.Owner, repo.Name, target.ParentSha, ct);
@@ -936,11 +1188,14 @@ public sealed class DependencyDriftService
             body: await BuildBodyAsync(version, edited, release, environment, ct),
             ct);
 
+        await RecordPullRequestAsync(
+            repo.FullName, version, pullRequest, automatic && target.ExistingPullRequest is null, ct);
+
         _logger.LogInformation(
             "Bumped {FileCount} manifest(s) in {RepoFullName} to Business Central {Version} on {Branch} as pull "
-            + "request #{PullRequestNumber} ({PullRequestState}).",
+            + "request #{PullRequestNumber} ({PullRequestState}, {Trigger}).",
             edited.Count, repo.FullName, version, target.Branch, pullRequest.Number,
-            target.ExistingPullRequest is null ? "opened" : "already open");
+            target.ExistingPullRequest is null ? "opened" : "already open", automatic ? "automatic" : "by hand");
 
         return new DependencyDriftPullRequest(
             repo.FullName, pullRequest, target.ExistingPullRequest is null, edited.Count, null);
@@ -1046,10 +1301,11 @@ public sealed class DependencyDriftService
     /// has a pull request still open (join it, so a second run lands in the
     /// review already running) or does not exist at all (start it from the
     /// default branch). A branch whose pull request has been merged or closed is
-    /// stepped past rather than reused.
+    /// stepped past rather than reused - except by the automatic run, for which it
+    /// means the version was already offered and answered, so it returns null.
     /// </summary>
-    private async Task<BranchTarget> ChooseBranchAsync(
-        string token, GitHubRepositorySummary repo, string version, CancellationToken ct)
+    private async Task<BranchTarget?> ChooseBranchAsync(
+        string token, GitHubRepositorySummary repo, string version, bool automatic, CancellationToken ct)
     {
         var baseName = BranchPrefix + version;
         for (var attempt = 1; attempt <= MaxBranchAttempts; attempt++)
@@ -1074,6 +1330,14 @@ public sealed class DependencyDriftService
                         $"'{repo.FullName}' has no commits on {repo.DefaultBranch} yet, so there is nothing to open "
                         + "a pull request against.");
                 return new BranchTarget(branch, defaultHead, null);
+            }
+
+            if (automatic)
+            {
+                _logger.LogInformation(
+                    "Branch {Branch} on {RepoFullName} exists with no open pull request, so the automatic run leaves Business Central {Version} alone.",
+                    branch, repo.FullName, version);
+                return null;
             }
 
             _logger.LogInformation(

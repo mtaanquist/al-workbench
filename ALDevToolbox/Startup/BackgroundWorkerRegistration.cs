@@ -54,6 +54,10 @@ public static class BackgroundWorkerRegistration
         // Asks GitHub to resend webhook deliveries the endpoint refused or never
         // answered, and closes pull-request builds a restart cut short (#1121).
         services.AddHostedService<ALDevToolbox.Services.GitHub.GitHubWebhookRecoveryScheduler>();
+        // Nightly drift check after the environment refresh: measures every tracked
+        // repository against its solution's environment again, then opens the update
+        // pull requests of the solutions that asked for that (#1104).
+        services.AddHostedService<ALDevToolbox.Services.GitHub.DependencyDriftScheduler>();
         // Periodic prune of old login_attempts rows so the table doesn't grow
         // unbounded (the rate-limiter only reads a ~15-minute window). See issue #403.
         services.AddHostedService<ALDevToolbox.Services.Account.LoginAttemptPruneScheduler>();
