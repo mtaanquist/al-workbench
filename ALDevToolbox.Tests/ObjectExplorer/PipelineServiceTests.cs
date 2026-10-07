@@ -260,6 +260,24 @@ public sealed class PipelineServiceTests : IDisposable
         (await read.OePipelines.IgnoreQueryFilters().SingleAsync(p => p.Id == id)).DeletedAt.Should().NotBeNull();
     }
 
+    [Fact]
+    public async Task Editing_a_deleted_pipeline_is_not_reported_as_a_name_clash()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+        var input = new PipelineInput(projectId, "Production", null);
+        var id = await svc.CreatePipelineAsync(input);
+        await svc.SoftDeletePipelineAsync(id);
+
+        var act = () => svc.UpdatePipelineAsync(id, input);
+
+        // The editor opens a custom-name field for any Name error, so this must not be one.
+        var errors = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors;
+        errors.Should().NotContainKey("Name");
+        errors["Pipeline"].Should().Be("This pipeline no longer exists.");
+    }
+
     // --- Build numbers in app versions --------------------------------------
 
     [Fact]

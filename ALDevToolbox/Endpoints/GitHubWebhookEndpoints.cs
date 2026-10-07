@@ -25,8 +25,9 @@ namespace ALDevToolbox.Endpoints;
 ///
 /// <para>The same route also takes <c>push</c> deliveries and merged pull
 /// requests (#963), so a build pipeline can tell when the branch it watches has
-/// moved past what it last built. Those are recorded by the worker and nothing is
-/// built on them; they pass the same secret, size and signature checks first.</para>
+/// moved past what it last built. The worker records those, and a push also starts
+/// a build on each pipeline that builds on push (#1079); they pass the same secret,
+/// size and signature checks first.</para>
 /// </summary>
 public static class GitHubWebhookEndpoints
 {
@@ -108,8 +109,9 @@ public static class GitHubWebhookEndpoints
                 return Results.Text("pong", "text/plain");
             }
 
-            // A branch moved. Recorded, never built: see "Branch watching" in the
-            // design doc (#963). A tag push, or a payload we cannot read, is 204.
+            // A branch moved. Recorded, and built only by pipelines that build on
+            // push: see "Branch watching" (#963) and "Building on push" (#1079) in
+            // the design doc. A tag push, or a payload we cannot read, is 204.
             if (string.Equals(eventName, "push", StringComparison.OrdinalIgnoreCase))
             {
                 var push = TryReadPush(body, deliveryId, log);

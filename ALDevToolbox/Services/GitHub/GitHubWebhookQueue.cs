@@ -66,9 +66,10 @@ public sealed record GitHubPushCommit(
 
 /// <summary>
 /// A branch moved: GitHub's <c>push</c> delivery for a <c>refs/heads/</c> ref. Tag
-/// pushes never become one of these. Nothing is built on it - the worker records
-/// the new head so a pipeline watching the branch can say it is behind. See
-/// <c>.design/github-integration-phase2.md</c>, "Branch watching" (#963).
+/// pushes never become one of these. The worker records the new head so a pipeline
+/// watching the branch can say it is behind, and starts a build on each pipeline that
+/// builds on push. See <c>.design/github-integration-phase2.md</c>, "Branch watching"
+/// (#963) and "Building on push" (#1079).
 /// </summary>
 /// <param name="Branch">The branch name, with <c>refs/heads/</c> taken off.</param>
 /// <param name="HeadSha">The commit the branch now points at, or the one it pointed at before a delete.</param>

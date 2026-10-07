@@ -128,7 +128,7 @@ public sealed class PipelineService
         RequireOrganizationId();
         var pipeline = await _db.OePipelines
             .FirstOrDefaultAsync(p => p.Id == id && p.DeletedAt == null, ct)
-            ?? throw Validation("Name", "This pipeline no longer exists.");
+            ?? throw Validation("Pipeline", "This pipeline no longer exists.");
 
         // Validate against the pipeline's own project (input.ProjectId is ignored on
         // update — a pipeline can't move between projects).
@@ -182,7 +182,7 @@ public sealed class PipelineService
         RequireOrganizationId();
         var pipeline = await _db.OePipelines
             .FirstOrDefaultAsync(p => p.Id == id && p.DeletedAt == null, ct)
-            ?? throw Validation("Name", "This pipeline no longer exists.");
+            ?? throw Validation("Pipeline", "This pipeline no longer exists.");
         var previewCheck = automation == PipelineAutomation.PreviewCheck;
         if (previewCheck ? !pipeline.PreviewCheck : !pipeline.BuildOnPush)
         {
@@ -222,7 +222,7 @@ public sealed class PipelineService
         RequireOrganizationId();
         var pipeline = await _db.OePipelines
             .FirstOrDefaultAsync(p => p.Id == id && p.DeletedAt == null, ct)
-            ?? throw Validation("Name", "This pipeline no longer exists.");
+            ?? throw Validation("Pipeline", "This pipeline no longer exists.");
 
         var ownerId = await _db.OeProjects.AsNoTracking()
             .Where(c => c.Id == pipeline.ProjectId)
@@ -268,7 +268,7 @@ public sealed class PipelineService
             .FirstOrDefaultAsync(ct);
         if (owner is null)
         {
-            throw Validation("Project", "Choose a project for this pipeline.");
+            throw Validation("Project", "Choose a solution for this pipeline.");
         }
         await _access.EnsureCanManageAsync(input.ProjectId, owner.CreatedByUserId, ct);
 

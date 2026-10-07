@@ -333,7 +333,7 @@ public sealed class ReleasePipelineService
         RequireOrganizationId();
         var pipeline = await _db.OeReleasePipelines
             .FirstOrDefaultAsync(r => r.Id == id && r.DeletedAt == null, ct)
-            ?? throw Validation("Name", "This deployment pipeline no longer exists.");
+            ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
 
         // A deployment pipeline can't move between projects; validate against its own.
         var v = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
@@ -373,7 +373,7 @@ public sealed class ReleasePipelineService
         RequireOrganizationId();
         var pipeline = await _db.OeReleasePipelines
             .FirstOrDefaultAsync(r => r.Id == id && r.DeletedAt == null, ct)
-            ?? throw Validation("Name", "This deployment pipeline no longer exists.");
+            ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
 
         var ownerId = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == pipeline.ProjectId)
