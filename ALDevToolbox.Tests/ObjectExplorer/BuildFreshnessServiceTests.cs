@@ -86,6 +86,64 @@ public sealed class BuildFreshnessServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_queued_build_on_push_of_the_new_head_marks_the_branch_as_being_built()
+    {
+        // The page offered Build while the push build of that very commit was queued,
+        // and the running guard then refused it (#1128).
+        var s = await SeedAsync(branch: "main");
+        await AddBuildAsync(s, Built);
+        await AddHeadAsync(s.RepositoryId, "main", Newest, commits: [Built, Newest]);
+        await AddActiveBuildAsync(s, ProjectBuildStatus.Queued, headSha: Newest, startedAt: DateTime.UtcNow);
+
+        var freshness = await GetAsync(s.PipelineId);
+
+        Single(freshness).State.Should().Be(BuildFreshnessState.Ahead);
+        Single(freshness).BeingBuilt.Should().BeTrue();
+        PipelineFreshnessSummary.From(freshness).Headline.Should().Be(PipelineFreshnessHeadline.Building);
+        PipelineFreshnessSummary.From(freshness).IsAhead.Should().BeFalse("there is nothing to start");
+    }
+
+    [Fact]
+    public async Task A_running_build_of_an_older_commit_does_not_cover_the_new_head()
+    {
+        var s = await SeedAsync(branch: "main");
+        await AddBuildAsync(s, Built);
+        await AddHeadAsync(s.RepositoryId, "main", Newest, commits: [Built, Newer, Newest]);
+        await AddActiveBuildAsync(s, ProjectBuildStatus.Building, headSha: Newer, startedAt: DateTime.UtcNow);
+
+        Single(await GetAsync(s.PipelineId)).BeingBuilt.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_build_somebody_started_after_the_push_covers_it_and_one_started_before_does_not()
+    {
+        // A build started from the Build button names no commit: it clones the branch
+        // as it is when it starts, so it covers every push recorded before it was queued.
+        var s = await SeedAsync(branch: "main");
+        await AddBuildAsync(s, Built);
+        await AddHeadAsync(s.RepositoryId, "main", Newest, commits: [Built, Newest]);
+        var head = await HeadPushedAtAsync(s.RepositoryId);
+
+        await AddActiveBuildAsync(s, ProjectBuildStatus.Building, headSha: null, startedAt: head.AddMinutes(-5));
+        Single(await GetAsync(s.PipelineId)).BeingBuilt.Should().BeFalse("it was queued before the push");
+
+        await AddActiveBuildAsync(s, ProjectBuildStatus.Queued, headSha: null, startedAt: head.AddMinutes(1));
+        Single(await GetAsync(s.PipelineId)).BeingBuilt.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_preview_check_does_not_count_as_building_the_branch()
+    {
+        var s = await SeedAsync(branch: "main");
+        await AddBuildAsync(s, Built);
+        await AddHeadAsync(s.RepositoryId, "main", Newest, commits: [Built, Newest]);
+        await AddActiveBuildAsync(s, ProjectBuildStatus.Building, headSha: null, startedAt: DateTime.UtcNow.AddMinutes(1),
+            target: ProjectBuildTarget.NextMajor);
+
+        Single(await GetAsync(s.PipelineId)).BeingBuilt.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task A_pipeline_with_no_successful_build_is_never_built()
     {
         var s = await SeedAsync(branch: "main");
@@ -373,6 +431,32 @@ public sealed class BuildFreshnessServiceTests : IDisposable
         ctx.OeProjectBuilds.Add(build);
         await ctx.SaveChangesAsync();
         return build.Id;
+    }
+
+    private async Task AddActiveBuildAsync(
+        Seeded s, string status, string? headSha, DateTime startedAt, string target = ProjectBuildTarget.Current)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.OeProjectBuilds.Add(new OeProjectBuild
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = s.ProjectId,
+            PipelineId = s.PipelineId,
+            Status = status,
+            Trigger = headSha is null ? ProjectBuildTrigger.Manual : ProjectBuildTrigger.Push,
+            HeadSha = headSha,
+            HeadRepositoryId = headSha is null ? null : s.RepositoryId,
+            BcTarget = target,
+            StartedAt = startedAt,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task<DateTime> HeadPushedAtAsync(int repositoryId)
+    {
+        await using var ctx = _db.NewContext();
+        return await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.SingleAsync(
+            ctx.OeRepositoryBranchHeads.Where(h => h.ProjectRepositoryId == repositoryId).Select(h => h.PushedAt));
     }
 
     private async Task AddHeadAsync(

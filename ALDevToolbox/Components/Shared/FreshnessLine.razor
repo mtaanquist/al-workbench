@@ -6,7 +6,7 @@
     "Up to date with main", "3 commits ahead on main, 2 hours ago", "2 pull requests merged
     since build #118", "main was force-pushed since build #118", "No successful build yet"
     (the issue's "Never built", which read as a contradiction beside a failed build),
-    "Branch main no longer exists". Nothing at all when the answer is unknown - the person reading a
+    "Branch main no longer exists", "Building the latest commit on main" (#1128). Nothing at all when the answer is unknown - the person reading a
     pipeline cannot do anything about the GitHub App's subscription, so the site-admin
     GitHub page is where that is said.
 
@@ -32,6 +32,9 @@
                     break;
                 case PipelineFreshnessHeadline.Ahead:
                     <text>New commits on @BranchName(s) since @BuildRef(s)</text>
+                    break;
+                case PipelineFreshnessHeadline.Building:
+                    <text>Building the latest commit on @BranchName(s)</text>
                     break;
                 case PipelineFreshnessHeadline.UpToDate:
                     <text>Up to date with @BranchName(s)</text>
@@ -64,6 +67,7 @@
     {
         PipelineFreshnessHeadline.Ahead when s.MergedPullRequests > 0 && !s.Forced => "git-merge",
         PipelineFreshnessHeadline.Ahead => "git-commit-vertical",
+        PipelineFreshnessHeadline.Building => "hammer",
         PipelineFreshnessHeadline.UpToDate => "circle-check",
         _ => "git-branch",
     };
