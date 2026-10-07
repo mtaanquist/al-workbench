@@ -150,6 +150,30 @@ public sealed class ArtifactsToolsTests : IDisposable
         _db.OrgContext.IsSiteAdmin = siteAdmin;
     }
 
+    [Fact]
+    public async Task List_builds_returns_the_newest_twenty_unless_asked_for_more()
+    {
+        int projectId;
+        await using (var ctx = _db.NewContext())
+        {
+            projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            for (var i = 0; i < 25; i++)
+            {
+                await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, DateTime.UtcNow.AddHours(-i));
+            }
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        var newest = await tools.ListProjectBuildsAsync("CRONUS A/S");
+        newest.Should().HaveCount(20);
+        newest.Select(b => b.StartedAt).Should().BeInDescendingOrder();
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 5)).Should().HaveCount(5);
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 1000)).Should().HaveCount(25, "the cap is far above what there is");
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 0)).Should().HaveCount(1, "a limit below one still returns the newest");
+    }
+
     private async Task SeedUsersAsync()
     {
         await using var ctx = _db.NewContext();

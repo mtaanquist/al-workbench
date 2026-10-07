@@ -415,6 +415,30 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task Merged_pull_requests_far_older_than_a_new_one_are_dropped()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
+        await SeedSolutionTrackingTheRepositoryAsync();
+        var worker = NewWorker();
+        var merged = DateTime.UtcNow;
+        var old = merged - GitHubBranchActivityService.MergedPullRequestRetention - TimeSpan.FromDays(1);
+        var recent = merged - GitHubBranchActivityService.MergedPullRequestRetention + TimeSpan.FromDays(1);
+
+        foreach (var (number, at) in new[] { (10, old), (11, recent), (12, merged) })
+        {
+            var job = GitHubWebhookEndpoints.TryReadMergedPullRequest(
+                System.Text.Encoding.UTF8.GetBytes(GitHubWebhookPayloads.MergedPullRequest(number: number, mergedAt: at.ToString("yyyy-MM-ddTHH:mm:ssZ"))),
+                "delivery", NullLogger.Instance);
+            await worker.RunOneAsync(job!, CancellationToken.None);
+        }
+
+        await using var ctx = _db.NewContext();
+        (await ctx.OeRepositoryMergedPullRequests.AsNoTracking().Select(m => m.Number).OrderBy(n => n).ToListAsync())
+            .Should().Equal(11, 12);
+    }
+
+    [Fact]
     public void A_pull_request_closed_without_merging_is_not_read_as_a_merge()
     {
         var job = GitHubWebhookEndpoints.TryReadMergedPullRequest(

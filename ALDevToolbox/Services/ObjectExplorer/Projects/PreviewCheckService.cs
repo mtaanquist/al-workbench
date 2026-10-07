@@ -66,38 +66,35 @@ public sealed class PreviewCheckService
         if (pipelines.Count == 0) return [];
 
         var pipelineIds = pipelines.Select(p => p.Id).ToList();
-        var builds = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value))
-            .Select(b => new
-            {
-                b.Id,
-                PipelineId = b.PipelineId!.Value,
-                b.BcTarget,
-                b.Status,
-                b.StartedAt,
-                b.BcArtifactVersion,
-                b.ReleaseId,
-                // In flight only while its release is still ingesting, as in
-                // ProjectBuildImporter.BlocksManualBuild: nothing resets a row whose job
-                // was lost, and trusting the row alone would stop the check for good (#1111).
-                InFlight = (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building)
-                    && b.Release != null && b.Release.Status == "ingesting",
-            })
-            .ToListAsync(ct).ConfigureAwait(false);
-        var byPipeline = builds.ToLookup(b => b.PipelineId);
+        // One row per pipeline and target, summed up in SQL rather than reading every
+        // build of every checked pipeline each night (#1138).
+        var history = (await _db.OeProjectBuilds.AsNoTracking()
+                .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value))
+                .GroupBy(b => new { PipelineId = b.PipelineId!.Value, b.BcTarget })
+                .Select(g => new BuildHistorySummary(
+                    g.Key.PipelineId,
+                    g.Key.BcTarget,
+                    // In flight only while its release is still ingesting, as in
+                    // ProjectBuildImporter.BlocksManualBuild: nothing resets a row whose job
+                    // was lost, and trusting the row alone would stop the check for good (#1111).
+                    g.Any(b => (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building)
+                               && b.Release != null && b.Release.Status == "ingesting"),
+                    g.Max(b => b.StartedAt),
+                    g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.BcArtifactVersion).First(),
+                    g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.Id).First(),
+                    g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.Status).First(),
+                    g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.ReleaseId).First()))
+                .ToListAsync(ct).ConfigureAwait(false))
+            .ToDictionary(h => (h.PipelineId, h.BcTarget));
 
         // What each pipeline's last check of each target compiled, and what its
         // branches hold now as the push webhook last reported them: together they
         // say whether the code changed since that check (#1140).
-        var lastChecks = builds
-            .Where(b => ProjectBuildTarget.IsPreview(b.BcTarget))
-            .GroupBy(b => (b.PipelineId, b.BcTarget))
-            .Select(g => g.MaxBy(b => b.StartedAt)!)
-            .ToList();
-        var lastCheckIds = lastChecks.Select(b => b.Id).ToList();
+        var lastChecks = history.Values.Where(h => ProjectBuildTarget.IsPreview(h.BcTarget)).ToList();
+        var lastCheckIds = lastChecks.Select(h => h.LastId).ToList();
         // A check that went ready with an extension that did not compile counts as
         // failed, as it does on the pipeline pages.
-        var lastCheckReleaseIds = lastChecks.Where(b => b.ReleaseId != null).Select(b => b.ReleaseId!.Value).ToList();
+        var lastCheckReleaseIds = lastChecks.Where(h => h.LastReleaseId != null).Select(h => h.LastReleaseId!.Value).ToList();
         var withFailedApps = (await _db.OeProjectBuildResults.AsNoTracking()
                 .Where(r => lastCheckReleaseIds.Contains(r.ReleaseId) && r.Status == ProjectBuildResultStatus.Failed)
                 .Select(r => r.ReleaseId)
@@ -144,19 +141,13 @@ public sealed class PreviewCheckService
             }
 
             due.Add(new PreviewCheckDue(pipeline.Id, userId, null, null));
-            var history = byPipeline[pipeline.Id].ToList();
-            var lastCurrentBuild = history
-                .Where(b => b.BcTarget == ProjectBuildTarget.Current)
-                .Select(b => (DateTime?)b.StartedAt)
-                .Max();
+            var lastCurrentBuild = history.GetValueOrDefault((pipeline.Id, ProjectBuildTarget.Current))?.LastStartedAt;
 
             foreach (var target in ProjectBuildTarget.Previews)
             {
-                var checks = history.Where(b => b.BcTarget == target).ToList();
-                if (checks.Any(b => b.InFlight)) continue;
-
-                var last = checks.MaxBy(b => b.StartedAt);
-                if (last is not null && DateOnly.FromDateTime(last.StartedAt) == today) continue;
+                var last = history.GetValueOrDefault((pipeline.Id, target));
+                if (last is { InFlight: true }) continue;
+                if (last is not null && DateOnly.FromDateTime(last.LastStartedAt) == today) continue;
 
                 var key = (country, target);
                 if (!versions.TryGetValue(key, out var version))
@@ -168,14 +159,14 @@ public sealed class PreviewCheckService
                 // index could not be read tonight. Neither is the pipeline's problem.
                 if (version is null) continue;
 
-                if (last is not null && last.BcArtifactVersion == version)
+                if (last is not null && last.LastBcArtifactVersion == version)
                 {
                     var sameCode = SameCode(
                         repositories[pipeline.ProjectId].ToList(),
-                        pinned[last.Id].ToDictionary(c => c.RepositoryId, c => c.CommitHash),
-                        heads, pipeline.Branch, last.StartedAt);
-                    var clean = last.Status == ProjectBuildStatus.Ready
-                                && !(last.ReleaseId is { } checkedRelease && withFailedApps.Contains(checkedRelease));
+                        pinned[last.LastId].ToDictionary(c => c.RepositoryId, c => c.CommitHash),
+                        heads, pipeline.Branch, last.LastStartedAt);
+                    var clean = last.LastStatus == ProjectBuildStatus.Ready
+                                && !(last.LastReleaseId is { } checkedRelease && withFailedApps.Contains(checkedRelease));
                     // A check that ran clean against the same code and the same preview
                     // build would only say the same again, however long ago it ran. One
                     // that failed is tried again once the quiet period passes, in case
@@ -184,8 +175,8 @@ public sealed class PreviewCheckService
                     // Without a stored head for every repository the code may have moved
                     // unseen, so a build of the pipeline since and the quiet period stand in.
                     var quiet = sameCode != false
-                        && (sameCode == true || lastCurrentBuild is null || lastCurrentBuild < last.StartedAt)
-                        && nowUtc - last.StartedAt < MaxQuietPeriod;
+                        && (sameCode == true || lastCurrentBuild is null || lastCurrentBuild < last.LastStartedAt)
+                        && nowUtc - last.LastStartedAt < MaxQuietPeriod;
                     if (quiet) continue;
                 }
 
@@ -194,6 +185,11 @@ public sealed class PreviewCheckService
         }
         return due;
     }
+
+    /// <summary>One pipeline's builds for one target, summed up: what <see cref="ListDueAsync"/> needs of them.</summary>
+    private sealed record BuildHistorySummary(
+        int PipelineId, string BcTarget, bool InFlight, DateTime LastStartedAt, string? LastBcArtifactVersion,
+        int LastId, string LastStatus, int? LastReleaseId);
 
     /// <summary>
     /// Whether every repository's watched branch still holds the commit the last
