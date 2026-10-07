@@ -565,7 +565,11 @@ on every pull request, inline in the Files tab.
   enqueues with `JobRowId: 0` and writes no `oe_import_jobs` row, so the startup
   reconciler never resumes one. By the time a restarted process got to it the head
   may have moved, and re-running would complete a check run about a commit nobody is
-  reviewing. The next push, or GitHub's own redelivery, is the recovery.
+  reviewing. Instead, on its first pass after startup `GitHubWebhookRecoveryScheduler`
+  marks every pull-request build left queued or building by the previous process as
+  failed ("The workbench restarted before this build finished") and completes its check
+  run as `neutral` with the same words, so the pull request is not left spinning. The
+  next push is the recovery (#1121).
 - **The organisation is found by walking, not by querying across tenants.**
   `GitHubPullRequestBuildWorker.ResolveOrganizationAsync` reads `organizations` (no
   tenant filter, so no bypass), then enters an `AmbientOrganizationScope` and a fresh
@@ -693,8 +697,25 @@ and it accepted work it should not have. What changed:
   cancel the build that is running. `EndBuild` evicts the newest-head entry when the head
   just built is still the newest, so the map does not grow for the life of the process.
 - **The queue refuses rather than waits.** The webhook runs on a request thread GitHub is
-  timing, so a full channel is answered with 503 and a body ("Busy; GitHub will retry")
-  instead of blocking - GitHub redelivers a 5xx.
+  timing, so a full channel is answered with 503 and a body ("Busy; the delivery will be
+  requested again") instead of blocking.
+- **A refused delivery is asked for again (#1121).** GitHub does not resend a delivery
+  it logged as failed - a 503 from a full queue, a 413, a 5xx, or no answer at all while
+  the app was down; it waits for somebody to press Redeliver. So
+  `GitHubWebhookRecoveryScheduler` does that every five minutes: it reads the App's
+  delivery log (`GET /app/hook/deliveries`, as the App), and for each event the endpoint
+  acts on (every `push`; `pull_request` opened, synchronize, reopened and closed) whose
+  attempts all failed it asks GitHub for one more (`POST /app/hook/deliveries/{id}/attempts`).
+  It looks back at most three days (what GitHub keeps), asks for no more than the webhook
+  queue has room for (half its capacity, less what is waiting), stops after five attempts
+  at one event, and asks in the order the events first failed. A 4xx other than 408, 413
+  and 429 is not resent: that is a delivery we read and turned away. A resent push is
+  safe because the push path ignores a push it has seen or one older than the recorded
+  head. The pull-request path has no such guard - the endpoint would take a resent older
+  head as the newest and cancel the build of the real one - so a pull-request build
+  delivery is resent only while GitHub still reports its head as the open pull request's
+  head (read from the logged payload, then `GET /repos/{owner}/{repo}/pulls/{n}`).
+  Attempt counts are in memory, so a restart allows five more.
 - **A check run is never left spinning.** The run is opened before the build is queued, so
   a failure between the two completes it as `neutral` with the reason; and a delivery that
   arrives while a restore is in flight is held and re-queued rather than reaching the
