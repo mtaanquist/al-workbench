@@ -109,9 +109,11 @@ public sealed class DeliveryScheduler : PolledScheduler
                 }
 
                 var enqueued = await deliveries.EnqueueDueDeliveriesAsync(nowUtc, ct).ConfigureAwait(false);
+                // Debug: a deployment waiting behind a long install is queued again on
+                // every sweep until its environment is free (#1139).
                 if (enqueued > 0)
                 {
-                    _logger.LogInformation("DeliveryScheduler enqueued {Count} due delivery(ies) for org {OrgId}.", enqueued, orgId);
+                    _logger.LogDebug("DeliveryScheduler enqueued {Count} due delivery(ies) for org {OrgId}.", enqueued, orgId);
                 }
             }
             catch (Exception ex)

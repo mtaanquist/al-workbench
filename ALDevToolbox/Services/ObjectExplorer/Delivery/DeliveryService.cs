@@ -1657,19 +1657,31 @@ public sealed class DeliveryService
             .Select(d => new { d.ProjectId, d.EnvironmentName, d.ScheduledFor, d.Project!.BcTenantId })
             .FirstOrDefaultAsync(ct);
         if (target is null) return false;
+
+        // ...and, within a solution, in the order they fell due, so an older build never
+        // lands after a newer one. Asked before the gate as well as after, so a later
+        // deployment steps aside without taking the gate from the earlier one it waits for.
+        async Task<bool> EarlierOneWaitsAsync()
+        {
+            var dueBy = DateTime.UtcNow + ClaimEarlySlack;
+            return await _db.OeProjectDeliveries.AsNoTracking().AnyAsync(d =>
+                d.ProjectId == target.ProjectId && d.EnvironmentName == target.EnvironmentName
+                && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy
+                && d.ReleasePipeline!.DeletedAt == null
+                && (d.ScheduledFor < target.ScheduledFor || (d.ScheduledFor == target.ScheduledFor && d.Id < deliveryId)), ct);
+        }
+        if (await EarlierOneWaitsAsync())
+        {
+            _logger.LogDebug("Delivery {DeliveryId} waits for an earlier deployment to {Env}.", deliveryId, target.EnvironmentName);
+            return false;
+        }
         using var environment = _queue.TryEnterEnvironment(target.BcTenantId, target.ProjectId, target.EnvironmentName);
         if (environment is null)
         {
             _logger.LogDebug("Delivery {DeliveryId} waits: another deployment to {Env} is running.", deliveryId, target.EnvironmentName);
             return false;
         }
-        // ...and in the order they fell due, so an older build never lands after a newer one.
-        var dueBy = DateTime.UtcNow + ClaimEarlySlack;
-        if (await _db.OeProjectDeliveries.AsNoTracking().AnyAsync(d =>
-                d.ProjectId == target.ProjectId && d.EnvironmentName == target.EnvironmentName
-                && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy
-                && d.ReleasePipeline!.DeletedAt == null
-                && (d.ScheduledFor < target.ScheduledFor || (d.ScheduledFor == target.ScheduledFor && d.Id < deliveryId)), ct))
+        if (await EarlierOneWaitsAsync())
         {
             _logger.LogDebug("Delivery {DeliveryId} waits for an earlier deployment to {Env}.", deliveryId, target.EnvironmentName);
             return false;
@@ -1681,9 +1693,9 @@ public sealed class DeliveryService
         }
 
         var claimedAt = DateTime.UtcNow;
-        dueBy = claimedAt + ClaimEarlySlack;
+        var claimBy = claimedAt + ClaimEarlySlack;
         var claimed = await _db.OeProjectDeliveries
-            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy
+            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= claimBy
                         && d.ReleasePipeline!.DeletedAt == null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.Status, ProjectDeliveryStatus.Claimed)
@@ -1766,8 +1778,8 @@ public sealed class DeliveryService
 
     /// <summary>
     /// A deployment the delivery window chose the time for runs in that window or not at
-    /// all: when its turn comes after the window has closed (deployments queue one at a
-    /// time, and Business Central can be slow), it is moved to the window's next opening
+    /// all: when its turn comes after the window has closed (deployments to one environment
+    /// run one at a time, and Business Central can be slow), it is moved to the window's next opening
     /// rather than installed while people are working (#1124). One a person deliberately
     /// placed outside the window (<see cref="OeProjectDelivery.ScheduledOutsideWindow"/>)
     /// runs when they said. Compare-and-set on the time it was read with, so a reschedule

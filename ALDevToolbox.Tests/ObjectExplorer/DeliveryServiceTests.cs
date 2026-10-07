@@ -459,6 +459,44 @@ public sealed class DeliveryServiceTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData("not due yet")]
+    [InlineData("waiting for approval")]
+    [InlineData("pipeline deleted")]
+    public async Task RunDeliveryAsync_does_not_wait_for_an_earlier_deployment_that_cannot_run_now(string why)
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var earlier = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddMinutes(1));
+        var later = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddMinutes(2));
+        await ctx.OeProjectDeliveries.Where(d => d.Id == earlier || d.Id == later)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.ScheduledFor, d => d.ScheduledFor.AddMinutes(-10)));
+        switch (why)
+        {
+            case "not due yet":
+                // Moved to the window's next opening, say (#1124).
+                await ctx.OeProjectDeliveries.Where(d => d.Id == earlier)
+                    .ExecuteUpdateAsync(s => s.SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddHours(5)));
+                break;
+            case "waiting for approval":
+                await ctx.OeProjectDeliveries.Where(d => d.Id == earlier)
+                    .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.Proposed));
+                break;
+            case "pipeline deleted":
+                // Only the earlier one's pipeline: give the later one a pipeline of its own.
+                var other = await NewReleasePipelineService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
+                    seed.ProjectId, null, seed.BuildPipelineId, seed.EnvironmentId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+                await ctx.OeProjectDeliveries.Where(d => d.Id == later)
+                    .ExecuteUpdateAsync(s => s.SetProperty(d => d.ReleasePipelineId, other));
+                await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+                break;
+        }
+
+        await using var run = _db.NewContext();
+        (await NewService(run).RunDeliveryAsync(later)).Should().BeTrue($"the earlier one is {why}");
+    }
+
     [Fact]
     public async Task EnqueueDueDeliveriesAsync_leaves_what_does_not_fit_a_full_queue_for_the_next_sweep()
     {

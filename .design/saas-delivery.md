@@ -850,8 +850,8 @@ whole. The page reads the log line back through the same parser, so a deployment
   **`DeliveryQueue`** (bounded `Channel`); **`DeliveryWorker`** drains and runs the publish under the
   triggering user's captured `AmbientOrganizationScope` identity. Persisted rows = restart-resume.
   The worker runs a few deployments at once, never two to one Business Central environment (two
-  solutions on one tenant share it), and to one environment in the order they fell due: a run that
-  finds its environment busy, or an earlier deployment to it still waiting, leaves the row
+  solutions on one tenant share it), and within a solution to one environment in the order they fell
+  due: a run that finds its environment busy, or an earlier deployment to it still waiting, leaves the row
   `scheduled` for the next sweep. Nothing waits on a full queue;
   a due row that doesn't fit is picked up by the next sweep too (#1139).
 
