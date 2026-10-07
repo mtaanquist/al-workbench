@@ -356,7 +356,7 @@ public sealed class ProjectServiceTests : IDisposable
     private static ProjectRepositoryInput Repo(string url) => new(RepositoryProvider.GitHub, url, "");
 
     private const string ClaimedByCronus =
-        "This repository already belongs to the solution CRONUS A/S. A repository can only belong to one solution.";
+        "This repository already belongs to the solution CRONUS A/S. A repository can only belong to one solution, so remove it from CRONUS A/S first.";
 
     [Theory]
     [InlineData("https://github.com/cronus-dk/core")]
@@ -481,7 +481,7 @@ public sealed class ProjectServiceTests : IDisposable
 
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors["Url"].Should().Be(
-                "This repository already belongs to another solution. A repository can only belong to one solution.");
+                "This repository already belongs to another solution. A repository can only belong to one solution, so ask an Admin to remove it from the other one first.");
     }
 
     [Fact]

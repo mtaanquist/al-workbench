@@ -449,35 +449,17 @@ public sealed class ProjectService
         IReadOnlyList<ProjectRepositoryInput> repos, int? projectId,
         ICollection<OeProjectRepository>? existing, CancellationToken ct)
     {
-        static string Key(RepositoryProvider provider, string url) =>
-            $"{provider}|{GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(url)}";
-
-        var had = (existing ?? []).Select(r => Key(r.Provider, r.Url)).ToHashSet(StringComparer.Ordinal);
+        var had = (existing ?? []).Select(r => RepositoryKey(r.Provider, r.Url)).ToHashSet(StringComparer.Ordinal);
         var added = repos
-            .Select((r, i) => (Index: i, Key: Key(r.Provider, r.Url)))
+            .Select((r, i) => (Index: i, Key: RepositoryKey(r.Provider, r.Url)))
             .Where(r => !had.Contains(r.Key))
             .ToList();
         var errors = new Dictionary<int, string>();
         if (added.Count == 0) return errors;
 
-        var owners = await RepositoryOwnersAsync(projectId, ct);
-        foreach (var (index, key) in added)
-        {
-            if (owners.TryGetValue(key, out var owner)) errors[index] = RepositoryClaimedMessage(owner);
-        }
-        return errors;
-    }
-
-    /// <summary>
-    /// Every repository on an active solution other than <paramref name="projectId"/>,
-    /// keyed provider plus normalised URL, mapped to how the refusal names its solution:
-    /// its name when the caller may see it, null when it is private to others, so the
-    /// message does not give a private solution's name away. Org-scoped by the ambient
-    /// query filter; the URL is normalised in memory, which is why every row is read -
-    /// an organisation has tens of repositories, not thousands.
-    /// </summary>
-    private async Task<Dictionary<string, string?>> RepositoryOwnersAsync(int? projectId, CancellationToken ct)
-    {
+        // Read every other active solution's repositories, org-scoped by the ambient
+        // query filter. The URL is normalised in memory, which is why every row is read -
+        // an organisation has tens of repositories, not thousands.
         var rows = await (
                 from r in _db.OeProjectRepositories.AsNoTracking()
                 join p in _db.OeProjects.AsNoTracking() on r.ProjectId equals p.Id
@@ -485,31 +467,43 @@ public sealed class ProjectService
                 orderby p.Id
                 select new { r.Provider, r.Url, ProjectId = p.Id, p.Name })
             .ToListAsync(ct);
-        if (rows.Count == 0) return new();
+        var owners = new Dictionary<string, (int Id, string Name)>(StringComparer.Ordinal);
+        foreach (var row in rows) owners.TryAdd(RepositoryKey(row.Provider, row.Url), (row.ProjectId, row.Name));
 
+        var claims = added
+            .Where(a => owners.ContainsKey(a.Key))
+            .Select(a => (a.Index, Owner: owners[a.Key]))
+            .ToList();
+        if (claims.Count == 0) return errors;
+
+        // A solution private to people the caller is not among is not named, so the
+        // refusal does not give its name away.
         var snapshot = await _access.GetSnapshotAsync(ct);
-        var ids = rows.Select(r => r.ProjectId).Distinct().ToList();
+        var ids = claims.Select(c => c.Owner.Id).Distinct().ToList();
         var visible = (await _db.OeProjects.AsNoTracking()
                 .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
                 .Where(p => ids.Contains(p.Id))
                 .Select(p => p.Id)
                 .ToListAsync(ct))
             .ToHashSet();
-
-        var owners = new Dictionary<string, string?>(StringComparer.Ordinal);
-        foreach (var row in rows)
+        foreach (var (index, owner) in claims)
         {
-            owners.TryAdd(
-                $"{row.Provider}|{GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(row.Url)}",
-                visible.Contains(row.ProjectId) ? row.Name : null);
+            errors[index] = RepositoryClaimedMessage(visible.Contains(owner.Id) ? owner.Name : null);
         }
-        return owners;
+        return errors;
     }
 
     private static string RepositoryClaimedMessage(string? owner) =>
         owner is null
-            ? "This repository already belongs to another solution. A repository can only belong to one solution."
-            : $"This repository already belongs to the solution {owner}. A repository can only belong to one solution.";
+            ? "This repository already belongs to another solution. A repository can only belong to one solution, so ask an Admin to remove it from the other one first."
+            : $"This repository already belongs to the solution {owner}. A repository can only belong to one solution, so remove it from {owner} first.";
+
+    /// <summary>
+    /// Repository identity: provider plus normalised URL, so the same repository typed
+    /// with and without <c>.git</c>, or in another case, is one repository.
+    /// </summary>
+    private static string RepositoryKey(RepositoryProvider provider, string url) =>
+        $"{provider}|{GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(url)}";
 
     /// <summary>The solution's GitHub repositories, keyed the way <see cref="ReconcileRepositories"/> matches them.</summary>
     private static HashSet<string> GitHubRepositoryKeys(OeProject project) =>
@@ -563,17 +557,14 @@ public sealed class ProjectService
     /// </summary>
     private void ReconcileRepositories(OeProject project, IReadOnlyList<ProjectRepositoryInput> repos, int orgId)
     {
-        static string Key(RepositoryProvider provider, string url) =>
-            $"{provider}|{GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(url)}";
-
         var existing = project.Repositories.ToList();
         var kept = new HashSet<int>();
         var wanted = new List<OeProjectRepository>(repos.Count);
 
         foreach (var repo in repos)
         {
-            var key = Key(repo.Provider, repo.Url);
-            var match = existing.FirstOrDefault(e => !kept.Contains(e.Id) && Key(e.Provider, e.Url) == key);
+            var key = RepositoryKey(repo.Provider, repo.Url);
+            var match = existing.FirstOrDefault(e => !kept.Contains(e.Id) && RepositoryKey(e.Provider, e.Url) == key);
             if (match is not null)
             {
                 kept.Add(match.Id);
