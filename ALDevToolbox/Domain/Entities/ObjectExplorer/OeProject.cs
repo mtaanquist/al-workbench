@@ -218,6 +218,33 @@ public class OeProject
 
     public ICollection<OeProjectRepository> Repositories { get; set; } = new List<OeProjectRepository>();
 
+    // ── Automatic Business Central update pull requests (#1104) ──────────
+    // See .design/github-integration-phase2.md, "Opening update pull requests on
+    // their own".
+
+    /// <summary>
+    /// Whether the nightly drift check opens the update pull request on each of this
+    /// solution's GitHub repositories that is behind its environment, instead of
+    /// waiting for someone to press the button. Off by default.
+    /// </summary>
+    public bool AutoUpdatePullRequests { get; set; }
+
+    /// <summary>
+    /// Who turned <see cref="AutoUpdatePullRequests"/> on. The pull requests are opened
+    /// with their GitHub account, the way building on push runs as
+    /// <see cref="OePipeline.BuildOnPushByUserId"/>. Null once that user is deleted,
+    /// which pauses it.
+    /// </summary>
+    public int? AutoUpdatePullRequestsByUserId { get; set; }
+    public User? AutoUpdatePullRequestsByUser { get; set; }
+
+    /// <summary>
+    /// Why the last night's run could not open the pull requests (the person lost
+    /// access, has no GitHub account connected), shown on the solution. Null when the
+    /// last run went through.
+    /// </summary>
+    public string? AutoUpdatePullRequestsBlocked { get; set; }
+
     /// <summary>
     /// Operator-supplied third-party symbols (<see cref="OeProjectSymbol"/>) the build
     /// merges into the symbol cache — the manual-symbols recovery path for a

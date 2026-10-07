@@ -254,6 +254,8 @@
                                                Providers="_providers"
                                                CanPickFromGitHub="_canPickFromGitHub"
                                                RepoErrors="_repoErrors"
+                                               LoadedProject="_loadedProject"
+                                               OnResumeAutoUpdates="ResumeAutoUpdatesAsync"
                                                OnDirty="MarkDirty" />
                 }
                 else if (_section == Section.Customer && Id is not null)
@@ -907,6 +909,7 @@
             Repos = _loadedProject.Repositories
                 .Select(r => new RepoRow { Provider = r.Provider, Url = r.Url, SavedUrl = r.Url, DisplayName = r.DisplayName })
                 .ToList(),
+            AutoUpdatePullRequests = _loadedProject.AutoUpdatePullRequests,
         };
         _dirty = false;
     }
@@ -979,7 +982,8 @@
                 repos,
                 // Blank asks the service for one made from the name; on create, the
                 // field is not shown and null does the same.
-                Id is null ? null : _edit.Slug.Trim());
+                Id is null ? null : _edit.Slug.Trim(),
+                Id is null ? null : _edit.AutoUpdatePullRequests);
 
             if (Id is null)
             {
@@ -1021,6 +1025,27 @@
         }
     }
 
+    /// <summary>"Resume with my access" on the Repositories tab: automatic update pull requests are opened as this person from now on.</summary>
+    private async Task ResumeAutoUpdatesAsync()
+    {
+        if (Id is not { } id) return;
+        _errors = new();
+        try
+        {
+            await Projects.ResumeAutoUpdatePullRequestsAsync(id);
+            _loadedProject = await Projects.GetProjectAsync(id) ?? _loadedProject;
+            _message = "Pull requests will be opened with your GitHub account from now on.";
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _errors = new() { ["_"] = "Only the solution owner or an admin can change this solution." };
+        }
+        catch (PlanValidationException ex)
+        {
+            _errors = new(ex.Errors);
+        }
+    }
+
     private async Task ConfirmDeleteAsync()
     {
         try
@@ -1050,6 +1075,8 @@
         /// <summary>The solution's key in its web address. Blank on save makes one from the name. See <see cref="SolutionSlug"/>.</summary>
         public string Slug { get; set; } = string.Empty;
         public List<RepoRow> Repos { get; set; } = new();
+        /// <summary>Whether update pull requests are opened automatically (#1104). Only an existing solution offers it.</summary>
+        public bool AutoUpdatePullRequests { get; set; }
     }
 
     /// <summary>One row of the Repositories tab's table. Identity, not value, keys its errors.</summary>

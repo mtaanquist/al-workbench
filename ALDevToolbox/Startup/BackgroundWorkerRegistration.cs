@@ -51,6 +51,10 @@ public static class BackgroundWorkerRegistration
         // no solution tracks yet, so the Solutions page can offer them without probing
         // GitHub on a page render. See .design/github-integration-phase2.md.
         services.AddHostedService<ALDevToolbox.Services.GitHub.RepositoryDiscoveryScheduler>();
+        // Nightly drift check after the environment refresh: measures every tracked
+        // repository against its solution's environment again, then opens the update
+        // pull requests of the solutions that asked for that (#1104).
+        services.AddHostedService<ALDevToolbox.Services.GitHub.DependencyDriftScheduler>();
         // Periodic prune of old login_attempts rows so the table doesn't grow
         // unbounded (the rate-limiter only reads a ~15-minute window). See issue #403.
         services.AddHostedService<ALDevToolbox.Services.Account.LoginAttemptPruneScheduler>();
