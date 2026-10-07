@@ -197,6 +197,12 @@ internal static class StartupTasks
             }
             await db.SaveChangesAsync(stopping);
             logger.LogWarning("Marked {Count} interrupted release import(s) as failed on startup.", stranded.Count);
+
+            // Their build rows too, or a preview check would wait on one for good (#1111).
+            var builds = await ALDevToolbox.Services.ObjectExplorer.Projects.InterruptedBuilds.FailAsync(
+                app.Services, stranded.Select(r => (r.OrganizationId, r.Id)).ToList(), DateTime.UtcNow, stopping);
+            if (builds > 0)
+                logger.LogWarning("Marked {Count} interrupted build(s) as failed on startup.", builds);
         }
 
         // Prime the in-memory MCP toggle from the singleton system_settings
