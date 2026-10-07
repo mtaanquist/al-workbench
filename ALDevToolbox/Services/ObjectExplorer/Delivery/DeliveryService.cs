@@ -1578,13 +1578,7 @@ public sealed class DeliveryService
             d.FailureMessage = "The deployment was interrupted by a restart. Deploy the build again.";
             d.FinishedAt = now;
             d.UpdatedAt = now;
-            foreach (var r in d.Results.Where(r => r.Status is ProjectDeliveryResultStatus.Pending
-                                                    or ProjectDeliveryResultStatus.Uploading
-                                                    or ProjectDeliveryResultStatus.Installing))
-            {
-                r.Status = ProjectDeliveryResultStatus.Skipped;
-                r.UpdatedAt = now;
-            }
+            SettleUnfinishedApps(d.Results, now);
         }
         await _db.SaveChangesAsync(ct);
         _logger.LogWarning("Failed {Count} delivery(ies) interrupted by a restart.", orphans.Count);
@@ -2380,16 +2374,41 @@ public sealed class DeliveryService
         delivery.UpdatedAt = now;
         Append(log, "Delivery failed: " + message);
         delivery.DiagnosticsLog = log.ToString();
-        // Any app still pending/uploading didn't get there.
-        foreach (var r in delivery.Results.Where(r => r.Status is ProjectDeliveryResultStatus.Pending
-                                                       or ProjectDeliveryResultStatus.Uploading
-                                                       or ProjectDeliveryResultStatus.Installing))
-        {
-            r.Status = ProjectDeliveryResultStatus.Skipped;
-            r.UpdatedAt = now;
-        }
-        await _db.SaveChangesAsync(ct);
+        SettleUnfinishedApps(delivery.Results, now);
+        // Saved whatever the token says: on shutdown it is already cancelled, and a failure
+        // that is never written leaves the row "installing" for the restart check (#1115).
+        await _db.SaveChangesAsync(CancellationToken.None);
     }
+
+    /// <summary>
+    /// What the apps a deployment never finished end up as. One still waiting was never
+    /// sent. One that was uploading or installing may well have gone in: Business Central
+    /// carries on installing whatever happens to us, so it is not called skipped - it is
+    /// not confirmed, and the message says where to look (#1115).
+    /// </summary>
+    private static void SettleUnfinishedApps(IEnumerable<OeProjectDeliveryResult> results, DateTime now)
+    {
+        foreach (var r in results)
+        {
+            switch (r.Status)
+            {
+                case ProjectDeliveryResultStatus.Pending:
+                    r.Status = ProjectDeliveryResultStatus.Skipped;
+                    r.UpdatedAt = now;
+                    break;
+                case ProjectDeliveryResultStatus.Uploading:
+                case ProjectDeliveryResultStatus.Installing:
+                    r.Status = ProjectDeliveryResultStatus.Failed;
+                    r.Message = InterruptedAppMessage;
+                    r.FinishedAt = now;
+                    r.UpdatedAt = now;
+                    break;
+            }
+        }
+    }
+
+    internal const string InterruptedAppMessage =
+        "Not confirmed: the deployment stopped while this app was on its way, and Business Central may still have installed it. Check the environment's installed apps.";
 
     private static void Append(StringBuilder log, string line) => log.Append(LogLine(line));
 
