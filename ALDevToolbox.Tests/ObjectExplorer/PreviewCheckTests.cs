@@ -102,47 +102,54 @@ public sealed class PreviewCheckTests : IDisposable
     }
 
     [Fact]
-    public async Task The_startup_sweep_fails_the_build_rows_of_interrupted_releases()
+    public async Task The_startup_sweep_fails_build_rows_left_without_an_importing_release()
     {
         var owner = await SeedUserAsync();
         var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        // Interrupted at this start, left behind by an earlier one, its release deleted,
+        // being resumed, and a pull-request build.
         await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-1), NextMajor,
             status: ProjectBuildStatus.Building, releaseStatus: "failed");
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-2), NextMinor,
+            status: ProjectBuildStatus.Queued, releaseStatus: "failed");
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-3), NextMinor,
+            status: ProjectBuildStatus.Queued, releaseStatus: "none");
         await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-1), NextMinor,
             status: ProjectBuildStatus.Queued);
-        int interrupted, resumed, pullRequest;
+        int deleted, resumed, pullRequest;
         await using (var ctx = _db.NewContext())
         {
             var rows = await ctx.OeProjectBuilds.OrderBy(b => b.Id).ToListAsync();
-            interrupted = rows[0].ReleaseId!.Value;
-            resumed = rows[1].Id;
-            var release = new OeRelease
-            {
-                OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS pr", Kind = "project", Status = "failed",
-                ImportedAt = Tonight, CreatedAt = Tonight, UpdatedAt = Tonight,
-            };
+            deleted = rows[2].Id;
+            resumed = rows[3].Id;
             ctx.OeProjectBuilds.Add(new OeProjectBuild
             {
                 OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
                 Status = ProjectBuildStatus.Building, Trigger = ProjectBuildTrigger.PullRequest, StartedAt = Tonight,
-                Release = release,
+                Release = new OeRelease
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS pr", Kind = "project", Status = "failed",
+                    ImportedAt = Tonight, CreatedAt = Tonight, UpdatedAt = Tonight,
+                },
             });
             await ctx.SaveChangesAsync();
-            pullRequest = release.Id;
+            pullRequest = (await ctx.OeProjectBuilds.SingleAsync(b => b.Trigger == ProjectBuildTrigger.PullRequest)).Id;
         }
 
-        var failed = await InterruptedBuilds.FailAsync(
-            NewProvider(), [(TestDb.DefaultOrgId, interrupted), (TestDb.DefaultOrgId, pullRequest)], Tonight,
-            TestContext.Current.CancellationToken);
+        var failed = await InterruptedBuilds.FailAsync(NewProvider(), Tonight, TestContext.Current.CancellationToken);
 
-        failed.Should().Be(1);
+        failed.Should().Be(3);
         await using var check = _db.NewContext();
         var builds = await check.OeProjectBuilds.AsNoTracking().OrderBy(b => b.Id).ToListAsync();
-        builds[0].Status.Should().Be(ProjectBuildStatus.Failed);
-        builds[0].FailureMessage.Should().Be(InterruptedBuilds.RestartedMessage);
-        builds[0].FinishedAt.Should().Be(Tonight);
+        foreach (var build in builds.Take(3))
+        {
+            build.Status.Should().Be(ProjectBuildStatus.Failed);
+            build.FailureMessage.Should().Be(InterruptedBuilds.RestartedMessage);
+            build.FinishedAt.Should().Be(Tonight);
+        }
+        builds.Single(b => b.Id == deleted).ReleaseId.Should().BeNull();
         builds.Single(b => b.Id == resumed).Status.Should().Be(ProjectBuildStatus.Queued, "its release is still importing");
-        builds[2].Status.Should().Be(ProjectBuildStatus.Building, "pull-request builds are closed with their check runs");
+        builds.Single(b => b.Id == pullRequest).Status.Should().Be(ProjectBuildStatus.Building, "pull-request builds are closed with their check runs");
     }
 
     [Fact]
