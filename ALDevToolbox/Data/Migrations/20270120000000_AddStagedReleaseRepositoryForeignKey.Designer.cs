@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -13,9 +14,11 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20270120000000_AddStagedReleaseRepositoryForeignKey")]
+    partial class AddStagedReleaseRepositoryForeignKey
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2451,10 +2454,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at");
 
-                    b.Property<DateTime?>("DisabledAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("disabled_at");
-
                     b.Property<int?>("GithubReleaseRepositoryId")
                         .HasColumnType("integer")
                         .HasColumnName("github_release_repository_id");
@@ -3391,12 +3390,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("started_at");
 
-                    b.Property<bool>("StartedByAgent")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false)
-                        .HasColumnName("started_by_agent");
-
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -4217,10 +4210,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("deployment_schedule");
 
-                    b.Property<DateTime?>("DisabledAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("disabled_at");
-
                     b.Property<int?>("GithubReleaseRepositoryId")
                         .HasColumnType("integer")
                         .HasColumnName("github_release_repository_id");
@@ -4631,12 +4620,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnName("id");
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<bool>("AgentsMayDeployToProduction")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(false)
-                        .HasColumnName("agents_may_deploy_to_production");
 
                     b.PrimitiveCollection<List<string>>("AllowedRepositoryProviders")
                         .IsRequired()

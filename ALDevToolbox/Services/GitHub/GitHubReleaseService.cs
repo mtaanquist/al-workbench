@@ -462,10 +462,12 @@ public sealed class GitHubReleaseService
             .FirstOrDefaultAsync(ct);
         if (alreadyStaged is { } existingId)
         {
-            // Staged before builds recorded their repository, and its link didn't say: the
-            // release was just fetched from this repository, so now it is known.
+            // The release link matched, so this is the same GitHub repository. Record the
+            // row it was just fetched through: the build may predate the column, its old row
+            // may have been removed and added back, or the solution may list the repository
+            // twice. Leaving a stale id would refuse this pipeline for good (#1178).
             await _db.OeProjectBuilds
-                .Where(b => b.Id == existingId && b.StagedFromRepositoryId == null)
+                .Where(b => b.Id == existingId && b.StagedFromRepositoryId != source.RepositoryId)
                 .ExecuteUpdateAsync(u => u.SetProperty(b => b.StagedFromRepositoryId, source.RepositoryId), ct);
             _logger.LogInformation(
                 "Release {Tag} on {Owner}/{Repo} is already staged as build {BuildId}.",
@@ -599,6 +601,17 @@ public sealed class GitHubReleaseService
             : segments[1];
         return owner.Length > 0 && name.Length > 0;
     }
+
+    /// <summary>
+    /// Whether two repository links name the same GitHub repository, however they were
+    /// typed (www., a .git ending, a trailing path, letter case). False when either is not
+    /// a GitHub link. A solution may list one repository twice (#1178).
+    /// </summary>
+    public static bool IsSameRepository(string? first, string? second) =>
+        TryParseRepository(first, out var firstOwner, out var firstName)
+        && TryParseRepository(second, out var secondOwner, out var secondName)
+        && string.Equals(firstOwner, secondOwner, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(firstName, secondName, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>A Release asset the workbench can install: a compiled extension, not a packaging by-product.</summary>
     private static bool IsAppAsset(GitHubReleaseAsset asset) =>

@@ -6,6 +6,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
+using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using Microsoft.EntityFrameworkCore;
@@ -371,6 +372,7 @@ public sealed class DeliveryService
                 r.BuildPipelineId,
                 r.ArtifactSource,
                 r.GithubReleaseRepositoryId,
+                GithubReleaseRepositoryUrl = r.GithubReleaseRepository!.Url,
                 r.DeploymentSchedule,
                 r.SchemaSyncMode,
                 r.RestrictBranch,
@@ -417,7 +419,7 @@ public sealed class DeliveryService
 
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.Id == projectBuildId)
-            .Select(b => new { b.Id, b.ProjectId, b.PipelineId, b.Status, b.GithubReleaseTag, b.StagedFromRepositoryId, b.BcTarget, b.Branch, b.DefaultBranch })
+            .Select(b => new { b.Id, b.ProjectId, b.PipelineId, b.Status, b.GithubReleaseTag, b.StagedFromRepositoryId, StagedFromRepositoryUrl = b.StagedFromRepository!.Url, b.BcTarget, b.Branch, b.DefaultBranch })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("Build", "That build no longer exists.");
 
@@ -437,13 +439,15 @@ public sealed class DeliveryService
         // from. A build pipeline's own runs, or - for a Release-sourced pipeline - a
         // build staged from one of the repository's GitHub releases: no pipeline of its
         // own, the tag it came from recorded on it, and staged from this pipeline's
-        // repository, not another of the solution's (#1118). See
+        // repository, not another of the solution's (#1118) - the same row, or another
+        // row naming the same GitHub repository (#1178). See
         // .design/github-integration-phase2.md (#632).
         var acceptable = build.ProjectId == rp.ProjectId
             && (rp.ArtifactSource == ReleaseArtifactSource.GithubRelease
                 ? build.PipelineId is null && build.GithubReleaseTag is not null
                   && rp.GithubReleaseRepositoryId is not null
-                  && build.StagedFromRepositoryId == rp.GithubReleaseRepositoryId
+                  && (build.StagedFromRepositoryId == rp.GithubReleaseRepositoryId
+                      || GitHubReleaseService.IsSameRepository(build.StagedFromRepositoryUrl, rp.GithubReleaseRepositoryUrl))
                 : build.PipelineId == rp.BuildPipelineId);
         if (!acceptable)
         {
