@@ -192,6 +192,44 @@ public sealed class BcArtifactCacheTests : IDisposable
         File.Exists(lease.Value.PlatformZipPath).Should().BeFalse();
     }
 
+    // After a failed store the build may be reading a half where the cache keeps it (its
+    // move back failed), so the key stays held until the build disposes its lease, and
+    // another build's tidy-up must not take that lone half from under it (#1194).
+    [Fact]
+    public async Task A_half_a_failed_store_left_in_the_cache_survives_eviction_until_the_build_is_done()
+    {
+        // Room for one set; storing a second one evicts.
+        var cache = NewCache(maxBytes: 250);
+        var cacheDir = Path.Combine(_root, "cache");
+        Directory.CreateDirectory(cacheDir);
+        var key = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(UrlA)));
+        // Something in the way of the application half's copy makes its store fail.
+        Directory.CreateDirectory(Path.Combine(cacheDir, key + ".app.zip.partial"));
+        // The platform half already sits at its cache path, which is where a half whose
+        // move back failed is read from: a lone, incomplete set eviction drops first.
+        var platformInCache = Path.Combine(cacheDir, key + ".platform.zip");
+        Func<CancellationToken, Task<BcArtifactDownload>> download = async _ =>
+        {
+            var app = Path.Combine(_downloads, Guid.NewGuid().ToString("N") + ".zip");
+            await File.WriteAllBytesAsync(app, new byte[100]);
+            await File.WriteAllBytesAsync(platformInCache, new byte[100]);
+            return new BcArtifactDownload(app, platformInCache);
+        };
+
+        var first = await cache.GetAsync(UrlA, download);
+        first.Value.PlatformZipPath.Should().Be(platformInCache);
+        using (await cache.GetAsync(UrlB, Download()))
+        {
+            File.Exists(first.Value.ApplicationZipPath).Should().BeTrue();
+            File.Exists(first.Value.PlatformZipPath).Should().BeTrue("the first build still reads it");
+        }
+
+        first.Dispose();
+
+        File.Exists(first.Value.ApplicationZipPath).Should().BeFalse();
+        File.Exists(first.Value.PlatformZipPath).Should().BeFalse();
+    }
+
     [Fact]
     public async Task A_cache_turned_off_downloads_every_time_and_keeps_nothing()
     {

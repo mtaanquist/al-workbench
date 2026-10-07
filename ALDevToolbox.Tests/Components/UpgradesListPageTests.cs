@@ -547,6 +547,67 @@ public sealed class UpgradesListPageTests : IDisposable
         cut.WaitForAssertion(() => cut.Find(".field-error").TextContent.Should().Contain("major.minor"));
     }
 
+    /// <summary>
+    /// New upgrade clicked while the first load's fleet read is still out: the click reads
+    /// the offered versions itself, and the dialog must open with the newest one picked
+    /// even though the page has not redrawn with them yet (8006eda2).
+    /// </summary>
+    [Fact]
+    public async Task New_upgrade_clicked_before_the_first_fleet_read_lands_still_picks_the_offered_version()
+    {
+        await SeedSolutionAsync("CRONUS Denmark", "27.5.1.0");
+        var gate = new FirstFleetReadGate();
+        _ctx.Services.ConfigureDbContext<ALDevToolbox.Data.AppDbContext>(opts => opts.AddInterceptors(gate));
+        // The time zone and the access check are read once per circuit. With both in
+        // hand the page first yields on the upgrades read, after it knows its view, so
+        // its first draw carries the head's New upgrade while the load goes on.
+        await _ctx.Services.GetRequiredService<ALDevToolbox.Services.Organizations.DisplayTimeZone>().EnsureLoadedAsync();
+        await _ctx.Services.GetRequiredService<ProjectAccess>().GetSnapshotAsync();
+        try
+        {
+            var cut = Render("archive");
+            await gate.Held.WaitAsync(TimeSpan.FromSeconds(30));
+
+            cut.WaitForAssertion(() => cut.Find(".page-head__actions .btn--primary").Click());
+
+            cut.WaitForAssertion(() => cut.Find("#nu-title").TextContent.Should().Be("New upgrade"));
+            cut.WaitForAssertion(() => cut.FindAll("#nu-target option[selected]")
+                .Should().ContainSingle().Which.TextContent.Trim().Should().Be("28.5"));
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Holds the first fleet read until released; every later one runs straight through.</summary>
+    private sealed class FirstFleetReadGate : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource _held = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _seen;
+
+        public Task Held => _held.Task;
+
+        public void Release() => _released.TrySetResult();
+
+        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(
+            System.Data.Common.DbCommand command,
+            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            // Only the fleet read filters out environments Business Central stopped reporting.
+            if (command.CommandText.Contains("missing_since", StringComparison.Ordinal)
+                && Interlocked.Increment(ref _seen) == 1)
+            {
+                _held.TrySetResult();
+                await _released.Task.WaitAsync(cancellationToken);
+            }
+            return result;
+        }
+    }
+
     /// <summary>Picks an upgrade's radio in the Add dialog.</summary>
     private static void PickUpgrade(IRenderedComponent<UpgradesPage> cut, string name) =>
         cut.FindAll(".atu-choice").Single(c => c.TextContent.Contains(name)).QuerySelector("input")!.Change(true);
