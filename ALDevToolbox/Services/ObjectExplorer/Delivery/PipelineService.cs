@@ -410,16 +410,14 @@ public sealed class PipelineService
         var after = Normalized(selected);
         if (discoveredIds is { Count: > 0 })
         {
-            before = Effective(before, discoveredIds);
-            after = Effective(after, discoveredIds);
+            // Empty means every extension, so it stands for the whole discovered set. Only
+            // the stored side is narrowed: the editor only offers discovered extensions,
+            // so an id it sends that discovery doesn't know is a real difference.
+            var all = discoveredIds.ToHashSet(StringComparer.Ordinal);
+            before = before.Count == 0 ? all : before.Where(all.Contains).ToHashSet(StringComparer.Ordinal);
+            if (after.Count == 0) after = all;
         }
         return before.SetEquals(after);
-
-        // Empty means every extension, so it stands for the whole discovered set.
-        static HashSet<string> Effective(HashSet<string> ids, IReadOnlyCollection<string> discovered) =>
-            ids.Count == 0
-                ? discovered.ToHashSet(StringComparer.Ordinal)
-                : ids.Where(discovered.Contains).ToHashSet(StringComparer.Ordinal);
 
         static HashSet<string> Normalized(IEnumerable<string>? ids) =>
             (ids ?? []).Where(id => !string.IsNullOrWhiteSpace(id))

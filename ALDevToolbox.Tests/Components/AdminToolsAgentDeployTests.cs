@@ -169,6 +169,29 @@ public sealed class AdminToolsAgentDeployTests : IDisposable
         stored.McpEnabled.Should().BeTrue();
     }
 
+    [Fact]
+    public async Task A_refused_window_change_does_not_save_a_tool_switched_off_with_it()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var org = await ctx.Organizations.FirstAsync(o => o.Id == TestDb.DefaultOrgId);
+            org.StepUpTools = ToolCatalog.Format(new[] { ToolKey.Releases });
+            await ctx.SaveChangesAsync();
+        }
+        var cut = _ctx.Render<AdminAdministrationTools>();
+        cut.WaitForAssertion(() => cut.Find("#step-up-window"));
+
+        await cut.Find("#step-up-window").ChangeAsync(new Microsoft.AspNetCore.Components.ChangeEventArgs { Value = "30" });
+        await cut.FindAll("input[type=checkbox]")[0].ChangeAsync(new Microsoft.AspNetCore.Components.ChangeEventArgs { Value = false });
+        await cut.Find("button.btn--primary").ClickAsync(new Microsoft.AspNetCore.Components.Web.MouseEventArgs());
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("you before changing this: open"));
+        await using var read = _db.NewContext();
+        var stored = await read.Organizations.AsNoTracking().SingleAsync(o => o.Id == TestDb.DefaultOrgId);
+        stored.DisabledTools.Should().BeEmpty();
+        stored.StepUpWindowMinutes.Should().NotBe(30);
+    }
+
     private static AuditInterceptor NewInterceptor(string name)
     {
         var http = new Microsoft.AspNetCore.Http.HttpContextAccessor();

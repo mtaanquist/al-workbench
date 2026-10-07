@@ -269,7 +269,8 @@ public sealed class DeliveryService
         scheduledForUtc = DateTime.SpecifyKind(scheduledForUtc, DateTimeKind.Utc);
 
         var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct);
-        if (forAgent && !BcEnvironmentTypes.IsSandbox(plan.EnvType)
+        var sandbox = BcEnvironmentTypes.IsSandbox(plan.EnvType);
+        if (forAgent && !sandbox
             && !await _db.OrganizationSettings.AsNoTracking()
                 .Where(s => s.OrganizationId == orgId)
                 .Select(s => s.AgentsMayDeployToProduction)
@@ -280,7 +281,7 @@ public sealed class DeliveryService
         // A parked delivery (the replacement a move writes before Business Central's copy is
         // cancelled) waits for approval, so nothing runs it if the move never finishes.
         var parked = parkedLog is not null;
-        var openingLog = forAgent ? LogLine(DeliveryProposalLog.StartedByAgent(await CurrentUserNameAsync(ct), BcEnvironmentTypes.IsSandbox(plan.EnvType))) : parkedLog;
+        var openingLog = forAgent ? LogLine(DeliveryProposalLog.StartedByAgent(await CurrentUserNameAsync(ct), sandbox)) : parkedLog;
         var delivery = await WriteDeliveryAsync(orgId, plan, scheduledForUtc, forceSyncOnce, proposed: parked, ct,
             openingLog: openingLog, startedByAgent: forAgent);
 

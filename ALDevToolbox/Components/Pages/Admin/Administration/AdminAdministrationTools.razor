@@ -272,10 +272,15 @@
                 .Concat(_visible.Where(t => _enabled[t.Key] ? _stepUp[t.Key] : _storedStepUp.Contains(t.Key)).Select(t => t.Key))
                 .ToList();
 
-            // Allowing agents into production needs a fresh session whenever the saved
-            // step-up rules ask for one. Check it before the first write, so a refusal
-            // leaves the whole page unsaved (#1196); the setter checks again below.
-            if (_enabled.ContainsKey(ToolKey.Mcp) && _agentsMayDeployToProduction && !_agentsBaseline && stepUp.Count > 0)
+            // Changing the step-up rules or window, or allowing agents into production,
+            // needs a fresh session whenever step-up rules are set, before or after the
+            // save. Check it before the first write, so a refusal leaves the whole page
+            // unsaved (#1196); each setter keeps its own check.
+            var stepUpChanged = !_storedStepUp.SetEquals(stepUp);
+            var needsFresh = (stepUpChanged && (_storedStepUp.Count > 0 || stepUp.Count > 0))
+                || (_windowMinutes != _windowBaseline && stepUp.Count > 0)
+                || (_enabled.ContainsKey(ToolKey.Mcp) && _agentsMayDeployToProduction && !_agentsBaseline && stepUp.Count > 0);
+            if (needsFresh)
             {
                 await OrgAdmin.RequireFreshSessionAsync();
             }
