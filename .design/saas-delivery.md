@@ -287,6 +287,13 @@ delivering to an environment that has one set, outside it) is **audited** — re
 deliberate, traceable act. Production targets, which already get an extra confirm, are the case this
 most matters for.
 
+**A time the window chose stays inside the window** (#1124). Deployments run one at a time per
+environment, so one booked for the window's opening can come up after the window has closed. When
+its turn comes, a deployment the window chose (`scheduled_by_delivery_window`, not
+`scheduled_outside_window`) is judged at that moment against the environment's window as it is
+now; outside it, the deployment moves to the next opening and a log line says so. One a person
+placed outside the window on purpose runs when they said.
+
 **The organisation can set the window a new environment starts with** (#962). Administration →
 Business Central holds one default for Production and one for Sandbox, each start-and-end or "any
 time", in four nullable `time` columns on `organization_settings`
@@ -310,8 +317,9 @@ asked once per solution - and **Missing or being deleted**), and
 `SetUpdateWindowForManyAsync` writes each changing row through `SetUpdateWindowAsync`, so the
 both-or-neither rule, the access check and the log line are the single-environment ones, and
 returns a result per row that the dialog shows. A deployment already scheduled for an
-environment's current window (`scheduled_by_delivery_window`) keeps its time; the preview says
-so, and the next deployment uses the new window.
+environment's current window (`scheduled_by_delivery_window`) keeps its time if that time falls
+in the new window, and otherwise moves to the new window's next opening when its turn comes (the
+rule below); the preview says so.
 
 This **supersedes `OeReleasePipeline.default_publish_time`** as the source of the schedule prefill: the
 window lives on the environment (where it's reused across every deployment pipeline targeting it and

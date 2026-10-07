@@ -2302,8 +2302,9 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             })
             .ToDictionaryAsync(e => e.Id, ct);
 
-        // A deployment already booked for the environment's current window keeps its time;
-        // the preview says so, because the new window then only applies from the next one.
+        // A deployment already booked for the environment's current window keeps its time
+        // while that time falls in the new window, and otherwise moves to the new window's
+        // next opening when its turn comes (#1124); the preview says so.
         var waiting = (await _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledByDeliveryWindow)
             .Where(d => ids.Contains(d.ReleasePipeline!.ProjectEnvironmentId))
@@ -2984,7 +2985,8 @@ public enum DeliveryWindowChangeGroup
 /// </summary>
 /// <param name="HasDeploymentWaitingForWindow">
 /// True on a row that will change and already has a deployment scheduled for its current
-/// delivery window. That deployment keeps its time; the next one uses the new window.
+/// delivery window. That deployment keeps its time if it falls in the new window, and
+/// otherwise moves to the new window's next opening.
 /// </param>
 public sealed record DeliveryWindowChangePreviewRow(
     int EnvironmentId,

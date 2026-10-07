@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Serialization;
 using System.Text;
 using ALDevToolbox.Data;
@@ -1605,6 +1606,11 @@ public sealed class DeliveryService
     /// </summary>
     public async Task<bool> RunDeliveryAsync(int deliveryId, CancellationToken ct = default)
     {
+        if (await MovedPastClosedWindowAsync(deliveryId, ct))
+        {
+            return false;
+        }
+
         var claimedAt = DateTime.UtcNow;
         var dueBy = claimedAt + ClaimEarlySlack;
         var claimed = await _db.OeProjectDeliveries
@@ -1647,6 +1653,63 @@ public sealed class DeliveryService
             await FailAsync(delivery, log, "The delivery failed unexpectedly. " + Short(ex.Message), ct);
         }
         return true;
+    }
+
+    /// <summary>
+    /// A deployment the delivery window chose the time for runs in that window or not at
+    /// all: when its turn comes after the window has closed (deployments queue one at a
+    /// time, and Business Central can be slow), it is moved to the window's next opening
+    /// rather than installed while people are working (#1124). One a person deliberately
+    /// placed outside the window (<see cref="OeProjectDelivery.ScheduledOutsideWindow"/>)
+    /// runs when they said. Compare-and-set on the time it was read with, so a reschedule
+    /// in between wins. True when it was moved.
+    /// </summary>
+    private async Task<bool> MovedPastClosedWindowAsync(int deliveryId, CancellationToken ct)
+    {
+        var d = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled
+                        && d.ScheduledByDeliveryWindow && !d.ScheduledOutsideWindow
+                        && d.ReleasePipeline!.DeletedAt == null)
+            .Select(d => new
+            {
+                d.ProjectId, d.EnvironmentName, d.ScheduledFor,
+                PipelineEnvironmentId = d.ReleasePipeline!.ProjectEnvironmentId,
+                TimeZone = d.ReleasePipeline.Project!.BcTimeZone,
+            })
+            .FirstOrDefaultAsync(ct);
+        if (d is null) return false;
+
+        // The environment it installs to is its snapshot name, the pipeline's own first.
+        var window = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.ProjectId == d.ProjectId && e.Name == d.EnvironmentName)
+            .OrderBy(e => e.Id == d.PipelineEnvironmentId ? 0 : 1)
+            .Select(e => new { e.UpdateWindowStart, e.UpdateWindowEnd })
+            .FirstOrDefaultAsync(ct);
+        if (window is null || !UpdateWindow.IsConfigured(window.UpdateWindowStart, window.UpdateWindowEnd)) return false;
+
+        // Judged at the time it would start: the claim may take it a moment early.
+        var now = DateTime.UtcNow;
+        var startsAt = d.ScheduledFor > now ? d.ScheduledFor : now;
+        var tz = UpdateWindow.ResolveTimeZone(d.TimeZone);
+        if (UpdateWindow.IsWithin(window.UpdateWindowStart, window.UpdateWindowEnd, tz, startsAt)) return false;
+
+        var next = UpdateWindow.NextOpeningUtc(window.UpdateWindowStart, window.UpdateWindowEnd, tz, startsAt);
+        // In the window's own time zone, the way the environment page shows the window.
+        var nextLocal = TimeZoneInfo.ConvertTimeFromUtc(next, tz);
+        var line = LogLine(string.Create(CultureInfo.InvariantCulture,
+            $"The delivery window had closed before this deployment's turn came, so it was moved to the window's next opening, {nextLocal:yyyy-MM-dd} at {UpdateWindow.Clock(TimeOnly.FromDateTime(nextLocal))} ({tz.Id})."));
+        var moved = await _db.OeProjectDeliveries
+            .Where(x => x.Id == deliveryId && x.Status == ProjectDeliveryStatus.Scheduled && x.ScheduledFor == d.ScheduledFor)
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(x => x.ScheduledFor, next)
+                .SetProperty(x => x.DiagnosticsLog, x => (x.DiagnosticsLog ?? string.Empty) + line)
+                .SetProperty(x => x.UpdatedAt, now), ct);
+        if (moved > 0)
+        {
+            _logger.LogInformation(
+                "Delivery {DeliveryId} came up after its delivery window closed; moved to {NextOpening}.", deliveryId, next);
+        }
+        return moved > 0;
     }
 
     /// <summary>
