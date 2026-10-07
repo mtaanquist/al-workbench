@@ -67,8 +67,9 @@ public sealed class PersistedImportJobs
                 row.DownloadUrl = artifact.ApplicationUrl;
                 break;
             case ReleaseImportSource.ProjectBuild build:
-                // Resumable: the project id re-clones HEAD and rebuilds from
-                // scratch into fresh temp dirs, so a restart picks it back up
+                // Resumable: the project id re-clones and rebuilds from scratch
+                // into fresh temp dirs, at the commits the build already recorded
+                // if it got that far (#1110), so a restart picks it back up
                 // idempotently like a URL/artifact import.
                 row.Kind = "project_build";
                 row.ProjectId = build.ProjectId;
@@ -190,9 +191,9 @@ public sealed class PersistedImportJobs
                         JobRowId: row.Id));
                     break;
                 case "project_build" when row.ProjectId is int projectId:
-                    // Re-clone HEAD and rebuild from scratch; nothing on disk
-                    // survives a restart, but the project id is the whole
-                    // payload so the build is reproducible.
+                    // Re-clone and rebuild from scratch; nothing on disk survives
+                    // a restart, but the build row holds the commits its first
+                    // clone recorded, so the rebuild is of the same code (#1110).
                     row.Status = "queued";
                     row.StartedAt = null;
                     toResume.Add(new ReleaseImportJob(

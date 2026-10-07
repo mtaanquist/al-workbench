@@ -202,6 +202,41 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         _tools.Clones.Should().BeEmpty();
     }
 
+    // ── Running the same build again (#1110) ───────────────────────────
+
+    [Fact]
+    public async Task A_first_run_builds_where_the_branch_is_now()
+    {
+        var (projectId, releaseId, _) = await SeedAsync();
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.Checkouts.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_second_run_of_the_same_build_checks_out_the_commit_its_first_run_built()
+    {
+        // Retry, symbol recovery and a restart resume all run the same build again; its
+        // number, and every app's version, belongs to the code the first run cloned.
+        const string FirstRun = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        await using (var seed = _db.NewContext())
+        {
+            var repo = await seed.OeProjectRepositories.SingleAsync(r => r.ProjectId == projectId);
+            seed.OeProjectBuildRepoCommits.Add(new OeProjectBuildRepoCommit
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = buildId, ProjectRepositoryId = repo.Id,
+                RepoUrl = repo.Url, RepoDisplayName = repo.DisplayName, CommitHash = FirstRun,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.Checkouts.Should().Equal(FirstRun);
+    }
+
     private async Task SetBuildAsync(int buildId, string branch, string trigger)
     {
         await using var seed = _db.NewContext();
@@ -1365,6 +1400,9 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         /// <summary>The folder of every <c>git diff</c> run.</summary>
         public List<string> DiffedFolders { get; } = new();
 
+        /// <summary>The commit of every <c>git checkout --detach</c> run.</summary>
+        public List<string> Checkouts { get; } = new();
+
         /// <summary>The commits <c>git merge-base --is-ancestor</c> finds in the clone's history; any other fails it.</summary>
         public HashSet<string> Ancestors { get; } = new(StringComparer.Ordinal);
 
@@ -1405,6 +1443,15 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                         dependencies = ext.Dependencies.Select(d => new { id = d.Id, name = d.Name, publisher = "Vendor", version = d.Version }),
                     }));
                 }
+                return Task.FromResult(new ProcessRunResult(0, string.Empty, string.Empty));
+            }
+            if (request.Arguments.Contains("fetch"))
+            {
+                return Task.FromResult(new ProcessRunResult(0, string.Empty, string.Empty));
+            }
+            if (request.Arguments.Contains("checkout") && request.Arguments.Contains("--detach"))
+            {
+                Checkouts.Add(request.Arguments[^1]);
                 return Task.FromResult(new ProcessRunResult(0, string.Empty, string.Empty));
             }
             if (request.Arguments.Contains("show") && HeadSha is not null)

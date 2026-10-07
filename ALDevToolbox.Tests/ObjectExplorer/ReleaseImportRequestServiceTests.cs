@@ -3,7 +3,11 @@ using System.Net.Http;
 using System.Text;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Import;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Tests.GitHub;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -34,6 +38,47 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             try { File.Delete(path); } catch { /* best effort */ }
         }
         _db.Dispose();
+    }
+
+    // ── Retrying a project build (#1110) ─────────────────────────────────
+
+    [Fact]
+    public async Task Retrying_a_project_build_is_refused_before_anything_is_wiped_for_someone_who_cannot_manage_it()
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var project = new Domain.Entities.ObjectExplorer.OeProject
+        {
+            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS", Visibility = Domain.Entities.ObjectExplorer.ProjectVisibility.Private,
+            CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeProjects.Add(project);
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS build", Kind = "project", Status = "ready",
+            ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        ctx.Users.Add(new Domain.Entities.User
+        {
+            Id = 9632, OrganizationId = TestDb.DefaultOrgId, Email = "nils@example.com", PasswordHash = "x",
+            DisplayName = "Nils", Role = Domain.Entities.UserRole.Editor, Status = Domain.Entities.UserStatus.Active, CreatedAt = now,
+        });
+        await ctx.SaveChangesAsync();
+        await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new ReleaseImportSource.ProjectBuild(project.Id), storeSymbolReference: false);
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = 9632;
+        var queue = new ReleaseImportQueue();
+
+        var act = () => NewService(ctx, queue).RetryAsync(release.Id, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null, CalTxtFile: null));
+
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == release.Id)).Status.Should().Be("ready");
+        queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
     // ── C/AL TXT wins, and decides the kind server-side ──────────────────
@@ -263,10 +308,16 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             new ThrowingHttpClientFactory(),
             _db.NewSystemSettingsService(ctx),
             NullLogger<DvdDownloadService>.Instance);
+        var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
+        var projectBuilds = new ProjectBuildImporter(
+            importer, queue, persistedJobs, ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
+            new CloneCredentialResolver(
+                new UserRepositoryTokenService(ctx, _db.OrgContext, NullLogger<UserRepositoryTokenService>.Instance, _db.DataProtectionProvider),
+                _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new FakeGitHubApi())),
+                _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance),
+            TimeProvider.System, NullLogger<ProjectBuildImporter>.Instance);
         return new ReleaseImportRequestService(
-            importer, management, downloads, queue,
-            new PersistedImportJobs(ctx, TimeProvider.System),
-            _db.OrgContext);
+            importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds);
     }
 
     private async Task SetAllowlistAsync(string hosts)
