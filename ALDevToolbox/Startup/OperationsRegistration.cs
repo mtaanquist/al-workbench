@@ -116,8 +116,9 @@ public static class OperationsRegistration
             // produces a burst of pull_request deliveries when a branch with many
             // open pull requests is rebased, and a delivery we reject is one GitHub
             // shows the operator as a failure. Verification is a single HMAC over at
-            // most a megabyte, so the real cost per request is small; the limit is
-            // there to bound it, not to shape traffic.
+            // most a megabyte, or 25 MB for a push with a well-formed signature, which
+            // the endpoint reads only a few at a time; the limit is there to bound the
+            // cost, not to shape traffic.
             options.AddPolicy(GitHubWebhookEndpoints.WebhookRateLimitPolicy, httpContext =>
                 RateLimitPartition.GetFixedWindowLimiter(
                     partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",

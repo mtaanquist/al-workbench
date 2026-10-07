@@ -327,6 +327,36 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task A_large_push_with_a_forged_signature_is_refused_as_401()
+    {
+        // The attack the larger cap opens: it is read, then refused like any other forgery.
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        var payload = GitHubWebhookPayloads.Push(commitCount: 20, filesPerCommit: 3000);
+
+        using var response = await client.SendAsync(Delivery(payload, "not-the-secret", eventName: "push"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        _factory.Services.GetRequiredService<GitHubWebhookQueue>().Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("x")]
+    [InlineData("sha256=abc")]
+    [InlineData("sha256=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")]
+    public async Task A_push_whose_signature_is_not_even_shaped_right_keeps_the_megabyte_cap(string header)
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        using var request = Delivery(GitHubWebhookPayloads.Push(commitCount: 20, filesPerCommit: 3000), secret: null, eventName: "push");
+        request.Headers.Add("X-Hub-Signature-256", header);
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.RequestEntityTooLarge);
+    }
+
+    [Fact]
     public async Task A_tag_push_is_answered_and_dropped()
     {
         await StoreSecretAsync();

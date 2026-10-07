@@ -54,6 +54,11 @@ public static class GitHubWebhookEndpoints
     /// </summary>
     public const int MaxPushBodyBytes = 25 * 1024 * 1024;
 
+    /// <summary>How many push bodies past a megabyte may be read at once (#1126).</summary>
+    internal const int MaxConcurrentLargeBodies = 4;
+
+    private static readonly SemaphoreSlim LargeBodyGate = new(MaxConcurrentLargeBodies);
+
     /// <summary>The pull-request actions worth a build. Everything else is a no-op we answer 204 to.</summary>
     private static readonly HashSet<string> BuildableActions =
         new(StringComparer.OrdinalIgnoreCase) { "opened", "synchronize", "reopened" };
@@ -93,14 +98,32 @@ public static class GitHubWebhookEndpoints
             }
 
             // Only a push is allowed past a megabyte, and only when it carries a
-            // signature at all: an unsigned body is refused below whatever its
-            // size, so there is no reason to read 25 MB of one first.
+            // well-formed signature: anything else is refused below whatever its
+            // size, so there is no reason to read 25 MB of it first. The body has
+            // to be read before the signature can be checked, so large reads also
+            // take a turn at LargeBodyGate: a stranger sending forged pushes in
+            // parallel cannot hold more than a few of them in memory at once.
             var signature = ctx.Request.Headers["X-Hub-Signature-256"].ToString();
             var eventName = ctx.Request.Headers["X-GitHub-Event"].ToString();
-            var cap = string.Equals(eventName, "push", StringComparison.OrdinalIgnoreCase) && signature.Length > 0
-                ? MaxPushBodyBytes
-                : MaxRequestBodyBytes;
-            var body = await ReadBodyAsync(ctx.Request, cap, ct);
+            var large = string.Equals(eventName, "push", StringComparison.OrdinalIgnoreCase)
+                && IsWellFormedSignature(signature);
+            byte[]? body;
+            if (large)
+            {
+                await LargeBodyGate.WaitAsync(ct);
+                try
+                {
+                    body = await ReadBodyAsync(ctx.Request, MaxPushBodyBytes, ct);
+                }
+                finally
+                {
+                    LargeBodyGate.Release();
+                }
+            }
+            else
+            {
+                body = await ReadBodyAsync(ctx.Request, MaxRequestBodyBytes, ct);
+            }
             if (body is null)
             {
                 return Results.Text("The delivery body is too large.", "text/plain", statusCode: 413);
@@ -206,21 +229,49 @@ public static class GitHubWebhookEndpoints
     /// Reads the whole body, or <see langword="null"/> when it exceeds
     /// <paramref name="cap"/>. The signature is over the raw bytes, so the body has
     /// to be read once and hashed before it is parsed - there is no streaming
-    /// shortcut here.
+    /// shortcut here. With a declared length (GitHub always sends one) the bytes
+    /// land in one array of exactly that size, so a large push is held once.
     /// </summary>
     private static async Task<byte[]?> ReadBodyAsync(HttpRequest request, int cap, CancellationToken ct)
     {
         if (request.ContentLength > cap) return null;
-        using var buffer = new MemoryStream();
-        var chunk = new byte[8192];
-        int read;
-        while ((read = await request.Body.ReadAsync(chunk, ct)) > 0)
+        try
         {
-            if (buffer.Length + read > cap) return null;
-            buffer.Write(chunk, 0, read);
+            if (request.ContentLength is { } length)
+            {
+                var exact = new byte[length];
+                var filled = 0;
+                int got;
+                while (filled < exact.Length
+                       && (got = await request.Body.ReadAsync(exact.AsMemory(filled), ct)) > 0)
+                {
+                    filled += got;
+                }
+                return filled == exact.Length ? exact : exact[..filled];
+            }
+
+            using var buffer = new MemoryStream();
+            var chunk = new byte[8192];
+            int read;
+            while ((read = await request.Body.ReadAsync(chunk, ct)) > 0)
+            {
+                if (buffer.Length + read > cap) return null;
+                buffer.Write(chunk, 0, read);
+            }
+            return buffer.ToArray();
         }
-        return buffer.ToArray();
+        catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
+        {
+            // The server's own limit tripped first; answer it the same way.
+            return null;
+        }
     }
+
+    /// <summary>Whether <paramref name="signature"/> has the shape of GitHub's header, <c>sha256=</c> and 64 hex digits.</summary>
+    internal static bool IsWellFormedSignature(string? signature) =>
+        signature is { Length: 71 }
+        && signature.StartsWith("sha256=", StringComparison.OrdinalIgnoreCase)
+        && !signature.AsSpan(7).ContainsAnyExcept("0123456789abcdefABCDEF");
 
     /// <summary>
     /// Whether <paramref name="signature"/> is GitHub's <c>sha256=&lt;hex&gt;</c>
