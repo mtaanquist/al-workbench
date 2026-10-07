@@ -510,7 +510,9 @@ on every pull request, inline in the Files tab.
   no outbound route does not lose deliveries; `DISABLE_GITHUB_HOOK_ADDRESS_REFRESH=1`
   keeps it that way for good. An IPv4 sender reported as IPv4-mapped IPv6 is matched as
   IPv4; a request with no address at all is refused once a list is loaded. Redeliveries
-  the recovery sweep asks for come from the same ranges, so they pass.
+  the recovery sweep asks for come from the same ranges, so they pass, and the sweep
+  treats a logged 403 as worth resending: only GitHub's own deliveries are in that log,
+  so a 403 there was a genuine delivery refused for a proxy setting or a stale list.
   **The check depends on the trusted-proxy setting.** The sender is
   `HttpContext.Connection.RemoteIpAddress` after `UseForwardedHeaders`, which takes the
   `X-Forwarded-For` value only from a peer listed in `TRUSTED_PROXIES` (or loopback),
@@ -742,8 +744,8 @@ and it accepted work it should not have. What changed:
   attempts all failed it asks GitHub for one more (`POST /app/hook/deliveries/{id}/attempts`).
   It looks back at most three days (what GitHub keeps), asks for no more than the webhook
   queue has room for (half its capacity, less what is waiting), stops after five attempts
-  at one event, and asks in the order the events first failed. A 4xx other than 408, 413
-  and 429 is not resent: that is a delivery we read and turned away. A resent push is
+  at one event, and asks in the order the events first failed. A 4xx other than 403, 408,
+  413 and 429 is not resent: that is a delivery we read and turned away. A resent push is
   safe because the push path ignores a push it has seen or one older than the recorded
   head. The pull-request path has no such guard - the endpoint would take a resent older
   head as the newest and cancel the build of the real one - so a pull-request build

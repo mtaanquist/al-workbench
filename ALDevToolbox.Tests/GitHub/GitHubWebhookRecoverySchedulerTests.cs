@@ -489,6 +489,7 @@ public sealed class GitHubWebhookRecoverySchedulerTests : IDisposable
 
     [Theory]
     [InlineData(0, true)]
+    [InlineData(403, true)]
     [InlineData(408, true)]
     [InlineData(413, true)]
     [InlineData(429, true)]

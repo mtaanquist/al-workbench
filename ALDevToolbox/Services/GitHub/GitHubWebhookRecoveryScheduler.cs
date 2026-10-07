@@ -527,11 +527,15 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
     /// <summary>
     /// Whether a delivery answered <paramref name="statusCode"/> could get through
     /// if sent again: no answer at all, a server error, a timeout, rate limiting, or
-    /// a body over the size cap (a later version may take it). Any other 4xx is a
-    /// delivery we read and turned away on purpose, and would be turned away again.
+    /// a body over the size cap (a later version may take it). A 403 is the endpoint
+    /// refusing the sender's address (#1201); every entry in the App's log was sent by
+    /// GitHub itself, so a 403 there is a proxy missing from <c>TRUSTED_PROXIES</c> or
+    /// an address list older than GitHub's, and a resend after the fix gets through.
+    /// Any other 4xx is a delivery we read and turned away on purpose, and would be
+    /// turned away again.
     /// </summary>
     internal static bool IsWorthResending(int statusCode) =>
-        statusCode is 0 or 408 or 413 or 429 || statusCode >= 500;
+        statusCode is 0 or 403 or 408 or 413 or 429 || statusCode >= 500;
 
     private void Prune(DateTime oldest)
     {
