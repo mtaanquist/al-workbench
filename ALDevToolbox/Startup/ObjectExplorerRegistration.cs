@@ -58,6 +58,10 @@ public static class ObjectExplorerRegistration
         services.AddSingleton(_ => new ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue(
             ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue
                 .Concurrency(Environment.GetEnvironmentVariable("OE_BUILD_CONCURRENCY"))));
+        // What the container reports about processor and memory, and the latest warning
+        // that builds were short of either (#1169).
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.ContainerResources>();
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.BuildResourceState>();
         for (var slot = 1; slot <= ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue.MaxConcurrency; slot++)
         {
             var workerSlot = slot;

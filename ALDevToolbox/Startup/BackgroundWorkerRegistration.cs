@@ -70,6 +70,9 @@ public static class BackgroundWorkerRegistration
         // Adds each newly shipped Business Central release wave to every org's
         // application-version catalogue, read daily off the Microsoft symbol feed.
         services.AddHostedService<ALDevToolbox.Services.Templates.ApplicationVersionSyncScheduler>();
+        // Warns when running pipeline builds are short of processor or memory, the sign
+        // the build limit is set higher than the server can carry (#1169).
+        services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Import.BuildResourceMonitor>();
         return services;
     }
 }
