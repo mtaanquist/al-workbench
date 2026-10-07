@@ -56,7 +56,10 @@ public sealed class GitHubWebhookRecoverySchedulerTests : IDisposable
             Delivery(5, "guid-issue", now.AddMinutes(-30), 503, "issues"),
             // Over the size cap, and nobody answered at all.
             Delivery(4, "guid-big-push", now.AddMinutes(-40), 413, "push"),
-            Delivery(3, "guid-pr", now.AddMinutes(-50), 0, "pull_request", action: "synchronize"));
+            Delivery(3, "guid-pr", now.AddMinutes(-50), 0, "pull_request", action: "synchronize"),
+            // Answered 204 even when it arrives; nothing to resend.
+            Delivery(2, "guid-label", now.AddMinutes(-55), 503, "pull_request", action: "labeled"));
+        WithPullRequest(api, deliveryId: 3, loggedHead: "abc1234", currentHead: "abc1234");
 
         await using var provider = BuildProvider(api);
         var resent = await NewScheduler(provider).RedeliverFailedAsync(CancellationToken.None);
@@ -110,6 +113,48 @@ public sealed class GitHubWebhookRecoverySchedulerTests : IDisposable
 
         attempts.Should().Be(GitHubWebhookRecoveryScheduler.MaxAttempts);
         RedeliveredIds(api).Should().OnlyHaveUniqueItems("an entry already acted on is never asked for twice");
+    }
+
+    [Fact]
+    public async Task A_pull_request_delivery_whose_head_has_moved_on_is_not_resent()
+    {
+        // Resending it would make the endpoint take the older head as the newest,
+        // cancel the build of the real head and leave that head's check spinning.
+        await ConfigureDeploymentAsync();
+        var api = ApiWithLog(
+            Delivery(3, "guid-old-head", DateTime.UtcNow.AddMinutes(-10), 503, "pull_request", action: "synchronize"));
+        WithPullRequest(api, deliveryId: 3, loggedHead: "abc1234", currentHead: "def5678");
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0);
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0);
+        RedeliveredIds(api).Should().BeEmpty();
+        api.Calls.Count(c => c.Contains("/pulls/7")).Should().Be(1, "a head that moved on is settled, not asked about again");
+    }
+
+    [Fact]
+    public async Task A_sweep_asks_for_no_more_than_the_queue_has_room_for_and_the_next_one_finishes()
+    {
+        await ConfigureDeploymentAsync();
+        var now = DateTime.UtcNow;
+        var api = ApiWithLog(
+            Delivery(3, "guid-c", now.AddMinutes(-1), 503, "push"),
+            Delivery(2, "guid-b", now.AddMinutes(-2), 503, "push"),
+            Delivery(1, "guid-a", now.AddMinutes(-3), 503, "push"));
+        var filler = new GitHubPullRequestJob(1, "a/b", "https://github.com/a/b.git", 1, "abc1234", "x", "main", "d");
+        for (var i = 0; i < GitHubWebhookQueue.Capacity / 2 - 2; i++) _queue.TryEnqueue(filler);
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(2);
+        RedeliveredIds(api).Should().Equal([1, 2]);
+
+        while (_queue.Reader.TryRead(out _)) { }
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(1);
+        RedeliveredIds(api).Should().Equal([1, 2, 3]);
     }
 
     [Fact]
@@ -237,6 +282,22 @@ public sealed class GitHubWebhookRecoverySchedulerTests : IDisposable
                         [("Link", "<https://api.github.com/app/hook/deliveries?per_page=100&cursor=v1_page2>; rel=\"next\"")]))
             .On(HttpMethod.Post, "/app/hook/deliveries/", HttpStatusCode.Accepted, "{}");
     }
+
+    /// <summary>
+    /// The logged payload of pull_request delivery <paramref name="deliveryId"/> (pull
+    /// request 7 at <paramref name="loggedHead"/>) and where that pull request's head is now.
+    /// </summary>
+    private static void WithPullRequest(FakeGitHubApi api, long deliveryId, string loggedHead, string currentHead) =>
+        api
+            .On(HttpMethod.Get, $"/app/hook/deliveries/{deliveryId}", HttpStatusCode.OK,
+                "{\"id\":" + deliveryId + ",\"request\":{\"headers\":{},\"payload\":{"
+                + "\"action\":\"synchronize\",\"installation\":{\"id\":" + InstallationId + "},"
+                + "\"repository\":{\"full_name\":\"" + Repository + "\"},"
+                + "\"pull_request\":{\"number\":7,\"head\":{\"sha\":\"" + loggedHead + "\"}}}}}")
+            .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
+                HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson("ghs_installation"))
+            .On(HttpMethod.Get, $"/repos/{Repository}/pulls/7", HttpStatusCode.OK,
+                "{\"number\":7,\"state\":\"open\",\"head\":{\"sha\":\"" + currentHead + "\"}}");
 
     private static FakeGitHubApi ApiWithLog(params string[] entries) =>
         new FakeGitHubApi()

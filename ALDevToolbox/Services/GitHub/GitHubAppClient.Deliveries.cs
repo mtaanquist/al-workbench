@@ -23,6 +23,15 @@ public sealed record GitHubHookDelivery(
     public bool Succeeded => StatusCode is >= 200 and < 300;
 }
 
+/// <summary>
+/// What a <c>pull_request</c> delivery was about, read back from the delivery log:
+/// enough to ask GitHub whether that head is still the pull request's.
+/// </summary>
+public sealed record GitHubHookPullRequestDelivery(long InstallationId, string RepositoryFullName, int Number, string HeadSha);
+
+/// <summary>A pull request as it stands now: whether it is open, and the commit its head points at.</summary>
+public sealed record GitHubPullRequestHead(bool IsOpen, string HeadSha);
+
 /// <summary>One page of the App's delivery log, newest first, with the cursor for the next (older) page.</summary>
 public sealed record GitHubHookDeliveryPage(IReadOnlyList<GitHubHookDelivery> Deliveries, string? NextCursor);
 
@@ -104,6 +113,64 @@ public sealed partial class GitHubAppClient
                 deliveryId, (int)response.StatusCode, message);
             throw new GitHubApiException(response.StatusCode, message, documentationUrl);
         }
+    }
+
+    /// <summary>
+    /// Reads back which pull request and head a logged <c>pull_request</c>
+    /// delivery carried, or null when the entry is gone or its payload is not one.
+    /// </summary>
+    /// <exception cref="GitHubAppNotConfiguredException">No usable App registration on this deployment.</exception>
+    /// <exception cref="GitHubApiException">GitHub refused the call.</exception>
+    public async Task<GitHubHookPullRequestDelivery?> GetHookPullRequestDeliveryAsync(
+        long deliveryId, CancellationToken ct = default)
+    {
+        var jwt = await CreateAppJwtAsync(ct);
+        using var request = NewRequest(
+            HttpMethod.Get, $"app/hook/deliveries/{deliveryId.ToString(CultureInfo.InvariantCulture)}", jwt);
+        using var document = await SendOrNotFoundAsync(request, ct);
+        if (document is null) return null;
+
+        var root = document.RootElement;
+        if (!root.TryGetProperty("request", out var sent) || sent.ValueKind != JsonValueKind.Object
+            || !sent.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+        if (!payload.TryGetProperty("installation", out var installation)
+            || !installation.TryGetProperty("id", out var installationId)
+            || !installationId.TryGetInt64(out var installationIdValue)
+            || !payload.TryGetProperty("repository", out var repository)
+            || !repository.TryGetProperty("full_name", out var fullName) || fullName.ValueKind != JsonValueKind.String
+            || !payload.TryGetProperty("pull_request", out var pullRequest)
+            || !pullRequest.TryGetProperty("number", out var number) || !number.TryGetInt32(out var numberValue)
+            || !pullRequest.TryGetProperty("head", out var head)
+            || !head.TryGetProperty("sha", out var sha) || sha.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+        return new GitHubHookPullRequestDelivery(installationIdValue, fullName.GetString()!, numberValue, sha.GetString()!);
+    }
+
+    /// <summary>
+    /// Where pull request <paramref name="number"/> stands now, or null when GitHub
+    /// has no such pull request for this credential.
+    /// </summary>
+    /// <exception cref="GitHubApiException">GitHub refused the call.</exception>
+    public async Task<GitHubPullRequestHead?> GetPullRequestHeadAsync(
+        string credential, string owner, string repo, int number, CancellationToken ct = default)
+    {
+        using var request = NewRequest(
+            HttpMethod.Get, $"{RepoPath(owner, repo)}/pulls/{number.ToString(CultureInfo.InvariantCulture)}", credential);
+        using var document = await SendOrNotFoundAsync(request, ct);
+        if (document is null) return null;
+
+        var root = document.RootElement;
+        var state = root.TryGetProperty("state", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() : null;
+        var headSha = root.TryGetProperty("head", out var head) && head.TryGetProperty("sha", out var sha)
+                      && sha.ValueKind == JsonValueKind.String ? sha.GetString() : null;
+        return headSha is null
+            ? null
+            : new GitHubPullRequestHead(string.Equals(state, "open", StringComparison.OrdinalIgnoreCase), headSha);
     }
 
     private static GitHubHookDelivery? ReadDelivery(JsonElement item)

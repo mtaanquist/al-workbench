@@ -14,9 +14,10 @@ namespace ALDevToolbox.Services.GitHub;
 /// queue is full, a 413, a 5xx, or no answer at all while the app was down all
 /// stay failed until somebody presses Redeliver. Every five minutes this reads the
 /// App's delivery log and does that for each <c>push</c> or <c>pull_request</c>
-/// event none of whose attempts got through. Both paths behind the endpoint already
-/// ignore a delivery they have seen and one older than what they recorded, so a
-/// resend can only fill a gap.</para>
+/// event none of whose attempts got through. The push path already ignores a push
+/// it has seen or one older than what it recorded. The pull-request path does not,
+/// so a pull-request delivery is resent only while its head is still the open pull
+/// request's head on GitHub.</para>
 ///
 /// <para><strong>Pull-request builds a restart cut short are closed.</strong> They
 /// are deliberately not resumed (see
@@ -59,10 +60,6 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
     /// <summary>What the build and its check run say when a restart cut a pull-request build short.</summary>
     internal const string RestartedMessage =
         "The workbench restarted before this build finished. Push to the pull request again to rebuild it.";
-
-    /// <summary>The events the endpoint acts on. Anything else is answered 204 and never needs a resend.</summary>
-    private static readonly HashSet<string> ResentEvents =
-        new(StringComparer.OrdinalIgnoreCase) { "push", "pull_request" };
 
     private readonly IServiceProvider _services;
     private readonly GitHubWebhookQueue _queue;
@@ -169,28 +166,70 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
         if (!complete)
         {
             _logger.LogWarning(
-                "Read {Pages} pages of GitHub's webhook delivery log back to {Oldest:O} without reaching {Since:O}; older failures are not resent this time.",
+                "Read {Pages} pages of GitHub's webhook delivery log back to {Oldest:O} without reaching {Since:O}; failures older than that are not resent.",
                 pages, log.Count > 0 ? log.Min(d => d.DeliveredAt) : now, since);
         }
 
         // An event got through when any of its attempts did; the rest are what to resend.
         var delivered = log.Where(d => d.Succeeded).Select(d => d.Guid).ToHashSet(StringComparer.Ordinal);
         var due = log
-            .Where(d => ResentEvents.Contains(d.Event) && IsWorthResending(d.StatusCode) && !delivered.Contains(d.Guid))
+            .Where(d => IsResentEvent(d) && IsWorthResending(d.StatusCode) && !delivered.Contains(d.Guid))
             .GroupBy(d => d.Guid, StringComparer.Ordinal)
-            // The newest failed attempt per event: GitHub resends the same payload
-            // whichever one is named, and one resend per event per sweep is enough.
-            .Select(g => g.MaxBy(d => d.DeliveredAt)!)
-            .Where(d => !_resentEntries.ContainsKey(d.Id))
-            .Where(d => !_attempts.TryGetValue(d.Guid, out var tried) || tried.Count < MaxAttempts)
-            // Oldest first, so pushes arrive in the order they happened.
-            .OrderBy(d => d.DeliveredAt)
+            // GitHub resends the same payload whichever attempt is named, so the
+            // newest one stands for the event, ordered by when the event first
+            // failed: GitHub handles each resend on its own, so this is the order
+            // they are asked for in, not a promise about arrival.
+            .Select(g => (Delivery: g.MaxBy(d => d.DeliveredAt)!, FirstAt: g.Min(d => d.DeliveredAt)))
+            .Where(e => !_resentEntries.ContainsKey(e.Delivery.Id))
+            .Where(e => !_attempts.TryGetValue(e.Delivery.Guid, out var tried) || tried.Count < MaxAttempts)
+            .OrderBy(e => e.FirstAt)
+            .Select(e => e.Delivery)
             .ToList();
 
+        // Only as many as the queue has room for: a resend refused again spends
+        // one of the event's attempts for nothing. The rest wait for the next sweep.
+        var room = Math.Max(0, GitHubWebhookQueue.Capacity / 2 - _queue.Backlog);
         var resent = 0;
+        var asked = 0;
+        var leftOver = false;
         foreach (var delivery in due)
         {
+            if (asked >= room)
+            {
+                leftOver = true;
+                break;
+            }
             ct.ThrowIfCancellationRequested();
+
+            // A pull request whose head has moved on since this delivery must not
+            // be resent: the endpoint would take the older head as the newest,
+            // cancel the build of the real one and compile code nobody reviews.
+            if (IsPullRequestBuild(delivery))
+            {
+                bool? current;
+                try
+                {
+                    current = await IsStillThePullRequestHeadAsync(github, delivery, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException)
+                {
+                    // Not knowing is not a yes; the next sweep asks again.
+                    _logger.LogWarning(ex,
+                        "Could not tell whether the pull_request delivery {Guid} is still current; not resent this time.", delivery.Guid);
+                    leftOver = true;
+                    continue;
+                }
+                if (current != true)
+                {
+                    _logger.LogInformation(
+                        "Not resending the pull_request delivery {Guid}: the pull request has moved on or is closed.", delivery.Guid);
+                    // Settled for good: its head will not become current again.
+                    _attempts[delivery.Guid] = (MaxAttempts, now);
+                    continue;
+                }
+            }
+
+            asked++;
             var count = (_attempts.TryGetValue(delivery.Guid, out var tried) ? tried.Count : 0) + 1;
             _attempts[delivery.Guid] = (count, now);
             _resentEntries[delivery.Id] = now;
@@ -211,9 +250,48 @@ public sealed class GitHubWebhookRecoveryScheduler : PolledScheduler
             }
         }
 
-        _lastSweepAt = now;
+        // The next sweep only reads back to here, so it moves on only when this one
+        // read the whole window and asked for everything it found. Otherwise the
+        // next sweep reads the same window again.
+        if (complete && !leftOver)
+        {
+            _lastSweepAt = now;
+        }
         Prune(oldest);
         return resent;
+    }
+
+    /// <summary>The pull-request actions the endpoint builds on.</summary>
+    private static readonly HashSet<string> PullRequestBuildActions =
+        new(StringComparer.OrdinalIgnoreCase) { "opened", "synchronize", "reopened" };
+
+    /// <summary>
+    /// The deliveries the endpoint acts on: every push, the pull-request actions it
+    /// builds, and <c>closed</c> (a merge is recorded). A label, an edit or a review
+    /// request is answered 204, so resending one would spend a call on nothing.
+    /// </summary>
+    private static bool IsResentEvent(GitHubHookDelivery delivery) =>
+        string.Equals(delivery.Event, "push", StringComparison.OrdinalIgnoreCase)
+        || (string.Equals(delivery.Event, "pull_request", StringComparison.OrdinalIgnoreCase)
+            && (IsPullRequestBuild(delivery) || string.Equals(delivery.Action, "closed", StringComparison.OrdinalIgnoreCase)));
+
+    private static bool IsPullRequestBuild(GitHubHookDelivery delivery) =>
+        string.Equals(delivery.Event, "pull_request", StringComparison.OrdinalIgnoreCase)
+        && delivery.Action is { } action && PullRequestBuildActions.Contains(action);
+
+    /// <summary>
+    /// Whether the head <paramref name="delivery"/> carried is still the open pull
+    /// request's head on GitHub; null when the delivery or the pull request is gone.
+    /// </summary>
+    private static async Task<bool?> IsStillThePullRequestHeadAsync(
+        GitHubAppClient github, GitHubHookDelivery delivery, CancellationToken ct)
+    {
+        var sent = await github.GetHookPullRequestDeliveryAsync(delivery.Id, ct).ConfigureAwait(false);
+        if (sent?.RepositoryFullName.Split('/') is not [var owner, var repo]) return null;
+        var token = await github.GetInstallationTokenAsync(sent.InstallationId, ct).ConfigureAwait(false);
+        var now = await github.GetPullRequestHeadAsync(token, owner, repo, sent.Number, ct).ConfigureAwait(false);
+        if (now is null) return null;
+        return now.IsOpen && string.Equals(now.HeadSha, sent.HeadSha, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
