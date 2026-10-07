@@ -1144,7 +1144,16 @@ worker as the web "Deploy now", so `deploy_build` returns the new delivery id to
 blocking. Access-gating + validation come from `DeliveryService`/`ProjectAccess` unchanged; the tool
 only maps `ProjectAccessDeniedException`/`PlanValidationException` to `McpException`. Scheduling a
 *future* delivery and the Production extra-confirm stay web-only — the agent path is deploy-now,
-including for a pipeline that installs in the delivery window (#928): the tool deploys immediately
+through `DeliveryService.DeployNowForAgentAsync`. Because an agent has no confirm step, that path
+refuses a Production (or any other non-sandbox) environment unless the organisation has switched on
+`organization_settings.agents_may_deploy_to_production` ("Let AI assistants deploy to production
+environments" on Administration → Tools, off by default, #1122); when it is on, the agent's
+Production deployment runs immediately, unconfirmed. The delivery is marked `started_by_agent` and
+its log opens with a line saying so, and the run checks the environment's type again before it
+uploads, as it does for a deployment started without approval: one that is no longer a sandbox is
+refused while the setting is off. Turning the setting on takes a recent second factor whenever the
+organisation asks for one for any tool. Deploy-now holds
+even for a pipeline that installs in the delivery window (#928): the tool deploys immediately
 and the delivery records that it ran outside the window when it did. `deploy_build` always uses
 the pipeline's own schema sync mode and has no parameter to change it: a one-time Force sync
 (#931) is a person's decision, taken in the web UI behind its acknowledgement, and no agent or
