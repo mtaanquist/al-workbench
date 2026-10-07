@@ -975,6 +975,12 @@ public sealed class ProjectBuildService
         try
         {
             var orgId = build.OrganizationId;
+            // A retried or resumed build records its provenance again; clear the earlier
+            // rows so its changelog isn't listed twice (same as PersistArtifactsAsync).
+            _db.OeProjectBuildRepoCommits.RemoveRange(await _db.OeProjectBuildRepoCommits
+                .Where(c => c.ProjectBuildId == build.Id).ToListAsync(ct).ConfigureAwait(false));
+            _db.OeProjectBuildCommits.RemoveRange(await _db.OeProjectBuildCommits
+                .Where(c => c.ProjectBuildId == build.Id).ToListAsync(ct).ConfigureAwait(false));
             // The commit set for this build.
             foreach (var clone in clones)
             {
@@ -1011,6 +1017,20 @@ public sealed class ProjectBuildService
     {
         var gitPath = NullIfBlank(Environment.GetEnvironmentVariable("GIT_PATH")) ?? "git";
         var orgId = build.OrganizationId;
+
+        // A pull-request build is of a commit that isn't on any pipeline's branch yet, and
+        // its clone is shallow, so there is nothing to measure from; the pull request on
+        // GitHub already lists its commits.
+        if (build.Trigger == ProjectBuildTrigger.PullRequest)
+        {
+            foreach (var clone in clones.Where(c => c.RepositoryId is not null && c.CommitSha is not null))
+            {
+                _db.OeProjectBuildCommits.Add(SummaryNote(orgId, build.Id, clone.RepositoryId,
+                    "Pull request build: its commits are listed on the pull request."));
+            }
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            return;
+        }
 
         var prevByRepo = await FindChangelogBaselineAsync(_db, build, ct).ConfigureAwait(false);
 
@@ -1082,7 +1102,8 @@ public sealed class ProjectBuildService
 
     /// <summary>
     /// The commit per repository that <paramref name="build"/>'s changelog is measured
-    /// from: the newest finished build of the <em>same pipeline</em>. Pipelines of one
+    /// from: the newest finished build of the <em>same pipeline and branch</em> (a pipeline
+    /// moved to another branch starts over rather than reading as a force-push). Pipelines of one
     /// solution watch different branches and each build clones only its own branch, so
     /// a build of another pipeline pins a commit this clone usually doesn't have, which
     /// read as a force-push on nearly every build. A preview build is a check, not
@@ -1093,7 +1114,8 @@ public sealed class ProjectBuildService
     internal static async Task<Dictionary<int, string>> FindChangelogBaselineAsync(AppDbContext db, OeProjectBuild build, CancellationToken ct)
     {
         var prevBuildId = await db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.ProjectId == build.ProjectId && b.PipelineId == build.PipelineId && b.Id != build.Id
+            .Where(b => b.ProjectId == build.ProjectId && b.PipelineId == build.PipelineId && b.Branch == build.Branch
+                        && b.Id != build.Id
                         && b.Status == ProjectBuildStatus.Ready
                         && b.BcTarget == ProjectBuildTarget.Current
                         && b.Trigger != ProjectBuildTrigger.PullRequest)
@@ -1104,10 +1126,8 @@ public sealed class ProjectBuildService
         var prevByRepo = new Dictionary<int, string>();
         if (prevBuildId is null) return prevByRepo;
 
-        // A build that was rebuilt or resumed records its commits again; the newest row wins.
         var prevCommits = await db.OeProjectBuildRepoCommits.AsNoTracking()
             .Where(c => c.ProjectBuildId == prevBuildId && c.ProjectRepositoryId != null && c.CommitHash != "")
-            .OrderBy(c => c.Id)
             .Select(c => new { RepoId = c.ProjectRepositoryId!.Value, c.CommitHash })
             .ToListAsync(ct).ConfigureAwait(false);
         foreach (var c in prevCommits) prevByRepo[c.RepoId] = c.CommitHash;

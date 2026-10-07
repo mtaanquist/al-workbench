@@ -714,6 +714,64 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         (await ChangelogAsync(buildId)).Should().ContainSingle().Which.Should().Contain("is no longer in history");
     }
 
+    [Fact]
+    public async Task A_retried_build_records_its_commits_and_changelog_once()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        _tools.Ancestors.Add(PriorSha);
+        await using (var seed = _db.NewContext())
+        {
+            // What the first, interrupted attempt left behind.
+            var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+            seed.OeProjectBuildRepoCommits.Add(Commit(buildId, repoId, HeadSha));
+            seed.OeProjectBuildCommits.Add(new OeProjectBuildCommit
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = buildId, ProjectRepositoryId = repoId,
+                Message = "No new commits since the last successful build.",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ChangelogAsync(buildId)).Should().ContainSingle();
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuildRepoCommits.CountAsync(c => c.ProjectBuildId == buildId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_pull_request_build_points_at_the_pull_request_for_its_commits()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        _tools.Ancestors.Add(PriorSha);
+        await using (var seed = _db.NewContext())
+        {
+            await seed.OeProjectBuilds.Where(b => b.Id == buildId)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.Trigger, ProjectBuildTrigger.PullRequest));
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().BeEmpty();
+        (await ChangelogAsync(buildId)).Should().Equal(["Pull request build: its commits are listed on the pull request."]);
+    }
+
+    [Fact]
+    public async Task A_pipeline_moved_to_another_branch_starts_its_changelog_over()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        _tools.Ancestors.Add(PriorSha);
+        await using (var seed = _db.NewContext())
+        {
+            await seed.OeProjectBuilds.Where(b => b.Id == buildId)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.Branch, "develop"));
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ChangelogAsync(buildId)).Should().ContainSingle().Which.Should().StartWith("First build of this repository");
+    }
+
     private const string OtherSha = "3333333333333333333333333333333333333333";
 
     /// <summary>

@@ -608,7 +608,7 @@
                                 @if (HistoryRows.Count == 0)
                                 {
                                     <tr>
-                                        <td colspan="8" class="u-muted">Only preview builds so far. Tick Show preview builds to see them.</td>
+                                        <td colspan="8" class="u-muted">No builds yet apart from preview builds.</td>
                                     </tr>
                                 }
                                 @foreach (var b in HistoryRows)
@@ -1068,6 +1068,8 @@
         _canManage = s.CanManage;
         _builds = s.Builds;
         _latest = Shown(s.Builds, BuildId);
+        // A preview build in the hero is listed below it too.
+        if (_latest is { IsPreview: true }) _showPreviewBuilds = true;
         _showingOther = _latest is not null && _latest.Id != Shown(s.Builds, null)?.Id;
         _latestDetail = s.LatestDetail;
         _comparable = s.Comparable;

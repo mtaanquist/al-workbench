@@ -492,6 +492,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
             cut.Find(".pb-topline").TextContent.Should().Contain("on BC 29.0.52914.0");
             cut.Markup.Should().Contain($"Next major preview build #{seed.NewerBuildId}");
             cut.Markup.Should().Contain("Back to the latest build");
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the preview build shown above is listed too");
         });
     }
 
