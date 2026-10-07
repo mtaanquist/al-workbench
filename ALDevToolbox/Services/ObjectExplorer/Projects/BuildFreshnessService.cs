@@ -112,6 +112,16 @@ public sealed class BuildFreshnessService
             .Select(c => new { c.ProjectBuildId, RepositoryId = c.ProjectRepositoryId!.Value, c.CommitHash, c.CommittedAt })
             .ToListAsync(ct).ConfigureAwait(false);
 
+        // Builds of these pipelines still queued or running against the current
+        // version: one that already covers a repository's new head means the branch
+        // is being built, not waiting for somebody to press Build (#1128). Same test
+        // as the running guard, so a row whose job was lost does not read as building.
+        var activeBuilds = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value))
+            .Where(ProjectBuildImporter.BlocksManualBuild)
+            .Select(b => new ActiveBuild(b.PipelineId!.Value, b.Branch, b.HeadSha, b.HeadRepositoryId, b.StartedAt))
+            .ToListAsync(ct).ConfigureAwait(false);
+
         var heads = await _db.OeRepositoryBranchHeads.AsNoTracking()
             .Where(h => repositoryIds.Contains(h.ProjectRepositoryId))
             .ToListAsync(ct).ConfigureAwait(false);
@@ -148,6 +158,11 @@ public sealed class BuildFreshnessService
                     : head is null ? BuildFreshnessState.Unknown
                     : string.Equals(head.HeadSha, built.Value.Sha, StringComparison.OrdinalIgnoreCase) ? BuildFreshnessState.UpToDate
                     : BuildFreshnessState.Ahead;
+
+                var beingBuilt = state == BuildFreshnessState.Ahead && head is not null
+                    && activeBuilds.Any(a => a.PipelineId == pipeline.Id
+                                             && string.Equals(a.Branch, pipeline.Branch, StringComparison.Ordinal)
+                                             && Covers(a, repository.Id, head));
 
                 IReadOnlyList<MergedPullRequestSummary> mergedSince = [];
                 IReadOnlyList<CommitSummary> commitsSince = [];
@@ -192,6 +207,7 @@ public sealed class BuildFreshnessService
                     Commits: commitsSince,
                     CommitsComplete: commitsComplete)
                 {
+                    BeingBuilt = beingBuilt,
                     WebUrl = repository.Provider == RepositoryProvider.GitHub ? GitHubWebUrl(repository.Url) : null,
                 });
             }
@@ -208,6 +224,22 @@ public sealed class BuildFreshnessService
         }
         return answers;
     }
+
+    private sealed record ActiveBuild(int PipelineId, string? Branch, string? HeadSha, int? HeadRepositoryId, DateTime StartedAt);
+
+    /// <summary>
+    /// Whether a queued or running build will build <paramref name="head"/>. A build
+    /// on push names its commit in the pushed repository, and covers that repository's
+    /// head when it is that commit. Every other repository, and every repository of a
+    /// build that names no commit (Build pressed by a person), is cloned at the branch
+    /// as it is when the build starts, so it covers every push recorded before the
+    /// build was queued. The caller has already matched the branch the build
+    /// snapshotted against the pipeline's current one.
+    /// </summary>
+    private static bool Covers(ActiveBuild build, int repositoryId, OeRepositoryBranchHead head) =>
+        build.HeadSha is { Length: > 0 } sha && build.HeadRepositoryId == repositoryId
+            ? string.Equals(sha, head.HeadSha, StringComparison.OrdinalIgnoreCase)
+            : build.StartedAt >= head.PushedAt;
 
     /// <summary>
     /// The repository's page on GitHub, from its clone URL (https or scp-style), for
@@ -284,6 +316,12 @@ public sealed record RepositoryFreshness(
 {
     /// <summary>The repository's page on GitHub (https://github.com/owner/name), for links to commits and pull requests; null for any other host.</summary>
     public string? WebUrl { get; init; }
+
+    /// <summary>
+    /// For <see cref="BuildFreshnessState.Ahead"/>: a build of the pipeline that is
+    /// queued or running already covers the branch's newest commit (#1128).
+    /// </summary>
+    public bool BeingBuilt { get; init; }
 }
 
 /// <summary>A pull request that merged into a watched branch.</summary>

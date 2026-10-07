@@ -809,6 +809,11 @@ ago", "2 pull requests merged since build #118" (preferred when merged pull requ
 stored), "main was force-pushed since build #118" (never a count after a force push, nor
 when the stored commits do not reach back to the build: then "New commits on main since
 build #118"), "No successful build yet" (the issue said "Never built", which read as a contradiction beside a failed build), "Branch main no longer exists", or nothing.
+When every repository that is ahead already has a queued or running build of the pipeline
+that will build its new head (a build on push of that exact commit, or a build somebody
+started after the push), the sentence is "Building the latest commit on main" instead, and
+the pipeline is not ahead: there is nothing for anybody to start (#1128). A preview check
+does not count.
 
 - **Builds list**: the sentence under the pipeline's name. An ahead pipeline with no build
   already queued or running takes the warning keyline, a **Build** button beside the sentence (outline, not in the kebab-only actions cell, and

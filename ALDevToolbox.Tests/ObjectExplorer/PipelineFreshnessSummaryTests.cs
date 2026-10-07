@@ -58,6 +58,20 @@ public sealed class PipelineFreshnessSummaryTests
     }
 
     [Fact]
+    public void A_branch_whose_new_commits_are_already_being_built_says_so_and_is_not_ahead()
+    {
+        var building = Fold(118, Repo(BuildFreshnessState.Ahead, commits: 1) with { BeingBuilt = true });
+        building.Headline.Should().Be(PipelineFreshnessHeadline.Building);
+        building.IsAhead.Should().BeFalse();
+
+        // One repository being built does not cover another that is also ahead.
+        Fold(118,
+                Repo(BuildFreshnessState.Ahead, commits: 1) with { BeingBuilt = true },
+                Repo(BuildFreshnessState.Ahead, commits: 2, name: "cronus-sales"))
+            .Headline.Should().Be(PipelineFreshnessHeadline.Ahead);
+    }
+
+    [Fact]
     public void A_pipeline_with_no_repository_says_nothing()
     {
         Fold(null).Headline.Should().Be(PipelineFreshnessHeadline.None);
