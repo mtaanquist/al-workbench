@@ -9,7 +9,7 @@ internal static class McpListLimit
 {
     public const int Default = 20;
     public const int Max = 200;
-    public const string Description = "How many to return, newest first. Default 20, at most 200.";
+    public const string Description = "How many to return, newest first. Default 20, at least 1, at most 200. Raise it when the build you need is older than the oldest one returned.";
 
     public static int Clamp(int limit) => Math.Clamp(limit, 1, Max);
 }

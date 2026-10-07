@@ -746,6 +746,9 @@ public sealed class ArtifactService
 
     // ── Project-scoped compare ──────────────────────────────────────────
 
+    /// <summary>How many builds the compare pickers offer, newest first.</summary>
+    public const int ComparableBuildLimit = 50;
+
     /// <summary>
     /// The builds of one pipeline that can be compared — those that produced a
     /// navigable Release (ready, with a ReleaseId), newest first. The picker is
@@ -757,7 +760,9 @@ public sealed class ArtifactService
         await EnsureCanViewPipelineAsync(pipelineId, ct);
         return await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId == pipelineId && b.Status == ProjectBuildStatus.Ready && b.ReleaseId != null)
-            .OrderByDescending(b => b.StartedAt)
+            .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
+            // The newest only: the page re-reads this while a build runs (#1138).
+            .Take(ComparableBuildLimit)
             .Select(b => new ComparableBuildRow(b.Id, b.ReleaseId!.Value, b.BcVersion, b.StartedAt, b.BcTarget))
             .ToListAsync(ct);
     }

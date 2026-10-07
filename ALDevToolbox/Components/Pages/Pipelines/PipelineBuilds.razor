@@ -584,8 +584,12 @@
                                nobody deploys, so they stay out of the list until asked for. *@
                             @if (_counts.Preview > 0)
                             {
-                                <label class="check @(_showPreviewBuilds ? "is-checked" : "")">
-                                    <input type="checkbox" @bind="_showPreviewBuilds" @bind:after="LoadAsync" />
+                                @* A preview build in the hero is listed below it too, so the box
+                                   stays ticked while one is shown. *@
+                                <label class="check @(_listingPreview ? "is-checked" : "")"
+                                       title="@(PreviewForcedByHero ? "The build shown above is a preview build" : null)">
+                                    <input type="checkbox" checked="@_listingPreview" disabled="@PreviewForcedByHero"
+                                           @onchange="TogglePreviewBuildsAsync" />
                                     <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
                                     <span>Show preview builds</span>
                                 </label>
@@ -933,14 +937,24 @@
     private const int HistoryPageSize = 25;
     private bool _loadingMore;
 
-    /// <summary>Whether Build history lists the nightly preview check's builds. Off by default.</summary>
+    /// <summary>Whether the person asked Build history to list the nightly preview check's builds. Off by default.</summary>
     private bool _showPreviewBuilds;
+
+    /// <summary>Whether the history read lists them: when asked, or when the hero shows one.</summary>
+    private bool _listingPreview;
+    private bool PreviewForcedByHero => _listingPreview && !_showPreviewBuilds;
+
+    /// <summary>
+    /// Bumped by every load the person sets off. A poll tick that started before one
+    /// read the page's settings as they were then, so its answer is dropped.
+    /// </summary>
+    private int _loadGeneration;
 
     /// <summary>The rows Build history lists: the builds read, already without preview builds unless asked for.</summary>
     private List<BuildRow> HistoryRows => _builds;
 
     /// <summary>How many builds Build history would list with no limit.</summary>
-    private int HistoryTotal => _showPreviewBuilds ? _counts.Total : _counts.Total - _counts.Preview;
+    private int HistoryTotal => _listingPreview ? _counts.Total : _counts.Total - _counts.Preview;
     private BuildRow? _latest;
     private BuildDetail? _latestDetail;
     private List<ComparableBuildRow> _comparable = new();
@@ -982,10 +996,22 @@
     protected override async Task OnParametersSetAsync()
     {
         if (_loading || (BuildId == _loadedBuildId && PipelineId == _loadedPipelineId)) return;
+        if (PipelineId != _loadedPipelineId)
+        {
+            // Another pipeline starts from the defaults, not this one's settings.
+            _historyLimit = HistoryPageSize;
+            _showPreviewBuilds = false;
+        }
         _loadedBuildId = BuildId;
         _loadedPipelineId = PipelineId;
         await LoadAsync();
         if (_inFlight) StartPoll();
+    }
+
+    private async Task TogglePreviewBuildsAsync(ChangeEventArgs e)
+    {
+        _showPreviewBuilds = e.Value is true;
+        await LoadAsync();
     }
 
     private async Task ShowMoreBuildsAsync()
@@ -1057,7 +1083,10 @@
 
     /// <summary>The user-driven load: reads through the circuit's own services.</summary>
     private async Task LoadAsync()
-        => Apply(await FetchAsync(Artifacts, Pipelines, Freshness, CancellationToken.None));
+    {
+        _loadGeneration++;
+        Apply(await FetchAsync(Artifacts, Pipelines, Freshness, CancellationToken.None));
+    }
 
     /// <summary>
     /// Reads the page's data through whichever <paramref name="artifacts"/> /
@@ -1084,7 +1113,9 @@
             // The hero shows the build asked for, else the newest of the pipeline's own. The
             // nightly preview check's builds are left out of "latest", so a red check never
             // reads as the pipeline being broken - unless they are all there is.
+            // The history is only the newest few, which may all be preview builds.
             var newest = builds.FirstOrDefault(b => !b.IsPreview)
+                ?? (counts.Total > counts.Preview ? (await artifacts.ListBuildsAsync(PipelineId, 1, false, ct)).FirstOrDefault() : null)
                 ?? builds.FirstOrDefault()
                 ?? (counts.Total > 0 ? (await artifacts.ListBuildsAsync(PipelineId, 1, true, ct)).FirstOrDefault() : null);
             var latest = requested ?? newest;
@@ -1115,7 +1146,7 @@
         _canManage = s.CanManage;
         _builds = s.Builds;
         _counts = s.Counts;
-        _showPreviewBuilds = s.ShowPreview;
+        _listingPreview = s.ShowPreview;
         _latest = s.Latest;
         _showingOther = s.ShowingOther;
         _latestDetail = s.LatestDetail;
@@ -1395,6 +1426,7 @@
                 // the circuit's dispatcher, so sharing the circuit's DbContext would let
                 // a tick and a click have two commands in flight on one context. See #679.
                 PageState state;
+                var generation = _loadGeneration;
                 await using (var scope = ScopeFactory.CreateAsyncScope())
                 {
                     state = await FetchAsync(
@@ -1407,7 +1439,13 @@
                 // Disposal can happen while we were parked on the queries; touching the
                 // renderer after that logs an error for what is a normal navigate-away.
                 if (token.IsCancellationRequested) break;
-                await InvokeAsync(() => { Apply(state); StateHasChanged(); });
+                await InvokeAsync(() =>
+                {
+                    // A load the person set off meanwhile has newer settings and data.
+                    if (generation != _loadGeneration) return;
+                    Apply(state);
+                    StateHasChanged();
+                });
                 if (!_inFlight) break;
             }
         }

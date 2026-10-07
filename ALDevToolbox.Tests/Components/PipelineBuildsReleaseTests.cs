@@ -494,6 +494,33 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     }
 
     [Fact]
+    public async Task The_hero_stays_the_pipelines_own_build_when_the_newest_listed_are_all_preview_builds()
+    {
+        var seed = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            // Four weeks of nightly checks after the pipeline last built for real.
+            for (var i = 0; i < 28; i++)
+            {
+                var id = await SeedBuildAsync(ctx, seed.ProjectId, seed.PipelineId, DateTime.UtcNow.AddMinutes(-i));
+                await ctx.OeProjectBuilds.Where(b => b.Id == id)
+                    .ExecuteUpdateAsync(u => u.SetProperty(b => b.BcTarget, ProjectBuildTarget.NextMajor));
+            }
+        }
+
+        var cut = RenderPage(seed);
+        cut.WaitForAssertion(() => cut.Find(".card__head input[type=checkbox]"));
+        cut.Find(".card__head input[type=checkbox]").Change(true);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(25, "the history now lists the preview builds");
+            cut.Markup.Should().NotContain("It can't be deployed", "the hero is still the pipeline's newest real build");
+            cut.Find(".card__head input[type=checkbox]").HasAttribute("disabled").Should().BeFalse();
+        });
+    }
+
+    [Fact]
     public async Task A_build_older_than_the_history_lists_still_opens_in_the_hero()
     {
         var seed = await SeedAsync();
