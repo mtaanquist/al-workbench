@@ -119,7 +119,7 @@ public sealed class SiteAdminSettingsBuildsTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             var text = System.Text.RegularExpressions.Regex.Replace(cut.Markup, @"\s+", " ");
-            text.Should().Contain("with 4 builds running, builds waited for a processor 60% of the time.");
+            text.Should().Contain("with 4 builds running and the limit at 4, builds waited for a processor 60% of the time.");
             text.Should().Contain("Lower this setting or give the server more processors and memory.");
         });
     }

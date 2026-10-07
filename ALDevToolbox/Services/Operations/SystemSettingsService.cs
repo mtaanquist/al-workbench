@@ -428,6 +428,7 @@ public sealed class SystemSettingsService
             input.DisabledTools.Where(k => k != ALDevToolbox.Domain.Tools.ToolKey.Mcp).Distinct());
         row.SignupEmailDomainAllowlist = normalisedAllowlist;
         row.ReleaseDownloadDomainAllowlist = normalisedDownloadAllowlist;
+        var buildConcurrencyChanged = row.BuildConcurrency != input.BuildConcurrency;
         row.BuildConcurrency = input.BuildConcurrency;
         row.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
 
@@ -455,7 +456,7 @@ public sealed class SystemSettingsService
         // And the build limit: the queue applies it at once, so a SiteAdmin resizing
         // the server does not need a restart (#1164).
         _buildQueue?.ApplySetting(row.BuildConcurrency);
-        if (_buildQueue is not null)
+        if (_buildQueue is not null && buildConcurrencyChanged)
             ALDevToolbox.Services.ObjectExplorer.Import.BuildConcurrencyAdvice.WarnIfAboveRecommendation(_buildQueue.Limit, _logger);
         _logger.LogInformation(
             "System settings updated (smtp_host={SmtpHost}, banner={HasBanner}, mcp={Mcp}, build_concurrency={BuildConcurrency}).",

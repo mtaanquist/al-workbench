@@ -80,8 +80,9 @@
             {
                 <Alert Tone="AlertTone.Warn">
                     <span>
-                        <Timestamp Value="@warning.At" Format="d MMM · HH:mm" />, with
-                        @Plural(warning.Running, "build") running, @warning.Shortage.Describe().
+                        On <Timestamp Value="@warning.At" Format="d MMM 'at' HH:mm" />, with
+                        @Plural(warning.Running, "build") running and the limit at @warning.Limit,
+                        @warning.Shortage.Describe().
                         Lower this setting or give the server more processors and memory.
                     </span>
                 </Alert>

@@ -13,8 +13,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 ///
 /// <para>
 /// Advice only, like <see cref="BuildConcurrencyAdvice"/>: nothing lowers the limit from
-/// it. Processor shortage only counts with two or more builds running, because one build
-/// that fills the processors on its own is not helped by running fewer. Where the kernel
+/// it. Processor shortage only counts with more builds running than this server is
+/// recommended for: a compiler keeps every processor busy on its own, so waiting for
+/// one is normal at or below that. Where the kernel
 /// exposes none of the figures, nothing is ever reported. Opt out with
 /// <c>DISABLE_BUILD_RESOURCE_MONITOR=1</c>. See <c>.design/deployment.md</c>,
 /// "Resource sizing".
@@ -25,7 +26,7 @@ public sealed class BuildResourceMonitor : PolledScheduler
     internal static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(30);
     internal static readonly TimeSpan WarningInterval = TimeSpan.FromMinutes(15);
 
-    /// <summary>Waiting for a processor this share of the time, with two or more builds running.</summary>
+    /// <summary>Waiting for a processor this share of the time, with more builds running than recommended.</summary>
     internal const double CpuWaitThreshold = 0.8;
 
     /// <summary>Out of processor time the container is allowed, in this share of the scheduler's periods.</summary>
@@ -34,7 +35,7 @@ public sealed class BuildResourceMonitor : PolledScheduler
     /// <summary>Waiting for memory this share of the time.</summary>
     internal const double MemoryWaitThreshold = 0.1;
 
-    /// <summary>Using this share of the container's memory limit.</summary>
+    /// <summary>Using this share of the container's memory limit, file cache the kernel can drop left out.</summary>
     internal const double MemoryFullThreshold = 0.9;
 
     private readonly ProjectBuildQueue _builds;
@@ -43,7 +44,9 @@ public sealed class BuildResourceMonitor : PolledScheduler
     private readonly TimeProvider _clock;
     private readonly ILogger<BuildResourceMonitor> _logger;
 
+    private readonly int _recommended;
     private ResourceSample? _previous;
+    private long? _lastOomKills;
 
     public BuildResourceMonitor(
         ProjectBuildQueue builds,
@@ -63,6 +66,16 @@ public sealed class BuildResourceMonitor : PolledScheduler
         _state = state;
         _clock = clock;
         _logger = logger;
+        _recommended = BuildConcurrencyAdvice.ForThisServer().Recommended;
+    }
+
+    /// <summary>Uses <paramref name="recommended"/> rather than this server's figure; for tests.</summary>
+    internal BuildResourceMonitor(
+        ProjectBuildQueue builds, ContainerResources resources, BuildResourceState state, TimeProvider clock,
+        ILogger<BuildResourceMonitor> logger, WorkerHeartbeatRegistry heartbeats, int recommended)
+        : this(builds, resources, state, clock, logger, heartbeats)
+    {
+        _recommended = recommended;
     }
 
     protected override Task TickAsync(CancellationToken ct)
@@ -75,20 +88,31 @@ public sealed class BuildResourceMonitor : PolledScheduler
     internal void Check()
     {
         var running = _builds.RunningCount;
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var current = _resources.Read(now);
+        var previous = _previous;
+        var lastOomKills = _lastOomKills;
+        _lastOomKills = current.OomKills ?? _lastOomKills;
+
+        BuildResourceShortage? shortage;
         if (running == 0)
         {
             // Only time spent building counts, so the next build starts a fresh comparison.
             _previous = null;
-            return;
+            // Except a process killed for memory since the last poll that saw builds: the
+            // kill may well be what ended the last of them.
+            if (previous is null) return;
+            var killed = Math.Max(0, (current.OomKills - lastOomKills) ?? 0);
+            if (killed == 0) return;
+            shortage = new BuildResourceShortage(null, null, null, null, killed);
+            running = 1;
         }
-
-        var now = _clock.GetUtcNow().UtcDateTime;
-        var current = _resources.Read(now);
-        var previous = _previous;
-        _previous = current;
-        if (previous is null) return;
-
-        var shortage = Assess(previous, current, running);
+        else
+        {
+            _previous = current;
+            if (previous is null) return;
+            shortage = Assess(previous, current, running, _recommended);
+        }
         if (shortage is null) return;
         if (_state.Last is { } last && now - last.At < WarningInterval) return;
 
@@ -103,7 +127,7 @@ public sealed class BuildResourceMonitor : PolledScheduler
     /// What the change from <paramref name="previous"/> to <paramref name="current"/>
     /// says the builds were short of, or null when they were not.
     /// </summary>
-    internal static BuildResourceShortage? Assess(ResourceSample previous, ResourceSample current, int running)
+    internal static BuildResourceShortage? Assess(ResourceSample previous, ResourceSample current, int running, int recommended)
     {
         var elapsedUs = (current.At - previous.At).Ticks / (TimeSpan.TicksPerMillisecond / 1000);
         if (elapsedUs <= 0) return null;
@@ -120,7 +144,10 @@ public sealed class BuildResourceMonitor : PolledScheduler
             : null;
         var oomKills = Math.Max(0, (current.OomKills - previous.OomKills) ?? 0);
 
-        var shortOfProcessor = running >= 2 && (cpuWait >= CpuWaitThreshold || throttled >= ThrottledThreshold);
+        // A compiler runs more threads than there are processors, so builds wait for one
+        // at any limit. That only says too many builds are running once more run than
+        // this server is recommended for.
+        var shortOfProcessor = running >= 2 && running > recommended && (cpuWait >= CpuWaitThreshold || throttled >= ThrottledThreshold);
         var shortOfMemory = memoryWait >= MemoryWaitThreshold || memoryUsed >= MemoryFullThreshold || oomKills > 0;
         if (!shortOfProcessor && !shortOfMemory) return null;
 
@@ -145,7 +172,7 @@ public sealed record BuildResourceShortage(
     {
         var parts = new List<string>();
         if (CpuWait is { } cpu) parts.Add($"builds waited for a processor {Percent(cpu)} of the time");
-        if (Throttled is { } throttled) parts.Add($"they used up the processor time the server allows {Percent(throttled)} of the time");
+        if (Throttled is { } throttled) parts.Add($"the processor time the server allows ran out {Percent(throttled)} of the time");
         if (MemoryWait is { } memory) parts.Add($"builds waited for memory {Percent(memory)} of the time");
         if (MemoryUsed is { } used) parts.Add($"{Percent(used)} of the server's memory was in use");
         if (OomKills == 1) parts.Add("the server stopped a process that ran out of memory");

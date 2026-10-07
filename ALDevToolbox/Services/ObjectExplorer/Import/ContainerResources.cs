@@ -4,21 +4,19 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// What the kernel says about the app container's processor and memory right now, read
 /// from its cgroup files (#1169). Each figure is null where the file is missing or
 /// unreadable: outside a container, on cgroup v1, or on a kernel without pressure
-/// accounting. Where the container's own pressure files are missing, the host-wide ones
-/// under <c>/proc/pressure</c> stand in.
+/// accounting. The host-wide figures under <c>/proc/pressure</c> are deliberately not
+/// used instead: they would blame other containers' load on the build limit.
 /// </summary>
 public sealed class ContainerResources
 {
     private readonly string _cgroupDirectory;
-    private readonly string _procPressureDirectory;
 
-    public ContainerResources() : this("/sys/fs/cgroup", "/proc/pressure") { }
+    public ContainerResources() : this("/sys/fs/cgroup") { }
 
-    /// <summary>Reads from other directories; for tests.</summary>
-    internal ContainerResources(string cgroupDirectory, string procPressureDirectory)
+    /// <summary>Reads from another directory; for tests.</summary>
+    internal ContainerResources(string cgroupDirectory)
     {
         _cgroupDirectory = cgroupDirectory;
-        _procPressureDirectory = procPressureDirectory;
     }
 
     /// <summary>One reading, stamped <paramref name="at"/>.</summary>
@@ -27,11 +25,11 @@ public sealed class ContainerResources
         var cpuStat = Read(_cgroupDirectory, "cpu.stat");
         return new ResourceSample(
             at,
-            CpuWaitMicroseconds: PressureTotal(Read(_cgroupDirectory, "cpu.pressure") ?? Read(_procPressureDirectory, "cpu")),
-            MemoryWaitMicroseconds: PressureTotal(Read(_cgroupDirectory, "memory.pressure") ?? Read(_procPressureDirectory, "memory")),
+            CpuWaitMicroseconds: PressureTotal(Read(_cgroupDirectory, "cpu.pressure")),
+            MemoryWaitMicroseconds: PressureTotal(Read(_cgroupDirectory, "memory.pressure")),
             Periods: Field(cpuStat, "nr_periods"),
             ThrottledPeriods: Field(cpuStat, "nr_throttled"),
-            MemoryUsedBytes: Number(Read(_cgroupDirectory, "memory.current")),
+            MemoryUsedBytes: WorkingSet(Number(Read(_cgroupDirectory, "memory.current")), Field(Read(_cgroupDirectory, "memory.stat"), "inactive_file")),
             MemoryLimitBytes: BuildConcurrencyAdvice.ParseLimit(Read(_cgroupDirectory, "memory.max")),
             OomKills: Field(Read(_cgroupDirectory, "memory.events"), "oom_kill"));
     }
@@ -58,6 +56,14 @@ public sealed class ContainerResources
         }
         return null;
     }
+
+    /// <summary>
+    /// Memory in use without the file cache the kernel can drop at once, as
+    /// <c>docker stats</c> counts it: builds read many files, and counting their cache
+    /// would make a container read as nearly full with no pressure on it.
+    /// </summary>
+    internal static long? WorkingSet(long? current, long? inactiveFile) =>
+        current is { } c ? Math.Max(0, c - (inactiveFile ?? 0)) : null;
 
     private static long? Number(string? text) => long.TryParse(text?.Trim(), out var n) ? n : null;
 

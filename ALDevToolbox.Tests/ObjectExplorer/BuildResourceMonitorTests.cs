@@ -22,14 +22,11 @@ public sealed class BuildResourceMonitorTests : IDisposable
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), "aldt-resources-" + Guid.NewGuid().ToString("N"));
     private readonly string _cgroup;
-    private readonly string _proc;
 
     public BuildResourceMonitorTests()
     {
         _cgroup = Path.Combine(_root, "cgroup");
-        _proc = Path.Combine(_root, "proc");
         Directory.CreateDirectory(_cgroup);
-        Directory.CreateDirectory(_proc);
     }
 
     public void Dispose()
@@ -47,33 +44,38 @@ public sealed class BuildResourceMonitorTests : IDisposable
 
     [Fact]
     public void Builds_with_room_to_spare_are_not_reported() =>
-        BuildResourceMonitor.Assess(Sample(0), Sample(30, cpuWait: 10 * Second, memoryWait: 1 * Second, periods: 300, throttled: 30, used: 5), running: 3)
+        BuildResourceMonitor.Assess(Sample(0), Sample(30, cpuWait: 10 * Second, memoryWait: 1 * Second, periods: 300, throttled: 30, used: 5), running: 3, recommended: 1)
             .Should().BeNull();
 
     [Fact]
     public void Several_builds_waiting_for_a_processor_most_of_the_time_are_reported()
     {
-        var shortage = BuildResourceMonitor.Assess(Sample(0), Sample(30, cpuWait: 27 * Second), running: 3);
+        var shortage = BuildResourceMonitor.Assess(Sample(0), Sample(30, cpuWait: 27 * Second), running: 3, recommended: 1);
 
         shortage.Should().NotBeNull();
         shortage!.Describe().Should().Be("builds waited for a processor 90% of the time");
     }
 
     [Fact]
+    public void Builds_waiting_for_a_processor_at_the_recommended_limit_are_not_reported() =>
+        BuildResourceMonitor.Assess(Sample(0), Sample(30, cpuWait: 30 * Second, periods: 300, throttled: 300), running: 3, recommended: 3)
+            .Should().BeNull("a compiler keeps every processor busy on its own");
+
+    [Fact]
     public void One_build_that_fills_the_processors_on_its_own_is_not_reported() =>
-        BuildResourceMonitor.Assess(Sample(0), Sample(30, cpuWait: 30 * Second, periods: 300, throttled: 300), running: 1)
+        BuildResourceMonitor.Assess(Sample(0), Sample(30, cpuWait: 30 * Second, periods: 300, throttled: 300), running: 1, recommended: 1)
             .Should().BeNull("running fewer builds would not help it");
 
     [Fact]
     public void Running_out_of_the_processor_time_the_server_allows_is_reported() =>
-        BuildResourceMonitor.Assess(Sample(0), Sample(30, periods: 300, throttled: 270), running: 2)!
-            .Describe().Should().Be("they used up the processor time the server allows 90% of the time");
+        BuildResourceMonitor.Assess(Sample(0), Sample(30, periods: 300, throttled: 270), running: 2, recommended: 1)!
+            .Describe().Should().Be("the processor time the server allows ran out 90% of the time");
 
     [Fact]
     public void Memory_shortage_is_reported_even_for_one_build()
     {
         var shortage = BuildResourceMonitor.Assess(
-            Sample(0, oom: 2), Sample(30, memoryWait: 6 * Second, used: 95, limit: 100, oom: 3), running: 1);
+            Sample(0, oom: 2), Sample(30, memoryWait: 6 * Second, used: 95, limit: 100, oom: 3), running: 1, recommended: 1);
 
         shortage!.Describe().Should().Be(
             "builds waited for memory 20% of the time and 95% of the server's memory was in use and the server stopped a process that ran out of memory");
@@ -84,7 +86,7 @@ public sealed class BuildResourceMonitorTests : IDisposable
         BuildResourceMonitor.Assess(
                 Sample(0, cpuWait: null, memoryWait: null, periods: null, throttled: null, used: null, limit: null, oom: null),
                 Sample(30, cpuWait: null, memoryWait: null, periods: null, throttled: null, used: null, limit: null, oom: null),
-                running: 4)
+                running: 4, recommended: 1)
             .Should().BeNull();
 
     [Fact]
@@ -93,25 +95,22 @@ public sealed class BuildResourceMonitorTests : IDisposable
         File.WriteAllText(Path.Combine(_cgroup, "cpu.pressure"), "some avg10=1.00 avg60=2.00 avg300=3.00 total=12345\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=99\n");
         File.WriteAllText(Path.Combine(_cgroup, "memory.pressure"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=678\n");
         File.WriteAllText(Path.Combine(_cgroup, "cpu.stat"), "usage_usec 1\nnr_periods 40\nnr_throttled 7\nthrottled_usec 9\n");
-        File.WriteAllText(Path.Combine(_cgroup, "memory.current"), "2048\n");
+        File.WriteAllText(Path.Combine(_cgroup, "memory.current"), "3072\n");
+        File.WriteAllText(Path.Combine(_cgroup, "memory.stat"), "anon 1500\nfile 1500\nactive_file 476\ninactive_file 1024\n");
         File.WriteAllText(Path.Combine(_cgroup, "memory.max"), "4096\n");
         File.WriteAllText(Path.Combine(_cgroup, "memory.events"), "low 0\nhigh 0\nmax 2\noom 1\noom_kill 1\n");
 
-        var sample = new ContainerResources(_cgroup, _proc).Read(T0);
+        var sample = new ContainerResources(_cgroup).Read(T0);
 
         sample.Should().Be(new ResourceSample(T0, 12345, 678, 40, 7, 2048, 4096, 1));
     }
 
     [Fact]
-    public void Without_the_containers_pressure_files_the_host_wide_ones_stand_in()
+    public void Without_the_container_files_nothing_is_known()
     {
-        File.WriteAllText(Path.Combine(_proc, "cpu"), "some avg10=0.05 avg60=3.11 avg300=10.84 total=1420689821\n");
+        var sample = new ContainerResources(_cgroup).Read(T0);
 
-        var sample = new ContainerResources(_cgroup, _proc).Read(T0);
-
-        sample.CpuWaitMicroseconds.Should().Be(1420689821);
-        sample.MemoryWaitMicroseconds.Should().BeNull();
-        sample.MemoryLimitBytes.Should().BeNull();
+        sample.Should().Be(new ResourceSample(T0, null, null, null, null, null, null, null));
     }
 
     private (BuildResourceMonitor Monitor, BuildResourceState State, FakeTimeProvider Clock, ListLogger Log) NewMonitor(ProjectBuildQueue queue)
@@ -120,7 +119,7 @@ public sealed class BuildResourceMonitorTests : IDisposable
         var clock = new FakeTimeProvider(new DateTimeOffset(T0));
         var log = new ListLogger();
         var monitor = new BuildResourceMonitor(
-            queue, new ContainerResources(_cgroup, _proc), state, clock, log, new WorkerHeartbeatRegistry());
+            queue, new ContainerResources(_cgroup), state, clock, log, new WorkerHeartbeatRegistry(), recommended: 1);
         return (monitor, state, clock, log);
     }
 
@@ -190,6 +189,29 @@ public sealed class BuildResourceMonitorTests : IDisposable
 
         state.Last.Should().BeNull();
     }
+
+    [Fact]
+    public void A_process_killed_for_memory_as_the_last_build_ended_is_still_reported()
+    {
+        var queue = RunningQueue(1);
+        var (monitor, state, clock, log) = NewMonitor(queue);
+        WriteOomKills(0);
+        monitor.Check();
+        clock.Advance(TimeSpan.FromSeconds(30));
+        monitor.Check();
+
+        queue.Complete(new ReleaseImportJob(1, Identity, new ReleaseImportSource.ProjectBuild(1),
+            BuildOrder: ProjectBuildOrder.For(1, ProjectBuildTarget.Current, ProjectBuildTrigger.Manual)));
+        WriteOomKills(1);
+        clock.Advance(TimeSpan.FromSeconds(30));
+        monitor.Check();
+
+        log.Warnings.Should().ContainSingle().Which.Should().Contain("stopped a process that ran out of memory");
+        state.Last!.Running.Should().Be(1);
+    }
+
+    private void WriteOomKills(long count) =>
+        File.WriteAllText(Path.Combine(_cgroup, "memory.events"), $"oom 0\noom_kill {count}\n");
 
     [Fact]
     public void A_limit_above_the_recommendation_is_logged()
