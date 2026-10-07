@@ -54,6 +54,7 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
             // The large-body slots with timings a test can wait out, and one gate
             // per test so holding its slots cannot leak into another test (#1174).
             services.AddSingleton(_gate);
+            services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, SlowBodyFilter>();
         });
     }
 
@@ -372,15 +373,182 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     /// <summary>Takes every large-body slot, as four forged slow pushes would.</summary>
     private async Task HoldEverySlotAsync()
     {
+        // One address holds at most one slot, so four slots take four addresses.
         for (var i = 0; i < GitHubWebhookBodyGate.DefaultSlots; i++)
         {
-            (await _gate.TryEnterAsync(TestContext.Current.CancellationToken)).Should().BeTrue();
+            (await _gate.TryEnterAsync($"203.0.113.{i}", TestContext.Current.CancellationToken)).Should().BeTrue();
         }
     }
 
     private void ReleaseEverySlot()
     {
-        for (var i = 0; i < GitHubWebhookBodyGate.DefaultSlots; i++) _gate.Release();
+        for (var i = 0; i < GitHubWebhookBodyGate.DefaultSlots; i++) _gate.Release($"203.0.113.{i}");
+    }
+
+    [Fact]
+    public async Task One_address_holds_at_most_one_large_body_slot()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        (await _gate.TryEnterAsync("203.0.113.7", ct)).Should().BeTrue();
+        (await _gate.TryEnterAsync("203.0.113.7", ct)).Should().BeFalse(
+            "a second large body from an address already reading one would let one sender hold every slot");
+        (await _gate.TryEnterAsync("203.0.113.8", ct)).Should().BeTrue();
+        _gate.Available.Should().Be(GitHubWebhookBodyGate.DefaultSlots - 2);
+
+        _gate.Release("203.0.113.7");
+        (await _gate.TryEnterAsync("203.0.113.7", ct)).Should().BeTrue("the address gave its slot back");
+
+        _gate.Release("203.0.113.7");
+        _gate.Release("203.0.113.8");
+        _gate.Available.Should().Be(GitHubWebhookBodyGate.DefaultSlots);
+    }
+
+    [Fact]
+    public async Task A_second_large_push_from_an_address_already_reading_one_is_answered_503()
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        var ct = TestContext.Current.CancellationToken;
+
+        // The first holds a slot by trickling; the second comes from the same address.
+        var slow = client.SendAsync(TricklingLargePush(), ct);
+        while (_gate.Available == GitHubWebhookBodyGate.DefaultSlots && !slow.IsCompleted)
+        {
+            await Task.Delay(20, ct);
+        }
+        using var second = await client.SendAsync(Delivery(
+            GitHubWebhookPayloads.Push(commitCount: 20, filesPerCommit: 3000), Secret, eventName: "push"), ct);
+        using var first = await slow;
+
+        second.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        first.StatusCode.Should().Be(HttpStatusCode.RequestTimeout);
+        _gate.Available.Should().Be(GitHubWebhookBodyGate.DefaultSlots);
+    }
+
+    [Fact]
+    public async Task A_push_that_declares_no_length_takes_the_large_body_path()
+    {
+        // Without a declared length nothing says the body is small, so it waits
+        // for a slot like a large one; with every slot held that is a 503.
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        var body = Encoding.UTF8.GetBytes(GitHubWebhookPayloads.Push(commitCount: 2));
+        using var request = new HttpRequestMessage(HttpMethod.Post, GitHubWebhookEndpoints.WebhookPath)
+        {
+            Content = new StreamContent(new UnseekableStream(body)),
+        };
+        request.Content.Headers.ContentLength.Should().BeNull();
+        request.Headers.Add("X-GitHub-Event", "push");
+        request.Headers.Add("X-Hub-Signature-256", Signature(Secret, body));
+        await HoldEverySlotAsync();
+        try
+        {
+            using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+            response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        }
+        finally
+        {
+            ReleaseEverySlot();
+        }
+    }
+
+    [Fact]
+    public async Task A_body_the_server_drops_for_arriving_too_slowly_is_answered_408()
+    {
+        // Kestrel's minimum data rate surfaces as its own exception, not as our
+        // deadline; it is answered the same way rather than escaping as a 500.
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        using var request = Delivery(GitHubWebhookPayloads.Push(commitCount: 2), Secret, eventName: "push");
+        request.Headers.Add(SlowBodyHeader, "1");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        response.StatusCode.Should().Be(HttpStatusCode.RequestTimeout);
+        (await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken))
+            .Should().Contain("too slowly");
+    }
+
+    private static HttpRequestMessage TricklingLargePush()
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, GitHubWebhookEndpoints.WebhookPath)
+        {
+            Content = new StreamContent(new StallingStream(Encoding.UTF8.GetBytes("{\"ref\":"))),
+        };
+        request.Content.Headers.ContentLength = 2 * GitHubWebhookEndpoints.MaxRequestBodyBytes;
+        request.Headers.Add("X-GitHub-Event", "push");
+        request.Headers.Add("X-Hub-Signature-256", "sha256=" + new string('a', 64));
+        return request;
+    }
+
+    /// <summary>A request header that makes <see cref="SlowBodyFilter"/> stand in for Kestrel's data-rate check.</summary>
+    private const string SlowBodyHeader = "X-Test-Slow-Body";
+
+    /// <summary>
+    /// The in-memory test server has no minimum data rate, so this puts in front of
+    /// the pipeline the exception Kestrel raises when a body arrives too slowly.
+    /// </summary>
+    private sealed class SlowBodyFilter : Microsoft.AspNetCore.Hosting.IStartupFilter
+    {
+        public Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> Configure(
+            Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> next) => app =>
+        {
+            app.Use(nextMiddleware => ctx =>
+            {
+                if (ctx.Request.Headers.ContainsKey(SlowBodyHeader))
+                {
+                    ctx.Request.Body = new ThrowingStream();
+                }
+                return nextMiddleware(ctx);
+            });
+            next(app);
+        };
+    }
+
+    private sealed class ThrowingStream : UnseekableStream
+    {
+        public ThrowingStream() : base([]) { }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            throw new Microsoft.AspNetCore.Http.BadHttpRequestException(
+                "Reading the request body timed out due to data arriving too slowly.", 408);
+    }
+
+    /// <summary>A body with no length the client can work out, so it is sent without a Content-Length.</summary>
+    private class UnseekableStream(byte[] content) : Stream
+    {
+        private int _position;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var n = Math.Min(count, content.Length - _position);
+            Array.Copy(content, _position, buffer, offset, n);
+            _position += n;
+            return n;
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var n = Math.Min(buffer.Length, content.Length - _position);
+            content.AsSpan(_position, n).CopyTo(buffer.Span);
+            _position += n;
+            return ValueTask.FromResult(n);
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
     }
 
     [Fact]
@@ -432,13 +600,7 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     {
         await StoreSecretAsync();
         using var client = _factory.CreateClient();
-        var request = new HttpRequestMessage(HttpMethod.Post, GitHubWebhookEndpoints.WebhookPath)
-        {
-            Content = new StreamContent(new StallingStream(Encoding.UTF8.GetBytes("{\"ref\":"))),
-        };
-        request.Content.Headers.ContentLength = 2 * GitHubWebhookEndpoints.MaxRequestBodyBytes;
-        request.Headers.Add("X-GitHub-Event", "push");
-        request.Headers.Add("X-Hub-Signature-256", "sha256=" + new string('a', 64));
+        using var request = TricklingLargePush();
 
         using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
 
@@ -507,6 +669,19 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
         (await GitHubWebhookEndpoints.ReadBodyAsync(exactly, null, Cap, ct)).Should().HaveCount(Cap);
         (await GitHubWebhookEndpoints.ReadBodyAsync(over, null, Cap, ct)).Should().BeNull();
         (await GitHubWebhookEndpoints.ReadBodyAsync(new MemoryStream(), Cap + 1, Cap, ct)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Reading_a_body_that_declares_exactly_the_cap_returns_all_of_it()
+    {
+        const int Cap = 100_000;
+        var sent = new byte[Cap];
+        Random.Shared.NextBytes(sent);
+        using var stream = new MemoryStream(sent);
+
+        var body = await GitHubWebhookEndpoints.ReadBodyAsync(stream, Cap, Cap, TestContext.Current.CancellationToken);
+
+        body.Should().Equal(sent);
     }
 
     /// <summary>

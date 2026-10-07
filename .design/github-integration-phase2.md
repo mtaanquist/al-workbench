@@ -490,8 +490,10 @@ on every pull request, inline in the Files tab.
   whose commit file lists can be large - #1126; at most four bodies that declare more than
   a megabyte, or no length, are read at once, since the body must be read before a forgery
   can be told apart. A push declaring a megabyte or less never waits for those slots; one
-  that cannot get a slot within two seconds is answered 503, a slotted read that has not
-  finished within ten seconds is answered 408, and the read buffer grows with the bytes
+  source address holds at most one slot (the address the rate limiter uses); one that
+  cannot get a slot within two seconds is answered 503, a slotted read that has not
+  finished within ten seconds, or that the server drops for its minimum data rate, is
+  answered 408, and the read buffer grows with the bytes
   that arrive rather than from the declared length - #1174), verifies `X-Hub-Signature-256` with a constant-time compare over the raw body,
   and writes a body on every response so the status-pages middleware does not rewrite a
   401 into a 400. It is on the maintenance-mode allow-list: accepting a delivery is

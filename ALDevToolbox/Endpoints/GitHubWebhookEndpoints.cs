@@ -109,45 +109,49 @@ public static class GitHubWebhookEndpoints
             // be past a megabyte - no declared length, or a larger one - takes a
             // slot at the gate, waits for one only briefly, and gets a deadline for
             // arriving (#1174). An ordinary push declares a smaller length and never
-            // queues behind a stranger holding the slots.
+            // queues behind a stranger holding the slots, and one address holds at
+            // most one slot, so filling them all takes as many addresses as slots.
             var signature = ctx.Request.Headers["X-Hub-Signature-256"].ToString();
             var eventName = ctx.Request.Headers["X-GitHub-Event"].ToString();
             var mayBeLarge = string.Equals(eventName, "push", StringComparison.OrdinalIgnoreCase)
                 && IsWellFormedSignature(signature);
             var declared = ctx.Request.ContentLength;
             byte[]? body;
+            IResult? refusal;
             if (mayBeLarge && (declared is null || declared > MaxRequestBodyBytes))
             {
-                if (!await gate.TryEnterAsync(ct))
+                // The address the rate limiter partitions on: the forwarded client
+                // address when the proxy in front is trusted, else the connection's.
+                var source = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                if (!await gate.TryEnterAsync(source, ct))
                 {
-                    log.LogWarning("Refused a large push delivery: every large-body slot is in use.");
+                    log.LogWarning(
+                        "Refused a large push delivery from {Source}: no large-body slot is free for it.", source);
                     return Results.Text("Busy; the delivery will be requested again.", "text/plain", statusCode: 503);
                 }
                 try
                 {
                     using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     deadline.CancelAfter(gate.ReadDeadline);
-                    body = await ReadBodyAsync(ctx.Request, MaxPushBodyBytes, deadline.Token);
+                    (body, refusal) = await ReadBodyAsync(ctx.Request, MaxPushBodyBytes, deadline.Token);
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
                     log.LogWarning(
                         "Refused a large push delivery: the body did not arrive within {Deadline}.", gate.ReadDeadline);
-                    return Results.Text("The delivery body arrived too slowly.", "text/plain", statusCode: 408);
+                    return TooSlow();
                 }
                 finally
                 {
-                    gate.Release();
+                    gate.Release(source);
                 }
             }
             else
             {
-                body = await ReadBodyAsync(ctx.Request, MaxRequestBodyBytes, ct);
+                (body, refusal) = await ReadBodyAsync(ctx.Request, MaxRequestBodyBytes, ct);
             }
-            if (body is null)
-            {
-                return Results.Text("The delivery body is too large.", "text/plain", statusCode: 413);
-            }
+            if (refusal is not null) return refusal;
+            if (body is null) return TooLarge();
 
             if (!SignatureMatches(secret, body, signature))
             {
@@ -247,23 +251,38 @@ public static class GitHubWebhookEndpoints
     }
 
     /// <summary>
-    /// Reads the whole body, or <see langword="null"/> when it exceeds
-    /// <paramref name="cap"/>. The signature is over the raw bytes, so the body has
+    /// Reads the whole body, or answers why it could not: 413 when it exceeds
+    /// <paramref name="cap"/>, 408 when the server gave up on a body arriving below
+    /// its minimum data rate. The signature is over the raw bytes, so the body has
     /// to be read once and hashed before it is parsed - there is no streaming
     /// shortcut here.
     /// </summary>
-    private static async Task<byte[]?> ReadBodyAsync(HttpRequest request, int cap, CancellationToken ct)
+    private static async Task<(byte[]? Body, IResult? Refusal)> ReadBodyAsync(
+        HttpRequest request, int cap, CancellationToken ct)
     {
         try
         {
-            return await ReadBodyAsync(request.Body, request.ContentLength, cap, ct);
+            var body = await ReadBodyAsync(request.Body, request.ContentLength, cap, ct);
+            return body is null ? (null, TooLarge()) : (body, null);
         }
         catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
         {
             // The server's own limit tripped first; answer it the same way.
-            return null;
+            return (null, TooLarge());
+        }
+        catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status408RequestTimeout)
+        {
+            // Kestrel's minimum request body data rate: the same verdict as our own
+            // deadline, and a status GitHub's redelivery treats as worth resending.
+            return (null, TooSlow());
         }
     }
+
+    private static IResult TooLarge() =>
+        Results.Text("The delivery body is too large.", "text/plain", statusCode: 413);
+
+    private static IResult TooSlow() =>
+        Results.Text("The delivery body arrived too slowly.", "text/plain", statusCode: 408);
 
     /// <summary>
     /// Reads <paramref name="body"/> to its end, or <see langword="null"/> when it
