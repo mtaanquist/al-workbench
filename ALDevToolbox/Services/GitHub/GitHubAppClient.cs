@@ -243,7 +243,11 @@ public sealed partial class GitHubAppClient
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, "meta");
         using var document = await SendAsync(request, ct);
-        if (!document.RootElement.TryGetProperty("hooks", out var hooks) || hooks.ValueKind != JsonValueKind.Array)
+        // TryGetProperty throws on a root that is not an object, so check that first:
+        // an array or a bare string is as unusable an answer as one with no list.
+        if (document.RootElement.ValueKind != JsonValueKind.Object
+            || !document.RootElement.TryGetProperty("hooks", out var hooks)
+            || hooks.ValueKind != JsonValueKind.Array)
         {
             throw new GitHubApiException(HttpStatusCode.BadGateway, "GitHub did not list the addresses it sends webhooks from.");
         }

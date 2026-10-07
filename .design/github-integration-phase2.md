@@ -519,9 +519,18 @@ on every pull request, inline in the Files tab.
   and only the last hop (`ForwardLimit` 1). Behind a proxy that is not listed, every
   delivery looks like it came from the proxy and is refused; the refusal warning (at most
   one every five minutes, with a count of the ones it skipped) names the address and
-  points at `TRUSTED_PROXIES`. A client cannot talk its way in with its own
-  `X-Forwarded-For`: from an untrusted peer the header is ignored, and a trusted proxy
-  appends the peer it saw last.
+  points at `TRUSTED_PROXIES`, and the site admin's GitHub settings page shows when the
+  list was last read and the last refused sender, for a day after the refusal. A client's
+  own `X-Forwarded-For` is ignored when it connects directly from an untrusted address,
+  and a trusted proxy appends the peer it saw last - **provided the only peers inside the
+  trusted range are proxies.** A trusted range as wide as the compose bridge network
+  (`172.16.0.0/12`) also covers Docker's port forwarding, so while the app's own port is
+  published a client can connect to it, appear to come from the bridge gateway, and name
+  a GitHub address; the README and `compose.yaml` therefore say to remove that mapping
+  or bind it to `127.0.0.1` when Caddy is in front. The signature check still applies to
+  such a request. A refusal also asks the refresh scheduler for an early read of the
+  list (at most one an hour), so a range GitHub has just added is picked up while the
+  recovery sweep still has resends left.
   `pull_request` with action `opened`, `synchronize` or `reopened` enqueues; everything
   else is 204. Since #963 it also takes `push`, and a `pull_request` `closed` with
   `merged: true`: both are parsed, enqueued and answered 202 behind exactly the same

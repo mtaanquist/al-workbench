@@ -260,7 +260,9 @@ To build the image locally instead of pulling it, comment out `image:` and uncom
 
 No public domain handy? Set `SITE_ADDRESS=localhost` (Caddy mints an internal-CA cert, so your browser will warn) or `SITE_ADDRESS=:80` (plain HTTP) to exercise the same service locally.
 
-**GitHub webhooks.** The webhook accepts deliveries only from the addresses GitHub publishes for its webhooks, read from GitHub once a day. Behind Caddy that check sees Caddy's address unless the app trusts it as a proxy, so set `TRUSTED_PROXIES` when you enable the `caddy` service (the commented default in `compose.yaml`, `172.16.0.0/12`, covers the compose network). If it is missing, every delivery is refused with 403 and the log warns about it, naming the proxy's address.
+**GitHub webhooks.** The webhook accepts deliveries only from the addresses GitHub publishes for its webhooks, read from GitHub once a day. Behind Caddy that check sees Caddy's address unless the app trusts it as a proxy, so set `TRUSTED_PROXIES` when you enable the `caddy` service (the commented default in `compose.yaml`, `172.16.0.0/12`, covers the compose network). If it is missing, every delivery is refused with 403; the log warns about it, and Site administration → Settings → GitHub shows the last refused address.
+
+**Close the direct port.** Once `TRUSTED_PROXIES` trusts the compose network, a connection to the app's published `8080` port can arrive from that network too (Docker's port forwarding hands it over from the bridge gateway), and its `X-Forwarded-For` would be believed. So when Caddy fronts the app, remove the app's `ports:` mapping in `compose.yaml`, or bind it to loopback (`"127.0.0.1:${HOST_PORT:-8080}:8080"`), so the only way in is through Caddy.
 
 **Email links and passkeys.** Links in outbound emails are built from the request host; Caddy preserves it while the app honours `X-Forwarded-Proto`, so they render as `https://<your-domain>/`. Make sure users reach the app through the domain, not the raw `:8080` host port. To enable passkeys on the domain, set `AUTH_WEBAUTHN_RP_ID` to it and `AUTH_WEBAUTHN_ORIGINS` to `https://<your-domain>`.
 

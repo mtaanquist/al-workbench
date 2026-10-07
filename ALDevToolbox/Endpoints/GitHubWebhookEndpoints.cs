@@ -100,7 +100,7 @@ public static class GitHubWebhookEndpoints
             switch (senders.Check(sender))
             {
                 case GitHubHookAddressVerdict.Refused:
-                    if (senders.ShouldWarnRefusal(out var suppressed))
+                    if (senders.ShouldWarnRefusal(sender, out var suppressed))
                     {
                         log.LogWarning(
                             "Refused a GitHub webhook delivery from {Sender}: not one of the addresses GitHub sends webhooks from ({Suppressed} more refused since the last warning). If every delivery is refused from the same address, it is probably the reverse proxy's: list the proxy in TRUSTED_PROXIES.",

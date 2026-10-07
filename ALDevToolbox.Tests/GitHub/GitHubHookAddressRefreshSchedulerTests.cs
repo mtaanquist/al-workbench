@@ -3,6 +3,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Workers;
+using ALDevToolbox.Tests.Auth;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.Http;
@@ -49,6 +50,8 @@ public sealed class GitHubHookAddressRefreshSchedulerTests : IDisposable
     [InlineData(HttpStatusCode.OK, "{\"hooks\":[]}")]
     [InlineData(HttpStatusCode.OK, "{\"web\":[\"140.82.112.0/20\"]}")]
     [InlineData(HttpStatusCode.OK, "{\"hooks\":[\"nonsense\"]}")]
+    [InlineData(HttpStatusCode.OK, "[\"192.30.252.0/22\"]")]
+    [InlineData(HttpStatusCode.OK, "\"192.30.252.0/22\"")]
     [InlineData(FakeGitHubApi.Unreachable, null)]
     public async Task A_failed_refresh_keeps_the_list_that_was_in_use(HttpStatusCode status, string? json)
     {
@@ -83,8 +86,52 @@ public sealed class GitHubHookAddressRefreshSchedulerTests : IDisposable
         GitHubHookAddressRefreshScheduler.IsDue(now - GitHubHookAddressRefreshScheduler.RefreshInterval, now).Should().BeTrue();
     }
 
-    private GitHubHookAddressRefreshScheduler NewScheduler(IServiceProvider provider) =>
-        new(provider, _allowList, TimeProvider.System,
+    [Fact]
+    public async Task A_refusal_asks_for_an_early_read_at_most_once_an_hour()
+    {
+        // A range GitHub has just added is refused until the list is read again; the
+        // daily read alone would let the recovery sweep's resends run out first.
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        var allowList = new GitHubHookAddressAllowList(clock);
+        var api = new FakeGitHubApi().On(HttpMethod.Get, "/meta", HttpStatusCode.OK, MetaJson);
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider, allowList, clock);
+
+        (await scheduler.TickOnceAsync(CancellationToken.None)).Should().BeTrue("nothing was loaded yet");
+        clock.Advance(TimeSpan.FromMinutes(5));
+        (await scheduler.TickOnceAsync(CancellationToken.None)).Should().BeFalse("no refusal, and the list is fresh");
+
+        allowList.ShouldWarnRefusal(IPAddress.Parse("203.0.113.7"), out _);
+        clock.Advance(TimeSpan.FromMinutes(5));
+        (await scheduler.TickOnceAsync(CancellationToken.None)).Should().BeTrue("a delivery was refused since the list loaded");
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        allowList.ShouldWarnRefusal(IPAddress.Parse("203.0.113.7"), out _);
+        clock.Advance(TimeSpan.FromMinutes(29));
+        (await scheduler.TickOnceAsync(CancellationToken.None)).Should().BeFalse("the last early read was half an hour ago");
+
+        clock.Advance(TimeSpan.FromMinutes(30));
+        (await scheduler.TickOnceAsync(CancellationToken.None)).Should().BeTrue("an hour has passed");
+
+        api.Calls.Should().HaveCount(3);
+    }
+
+    [Fact]
+    public void An_early_read_is_due_only_for_a_refusal_after_the_list_loaded()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var loaded = now.AddMinutes(-10);
+        GitHubHookAddressRefreshScheduler.IsEarlyRefreshDue(null, now, null, now).Should().BeFalse("nothing is refused before a first load");
+        GitHubHookAddressRefreshScheduler.IsEarlyRefreshDue(loaded, null, null, now).Should().BeFalse();
+        GitHubHookAddressRefreshScheduler.IsEarlyRefreshDue(loaded, loaded.AddMinutes(-1), null, now).Should().BeFalse("the list was read after that refusal");
+        GitHubHookAddressRefreshScheduler.IsEarlyRefreshDue(loaded, now, null, now).Should().BeTrue();
+        GitHubHookAddressRefreshScheduler.IsEarlyRefreshDue(loaded, now, now.AddMinutes(-59), now).Should().BeFalse();
+        GitHubHookAddressRefreshScheduler.IsEarlyRefreshDue(loaded, now, now - GitHubHookAddressRefreshScheduler.EarlyRefreshInterval, now).Should().BeTrue();
+    }
+
+    private GitHubHookAddressRefreshScheduler NewScheduler(
+        IServiceProvider provider, GitHubHookAddressAllowList? allowList = null, TimeProvider? clock = null) =>
+        new(provider, allowList ?? _allowList, clock ?? TimeProvider.System,
             NullLogger<GitHubHookAddressRefreshScheduler>.Instance, new WorkerHeartbeatRegistry());
 
     private ServiceProvider BuildProvider(FakeGitHubApi api)

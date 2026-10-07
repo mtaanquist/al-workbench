@@ -17,6 +17,9 @@ public enum GitHubHookAddressVerdict
     Refused,
 }
 
+/// <summary>A refused delivery: who sent it (when it had an address) and when.</summary>
+public sealed record GitHubHookAddressRefusal(string? Sender, DateTimeOffset At);
+
 /// <summary>
 /// The address ranges GitHub sends webhook deliveries from (the <c>hooks</c> list of
 /// <c>GET /meta</c>), held in memory so <c>POST /github/webhook</c> can turn a stranger
@@ -49,6 +52,11 @@ public sealed class GitHubHookAddressAllowList
     private long _nextUnloadedWarningTicks;
     private long _refusalsSinceWarning;
 
+    // The last refused sender, kept for the site admin's GitHub page: behind a proxy
+    // that is not trusted, every delivery is refused from the proxy's own address,
+    // and a rate-limited log line is easy to miss.
+    private volatile GitHubHookAddressRefusal? _lastRefusal;
+
     private sealed record Loaded(IReadOnlyList<IPNetwork> Ranges, DateTimeOffset LoadedAt);
 
     public GitHubHookAddressAllowList(TimeProvider clock)
@@ -61,6 +69,9 @@ public sealed class GitHubHookAddressAllowList
 
     /// <summary>The ranges in use; empty when none was ever loaded.</summary>
     public IReadOnlyList<IPNetwork> Ranges => _current?.Ranges ?? [];
+
+    /// <summary>The last delivery refused since start-up, or <see langword="null"/> when none was.</summary>
+    public GitHubHookAddressRefusal? LastRefusal => _lastRefusal;
 
     /// <summary>
     /// Whether <paramref name="address"/> may deliver. An IPv4 address that arrived
@@ -125,12 +136,16 @@ public sealed class GitHubHookAddressAllowList
     }
 
     /// <summary>
-    /// Counts one refusal and says whether this one should be logged, at most once per
-    /// <see cref="WarningInterval"/>. When it should, <paramref name="suppressed"/> is
-    /// how many refusals went unlogged since the last warning.
+    /// Counts one refusal of <paramref name="sender"/> and says whether it should be
+    /// logged, at most once per <see cref="WarningInterval"/>. When it should,
+    /// <paramref name="suppressed"/> is how many refusals went unlogged since the last
+    /// warning. The refusal is also kept as <see cref="LastRefusal"/>, which the site
+    /// admin's GitHub page shows and which asks
+    /// <see cref="GitHubHookAddressRefreshScheduler"/> for an early read of the list.
     /// </summary>
-    public bool ShouldWarnRefusal(out long suppressed)
+    public bool ShouldWarnRefusal(IPAddress? sender, out long suppressed)
     {
+        _lastRefusal = new GitHubHookAddressRefusal(sender?.ToString(), _clock.GetUtcNow());
         Interlocked.Increment(ref _refusalsSinceWarning);
         if (!Claim(ref _nextRefusalWarningTicks))
         {

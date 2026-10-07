@@ -94,14 +94,29 @@ public sealed class GitHubHookAddressAllowListTests
         var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
         var list = Loaded(clock);
 
-        list.ShouldWarnRefusal(out var first).Should().BeTrue();
+        list.ShouldWarnRefusal(null, out var first).Should().BeTrue();
         first.Should().Be(0);
-        list.ShouldWarnRefusal(out _).Should().BeFalse();
-        list.ShouldWarnRefusal(out _).Should().BeFalse();
+        list.ShouldWarnRefusal(null, out _).Should().BeFalse();
+        list.ShouldWarnRefusal(null, out _).Should().BeFalse();
 
         clock.Advance(GitHubHookAddressAllowList.WarningInterval);
-        list.ShouldWarnRefusal(out var later).Should().BeTrue();
+        list.ShouldWarnRefusal(null, out var later).Should().BeTrue();
         later.Should().Be(2, "two refusals were swallowed in between");
+    }
+
+    [Fact]
+    public void The_last_refused_sender_and_time_are_kept_for_the_site_admin()
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        var list = Loaded(clock);
+        list.LastRefusal.Should().BeNull();
+
+        list.ShouldWarnRefusal(IPAddress.Parse("172.18.0.5"), out _);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        list.ShouldWarnRefusal(IPAddress.Parse("172.18.0.6"), out _).Should().BeFalse("still inside the warning interval");
+
+        list.LastRefusal.Should().Be(new GitHubHookAddressRefusal("172.18.0.6", clock.GetUtcNow()),
+            "a refusal the log skipped is still recorded");
     }
 
     [Fact]
