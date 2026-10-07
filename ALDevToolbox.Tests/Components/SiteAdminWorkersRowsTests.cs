@@ -1,4 +1,5 @@
 using ALDevToolbox.Components.Pages.SiteAdmin;
+using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.Workers;
 using AwesomeAssertions;
@@ -61,5 +62,21 @@ public sealed class SiteAdminWorkersRowsTests
 
         rows.Single(r => r.Name == "ProjectBuildWorker 7").Healthy.Should().BeFalse();
         rows.Single(r => r.Name == "ProjectBuildWorker x15").Healthy.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Idle_deployment_workers_share_one_row_and_a_busy_one_keeps_its_own()
+    {
+        var registry = new WorkerHeartbeatRegistry();
+        for (var slot = 1; slot <= DeliveryWorker.Lanes; slot++)
+            registry.Register($"DeliveryWorker {slot}", TimeSpan.FromMinutes(30), maxIdleSilence: null);
+        registry.Register("DeliveryWorker 2", TimeSpan.FromMinutes(30), null).BeginActive();
+
+        var rows = SiteAdminWorkers.Rows(registry.All(), DateTime.UtcNow, buildLimit: 2);
+
+        rows.Select(r => r.Name).Should().BeEquivalentTo("DeliveryWorker 2", $"DeliveryWorker x{DeliveryWorker.Lanes - 1}");
+        rows.Single(r => r.Name == "DeliveryWorker 2").Plain.Should().Be("Deploying to Business Central");
+        rows.Single(r => r.Name.EndsWith($"x{DeliveryWorker.Lanes - 1}")).Plain
+            .Should().Be($"Waiting for deployments ({DeliveryWorker.Lanes - 1} ready)");
     }
 }

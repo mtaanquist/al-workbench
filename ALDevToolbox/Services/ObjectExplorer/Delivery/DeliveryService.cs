@@ -260,7 +260,7 @@ public sealed class DeliveryService
         // a future delivery is left for the DeliveryScheduler to enqueue when due.
         if (!parked && scheduledForUtc <= delivery.CreatedAt)
         {
-            await _queue.EnqueueAsync(new DeliveryJob(delivery.Id, AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "capturing identity for a delivery")), ct);
+            Enqueue(new DeliveryJob(delivery.Id, AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "capturing identity for a delivery")));
         }
 
         _logger.LogInformation(
@@ -859,7 +859,7 @@ public sealed class DeliveryService
         var delivery = await WriteDeliveryAsync(orgId, plan, when, forceSyncOnce: false, proposed: false, ct, opening, withoutApproval: true);
         if (when <= delivery.CreatedAt)
         {
-            await _queue.EnqueueAsync(new DeliveryJob(delivery.Id, AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "capturing identity for a delivery")), ct);
+            Enqueue(new DeliveryJob(delivery.Id, AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "capturing identity for a delivery")));
         }
         _logger.LogInformation(
             "Deploying build {BuildId} through deployment pipeline {ReleasePipelineId} ({Env}) without approval as delivery {DeliveryId}, for {ScheduledFor:o}.",
@@ -924,7 +924,7 @@ public sealed class DeliveryService
 
         if (when <= now)
         {
-            await _queue.EnqueueAsync(new DeliveryJob(deliveryId, AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "capturing identity for a delivery")), ct);
+            Enqueue(new DeliveryJob(deliveryId, AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "capturing identity for a delivery")));
         }
         _logger.LogInformation("Approved prepared delivery {DeliveryId}, scheduled for {ScheduledFor:o}.", deliveryId, when);
     }
@@ -1135,7 +1135,7 @@ public sealed class DeliveryService
         {
             throw Validation("Delivery", "This delivery has already started and can no longer be rescheduled.");
         }
-        await EnqueueIfDueAsync(deliveryId, info, t.When, now, ct);
+        EnqueueIfDue(deliveryId, info, t.When, now);
         _logger.LogInformation("Rescheduled delivery {DeliveryId} to {Timing} ({Schedule}, {ScheduledFor:o}).",
             deliveryId, timing, t.Schedule, t.When);
         return deliveryId;
@@ -1276,12 +1276,12 @@ public sealed class DeliveryService
                 .SetProperty(d => d.UpdatedAt, now), ct) > 0;
     }
 
-    private async Task EnqueueIfDueAsync(int deliveryId, RescheduleInfo info, DateTime when, DateTime now, CancellationToken ct)
+    private void EnqueueIfDue(int deliveryId, RescheduleInfo info, DateTime when, DateTime now)
     {
         if (when > now) return;
-        await _queue.EnqueueAsync(new DeliveryJob(deliveryId,
+        Enqueue(new DeliveryJob(deliveryId,
             AmbientOrganizationScope.OrganizationIdentity.ForOrganization(
-                info.OrganizationId, _orgContext.IsSystemOrganization, _orgContext.CurrentUserId ?? info.TriggeredByUserId)), ct);
+                info.OrganizationId, _orgContext.IsSystemOrganization, _orgContext.CurrentUserId ?? info.TriggeredByUserId)));
     }
 
     /// <summary>
@@ -1399,7 +1399,7 @@ public sealed class DeliveryService
             throw Validation("Delivery",
                 $"Business Central's copy was cancelled, but the new deployment was dismissed while this ran, so nothing will install. Deploy the build to {info.EnvironmentName} again.");
         }
-        await EnqueueIfDueAsync(replacementId, info, t.When, now, CancellationToken.None);
+        EnqueueIfDue(replacementId, info, t.When, now);
         _logger.LogInformation(
             "Moved delivery {DeliveryId}, held by Business Central for {OldSchedule}, to delivery {ReplacementId} ({Timing}, {Schedule}, {ScheduledFor:o}).",
             info.DeliveryId, info.DeploymentSchedule, replacementId, timing, t.Schedule, t.When);
@@ -1551,13 +1551,25 @@ public sealed class DeliveryService
             _ => RescheduleTiming.AtTime,
         };
 
+    /// <summary>
+    /// Hands a due delivery to the worker without waiting (#1139). The row stays
+    /// <c>scheduled</c>, so one that doesn't fit a full queue, or is already queued, is
+    /// picked up by the scheduler's next sweep.
+    /// </summary>
+    private bool Enqueue(DeliveryJob job)
+    {
+        if (_queue.TryEnqueue(job)) return true;
+        _logger.LogDebug("Delivery {DeliveryId} is already queued or the queue is full; the scheduler picks it up.", job.DeliveryId);
+        return false;
+    }
+
     // ── Scheduler sweep helpers (called per-org under an AmbientOrganizationScope) ──
 
     /// <summary>
     /// Enqueues every <c>scheduled</c> delivery in the current org whose time has come
     /// (<see cref="OeProjectDelivery.ScheduledFor"/> ≤ <paramref name="nowUtc"/>). Org-scoped
-    /// via the query filter (the scheduler sets the ambient org). Re-enqueuing a row the
-    /// worker hasn't claimed yet is a no-op (the queue dedupes by id). Returns the count.
+    /// via the query filter (the scheduler sets the ambient org). A row already queued, or one that
+    /// doesn't fit a full queue, waits for the next sweep (#1139). Returns how many it queued.
     /// </summary>
     public async Task<int> EnqueueDueDeliveriesAsync(DateTime nowUtc, CancellationToken ct = default)
     {
@@ -1566,16 +1578,13 @@ public sealed class DeliveryService
             // A deleted pipeline's deployments are cancelled with it (#1108); this is the backstop.
             .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= nowUtc
                         && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null)
+            .OrderBy(d => d.ScheduledFor).ThenBy(d => d.Id)
             .Select(d => new { d.Id, d.OrganizationId, d.TriggeredByUserId })
             .ToListAsync(ct);
 
-        foreach (var d in due)
-        {
-            await _queue.EnqueueAsync(new DeliveryJob(d.Id,
-                AmbientOrganizationScope.OrganizationIdentity.ForOrganization(
-                    d.OrganizationId, _orgContext.IsSystemOrganization, d.TriggeredByUserId)), ct);
-        }
-        return due.Count;
+        return due.Count(d => Enqueue(new DeliveryJob(d.Id,
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(
+                d.OrganizationId, _orgContext.IsSystemOrganization, d.TriggeredByUserId))));
     }
 
     /// <summary>
@@ -1670,15 +1679,52 @@ public sealed class DeliveryService
     /// </summary>
     public async Task<bool> RunDeliveryAsync(int deliveryId, CancellationToken ct = default)
     {
+        // Several deployments run at once, but never two to one environment (#1139). One
+        // that finds its environment busy stays scheduled for the next sweep.
+        var target = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.Id == deliveryId)
+            .Select(d => new { d.ProjectId, d.EnvironmentName, d.ScheduledFor, d.Project!.BcTenantId })
+            .FirstOrDefaultAsync(ct);
+        if (target is null) return false;
+
+        // ...and, within a solution, in the order they fell due, so an older build never
+        // lands after a newer one. Asked before the gate as well as after, so a later
+        // deployment steps aside without taking the gate from the earlier one it waits for.
+        async Task<bool> EarlierOneWaitsAsync()
+        {
+            var dueBy = DateTime.UtcNow + ClaimEarlySlack;
+            return await _db.OeProjectDeliveries.AsNoTracking().AnyAsync(d =>
+                d.ProjectId == target.ProjectId && d.EnvironmentName == target.EnvironmentName
+                && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy
+                && d.ReleasePipeline!.DeletedAt == null
+                && (d.ScheduledFor < target.ScheduledFor || (d.ScheduledFor == target.ScheduledFor && d.Id < deliveryId)), ct);
+        }
+        if (await EarlierOneWaitsAsync())
+        {
+            _logger.LogDebug("Delivery {DeliveryId} waits for an earlier deployment to {Env}.", deliveryId, target.EnvironmentName);
+            return false;
+        }
+        using var environment = _queue.TryEnterEnvironment(target.BcTenantId, target.ProjectId, target.EnvironmentName);
+        if (environment is null)
+        {
+            _logger.LogDebug("Delivery {DeliveryId} waits: another deployment to {Env} is running.", deliveryId, target.EnvironmentName);
+            return false;
+        }
+        if (await EarlierOneWaitsAsync())
+        {
+            _logger.LogDebug("Delivery {DeliveryId} waits for an earlier deployment to {Env}.", deliveryId, target.EnvironmentName);
+            return false;
+        }
+
         if (await MovedPastClosedWindowAsync(deliveryId, ct))
         {
             return false;
         }
 
         var claimedAt = DateTime.UtcNow;
-        var dueBy = claimedAt + ClaimEarlySlack;
+        var claimBy = claimedAt + ClaimEarlySlack;
         var claimed = await _db.OeProjectDeliveries
-            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy
+            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= claimBy
                         && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.Status, ProjectDeliveryStatus.Claimed)
@@ -1761,8 +1807,8 @@ public sealed class DeliveryService
 
     /// <summary>
     /// A deployment the delivery window chose the time for runs in that window or not at
-    /// all: when its turn comes after the window has closed (deployments queue one at a
-    /// time, and Business Central can be slow), it is moved to the window's next opening
+    /// all: when its turn comes after the window has closed (deployments to one environment
+    /// run one at a time, and Business Central can be slow), it is moved to the window's next opening
     /// rather than installed while people are working (#1124). One a person deliberately
     /// placed outside the window (<see cref="OeProjectDelivery.ScheduledOutsideWindow"/>)
     /// runs when they said. Compare-and-set on the time it was read with, so a reschedule

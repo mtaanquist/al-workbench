@@ -409,6 +409,119 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task RunDeliveryAsync_leaves_a_delivery_scheduled_while_another_deploys_to_the_same_environment()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        var target = await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+            .Select(d => new { d.ProjectId, d.Project!.BcTenantId }).SingleAsync();
+
+        using (_queue.TryEnterEnvironment(target.BcTenantId, target.ProjectId, "Production"))
+        {
+            await using var run = _db.NewContext();
+            (await NewService(run).RunDeliveryAsync(deliveryId)).Should().BeFalse("another deployment holds the environment");
+        }
+
+        _apps.UploadedOrder.Should().BeEmpty();
+        await using (var read = _db.NewContext())
+        {
+            (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status
+                .Should().Be(ProjectDeliveryStatus.Scheduled, "it waits for the next sweep rather than failing");
+        }
+
+        await using var again = _db.NewContext();
+        (await NewService(again).RunDeliveryAsync(deliveryId)).Should().BeTrue("the environment is free once the other deployment ends");
+        _queue.TryEnterEnvironment(target.BcTenantId, target.ProjectId, "Production").Should().NotBeNull("the run frees the environment when it ends");
+    }
+
+    [Fact]
+    public async Task RunDeliveryAsync_waits_for_an_earlier_deployment_to_the_same_environment()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var earlier = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddMinutes(1));
+        var later = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddMinutes(2));
+        await ctx.OeProjectDeliveries.Where(d => d.Id == earlier || d.Id == later)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.ScheduledFor, d => d.ScheduledFor.AddMinutes(-10)));
+
+        await using (var run = _db.NewContext())
+        {
+            (await NewService(run).RunDeliveryAsync(later)).Should().BeFalse("the earlier deployment goes first");
+        }
+        await using (var run = _db.NewContext())
+        {
+            (await NewService(run).RunDeliveryAsync(earlier)).Should().BeTrue();
+        }
+        await using (var run = _db.NewContext())
+        {
+            (await NewService(run).RunDeliveryAsync(later)).Should().BeTrue("its turn came once the earlier one ran");
+        }
+    }
+
+    [Theory]
+    [InlineData("not due yet")]
+    [InlineData("waiting for approval")]
+    [InlineData("pipeline deleted")]
+    public async Task RunDeliveryAsync_does_not_wait_for_an_earlier_deployment_that_cannot_run_now(string why)
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var earlier = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddMinutes(1));
+        var later = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddMinutes(2));
+        await ctx.OeProjectDeliveries.Where(d => d.Id == earlier || d.Id == later)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.ScheduledFor, d => d.ScheduledFor.AddMinutes(-10)));
+        switch (why)
+        {
+            case "not due yet":
+                // Moved to the window's next opening, say (#1124).
+                await ctx.OeProjectDeliveries.Where(d => d.Id == earlier)
+                    .ExecuteUpdateAsync(s => s.SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddHours(5)));
+                break;
+            case "waiting for approval":
+                await ctx.OeProjectDeliveries.Where(d => d.Id == earlier)
+                    .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.Proposed));
+                break;
+            case "pipeline deleted":
+                // Only the earlier one's pipeline: give the later one a pipeline of its own.
+                var other = await NewReleasePipelineService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
+                    seed.ProjectId, null, seed.BuildPipelineId, seed.EnvironmentId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+                await ctx.OeProjectDeliveries.Where(d => d.Id == later)
+                    .ExecuteUpdateAsync(s => s.SetProperty(d => d.ReleasePipelineId, other));
+                await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+                break;
+        }
+
+        await using var run = _db.NewContext();
+        (await NewService(run).RunDeliveryAsync(later)).Should().BeTrue($"the earlier one is {why}");
+    }
+
+    [Fact]
+    public async Task EnqueueDueDeliveriesAsync_leaves_what_does_not_fit_a_full_queue_for_the_next_sweep()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddMinutes(5));
+        var identity = new ALDevToolbox.Services.AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, UserId: 1, IsSiteAdmin: false, IsSystemOrganization: false);
+        var filler = 100_000;
+        while (_queue.TryEnqueue(new DeliveryJob(filler++, identity))) { }
+
+        await using var sweep = _db.NewContext();
+        var sweepTask = NewService(sweep).EnqueueDueDeliveriesAsync(DateTime.UtcNow.AddMinutes(10));
+        (await Task.WhenAny(sweepTask, Task.Delay(TimeSpan.FromSeconds(10)))).Should().BeSameAs(sweepTask, "a full queue never holds the sweep up");
+        await sweepTask;
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        while (_queue.Reader.TryRead(out var job)) _queue.Complete(job.DeliveryId);
+        await using var next = _db.NewContext();
+        await NewService(next).EnqueueDueDeliveriesAsync(DateTime.UtcNow.AddMinutes(10));
+        _queue.Reader.TryRead(out var queued).Should().BeTrue("the next sweep picks it up");
+        queued!.DeliveryId.Should().Be(deliveryId);
+    }
+
+    [Fact]
     public async Task ListDeliveryHistoryAsync_returns_deliveries_with_their_app_rows()
     {
         await using var ctx = _db.NewContext();
