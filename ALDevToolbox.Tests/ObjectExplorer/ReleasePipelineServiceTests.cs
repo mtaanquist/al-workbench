@@ -792,6 +792,47 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Turning_on_deploying_without_approval_takes_the_step_up_rule_deploying_takes()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, type: "Sandbox");
+        var input = new ReleasePipelineInput(
+            projectId, null, buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            PrepareReleaseOnNewBuild: true, DeployWithoutApproval: false);
+        var id = await NewService(ctx).CreateReleasePipelineAsync(input);
+        // The organisation asks for a recent second factor before deploying (#1127).
+        await ctx.Organizations.Where(o => o.Id == TestDb.DefaultOrgId)
+            .ExecuteUpdateAsync(s => s.SetProperty(o => o.StepUpTools,
+                ALDevToolbox.Domain.Tools.ToolCatalog.Format(new[] { ALDevToolbox.Domain.Tools.ToolKey.Releases })));
+        // A cookie session with no recent second factor.
+        var session = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(new[]
+        {
+            new System.Security.Claims.Claim(ALDevToolbox.Services.HttpOrganizationContext.UserIdClaim, "1"),
+            new System.Security.Claims.Claim(ALDevToolbox.Services.HttpOrganizationContext.OrganizationIdClaim, TestDb.DefaultOrgId.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            new System.Security.Claims.Claim(ALDevToolbox.Endpoints.EndpointHelpers.DisabledToolsClaim, string.Empty),
+            new System.Security.Claims.Claim(ALDevToolbox.Endpoints.EndpointHelpers.StepUpToolsClaim, string.Empty),
+        }, "test"));
+        ReleasePipelineService Svc(AppDbContext c) => new(c, _db.OrgContext, new ProjectAccess(c, _db.OrgContext),
+            new ALDevToolbox.Services.Tools.ToolEnablement(TestDb.EverythingEnabled(),
+                new TestDb.FixedHttpContextAccessor(new Microsoft.AspNetCore.Http.DefaultHttpContext { User = session }),
+                c, _db.OrgContext, TimeProvider.System),
+            NullLogger<ReleasePipelineService>.Instance);
+
+        // Saving with it off needs nothing more.
+        await Svc(_db.NewContext()).UpdateReleasePipelineAsync(id, input with { PrepareReleaseOnNewBuild = false });
+
+        var turnOn = () => Svc(_db.NewContext()).UpdateReleasePipelineAsync(id, input with { DeployWithoutApproval = true });
+        await turnOn.Should().ThrowAsync<ALDevToolbox.Services.Tools.StepUpRequiredException>();
+        var otherEnvId = await SeedEnvironmentAsync(ctx, projectId, name: "Sandbox2", type: "Sandbox");
+        var create = () => Svc(_db.NewContext()).CreateReleasePipelineAsync(input with { ProjectEnvironmentId = otherEnvId, DeployWithoutApproval = true });
+        await create.Should().ThrowAsync<ALDevToolbox.Services.Tools.StepUpRequiredException>();
+
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id)).DeployWithoutApproval.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task Deploying_without_approval_is_refused_for_an_environment_that_is_not_a_sandbox()
     {
         await using var ctx = _db.NewContext();
@@ -856,7 +897,7 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     private ReleasePipelineService NewService(AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleasePipelineService>.Instance);
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
 
     private static async Task<int> SeedProjectAsync(AppDbContext ctx)
     {

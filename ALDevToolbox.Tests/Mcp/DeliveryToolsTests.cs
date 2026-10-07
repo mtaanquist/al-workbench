@@ -42,7 +42,7 @@ public sealed class DeliveryToolsTests : IDisposable
                 _db.NewToolEnablement(ctx),
                 NullLogger<DeliveryService>.Instance),
             new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
-                NullLogger<ReleasePipelineService>.Instance),
+                _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance),
             _db.NewGitHubReleaseService(ctx, _db.NewGitHubAppClient(ctx, api ?? new UnreachableGitHub()),
                 _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, api ?? new UnreachableGitHub()))),
             new ArtifactService(ctx, new ProjectAccess(ctx, _db.OrgContext)));

@@ -1476,7 +1476,7 @@ public sealed class DeliveryServiceTests : IDisposable
     {
         await using var ctx = _db.NewContext();
         var rows = await new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
-            NullLogger<ReleasePipelineService>.Instance).ListReleasePipelineOverviewAsync();
+            _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance).ListReleasePipelineOverviewAsync();
         return rows.Single(r => r.Id == seed.ReleasePipelineId).LastDelivery!;
     }
 
@@ -2335,6 +2335,37 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ApproveProposalAsync_takes_the_step_up_rule_deploying_takes()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        var proposedId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+        // The organisation asks for a recent second factor before deploying (#1127).
+        await ctx.Organizations.Where(o => o.Id == TestDb.DefaultOrgId)
+            .ExecuteUpdateAsync(s => s.SetProperty(o => o.StepUpTools,
+                ALDevToolbox.Domain.Tools.ToolCatalog.Format(new[] { ALDevToolbox.Domain.Tools.ToolKey.Releases })));
+        var signedInLongAgo = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(new[]
+        {
+            new System.Security.Claims.Claim(ALDevToolbox.Services.HttpOrganizationContext.UserIdClaim, "1"),
+            new System.Security.Claims.Claim(ALDevToolbox.Services.HttpOrganizationContext.OrganizationIdClaim, TestDb.DefaultOrgId.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            // A cookie session carries these; a token does not.
+            new System.Security.Claims.Claim(ALDevToolbox.Endpoints.EndpointHelpers.DisabledToolsClaim, string.Empty),
+            new System.Security.Claims.Claim(ALDevToolbox.Endpoints.EndpointHelpers.StepUpToolsClaim, string.Empty),
+        }, "test"));
+        var tools = new ALDevToolbox.Services.Tools.ToolEnablement(TestDb.EverythingEnabled(),
+            new TestDb.FixedHttpContextAccessor(new Microsoft.AspNetCore.Http.DefaultHttpContext { User = signedInLongAgo }),
+            ctx, _db.OrgContext, TimeProvider.System);
+
+        var act = () => NewService(ctx, tools).ApproveProposalAsync(proposedId);
+
+        await act.Should().ThrowAsync<ALDevToolbox.Services.Tools.StepUpRequiredException>();
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == proposedId)).Status.Should().Be(ProjectDeliveryStatus.Proposed);
+        _queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task ProposeReleasesForBuildAsync_leaves_a_pipeline_that_did_not_ask_for_it()
     {
         await using var ctx = _db.NewContext();
@@ -2513,7 +2544,7 @@ public sealed class DeliveryServiceTests : IDisposable
                 await using (var del = _db.NewContext())
                 {
                     await new ReleasePipelineService(del, _db.OrgContext, new ProjectAccess(del, _db.OrgContext),
-                        NullLogger<ReleasePipelineService>.Instance).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+                        _db.NewToolEnablement(del), NullLogger<ReleasePipelineService>.Instance).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
                 }
                 break;
             default:
@@ -3074,14 +3105,14 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     private ReleasePipelineService NewReleasePipelineService(AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleasePipelineService>.Instance);
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
 
-    private DeliveryService NewService(AppDbContext ctx)
+    private DeliveryService NewService(AppDbContext ctx, ALDevToolbox.Services.Tools.ToolEnablement? tools = null)
     {
         var svc = new DeliveryService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             _tokens, _apps, _admin, _queue,
             new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
-            _db.NewToolEnablement(ctx),
+            tools ?? _db.NewToolEnablement(ctx),
             NullLogger<DeliveryService>.Instance)
         {
             PollDelay = TimeSpan.Zero,

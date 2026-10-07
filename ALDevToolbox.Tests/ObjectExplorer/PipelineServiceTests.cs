@@ -145,7 +145,7 @@ public sealed class PipelineServiceTests : IDisposable
         var buildId = await svc.CreatePipelineAsync(new PipelineInput(projectId, null, null, Branch: "main"));
         var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
         var test = await SeedEnvironmentAsync(ctx, projectId, "Test");
-        var deployments = new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleasePipelineService>.Instance);
+        var deployments = new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
         var generated = await deployments.CreateReleasePipelineAsync(
             new ReleasePipelineInput(projectId, null, buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
         var typed = await deployments.CreateReleasePipelineAsync(
