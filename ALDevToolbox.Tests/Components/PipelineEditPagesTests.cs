@@ -159,7 +159,7 @@ public sealed class PipelineEditPagesTests : IDisposable
 
         cut.WaitForAssertion(() => cut.Find("#pe-name").GetAttribute("value").Should().Be("Nightly"));
         cut.Find("#pe-name-hint").TextContent.Should().Be(
-            "Clear it to name the pipeline after its branch and extensions. Changing the branch or the extensions does the same, unless you also type a new name.");
+            "If you change the branch or the extensions, this name is replaced with the automatic one. Leave it blank to use the automatic name now.");
     }
 
     [Fact]
@@ -316,7 +316,7 @@ public sealed class PipelineEditPagesTests : IDisposable
         var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
 
         cut.WaitForAssertion(() => cut.Find("#rpe-name-hint").TextContent.Should().Be(
-            "Clear it to name the pipeline after where its apps come from and where they go. Changing either of those does the same, unless you also type a new name."));
+            "If you change where the apps come from or the target environment, this name is replaced with the automatic one. Leave it blank to use the automatic name now."));
     }
 
     [Fact]

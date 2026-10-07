@@ -310,15 +310,12 @@
                                 <div class="field">
                                     <label class="field__label" for="pe-name">Name</label>
                                     <input id="pe-name" type="text" class="input" maxlength="@PipelineNames.MaxLength" @bind="_customName"
-                                           disabled="@_saving" placeholder="e.g. @GeneratedName - nightly" @ref="_nameInput" />
+                                           disabled="@_saving" placeholder="@($"e.g. {GeneratedName ?? "main"} - nightly")" @ref="_nameInput" />
                                     @if (_nameError is not null)
                                     {
                                         <FieldError Message="@_nameError" />
                                     }
-                                    else
-                                    {
-                                        <small class="field__hint" id="pe-name-hint">Clear it to name the pipeline after its branch and extensions. Changing the branch or the extensions does the same, unless you also type a new name.</small>
-                                    }
+                                    <small class="field__hint" id="pe-name-hint">If you change the branch or the extensions, this name is replaced with the automatic one. Leave it blank to use the automatic name now.</small>
                                 </div>
                             }
                             else
