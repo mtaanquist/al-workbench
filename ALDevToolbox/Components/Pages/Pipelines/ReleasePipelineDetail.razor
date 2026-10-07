@@ -77,7 +77,14 @@
         else
         {
             <text>Installs from build pipeline </text>
-            <a href="@SourceHref">"@SourceName"</a>
+            @if (SourceDeleted)
+            {
+                <text>"@SourceName" (deleted)</text>
+            }
+            else
+            {
+                <a href="@SourceHref">"@SourceName"</a>
+            }
         }
         <text> into the @EnvType environment </text><a href="@EnvHref">"@EnvName"</a>.
     </SubtitleContent>
@@ -100,6 +107,20 @@
         @if (_rescheduleNotice is { } rescheduleNotice)
         {
             <Alert Tone="AlertTone.Info" Role="status"><span>@rescheduleNotice</span></Alert>
+        }
+        @if (SourceDeleted)
+        {
+            @* Deleting a build pipeline in use is refused (#1123); this is for the ones
+               deleted before that. Its old builds can still be deployed from here. *@
+            <Alert Tone="AlertTone.Danger">
+                <span>
+                    Its build pipeline <b>@SourceName</b> was deleted, so no new builds will reach this deployment pipeline.
+                    @if (_canManage)
+                    {
+                        <a href="@($"/pipelines/deployments/{Id}/edit")">Point it at another build pipeline</a><text>, or delete it.</text>
+                    }
+                </span>
+            </Alert>
         }
         @if (_rp!.ProjectEnvironment!.MissingSince is not null)
         {
@@ -126,7 +147,7 @@
         {
             <Alert Tone="AlertTone.Danger"><span>@gre</span></Alert>
         }
-        else if (_canManage && !HasSomethingToRelease)
+        else if (_canManage && !HasSomethingToRelease && !SourceDeleted)
         {
             <Alert Tone="AlertTone.Info">
                 @if (_fromReleases)
@@ -190,7 +211,14 @@
                                     }
                                     else
                                     {
-                                        <a href="@SourceHref">@SourceName</a> <span class="u-muted">build pipeline</span>
+                                        @if (SourceDeleted)
+                                        {
+                                            @SourceName <span class="u-muted">deleted build pipeline</span>
+                                        }
+                                        else
+                                        {
+                                            <a href="@SourceHref">@SourceName</a> <span class="u-muted">build pipeline</span>
+                                        }
                                     }
                                 </span>
                             </span>
@@ -312,7 +340,7 @@
                                     <Icon Name="send" Width="16" Height="16" /><span>Deploy</span>
                                 </button>
                             }
-                            else if (_canManage && !_fromReleases)
+                            else if (_canManage && !_fromReleases && !SourceDeleted)
                             {
                                 <a class="btn" href="@SourceHref"><Icon Name="hammer" Width="16" Height="16" /><span>Open the build pipeline</span></a>
                             }
@@ -721,6 +749,9 @@
     private string SourceName => _fromReleases
         ? _rp?.GithubReleaseRepository?.DisplayName ?? "the repository"
         : _rp?.BuildPipeline?.Name ?? "the build pipeline";
+
+    /// <summary>True when the build pipeline this draws from has been deleted; its page is gone with it.</summary>
+    private bool SourceDeleted => !_fromReleases && _rp?.BuildPipeline?.DeletedAt is not null;
 
     /// <summary>
     /// Where the source lives. Same-named source and environment ("Test" into "Test") are

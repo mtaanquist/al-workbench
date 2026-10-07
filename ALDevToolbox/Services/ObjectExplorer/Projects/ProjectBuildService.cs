@@ -1743,14 +1743,14 @@ public sealed class ProjectBuildService
         return outcome.Unresolved;
     }
 
-    /// <summary>Copies any third-party symbols the repos committed under <c>.alpackages/</c> into the symbol dir.</summary>
-    private static void CopyCommittedSymbols(IReadOnlyList<string> cloneDirs, string symbolsDir)
+    /// <summary>Copies any third-party symbols the repos committed under <c>.alpackages/</c> into the symbol dir, never through a symbolic link.</summary>
+    internal static void CopyCommittedSymbols(IReadOnlyList<string> cloneDirs, string symbolsDir)
     {
         foreach (var cloneDir in cloneDirs)
         {
-            foreach (var pkgDir in Directory.EnumerateDirectories(cloneDir, ".alpackages", SearchOption.AllDirectories))
+            foreach (var pkgDir in Directory.EnumerateDirectories(cloneDir, ".alpackages", NoLinksRecursive))
             {
-                foreach (var app in Directory.EnumerateFiles(pkgDir, "*.app", SearchOption.TopDirectoryOnly))
+                foreach (var app in Directory.EnumerateFiles(pkgDir, "*.app", NoLinks))
                 {
                     var dest = Path.Combine(symbolsDir, Path.GetFileName(app));
                     if (!File.Exists(dest)) File.Copy(app, dest);
@@ -2098,9 +2098,35 @@ public sealed class ProjectBuildService
     internal static bool IsTestSegment(string segment) => AppJsonManifestParser.IsTestSegment(segment);
 
     /// <summary>
+    /// How every walk of a clone enumerates: never into a symbolic link, so a link
+    /// that slipped past <c>core.symlinks=false</c> (see <see cref="GitAuthEnv"/>)
+    /// still cannot lead the walk out of the clone (#1109).
+    /// </summary>
+    private static readonly EnumerationOptions NoLinks = new()
+    {
+        AttributesToSkip = FileAttributes.ReparsePoint,
+        IgnoreInaccessible = true,
+    };
+
+    private static readonly EnumerationOptions NoLinksRecursive = new()
+    {
+        AttributesToSkip = FileAttributes.ReparsePoint,
+        IgnoreInaccessible = true,
+        RecurseSubdirectories = true,
+    };
+
+    /// <summary>True for a file that exists and is not a symbolic link.</summary>
+    private static bool IsRegularFile(string path)
+    {
+        var info = new FileInfo(path);
+        return info.Exists && info.LinkTarget is null;
+    }
+
+    /// <summary>
     /// Walks <paramref name="root"/> for folders containing an <c>app.json</c>,
     /// pruning excluded (<c>.alpackages</c>, <c>.git</c>, …) and test folders during
-    /// descent. Returns the project directories (the folders holding app.json).
+    /// descent, and never following a symbolic link. Returns the project directories
+    /// (the folders holding app.json).
     /// </summary>
     internal static IReadOnlyList<string> DiscoverAppProjectDirs(string root)
     {
@@ -2110,9 +2136,9 @@ public sealed class ProjectBuildService
         while (stack.Count > 0)
         {
             var dir = stack.Pop();
-            if (File.Exists(Path.Combine(dir, "app.json"))) results.Add(dir);
+            if (IsRegularFile(Path.Combine(dir, "app.json"))) results.Add(dir);
             string[] subs;
-            try { subs = Directory.GetDirectories(dir); }
+            try { subs = Directory.GetDirectories(dir, "*", NoLinks); }
             catch { continue; }
             foreach (var sub in subs)
             {
@@ -2164,8 +2190,16 @@ public sealed class ProjectBuildService
     /// The app process is multi-tenant; an argv is visible via the world-readable
     /// <c>/proc/&lt;pid&gt;/cmdline</c>, whereas the environment block isn't.
     /// Always sets <c>GIT_TERMINAL_PROMPT=0</c> so a bad token fails fast. See #430.
+    ///
+    /// <para>
+    /// Also turns <c>core.symlinks</c> off, so a symbolic link committed to a
+    /// repository is checked out as a small text file holding its target rather than
+    /// as a link. Repository content is untrusted, and a link such as <c>x -&gt; /</c>
+    /// would otherwise lead every walk of the clone out onto the server's own disk
+    /// (#1109). AL projects have no use for links.
+    /// </para>
     /// </summary>
-    private static Dictionary<string, string> GitAuthEnv(RepositoryProvider provider, string pat) => new()
+    internal static Dictionary<string, string> GitAuthEnv(RepositoryProvider provider, string pat) => new()
     {
         // Never block on an interactive prompt or a credential helper — the PAT
         // travels in http.extraHeader. A configured helper (manager/cache/store) on
@@ -2174,7 +2208,7 @@ public sealed class ProjectBuildService
         // remote into a fast, non-zero failure instead of a forever-hang.
         ["GIT_TERMINAL_PROMPT"] = "0",
         ["GCM_INTERACTIVE"] = "never",
-        ["GIT_CONFIG_COUNT"] = "4",
+        ["GIT_CONFIG_COUNT"] = "5",
         ["GIT_CONFIG_KEY_0"] = "http.extraHeader",
         ["GIT_CONFIG_VALUE_0"] = BasicAuthHeaderValue(provider, pat),
         ["GIT_CONFIG_KEY_1"] = "credential.helper",
@@ -2183,6 +2217,8 @@ public sealed class ProjectBuildService
         ["GIT_CONFIG_VALUE_2"] = "1000",
         ["GIT_CONFIG_KEY_3"] = "http.lowSpeedTime",
         ["GIT_CONFIG_VALUE_3"] = "60",
+        ["GIT_CONFIG_KEY_4"] = "core.symlinks",
+        ["GIT_CONFIG_VALUE_4"] = "false",
     };
 
     /// <summary>

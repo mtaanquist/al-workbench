@@ -357,6 +357,26 @@ public sealed class ReleasePipelineServiceTests : IDisposable
         row.EnvironmentMissing.Should().BeFalse();
     }
 
+    [Fact]
+    public async Task A_pipeline_says_so_when_its_build_pipeline_was_deleted()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId, name: "Nightly");
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "Production");
+        await NewService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
+            projectId, "Nightly to Production", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+        (await NewService(_db.NewContext()).ListReleasePipelinesAsync(projectId)).Single().BuildPipelineDeleted.Should().BeFalse();
+
+        // Deleted before deleting one in use was refused.
+        await ctx.OePipelines.Where(p => p.Id == buildId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+
+        var row = (await NewService(_db.NewContext()).ListReleasePipelinesAsync(projectId)).Single();
+        row.BuildPipelineDeleted.Should().BeTrue();
+        row.BuildPipelineName.Should().Be("Nightly");
+    }
+
     [Theory]
     [InlineData("Active", null)]
     [InlineData("Upgrading", null)]
