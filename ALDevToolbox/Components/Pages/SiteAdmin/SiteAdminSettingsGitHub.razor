@@ -8,6 +8,8 @@
 @inject NavigationManager Nav
 @inject ALDevToolbox.Endpoints.PublicOrigin Origin
 @inject ILogger<SiteAdminSettingsGitHub> Log
+@inject ALDevToolbox.Services.GitHub.GitHubHookAddressAllowList Senders
+@inject TimeProvider Clock
 
 @*
     The deployment-wide GitHub App registration. Interactive because the removal
@@ -271,6 +273,36 @@
                     </span>
                 </Alert>
             }
+            @if (_view is not null)
+            {
+                @* Read once per render from the in-memory list (#1201). Behind a
+                   reverse proxy the app does not trust, every delivery is refused
+                   from the proxy's own address, and a rate-limited log line is the
+                   only other place that shows it. *@
+                <Alert Tone="AlertTone.Info" Role="status">
+                    <span id="github-hook-addresses">
+                        @if (_senderListLoadedAt is { } loadedAt)
+                        {
+                            <text>GitHub's list of webhook addresses was last read <Timestamp Value="@loadedAt.UtcDateTime" Relative="true" />. Webhook messages from any other address are turned away.</text>
+                        }
+                        else
+                        {
+                            <text>GitHub's list of webhook addresses has not been read yet, so webhook messages are accepted from any address. It is read shortly after the workbench starts, then once a day.</text>
+                        }
+                    </span>
+                </Alert>
+                @if (RecentRefusal is { } refusal)
+                {
+                    <Alert Tone="AlertTone.Warn" Role="status">
+                        <span id="github-hook-refusal">
+                            A webhook message was turned away <Timestamp Value="@refusal.At.UtcDateTime" Relative="true" />
+                            because it came from @(refusal.Sender ?? "an unknown address"), which is not one of GitHub's.
+                            If AL Workbench runs behind a reverse proxy, add the proxy's address to
+                            TRUSTED_PROXIES and restart AL Workbench.
+                        </span>
+                    </Alert>
+                }
+            }
             <Alert Tone="AlertTone.Info">
                 <span>
                     One GitHub app, shared by every organisation on this site. Filling
@@ -299,6 +331,15 @@
     private ConfirmDialog? _confirmRemove;
 
     private bool IsConfigured => _view?.IsConfigured ?? false;
+
+    private DateTimeOffset? _senderListLoadedAt;
+    private ALDevToolbox.Services.GitHub.GitHubHookAddressRefusal? _lastRefusal;
+
+    /// <summary>How far back a refused delivery is still worth pointing out.</summary>
+    private static readonly TimeSpan RefusalShownFor = TimeSpan.FromDays(1);
+
+    private ALDevToolbox.Services.GitHub.GitHubHookAddressRefusal? RecentRefusal =>
+        _lastRefusal is { } r && Clock.GetUtcNow() - r.At < RefusalShownFor ? r : null;
 
     private string SetupUrl => Nav.BaseUri.TrimEnd('/') + Endpoints.GitHubAppEndpoints.SetupCallbackPath;
 
@@ -329,6 +370,8 @@
         // GitHub lives on the same system_settings singleton as the rest of the
         // family, so that row's timestamp is this tab's "last saved" too.
         _updatedAt = (await Settings.GetViewAsync()).UpdatedAt;
+        _senderListLoadedAt = Senders.LoadedAt;
+        _lastRefusal = Senders.LastRefusal;
     }
 
     /// <summary>

@@ -54,6 +54,9 @@ public static class BackgroundWorkerRegistration
         // Asks GitHub to resend webhook deliveries the endpoint refused or never
         // answered, and closes pull-request builds a restart cut short (#1121).
         services.AddHostedService<ALDevToolbox.Services.GitHub.GitHubWebhookRecoveryScheduler>();
+        // Reads the address ranges GitHub sends webhooks from, at start-up and daily,
+        // so the webhook can refuse other senders before reading a body (#1201).
+        services.AddHostedService<ALDevToolbox.Services.GitHub.GitHubHookAddressRefreshScheduler>();
         // Nightly drift check after the environment refresh: measures every tracked
         // repository against its solution's environment again, then opens the update
         // pull requests of the solutions that asked for that (#1104).

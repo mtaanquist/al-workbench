@@ -231,6 +231,32 @@ public sealed partial class GitHubAppClient
         return token;
     }
 
+    /// <summary>
+    /// The address ranges GitHub sends webhook deliveries from: the <c>hooks</c> list of
+    /// <c>GET /meta</c>, as CIDR strings (#1201). Asked without a credential - the route
+    /// is public and a deployment with no App registered still has a webhook to guard -
+    /// which GitHub allows sixty times an hour per address; this is asked once a day.
+    /// </summary>
+    /// <exception cref="GitHubApiException">GitHub refused the call or the answer had no <c>hooks</c> list.</exception>
+    /// <exception cref="HttpRequestException">GitHub could not be reached.</exception>
+    public async Task<IReadOnlyList<string>> GetHookAddressRangesAsync(CancellationToken ct = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, "meta");
+        using var document = await SendAsync(request, ct);
+        // TryGetProperty throws on a root that is not an object, so check that first:
+        // an array or a bare string is as unusable an answer as one with no list.
+        if (document.RootElement.ValueKind != JsonValueKind.Object
+            || !document.RootElement.TryGetProperty("hooks", out var hooks)
+            || hooks.ValueKind != JsonValueKind.Array)
+        {
+            throw new GitHubApiException(HttpStatusCode.BadGateway, "GitHub did not list the addresses it sends webhooks from.");
+        }
+        return hooks.EnumerateArray()
+            .Where(e => e.ValueKind == JsonValueKind.String)
+            .Select(e => e.GetString()!)
+            .ToList();
+    }
+
     // ── User-to-server: acting as one person rather than as the organisation ──
 
     /// <summary>

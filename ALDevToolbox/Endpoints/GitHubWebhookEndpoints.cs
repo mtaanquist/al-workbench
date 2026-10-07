@@ -16,7 +16,8 @@ namespace ALDevToolbox.Endpoints;
 /// <para>Phase 1 had no such route on purpose - "nothing needs GitHub to call us".
 /// This one exists because a check run is by definition something GitHub asks for,
 /// and it is written to be the smallest inbound surface that can be: anonymous,
-/// antiforgery-disabled (there is no browser and no cookie), rate-limited per
+/// antiforgery-disabled (there is no browser and no cookie), open only to the
+/// addresses GitHub publishes for its webhooks (#1201), rate-limited per
 /// source address, capped at a megabyte (25 MB for a push), and doing nothing at all until an
 /// HMAC-SHA256 over the raw body matches the deployment's stored webhook secret.
 /// A delivery that verifies is parsed and enqueued; nothing here reads or writes
@@ -83,10 +84,38 @@ public static class GitHubWebhookEndpoints
             SystemSettingsService settings,
             GitHubWebhookQueue queue,
             GitHubWebhookBodyGate gate,
+            GitHubHookAddressAllowList senders,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             var log = loggerFactory.CreateLogger("ALDevToolbox.GitHubWebhook");
+
+            // Only GitHub's published webhook addresses may deliver (#1201), and that
+            // is decided before anything else: before the body is read and before a
+            // large-body slot is taken, so a stranger costs one header parse however
+            // many addresses it has. The address is the forwarded client address when
+            // the proxy in front is trusted, else the connection's - which behind an
+            // untrusted proxy is the proxy itself, hence the hint in the warning.
+            var sender = ctx.Connection.RemoteIpAddress;
+            switch (senders.Check(sender))
+            {
+                case GitHubHookAddressVerdict.Refused:
+                    if (senders.ShouldWarnRefusal(sender, out var suppressed))
+                    {
+                        log.LogWarning(
+                            "Refused a GitHub webhook delivery from {Sender}: not one of the addresses GitHub sends webhooks from ({Suppressed} more refused since the last warning). If every delivery is refused from the same address, it is probably the reverse proxy's: list the proxy in TRUSTED_PROXIES.",
+                            sender?.ToString() ?? "unknown", suppressed);
+                    }
+                    return Results.Text("This address is not one GitHub sends webhooks from.", "text/plain", statusCode: 403);
+                case GitHubHookAddressVerdict.NotLoaded:
+                    if (senders.ShouldWarnUnloaded())
+                    {
+                        log.LogWarning(
+                            "Accepting GitHub webhook deliveries from any address, {Sender} included: GitHub's webhook address ranges have not been loaded yet.",
+                            sender?.ToString() ?? "unknown");
+                    }
+                    break;
+            }
 
             // Every response writes a body. UseStatusCodePagesWithReExecute
             // re-runs the pipeline at GET /not-found for a bare 4xx, and for a

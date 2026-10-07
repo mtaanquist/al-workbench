@@ -498,6 +498,39 @@ on every pull request, inline in the Files tab.
   and writes a body on every response so the status-pages middleware does not rewrite a
   401 into a 400. It is on the maintenance-mode allow-list: accepting a delivery is
   enqueueing, and GitHub disables hooks that keep failing. `ping` answers 200.
+- **Only GitHub's webhook addresses may deliver (#1201).** The slots above bound what
+  one address can hold, but someone with many addresses could still hold them all with
+  forged slow pushes. So the first thing the endpoint does, before it reads the body or
+  takes a slot, is check the sender against the `hooks` ranges of `GET /meta`, and answer
+  anything else 403 with a short text. `GitHubHookAddressRefreshScheduler` reads that list
+  (unauthenticated, through the App's API client) about twenty seconds after start-up and
+  then daily, into the singleton `GitHubHookAddressAllowList`; a failed or empty refresh
+  keeps the list in use. Until a list has loaded once the check **fails open** - every
+  sender is let through, with a rate-limited warning - so a GitHub outage or a host with
+  no outbound route does not lose deliveries; `DISABLE_GITHUB_HOOK_ADDRESS_REFRESH=1`
+  keeps it that way for good. An IPv4 sender reported as IPv4-mapped IPv6 is matched as
+  IPv4; a request with no address at all is refused once a list is loaded. Redeliveries
+  the recovery sweep asks for come from the same ranges, so they pass, and the sweep
+  treats a logged 403 as worth resending: only GitHub's own deliveries are in that log,
+  so a 403 there was a genuine delivery refused for a proxy setting or a stale list.
+  **The check depends on the trusted-proxy setting.** The sender is
+  `HttpContext.Connection.RemoteIpAddress` after `UseForwardedHeaders`, which takes the
+  `X-Forwarded-For` value only from a peer listed in `TRUSTED_PROXIES` (or loopback),
+  and only the last hop (`ForwardLimit` 1). Behind a proxy that is not listed, every
+  delivery looks like it came from the proxy and is refused; the refusal warning (at most
+  one every five minutes, with a count of the ones it skipped) names the address and
+  points at `TRUSTED_PROXIES`, and the site admin's GitHub settings page shows when the
+  list was last read and the last refused sender, for a day after the refusal. A client's
+  own `X-Forwarded-For` is ignored when it connects directly from an untrusted address,
+  and a trusted proxy appends the peer it saw last - **provided the only peers inside the
+  trusted range are proxies.** A trusted range as wide as the compose bridge network
+  (`172.16.0.0/12`) also covers Docker's port forwarding, so while the app's own port is
+  published a client can connect to it, appear to come from the bridge gateway, and name
+  a GitHub address; the README and `compose.yaml` therefore say to remove that mapping
+  or bind it to `127.0.0.1` when Caddy is in front. The signature check still applies to
+  such a request. A refusal also asks the refresh scheduler for an early read of the
+  list (at most one an hour), so a range GitHub has just added is picked up while the
+  recovery sweep still has resends left.
   `pull_request` with action `opened`, `synchronize` or `reopened` enqueues; everything
   else is 204. Since #963 it also takes `push`, and a `pull_request` `closed` with
   `merged: true`: both are parsed, enqueued and answered 202 behind exactly the same
@@ -720,8 +753,8 @@ and it accepted work it should not have. What changed:
   attempts all failed it asks GitHub for one more (`POST /app/hook/deliveries/{id}/attempts`).
   It looks back at most three days (what GitHub keeps), asks for no more than the webhook
   queue has room for (half its capacity, less what is waiting), stops after five attempts
-  at one event, and asks in the order the events first failed. A 4xx other than 408, 413
-  and 429 is not resent: that is a delivery we read and turned away. A resent push is
+  at one event, and asks in the order the events first failed. A 4xx other than 403, 408,
+  413 and 429 is not resent: that is a delivery we read and turned away. A resent push is
   safe because the push path ignores a push it has seen or one older than the recorded
   head. The pull-request path has no such guard - the endpoint would take a resent older
   head as the newest and cancel the build of the real one - so a pull-request build
