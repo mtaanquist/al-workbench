@@ -100,6 +100,20 @@ public sealed class DeliveryService
         => CreateDeliveryAsync(releasePipelineId, projectBuildId, scheduledForUtc, forceSyncOnce: false, ct);
 
     /// <summary>
+    /// <see cref="ReleaseBuildNowAsync"/> for an agent (the <c>deploy_build</c> MCP tool).
+    /// A production deployment asks a person to confirm it on the deployment pipeline's
+    /// page, and an agent has no such step, so a non-sandbox environment is refused here
+    /// unless the organisation has switched on
+    /// <see cref="OrganizationSettings.AgentsMayDeployToProduction"/>; then it deploys
+    /// immediately, unconfirmed (#1122).
+    /// </summary>
+    public Task<int> DeployNowForAgentAsync(int releasePipelineId, int projectBuildId, CancellationToken ct = default)
+        => CreateDeliveryAsync(releasePipelineId, projectBuildId, DateTime.UtcNow, forceSyncOnce: false, ct, forAgent: true);
+
+    internal static string ProductionRefusedForAgents(string environmentName) =>
+        $"{environmentName} is not a sandbox, and this organisation does not let AI assistants deploy to production. Deploy to it from the deployment pipeline's page, which asks you to confirm first.";
+
+    /// <summary>
     /// Deploys a failed delivery's build again, now, through the same deployment pipeline
     /// (#931). With <paramref name="forceSyncOnce"/> the new delivery snapshots
     /// <see cref="BcSyncMode.ForceSync"/> as its own schema sync mode; the pipeline's
@@ -240,7 +254,7 @@ public sealed class DeliveryService
     internal TimeSpan OpenSessionsTimeout { get; set; } = TimeSpan.FromSeconds(15);
 
     private async Task<int> CreateDeliveryAsync(int releasePipelineId, int projectBuildId, DateTime scheduledForUtc, bool forceSyncOnce, CancellationToken ct,
-        string? parkedLog = null)
+        string? parkedLog = null, bool forAgent = false)
     {
         var orgId = RequireOrganizationId();
         // Deploying spends the customer's Business Central credential, and it
@@ -251,10 +265,20 @@ public sealed class DeliveryService
         scheduledForUtc = DateTime.SpecifyKind(scheduledForUtc, DateTimeKind.Utc);
 
         var plan = await ResolveReleaseAsync(releasePipelineId, projectBuildId, checkAccess: true, ct);
+        if (forAgent && !BcEnvironmentTypes.IsSandbox(plan.EnvType)
+            && !await _db.OrganizationSettings.AsNoTracking()
+                .Where(s => s.OrganizationId == orgId)
+                .Select(s => s.AgentsMayDeployToProduction)
+                .FirstOrDefaultAsync(ct))
+        {
+            throw Validation("ProjectEnvironment", ProductionRefusedForAgents(plan.EnvName));
+        }
         // A parked delivery (the replacement a move writes before Business Central's copy is
         // cancelled) waits for approval, so nothing runs it if the move never finishes.
         var parked = parkedLog is not null;
-        var delivery = await WriteDeliveryAsync(orgId, plan, scheduledForUtc, forceSyncOnce, proposed: parked, ct, openingLog: parkedLog);
+        var openingLog = forAgent ? LogLine(DeliveryProposalLog.StartedByAgent(await CurrentUserNameAsync(ct))) : parkedLog;
+        var delivery = await WriteDeliveryAsync(orgId, plan, scheduledForUtc, forceSyncOnce, proposed: parked, ct,
+            openingLog: openingLog, startedByAgent: forAgent);
 
         // Due now (or in the past) → enqueue immediately so "Deploy now" is snappy;
         // a future delivery is left for the DeliveryScheduler to enqueue when due.
@@ -278,7 +302,7 @@ public sealed class DeliveryService
     /// </summary>
     private async Task<OeProjectDelivery> WriteDeliveryAsync(
         int orgId, ReleasePlan plan, DateTime scheduledForUtc, bool forceSyncOnce, bool proposed, CancellationToken ct,
-        string? openingLog = null, bool withoutApproval = false)
+        string? openingLog = null, bool withoutApproval = false, bool startedByAgent = false)
     {
         var now = DateTime.UtcNow;
         var delivery = new OeProjectDelivery
@@ -299,6 +323,7 @@ public sealed class DeliveryService
             Status = proposed ? ProjectDeliveryStatus.Proposed : ProjectDeliveryStatus.Scheduled,
             DiagnosticsLog = openingLog ?? (proposed ? LogLine(DeliveryProposalLog.Prepared(plan.BuildId)) : null),
             DeployedWithoutApproval = withoutApproval,
+            StartedByAgent = startedByAgent,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -354,6 +379,7 @@ public sealed class DeliveryService
                 EnvName = r.ProjectEnvironment!.Name,
                 EnvMissing = r.ProjectEnvironment.MissingSince != null,
                 EnvStatus = r.ProjectEnvironment.Status,
+                EnvType = r.ProjectEnvironment.Type,
                 WindowStart = r.ProjectEnvironment.UpdateWindowStart,
                 WindowEnd = r.ProjectEnvironment.UpdateWindowEnd,
             })
@@ -494,7 +520,7 @@ public sealed class DeliveryService
         }
 
         return new ReleasePlan(
-            rp.Id, rp.ProjectId, rp.EnvName, wireSchedule,
+            rp.Id, rp.ProjectId, rp.EnvName, rp.EnvType, wireSchedule,
             BcDeploymentSchedule.IsOurDeliveryWindow(rp.DeploymentSchedule), rp.SchemaSyncMode,
             UpdateWindow.ResolveTimeZone(rp.TimeZone), rp.WindowStart, rp.WindowEnd, build.Id, artifacts);
     }
@@ -555,7 +581,7 @@ public sealed class DeliveryService
 
     /// <summary>A deployment checked and ready to be written: see <see cref="ResolveReleaseAsync"/>.</summary>
     private sealed record ReleasePlan(
-        int Id, int ProjectId, string EnvName, string WireSchedule, bool ByDeliveryWindow, string SchemaSyncMode,
+        int Id, int ProjectId, string EnvName, string? EnvType, string WireSchedule, bool ByDeliveryWindow, string SchemaSyncMode,
         TimeZoneInfo Tz, TimeOnly? WindowStart, TimeOnly? WindowEnd, int BuildId, List<ReleaseApp> Artifacts)
     {
         /// <summary>True when a window is set and <paramref name="utc"/> falls outside it: the audited override.</summary>
@@ -2329,7 +2355,7 @@ public sealed class DeliveryService
                 delivery.Id, delivery.EnvironmentName, ex.Message);
             // Without the live answer, the type as last read decides: an unapproved
             // deployment never goes ahead on a guess.
-            return NotASandboxRefusal(delivery, env?.Type);
+            return await NotASandboxRefusalAsync(delivery, env?.Type, ct);
         }
 
         if (live is null)
@@ -2346,7 +2372,7 @@ public sealed class DeliveryService
                     .SetProperty(e => e.StatusFetchedAt, stamped), ct);
         }
 
-        if (NotASandboxRefusal(delivery, live.Type) is { } notSandbox)
+        if (await NotASandboxRefusalAsync(delivery, live.Type, ct) is { } notSandbox)
         {
             _logger.LogWarning("Delivery {DeliveryId} refused: it was not approved and environment {Env} is {Type}, not a sandbox.",
                 delivery.Id, delivery.EnvironmentName, live.Type);
@@ -2363,14 +2389,28 @@ public sealed class DeliveryService
     }
 
     /// <summary>
-    /// The refusal for a deployment nobody approved (#1096) whose environment is not a
-    /// sandbox; null for every other deployment. This is what keeps the option away from a
-    /// Production environment even when the environment's type changed after it was set.
+    /// The refusal for a deployment nobody confirmed whose environment is not a sandbox:
+    /// one a new build started without approval (#1096), or one an AI assistant started
+    /// while the organisation does not let assistants deploy to production (#1122). Null
+    /// for every other deployment. This is what keeps both away from a Production
+    /// environment even when the environment's type changed after they were started.
     /// </summary>
-    private static string? NotASandboxRefusal(OeProjectDelivery delivery, string? environmentType) =>
-        delivery.DeployedWithoutApproval && !BcEnvironmentTypes.IsSandbox(environmentType)
-            ? $"Not deployed: {delivery.EnvironmentName} is no longer a sandbox, and only a sandbox can be deployed to without approval. Deploy this build from the pipeline's page if it should go there."
-            : null;
+    private async Task<string?> NotASandboxRefusalAsync(OeProjectDelivery delivery, string? environmentType, CancellationToken ct)
+    {
+        if (BcEnvironmentTypes.IsSandbox(environmentType)) return null;
+        if (delivery.DeployedWithoutApproval)
+        {
+            return $"Not deployed: {delivery.EnvironmentName} is no longer a sandbox, and only a sandbox can be deployed to without approval. Deploy this build from the pipeline's page if it should go there.";
+        }
+        if (delivery.StartedByAgent && !await _db.OrganizationSettings.AsNoTracking()
+                .Where(s => s.OrganizationId == delivery.OrganizationId)
+                .Select(s => s.AgentsMayDeployToProduction)
+                .FirstOrDefaultAsync(ct))
+        {
+            return $"Not deployed: {delivery.EnvironmentName} is no longer a sandbox, and this organisation does not let AI assistants deploy to production. Deploy this build from the pipeline's page if it should go there.";
+        }
+        return null;
+    }
 
     /// <summary>
     /// Polls one install operation until it reports a terminal state or the per-app
@@ -2675,6 +2715,10 @@ public static class DeliveryProposalLog
     /// <summary>The first line of a deployment a new build started without approval (#1096).</summary>
     public static string DeployedWithoutApproval(int buildId, string who) =>
         $"Started by build #{buildId} when it succeeded, without waiting for approval, because the pipeline deploys to this sandbox automatically. Runs as {who}, who turned that on.";
+
+    /// <summary>The first line of a deployment an AI assistant started (#1122).</summary>
+    public static string StartedByAgent(string who) =>
+        $"Started by an AI assistant acting for {who}, without the confirmation step.";
 
     /// <summary>Why a pipeline set to deploy without approval prepared this one for approval instead.</summary>
     public static string NotDeployedWithoutApproval(string reason) =>
