@@ -197,7 +197,8 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     private IRenderedComponent<PipelineBuilds> RenderPage(Seed seed)
     {
         var cut = _ctx.Render<PipelineBuilds>(p => p.Add(c => c.PipelineId, seed.PipelineId));
-        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
+        // Two builds, though Build history hides one of them when it is a preview build.
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().NotBeEmpty());
         return cut;
     }
 
@@ -503,13 +504,45 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
 
         var cut = RenderPage(seed);
 
+        ActThen(cut,
+            () => cut.Find(".card__head .check input").Change(true),
+            () =>
+            {
+                var rows = cut.FindAll(".data-table tbody tr");
+                rows[0].TextContent.Should().Contain("Next major preview build").And.Contain("on BC 29.0.52914.0");
+                rows[1].TextContent.Should().NotContain("preview").And.Contain("on BC 28.4.47110.0");
+                cut.FindAll(ReleaseButton(seed.NewerBuildId)).Should().BeEmpty("a preview build cannot be deployed");
+                cut.FindAll(ReleaseButton(seed.OlderBuildId)).Should().ContainSingle();
+            });
+    }
+
+    [Fact]
+    public async Task Build_history_hides_preview_builds_until_asked()
+    {
+        var seed = await SeedAsync();
+        await MakeNewerAPreviewCheckAsync(seed);
+
+        var cut = RenderPage(seed);
+
         cut.WaitForAssertion(() =>
         {
             var rows = cut.FindAll(".data-table tbody tr");
-            rows[0].TextContent.Should().Contain("Next major preview build").And.Contain("on BC 29.0.52914.0");
-            rows[1].TextContent.Should().NotContain("preview").And.Contain("on BC 28.4.47110.0");
-            cut.FindAll(ReleaseButton(seed.NewerBuildId)).Should().BeEmpty("a preview build cannot be deployed");
-            cut.FindAll(ReleaseButton(seed.OlderBuildId)).Should().ContainSingle();
+            rows.Should().ContainSingle().Which.TextContent.Should().NotContain("preview build");
+            cut.Find(".card__head .check").TextContent.Should().Contain("Show preview builds");
+        });
+    }
+
+    [Fact]
+    public async Task Build_history_without_preview_builds_offers_no_toggle()
+    {
+        var seed = await SeedAsync();
+
+        var cut = RenderPage(seed);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(2);
+            cut.Markup.Should().NotContain("Show preview builds");
         });
     }
 

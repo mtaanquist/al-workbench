@@ -578,7 +578,19 @@
                        markup and gains a card around it (.card--flush, so the
                        card's frame is the only one). *@
                     <section class="card card--flush">
-                        <div class="card__head"><h2 class="card__title">Build history</h2></div>
+                        <div class="card__head">
+                            <h2 class="card__title">Build history</h2>
+                            @* The nightly preview check adds two builds a night that
+                               nobody deploys, so they stay out of the list until asked for. *@
+                            @if (_builds.Any(b => b.IsPreview))
+                            {
+                                <label class="check @(_showPreviewBuilds ? "is-checked" : "")">
+                                    <input type="checkbox" @bind="_showPreviewBuilds" />
+                                    <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
+                                    <span>Show preview builds</span>
+                                </label>
+                            }
+                        </div>
                         <table class="data-table data-table--edge">
                             <thead>
                                 <tr>
@@ -593,7 +605,13 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                @foreach (var b in _builds)
+                                @if (HistoryRows.Count == 0)
+                                {
+                                    <tr>
+                                        <td colspan="8" class="u-muted">Only preview builds so far. Tick Show preview builds to see them.</td>
+                                    </tr>
+                                }
+                                @foreach (var b in HistoryRows)
                                 {
                                     <tr class="@RowStateIcon.RowClass(b.Status)">
                                         <td class="data-table__col-state"><RowStateIcon State="@b.Status" /></td>
@@ -893,6 +911,12 @@
 
     private PipelineHeader? _header;
     private List<BuildRow> _builds = new();
+
+    /// <summary>Whether Build history lists the nightly preview check's builds. Off by default.</summary>
+    private bool _showPreviewBuilds;
+
+    /// <summary>The rows Build history lists: every build, or all but the preview check's.</summary>
+    private List<BuildRow> HistoryRows => _showPreviewBuilds ? _builds : _builds.Where(b => !b.IsPreview).ToList();
     private BuildRow? _latest;
     private BuildDetail? _latestDetail;
     private List<ComparableBuildRow> _comparable = new();
