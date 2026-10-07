@@ -87,6 +87,15 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
     }
 
     [Fact]
+    public void An_app_a_stopped_deployment_left_on_its_way_reads_as_not_confirmed_rather_than_failed()
+    {
+        var look = ReleasePipelineDetail.AppLook(ProjectDeliveryResultStatus.Unconfirmed);
+
+        look.Word.Should().Be("Not confirmed");
+        look.Tone.Should().NotBe("failed", "Business Central may well have installed it");
+    }
+
+    [Fact]
     public async Task A_failed_release_opens_with_the_whole_failure_its_apps_in_words_and_the_log()
     {
         var seed = await SeedAsync();

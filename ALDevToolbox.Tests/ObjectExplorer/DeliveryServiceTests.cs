@@ -696,7 +696,7 @@ public sealed class DeliveryServiceTests : IDisposable
         delivery.Status.Should().Be(ProjectDeliveryStatus.Failed, "the failure is saved although the token was cancelled");
         delivery.FailureMessage.Should().Contain("shutting down");
         var core = delivery.Results.Single(r => r.AppName == "CRONUS Core");
-        core.Status.Should().Be(ProjectDeliveryResultStatus.Failed);
+        core.Status.Should().Be(ProjectDeliveryResultStatus.Unconfirmed, "Business Central may still install it");
         core.Message.Should().Be(DeliveryService.InterruptedAppMessage);
         delivery.Results.Single(r => r.AppName == "CRONUS Sales").Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
     }
@@ -714,11 +714,16 @@ public sealed class DeliveryServiceTests : IDisposable
         await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == deliveryId && r.AppName == "CRONUS Core")
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, ProjectDeliveryResultStatus.Installing));
 
-        await NewService(_db.NewContext()).FailInterruptedDeliveriesAsync(DateTime.UtcNow);
+        await using (var sweep = _db.NewContext())
+        {
+            await NewService(sweep).FailInterruptedDeliveriesAsync(DateTime.UtcNow);
+        }
 
         await using var read = _db.NewContext();
         var results = await read.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == deliveryId).ToListAsync();
-        results.Single(r => r.AppName == "CRONUS Core").Message.Should().Be(DeliveryService.InterruptedAppMessage);
+        var core = results.Single(r => r.AppName == "CRONUS Core");
+        core.Status.Should().Be(ProjectDeliveryResultStatus.Unconfirmed);
+        core.Message.Should().Be(DeliveryService.InterruptedAppMessage);
         results.Single(r => r.AppName == "CRONUS Sales").Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
     }
 

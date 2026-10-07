@@ -1634,7 +1634,7 @@ public sealed class DeliveryService
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            await FailAsync(delivery, log, "The delivery was interrupted while the app was shutting down.", ct);
+            await FailAsync(delivery, log, "The deployment was interrupted because AL Workbench was shutting down. Deploy the build again.", ct);
             throw;
         }
         catch (Exception ex)
@@ -2383,8 +2383,8 @@ public sealed class DeliveryService
     /// <summary>
     /// What the apps a deployment never finished end up as. One still waiting was never
     /// sent. One that was uploading or installing may well have gone in: Business Central
-    /// carries on installing whatever happens to us, so it is not called skipped - it is
-    /// not confirmed, and the message says where to look (#1115).
+    /// carries on installing whatever happens to us, so it is neither skipped nor failed -
+    /// it is not confirmed, and the message says where to look (#1115).
     /// </summary>
     private static void SettleUnfinishedApps(IEnumerable<OeProjectDeliveryResult> results, DateTime now)
     {
@@ -2398,7 +2398,7 @@ public sealed class DeliveryService
                     break;
                 case ProjectDeliveryResultStatus.Uploading:
                 case ProjectDeliveryResultStatus.Installing:
-                    r.Status = ProjectDeliveryResultStatus.Failed;
+                    r.Status = ProjectDeliveryResultStatus.Unconfirmed;
                     r.Message = InterruptedAppMessage;
                     r.FinishedAt = now;
                     r.UpdatedAt = now;
