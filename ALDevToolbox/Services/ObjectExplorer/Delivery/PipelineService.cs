@@ -212,7 +212,11 @@ public sealed class PipelineService
         _logger.LogInformation("Pipeline {PipelineId}'s {Automation} now runs as user {UserId}.", id, automation, _orgContext.CurrentUserId);
     }
 
-    /// <summary>Soft-deletes a pipeline. Its past builds stay reachable (their pipeline_id is nulled by the FK).</summary>
+    /// <summary>
+    /// Soft-deletes a pipeline. Refused while a deployment pipeline still draws from it:
+    /// the delete is soft, so the foreign key's restrict never fires, and the deployment
+    /// pipeline would go on naming a source that no longer builds (#1123).
+    /// </summary>
     public async Task SoftDeletePipelineAsync(int id, CancellationToken ct = default)
     {
         RequireOrganizationId();
@@ -225,6 +229,19 @@ public sealed class PipelineService
             .Select(c => c.CreatedByUserId)
             .FirstOrDefaultAsync(ct);
         await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
+
+        var dependents = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.BuildPipelineId == id && r.DeletedAt == null)
+            .OrderBy(r => r.Name)
+            .Select(r => r.Name)
+            .ToListAsync(ct);
+        if (dependents.Count > 0)
+        {
+            var names = string.Join(", ", dependents.Select(n => $"\"{n}\""));
+            throw Validation("Pipeline", dependents.Count == 1
+                ? $"The deployment pipeline {names} deploys this pipeline's builds. Delete it, or point it at another build pipeline, first."
+                : $"The deployment pipelines {names} deploy this pipeline's builds. Delete them, or point them at another build pipeline, first.");
+        }
 
         pipeline.DeletedAt = DateTime.UtcNow;
         pipeline.UpdatedAt = pipeline.DeletedAt.Value;

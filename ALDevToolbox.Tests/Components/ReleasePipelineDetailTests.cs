@@ -202,6 +202,25 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_deleted_build_pipeline_is_named_without_a_link_and_the_page_says_what_to_do()
+    {
+        var seed = await SeedAsync();
+        await using (var db = _db.NewContext())
+        {
+            await db.OePipelines.Where(p => p.Id == seed.BuildPipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        }
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("was deleted, so no new builds will reach this deployment pipeline");
+            cut.FindAll($"a[href='/pipelines/{seed.BuildPipelineId}']").Should().BeEmpty("the page behind it is gone");
+        });
+    }
+
+    [Fact]
     public async Task An_app_the_environment_already_had_says_so_instead_of_blaming_a_failure()
     {
         var seed = await SeedAsync();
