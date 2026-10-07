@@ -670,6 +670,90 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == null);
     }
 
+    // ── The changelog baseline ──────────────────────────────────────────
+
+    [Fact]
+    public async Task The_changelog_is_measured_from_the_same_pipelines_last_build()
+    {
+        // Another pipeline of the solution watches another branch and built since; its
+        // commit isn't in this pipeline's single-branch clone.
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        await SeedOtherBuildAsync(projectId, pipelineName: "test", OtherSha);
+        _tools.Ancestors.Add(PriorSha);
+        _tools.LogOutput = "2222222\u001fCRONUS Developer\u001f2026-10-01T00:00:00+00:00\u001fAdd the sales report\n";
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().Equal([$"{PriorSha}..HEAD"]);
+        (await ChangelogAsync(buildId)).Should().Equal(["Add the sales report"]);
+    }
+
+    [Theory]
+    [InlineData(ProjectBuildTarget.NextMajor, ProjectBuildTrigger.Manual)]
+    [InlineData(ProjectBuildTarget.Current, ProjectBuildTrigger.PullRequest)]
+    public async Task A_preview_or_pull_request_build_is_never_the_changelog_baseline(string target, string trigger)
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        await SeedOtherBuildAsync(projectId, pipelineName: null, OtherSha, target, trigger);
+        _tools.Ancestors.Add(PriorSha);
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().Equal([$"{PriorSha}..HEAD"]);
+        (await ChangelogAsync(buildId)).Should().Equal(["No new commits since the last successful build."]);
+    }
+
+    [Fact]
+    public async Task A_previous_commit_that_left_the_branch_says_so()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().BeEmpty();
+        (await ChangelogAsync(buildId)).Should().ContainSingle().Which.Should().Contain("is no longer in history");
+    }
+
+    private const string OtherSha = "3333333333333333333333333333333333333333";
+
+    /// <summary>
+    /// A finished build newer than the seeded prior one at <paramref name="sha"/>: of a new
+    /// pipeline called <paramref name="pipelineName"/>, or of the seeded pipeline when null.
+    /// </summary>
+    private async Task SeedOtherBuildAsync(int projectId, string? pipelineName, string sha,
+        string target = ProjectBuildTarget.Current, string trigger = ProjectBuildTrigger.Manual)
+    {
+        await using var seed = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var pipelineId = await seed.OePipelines.Where(p => p.ProjectId == projectId).Select(p => p.Id).SingleAsync();
+        if (pipelineName is not null)
+        {
+            var other = new OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = pipelineName,
+                CreatedAt = now, UpdatedAt = now,
+            };
+            seed.OePipelines.Add(other);
+            await seed.SaveChangesAsync();
+            pipelineId = other.Id;
+        }
+        var build = PriorBuild(projectId, pipelineId, now.AddMinutes(-30), [], "1.0.600.0");
+        build.BcTarget = target;
+        build.Trigger = trigger;
+        seed.OeProjectBuilds.Add(build);
+        await seed.SaveChangesAsync();
+        var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+        seed.OeProjectBuildRepoCommits.Add(Commit(build.Id, repoId, sha));
+        await seed.SaveChangesAsync();
+    }
+
+    private async Task<List<string>> ChangelogAsync(int buildId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeProjectBuildCommits.AsNoTracking()
+            .Where(c => c.ProjectBuildId == buildId).OrderBy(c => c.Ordering).Select(c => c.Message).ToListAsync();
+    }
+
     /// <summary>
     /// A pipeline with numbering on, an earlier finished build of it that produced
     /// both extensions as 1.0.500.0 at <see cref="PriorSha"/>, and the queued build at
@@ -1191,6 +1275,15 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         /// <summary>The folder of every <c>git diff</c> run.</summary>
         public List<string> DiffedFolders { get; } = new();
 
+        /// <summary>The commits <c>git merge-base --is-ancestor</c> finds in the clone's history; any other fails it.</summary>
+        public HashSet<string> Ancestors { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>What <c>git log</c> prints for the changelog.</summary>
+        public string LogOutput { get; set; } = string.Empty;
+
+        /// <summary>The range of every changelog <c>git log</c> run.</summary>
+        public List<string> LoggedRanges { get; } = new();
+
         public Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken ct = default)
         {
             if (request.FileName == AlcPath)
@@ -1234,6 +1327,18 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                 return Task.FromResult(DiffFails
                     ? new ProcessRunResult(128, string.Empty, "fatal: bad object")
                     : new ProcessRunResult(0, Diffs.GetValueOrDefault(folder, string.Empty), string.Empty));
+            }
+            if (request.Arguments.Contains("merge-base"))
+            {
+                var ancestor = request.Arguments[request.Arguments.ToList().IndexOf("--is-ancestor") + 1];
+                return Task.FromResult(Ancestors.Contains(ancestor)
+                    ? new ProcessRunResult(0, string.Empty, string.Empty)
+                    : new ProcessRunResult(1, string.Empty, string.Empty));
+            }
+            if (request.Arguments.Contains("log"))
+            {
+                LoggedRanges.Add(request.Arguments[^1]);
+                return Task.FromResult(new ProcessRunResult(0, LogOutput, string.Empty));
             }
             // The branch a clone without --branch landed on: its default branch.
             if (request.Arguments.Contains("symbolic-ref"))
