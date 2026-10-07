@@ -115,6 +115,309 @@ public sealed class GitHubWebhookRecoverySchedulerTests : IDisposable
         RedeliveredIds(api).Should().OnlyHaveUniqueItems("an entry already acted on is never asked for twice");
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "{\"message\":\"Service unavailable\"}")]
+    [InlineData(HttpStatusCode.TooManyRequests, "{\"message\":\"You have exceeded a secondary rate limit.\"}")]
+    [InlineData(HttpStatusCode.Forbidden, "{\"message\":\"API rate limit exceeded for app ID 123456.\"}")]
+    [InlineData(FakeGitHubApi.Unreachable, null)]
+    public async Task A_resend_GitHub_could_not_take_is_asked_for_again_next_sweep(HttpStatusCode refusal, string? body)
+    {
+        // GitHub made no new attempt, so nothing in its log would ever show one:
+        // before #1175 the entry was marked as asked for and skipped until it aged out.
+        await ConfigureDeploymentAsync();
+        var now = DateTime.UtcNow;
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Get, "/app/hook/deliveries", HttpStatusCode.OK, LogJson(
+                Delivery(2, "guid-newer", now.AddMinutes(-1), 503, "push"),
+                Delivery(1, "guid-older", now.AddMinutes(-2), 503, "push")))
+            .OnSequence(HttpMethod.Post, "/app/hook/deliveries/", (refusal, body), (HttpStatusCode.Accepted, "{}"));
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(1);
+        RedeliveredIds(api).Should().Equal([1, 2], "one refusal can be about that delivery, so the next is still asked for");
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(1);
+        RedeliveredIds(api).Should().Equal([1, 2, 1]);
+    }
+
+    [Fact]
+    public async Task Refusals_on_two_deliveries_hold_the_rest_until_the_next_sweep()
+    {
+        await ConfigureDeploymentAsync();
+        var now = DateTime.UtcNow;
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Get, "/app/hook/deliveries", HttpStatusCode.OK, LogJson(
+                Delivery(3, "guid-c", now.AddMinutes(-1), 503, "push"),
+                Delivery(2, "guid-b", now.AddMinutes(-2), 503, "push"),
+                Delivery(1, "guid-a", now.AddMinutes(-3), 503, "push")))
+            .OnSequence(HttpMethod.Post, "/app/hook/deliveries/",
+                (HttpStatusCode.BadGateway, "{}"), (HttpStatusCode.BadGateway, "{}"), (HttpStatusCode.Accepted, "{}"));
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0);
+        RedeliveredIds(api).Should().Equal([1, 2], "GitHub is struggling, so the third waits");
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(3);
+        RedeliveredIds(api).Should().Equal([1, 2, 3, 1, 2], "the two GitHub refused go behind the one it never saw");
+    }
+
+    [Fact]
+    public async Task A_delivery_GitHub_keeps_refusing_does_not_hold_up_the_rest()
+    {
+        await ConfigureDeploymentAsync();
+        var now = DateTime.UtcNow;
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Get, "/app/hook/deliveries", HttpStatusCode.OK, LogJson(
+                Delivery(3, "guid-fine", now.AddMinutes(-1), 503, "push"),
+                Delivery(2, "guid-stuck-b", now.AddMinutes(-2), 503, "push"),
+                Delivery(1, "guid-stuck-a", now.AddMinutes(-3), 503, "push")))
+            .On(HttpMethod.Post, "/app/hook/deliveries/", HttpStatusCode.Accepted, "{}")
+            .On(HttpMethod.Post, "/app/hook/deliveries/1/attempts", HttpStatusCode.InternalServerError, "{}")
+            .On(HttpMethod.Post, "/app/hook/deliveries/2/attempts", HttpStatusCode.InternalServerError, "{}");
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0);
+        RedeliveredIds(api).Should().Equal([1, 2]);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(1);
+        RedeliveredIds(api).Should().Equal([1, 2, 3, 1, 2], "the oldest failures no longer go first once GitHub keeps refusing them");
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized, "{\"message\":\"Bad credentials\"}")]
+    [InlineData(HttpStatusCode.Forbidden, "{\"message\":\"Resource not accessible by integration\"}")]
+    public async Task A_resend_refused_to_the_App_itself_stops_the_sweep_and_counts_no_attempt(HttpStatusCode refusal, string body)
+    {
+        // A fresh App token goes with every call, so a 401 or a plain 403 is about
+        // the App, not the delivery, and every other resend would meet it too.
+        await ConfigureDeploymentAsync();
+        var now = DateTime.UtcNow;
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Get, "/app/hook/deliveries", HttpStatusCode.OK, LogJson(
+                Delivery(2, "guid-newer", now.AddMinutes(-1), 503, "push"),
+                Delivery(1, "guid-older", now.AddMinutes(-2), 503, "push")))
+            .OnSequence(HttpMethod.Post, "/app/hook/deliveries/", (refusal, body), (HttpStatusCode.Accepted, "{}"));
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0);
+        RedeliveredIds(api).Should().Equal([1]);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(2);
+        RedeliveredIds(api).Should().Equal([1, 1, 2]);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound)]
+    [InlineData(HttpStatusCode.Gone)]
+    [InlineData(HttpStatusCode.UnprocessableEntity)]
+    public async Task A_resend_GitHub_refuses_for_good_is_not_asked_for_again_and_does_not_hold_up_the_rest(HttpStatusCode refusal)
+    {
+        await ConfigureDeploymentAsync();
+        var now = DateTime.UtcNow;
+        var api = new FakeGitHubApi()
+            .On(HttpMethod.Get, "/app/hook/deliveries", HttpStatusCode.OK, LogJson(
+                Delivery(2, "guid-newer", now.AddMinutes(-1), 503, "push"),
+                Delivery(1, "guid-gone", now.AddMinutes(-2), 503, "push")))
+            .On(HttpMethod.Post, "/app/hook/deliveries/2/attempts", HttpStatusCode.Accepted, "{}")
+            .On(HttpMethod.Post, "/app/hook/deliveries/1/attempts", refusal, "{\"message\":\"Not redeliverable\"}");
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(1);
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0);
+        RedeliveredIds(api).Should().Equal([1, 2]);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound, "Not Found", GitHubWebhookRecoveryScheduler.Refusal.Settled)]
+    [InlineData(HttpStatusCode.Gone, "Gone", GitHubWebhookRecoveryScheduler.Refusal.Settled)]
+    [InlineData(HttpStatusCode.UnprocessableEntity, "Validation Failed", GitHubWebhookRecoveryScheduler.Refusal.Settled)]
+    [InlineData(HttpStatusCode.Unauthorized, "Bad credentials", GitHubWebhookRecoveryScheduler.Refusal.Systemic)]
+    [InlineData(HttpStatusCode.Forbidden, "Resource not accessible by integration", GitHubWebhookRecoveryScheduler.Refusal.Systemic)]
+    [InlineData(HttpStatusCode.Forbidden, "API rate limit exceeded for app ID 123456.", GitHubWebhookRecoveryScheduler.Refusal.Transient)]
+    [InlineData(HttpStatusCode.TooManyRequests, "You have exceeded a secondary rate limit.", GitHubWebhookRecoveryScheduler.Refusal.Transient)]
+    [InlineData(HttpStatusCode.RequestTimeout, "GitHub did not answer within the time allowed.", GitHubWebhookRecoveryScheduler.Refusal.Transient)]
+    [InlineData(HttpStatusCode.InternalServerError, "Server Error", GitHubWebhookRecoveryScheduler.Refusal.Transient)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "Service unavailable", GitHubWebhookRecoveryScheduler.Refusal.Transient)]
+    [InlineData(HttpStatusCode.BadRequest, "Bad Request", GitHubWebhookRecoveryScheduler.Refusal.Transient)]
+    public void A_refused_resend_is_classified_by_what_asking_again_could_change(
+        HttpStatusCode status, string message, GitHubWebhookRecoveryScheduler.Refusal expected) =>
+        GitHubWebhookRecoveryScheduler.ClassifyResendRefusal(status, message).Should().Be(expected);
+
+    [Theory]
+    [InlineData(HttpStatusCode.BadRequest, "Bad Request", GitHubWebhookRecoveryScheduler.Refusal.Settled)]
+    [InlineData(HttpStatusCode.NotFound, "Not Found", GitHubWebhookRecoveryScheduler.Refusal.Settled)]
+    [InlineData(HttpStatusCode.UnprocessableEntity, "Validation Failed", GitHubWebhookRecoveryScheduler.Refusal.Settled)]
+    [InlineData(HttpStatusCode.Gone, "Gone", GitHubWebhookRecoveryScheduler.Refusal.Transient)]
+    [InlineData(HttpStatusCode.Unauthorized, "Bad credentials", GitHubWebhookRecoveryScheduler.Refusal.Systemic)]
+    [InlineData(HttpStatusCode.Forbidden, "Resource not accessible by integration", GitHubWebhookRecoveryScheduler.Refusal.Systemic)]
+    [InlineData(HttpStatusCode.Forbidden, "API rate limit exceeded for app ID 123456.", GitHubWebhookRecoveryScheduler.Refusal.Transient)]
+    [InlineData(HttpStatusCode.BadGateway, "Bad Gateway", GitHubWebhookRecoveryScheduler.Refusal.Transient)]
+    public void A_refused_log_page_gives_its_stretch_up_only_when_the_cursor_is_no_good(
+        HttpStatusCode status, string message, GitHubWebhookRecoveryScheduler.Refusal expected) =>
+        GitHubWebhookRecoveryScheduler.ClassifyLogRefusal(status, message).Should().Be(expected);
+
+    [Fact]
+    public async Task Failures_a_full_queue_left_over_are_resent_even_when_the_log_no_longer_shows_them()
+    {
+        await ConfigureDeploymentAsync();
+        var now = DateTime.UtcNow;
+        var api = new FakeGitHubApi()
+            .OnSequence(HttpMethod.Get, "/app/hook/deliveries",
+                (HttpStatusCode.OK, LogJson(
+                    Delivery(3, "guid-c", now.AddMinutes(-1), 503, "push"),
+                    Delivery(2, "guid-b", now.AddMinutes(-2), 503, "push"),
+                    Delivery(1, "guid-a", now.AddMinutes(-3), 503, "push"))),
+                // The next sweep's read of the log finds nothing new.
+                (HttpStatusCode.OK, "[]"))
+            .On(HttpMethod.Post, "/app/hook/deliveries/", HttpStatusCode.Accepted, "{}");
+        var filler = new GitHubPullRequestJob(1, "a/b", "https://github.com/a/b.git", 1, "abc1234", "x", "main", "d");
+        for (var i = 0; i < GitHubWebhookQueue.Capacity / 2 - 1; i++) _queue.TryEnqueue(filler);
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(1);
+        RedeliveredIds(api).Should().Equal([1]);
+
+        while (_queue.Reader.TryRead(out _)) { }
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(2);
+        RedeliveredIds(api).Should().Equal([1, 2, 3]);
+    }
+
+    [Fact]
+    public async Task A_sweep_cut_short_keeps_what_it_had_not_got_to()
+    {
+        await ConfigureDeploymentAsync();
+        var now = DateTime.UtcNow;
+        using var cts = new CancellationTokenSource();
+        var api = new FakeGitHubApi()
+            .OnSequence(HttpMethod.Get, "/app/hook/deliveries",
+                (HttpStatusCode.OK, LogJson(
+                    Delivery(3, "guid-c", now.AddMinutes(-1), 503, "push"),
+                    Delivery(2, "guid-b", now.AddMinutes(-2), 503, "push"),
+                    Delivery(1, "guid-a", now.AddMinutes(-3), 503, "push"))),
+                (HttpStatusCode.OK, "[]"))
+            .On(HttpMethod.Post, "/app/hook/deliveries/", _ =>
+            {
+                // The host shuts down while the first resend is in flight.
+                cts.Cancel();
+                return (HttpStatusCode.Accepted, "{}");
+            });
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        Func<Task> cutShort = () => scheduler.RedeliverFailedAsync(cts.Token);
+        await cutShort.Should().ThrowAsync<OperationCanceledException>();
+
+        await scheduler.RedeliverFailedAsync(CancellationToken.None);
+        RedeliveredIds(api).Should().Contain([2, 3], "the deliveries the cut-short sweep never reached are still asked for");
+    }
+
+    [Fact]
+    public async Task A_log_longer_than_one_sweep_reads_is_finished_by_the_next_sweeps_without_reading_it_all_again()
+    {
+        // Five pages more than one sweep may read. Before #1175 every sweep read the
+        // newest twenty pages again and never reached the oldest failure.
+        await ConfigureDeploymentAsync();
+        var api = BusyLogApi(DateTime.UtcNow, _ => null);
+        int LogReads() => api.Calls.Count(c => c.StartsWith("GET ") && c.Contains("/app/hook/deliveries?"));
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0);
+        LogReads().Should().Be(GitHubWebhookRecoveryScheduler.MaxPages);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(1);
+        LogReads().Should().Be(GitHubWebhookRecoveryScheduler.MaxPages + 1 + 5,
+            "the newest page, then the five the first sweep did not reach");
+        RedeliveredIds(api).Should().Equal([BusyLogOldestFailureId]);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0);
+        LogReads().Should().Be(GitHubWebhookRecoveryScheduler.MaxPages + 1 + 5 + 1, "nothing is left to catch up on");
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized, "{\"message\":\"Bad credentials\"}")]
+    [InlineData(HttpStatusCode.Forbidden, "{\"message\":\"Resource not accessible by integration\"}")]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "{\"message\":\"Service unavailable\"}")]
+    public async Task An_unread_stretch_GitHub_refuses_once_is_kept_and_its_failure_still_resent(HttpStatusCode refusal, string body)
+    {
+        await ConfigureDeploymentAsync();
+        var refused = false;
+        var api = BusyLogApi(DateTime.UtcNow, page =>
+        {
+            if (page != GitHubWebhookRecoveryScheduler.MaxPages || refused) return null;
+            refused = true;
+            return (refusal, body);
+        });
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0);
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0, "the unread stretch was refused this time");
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(1);
+        RedeliveredIds(api).Should().Equal([BusyLogOldestFailureId]);
+    }
+
+    [Fact]
+    public async Task An_unread_stretch_whose_cursor_GitHub_no_longer_knows_is_given_up()
+    {
+        await ConfigureDeploymentAsync();
+        var api = BusyLogApi(DateTime.UtcNow, page =>
+            page == GitHubWebhookRecoveryScheduler.MaxPages ? (HttpStatusCode.UnprocessableEntity, "{\"message\":\"Invalid cursor\"}") : null);
+        int LogReads() => api.Calls.Count(c => c.StartsWith("GET ") && c.Contains("/app/hook/deliveries?"));
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        await scheduler.RedeliverFailedAsync(CancellationToken.None);
+        await scheduler.RedeliverFailedAsync(CancellationToken.None);
+        var afterGivingUp = LogReads();
+        await scheduler.RedeliverFailedAsync(CancellationToken.None);
+
+        LogReads().Should().Be(afterGivingUp + 1, "only the newest page is read once the stretch is given up");
+        RedeliveredIds(api).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task An_unread_stretch_that_fails_partway_resumes_where_it_stopped()
+    {
+        await ConfigureDeploymentAsync();
+        var failAt = GitHubWebhookRecoveryScheduler.MaxPages + 2;
+        var refused = false;
+        var api = BusyLogApi(DateTime.UtcNow, page =>
+        {
+            if (page != failAt || refused) return null;
+            refused = true;
+            return (HttpStatusCode.BadGateway, "{\"message\":\"Bad Gateway\"}");
+        });
+        int PageReads(int page) => api.Calls.Count(c => c.StartsWith("GET ") && c.EndsWith($"cursor=p{page}"));
+
+        await using var provider = BuildProvider(api);
+        var scheduler = NewScheduler(provider);
+
+        await scheduler.RedeliverFailedAsync(CancellationToken.None);
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(0);
+        (await scheduler.RedeliverFailedAsync(CancellationToken.None)).Should().Be(1);
+
+        PageReads(GitHubWebhookRecoveryScheduler.MaxPages).Should().Be(1, "the pages read before the failure are not read again");
+        PageReads(failAt).Should().Be(2);
+        RedeliveredIds(api).Should().Equal([BusyLogOldestFailureId]);
+    }
+
     [Fact]
     public async Task A_pull_request_delivery_whose_head_has_moved_on_is_not_resent()
     {
@@ -265,6 +568,47 @@ public sealed class GitHubWebhookRecoverySchedulerTests : IDisposable
         _db.AddGitHubServices(services, api);
         return services.BuildServiceProvider();
     }
+
+    /// <summary>The page count of <see cref="BusyLogApi"/>: five more than one sweep may read.</summary>
+    private const int BusyLogPages = GitHubWebhookRecoveryScheduler.MaxPages + 5;
+
+    /// <summary>The failure on the last page of <see cref="BusyLogApi"/>, the only one to resend.</summary>
+    private const long BusyLogOldestFailureId = 1000 - (BusyLogPages * 2 - 1);
+
+    /// <summary>
+    /// A delivery log of <see cref="BusyLogPages"/> pages of two, all older than the
+    /// overlap, so after the first sweep the newest stretch is one page. Page n is
+    /// read with <c>cursor=pn</c>. <paramref name="fault"/> may answer a page with an
+    /// error instead.
+    /// </summary>
+    private static FakeGitHubApi BusyLogApi(DateTime now, Func<int, (HttpStatusCode Status, string Body)?> fault) =>
+        new FakeGitHubApi()
+            .OnWithHeaders(HttpMethod.Get, "/app/hook/deliveries", request =>
+            {
+                var query = request.RequestUri!.Query;
+                var cursorAt = query.IndexOf("cursor=p", StringComparison.Ordinal);
+                var page = cursorAt < 0 ? 0 : int.Parse(query[(cursorAt + "cursor=p".Length)..]);
+                if (fault(page) is { } refusal) return (refusal.Status, refusal.Body, []);
+                var entries = Enumerable.Range(0, 2).Select(i =>
+                {
+                    var id = 1000 - (page * 2 + i);
+                    var at = now.AddHours(-1).AddMinutes(-(page * 2 + i));
+                    return (page, i) switch
+                    {
+                        // Got through on a resend logged on the first page...
+                        (0, 0) => Delivery(id, "guid-recovered", at, 200, "push", redelivery: true),
+                        // ...so its failure, read sweeps later, is not asked for.
+                        (BusyLogPages - 3, 0) => Delivery(id, "guid-recovered", at, 503, "push"),
+                        (BusyLogPages - 1, 1) => Delivery(id, "guid-oldest", at, 503, "push"),
+                        _ => Delivery(id, $"guid-{id}", at, 200, "push"),
+                    };
+                }).ToArray();
+                (string, string)[] headers = page < BusyLogPages - 1
+                    ? [("Link", $"<https://api.github.com/app/hook/deliveries?per_page=100&cursor=p{page + 1}>; rel=\"next\"")]
+                    : [];
+                return (HttpStatusCode.OK, LogJson(entries), headers);
+            })
+            .On(HttpMethod.Post, "/app/hook/deliveries/", HttpStatusCode.Accepted, "{}");
 
     private static FakeGitHubApi PagedApi(DateTime now)
     {
