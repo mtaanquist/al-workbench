@@ -846,6 +846,9 @@ public sealed class DeliveryService
 
         // Access first, so somebody who may not approve learns that rather than the state.
         var plan = await ResolveReleaseAsync(proposal.ReleasePipelineId, proposal.ProjectBuildId, checkAccess: true, ct);
+        // Approving spends the customer's Business Central credential as deploying does,
+        // so it takes the same step-up rule rather than trusting the page's gate (#1127).
+        await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
         if (proposal.Status != ProjectDeliveryStatus.Proposed)
         {
             throw Validation("Delivery", NoLongerWaiting);
