@@ -994,7 +994,7 @@ public sealed class ProjectService
             .Select(b => new
             {
                 b.ProjectId, b.Status, b.ReleaseId,
-                HasObjects = b.BcTarget == ProjectBuildTarget.Current || (b.Release != null && b.Release.SourceFileCount > 0),
+                HasObjects = _db.OeProjectBuilds.Where(OeProjectBuild.HasIndexedObjects).Any(x => x.Id == b.Id),
             })
             .FirstOrDefaultAsync(ct)
             ?? throw new McpException($"Build {buildId} was not found in this organisation.");

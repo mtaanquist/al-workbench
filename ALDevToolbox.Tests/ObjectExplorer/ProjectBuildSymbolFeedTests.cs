@@ -1196,31 +1196,32 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     }
 
     [Fact]
-    public async Task A_next_version_build_replaces_a_stale_preview_parent_with_the_current_insider_build()
+    public async Task A_next_version_build_leaves_refreshing_a_stale_preview_parent_to_the_daily_sweep()
     {
+        // It indexes nothing of its own (#1140), so importing 2 GB of preview to parent
+        // onto would buy it nothing; it links what is there.
         var (projectId, releaseId, _) = await SeedAsync();
         var staleId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", DateTime.UtcNow.AddDays(-20));
 
-        await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
+        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
 
+        outcome.ParentReleaseId.Should().Be(staleId);
         await using var read = _db.NewContext();
-        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == staleId)).DeletedAt.Should().NotBeNull();
-        var current = await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == "bc-insider:30.0:dk" && r.DeletedAt == null);
-        current.Id.Should().NotBe(staleId);
-        current.IsPrerelease.Should().BeTrue();
+        (await read.OeReleases.AsNoTracking().CountAsync(r => r.DedupKey == "bc-insider:30.0:dk")).Should().Be(1);
     }
 
     [Fact]
-    public async Task A_failed_preview_parent_is_replaced_at_once_and_never_adopted()
+    public async Task A_next_version_build_never_adopts_a_failed_preview_parent_nor_imports_one()
     {
         var (projectId, releaseId, _) = await SeedAsync();
         var failedId = await SeedPreviewAsync("bc-insider:30.0:dk", null, DateTime.UtcNow, status: "failed");
 
         var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
 
-        outcome.ParentReleaseId.Should().NotBe(failedId);
+        outcome.ParentReleaseId.Should().BeNull();
         await using var read = _db.NewContext();
-        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().NotBeNull();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().BeNull();
+        (await read.OeReleases.AsNoTracking().CountAsync(r => r.DedupKey == "bc-insider:30.0:dk")).Should().Be(1);
     }
 
     [Fact]

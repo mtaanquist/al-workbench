@@ -68,18 +68,28 @@ public sealed class PreviewCheckService
         var pipelineIds = pipelines.Select(p => p.Id).ToList();
         var builds = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value))
-            .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.BcTarget, b.Status, b.StartedAt, b.BcArtifactVersion })
+            .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.BcTarget, b.Status, b.StartedAt, b.BcArtifactVersion, b.ReleaseId })
             .ToListAsync(ct).ConfigureAwait(false);
         var byPipeline = builds.ToLookup(b => b.PipelineId);
 
         // What each pipeline's last check of each target compiled, and what its
         // branches hold now as the push webhook last reported them: together they
         // say whether the code changed since that check (#1140).
-        var lastCheckIds = builds
+        var lastChecks = builds
             .Where(b => ProjectBuildTarget.IsPreview(b.BcTarget))
             .GroupBy(b => (b.PipelineId, b.BcTarget))
-            .Select(g => g.MaxBy(b => b.StartedAt)!.Id)
+            .Select(g => g.MaxBy(b => b.StartedAt)!)
             .ToList();
+        var lastCheckIds = lastChecks.Select(b => b.Id).ToList();
+        // A check that went ready with an extension that did not compile counts as
+        // failed, as it does on the pipeline pages.
+        var lastCheckReleaseIds = lastChecks.Where(b => b.ReleaseId != null).Select(b => b.ReleaseId!.Value).ToList();
+        var withFailedApps = (await _db.OeProjectBuildResults.AsNoTracking()
+                .Where(r => lastCheckReleaseIds.Contains(r.ReleaseId) && r.Status == ProjectBuildResultStatus.Failed)
+                .Select(r => r.ReleaseId)
+                .Distinct()
+                .ToListAsync(ct).ConfigureAwait(false))
+            .ToHashSet();
         var pinned = (await _db.OeProjectBuildRepoCommits.AsNoTracking()
             .Where(c => lastCheckIds.Contains(c.ProjectBuildId) && c.ProjectRepositoryId != null && c.CommitHash != "")
             .Select(c => new { c.ProjectBuildId, RepositoryId = c.ProjectRepositoryId!.Value, c.CommitHash })
@@ -94,7 +104,7 @@ public sealed class PreviewCheckService
         var repositoryIds = repositories.SelectMany(g => g).ToList();
         var heads = await _db.OeRepositoryBranchHeads.AsNoTracking()
             .Where(h => repositoryIds.Contains(h.ProjectRepositoryId) && h.DeletedAt == null)
-            .Select(h => new BranchHead(h.ProjectRepositoryId, h.Branch, h.IsDefaultBranch, h.HeadSha))
+            .Select(h => new BranchHead(h.ProjectRepositoryId, h.Branch, h.IsDefaultBranch, h.HeadSha, h.PushedAt))
             .ToListAsync(ct).ConfigureAwait(false);
 
         var today = DateOnly.FromDateTime(nowUtc);
@@ -149,12 +159,14 @@ public sealed class PreviewCheckService
                     var sameCode = SameCode(
                         repositories[pipeline.ProjectId].ToList(),
                         pinned[last.Id].ToDictionary(c => c.RepositoryId, c => c.CommitHash),
-                        heads, pipeline.Branch);
+                        heads, pipeline.Branch, last.StartedAt);
+                    var clean = last.Status == ProjectBuildStatus.Ready
+                                && !(last.ReleaseId is { } checkedRelease && withFailedApps.Contains(checkedRelease));
                     // A check that ran clean against the same code and the same preview
                     // build would only say the same again, however long ago it ran. One
                     // that failed is tried again once the quiet period passes, in case
                     // what failed was not the code.
-                    if (sameCode == true && last.Status == ProjectBuildStatus.Ready) continue;
+                    if (sameCode == true && clean) continue;
                     // Without a stored head for every repository the code may have moved
                     // unseen, so a build of the pipeline since and the quiet period stand in.
                     var quiet = sameCode != false
@@ -171,29 +183,40 @@ public sealed class PreviewCheckService
 
     /// <summary>
     /// Whether every repository's watched branch still holds the commit the last
-    /// check compiled: true or false when the push webhook has reported a head for
-    /// each, null when it has not for one of them (nothing can tell then).
+    /// check compiled. True when every stored head matches; false when a push the
+    /// webhook reported after the check moved one; null when nothing can tell: a
+    /// repository with no stored head or no commit in the check, or a head that
+    /// differs but was stored before the check ran (a missed push left it behind
+    /// the branch the check cloned, so the difference says nothing).
     /// </summary>
     internal static bool? SameCode(
         IReadOnlyList<int> repositoryIds,
         IReadOnlyDictionary<int, string> checkedCommits,
         IReadOnlyList<BranchHead> heads,
-        string? branch)
+        string? branch,
+        DateTime checkStartedAt)
     {
         if (repositoryIds.Count == 0) return null;
+        var unknown = false;
         foreach (var repositoryId in repositoryIds)
         {
             var head = branch is { } named
                 ? heads.FirstOrDefault(h => h.RepositoryId == repositoryId && string.Equals(h.Branch, named, StringComparison.Ordinal))
                 : heads.FirstOrDefault(h => h.RepositoryId == repositoryId && h.IsDefaultBranch);
-            if (head is null || !checkedCommits.TryGetValue(repositoryId, out var sha)) return null;
-            if (!string.Equals(head.HeadSha, sha, StringComparison.OrdinalIgnoreCase)) return false;
+            if (head is null || !checkedCommits.TryGetValue(repositoryId, out var sha))
+            {
+                unknown = true;
+                continue;
+            }
+            if (string.Equals(head.HeadSha, sha, StringComparison.OrdinalIgnoreCase)) continue;
+            if (head.PushedAt > checkStartedAt) return false;
+            unknown = true;
         }
-        return true;
+        return unknown ? null : true;
     }
 
     /// <summary>A branch head as the push webhook last reported it.</summary>
-    internal sealed record BranchHead(int RepositoryId, string Branch, bool IsDefaultBranch, string HeadSha);
+    internal sealed record BranchHead(int RepositoryId, string Branch, bool IsDefaultBranch, string HeadSha, DateTime PushedAt);
 
     /// <summary>
     /// Records why <paramref name="pipelineId"/>'s check could not start, or clears it

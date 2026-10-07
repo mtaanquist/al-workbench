@@ -160,13 +160,43 @@ public sealed class PreviewCheckTests : IDisposable
     {
         var owner = await SeedUserAsync();
         var (projectId, pipelineId) = await SeedPipelineAsync(owner);
-        await SeedHeadAsync(projectId, ShaB);
+        await SeedHeadAsync(projectId, ShaB, pushedAt: Tonight.AddHours(-5));
         await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-1), NextMinor, commit: ShaA);
         await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-1), NextMajor, commit: ShaA);
 
         var due = await ListDueAsync();
 
         due.Select(d => d.BcTarget).Should().Equal(ProjectBuildTarget.NextMinor, ProjectBuildTarget.NextMajor);
+    }
+
+    [Fact]
+    public async Task A_head_stored_before_the_check_that_differs_from_it_does_not_make_it_due()
+    {
+        // A push the app missed: the check cloned the newer tip, the stored head is behind it.
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedHeadAsync(projectId, ShaA, pushedAt: Tonight.AddDays(-5));
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-2), NextMinor, commit: ShaB);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-2), NextMajor, commit: ShaB);
+
+        var due = await ListDueAsync();
+
+        due.Where(d => d.BcTarget is not null).Should().BeEmpty("nothing pushed since the check, so the quiet period decides");
+    }
+
+    [Fact]
+    public async Task A_check_that_went_ready_with_an_extension_that_failed_is_not_clean()
+    {
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedHeadAsync(projectId, ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-8), NextMinor,
+            commit: ShaA, failedApp: true);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-8), NextMajor, commit: ShaA);
+
+        var due = await ListDueAsync();
+
+        due.Where(d => d.BcTarget is not null).Select(d => d.BcTarget).Should().Equal(ProjectBuildTarget.NextMinor);
     }
 
     [Theory]
@@ -185,6 +215,39 @@ public sealed class PreviewCheckTests : IDisposable
 
         due.Where(d => d.BcTarget is not null).Select(d => d.BcTarget).Should()
             .Equal(expectDue ? [ProjectBuildTarget.NextMinor] : Array.Empty<string>());
+    }
+
+    private static readonly DateTime CheckedAt = Tonight.AddDays(-1);
+
+    private static PreviewCheckService.BranchHead Head(int repo, string branch, string sha, bool isDefault = false, int pushedHoursAgo = 48) =>
+        new(repo, branch, isDefault, sha, Tonight.AddHours(-pushedHoursAgo));
+
+    [Fact]
+    public void SameCode_reads_the_pipelines_named_branch_rather_than_the_default()
+    {
+        var heads = new[] { Head(1, "main", ShaB, isDefault: true, pushedHoursAgo: 2), Head(1, "release", ShaA) };
+
+        PreviewCheckService.SameCode([1], new Dictionary<int, string> { [1] = ShaA }, heads, "release", CheckedAt)
+            .Should().BeTrue();
+        PreviewCheckService.SameCode([1], new Dictionary<int, string> { [1] = ShaA }, heads, null, CheckedAt)
+            .Should().BeFalse("the default branch moved after the check");
+    }
+
+    [Fact]
+    public void SameCode_across_repositories_needs_every_one_to_say()
+    {
+        var checkedCommits = new Dictionary<int, string> { [1] = ShaA, [2] = ShaA };
+        var bothSame = new[] { Head(1, "main", ShaA, isDefault: true), Head(2, "main", ShaA, isDefault: true) };
+        var oneMissing = new[] { Head(1, "main", ShaA, isDefault: true) };
+        var oneMoved = new[] { Head(1, "main", ShaB, isDefault: true, pushedHoursAgo: 2) };
+
+        PreviewCheckService.SameCode([1, 2], checkedCommits, bothSame, null, CheckedAt).Should().BeTrue();
+        PreviewCheckService.SameCode([1, 2], checkedCommits, oneMissing, null, CheckedAt).Should().BeNull();
+        PreviewCheckService.SameCode([1, 2], checkedCommits, oneMoved, null, CheckedAt).Should().BeFalse(
+            "a push after the check is a change, whatever the other repository says");
+        // A repository added after the check has no commit in it.
+        PreviewCheckService.SameCode([1, 2, 3], checkedCommits,
+            [.. bothSame, Head(3, "main", ShaA, isDefault: true)], null, CheckedAt).Should().BeNull();
     }
 
     [Fact]
@@ -457,11 +520,29 @@ public sealed class PreviewCheckTests : IDisposable
     }
 
     private async Task SeedCheckAsync(int projectId, int pipelineId, string target, DateTime startedAt, string version,
-        string status = ProjectBuildStatus.Ready, string? commit = null)
+        string status = ProjectBuildStatus.Ready, string? commit = null, bool failedApp = false)
     {
         await using var ctx = _db.NewContext();
+        int? releaseId = null;
+        if (failedApp)
+        {
+            var release = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS check", Kind = "project", Status = "ready",
+                ImportedAt = startedAt, CreatedAt = startedAt, UpdatedAt = startedAt,
+            };
+            ctx.OeReleases.Add(release);
+            await ctx.SaveChangesAsync();
+            releaseId = release.Id;
+            ctx.OeProjectBuildResults.Add(new OeProjectBuildResult
+            {
+                OrganizationId = TestDb.DefaultOrgId, ReleaseId = release.Id, AppName = "CRONUS Sales",
+                Status = ProjectBuildResultStatus.Failed, Message = "A dependency could not be found.",
+            });
+        }
         var build = new OeProjectBuild
         {
+            ReleaseId = releaseId,
             OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
             Status = status, BcTarget = target, Trigger = ProjectBuildTrigger.PreviewCheck, BcArtifactVersion = version,
             StartedAt = startedAt, FinishedAt = status == ProjectBuildStatus.Ready ? startedAt.AddMinutes(3) : null,
@@ -481,14 +562,14 @@ public sealed class PreviewCheckTests : IDisposable
     }
 
     /// <summary>The head of the repository's default branch, as the push webhook last reported it.</summary>
-    private async Task SeedHeadAsync(int projectId, string sha)
+    private async Task SeedHeadAsync(int projectId, string sha, DateTime? pushedAt = null)
     {
         await using var ctx = _db.NewContext();
         var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
         ctx.OeRepositoryBranchHeads.Add(new OeRepositoryBranchHead
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectRepositoryId = repositoryId, Branch = "main", HeadSha = sha,
-            PushedAt = Tonight.AddDays(-20), PusherLogin = "erik", CommitCount = 1, IsDefaultBranch = true,
+            PushedAt = pushedAt ?? Tonight.AddDays(-40), PusherLogin = "erik", CommitCount = 1, IsDefaultBranch = true,
             UpdatedAt = Tonight.AddDays(-20),
         });
         await ctx.SaveChangesAsync();

@@ -178,6 +178,17 @@ public sealed class ReleasePaletteSourceTests : PaletteSourceVisibilityTestBase
             "CRONUS Banking - PSP 28.6.0.0 (symbols)", "CRONUS Banking - SEPA 28.6.0.0 (symbols)");
     }
 
+    [Fact]
+    public async Task A_preview_check_that_indexed_nothing_is_not_offered()
+    {
+        await SeedWorldAsync();
+        await SeedBuildReleaseAsync(null, TestDbOrgId, VisibleProjectId, "Nightly check 2026-10-07", bcTarget: ProjectBuildTarget.NextMajor);
+
+        var results = await SearchAsync("cronus nightly check");
+
+        results.Should().BeEmpty("a preview check records compile results only (#1140)");
+    }
+
     private async Task SeedFeedSymbolsAsync(string label, string dedupKey, int files, string status = "ready")
     {
         await using var ctx = Db.NewContext();
@@ -232,7 +243,8 @@ public sealed class ReleasePaletteSourceTests : PaletteSourceVisibilityTestBase
     /// the world, and null when a case seeds one of its own.
     /// </summary>
     private async Task SeedBuildReleaseAsync(
-        AppDbContext? ctx, int organizationId, int projectId, string label, string status = "ready")
+        AppDbContext? ctx, int organizationId, int projectId, string label, string status = "ready",
+        string bcTarget = ProjectBuildTarget.Current)
     {
         var owned = ctx is null ? Db.NewContext() : null;
         var context = ctx ?? owned!;
@@ -262,6 +274,7 @@ public sealed class ReleasePaletteSourceTests : PaletteSourceVisibilityTestBase
                 ProjectId = projectId,
                 ReleaseId = release.Id,
                 Status = ProjectBuildStatus.Ready,
+                BcTarget = bcTarget,
                 StartedAt = DateTime.UtcNow,
             });
             await context.SaveChangesAsync();

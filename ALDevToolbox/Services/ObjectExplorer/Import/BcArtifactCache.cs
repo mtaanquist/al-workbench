@@ -25,6 +25,10 @@ public sealed class BcArtifactCache
 {
     private const string AppSuffix = ".app.zip";
     private const string PlatformSuffix = ".platform.zip";
+    private const string PartialSuffix = ".partial";
+
+    /// <summary>A partial file older than this is left over from a store that never finished.</summary>
+    internal static readonly TimeSpan AbandonedPartialAge = TimeSpan.FromHours(6);
 
     private readonly BcArtifactCacheOptions _options;
     private readonly ILogger<BcArtifactCache> _logger;
@@ -67,24 +71,32 @@ public sealed class BcArtifactCache
             // An artifact set without its platform half is not what a later build
             // would download, so it is used once and not kept.
             if (fresh.PlatformZipPath is null) return Uncached(fresh);
+            // Held before the files land, so a concurrent eviction never takes a set
+            // that is being stored.
+            Hold(key);
             try
             {
                 Directory.CreateDirectory(_options.Directory);
-                // Platform first: a set is only found once its application half is
-                // there, so a crash in between leaves an orphan, never half a set.
-                File.Move(fresh.PlatformZipPath, PathOf(key, PlatformSuffix), overwrite: true);
-                File.Move(fresh.ApplicationZipPath, PathOf(key, AppSuffix), overwrite: true);
+                // The download sits on another filesystem, so a move is a copy. Each
+                // file is copied under a name eviction and reads ignore, then renamed
+                // in place: a crash mid-copy leaves a partial file, never a set that
+                // reads as complete with a cut-off zip in it.
+                Store(fresh.PlatformZipPath, PathOf(key, PlatformSuffix));
+                Store(fresh.ApplicationZipPath, PathOf(key, AppSuffix));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 _logger.LogWarning(ex, "Could not keep the Business Central artifacts for {Url}; this build uses them once.", applicationUrl);
+                Release(key);
                 TryDelete(PathOf(key, AppSuffix));
                 TryDelete(PathOf(key, PlatformSuffix));
+                TryDelete(PathOf(key, AppSuffix) + PartialSuffix);
+                TryDelete(PathOf(key, PlatformSuffix) + PartialSuffix);
                 return Uncached(fresh);
             }
 
-            var lease = TryLease(key)
-                ?? throw new InvalidOperationException($"The cached artifacts for {applicationUrl} disappeared as they were stored.");
+            var lease = new BcArtifactLease(
+                new BcArtifactDownload(PathOf(key, AppSuffix), PathOf(key, PlatformSuffix)), () => Release(key), () => Discard(key));
             Evict();
             return lease;
         }
@@ -104,7 +116,33 @@ public sealed class BcArtifactCache
         var now = DateTime.UtcNow;
         TryTouch(app, now);
         TryTouch(platform, now);
-        return new BcArtifactLease(new BcArtifactDownload(app, platform), () => Release(key));
+        return new BcArtifactLease(new BcArtifactDownload(app, platform), () => Release(key), () => Discard(key));
+    }
+
+    private void Hold(string key)
+    {
+        lock (_inUseLock) _inUse[key] = _inUse.GetValueOrDefault(key) + 1;
+    }
+
+    private static void Store(string source, string target)
+    {
+        var partial = target + PartialSuffix;
+        File.Move(source, partial, overwrite: true);
+        File.Move(partial, target, overwrite: true);
+    }
+
+    // A set a build could not read (a corrupt download): released, then deleted unless
+    // another build still holds it, so the next build downloads it again.
+    private void Discard(string key)
+    {
+        lock (_inUseLock)
+        {
+            Release(key);
+            if (_inUse.ContainsKey(key)) return;
+            TryDelete(PathOf(key, AppSuffix));
+            TryDelete(PathOf(key, PlatformSuffix));
+        }
+        _logger.LogWarning("Removed cached Business Central artifacts {Key}: a build could not read them.", key);
     }
 
     private void Release(string key)
@@ -123,7 +161,24 @@ public sealed class BcArtifactCache
     /// </summary>
     internal void Evict()
     {
+        // Best-effort: a build that already has its files must not fail over the tidy-up.
+        try
+        {
+            EvictCore();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex, "Could not tidy the Business Central artifact cache; trying again after the next download.");
+        }
+    }
+
+    private void EvictCore()
+    {
         if (!Directory.Exists(_options.Directory)) return;
+        foreach (var partial in Directory.EnumerateFiles(_options.Directory, "*" + PartialSuffix))
+        {
+            if (DateTime.UtcNow - File.GetLastWriteTimeUtc(partial) > AbandonedPartialAge) TryDelete(partial);
+        }
         lock (_inUseLock)
         {
             var sets = Directory.EnumerateFiles(_options.Directory, "*.zip")
@@ -191,14 +246,27 @@ public sealed class BcArtifactCache
 public sealed class BcArtifactLease : IDisposable
 {
     private Action? _release;
+    private readonly Action? _discard;
 
-    public BcArtifactLease(BcArtifactDownload download, Action release)
+    public BcArtifactLease(BcArtifactDownload download, Action release, Action? discard = null)
     {
         Download = download;
         _release = release;
+        _discard = discard;
     }
 
     public BcArtifactDownload Download { get; }
+
+    /// <summary>
+    /// Releases the set and drops it from the cache: the files could not be read, so
+    /// the next build must download them again rather than fail on them too.
+    /// </summary>
+    public void Discard()
+    {
+        var release = Interlocked.Exchange(ref _release, null);
+        if (release is null) return;
+        (_discard ?? release)();
+    }
 
     public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
 }

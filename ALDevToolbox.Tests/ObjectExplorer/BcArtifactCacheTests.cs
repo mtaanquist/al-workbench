@@ -126,6 +126,37 @@ public sealed class BcArtifactCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task A_set_a_build_could_not_read_is_dropped_so_the_next_build_downloads_it_again()
+    {
+        var cache = NewCache();
+        var lease = await cache.GetAsync(UrlA, Download());
+
+        lease.Discard();
+
+        File.Exists(lease.Download.ApplicationZipPath).Should().BeFalse();
+        (await cache.GetAsync(UrlA, Download())).Dispose();
+        _downloadCount.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task A_copy_a_crash_cut_short_is_tidied_away_once_it_is_old_and_never_read()
+    {
+        var cache = NewCache();
+        (await cache.GetAsync(UrlA, Download())).Dispose();
+        var dir = Path.Combine(_root, "cache");
+        var abandoned = Path.Combine(dir, "abandoned.app.zip.partial");
+        var copying = Path.Combine(dir, "copying.app.zip.partial");
+        await File.WriteAllBytesAsync(abandoned, new byte[10]);
+        await File.WriteAllBytesAsync(copying, new byte[10]);
+        File.SetLastWriteTimeUtc(abandoned, DateTime.UtcNow - BcArtifactCache.AbandonedPartialAge - TimeSpan.FromMinutes(1));
+
+        cache.Evict();
+
+        File.Exists(abandoned).Should().BeFalse();
+        File.Exists(copying).Should().BeTrue("another build may still be copying it");
+    }
+
+    [Fact]
     public async Task A_set_without_its_platform_half_is_used_once_and_deleted()
     {
         var cache = NewCache();

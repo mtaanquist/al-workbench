@@ -375,7 +375,17 @@ public sealed class ProjectBuildService
             IReadOnlyList<ResolvedSymbolPackage> fromFeeds = [];
             try
             {
-                ExtractArtifactSymbols(download, symbolsDir);
+                try
+                {
+                    ExtractArtifactSymbols(download, symbolsDir);
+                }
+                catch (InvalidDataException)
+                {
+                    // A zip that cannot be read would fail every later build of this
+                    // version too; drop it so the next one downloads it again.
+                    artifactLease.Discard();
+                    throw;
+                }
                 CopyCommittedSymbols(clones.Select(c => c.Dir).ToList(), symbolsDir);
                 // Whatever is still missing comes from Microsoft's public symbol
                 // feeds, then from the organisation's own earlier builds (#901).
@@ -390,8 +400,13 @@ public sealed class ProjectBuildService
                 await WriteSupplementalSymbolsAsync(projectId, supplemental, symbolsDir, ct).ConfigureAwait(false);
                 // 4. Auto-import the parent BC release inline (best-effort) so
                 //    cross-release references into Base App resolve. Reuses the
-                //    artifact we already downloaded.
-                parentReleaseId = await EnsureParentReleaseAsync(resolved, download, ct).ConfigureAwait(false);
+                //    artifact we already downloaded. A preview check indexes no
+                //    objects of its own (#1140), so it has no references to resolve:
+                //    it links the catalogue's preview when there is one and imports
+                //    nothing.
+                parentReleaseId = options.Target == BcBuildTarget.Current
+                    ? await EnsureParentReleaseAsync(resolved, download, ct).ConfigureAwait(false)
+                    : await ExistingParentReleaseAsync(resolved, ct).ConfigureAwait(false);
             }
             finally
             {
@@ -400,9 +415,11 @@ public sealed class ProjectBuildService
 
             // 4b. Put each vendor package the feeds resolved into the Object
             //     Explorer, once per (app id, version), so our code's references
-            //     into it resolve (#901, Part 4). Best-effort, like the parent.
-            var dependencyReleaseIds = await EnsureVendorReleasesAsync(fromFeeds, symbolsDir, parentReleaseId, logs, ct)
-                .ConfigureAwait(false);
+            //     into it resolve (#901, Part 4). Best-effort, like the parent. Not
+            //     for a preview check, which has no references to resolve (#1140).
+            IReadOnlyList<int> dependencyReleaseIds = options.Target == BcBuildTarget.Current
+                ? await EnsureVendorReleasesAsync(fromFeeds, symbolsDir, parentReleaseId, logs, ct).ConfigureAwait(false)
+                : [];
 
             // 5. Compile each extension in dependency order; a compiled sibling
             //    becomes a symbol for the apps that depend on it.
@@ -1842,6 +1859,13 @@ public sealed class ProjectBuildService
     /// it inline from the already-downloaded zips when absent. Best-effort: a failed
     /// parent import logs and returns null rather than sinking the project build.
     /// </summary>
+    /// <summary>The catalogue's ready release for <paramref name="resolved"/>, or null; never imports one.</summary>
+    private Task<int?> ExistingParentReleaseAsync(ResolvedArtifact resolved, CancellationToken ct) =>
+        _db.OeReleases.AsNoTracking()
+            .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null && r.Status == "ready")
+            .Select(r => (int?)r.Id)
+            .FirstOrDefaultAsync(ct);
+
     private async Task<int?> EnsureParentReleaseAsync(ResolvedArtifact resolved, BcArtifactDownload download, CancellationToken ct)
     {
         var existing = await _db.OeReleases.AsNoTracking()
