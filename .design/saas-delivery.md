@@ -1204,9 +1204,10 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
     the system org the way the release auto-importer does, because in single-tenant (and fresh
     bootstrap-admin) deployments the working org **is** the system org, so its deliveries have to run.
   - **Restart-resume:** scheduled rows survive a restart (re-picked on the next due sweep); a delivery
-    orphaned mid-publish is failed on the scheduler's first per-org sweep (nothing runs yet at startup,
-    so an active delivery is never tripped) — folded into the scheduler to avoid a second
-    cross-org startup site.
+    orphaned mid-publish is failed on the scheduler's first per-org sweep that gets through (an org
+    whose check fails is tried again next sweep). Only deliveries claimed before the process started
+    count, because the worker is already draining by then and one it claimed since is running, not
+    orphaned (#1114) — folded into the scheduler to avoid a second cross-org startup site.
   - Times are entered/displayed in the project's `bc_time_zone` (customer's local time). The window
     may wrap past midnight.
 
