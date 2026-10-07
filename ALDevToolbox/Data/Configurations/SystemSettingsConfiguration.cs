@@ -43,6 +43,7 @@ internal sealed class SystemSettingsConfiguration : IEntityTypeConfiguration<Sys
         entity.Property(e => e.OffsiteRetentionDays).HasColumnName("offsite_retention_days").IsRequired();
         entity.Property(e => e.OffsiteProvider).HasColumnName("offsite_provider").IsRequired();
         entity.Property(e => e.McpEnabled).HasColumnName("mcp_enabled").IsRequired();
+        entity.Property(e => e.BuildConcurrency).HasColumnName("build_concurrency");
         // text[] of ToolKey names; empty-array default backfills the singleton
         // row so every tool stays on after the migration. See Domain/Tools/ToolCatalog.cs.
         entity.Property(e => e.DisabledTools)

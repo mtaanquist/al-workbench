@@ -9,6 +9,7 @@
 @using ALDevToolbox.Services.Workers
 @inject WorkerHeartbeatRegistry Heartbeats
 @inject PersistedImportJobs ImportJobs
+@inject ProjectBuildQueue Builds
 @inject TimeProvider Clock
 
 <PageTitle>Background workers · Site administration · AL Workbench</PageTitle>
@@ -68,7 +69,7 @@
                                           Label="@(row.Healthy ? "Keeping up" : $"Stuck - {row.Reason}")" />
                         </td>
                         <td>
-                            @Friendly(row.Name)
+                            @(row.Plain ?? Friendly(row.Name))
                             <div class="u-muted">@row.Name</div>
                         </td>
                         <td class="u-muted"><Timestamp Value="@row.ActiveSinceUtc" Format="yyyy-MM-dd HH:mm:ss" Placeholder="Not busy" /></td>
@@ -172,14 +173,7 @@
     protected override async Task OnInitializedAsync()
     {
         var now = Clock.GetUtcNow().UtcDateTime;
-        _heartbeats = Heartbeats.All()
-            .OrderBy(h => h.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(h =>
-            {
-                var healthy = h.IsHealthy(now, out var reason);
-                return new HeartbeatRow(h.Name, h.LastTickUtc, h.ActiveSinceUtc, h.MaxActiveDuration, h.MaxIdleSilence, healthy, reason);
-            })
-            .ToList();
+        _heartbeats = Rows(Heartbeats.All(), now, Builds.Limit);
         _queue = await ImportJobs.SnapshotAsync();
     }
 
@@ -213,17 +207,70 @@
         _ => name,
     };
 
+    private const string BuildWorkerPrefix = nameof(ProjectBuildWorker) + " ";
+
+    /// <summary>
+    /// One row per worker, except the build workers waiting for work, which share one.
+    /// </summary>
+    /// <remarks>
+    /// All <see cref="ProjectBuildQueue.MaxConcurrency"/> build workers are always
+    /// running so a new build limit applies without a restart (#1164), but at most the
+    /// limit of them are ever busy. Sixteen identical "not busy" rows would bury the
+    /// workers worth reading, so the idle, healthy ones fold into a single row. A build
+    /// worker that is busy or stuck keeps a row of its own, so a stuck build still
+    /// names the worker the logs name. Idle build workers need no beat to stay healthy:
+    /// queue workers opt out of the silence check (see <see cref="WorkerHeartbeat"/>).
+    /// </remarks>
+    internal static List<HeartbeatRow> Rows(IEnumerable<WorkerHeartbeat> heartbeats, DateTime now, int buildLimit)
+    {
+        var rows = new List<HeartbeatRow>();
+        var idleBuilders = new List<HeartbeatRow>();
+        foreach (var h in heartbeats)
+        {
+            var healthy = h.IsHealthy(now, out var reason);
+            var row = new HeartbeatRow(h.Name, h.LastTickUtc, h.ActiveSinceUtc, h.MaxActiveDuration, h.MaxIdleSilence, healthy, reason);
+            if (!h.Name.StartsWith(BuildWorkerPrefix, StringComparison.Ordinal))
+                rows.Add(row);
+            else if (healthy && h.ActiveSinceUtc is null)
+                idleBuilders.Add(row);
+            else
+                rows.Add(row with { Plain = "Running a build" });
+        }
+        if (idleBuilders.Count > 0)
+        {
+            var first = idleBuilders[0];
+            rows.Add(new HeartbeatRow(
+                Name: $"{nameof(ProjectBuildWorker)} x{idleBuilders.Count}",
+                LastTickUtc: idleBuilders.Max(r => r.LastTickUtc),
+                ActiveSinceUtc: null,
+                MaxActiveDuration: first.MaxActiveDuration,
+                MaxIdleSilence: first.MaxIdleSilence,
+                Healthy: true,
+                Reason: null)
+            {
+                Plain = $"Waiting for builds ({idleBuilders.Count} ready, up to {buildLimit} run at once)",
+            });
+        }
+        return rows
+            .OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     private static string FormatSpan(TimeSpan span) =>
         span.TotalHours >= 1 ? $"{span.TotalHours:N0}h" :
         span.TotalMinutes >= 1 ? $"{span.TotalMinutes:N0}m" :
         $"{span.TotalSeconds:N0}s";
 
-    private sealed record HeartbeatRow(
+    internal sealed record HeartbeatRow(
         string Name,
         DateTime? LastTickUtc,
         DateTime? ActiveSinceUtc,
         TimeSpan MaxActiveDuration,
         TimeSpan? MaxIdleSilence,
         bool Healthy,
-        string? Reason);
+        string? Reason)
+    {
+        /// <summary>The plain name, when it is not the one <see cref="Friendly"/> gives.</summary>
+        public string? Plain { get; init; }
+    }
 }

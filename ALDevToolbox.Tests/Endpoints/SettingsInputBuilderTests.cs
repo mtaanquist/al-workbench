@@ -36,6 +36,7 @@ public class SettingsInputBuilderTests
         SignupEmailDomainAllowlist: "cronus.com",
         ReleaseDownloadDomainAllowlist: "download.microsoft.com",
         DisabledTools: Array.Empty<string>(),
+        BuildConcurrency: 6,
         UpdatedAt: new DateTime(2026, 8, 16, 9, 42, 0, DateTimeKind.Utc));
 
     private static IFormCollection Form(params (string Key, string[] Values)[] fields) =>
@@ -167,5 +168,32 @@ public class SettingsInputBuilderTests
         var input = SettingsInputBuilder.WithBackups(Current(), form, Summer);
 
         input.BackupScheduleTimeUtc.Should().Be(new TimeOnly(2, 0));
+    }
+
+    [Theory]
+    [InlineData("4", 4)]
+    [InlineData("", null)]
+    [InlineData("  ", null)]
+    public void The_builds_tab_saves_its_number_and_an_empty_box_clears_it(string posted, int? expected)
+    {
+        var input = SettingsInputBuilder.WithBuilds(Current(), Form(("BuildConcurrency", [posted])));
+
+        input.BuildConcurrency.Should().Be(expected);
+    }
+
+    [Fact]
+    public void A_build_limit_that_is_not_a_number_is_passed_on_to_be_refused_not_cleared()
+    {
+        var input = SettingsInputBuilder.WithBuilds(Current(), Form(("BuildConcurrency", ["many"])));
+
+        input.BuildConcurrency.Should().Be(0, "the service refuses 0 with the field's own message");
+    }
+
+    [Fact]
+    public void Other_tabs_leave_the_build_limit_alone()
+    {
+        var input = SettingsInputBuilder.WithGeneral(Current(), Form(("BannerText", ["Back on Monday."])));
+
+        input.BuildConcurrency.Should().Be(6);
     }
 }

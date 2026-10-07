@@ -47,11 +47,13 @@ public static class ObjectExplorerRegistration
         // form and redirect on the outcome.
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportRequestService>();
         services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportWorker>();
-        // Builds have their own line and run OE_BUILD_CONCURRENCY at a time (#1137).
-        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue>();
-        var buildWorkers = ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue
-            .Concurrency(Environment.GetEnvironmentVariable("OE_BUILD_CONCURRENCY"));
-        for (var slot = 1; slot <= buildWorkers; slot++)
+        // Builds have their own line (#1137). Every possible worker is registered, and the
+        // queue's limit decides how many build at once: the site setting, else
+        // OE_BUILD_CONCURRENCY, changed at runtime without a restart (#1164).
+        services.AddSingleton(_ => new ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue(
+            ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue
+                .Concurrency(Environment.GetEnvironmentVariable("OE_BUILD_CONCURRENCY"))));
+        for (var slot = 1; slot <= ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue.MaxConcurrency; slot++)
         {
             var workerSlot = slot;
             services.AddSingleton<IHostedService>(sp =>

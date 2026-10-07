@@ -34,6 +34,7 @@ public sealed record SystemSettingsView(
     string? SignupEmailDomainAllowlist,
     string? ReleaseDownloadDomainAllowlist,
     IReadOnlyList<string> DisabledTools,
+    int? BuildConcurrency,
     DateTime UpdatedAt);
 
 /// <summary>
@@ -62,7 +63,8 @@ public sealed record SystemSettingsInput(
     bool McpEnabled,
     string? SignupEmailDomainAllowlist,
     string? ReleaseDownloadDomainAllowlist,
-    IReadOnlyList<ALDevToolbox.Domain.Tools.ToolKey> DisabledTools);
+    IReadOnlyList<ALDevToolbox.Domain.Tools.ToolKey> DisabledTools,
+    int? BuildConcurrency);
 
 /// <summary>
 /// SiteAdmin-facing view of the off-site backup settings. Carries flags
@@ -276,6 +278,7 @@ public sealed class SystemSettingsService
     private readonly ALDevToolbox.Services.Mcp.McpAvailabilityState? _mcpAvailability;
     private readonly ALDevToolbox.Services.Tools.ToolAvailabilityState? _toolAvailability;
     private readonly IMemoryCache? _cache;
+    private readonly ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue? _buildQueue;
 
     /// <summary>
     /// Cache key for the site banner. The banner is read on every page render
@@ -293,7 +296,8 @@ public sealed class SystemSettingsService
         ALDevToolbox.Services.Mcp.McpAvailabilityState? mcpAvailability = null,
         ALDevToolbox.Services.Tools.ToolAvailabilityState? toolAvailability = null,
         IMemoryCache? cache = null,
-        SmtpFallbackOptions? smtpFallback = null)
+        SmtpFallbackOptions? smtpFallback = null,
+        ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue? buildQueue = null)
     {
         _smtpFallback = smtpFallback ?? new SmtpFallbackOptions();
         _db = db;
@@ -311,6 +315,7 @@ public sealed class SystemSettingsService
         _mcpAvailability = mcpAvailability;
         _toolAvailability = toolAvailability;
         _cache = cache;
+        _buildQueue = buildQueue;
     }
 
     /// <summary>
@@ -346,6 +351,7 @@ public sealed class SystemSettingsService
             SignupEmailDomainAllowlist: row.SignupEmailDomainAllowlist,
             ReleaseDownloadDomainAllowlist: row.ReleaseDownloadDomainAllowlist,
             DisabledTools: row.DisabledTools,
+            BuildConcurrency: row.BuildConcurrency,
             UpdatedAt: row.UpdatedAt);
     }
 
@@ -388,6 +394,12 @@ public sealed class SystemSettingsService
         {
             errors["IndexSizeMultiplier"] = "Multiplier must be between 0 and 10.";
         }
+        if (input.BuildConcurrency is int builds
+            && (builds < ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue.MinConcurrency
+                || builds > ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue.MaxConcurrency))
+        {
+            errors["BuildConcurrency"] = "Enter a number from 1 to 16, or leave it empty to use the default.";
+        }
         var normalisedAllowlist = NormaliseDomainAllowlist(
             input.SignupEmailDomainAllowlist, "SignupEmailDomainAllowlist", errors);
         var normalisedDownloadAllowlist = NormaliseDomainAllowlist(
@@ -416,6 +428,7 @@ public sealed class SystemSettingsService
             input.DisabledTools.Where(k => k != ALDevToolbox.Domain.Tools.ToolKey.Mcp).Distinct());
         row.SignupEmailDomainAllowlist = normalisedAllowlist;
         row.ReleaseDownloadDomainAllowlist = normalisedDownloadAllowlist;
+        row.BuildConcurrency = input.BuildConcurrency;
         row.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
 
         if (input.ClearSmtpPassword)
@@ -439,11 +452,15 @@ public sealed class SystemSettingsService
         // Same for the per-tool site toggles — refresh the cached set so the
         // sidebar and route gate pick up the change on the next render/request.
         _toolAvailability?.Set(ALDevToolbox.Domain.Tools.ToolCatalog.ParseDisabled(row.DisabledTools));
+        // And the build limit: the queue applies it at once, so a SiteAdmin resizing
+        // the server does not need a restart (#1164).
+        _buildQueue?.ApplySetting(row.BuildConcurrency);
         _logger.LogInformation(
-            "System settings updated (smtp_host={SmtpHost}, banner={HasBanner}, mcp={Mcp}).",
+            "System settings updated (smtp_host={SmtpHost}, banner={HasBanner}, mcp={Mcp}, build_concurrency={BuildConcurrency}).",
             row.SmtpHost ?? "<unset>",
             !string.IsNullOrEmpty(row.BannerText),
-            row.McpEnabled);
+            row.McpEnabled,
+            row.BuildConcurrency?.ToString() ?? "<default>");
     }
 
     /// <summary>

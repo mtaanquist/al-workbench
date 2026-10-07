@@ -221,6 +221,15 @@ internal static class StartupTasks
         app.Services.GetRequiredService<ALDevToolbox.Services.Tools.ToolAvailabilityState>()
             .Set(ALDevToolbox.Domain.Tools.ToolCatalog.ParseDisabled(disabledTools));
 
+        // Apply the SiteAdmin's build limit before the workers start taking builds
+        // (they start with app.Run(), after this). Empty keeps OE_BUILD_CONCURRENCY's
+        // default, which the queue already holds (#1164).
+        var buildConcurrency = await db.SystemSettings.AsNoTracking()
+            .Where(s => s.Id == 1)
+            .Select(s => s.BuildConcurrency)
+            .FirstOrDefaultAsync(stopping);
+        buildQueue.ApplySetting(buildConcurrency);
+
         // Flip /readyz to green now that migrations, seed and bootstrap have
         // all run. Resolved from the root service provider so the flag
         // survives the scope's disposal.

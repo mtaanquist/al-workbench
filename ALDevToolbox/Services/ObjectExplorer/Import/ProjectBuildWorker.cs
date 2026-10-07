@@ -4,8 +4,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 
 /// <summary>
 /// One of the workers that run project and pull request builds from
-/// <see cref="ProjectBuildQueue"/>. <c>OE_BUILD_CONCURRENCY</c> of them run side by
-/// side (#1137), each one build at a time, with the same job code
+/// <see cref="ProjectBuildQueue"/>. <see cref="ProjectBuildQueue.MaxConcurrency"/> of
+/// them wait side by side (#1137) and the queue's limit decides how many build at once
+/// (#1164), each one build at a time, with the same job code
 /// <see cref="ReleaseImportWorker"/> runs for imports. Each has a heartbeat of its own,
 /// so one stuck build shows as one stuck worker.
 /// </summary>
