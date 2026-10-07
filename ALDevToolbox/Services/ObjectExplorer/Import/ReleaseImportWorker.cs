@@ -486,7 +486,12 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                 catch (Exception ex)
                 {
                     jobFailureMessage = FriendlyMessage(ex);
-                    _logger.LogError(ex, "Release {ReleaseId} project build failed.", job.ReleaseId);
+                    // A refusal (the pipeline no longer asks for this build, #1112) is
+                    // expected, not a fault worth a stack trace.
+                    if (ex is PlanValidationException)
+                        _logger.LogWarning("Release {ReleaseId} project build was refused: {Reason}", job.ReleaseId, jobFailureMessage);
+                    else
+                        _logger.LogError(ex, "Release {ReleaseId} project build failed.", job.ReleaseId);
                     await importer.MarkFailedAsync(job.ReleaseId, jobFailureMessage, ct).ConfigureAwait(false);
                     await buildService.MarkBuildFailedAsync(job.ReleaseId, jobFailureMessage, ct).ConfigureAwait(false);
                     await NotifyBuildFinishedAsync(scope.ServiceProvider, job.ReleaseId, ct).ConfigureAwait(false);

@@ -88,6 +88,21 @@ public sealed class BuildNotifierTests : IDisposable
     }
 
     [Fact]
+    public async Task A_build_refused_because_the_pipeline_no_longer_asked_for_it_is_not_news()
+    {
+        await SeedAsync();
+        await FinishAsync(ProjectBuildStatus.Ready);
+        _email.Sent.Clear();
+
+        await FinishAsync(ProjectBuildStatus.Failed, ProjectBuildTrigger.Push,
+            failure: "Building automatically on push was turned off before this build started.");
+        _email.Sent.Should().BeEmpty("turning the setting off broke nothing");
+
+        await FinishAsync(ProjectBuildStatus.Ready);
+        _email.Sent.Should().BeEmpty("the build before the refused one was working too");
+    }
+
+    [Fact]
     public async Task A_build_on_push_and_a_manual_build_count_as_the_same_kind()
     {
         await SeedAsync();
