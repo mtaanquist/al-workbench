@@ -375,7 +375,10 @@ internal static class ObjectExplorerEndpoints
                 // Store the symbols, so every later build of this project benefits,
                 // then rebuild this release in place. The checks, the stored symbols
                 // and the reopen commit together under the pipeline's build lock
-                // (#1119), so a refused rebuild stores nothing.
+                // (#1119), so a refused rebuild stores nothing. The release reads
+                // as importing from the reopen on, through the wipe, until its job
+                // is queued, as in a retry (#1180).
+                using var rebuilding = importer.Ingests.Track(id);
                 await using (var rebuild = await projectBuilds.BeginRebuildAsync(id, projectId, "Symbols", ct))
                 {
                     await projects.AddSupplementalSymbolsAsync(projectId, uploads, ct);

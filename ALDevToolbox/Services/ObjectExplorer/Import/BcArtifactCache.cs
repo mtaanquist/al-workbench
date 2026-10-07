@@ -87,9 +87,11 @@ public sealed class BcArtifactCache
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 _logger.LogWarning(ex, "Could not keep the Business Central artifacts for {Url}; this build uses them once.", applicationUrl);
-                Release(key);
                 // A half that already moved in is no longer at its download path, so
                 // it goes back there before the cache copies are tidied away (#1181).
+                // The hold stays until the build is done with the files, or a
+                // concurrent eviction could delete a half before it moves back, or
+                // one whose move back failed while the build reads it.
                 var uncached = new BcArtifactDownload(
                     Unstore(fresh.ApplicationZipPath, PathOf(key, AppSuffix)),
                     Unstore(fresh.PlatformZipPath, PathOf(key, PlatformSuffix)));
@@ -100,7 +102,12 @@ public sealed class BcArtifactCache
                     if (!kept.Contains(cached)) TryDelete(cached);
                     if (!kept.Contains(cached + PartialSuffix)) TryDelete(cached + PartialSuffix);
                 }
-                return Uncached(uncached);
+                var once = Uncached(uncached);
+                return new BcArtifactLease(uncached, () =>
+                {
+                    once.Dispose();
+                    Release(key);
+                });
             }
 
             var lease = new BcArtifactLease(
