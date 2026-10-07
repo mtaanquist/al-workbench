@@ -54,6 +54,20 @@ public sealed class PreviewCheckTests : IDisposable
     }
 
     [Fact]
+    public async Task A_disabled_pipeline_is_never_due()
+    {
+        var owner = await SeedUserAsync();
+        var (_, pipelineId) = await SeedPipelineAsync(owner);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OePipelines.Where(p => p.Id == pipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+        }
+
+        (await ListDueAsync()).Should().NotContain(d => d.PipelineId == pipelineId);
+    }
+
+    [Fact]
     public async Task A_first_check_is_due_against_both_upcoming_versions_as_its_owner()
     {
         var owner = await SeedUserAsync();

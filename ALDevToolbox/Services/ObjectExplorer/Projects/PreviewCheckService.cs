@@ -52,7 +52,7 @@ public sealed class PreviewCheckService
     public async Task<List<PreviewCheckDue>> ListDueAsync(DateTime nowUtc, CancellationToken ct = default)
     {
         var pipelines = await _db.OePipelines.AsNoTracking()
-            .Where(p => p.PreviewCheck && p.DeletedAt == null && p.Project!.DeletedAt == null)
+            .Where(p => p.PreviewCheck && p.DeletedAt == null && p.DisabledAt == null && p.Project!.DeletedAt == null)
             .Select(p => new
             {
                 p.Id,

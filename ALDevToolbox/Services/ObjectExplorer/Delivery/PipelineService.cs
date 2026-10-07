@@ -50,6 +50,12 @@ public sealed class PipelineService
     }
 
     /// <summary>
+    /// True when the current user may delete pipelines: an org Admin or a SiteAdmin.
+    /// Everyone else who manages a solution disables its pipelines instead (#1131).
+    /// </summary>
+    public Task<bool> CanDeleteAsync(CancellationToken ct = default) => _access.CanDeletePipelinesAsync(ct);
+
+    /// <summary>
     /// Active pipelines the current user may see, optionally scoped to one project,
     /// ordered by name. A pipeline inherits its project's visibility.
     /// </summary>
@@ -213,11 +219,13 @@ public sealed class PipelineService
     }
 
     /// <summary>
-    /// Soft-deletes a pipeline. Refused while a deployment pipeline still draws from it:
-    /// the delete is soft, so the foreign key's restrict never fires, and the deployment
-    /// pipeline would go on naming a source that no longer builds (#1123).
+    /// Disables or enables a pipeline. A disabled pipeline starts no build: Build is
+    /// refused, pushes and the nightly preview check pass it by, and automatic builds
+    /// already waiting are refused when their turn comes. Its settings, its builds and
+    /// the deployment pipelines drawing from it stay as they are (#1131). Anyone who may
+    /// manage the solution may do it. Doing it twice changes nothing.
     /// </summary>
-    public async Task SoftDeletePipelineAsync(int id, CancellationToken ct = default)
+    public async Task SetPipelineDisabledAsync(int id, bool disabled, CancellationToken ct = default)
     {
         RequireOrganizationId();
         var pipeline = await _db.OePipelines
@@ -229,6 +237,30 @@ public sealed class PipelineService
             .Select(c => c.CreatedByUserId)
             .FirstOrDefaultAsync(ct);
         await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
+
+        if ((pipeline.DisabledAt is not null) == disabled) return;
+        var now = DateTime.UtcNow;
+        pipeline.DisabledAt = disabled ? now : null;
+        pipeline.UpdatedAt = now;
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("{Action} pipeline {PipelineId} as user {UserId}.",
+            disabled ? "Disabled" : "Enabled", id, _orgContext.CurrentUserId);
+    }
+
+    /// <summary>
+    /// Soft-deletes a pipeline. Admins only: anyone else who manages the solution can
+    /// disable it instead (#1131). Refused while a deployment pipeline still draws from
+    /// it: the delete is soft, so the foreign key's restrict never fires, and the
+    /// deployment pipeline would go on naming a source that no longer builds (#1123).
+    /// </summary>
+    public async Task SoftDeletePipelineAsync(int id, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var pipeline = await _db.OePipelines
+            .FirstOrDefaultAsync(p => p.Id == id && p.DeletedAt == null, ct)
+            ?? throw Validation("Pipeline", "This pipeline no longer exists.");
+
+        await _access.EnsureCanDeletePipelinesAsync(ct);
 
         var dependents = await _db.OeReleasePipelines.AsNoTracking()
             .Where(r => r.BuildPipelineId == id && r.DeletedAt == null)

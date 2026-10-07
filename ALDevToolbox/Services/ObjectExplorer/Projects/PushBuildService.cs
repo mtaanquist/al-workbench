@@ -76,7 +76,7 @@ public sealed class PushBuildService
         var isDefault = push.DefaultBranch.Length > 0
                         && string.Equals(push.Branch, push.DefaultBranch, StringComparison.Ordinal);
         var pipelines = await _db.OePipelines.AsNoTracking()
-            .Where(p => p.BuildOnPush && p.DeletedAt == null && p.Project!.DeletedAt == null
+            .Where(p => p.BuildOnPush && p.DeletedAt == null && p.DisabledAt == null && p.Project!.DeletedAt == null
                         && projectIds.Contains(p.ProjectId)
                         && (p.Branch == push.Branch || (isDefault && p.Branch == null)))
             .Select(p => new

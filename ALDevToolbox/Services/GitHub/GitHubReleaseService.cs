@@ -435,6 +435,11 @@ public sealed class GitHubReleaseService
         // Fetches the files that will be deployed; same rule as deploying.
         await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
         var source = await ResolveSourceAsync(releasePipelineId, ct);
+        // Staging is the first half of a deployment, and a disabled pipeline refuses the second (#1131).
+        if (await _db.OeReleasePipelines.AsNoTracking().AnyAsync(r => r.Id == releasePipelineId && r.DisabledAt != null, ct))
+        {
+            throw Validation("ReleasePipeline", ObjectExplorer.Delivery.DeliveryService.DisabledRefusal);
+        }
         tag = (tag ?? string.Empty).Trim();
         if (tag.Length == 0) throw Validation("Tag", "Choose a release to deploy.");
 
