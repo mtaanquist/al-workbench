@@ -68,6 +68,53 @@ public sealed class ProjectServiceTests : IDisposable
             : repos);
 
     [Fact]
+    public async Task Turning_on_automatic_update_pull_requests_makes_the_saver_the_person_they_are_opened_as()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        var id = await svc.CreateProjectAsync(NewInput("CRONUS A/S"));
+        await ctx.OeProjects.Where(p => p.Id == id)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.AutoUpdatePullRequestsBlocked, "stale"));
+
+        await using (var save = _db.NewContext())
+        {
+            await Svc(save).UpdateProjectAsync(id, NewInput("CRONUS A/S") with { AutoUpdatePullRequests = true });
+        }
+
+        await using var read = _db.NewContext();
+        var saved = await read.OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequests.Should().BeTrue();
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId);
+        saved.AutoUpdatePullRequestsBlocked.Should().BeNull();
+
+        // A save that does not mention it leaves it alone; turning it off forgets who.
+        await Svc(read).UpdateProjectAsync(id, NewInput("CRONUS A/S"));
+        (await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id)).AutoUpdatePullRequests.Should().BeTrue();
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S") with { AutoUpdatePullRequests = false });
+        var off = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        off.AutoUpdatePullRequests.Should().BeFalse();
+        off.AutoUpdatePullRequestsByUserId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Resuming_automatic_update_pull_requests_takes_them_over_and_clears_the_hold_up()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        var id = await svc.CreateProjectAsync(NewInput("CRONUS A/S"));
+        await ctx.OeProjects.Where(p => p.Id == id).ExecuteUpdateAsync(s => s
+            .SetProperty(p => p.AutoUpdatePullRequests, true)
+            .SetProperty(p => p.AutoUpdatePullRequestsByUserId, (int?)null)
+            .SetProperty(p => p.AutoUpdatePullRequestsBlocked, "the person they are opened as no longer has an active account."));
+
+        await Svc(_db.NewContext()).ResumeAutoUpdatePullRequestsAsync(id);
+
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId);
+        saved.AutoUpdatePullRequestsBlocked.Should().BeNull();
+    }
+
+    [Fact]
     public async Task Create_persists_project_and_repositories()
     {
         await using var ctx = _db.NewContext();

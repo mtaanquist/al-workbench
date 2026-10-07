@@ -794,6 +794,41 @@ public sealed partial class GitHubAppClient
     }
 
     /// <summary>
+    /// Whether pull request <paramref name="number"/> is still open. False for one that
+    /// was merged or closed, and for one GitHub no longer shows.
+    /// </summary>
+    public async Task<bool> IsPullRequestOpenAsync(
+        string credential, string owner, string repo, int number, CancellationToken ct = default)
+    {
+        using var request = NewRequest(HttpMethod.Get, $"{RepoPath(owner, repo)}/pulls/{number}", credential);
+        using var document = await SendOrNotFoundAsync(request, ct);
+        return document is not null
+            && document.RootElement.TryGetProperty("state", out var state)
+            && state.GetString() == "open";
+    }
+
+    /// <summary>
+    /// Closes pull request <paramref name="number"/> and then leaves
+    /// <paramref name="comment"/> on it, as <paramref name="credential"/>'s owner. Closed
+    /// first, so a comment saying it was closed never sits on one that is still open.
+    /// </summary>
+    public async Task ClosePullRequestAsync(
+        string credential, string owner, string repo, int number, string comment, CancellationToken ct = default)
+    {
+        using (var close = NewJsonRequest(
+            HttpMethod.Patch, $"{RepoPath(owner, repo)}/pulls/{number}", credential, new { state = "closed" }))
+        using (await SendAsync(close, ct))
+        {
+        }
+
+        // A pull request is an issue to GitHub's comment API.
+        using var commentRequest = NewJsonRequest(
+            HttpMethod.Post, $"{RepoPath(owner, repo)}/issues/{number}/comments", credential, new { body = comment });
+        using var _ = await SendAsync(commentRequest, ct);
+        _logger.LogInformation("Closed pull request #{PullRequestNumber} on {Owner}/{Repo}.", number, owner, repo);
+    }
+
+    /// <summary>
     /// The open pull request whose head is <paramref name="headBranch"/>, or
     /// <see langword="null"/> when there is not one.
     ///
