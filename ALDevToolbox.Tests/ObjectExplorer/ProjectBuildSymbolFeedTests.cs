@@ -541,6 +541,8 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         fresh.AppVersion.Should().Be($"1.0.{buildId}.0");
         _tools.SeenVersions["CRONUS Sales Extension"][BaseId].Should().Be("1.0.500.0",
             "the changed app compiles against the version of its sibling that is deployed beside it");
+        _tools.SeenVersions.Should().NotContainKey("CRONUS Base Extension", "an unchanged app is not compiled again (#1140)");
+        (await LogAsync(buildId, "Compile: CRONUS Base Extension")).Should().Contain("Not compiled").And.Contain($"build #{priorId}");
 
         var log = await LogAsync(buildId, "Changes");
         log.Should().Contain($"CRONUS Base Extension: unchanged since build #{priorId}, so it keeps 1.0.500.0")
@@ -1122,6 +1124,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         outcome.BcVersion.Should().Be("30.0");
         outcome.FinalLabel.Should().Be("CRONUS on BC 30.0");
         outcome.ParentReleaseId.Should().Be(previewId, "the build parents onto the catalogue's preview of that version");
+        outcome.IsPreview.Should().BeTrue("the worker skips the Object Explorer index for it (#1140)");
         _tools.CompilersRun.Should().NotBeEmpty().And.OnlyContain(p => p.Contains("/30.0.42.32495-beta/"));
         _http.Requests.Should().Contain($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/{NextMajorVersion}/dk");
         // The feed picks third-party symbols for the target version, not the manifests' 29.0.
@@ -1193,31 +1196,32 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     }
 
     [Fact]
-    public async Task A_next_version_build_replaces_a_stale_preview_parent_with_the_current_insider_build()
+    public async Task A_next_version_build_leaves_refreshing_a_stale_preview_parent_to_the_daily_sweep()
     {
+        // It indexes nothing of its own (#1140), so importing 2 GB of preview to parent
+        // onto would buy it nothing; it links what is there.
         var (projectId, releaseId, _) = await SeedAsync();
         var staleId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", DateTime.UtcNow.AddDays(-20));
 
-        await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
+        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
 
+        outcome.ParentReleaseId.Should().Be(staleId);
         await using var read = _db.NewContext();
-        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == staleId)).DeletedAt.Should().NotBeNull();
-        var current = await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == "bc-insider:30.0:dk" && r.DeletedAt == null);
-        current.Id.Should().NotBe(staleId);
-        current.IsPrerelease.Should().BeTrue();
+        (await read.OeReleases.AsNoTracking().CountAsync(r => r.DedupKey == "bc-insider:30.0:dk")).Should().Be(1);
     }
 
     [Fact]
-    public async Task A_failed_preview_parent_is_replaced_at_once_and_never_adopted()
+    public async Task A_next_version_build_never_adopts_a_failed_preview_parent_nor_imports_one()
     {
         var (projectId, releaseId, _) = await SeedAsync();
         var failedId = await SeedPreviewAsync("bc-insider:30.0:dk", null, DateTime.UtcNow, status: "failed");
 
         var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
 
-        outcome.ParentReleaseId.Should().NotBe(failedId);
+        outcome.ParentReleaseId.Should().BeNull();
         await using var read = _db.NewContext();
-        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().NotBeNull();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().BeNull();
+        (await read.OeReleases.AsNoTracking().CountAsync(r => r.DedupKey == "bc-insider:30.0:dk")).Should().Be(1);
     }
 
     [Fact]
@@ -1247,6 +1251,8 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         var service = new ProjectBuildService(
             ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             new BcArtifactService(_http, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance),
+            new BcArtifactCache(new BcArtifactCacheOptions { Directory = Path.Combine(_root, "artifact-cache") },
+                NullLogger<BcArtifactCache>.Instance),
             importer,
             compiler ?? new AlCompilerProvisioner(_http, NullLogger<AlCompilerProvisioner>.Instance,
                 new AlCompilerOptions { ExplicitAlcPath = _tools.AlcPath }),

@@ -455,8 +455,17 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                         return;
                     }
 
-                    await importer.ProcessReleaseAsync(job.ReleaseId, outcome.Uploads, job.StoreSymbolReference, ct).ConfigureAwait(false);
-                    await buildService.MarkCompiledResultsIngestedAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                    if (outcome.IsPreview)
+                    {
+                        // A preview check is compile-only: its results and diagnostics
+                        // are the answer, so the Object Explorer index is skipped (#1140).
+                        await importer.MarkReadyWithoutIngestAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await importer.ProcessReleaseAsync(job.ReleaseId, outcome.Uploads, job.StoreSymbolReference, ct).ConfigureAwait(false);
+                        await buildService.MarkCompiledResultsIngestedAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                    }
                     // Flip the first-class build row ready alongside the Release.
                     await buildService.MarkBuildReadyAsync(job.ReleaseId, outcome.BcVersion, ct).ConfigureAwait(false);
                     await NotifyBuildFinishedAsync(scope.ServiceProvider, job.ReleaseId, ct).ConfigureAwait(false);

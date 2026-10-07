@@ -34,6 +34,11 @@ public static class ObjectExplorerRegistration
         services.AddSingleton(sp => ALDevToolbox.Services.Configuration.AlSymbolFeedOptions
             .FromConfiguration(sp.GetRequiredService<IConfiguration>()));
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Projects.AlSymbolFeedResolver>();
+        // Business Central artifacts project builds downloaded, kept on the same volume so
+        // the next build of that version skips the download; singleton for its gates (#1140).
+        services.AddSingleton(sp => ALDevToolbox.Services.Configuration.BcArtifactCacheOptions
+            .FromConfiguration(sp.GetRequiredService<IConfiguration>()));
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.BcArtifactCache>();
         // Redirects are followed by the resolver itself (the .nupkg answers 303 to a blob
         // URL), so it can refuse a hop off HTTPS; the handler must not follow them first.
         services.AddHttpClient(ALDevToolbox.Services.ObjectExplorer.Projects.AlSymbolFeedResolver.HttpClientName, client =>

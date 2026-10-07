@@ -17,9 +17,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 public sealed class PreviewCheckService
 {
     /// <summary>
-    /// The longest a check goes without running, even when nothing it can see has
-    /// changed. Nothing here can see a push to a repository the pipeline has not
-    /// built since, so this is what catches one.
+    /// The longest a check goes without running when it cannot tell whether the code
+    /// changed (a repository with no head stored from a push), or when its last run
+    /// failed against the same code. A clean check on unchanged code waits for a change.
     /// </summary>
     internal static readonly TimeSpan MaxQuietPeriod = TimeSpan.FromDays(7);
 
@@ -41,8 +41,10 @@ public sealed class PreviewCheckService
     /// The preview builds due tonight. A target is due when nothing is in flight for
     /// it, it has not run on this UTC day, Microsoft has published a preview for it,
     /// and something has changed since its last run: a new preview build from
-    /// Microsoft, a build of the pipeline since, or <see cref="MaxQuietPeriod"/>
-    /// passing. A pipeline that cannot run at all comes back once, with
+    /// Microsoft, or new commits on the pipeline's branch. A check that ran clean on
+    /// the same commits and preview build is not run again (#1140). Where no push has
+    /// reported a branch's head, a build of the pipeline since, or
+    /// <see cref="MaxQuietPeriod"/> passing, stands in for new commits. A pipeline that cannot run at all comes back once, with
     /// <see cref="PreviewCheckDue.Blocked"/> saying why; one that can comes back once
     /// with neither a target nor a reason, so a pause whose cause has gone is lifted
     /// even on a night with nothing to build.
@@ -54,6 +56,8 @@ public sealed class PreviewCheckService
             .Select(p => new
             {
                 p.Id,
+                p.ProjectId,
+                p.Branch,
                 p.PreviewCheckByUserId,
                 OwnerActive = p.PreviewCheckByUser != null && p.PreviewCheckByUser.Status == UserStatus.Active,
                 Country = p.Project!.DefaultArtifactCountry,
@@ -76,9 +80,43 @@ public sealed class PreviewCheckService
                     g.Any(b => (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building)
                                && b.Release != null && b.Release.Status == "ingesting"),
                     g.Max(b => b.StartedAt),
-                    g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.BcArtifactVersion).First()))
+                    g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.BcArtifactVersion).First(),
+                    g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.Id).First(),
+                    g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.Status).First(),
+                    g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.ReleaseId).First()))
                 .ToListAsync(ct).ConfigureAwait(false))
             .ToDictionary(h => (h.PipelineId, h.BcTarget));
+
+        // What each pipeline's last check of each target compiled, and what its
+        // branches hold now as the push webhook last reported them: together they
+        // say whether the code changed since that check (#1140).
+        var lastChecks = history.Values.Where(h => ProjectBuildTarget.IsPreview(h.BcTarget)).ToList();
+        var lastCheckIds = lastChecks.Select(h => h.LastId).ToList();
+        // A check that went ready with an extension that did not compile counts as
+        // failed, as it does on the pipeline pages.
+        var lastCheckReleaseIds = lastChecks.Where(h => h.LastReleaseId != null).Select(h => h.LastReleaseId!.Value).ToList();
+        var withFailedApps = (await _db.OeProjectBuildResults.AsNoTracking()
+                .Where(r => lastCheckReleaseIds.Contains(r.ReleaseId) && r.Status == ProjectBuildResultStatus.Failed)
+                .Select(r => r.ReleaseId)
+                .Distinct()
+                .ToListAsync(ct).ConfigureAwait(false))
+            .ToHashSet();
+        var pinned = (await _db.OeProjectBuildRepoCommits.AsNoTracking()
+            .Where(c => lastCheckIds.Contains(c.ProjectBuildId) && c.ProjectRepositoryId != null && c.CommitHash != "")
+            .Select(c => new { c.ProjectBuildId, RepositoryId = c.ProjectRepositoryId!.Value, c.CommitHash })
+            .ToListAsync(ct).ConfigureAwait(false))
+            .ToLookup(c => c.ProjectBuildId);
+        var projectIds = pipelines.Select(p => p.ProjectId).Distinct().ToList();
+        var repositories = (await _db.OeProjectRepositories.AsNoTracking()
+            .Where(r => projectIds.Contains(r.ProjectId))
+            .Select(r => new { r.Id, r.ProjectId })
+            .ToListAsync(ct).ConfigureAwait(false))
+            .ToLookup(r => r.ProjectId, r => r.Id);
+        var repositoryIds = repositories.SelectMany(g => g).ToList();
+        var heads = await _db.OeRepositoryBranchHeads.AsNoTracking()
+            .Where(h => repositoryIds.Contains(h.ProjectRepositoryId) && h.DeletedAt == null)
+            .Select(h => new BranchHead(h.ProjectRepositoryId, h.Branch, h.IsDefaultBranch, h.HeadSha, h.PushedAt))
+            .ToListAsync(ct).ConfigureAwait(false);
 
         var today = DateOnly.FromDateTime(nowUtc);
         var versions = new Dictionary<(string Country, string Target), string?>();
@@ -121,11 +159,26 @@ public sealed class PreviewCheckService
                 // index could not be read tonight. Neither is the pipeline's problem.
                 if (version is null) continue;
 
-                var unchanged = last is not null
-                    && last.LastBcArtifactVersion == version
-                    && (lastCurrentBuild is null || lastCurrentBuild < last.LastStartedAt)
-                    && nowUtc - last.LastStartedAt < MaxQuietPeriod;
-                if (unchanged) continue;
+                if (last is not null && last.LastBcArtifactVersion == version)
+                {
+                    var sameCode = SameCode(
+                        repositories[pipeline.ProjectId].ToList(),
+                        pinned[last.LastId].ToDictionary(c => c.RepositoryId, c => c.CommitHash),
+                        heads, pipeline.Branch, last.LastStartedAt);
+                    var clean = last.LastStatus == ProjectBuildStatus.Ready
+                                && !(last.LastReleaseId is { } checkedRelease && withFailedApps.Contains(checkedRelease));
+                    // A check that ran clean against the same code and the same preview
+                    // build would only say the same again, however long ago it ran. One
+                    // that failed is tried again once the quiet period passes, in case
+                    // what failed was not the code.
+                    if (sameCode == true && clean) continue;
+                    // Without a stored head for every repository the code may have moved
+                    // unseen, so a build of the pipeline since and the quiet period stand in.
+                    var quiet = sameCode != false
+                        && (sameCode == true || lastCurrentBuild is null || lastCurrentBuild < last.LastStartedAt)
+                        && nowUtc - last.LastStartedAt < MaxQuietPeriod;
+                    if (quiet) continue;
+                }
 
                 due.Add(new PreviewCheckDue(pipeline.Id, userId, target, null));
             }
@@ -135,7 +188,45 @@ public sealed class PreviewCheckService
 
     /// <summary>One pipeline's builds for one target, summed up: what <see cref="ListDueAsync"/> needs of them.</summary>
     private sealed record BuildHistorySummary(
-        int PipelineId, string BcTarget, bool InFlight, DateTime LastStartedAt, string? LastBcArtifactVersion);
+        int PipelineId, string BcTarget, bool InFlight, DateTime LastStartedAt, string? LastBcArtifactVersion,
+        int LastId, string LastStatus, int? LastReleaseId);
+
+    /// <summary>
+    /// Whether every repository's watched branch still holds the commit the last
+    /// check compiled. True when every stored head matches; false when a push the
+    /// webhook reported after the check moved one; null when nothing can tell: a
+    /// repository with no stored head or no commit in the check, or a head that
+    /// differs but was stored before the check ran (a missed push left it behind
+    /// the branch the check cloned, so the difference says nothing).
+    /// </summary>
+    internal static bool? SameCode(
+        IReadOnlyList<int> repositoryIds,
+        IReadOnlyDictionary<int, string> checkedCommits,
+        IReadOnlyList<BranchHead> heads,
+        string? branch,
+        DateTime checkStartedAt)
+    {
+        if (repositoryIds.Count == 0) return null;
+        var unknown = false;
+        foreach (var repositoryId in repositoryIds)
+        {
+            var head = branch is { } named
+                ? heads.FirstOrDefault(h => h.RepositoryId == repositoryId && string.Equals(h.Branch, named, StringComparison.Ordinal))
+                : heads.FirstOrDefault(h => h.RepositoryId == repositoryId && h.IsDefaultBranch);
+            if (head is null || !checkedCommits.TryGetValue(repositoryId, out var sha))
+            {
+                unknown = true;
+                continue;
+            }
+            if (string.Equals(head.HeadSha, sha, StringComparison.OrdinalIgnoreCase)) continue;
+            if (head.PushedAt > checkStartedAt) return false;
+            unknown = true;
+        }
+        return unknown ? null : true;
+    }
+
+    /// <summary>A branch head as the push webhook last reported it.</summary>
+    internal sealed record BranchHead(int RepositoryId, string Branch, bool IsDefaultBranch, string HeadSha, DateTime PushedAt);
 
     /// <summary>
     /// Records why <paramref name="pipelineId"/>'s check could not start, or clears it

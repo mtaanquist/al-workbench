@@ -166,6 +166,23 @@ public sealed class ReleaseImportServiceTests : IDisposable
         row.StatusMessage.Should().Be("Download was unreachable.");
     }
 
+    [Fact]
+    public async Task MarkReadyWithoutIngestAsync_flips_a_build_release_ready_holding_no_files()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+
+        var releaseId = await svc.BeginReleaseAsync(new ReleaseImportMetadata(
+            "CRONUS on BC 30.0", "project", null, null));
+        await svc.MarkReadyWithoutIngestAsync(releaseId);
+
+        await using var read = _db.NewContext();
+        var row = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+        row.Status.Should().Be("ready");
+        row.SourceFileCount.Should().Be(0);
+        (await read.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == releaseId)).Should().BeFalse();
+    }
+
     // ── Happy path ──────────────────────────────────────────────────────
 
     [Fact]

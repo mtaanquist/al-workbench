@@ -152,7 +152,7 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
         // Never reached when the build is refused: the check runs before anything is cloned.
         var service = new ProjectBuildService(
             ctx, context, new ProjectAccess(ctx, context),
-            null!, null!, null!, null!, null!, null!, TimeProvider.System, NullLogger<ProjectBuildService>.Instance);
+            null!, null!, null!, null!, null!, null!, null!, TimeProvider.System, NullLogger<ProjectBuildService>.Instance);
         try
         {
             await service.BuildAsync(projectId, releaseId, ct: TestContext.Current.CancellationToken);

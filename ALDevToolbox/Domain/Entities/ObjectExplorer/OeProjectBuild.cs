@@ -192,6 +192,14 @@ public class OeProjectBuild
     public ICollection<OeProjectBuildArtifact> Artifacts { get; set; } = new List<OeProjectBuildArtifact>();
     public ICollection<OeProjectBuildLog> Logs { get; set; } = new List<OeProjectBuildLog>();
     public ICollection<OeProjectBuildDiagnostic> Diagnostics { get; set; } = new List<OeProjectBuildDiagnostic>();
+
+    /// <summary>
+    /// A build whose objects are in the Object Explorer, so it can be explored and
+    /// compared. Every current-version build; a preview check only if it ran before
+    /// checks stopped indexing their objects (#1140). Translates to SQL.
+    /// </summary>
+    public static readonly System.Linq.Expressions.Expression<Func<OeProjectBuild, bool>> HasIndexedObjects =
+        b => b.BcTarget == ProjectBuildTarget.Current || (b.Release != null && b.Release.SourceFileCount > 0);
 }
 
 /// <summary>What asked for a <see cref="OeProjectBuild"/>.</summary>

@@ -614,6 +614,27 @@ public class ReleaseImportService
     }
 
     /// <summary>
+    /// Flips a project build's Release to <c>ready</c> without indexing what it
+    /// compiled. A preview check only has to say whether the code still compiles
+    /// against the next Business Central version; its build results and
+    /// diagnostics carry that, and the source it would index is a commit the
+    /// current build indexes anyway (#1140). The release stays so the build keeps
+    /// its results, but holds no files.
+    /// </summary>
+    public async Task MarkReadyWithoutIngestAsync(int releaseId, CancellationToken ct = default)
+    {
+        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
+            ?? throw new InvalidOperationException($"Release {releaseId} not found.");
+        release.Status = "ready";
+        release.StatusMessage = null;
+        release.SourceFileCount = 0;
+        release.SourceContentLength = 0;
+        release.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        _logger.LogInformation("Release {ReleaseId} marked ready without indexing its objects.", releaseId);
+    }
+
+    /// <summary>
     /// Reopens a <c>failed</c> Release for a fresh import attempt: flips it back
     /// to <c>ingesting</c> and clears the failure message so the row reads as
     /// in-progress while the re-queued job runs. The caller wipes any partial
