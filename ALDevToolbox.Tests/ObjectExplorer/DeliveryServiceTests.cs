@@ -667,12 +667,17 @@ public sealed class DeliveryServiceTests : IDisposable
         delivery.DiagnosticsLog.Should().Contain("window had closed");
     }
 
-    [Fact]
-    public async Task A_moved_deployment_lands_in_the_window_in_the_solutions_time_zone()
+    [Theory]
+    // Winter and summer time, on a clock of their own rather than whatever today is (#1179).
+    [InlineData("2026-01-14T10:00:00Z")]
+    [InlineData("2026-07-14T10:00:00Z")]
+    public async Task A_moved_deployment_lands_in_the_window_in_the_solutions_time_zone(string at)
     {
         int deliveryId;
+        var clock = new ALDevToolbox.Tests.Auth.FakeTimeProvider(DateTimeOffset.Parse(at, System.Globalization.CultureInfo.InvariantCulture));
+        var utcNow = clock.GetUtcNow().UtcDateTime;
         var tz = UpdateWindow.ResolveTimeZone("Europe/Copenhagen");
-        var localNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, tz);
+        var localNow = TimeZoneInfo.ConvertTimeFromUtc(utcNow, tz);
         var nowClock = new TimeOnly(localNow.Hour, localNow.Minute);
         // Closed for the three hours around now and open the rest of the day, so on most
         // clocks the window runs through midnight (start after end).
@@ -687,16 +692,16 @@ public sealed class DeliveryServiceTests : IDisposable
             deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
             await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
                 .ExecuteUpdateAsync(s => s
-                    .SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddMinutes(-90))
+                    .SetProperty(d => d.ScheduledFor, utcNow.AddMinutes(-90))
                     .SetProperty(d => d.ScheduledByDeliveryWindow, true)
                     .SetProperty(d => d.ScheduledOutsideWindow, false));
         }
 
-        (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeFalse();
+        (await NewService(_db.NewContext(), clock: clock).RunDeliveryAsync(deliveryId)).Should().BeFalse();
 
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
-        delivery.ScheduledFor.Should().BeAfter(DateTime.UtcNow);
+        delivery.ScheduledFor.Should().BeAfter(utcNow);
         var movedLocal = TimeZoneInfo.ConvertTimeFromUtc(delivery.ScheduledFor, tz);
         new TimeOnly(movedLocal.Hour, movedLocal.Minute).Should().Be(start, "it moves to the window's opening in the solution's own time");
         delivery.DiagnosticsLog.Should().Contain($"at {UpdateWindow.Clock(start)} (Europe/Copenhagen)");
@@ -837,6 +842,51 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_run_queued_for_one_person_leaves_a_deployment_rescheduled_by_another_to_run_as_them()
+    {
+        var annId = await SeedUserAsync("Ann");
+        var boId = await SeedUserAsync("Bo");
+        int deliveryId;
+        _db.OrgContext.CurrentUserId = annId;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        }
+        // Ann's run is waiting in the queue under her identity.
+        _queue.Reader.TryRead(out var annsJob).Should().BeTrue();
+        annsJob!.Identity.UserId.Should().Be(annId);
+
+        // Bo moves it to now before a worker gets to it. It runs as him from here (#1125),
+        // and the queue already holds this deployment, so his run is not added (#1179).
+        _db.OrgContext.CurrentUserId = boId;
+        await NewService(_db.NewContext()).RescheduleDeliveryAsync(deliveryId, RescheduleTiming.Now);
+        _queue.Reader.TryRead(out _).Should().BeFalse();
+
+        // A worker takes Ann's job, as Ann: it leaves the deployment alone.
+        _db.OrgContext.CurrentUserId = annId;
+        (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeFalse();
+        _queue.Complete(deliveryId);
+        _apps.UploadedOrder.Should().BeEmpty();
+        await using (var read = _db.NewContext())
+        {
+            var waiting = await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
+            waiting.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+            waiting.TriggeredByUserId.Should().Be(boId);
+        }
+
+        // The scheduler's next sweep queues it as Bo, and it runs as him.
+        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow.AddMinutes(1))).Should().Be(1);
+        _queue.Reader.TryRead(out var bosJob).Should().BeTrue();
+        bosJob!.Identity.UserId.Should().Be(boId);
+        _db.OrgContext.CurrentUserId = boId;
+        (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeTrue();
+
+        await using var after = _db.NewContext();
+        (await after.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status.Should().Be(ProjectDeliveryStatus.Deployed);
+    }
+
+    [Fact]
     public async Task EnqueueDueDeliveriesAsync_enqueues_due_rows_and_skips_future_ones()
     {
         await using var ctx = _db.NewContext();
@@ -971,6 +1021,42 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_prepared_deployment_left_on_a_deleted_pipeline_is_dismissed_by_the_sweep_and_stops_asking()
+    {
+        int deliveryId, ownerId;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+            // Prepared just after the delete's own pass over the pipeline (#1179).
+            deliveryId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+            await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+            ownerId = await SeedUserAsync("Ann");
+            ctx.UserNotifications.Add(new ALDevToolbox.Domain.Entities.UserNotification
+            {
+                UserId = ownerId, OrganizationId = TestDb.DefaultOrgId,
+                Category = ALDevToolbox.Domain.Entities.NotificationCategory.Deployments,
+                Title = "Waiting for approval: CRONUS Core to Production", Path = $"/pipelines/deployments/{seed.ReleasePipelineId}",
+                CreatedAt = DateTime.UtcNow, Subject = NotificationSubject.Delivery(deliveryId),
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow)).Should().Be(0);
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Dismissed);
+        delivery.DismissReason.Should().Be("The deployment pipeline was deleted");
+        delivery.FinishedAt.Should().NotBeNull();
+        delivery.Results.Should().OnlyContain(r =>
+            r.Status == ProjectDeliveryResultStatus.Skipped && r.Message == "Not sent: the deployment pipeline was deleted.");
+        (await read.UserNotifications.SingleAsync(n => n.UserId == ownerId)).ReadAt
+            .Should().NotBeNull("nobody can approve a deployment of a deleted pipeline");
+    }
+
+    [Fact]
     public async Task FailInterruptedDeliveriesAsync_fails_orphaned_in_progress_runs()
     {
         await using var ctx = _db.NewContext();
@@ -1033,8 +1119,9 @@ public sealed class DeliveryServiceTests : IDisposable
 
         await using (var run = _db.NewContext())
         {
-            var act = () => NewService(run).RunDeliveryAsync(deliveryId, shutdown.Token);
-            await act.Should().ThrowAsync<OperationCanceledException>();
+            // Reported as a run that happened, so the worker still tells the person behind
+            // it: after the restart nothing else will (#1179).
+            (await NewService(run).RunDeliveryAsync(deliveryId, shutdown.Token)).Should().BeTrue();
         }
 
         await using var read = _db.NewContext();
@@ -3272,12 +3359,13 @@ public sealed class DeliveryServiceTests : IDisposable
     private ReleasePipelineService NewReleasePipelineService(AppDbContext ctx) =>
         new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
 
-    private DeliveryService NewService(AppDbContext ctx, ALDevToolbox.Services.Tools.ToolEnablement? tools = null)
+    private DeliveryService NewService(AppDbContext ctx, ALDevToolbox.Services.Tools.ToolEnablement? tools = null, TimeProvider? clock = null)
     {
         var svc = new DeliveryService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             _tokens, _apps, _admin, _queue,
             new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
             tools ?? _db.NewToolEnablement(ctx),
+            clock ?? TimeProvider.System,
             NullLogger<DeliveryService>.Instance)
         {
             PollDelay = TimeSpan.Zero,

@@ -49,11 +49,20 @@ public sealed class DeliveryWorker : QueueDrainWorker<DeliveryJob>
         if (await deliveries.RunDeliveryAsync(job.DeliveryId, ct).ConfigureAwait(false))
         {
             // Only when this run claimed it, so a delivery another run already took is
-            // never announced twice (#1036). The notifier never throws.
+            // never announced twice (#1036). A run cut off by a shutdown has saved its
+            // failure and is told about here too, on a short grace of its own: nothing
+            // after the restart reports it (#1179). The notifier never throws.
+            using var grace = ct.IsCancellationRequested ? new CancellationTokenSource(ShutdownNotifyGrace) : null;
             await scope.ServiceProvider.GetRequiredService<Notifications.DeploymentNotifier>()
-                .NotifyAsync(job.DeliveryId, ct).ConfigureAwait(false);
+                .NotifyAsync(job.DeliveryId, grace?.Token ?? ct).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// How long a deployment stopped by a shutdown may take to tell its person, well inside
+    /// the host's 30-second shutdown timeout.
+    /// </summary>
+    private static readonly TimeSpan ShutdownNotifyGrace = TimeSpan.FromSeconds(10);
 
     protected override void OnJobFinished(DeliveryJob job) => _queue.Complete(job.DeliveryId);
 

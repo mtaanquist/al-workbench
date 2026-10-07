@@ -40,6 +40,7 @@ public sealed class DeliveryToolsTests : IDisposable
                 new ThrowingTokenSource(), new ThrowingAppManagementClient(), new ThrowingAdminClient(), _queue,
                 new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
                 _db.NewToolEnablement(ctx),
+                TimeProvider.System,
                 NullLogger<DeliveryService>.Instance),
             new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
                 _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance),
