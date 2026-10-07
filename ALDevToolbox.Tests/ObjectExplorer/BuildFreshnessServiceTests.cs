@@ -132,6 +132,58 @@ public sealed class BuildFreshnessServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_build_of_another_branch_does_not_cover_the_head()
+    {
+        // Queued for the branch the pipeline had then; the pipeline has moved since.
+        var s = await SeedAsync(branch: "main");
+        await AddBuildAsync(s, Built);
+        await AddHeadAsync(s.RepositoryId, "main", Newest, commits: [Built, Newest]);
+        var head = await HeadPushedAtAsync(s.RepositoryId);
+
+        await AddActiveBuildAsync(s, ProjectBuildStatus.Queued, headSha: null, startedAt: head.AddMinutes(1), branch: "release");
+
+        Single(await GetAsync(s.PipelineId)).BeingBuilt.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_build_on_push_covers_the_other_repositories_pushed_before_it()
+    {
+        // It checks out its own commit in the pushed repository and clones the rest at
+        // the branch, so an earlier push to another repository rides along.
+        var s = await SeedAsync(branch: "main");
+        var second = await AddRepositoryAsync(s.ProjectId, "second-app");
+        await AddBuildAsync(s, Built, alsoPinned: second);
+        await AddHeadAsync(s.RepositoryId, "main", Newest, commits: [Built, Newest]);
+        await AddHeadAsync(second, "main", Newer, commits: [Built, Newer]);
+        var head = await HeadPushedAtAsync(second);
+
+        await AddActiveBuildAsync(s, ProjectBuildStatus.Queued, headSha: Newest, startedAt: head.AddMinutes(1));
+
+        var freshness = await GetAsync(s.PipelineId);
+        freshness.Repositories.Should().OnlyContain(r => r.BeingBuilt);
+        PipelineFreshnessSummary.From(freshness).Headline.Should().Be(PipelineFreshnessHeadline.Building);
+    }
+
+    [Fact]
+    public async Task A_pipeline_is_still_ahead_while_one_of_its_new_commits_is_not_being_built()
+    {
+        var s = await SeedAsync(branch: "main");
+        var second = await AddRepositoryAsync(s.ProjectId, "second-app");
+        await AddBuildAsync(s, Built, alsoPinned: second);
+        await AddHeadAsync(s.RepositoryId, "main", Newest, commits: [Built, Newest]);
+        await AddHeadAsync(second, "main", Newer, commits: [Built, Newer]);
+        var head = await HeadPushedAtAsync(second);
+
+        // A push build of the first repository, queued before the second one moved.
+        await AddActiveBuildAsync(s, ProjectBuildStatus.Queued, headSha: Newest, startedAt: head.AddMinutes(-1));
+
+        var freshness = await GetAsync(s.PipelineId);
+        freshness.Repositories.Single(r => r.RepositoryId == s.RepositoryId).BeingBuilt.Should().BeTrue();
+        freshness.Repositories.Single(r => r.RepositoryId == second).BeingBuilt.Should().BeFalse();
+        PipelineFreshnessSummary.From(freshness).Headline.Should().Be(PipelineFreshnessHeadline.Ahead);
+    }
+
+    [Fact]
     public async Task A_build_row_whose_release_is_no_longer_ingesting_does_not_count()
     {
         // Nothing resets a build row whose job was lost; the release is what says
@@ -420,7 +472,8 @@ public sealed class BuildFreshnessServiceTests : IDisposable
     }
 
     private async Task<int> AddBuildAsync(
-        Seeded s, string sha, string status = ProjectBuildStatus.Ready, DateTime? startedAt = null)
+        Seeded s, string sha, string status = ProjectBuildStatus.Ready, DateTime? startedAt = null,
+        params int[] alsoPinned)
     {
         await using var ctx = _db.NewContext();
         var started = startedAt ?? DateTime.UtcNow.AddHours(-1);
@@ -442,6 +495,18 @@ public sealed class BuildFreshnessServiceTests : IDisposable
             CommitHash = sha,
             CommittedAt = BuiltCommittedAt,
         });
+        foreach (var repositoryId in alsoPinned)
+        {
+            build.RepoCommits.Add(new OeProjectBuildRepoCommit
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectRepositoryId = repositoryId,
+                RepoUrl = "https://github.com/cronus-dk/other-" + repositoryId + ".git",
+                RepoDisplayName = "other-" + repositoryId,
+                CommitHash = sha,
+                CommittedAt = BuiltCommittedAt,
+            });
+        }
         ctx.OeProjectBuilds.Add(build);
         await ctx.SaveChangesAsync();
         return build.Id;
@@ -449,7 +514,7 @@ public sealed class BuildFreshnessServiceTests : IDisposable
 
     private async Task AddActiveBuildAsync(
         Seeded s, string status, string? headSha, DateTime startedAt, string target = ProjectBuildTarget.Current,
-        string releaseStatus = "ingesting")
+        string releaseStatus = "ingesting", string? branch = "main", int? pushedRepositoryId = null)
     {
         await using var ctx = _db.NewContext();
         var release = new OeRelease
@@ -473,7 +538,8 @@ public sealed class BuildFreshnessServiceTests : IDisposable
             Status = status,
             Trigger = headSha is null ? ProjectBuildTrigger.Manual : ProjectBuildTrigger.Push,
             HeadSha = headSha,
-            HeadRepositoryId = headSha is null ? null : s.RepositoryId,
+            HeadRepositoryId = headSha is null ? null : pushedRepositoryId ?? s.RepositoryId,
+            Branch = branch,
             BcTarget = target,
             StartedAt = startedAt,
         });
