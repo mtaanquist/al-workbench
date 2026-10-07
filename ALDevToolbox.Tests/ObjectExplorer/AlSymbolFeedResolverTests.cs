@@ -150,6 +150,19 @@ public sealed class AlSymbolFeedResolverTests : IDisposable
         missing.Reason.Should().Contain("AppSource symbol feed").And.Contain("Microsoft symbol feed");
     }
 
+    [Theory]
+    [InlineData("../../etc")]
+    [InlineData("continia-core")]
+    [InlineData("1234/../../x")]
+    public async Task A_dependency_id_that_is_not_a_guid_is_refused_without_touching_the_feeds_or_the_cache(string id)
+    {
+        var outcome = await Resolver().ResolveAsync(Request("29.0", new SymbolDependency(id, "Odd Extension", "1.0.0.0")));
+
+        outcome.Resolved.Should().BeEmpty();
+        outcome.Unresolved.Should().ContainSingle().Which.Reason.Should().Contain("not a valid app id");
+        _feeds.Requests.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task A_feed_answering_5xx_is_a_per_app_failure_not_an_exception()
     {
