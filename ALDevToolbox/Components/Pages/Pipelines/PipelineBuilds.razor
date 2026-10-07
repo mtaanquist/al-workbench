@@ -525,7 +525,7 @@
                                 </Alert>
                             }
 
-                            @if (_latestDetail?.ReleaseId is { } relId)
+                            @if (_latestDetail is { HasObjects: true, ReleaseId: { } relId })
                             {
                                 <div class="pb-explore">
                                     <a class="btn btn--sm" href="@($"/object-explorer/release/{relId}")">

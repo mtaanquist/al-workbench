@@ -136,6 +136,57 @@ public sealed class PreviewCheckTests : IDisposable
         due.Select(d => d.BcTarget).Should().Equal(ProjectBuildTarget.NextMinor);
     }
 
+    private const string ShaA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string ShaB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    [Fact]
+    public async Task A_clean_check_of_the_same_commit_and_preview_is_not_run_again_however_long_ago()
+    {
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedHeadAsync(projectId, ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-30), NextMinor, commit: ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-30), NextMajor, commit: ShaA);
+        // A build of the same commit since says nothing new either.
+        await SeedBuildAsync(projectId, pipelineId, Tonight.AddDays(-2));
+
+        var due = await ListDueAsync();
+
+        due.Where(d => d.BcTarget is not null).Should().BeEmpty("neither the code nor Microsoft's preview changed (#1140)");
+    }
+
+    [Fact]
+    public async Task A_new_commit_on_the_branch_makes_both_due_without_a_build_of_the_pipeline()
+    {
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedHeadAsync(projectId, ShaB);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-1), NextMinor, commit: ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-1), NextMajor, commit: ShaA);
+
+        var due = await ListDueAsync();
+
+        due.Select(d => d.BcTarget).Should().Equal(ProjectBuildTarget.NextMinor, ProjectBuildTarget.NextMajor);
+    }
+
+    [Theory]
+    [InlineData(3, false)]
+    [InlineData(8, true)]
+    public async Task A_failed_check_of_the_same_code_is_tried_again_after_the_quiet_period(int daysAgo, bool expectDue)
+    {
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedHeadAsync(projectId, ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-daysAgo), NextMinor,
+            status: ProjectBuildStatus.Failed, commit: ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-1), NextMajor, commit: ShaA);
+
+        var due = await ListDueAsync();
+
+        due.Where(d => d.BcTarget is not null).Select(d => d.BcTarget).Should()
+            .Equal(expectDue ? [ProjectBuildTarget.NextMinor] : Array.Empty<string>());
+    }
+
     [Fact]
     public async Task No_preview_from_Microsoft_yet_means_nothing_to_check()
     {
@@ -406,14 +457,39 @@ public sealed class PreviewCheckTests : IDisposable
     }
 
     private async Task SeedCheckAsync(int projectId, int pipelineId, string target, DateTime startedAt, string version,
-        string status = ProjectBuildStatus.Ready)
+        string status = ProjectBuildStatus.Ready, string? commit = null)
     {
         await using var ctx = _db.NewContext();
-        ctx.OeProjectBuilds.Add(new OeProjectBuild
+        var build = new OeProjectBuild
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
             Status = status, BcTarget = target, Trigger = ProjectBuildTrigger.PreviewCheck, BcArtifactVersion = version,
             StartedAt = startedAt, FinishedAt = status == ProjectBuildStatus.Ready ? startedAt.AddMinutes(3) : null,
+        };
+        ctx.OeProjectBuilds.Add(build);
+        await ctx.SaveChangesAsync();
+        if (commit is not null)
+        {
+            var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+            ctx.OeProjectBuildRepoCommits.Add(new OeProjectBuildRepoCommit
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = build.Id, ProjectRepositoryId = repositoryId,
+                RepoUrl = "https://github.com/cronus/core", RepoDisplayName = "core", CommitHash = commit,
+            });
+            await ctx.SaveChangesAsync();
+        }
+    }
+
+    /// <summary>The head of the repository's default branch, as the push webhook last reported it.</summary>
+    private async Task SeedHeadAsync(int projectId, string sha)
+    {
+        await using var ctx = _db.NewContext();
+        var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+        ctx.OeRepositoryBranchHeads.Add(new OeRepositoryBranchHead
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectRepositoryId = repositoryId, Branch = "main", HeadSha = sha,
+            PushedAt = Tonight.AddDays(-20), PusherLogin = "erik", CommitCount = 1, IsDefaultBranch = true,
+            UpdatedAt = Tonight.AddDays(-20),
         });
         await ctx.SaveChangesAsync();
     }

@@ -563,6 +563,7 @@ public sealed class ArtifactService
             {
                 b.Id, b.ProjectId, b.PipelineId, b.ReleaseId, b.Status, b.BcVersion, b.Branch,
                 b.StartedAt, b.FinishedAt, b.FailureMessage, b.BcTarget, b.BcArtifactVersion,
+                HasObjects = b.BcTarget == ProjectBuildTarget.Current || (b.Release != null && b.Release.SourceFileCount > 0),
                 StartedBy = b.StartedByUser != null ? b.StartedByUser.DisplayName : null,
                 ProjectName = b.Project != null ? b.Project.Name : string.Empty,
                 PipelineName = b.Pipeline != null ? b.Pipeline.Name : null,
@@ -647,7 +648,7 @@ public sealed class ArtifactService
             build.ReleaseId, build.Status,
             build.BcVersion, build.Branch, build.StartedAt, build.FinishedAt, build.FailureMessage,
             build.StartedBy, repoCommits, changelogGroups, artifacts, logSections,
-            errorCount, warningCount, failedApps, build.BcTarget, build.BcArtifactVersion);
+            errorCount, warningCount, failedApps, build.BcTarget, build.BcArtifactVersion, build.HasObjects);
     }
 
     /// <summary>The deliverables of a build (metadata only), ordered by file name.</summary>
@@ -674,6 +675,8 @@ public sealed class ArtifactService
         await EnsureCanViewPipelineAsync(pipelineId, ct);
         return await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId == pipelineId && b.Status == ProjectBuildStatus.Ready && b.ReleaseId != null)
+            // Preview checks stopped indexing their objects (#1140); only the older ones that did can be compared.
+            .Where(b => b.BcTarget == ProjectBuildTarget.Current || b.Release!.SourceFileCount > 0)
             .OrderByDescending(b => b.StartedAt)
             .Select(b => new ComparableBuildRow(b.Id, b.ReleaseId!.Value, b.BcVersion, b.StartedAt, b.BcTarget))
             .ToListAsync(ct);
@@ -960,7 +963,8 @@ public sealed record BuildDetail(
     int WarningCount = 0,
     IReadOnlyList<FailedAppRow>? FailedApps = null,
     string BcTarget = ProjectBuildTarget.Current,
-    string? BcArtifactVersion = null)
+    string? BcArtifactVersion = null,
+    bool HasObjects = true)
 {
     /// <summary>True for a build against a preview version: check-only, never deployable or published.</summary>
     public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);

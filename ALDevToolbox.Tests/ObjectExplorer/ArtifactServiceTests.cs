@@ -277,6 +277,27 @@ public sealed class ArtifactServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_preview_check_that_indexed_nothing_cannot_be_compared_or_explored()
+    {
+        int pipelineId, checkOnly, current;
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            pipelineId = await SeedPipelineAsync(ctx, projectId);
+            current = await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc), releaseId: await SeedReleaseAsync(ctx), pipelineId: pipelineId);
+            checkOnly = await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, new DateTime(2026, 6, 2, 0, 0, 0, DateTimeKind.Utc), releaseId: await SeedReleaseAsync(ctx), pipelineId: pipelineId);
+            var build = await ctx.OeProjectBuilds.SingleAsync(b => b.Id == checkOnly);
+            build.BcTarget = ProjectBuildTarget.NextMajor;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        (await Svc(read).ListComparableBuildsAsync(pipelineId)).Select(c => c.BuildId).Should().Equal(current);
+        (await Svc(read).GetBuildDetailAsync(checkOnly))!.HasObjects.Should().BeFalse();
+        (await Svc(read).GetBuildDetailAsync(current))!.HasObjects.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Download_fetches_return_bytes_and_a_concatenated_log()
     {
         int buildId, artifactId;

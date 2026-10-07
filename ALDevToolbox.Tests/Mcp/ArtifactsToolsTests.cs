@@ -5,6 +5,7 @@ using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Services.Mcp.Tools;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol;
 
@@ -98,6 +99,24 @@ public sealed class ArtifactsToolsTests : IDisposable
         await using var read = _db.NewContext();
         var act = () => NewTools(read).CompareProjectBuildsAsync(b1, b2);
         (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("same project");
+    }
+
+    [Fact]
+    public async Task Compare_project_builds_rejects_a_preview_check_that_indexed_nothing()
+    {
+        int b1, b2;
+        await using (var ctx = _db.NewContext())
+        {
+            var p = await SeedProjectAsync(ctx, "CRONUS A/S");
+            b1 = await SeedBuildAsync(ctx, p, ProjectBuildStatus.Ready, DateTime.UtcNow, releaseId: await SeedReleaseAsync(ctx));
+            b2 = await SeedBuildAsync(ctx, p, ProjectBuildStatus.Ready, DateTime.UtcNow, releaseId: await SeedReleaseAsync(ctx));
+            (await ctx.OeProjectBuilds.SingleAsync(b => b.Id == b2)).BcTarget = ProjectBuildTarget.NextMajor;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var act = () => NewTools(read).CompareProjectBuildsAsync(b1, b2);
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("preview check");
     }
 
     [Fact]

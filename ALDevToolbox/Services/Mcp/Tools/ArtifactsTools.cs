@@ -132,7 +132,7 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "compare_solution_builds", ReadOnly = true)]
-    [Description("Diffs two of the SAME solution's builds at the object level (added / removed / modified / unchanged), so you can see what objects changed between two compiles. Both builds must be 'ready'. This is deliberately solution-scoped — use compare_releases for Microsoft/third-party releases.")]
+    [Description("Diffs two of the SAME solution's builds at the object level (added / removed / modified / unchanged), so you can see what objects changed between two compiles. Both builds must be 'ready'; nightly preview check builds hold compile results only and cannot be compared. This is deliberately solution-scoped — use compare_releases for Microsoft/third-party releases.")]
     public async Task<IReadOnlyList<ObjectCompareRow>> CompareProjectBuildsAsync(
         [Description("First (earlier / base) build id.")] int baseBuildId,
         [Description("Second (later) build id.")] int otherBuildId,

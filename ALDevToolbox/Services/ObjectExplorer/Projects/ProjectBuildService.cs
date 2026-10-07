@@ -76,6 +76,7 @@ public sealed class ProjectBuildService
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly BcArtifactService _artifacts;
+    private readonly BcArtifactCache _artifactCache;
     private readonly ReleaseImportService _importer;
     private readonly AlCompilerProvisioner _compiler;
     private readonly AlSymbolFeedResolver _symbolFeeds;
@@ -88,6 +89,7 @@ public sealed class ProjectBuildService
         AppDbContext db,
         IOrganizationContext orgContext,
         BcArtifactService artifacts,
+        BcArtifactCache artifactCache,
         ReleaseImportService importer,
         AlCompilerProvisioner compiler,
         AlSymbolFeedResolver symbolFeeds,
@@ -99,6 +101,7 @@ public sealed class ProjectBuildService
         _db = db;
         _orgContext = orgContext;
         _artifacts = artifacts;
+        _artifactCache = artifactCache;
         _importer = importer;
         _compiler = compiler;
         _symbolFeeds = symbolFeeds;
@@ -294,8 +297,8 @@ public sealed class ProjectBuildService
 
             // 2c. On a pipeline that publishes only what changed, find the apps with no
             //     change since the pipeline last produced them. They keep that earlier
-            //     version (written into the clone so the compile agrees), and after the
-            //     compile the build carries the earlier .app instead of its own (#1094).
+            //     version (written into the clone so the app.json agrees), and the build
+            //     carries the earlier .app without compiling it again (#1094, #1140).
             var settings = build is not null && MayNumberApps(build.PipelineId, build.Trigger, options.Target)
                 ? await ReadPipelineBuildSettingsAsync(_db, build.PipelineId!.Value, ct).ConfigureAwait(false)
                 : null;
@@ -362,7 +365,12 @@ public sealed class ProjectBuildService
 
             var symbolsDir = Path.Combine(buildRoot, "symbols");
             Directory.CreateDirectory(symbolsDir);
-            var download = await _artifacts.DownloadArtifactSetAsync(resolved.ApplicationUrl, ct).ConfigureAwait(false);
+            // Kept between builds, so the next build of this version reads it from disk (#1140).
+            using var artifactLease = await _artifactCache.GetAsync(
+                resolved.ApplicationUrl,
+                token => _artifacts.DownloadArtifactSetAsync(resolved.ApplicationUrl, token),
+                ct).ConfigureAwait(false);
+            var download = artifactLease.Download;
             int? parentReleaseId;
             IReadOnlyList<ResolvedSymbolPackage> fromFeeds = [];
             try
@@ -387,8 +395,7 @@ public sealed class ProjectBuildService
             }
             finally
             {
-                TryDelete(download.ApplicationZipPath);
-                if (download.PlatformZipPath is not null) TryDelete(download.PlatformZipPath);
+                artifactLease.Dispose();
             }
 
             // 4b. Put each vendor package the feeds resolved into the Object
@@ -406,6 +413,43 @@ public sealed class ProjectBuildService
             foreach (var app in TopologicalOrder(discovered))
             {
                 ct.ThrowIfCancellationRequested();
+                if (carried.TryGetValue(NormalizeAppId(app.Manifest.Id), out var earlier))
+                {
+                    // Unchanged, and so is every sibling it depends on (FindUnchangedAppsAsync
+                    // carries nothing whose dependency changed): compiling it again would only
+                    // produce what the earlier build already did, so its .app is used as it is
+                    // (#1140). It goes into the symbols folder for the apps that depend on it.
+                    var kept = await _db.OeProjectBuildArtifacts.AsNoTracking()
+                        .Where(a => a.Id == earlier.ArtifactId)
+                        .Select(a => new { a.FileName, a.AppVersion, a.RuntimeVersion, a.Content })
+                        .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                    if (kept is null)
+                    {
+                        // The earlier build was removed while this one ran. Building again
+                        // finds no earlier build and gives the app a new version.
+                        results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
+                            ProjectBuildResultStatus.Failed,
+                            $"The earlier build of {app.Manifest.Name} was removed while this one ran. Build again.",
+                            RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                        continue;
+                    }
+                    await File.WriteAllBytesAsync(Path.Combine(symbolsDir, SafeAppFileName(app.Manifest)), kept.Content, ct).ConfigureAwait(false);
+                    uploads.Add(new AppFileUpload(
+                        FileName: kept.FileName,
+                        AppStream: new MemoryStream(kept.Content, writable: false),
+                        SourceZipStream: null));
+                    // Deliver exactly the .app the earlier build produced, so an
+                    // environment already on it sees the same version and skips it.
+                    artifacts.Add(new PendingArtifact(kept.FileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name,
+                        kept.AppVersion, kept.RuntimeVersion, kept.Content, earlier.OriginBuildId));
+                    logs.Add(new PendingLog(app.Repo.RepositoryId, $"Compile: {app.Manifest.Name}",
+                        $"Not compiled: nothing in it or in the extensions it depends on changed since build #{earlier.OriginBuildId}, so this build uses that build's {kept.FileName}."));
+                    results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
+                        ProjectBuildResultStatus.Compiled, null,
+                        RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                    continue;
+                }
+
                 var (compiled, compileLog) = await CompileAsync(app, symbolsDir, compiler, ct).ConfigureAwait(false);
                 if (!string.IsNullOrWhiteSpace(compileLog))
                 {
@@ -460,34 +504,7 @@ public sealed class ProjectBuildService
                 // Retain the compiled .app as a downloadable deliverable. Packaging
                 // artifacts (.dep.app) are never compiler output here, but guard
                 // anyway so they can't slip in as a download. See .design/artifacts.md.
-                if (carried.TryGetValue(NormalizeAppId(app.Manifest.Id), out var earlier))
-                {
-                    // Unchanged: deliver exactly the .app the earlier build produced, so
-                    // an environment already on it sees the same version and skips it.
-                    var kept = await _db.OeProjectBuildArtifacts.AsNoTracking()
-                        .Where(a => a.Id == earlier.ArtifactId)
-                        .Select(a => new { a.FileName, a.AppVersion, a.RuntimeVersion, a.Content })
-                        .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-                    if (kept is not null)
-                    {
-                        artifacts.Add(new PendingArtifact(kept.FileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name,
-                            kept.AppVersion, kept.RuntimeVersion, kept.Content, earlier.OriginBuildId));
-                    }
-                    else
-                    {
-                        // The earlier build was removed while this one ran. What was just
-                        // compiled carries the earlier version, so storing it would publish
-                        // different bytes under a version that already exists. Fail the app
-                        // instead; building again finds no earlier build and gives it a new one.
-                        uploads.RemoveAt(uploads.Count - 1);
-                        results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
-                            ProjectBuildResultStatus.Failed,
-                            $"The earlier build of {app.Manifest.Name} was removed while this one ran. Build again.",
-                            RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
-                        continue;
-                    }
-                }
-                else if (!fileName.EndsWith(".dep.app", StringComparison.OrdinalIgnoreCase))
+                if (!fileName.EndsWith(".dep.app", StringComparison.OrdinalIgnoreCase))
                 {
                     artifacts.Add(new PendingArtifact(fileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name, app.Manifest.Version, app.Manifest.Runtime, bytes));
                 }
@@ -512,7 +529,8 @@ public sealed class ProjectBuildService
                 "Project build for {Project} (release {ReleaseId}): {Compiled} compiled, {Failed} failed, parent release {ParentReleaseId}.",
                 project.Name, releaseId, uploads.Count, results.Count(r => r.Status == ProjectBuildResultStatus.Failed), parentReleaseId);
 
-            return new ProjectBuildOutcome(uploads, results, parentReleaseId, finalLabel, resolved.MajorMinor);
+            return new ProjectBuildOutcome(uploads, results, parentReleaseId, finalLabel, resolved.MajorMinor,
+                IsPreview: options.Target != BcBuildTarget.Current);
         }
         finally
         {
@@ -2574,7 +2592,8 @@ public sealed record ProjectBuildOutcome(
     IReadOnlyList<BuildAppResult> Results,
     int? ParentReleaseId,
     string? FinalLabel,
-    string? BcVersion = null);
+    string? BcVersion = null,
+    bool IsPreview = false);
 
 /// <summary>One parsed changelog commit (short hash, author, committer date, subject).</summary>
 public sealed record ChangelogEntry(string ShortHash, string Author, DateTime? CommittedAt, string Subject);

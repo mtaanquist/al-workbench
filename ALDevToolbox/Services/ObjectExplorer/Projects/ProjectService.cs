@@ -991,12 +991,21 @@ public sealed class ProjectService
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => _db.OeProjects.Where(visible).Any(p => p.Id == b.ProjectId))
             .Where(b => b.Id == buildId)
-            .Select(b => new { b.ProjectId, b.Status, b.ReleaseId })
+            .Select(b => new
+            {
+                b.ProjectId, b.Status, b.ReleaseId,
+                HasObjects = b.BcTarget == ProjectBuildTarget.Current || (b.Release != null && b.Release.SourceFileCount > 0),
+            })
             .FirstOrDefaultAsync(ct)
             ?? throw new McpException($"Build {buildId} was not found in this organisation.");
         if (build.Status != ProjectBuildStatus.Ready || build.ReleaseId is null)
         {
             throw new McpException($"Build {buildId} can't be compared — only 'ready' builds that produced a release can be diffed.");
+        }
+        if (!build.HasObjects)
+        {
+            // Preview checks only record whether the code compiles (#1140).
+            throw new McpException($"Build {buildId} is a preview check: it records compile results only, so it can't be compared. Use get_solution_build for its errors.");
         }
         return (build.ProjectId, build.ReleaseId.Value);
     }

@@ -85,9 +85,14 @@ public sealed class BuildCompareCandidatesTests : IDisposable
 
             self = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2", bcVersion: "28.2");
             await SeedBuildAsync(seed, projectId, main, self, ProjectBuildStatus.Ready, now.AddDays(-1));
-            preview = await SeedProjectReleaseAsync(seed, "CRONUS on BC 29.0", bcVersion: "29.0");
+            // A preview check from before #1140, which still indexed its objects.
+            preview = await SeedProjectReleaseAsync(seed, "CRONUS on BC 29.0", bcVersion: "29.0", sourceFileCount: 12);
             previewBuild = await SeedBuildAsync(seed, projectId, main, preview, ProjectBuildStatus.Ready, now,
                 bcTarget: ProjectBuildTarget.NextMajor);
+            // A preview check that recorded compile results only: nothing to compare.
+            var checkOnly = await SeedProjectReleaseAsync(seed, "CRONUS on BC 29.1", bcVersion: "29.1");
+            await SeedBuildAsync(seed, projectId, main, checkOnly, ProjectBuildStatus.Ready, now,
+                bcTarget: ProjectBuildTarget.NextMinor);
 
             var deletedPipeline = await SeedProjectReleaseAsync(seed, "CRONUS on BC 28.2");
             await SeedBuildAsync(seed, projectId, gone, deletedPipeline, ProjectBuildStatus.Ready, now);
@@ -172,7 +177,8 @@ public sealed class BuildCompareCandidatesTests : IDisposable
     }
 
     private static async Task<int> SeedProjectReleaseAsync(
-        AppDbContext ctx, string label, string status = "ready", bool deleted = false, string? bcVersion = null)
+        AppDbContext ctx, string label, string status = "ready", bool deleted = false, string? bcVersion = null,
+        int sourceFileCount = 0)
     {
         var release = new OeRelease
         {
@@ -181,6 +187,7 @@ public sealed class BuildCompareCandidatesTests : IDisposable
             Kind = "project",
             Status = status,
             BcVersion = bcVersion,
+            SourceFileCount = sourceFileCount,
             ImportedAt = DateTime.UtcNow,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,

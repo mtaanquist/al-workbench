@@ -247,7 +247,9 @@ public class ObjectExplorerService
                         && b.Release!.Status == "ready"
                         && b.Release!.DeletedAt == null
                         // A deleted pipeline's builds go with it, as on the Pipelines pages.
-                        && (b.Pipeline == null || b.Pipeline.DeletedAt == null))
+                        && (b.Pipeline == null || b.Pipeline.DeletedAt == null)
+                        // Preview checks stopped indexing their objects (#1140); only the older ones that did can be compared.
+                        && (b.BcTarget == ProjectBuildTarget.Current || b.Release!.SourceFileCount > 0))
             .Where(b => _db.OeReleases.Where(visibleRelease).Any(r => r.Id == b.ReleaseId))
             .OrderBy(b => own.PipelineId != null && b.PipelineId == own.PipelineId ? 0 : 1)
             .ThenByDescending(b => b.StartedAt)

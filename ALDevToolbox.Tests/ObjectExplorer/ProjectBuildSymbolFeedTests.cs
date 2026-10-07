@@ -541,6 +541,8 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         fresh.AppVersion.Should().Be($"1.0.{buildId}.0");
         _tools.SeenVersions["CRONUS Sales Extension"][BaseId].Should().Be("1.0.500.0",
             "the changed app compiles against the version of its sibling that is deployed beside it");
+        _tools.SeenVersions.Should().NotContainKey("CRONUS Base Extension", "an unchanged app is not compiled again (#1140)");
+        (await LogAsync(buildId, "Compile: CRONUS Base Extension")).Should().Contain("Not compiled").And.Contain($"build #{priorId}");
 
         var log = await LogAsync(buildId, "Changes");
         log.Should().Contain($"CRONUS Base Extension: unchanged since build #{priorId}, so it keeps 1.0.500.0")
@@ -1122,6 +1124,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         outcome.BcVersion.Should().Be("30.0");
         outcome.FinalLabel.Should().Be("CRONUS on BC 30.0");
         outcome.ParentReleaseId.Should().Be(previewId, "the build parents onto the catalogue's preview of that version");
+        outcome.IsPreview.Should().BeTrue("the worker skips the Object Explorer index for it (#1140)");
         _tools.CompilersRun.Should().NotBeEmpty().And.OnlyContain(p => p.Contains("/30.0.42.32495-beta/"));
         _http.Requests.Should().Contain($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/{NextMajorVersion}/dk");
         // The feed picks third-party symbols for the target version, not the manifests' 29.0.
@@ -1247,6 +1250,8 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         var service = new ProjectBuildService(
             ctx, _db.OrgContext,
             new BcArtifactService(_http, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance),
+            new BcArtifactCache(new BcArtifactCacheOptions { Directory = Path.Combine(_root, "artifact-cache") },
+                NullLogger<BcArtifactCache>.Instance),
             importer,
             compiler ?? new AlCompilerProvisioner(_http, NullLogger<AlCompilerProvisioner>.Instance,
                 new AlCompilerOptions { ExplicitAlcPath = _tools.AlcPath }),
