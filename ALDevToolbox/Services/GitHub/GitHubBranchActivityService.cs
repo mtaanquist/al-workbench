@@ -12,9 +12,9 @@ namespace ALDevToolbox.Services.GitHub;
 /// the organisation it resolved from the installation id, so every read and write
 /// here runs under that organisation's ordinary query filter.
 ///
-/// <para>Nothing is built because of anything written here; builds on push are
-/// started separately by <see cref="ALDevToolbox.Services.ObjectExplorer.Projects.PushBuildService"/>
-/// (#1079). The rows are what <c>BuildFreshnessService</c> compares a pipeline's last
+/// <para>Nothing is built because of anything written here; which pipelines build on a
+/// push is decided separately by <see cref="ALDevToolbox.Services.ObjectExplorer.Projects.PushBuildService"/>
+/// and started by <see cref="GitHubPullRequestBuildWorker"/> (#1079). The rows are what <c>BuildFreshnessService</c> compares a pipeline's last
 /// build against. See <c>.design/github-integration-phase2.md</c>, "Branch watching" (#963).</para>
 /// </summary>
 public sealed class GitHubBranchActivityService

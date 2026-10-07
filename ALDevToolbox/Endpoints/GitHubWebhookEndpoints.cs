@@ -26,7 +26,8 @@ namespace ALDevToolbox.Endpoints;
 /// <para>The same route also takes <c>push</c> deliveries and merged pull
 /// requests (#963), so a build pipeline can tell when the branch it watches has
 /// moved past what it last built. The worker records those, and a push also starts
-/// a build on each pipeline that builds on push (#1079); they pass the same secret,
+/// a build on each pipeline that builds on push, unless it was forced or deleted
+/// the branch (#1079); they pass the same secret,
 /// size and signature checks first.</para>
 /// </summary>
 public static class GitHubWebhookEndpoints

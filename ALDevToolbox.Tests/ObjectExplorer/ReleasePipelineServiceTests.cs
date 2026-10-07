@@ -354,7 +354,7 @@ public sealed class ReleasePipelineServiceTests : IDisposable
         // The editor opens a custom-name field for any Name error, so this must not be one.
         var errors = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors;
         errors.Should().NotContainKey("Name");
-        errors.Should().ContainKey("ReleasePipeline");
+        errors["ReleasePipeline"].Should().Be("This deployment pipeline no longer exists.");
     }
 
     [Fact]
