@@ -1213,16 +1213,23 @@ public sealed class DeliveryService
         return new ResolvedTiming(when, schedule, byWindow, outsideWindow);
     }
 
-    /// <summary>Writes a timing onto a delivery still <c>scheduled</c>; false when it has started meanwhile.</summary>
-    private async Task<bool> ApplyTimingAsync(int deliveryId, ResolvedTiming t, DateTime now, CancellationToken ct) =>
-        await _db.OeProjectDeliveries
+    /// <summary>
+    /// Writes a timing onto a delivery still <c>scheduled</c>; false when it has started meanwhile.
+    /// The person who set the new time is the one it then runs as, as with approving (#1125).
+    /// </summary>
+    private async Task<bool> ApplyTimingAsync(int deliveryId, ResolvedTiming t, DateTime now, CancellationToken ct)
+    {
+        var personId = _orgContext.CurrentUserId;
+        return await _db.OeProjectDeliveries
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled)
             .ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.TriggeredByUserId, d => personId ?? d.TriggeredByUserId)
                 .SetProperty(d => d.ScheduledFor, t.When)
                 .SetProperty(d => d.DeploymentSchedule, t.Schedule)
                 .SetProperty(d => d.ScheduledByDeliveryWindow, t.ByWindow)
                 .SetProperty(d => d.ScheduledOutsideWindow, t.OutsideWindow)
                 .SetProperty(d => d.UpdatedAt, now), ct) > 0;
+    }
 
     private async Task EnqueueIfDueAsync(int deliveryId, RescheduleInfo info, DateTime when, DateTime now, CancellationToken ct)
     {
@@ -1640,6 +1647,11 @@ public sealed class DeliveryService
         var log = new StringBuilder(delivery.DiagnosticsLog ?? string.Empty);
         try
         {
+            if (await WhyTheSchedulerCannotDeployAsync(delivery, ct) is { } refusal)
+            {
+                await FailAsync(delivery, log, refusal, ct);
+                return true;
+            }
             await PublishAsync(delivery, log, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1654,6 +1666,41 @@ public sealed class DeliveryService
         }
         return true;
     }
+
+    /// <summary>
+    /// A deployment runs as a person: the one who scheduled, approved or enabled it, or
+    /// who last rescheduled it (the worker runs under that identity). It may wait hours for
+    /// its time, so whether that person may still deploy to the solution is asked again
+    /// when it starts: someone removed from the solution's team, or disabled, no longer
+    /// deploys through a deployment they set up earlier (#1125). Null when they may, or
+    /// when it runs as nobody.
+    /// </summary>
+    private async Task<string?> WhyTheSchedulerCannotDeployAsync(OeProjectDelivery delivery, CancellationToken ct)
+    {
+        if (_orgContext.CurrentUserId is not { } userId) return null;
+
+        // Read from the user row: a run queued for later carries no site-admin flag.
+        var person = await _db.Users.AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => new { Active = u.Status == UserStatus.Active, u.IsSiteAdmin })
+            .FirstOrDefaultAsync(ct);
+        if (person is { Active: true, IsSiteAdmin: true }) return null;
+        var ownerId = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == delivery.ProjectId)
+            .Select(p => p.CreatedByUserId)
+            .FirstOrDefaultAsync(ct);
+        if (person is { Active: true } && await _access.CanManageAsync(delivery.ProjectId, ownerId, ct))
+        {
+            return null;
+        }
+        _logger.LogWarning(
+            "Delivery {DeliveryId} refused: user {UserId} who scheduled it can no longer deploy to project {ProjectId}.",
+            delivery.Id, userId, delivery.ProjectId);
+        return SchedulerLostAccess;
+    }
+
+    internal const string SchedulerLostAccess =
+        "The person who scheduled this deployment can no longer deploy to this solution, so it was not sent. Someone who can should deploy the build again.";
 
     /// <summary>
     /// A deployment the delivery window chose the time for runs in that window or not at
