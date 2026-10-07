@@ -91,7 +91,7 @@ Shell out to `git`, following the external-process pattern `BackupService` uses 
 
 ### 2. Discover apps
 
-Walk each clone for `app.json` files (skipping `.alpackages/`, `.vscode/`, test-app folders by the same heuristics the workspace walker already applies). Each `app.json` is one extension to build. Read its `id`, `name`, `publisher`, `version`, `application` (and `platform`) version, and `dependencies`.
+Walk each clone for `app.json` files (skipping `.alpackages/`, `.vscode/`, test-app folders by the same heuristics the workspace walker already applies). An `app.json` that depends on one of Microsoft's test framework apps (Library Assert, Test Runner, Any and the like, matched by id or name in `AppJsonManifestParser.IsTestApp`) is a test app whatever its folder is called, and is left out with a note in the build log (#1130); the pipeline's extension picker leaves it out too. Each remaining `app.json` is one extension to build. Read its `id`, `name`, `publisher`, `version`, `application` (and `platform`) version, and `dependencies`.
 
 ### 3. Resolve symbols (per extension)
 

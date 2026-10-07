@@ -267,6 +267,7 @@ public sealed class ProjectBuildService
 
             // 2. Discover extensions across the successful clones.
             var discovered = new List<DiscoveredApp>();
+            var testApps = new List<string>();
             foreach (var clone in clones)
             {
                 foreach (var projectDir in DiscoverAppProjectDirs(clone.Dir))
@@ -279,8 +280,17 @@ public sealed class ProjectBuildService
                             RepoUrl: clone.Url, CommitSha: clone.CommitSha, CommitDate: clone.CommitDate));
                         continue;
                     }
+                    if (AppJsonManifestParser.IsTestApp(manifest))
+                    {
+                        testApps.Add(string.IsNullOrWhiteSpace(manifest.Name) ? Path.GetFileName(projectDir) : manifest.Name);
+                        continue;
+                    }
                     discovered.Add(new DiscoveredApp(projectDir, manifest, clone));
                 }
+            }
+            if (testApps.Count > 0)
+            {
+                logs.Add(new PendingLog(null, "Build", DescribeSkippedTestApps(testApps)));
             }
             if (discovered.Count == 0)
             {
@@ -944,6 +954,7 @@ public sealed class ProjectBuildService
                 {
                     var manifest = TryReadManifest(projectDir);
                     if (manifest is null || string.IsNullOrWhiteSpace(manifest.Id)) continue;
+                    if (AppJsonManifestParser.IsTestApp(manifest)) continue;
                     discovered.Add(new DiscoveredExtension(
                         manifest.Id, manifest.Name, manifest.Publisher, manifest.Version, repo.Url, repo.DisplayName));
                 }
@@ -953,7 +964,7 @@ public sealed class ProjectBuildService
             {
                 var reason = failures.Count > 0
                     ? string.Join(" ", failures)
-                    : "No extensions with an app.json were found outside test folders.";
+                    : "No extensions with an app.json were found outside test folders, apart from test apps.";
                 _logger.LogWarning("Discovery: found no extensions for project {ProjectId}. {Reason}", project.Id, reason);
                 return (Array.Empty<DiscoveredExtension>(), reason);
             }
@@ -1574,11 +1585,20 @@ public sealed class ProjectBuildService
     /// the person who started the build, a failed clone) is named here rather than
     /// reported as a repository without extensions.
     /// </summary>
+    /// <summary>The build log's note for extensions left out as test apps (#1130).</summary>
+    internal static string DescribeSkippedTestApps(IReadOnlyList<string> names)
+    {
+        var distinct = names.Distinct(StringComparer.Ordinal).ToList();
+        return distinct.Count == 1
+            ? $"Not built: {distinct[0]}. It depends on Microsoft's test framework, so it is a test app rather than an extension to ship."
+            : $"Not built: {string.Join(", ", distinct)}. They depend on Microsoft's test framework, so they are test apps rather than extensions to ship.";
+    }
+
     internal static string DescribeNothingToBuild(IReadOnlyList<BuildAppResult> failures)
     {
         if (failures.Count == 0)
         {
-            return "No buildable extensions were found. Check the repositories contain an app.json outside test folders.";
+            return "No buildable extensions were found. Check the repositories contain an app.json outside test folders, for an extension that is not a test app.";
         }
         // git's own error can run over several lines; this becomes a headline, a
         // notification's first line and a check-run summary, so keep it on one.

@@ -195,7 +195,6 @@
     {
         "BackupScheduler" => "Nightly backup",
         "DeliveryScheduler" => "Scheduled deployments to Business Central",
-        "DeliveryWorker" => "Deploying to Business Central",
         "EmailOutboxScheduler" => "Sending email",
         "LoginAttemptPruneScheduler" => "Sign-in log clean-up",
         "ObjectExplorerVacuumScheduler" => "Reclaiming Object Explorer disk space",
@@ -208,9 +207,11 @@
     };
 
     private const string BuildWorkerPrefix = nameof(ProjectBuildWorker) + " ";
+    private const string DeliveryWorkerPrefix = nameof(DeliveryWorker) + " ";
 
     /// <summary>
-    /// One row per worker, except the build workers waiting for work, which share one.
+    /// One row per worker, except the build workers waiting for work, which share one, and
+    /// likewise the deployment workers (#1139).
     /// </summary>
     /// <remarks>
     /// All <see cref="ProjectBuildQueue.MaxConcurrency"/> build workers are always
@@ -225,36 +226,54 @@
     {
         var rows = new List<HeartbeatRow>();
         var idleBuilders = new List<HeartbeatRow>();
+        var idleDeliverers = new List<HeartbeatRow>();
         foreach (var h in heartbeats)
         {
             var healthy = h.IsHealthy(now, out var reason);
             var row = new HeartbeatRow(h.Name, h.LastTickUtc, h.ActiveSinceUtc, h.MaxActiveDuration, h.MaxIdleSilence, healthy, reason);
-            if (!h.Name.StartsWith(BuildWorkerPrefix, StringComparison.Ordinal))
-                rows.Add(row);
-            else if (healthy && h.ActiveSinceUtc is null)
-                idleBuilders.Add(row);
+            var idle = healthy && h.ActiveSinceUtc is null;
+            if (h.Name.StartsWith(BuildWorkerPrefix, StringComparison.Ordinal))
+            {
+                if (idle) idleBuilders.Add(row);
+                else rows.Add(row with { Plain = "Running a build" });
+            }
+            else if (h.Name.StartsWith(DeliveryWorkerPrefix, StringComparison.Ordinal))
+            {
+                if (idle) idleDeliverers.Add(row);
+                else rows.Add(row with { Plain = "Deploying to Business Central" });
+            }
             else
-                rows.Add(row with { Plain = "Running a build" });
+            {
+                rows.Add(row);
+            }
         }
         if (idleBuilders.Count > 0)
         {
-            var first = idleBuilders[0];
-            rows.Add(new HeartbeatRow(
-                Name: $"{nameof(ProjectBuildWorker)} x{idleBuilders.Count}",
-                LastTickUtc: idleBuilders.Max(r => r.LastTickUtc),
-                ActiveSinceUtc: null,
-                MaxActiveDuration: first.MaxActiveDuration,
-                MaxIdleSilence: first.MaxIdleSilence,
-                Healthy: true,
-                Reason: null)
-            {
-                Plain = $"Waiting for builds ({idleBuilders.Count} ready, up to {buildLimit} run at once)",
-            });
+            rows.Add(Folded(idleBuilders, nameof(ProjectBuildWorker),
+                $"Waiting for builds ({idleBuilders.Count} ready, up to {buildLimit} run at once)"));
+        }
+        if (idleDeliverers.Count > 0)
+        {
+            rows.Add(Folded(idleDeliverers, nameof(DeliveryWorker),
+                $"Waiting for deployments ({idleDeliverers.Count} ready)"));
         }
         return rows
             .OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
+
+    private static HeartbeatRow Folded(List<HeartbeatRow> idle, string worker, string plain) =>
+        new(
+            Name: $"{worker} x{idle.Count}",
+            LastTickUtc: idle.Max(r => r.LastTickUtc),
+            ActiveSinceUtc: null,
+            MaxActiveDuration: idle[0].MaxActiveDuration,
+            MaxIdleSilence: idle[0].MaxIdleSilence,
+            Healthy: true,
+            Reason: null)
+        {
+            Plain = plain,
+        };
 
     private static string FormatSpan(TimeSpan span) =>
         span.TotalHours >= 1 ? $"{span.TotalHours:N0}h" :
