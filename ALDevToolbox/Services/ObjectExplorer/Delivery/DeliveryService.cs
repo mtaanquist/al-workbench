@@ -1213,16 +1213,23 @@ public sealed class DeliveryService
         return new ResolvedTiming(when, schedule, byWindow, outsideWindow);
     }
 
-    /// <summary>Writes a timing onto a delivery still <c>scheduled</c>; false when it has started meanwhile.</summary>
-    private async Task<bool> ApplyTimingAsync(int deliveryId, ResolvedTiming t, DateTime now, CancellationToken ct) =>
-        await _db.OeProjectDeliveries
+    /// <summary>
+    /// Writes a timing onto a delivery still <c>scheduled</c>; false when it has started meanwhile.
+    /// The person who set the new time is the one it then runs as, as with approving (#1125).
+    /// </summary>
+    private async Task<bool> ApplyTimingAsync(int deliveryId, ResolvedTiming t, DateTime now, CancellationToken ct)
+    {
+        var personId = _orgContext.CurrentUserId;
+        return await _db.OeProjectDeliveries
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled)
             .ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.TriggeredByUserId, d => personId ?? d.TriggeredByUserId)
                 .SetProperty(d => d.ScheduledFor, t.When)
                 .SetProperty(d => d.DeploymentSchedule, t.Schedule)
                 .SetProperty(d => d.ScheduledByDeliveryWindow, t.ByWindow)
                 .SetProperty(d => d.ScheduledOutsideWindow, t.OutsideWindow)
                 .SetProperty(d => d.UpdatedAt, now), ct) > 0;
+    }
 
     private async Task EnqueueIfDueAsync(int deliveryId, RescheduleInfo info, DateTime when, DateTime now, CancellationToken ct)
     {
@@ -1662,7 +1669,7 @@ public sealed class DeliveryService
 
     /// <summary>
     /// A deployment runs as a person: the one who scheduled, approved or enabled it, or
-    /// who moved it to "now" (the worker runs under that identity). It may wait hours for
+    /// who last rescheduled it (the worker runs under that identity). It may wait hours for
     /// its time, so whether that person may still deploy to the solution is asked again
     /// when it starts: someone removed from the solution's team, or disabled, no longer
     /// deploys through a deployment they set up earlier (#1125). Null when they may, or
@@ -1672,13 +1679,17 @@ public sealed class DeliveryService
     {
         if (_orgContext.CurrentUserId is not { } userId) return null;
 
-        var active = await _db.Users.AsNoTracking()
-            .AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct);
+        // Read from the user row: a run queued for later carries no site-admin flag.
+        var person = await _db.Users.AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => new { Active = u.Status == UserStatus.Active, u.IsSiteAdmin })
+            .FirstOrDefaultAsync(ct);
+        if (person is { Active: true, IsSiteAdmin: true }) return null;
         var ownerId = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == delivery.ProjectId)
             .Select(p => p.CreatedByUserId)
             .FirstOrDefaultAsync(ct);
-        if (active && await _access.CanManageAsync(delivery.ProjectId, ownerId, ct))
+        if (person is { Active: true } && await _access.CanManageAsync(delivery.ProjectId, ownerId, ct))
         {
             return null;
         }

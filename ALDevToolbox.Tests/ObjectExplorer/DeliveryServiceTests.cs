@@ -672,6 +672,58 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_site_admins_deployment_queued_for_later_still_runs()
+    {
+        var adminId = await SeedUserAsync("Ann");
+        int deliveryId;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            // A private solution Ann is on no team of; only being a site admin lets her deploy.
+            var ownerId = await SeedUserAsync("Bo");
+            await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(p => p.CreatedByUserId, ownerId)
+                    .SetProperty(p => p.Visibility, ProjectVisibility.Private));
+            await ctx.Users.Where(u => u.Id == adminId).ExecuteUpdateAsync(s => s.SetProperty(u => u.IsSiteAdmin, true));
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddMinutes(-1))
+                    .SetProperty(d => d.TriggeredByUserId, adminId));
+        }
+
+        // The scheduler's sweep runs it as Ann, without the site-admin flag on the identity.
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = adminId;
+        (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeTrue();
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status.Should().Be(ProjectDeliveryStatus.Deployed);
+    }
+
+    [Fact]
+    public async Task Rescheduling_makes_the_deployment_run_as_the_person_who_rescheduled_it()
+    {
+        var annId = await SeedUserAsync("Ann");
+        var boId = await SeedUserAsync("Bo");
+        int deliveryId;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.TriggeredByUserId, annId));
+        }
+
+        _db.OrgContext.CurrentUserId = boId;
+        await NewService(_db.NewContext()).RescheduleDeliveryAsync(deliveryId, RescheduleTiming.AtTime, DateTime.UtcNow.AddHours(3));
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).TriggeredByUserId.Should().Be(boId);
+    }
+
+    [Fact]
     public async Task EnqueueDueDeliveriesAsync_enqueues_due_rows_and_skips_future_ones()
     {
         await using var ctx = _db.NewContext();

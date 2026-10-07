@@ -2,6 +2,7 @@ using ALDevToolbox.Components.Email;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Notifications;
@@ -87,8 +88,11 @@ public sealed class DeploymentNotifier
 
         var waiting = outcome == DeploymentOutcome.WaitingForApproval;
         // A finished deployment goes to the person it ran as. One that ran on a
-        // schedule with nobody behind it goes to the pipeline's creator instead.
-        int?[] candidates = waiting
+        // schedule with nobody behind it goes to the pipeline's creator instead. One
+        // refused because that person lost access also goes to the people who can deploy
+        // it again, since the person it ran as no longer hears about the solution (#1125).
+        var schedulerLostAccess = delivery.FailureMessage == DeliveryService.SchedulerLostAccess;
+        int?[] candidates = waiting || schedulerLostAccess
             ? [delivery.SolutionOwner, delivery.PipelineCreator]
             : [delivery.TriggeredByUserId ?? delivery.PipelineCreator];
         var recipients = candidates.OfType<int>().Distinct().ToList();
