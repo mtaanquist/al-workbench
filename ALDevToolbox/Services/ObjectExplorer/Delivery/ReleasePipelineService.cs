@@ -390,17 +390,20 @@ public sealed class ReleasePipelineService
         pipeline.UpdatedAt = now;
         await _db.SaveChangesAsync(ct);
 
-        var cancelled = await _db.OeProjectDeliveries
-            .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.Scheduled)
-            .Select(d => d.Id)
-            .ToListAsync(ct);
-        cancelled = await SetAsideAsync(cancelled, ProjectDeliveryStatus.Scheduled, ProjectDeliveryStatus.Cancelled, ct);
-
+        // Prepared ones first: one approved in between becomes scheduled, and the next
+        // pass still catches it. Anything that slips past both (a deployment made while
+        // this commits) is cancelled by the scheduler's sweep.
         var dismissed = await _db.OeProjectDeliveries
             .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.Proposed)
             .Select(d => d.Id)
             .ToListAsync(ct);
         dismissed = await SetAsideAsync(dismissed, ProjectDeliveryStatus.Proposed, ProjectDeliveryStatus.Dismissed, ct);
+
+        var cancelled = await _db.OeProjectDeliveries
+            .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.Scheduled)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        cancelled = await SetAsideAsync(cancelled, ProjectDeliveryStatus.Scheduled, ProjectDeliveryStatus.Cancelled, ct);
 
         var setAside = cancelled.Concat(dismissed).ToList();
         if (setAside.Count > 0)
@@ -460,17 +463,26 @@ public sealed class ReleasePipelineService
     public async Task<WaitingDeploymentCounts> CountWaitingDeploymentsAsync(int id, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var counts = await _db.OeProjectDeliveries.AsNoTracking()
-            .Where(d => d.ReleasePipelineId == id
-                        && (d.Status == ProjectDeliveryStatus.Scheduled
-                            || d.Status == ProjectDeliveryStatus.Proposed
-                            || d.Status == ProjectDeliveryStatus.HandedOff))
-            .GroupBy(d => d.Status == ProjectDeliveryStatus.HandedOff)
-            .Select(g => new { HeldByBc = g.Key, Count = g.Count() })
+        var projectId = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.Id == id)
+            .Select(r => (int?)r.ProjectId)
+            .FirstOrDefaultAsync(ct);
+        if (projectId is null) return new WaitingDeploymentCounts(0, 0);
+        await _access.EnsureCanViewAsync(projectId.Value, ct);
+
+        var waiting = await _db.OeProjectDeliveries.AsNoTracking()
+            .CountAsync(d => d.ReleasePipelineId == id
+                             && (d.Status == ProjectDeliveryStatus.Scheduled || d.Status == ProjectDeliveryStatus.Proposed), ct);
+        // Handed-off runs stay handed off for good, long after Business Central installed
+        // them; only the ones it still holds are booked. Read the way the pipelines list
+        // reads it, which can only tell for a run that left one app with Business Central.
+        var handedOff = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.HandedOff)
+            .Select(d => d.Id)
             .ToListAsync(ct);
-        return new WaitingDeploymentCounts(
-            counts.Where(c => !c.HeldByBc).Sum(c => c.Count),
-            counts.Where(c => c.HeldByBc).Sum(c => c.Count));
+        var held = (await HeldInstalls.CheckAsync(_db, handedOff, ct)).Values
+            .Count(c => c.Verdict is HeldInstalls.Verdict.Held or HeldInstalls.Verdict.PipelineMoved);
+        return new WaitingDeploymentCounts(waiting, held);
     }
 
     /// <summary>

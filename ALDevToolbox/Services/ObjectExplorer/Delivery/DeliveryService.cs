@@ -1115,7 +1115,7 @@ public sealed class DeliveryService
             .Where(d => d.ProjectId == projectId
                 && d.ReleasePipeline!.ProjectEnvironmentId == environmentId
                 && d.EnvironmentName == envName
-                && (d.Status == ProjectDeliveryStatus.Scheduled
+                && ((d.Status == ProjectDeliveryStatus.Scheduled && d.ReleasePipeline!.DeletedAt == null)
                     || (d.Status == ProjectDeliveryStatus.HandedOff
                         && !_db.OeProjectDeliveries.Any(o => o.ReleasePipelineId == d.ReleasePipelineId
                             && o.EnvironmentName == envName
@@ -1504,6 +1504,7 @@ public sealed class DeliveryService
     /// </summary>
     public async Task<int> EnqueueDueDeliveriesAsync(DateTime nowUtc, CancellationToken ct = default)
     {
+        await CancelDeletedPipelinesDeliveriesAsync(ct);
         var due = await _db.OeProjectDeliveries.AsNoTracking()
             // A deleted pipeline's deployments are cancelled with it (#1108); this is the backstop.
             .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= nowUtc
@@ -1518,6 +1519,35 @@ public sealed class DeliveryService
                     d.OrganizationId, _orgContext.IsSystemOrganization, d.TriggeredByUserId)), ct);
         }
         return due.Count;
+    }
+
+    /// <summary>
+    /// Cancels scheduled deliveries whose deployment pipeline is deleted (#1108). The delete
+    /// cancels them itself; this catches one made while the delete was committing, and
+    /// those left behind by deletes from before it did. Compare-and-set, like every cancel.
+    /// </summary>
+    private async Task CancelDeletedPipelinesDeliveriesAsync(CancellationToken ct)
+    {
+        var ids = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ReleasePipeline!.DeletedAt != null)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        if (ids.Count == 0) return;
+        var line = LogLine(ReleasePipelineService.DeletedPipelineReason + ".");
+        foreach (var id in ids)
+        {
+            var now = DateTime.UtcNow;
+            var changed = await _db.OeProjectDeliveries
+                .Where(d => d.Id == id && d.Status == ProjectDeliveryStatus.Scheduled)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(d => d.Status, ProjectDeliveryStatus.Cancelled)
+                    .SetProperty(d => d.FinishedAt, now)
+                    .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line)
+                    .SetProperty(d => d.UpdatedAt, now), ct);
+            if (changed == 0) continue;
+            await MarkAppsNotSentAsync(id, "Not sent: the deployment pipeline was deleted.", ct);
+            _logger.LogInformation("Cancelled scheduled delivery {DeliveryId} because its deployment pipeline was deleted.", id);
+        }
     }
 
     /// <summary>

@@ -491,40 +491,56 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task CountWaitingDeploymentsAsync_counts_deployments_business_central_holds_separately()
+    public async Task CountWaitingDeploymentsAsync_counts_only_what_business_central_still_holds()
     {
         await using var ctx = _db.NewContext();
         var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
-        var held = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
-        await ctx.OeProjectDeliveries.Where(d => d.Id == held)
-            .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.HandedOff));
-        await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(3));
+        var svc = NewService(ctx);
+        // An old handed-off run a later one replaced, and the newest, which BC still holds.
+        var replaced = await svc.ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+        var held = await svc.ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(2));
+        foreach (var id in new[] { replaced, held })
+        {
+            await ctx.OeProjectDeliveries.Where(d => d.Id == id)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.HandedOff));
+            await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == id)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(r => r.Status, ProjectDeliveryResultStatus.Scheduled)
+                    .SetProperty(r => r.AppId, Guid.NewGuid().ToString()));
+        }
+        await svc.ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(3));
 
         var counts = await NewReleasePipelineService(_db.NewContext()).CountWaitingDeploymentsAsync(seed.ReleasePipelineId);
 
-        counts.Should().Be(new WaitingDeploymentCounts(1, 1));
+        counts.Should().Be(new WaitingDeploymentCounts(1, 1), "the older handed-off run was replaced, so Business Central no longer holds it");
     }
 
     [Fact]
-    public async Task A_scheduled_deployment_of_a_deleted_pipeline_is_neither_queued_nor_claimed()
+    public async Task A_scheduled_deployment_left_on_a_deleted_pipeline_is_cancelled_by_the_sweep()
     {
         int deliveryId;
         await using (var ctx = _db.NewContext())
         {
             var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
-            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddMinutes(-1));
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(5));
             DrainQueue();
-            // Deleted some other way than the service's delete: the claim is the backstop.
+            // Deleted before the delete cancelled anything, or while a deployment was being made.
             await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
                 .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddMinutes(-1)));
         }
 
-        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow)).Should().Be(0);
+        // A queue entry from before the delete is refused by the claim...
         (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeFalse();
+        // ...and the sweep cancels the row, due or not.
+        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow)).Should().Be(0);
 
         _apps.UploadedOrder.Should().BeEmpty();
         await using var read = _db.NewContext();
-        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Cancelled);
+        delivery.Results.Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
     }
 
     [Fact]
