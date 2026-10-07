@@ -112,13 +112,16 @@ public sealed class ProjectBuildQueue
     }
 
     // Caller holds _lock. A build whose key is running is skipped, and so is every
-    // later build with the same key, which keeps the key's builds in queue order.
+    // later build with the same key, which keeps the key's builds in queue order. A
+    // release already building is skipped too: two Retry clicks on a build with no
+    // pipeline must not build into the same release at once.
     private Waiting? NextStartable()
     {
         Waiting? best = null;
         HashSet<string>? passed = null;
         foreach (var w in _waiting.OrderBy(w => w.Sequence))
         {
+            if (_runningByRelease.ContainsKey(w.Job.ReleaseId)) continue;
             if (w.Order.SerialKey is { } key)
             {
                 if (_runningKeys.Contains(key) || (passed?.Contains(key) ?? false)) continue;

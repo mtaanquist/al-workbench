@@ -91,31 +91,52 @@ public sealed class ProjectBuildQueueTests
         for (var i = 1; i <= 60; i++) queue.Enqueue(Build(i, pipelineId: i % 6, ProjectBuildTrigger.Push));
 
         var running = new HashSet<int>();
+        var overlaps = new System.Collections.Concurrent.ConcurrentBag<int>();
         var seen = new System.Collections.Concurrent.ConcurrentBag<int>();
-        using var done = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var workers = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
         {
-            while (seen.Count < 60)
+            try
             {
-                if (!await queue.Reader.WaitToReadAsync(done.Token)) return;
-                if (!queue.Reader.TryRead(out var job)) continue;
-                var pipeline = job.ReleaseId % 6;
-                lock (running) running.Add(pipeline).Should().BeTrue("a pipeline's builds never overlap");
-                await Task.Yield();
-                lock (running) running.Remove(pipeline);
-                seen.Add(job.ReleaseId);
-                queue.Complete(job);
+                while (true)
+                {
+                    await queue.Reader.WaitToReadAsync(stop.Token);
+                    if (!queue.Reader.TryRead(out var job)) continue;
+                    var pipeline = job.ReleaseId % 6;
+                    lock (running) if (!running.Add(pipeline)) overlaps.Add(pipeline);
+                    await Task.Yield();
+                    lock (running) running.Remove(pipeline);
+                    seen.Add(job.ReleaseId);
+                    queue.Complete(job);
+                }
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested)
+            {
+                // Stopped once every build was seen, or by the time limit.
             }
         })).ToList();
 
-        // Each worker exits once all 60 are seen; the last ones may still be waiting.
-        while (seen.Count < 60) await Task.Delay(10, done.Token);
-        await done.CancelAsync();
-        await Task.WhenAll(workers.Select(w => w.ContinueWith(_ => { })));
+        while (seen.Count < 60 && !stop.IsCancellationRequested) await Task.Delay(10);
+        await stop.CancelAsync();
+        await Task.WhenAll(workers);
 
+        overlaps.Should().BeEmpty("a pipeline's builds never overlap");
         seen.Should().BeEquivalentTo(Enumerable.Range(1, 60));
         queue.WaitingCount.Should().Be(0);
         queue.RunningCount.Should().Be(0);
+    }
+
+    [Fact]
+    public void A_release_already_building_is_not_handed_out_again()
+    {
+        var queue = new ProjectBuildQueue();
+        var first = Build(1, pipelineId: null, ProjectBuildTrigger.Manual);
+        queue.Enqueue(first);
+        queue.Enqueue(Build(1, pipelineId: null, ProjectBuildTrigger.Manual));
+
+        TakeAll(queue).Should().Equal(1);
+        queue.Complete(first);
+        TakeAll(queue).Should().Equal(1);
     }
 
     [Theory]

@@ -146,6 +146,7 @@ public sealed class PersistedImportJobs
         // sits in (see StartupTasks). No user in scope at startup; reading
         // every org's job rows here is the design.
         // A build's row comes along so it resumes in its place in the build queue (#1137).
+        // The filter is off for that read too; it is pinned to b.ReleaseId == j.ReleaseId.
         var survivors = await _db.OeImportJobs.IgnoreQueryFilters()
             .Where(j => j.Status == "queued" || j.Status == "running")
             // Oldest first, so waiting push builds resume in the order they were pushed.

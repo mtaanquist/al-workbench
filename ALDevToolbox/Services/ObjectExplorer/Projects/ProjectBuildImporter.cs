@@ -433,6 +433,8 @@ public sealed class ProjectBuildImporter
         _queue.Enqueue(new ReleaseImportJob(
             releaseId, identity, source, StoreSymbolReference: false, jobRowId,
             ProjectBuildOrder.For(build?.PipelineId, build?.BcTarget, ProjectBuildTrigger.Manual)));
+        _logger.LogInformation("Queued a rebuild of release {ReleaseId} (project {ProjectId}, pipeline {PipelineId}).",
+            releaseId, projectId, build?.PipelineId);
     }
 
     /// <summary>
