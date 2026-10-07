@@ -132,6 +132,20 @@ public sealed class BuildFreshnessServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_build_row_whose_release_is_no_longer_ingesting_does_not_count()
+    {
+        // Nothing resets a build row whose job was lost; the release is what says
+        // whether anything is still running it.
+        var s = await SeedAsync(branch: "main");
+        await AddBuildAsync(s, Built);
+        await AddHeadAsync(s.RepositoryId, "main", Newest, commits: [Built, Newest]);
+        await AddActiveBuildAsync(s, ProjectBuildStatus.Building, headSha: Newest, startedAt: DateTime.UtcNow,
+            releaseStatus: "failed");
+
+        Single(await GetAsync(s.PipelineId)).BeingBuilt.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task A_preview_check_does_not_count_as_building_the_branch()
     {
         var s = await SeedAsync(branch: "main");
@@ -434,14 +448,28 @@ public sealed class BuildFreshnessServiceTests : IDisposable
     }
 
     private async Task AddActiveBuildAsync(
-        Seeded s, string status, string? headSha, DateTime startedAt, string target = ProjectBuildTarget.Current)
+        Seeded s, string status, string? headSha, DateTime startedAt, string target = ProjectBuildTarget.Current,
+        string releaseStatus = "ingesting")
     {
         await using var ctx = _db.NewContext();
+        var release = new OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Label = "CRONUS " + Guid.NewGuid().ToString("N"),
+            Kind = "project",
+            Status = releaseStatus,
+            ImportedAt = startedAt,
+            CreatedAt = startedAt,
+            UpdatedAt = startedAt,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
         ctx.OeProjectBuilds.Add(new OeProjectBuild
         {
             OrganizationId = TestDb.DefaultOrgId,
             ProjectId = s.ProjectId,
             PipelineId = s.PipelineId,
+            ReleaseId = release.Id,
             Status = status,
             Trigger = headSha is null ? ProjectBuildTrigger.Manual : ProjectBuildTrigger.Push,
             HeadSha = headSha,

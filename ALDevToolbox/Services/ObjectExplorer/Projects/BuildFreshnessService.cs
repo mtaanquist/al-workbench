@@ -114,11 +114,11 @@ public sealed class BuildFreshnessService
 
         // Builds of these pipelines still queued or running against the current
         // version: one that already covers a repository's new head means the branch
-        // is being built, not waiting for somebody to press Build (#1128).
+        // is being built, not waiting for somebody to press Build (#1128). Same test
+        // as the running guard, so a row whose job was lost does not read as building.
         var activeBuilds = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value)
-                && (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building)
-                && b.BcTarget == ProjectBuildTarget.Current)
+            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value))
+            .Where(ProjectBuildImporter.BlocksManualBuild)
             .Select(b => new ActiveBuild(b.PipelineId!.Value, b.HeadSha, b.HeadRepositoryId, b.StartedAt))
             .ToListAsync(ct).ConfigureAwait(false);
 
