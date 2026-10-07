@@ -120,6 +120,8 @@ public sealed class ProjectBuildService
         if (build is not null)
         {
             build.Status = ProjectBuildStatus.Building;
+            // A rerun starts clean: the earlier attempt's reason is no longer the build's.
+            build.FailureMessage = null;
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
             // A push may have moved this build onto its own commit between the read
             // above and the save (ProjectBuildImporter.StartPushBuildAsync). That move
@@ -158,6 +160,30 @@ public sealed class ProjectBuildService
             && options.HeadSha is null)
         {
             options = options with { RepositoryId = pushedRepositoryId, HeadSha = build.HeadSha };
+        }
+
+        // A second run of the same build (Retry, symbol recovery, a restart resume)
+        // builds the commits its first run cloned, not wherever the branches are now.
+        // The build number, and with it every app's version, belongs to that code: a
+        // rerun that picked up later commits would ship different apps under a version
+        // environments already have, and they would never be offered it (#1110).
+        if (build is not null && build.Trigger != ProjectBuildTrigger.PullRequest && options.PinnedCommits is null)
+        {
+            var earlier = await _db.OeProjectBuildRepoCommits.AsNoTracking()
+                .Where(c => c.ProjectBuildId == build.Id && c.ProjectRepositoryId != null && c.CommitHash != "")
+                .OrderBy(c => c.Id)
+                .Select(c => new { RepositoryId = c.ProjectRepositoryId!.Value, c.CommitHash })
+                .ToListAsync(ct).ConfigureAwait(false);
+            if (earlier.Count > 0)
+            {
+                // A run that recorded its commits more than once keeps the latest.
+                options = options with
+                {
+                    PinnedCommits = earlier
+                        .GroupBy(c => c.RepositoryId)
+                        .ToDictionary(g => g.Key, g => g.Last().CommitHash),
+                };
+            }
         }
 
         // A next-major build compiles with the newest beta compiler, because the
@@ -1308,9 +1334,12 @@ public sealed class ProjectBuildService
                 // The branch is read before that checkout, which detaches HEAD: a build
                 // on push of the default branch still records which branch it was.
                 var clonedBranch = branch is null ? await CaptureBranchAsync(gitPath, dest, ct).ConfigureAwait(false) : branch;
-                if (options.HeadSha is { Length: > 0 } headSha && options.RepositoryId == repo.Id)
+                var commit = options.HeadSha is { Length: > 0 } headSha && options.RepositoryId == repo.Id
+                    ? headSha
+                    : options.PinnedCommits?.GetValueOrDefault(repo.Id);
+                if (commit is not null)
                 {
-                    var checkedOut = await CheckoutCommitAsync(gitPath, dest, headSha, env, pat, repo, logs, results,
+                    var checkedOut = await CheckoutCommitAsync(gitPath, dest, commit, env, pat, repo, logs, results,
                         shallow: options.InstallationToken is not null, ct)
                         .ConfigureAwait(false);
                     if (!checkedOut) continue;
@@ -2301,11 +2330,16 @@ public sealed class ProjectBuildService
 /// <param name="HeadSha">The commit to check that repository out at.</param>
 /// <param name="InstallationToken">The GitHub installation token to clone with, in place of a per-user token.</param>
 /// <param name="Target">Which Business Central version to compile against; <see cref="BcBuildTarget.Current"/> is the version the manifests ask for.</param>
+/// <param name="PinnedCommits">
+/// Repository id to the commit to check it out at, for a rerun of a build that has
+/// already cloned once. <paramref name="HeadSha"/> wins for its own repository.
+/// </param>
 public sealed record ProjectBuildOptions(
     int? RepositoryId = null,
     string? HeadSha = null,
     string? InstallationToken = null,
-    BcBuildTarget Target = BcBuildTarget.Current)
+    BcBuildTarget Target = BcBuildTarget.Current,
+    IReadOnlyDictionary<int, string>? PinnedCommits = null)
 {
     /// <summary>The ordinary build: default branches, the acting user's own repository tokens.</summary>
     public static readonly ProjectBuildOptions Manual = new();

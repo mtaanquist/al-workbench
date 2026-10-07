@@ -3,7 +3,11 @@ using System.Net.Http;
 using System.Text;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Account;
+using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Import;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Tests.GitHub;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -263,10 +267,16 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             new ThrowingHttpClientFactory(),
             _db.NewSystemSettingsService(ctx),
             NullLogger<DvdDownloadService>.Instance);
+        var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
+        var projectBuilds = new ProjectBuildImporter(
+            importer, queue, persistedJobs, ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
+            new CloneCredentialResolver(
+                new UserRepositoryTokenService(ctx, _db.OrgContext, NullLogger<UserRepositoryTokenService>.Instance, _db.DataProtectionProvider),
+                _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new FakeGitHubApi())),
+                _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance),
+            TimeProvider.System, NullLogger<ProjectBuildImporter>.Instance);
         return new ReleaseImportRequestService(
-            importer, management, downloads, queue,
-            new PersistedImportJobs(ctx, TimeProvider.System),
-            _db.OrgContext);
+            importer, management, downloads, queue, persistedJobs, _db.OrgContext, projectBuilds);
     }
 
     private async Task SetAllowlistAsync(string hosts)

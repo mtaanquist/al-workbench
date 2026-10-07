@@ -99,6 +99,7 @@ public sealed class ReleaseImportRequestService
     private readonly ReleaseImportQueue _queue;
     private readonly PersistedImportJobs _persistedJobs;
     private readonly IOrganizationContext _orgContext;
+    private readonly ProjectBuildImporter _projectBuilds;
 
     public ReleaseImportRequestService(
         ReleaseImportService importer,
@@ -106,7 +107,8 @@ public sealed class ReleaseImportRequestService
         DvdDownloadService dvdDownloader,
         ReleaseImportQueue queue,
         PersistedImportJobs persistedJobs,
-        IOrganizationContext orgContext)
+        IOrganizationContext orgContext,
+        ProjectBuildImporter projectBuilds)
     {
         _importer = importer;
         _management = management;
@@ -114,6 +116,7 @@ public sealed class ReleaseImportRequestService
         _queue = queue;
         _persistedJobs = persistedJobs;
         _orgContext = orgContext;
+        _projectBuilds = projectBuilds;
     }
 
     /// <summary>
@@ -307,6 +310,10 @@ public sealed class ReleaseImportRequestService
             // build — which lands `ready`, not `failed` — can be plainly
             // re-run without a symbol upload when its failure was
             // transient. See issue #433.
+            // Held to the same rules as pressing Build: the person must be able to
+            // manage the solution, and no other build of its pipeline may be running.
+            // The rerun builds the commits the first run did (#1110).
+            await _projectBuilds.EnsureCanRebuildAsync(releaseId, retryProjectId, ct).ConfigureAwait(false);
             await _importer.ReopenForRebuildAsync(releaseId, ct).ConfigureAwait(false);
             await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
             var buildSource = new ReleaseImportSource.ProjectBuild(retryProjectId);

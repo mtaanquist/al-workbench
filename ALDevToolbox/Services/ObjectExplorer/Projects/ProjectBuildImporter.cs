@@ -131,6 +131,40 @@ public sealed class ProjectBuildImporter
         && b.BcTarget == ProjectBuildTarget.Current
         && b.Release != null && b.Release.Status == "ingesting";
 
+    /// <summary>
+    /// Refuses to run an existing build again (an admin Retry, the symbol-recovery
+    /// rebuild) when the person could not have started it: they must be able to manage
+    /// its solution, and no other build of its pipeline may be running (#1110). The
+    /// rebuild clones with the person's own credentials and replaces what the build
+    /// holds, so it is held to the same rules as pressing Build.
+    /// </summary>
+    /// <param name="projectId">The solution the release was built from, for a release with no build row.</param>
+    public async Task EnsureCanRebuildAsync(int releaseId, int projectId, CancellationToken ct = default)
+    {
+        var build = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.ReleaseId == releaseId)
+            .Select(b => new { b.Id, b.PipelineId, b.ProjectId })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        var solutionId = build?.ProjectId ?? projectId;
+        var ownerId = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == solutionId && p.DeletedAt == null)
+            .Select(p => (int?)p.CreatedByUserId)
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        await _access.EnsureCanManageAsync(solutionId, ownerId, ct).ConfigureAwait(false);
+
+        if (build is { PipelineId: { } pipelineId }
+            && await _db.OeProjectBuilds.AsNoTracking()
+                .Where(b => b.PipelineId == pipelineId && b.Id != build.Id)
+                .AnyAsync(BlocksManualBuild, ct)
+                .ConfigureAwait(false))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Retry"] = "Another build of this pipeline is running. Wait for it to finish, then try again.",
+            });
+        }
+    }
+
     private async Task<int> StartPipelineBuildAsync(
         int pipelineId, string bcTarget, string trigger, CancellationToken ct, (int RepositoryId, string Sha)? head = null)
     {
