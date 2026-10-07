@@ -89,7 +89,8 @@ public sealed class DeliveryToolsTests : IDisposable
         delivery.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
         delivery.ReleasePipelineId.Should().Be(seed.ReleasePipelineId);
         delivery.StartedByAgent.Should().BeTrue("the run checks the environment type again for agent deployments");
-        delivery.DiagnosticsLog.Should().Contain("Started by an AI assistant");
+        delivery.DiagnosticsLog.Should().Contain("Started by an AI assistant")
+            .And.NotContain("confirmation step", "a person gets no confirmation step on a sandbox either");
     }
 
     [Fact]
@@ -160,6 +161,7 @@ public sealed class DeliveryToolsTests : IDisposable
             .SingleAsync(d => d.Id == result.DeploymentId);
         delivery.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
         delivery.ScheduledFor.Should().BeBefore(DateTime.UtcNow.AddMinutes(1), "an allowed agent deployment runs now, unconfirmed");
+        delivery.DiagnosticsLog.Should().Contain("Started by an AI assistant").And.Contain("without the confirmation step");
     }
 
     private static async Task AllowAgentsToDeployToProductionAsync(AppDbContext ctx)

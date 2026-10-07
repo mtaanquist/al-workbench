@@ -335,6 +335,58 @@ public sealed class PipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task An_extension_leaving_the_repository_does_not_drop_a_typed_name_on_an_unrelated_save()
+    {
+        // Typed under [Sales, Base] while a third extension was discovered too. The
+        // third one has since gone, so the editor pre-fills every discovered extension
+        // and sends "all" (null) on a save that only touched another setting (#1196).
+        const string ReportsId = "33333333-3333-3333-3333-333333333333";
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, JsonSerializer.Serialize(new[]
+        {
+            new DiscoveredExtension(SalesId, "CRONUS Sales", "CRONUS", "1.0.0.0", "", ""),
+            new DiscoveredExtension(BaseId, "CRONUS Base", "CRONUS", "1.0.0.0", "", ""),
+            new DiscoveredExtension(ReportsId, "CRONUS Reports", "CRONUS", "1.0.0.0", "", ""),
+        }));
+        var svc = NewService(ctx);
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Both nightly", [SalesId, BaseId], Branch: "main"));
+        await ctx.OeProjects.Where(p => p.Id == projectId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DiscoveredExtensionsJson, Discovered()));
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Both nightly", null, Branch: "main"));
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.Name.Should().Be("Both nightly");
+        pipeline.NameIsCustom.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_stored_extension_no_longer_discovered_does_not_drop_a_typed_name_on_an_unrelated_save()
+    {
+        const string ReportsId = "33333333-3333-3333-3333-333333333333";
+        var reports = new DiscoveredExtension(ReportsId, "CRONUS Reports", "CRONUS", "1.0.0.0", "", "");
+        var sales = new DiscoveredExtension(SalesId, "CRONUS Sales", "CRONUS", "1.0.0.0", "", "");
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, JsonSerializer.Serialize(new[]
+        {
+            sales, new DiscoveredExtension(BaseId, "CRONUS Base", "CRONUS", "1.0.0.0", "", ""), reports,
+        }));
+        var svc = NewService(ctx);
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Both nightly", [SalesId, BaseId], Branch: "main"));
+        await ctx.OeProjects.Where(p => p.Id == projectId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DiscoveredExtensionsJson, JsonSerializer.Serialize(new[] { sales, reports })));
+
+        // Base has gone, so the editor pre-fills only Sales of what it finds now.
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Both nightly", [SalesId], Branch: "main"));
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.Name.Should().Be("Both nightly");
+        pipeline.NameIsCustom.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task A_name_typed_in_the_same_save_as_a_branch_change_is_kept()
     {
         await using var ctx = _db.NewContext();

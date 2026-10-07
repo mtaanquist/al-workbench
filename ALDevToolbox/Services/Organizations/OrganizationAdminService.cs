@@ -278,7 +278,13 @@ public sealed class OrganizationAdminService
         _logger.LogInformation("Org {OrgId} set step-up window = {Minutes} minutes.", orgId, minutes);
     }
 
-    private async Task RequireFreshSessionAsync(CancellationToken ct)
+    /// <summary>
+    /// Refuses with the "confirm it's you" field error unless the signed-in session
+    /// confirmed a second factor within the organisation's step-up window. The setters
+    /// that loosen a protection call it themselves; a page that saves several settings
+    /// at once calls it first too, so a refusal comes before any of its writes (#1196).
+    /// </summary>
+    public async Task RequireFreshSessionAsync(CancellationToken ct = default)
     {
         if (await _tools.IsFreshAsync(_http.HttpContext?.User, ct)) return;
         throw new PlanValidationException(new Dictionary<string, string>
