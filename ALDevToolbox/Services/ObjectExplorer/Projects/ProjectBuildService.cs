@@ -140,7 +140,9 @@ public sealed class ProjectBuildService
         // persistence then no-ops, leaving the old per-app report as the record.
         var build = await _db.OeProjectBuilds
             .FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
-        if (build is { Trigger: ProjectBuildTrigger.Push or ProjectBuildTrigger.PreviewCheck })
+        // Only on the first run: a Retry or Recover symbols is a person's own choice, made
+        // and run as them, so it is not the pipeline's automation to check.
+        if (build is { Trigger: ProjectBuildTrigger.Push or ProjectBuildTrigger.PreviewCheck, FinishedAt: null })
         {
             await EnsureAutomationStillOnAsync(build, project.CreatedByUserId, ct).ConfigureAwait(false);
         }
@@ -1001,6 +1003,24 @@ public sealed class ProjectBuildService
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
     }
 
+    private const string PipelineDeletedRefusal = "The pipeline was deleted before this build started.";
+    private const string PushTurnedOffRefusal = "Building automatically on push was turned off before this build started.";
+    private const string PreviewCheckTurnedOffRefusal = "The nightly preview check was turned off before this build started.";
+    private const string TakenOverRefusal = "Someone else took over this pipeline's automatic builds before this build started.";
+    private const string InactiveRefusal = "The person this build runs as no longer has an active account.";
+    private const string NoAccessRefusal = "The person this build runs as can no longer manage this solution.";
+
+    /// <summary>
+    /// The reasons <see cref="EnsureAutomationStillOnAsync"/> fails a build with. Such a
+    /// build did not fail on its own merits, so it sends no build email and does not
+    /// count as the build before the next one (<c>BuildNotifier</c>).
+    /// </summary>
+    public static readonly IReadOnlyList<string> AutomationRefusals =
+    [
+        PipelineDeletedRefusal, PushTurnedOffRefusal, PreviewCheckTurnedOffRefusal,
+        TakenOverRefusal, InactiveRefusal, NoAccessRefusal,
+    ];
+
     /// <summary>
     /// Refuses a build the pipeline started on its own once that is no longer what the
     /// pipeline asks for. Pipeline state and access are checked when the build is
@@ -1024,18 +1044,16 @@ public sealed class ProjectBuildService
 
         string? reason;
         if (pipeline is null)
-            reason = "The pipeline was deleted before this build started.";
+            reason = PipelineDeletedRefusal;
         else if (!pipeline.On)
-            reason = push
-                ? "Building automatically on push was turned off before this build started."
-                : "The nightly preview check was turned off before this build started.";
+            reason = push ? PushTurnedOffRefusal : PreviewCheckTurnedOffRefusal;
         else if (pipeline.RunsAs != build.StartedByUserId)
-            reason = "Someone else took over this pipeline's automatic builds before this build started.";
+            reason = TakenOverRefusal;
         else if (build.StartedByUserId is not { } userId
                  || !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct).ConfigureAwait(false))
-            reason = "The person this build runs as no longer has an active account.";
+            reason = InactiveRefusal;
         else if (!await _access.CanManageAsync(build.ProjectId, projectOwnerId, ct).ConfigureAwait(false))
-            reason = "The person this build runs as can no longer manage this solution.";
+            reason = NoAccessRefusal;
         else
             return;
 

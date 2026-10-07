@@ -2,6 +2,7 @@ using ALDevToolbox.Components.Email;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.Notifications;
@@ -72,7 +73,9 @@ public sealed class BuildNotifier
         // a build outside a pipeline (a GitHub release) has no state to change.
         if (build?.PipelineId is not { } pipelineId
             || build.Trigger == ProjectBuildTrigger.PullRequest
-            || build.Status is not (ProjectBuildStatus.Ready or ProjectBuildStatus.Failed))
+            || build.Status is not (ProjectBuildStatus.Ready or ProjectBuildStatus.Failed)
+            // Refused because the pipeline no longer asked for it (#1112): nothing broke.
+            || ProjectBuildService.AutomationRefusals.Contains(build.FailureMessage))
         {
             return;
         }
@@ -85,6 +88,7 @@ public sealed class BuildNotifier
         string[] sameKind = build.Trigger is ProjectBuildTrigger.Manual or ProjectBuildTrigger.Push
             ? [ProjectBuildTrigger.Manual, ProjectBuildTrigger.Push]
             : [build.Trigger];
+        var refusals = ProjectBuildService.AutomationRefusals;
         var previous = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.PipelineId == pipelineId
                 && sameKind.Contains(b.Trigger)
@@ -92,7 +96,8 @@ public sealed class BuildNotifier
                 && b.Id != build.Id
                 && b.FinishedAt != null
                 && (b.FinishedAt < finishedAt || (b.FinishedAt == finishedAt && b.Id < build.Id))
-                && (b.Status == ProjectBuildStatus.Ready || b.Status == ProjectBuildStatus.Failed))
+                && (b.Status == ProjectBuildStatus.Ready || b.Status == ProjectBuildStatus.Failed)
+                && (b.FailureMessage == null || !refusals.Contains(b.FailureMessage)))
             .OrderByDescending(b => b.FinishedAt)
             .ThenByDescending(b => b.Id)
             .Select(b => new { b.Status, b.ReleaseId })

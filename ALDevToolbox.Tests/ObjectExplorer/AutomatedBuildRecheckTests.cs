@@ -121,6 +121,23 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
         refusal.Should().Be("The person this build runs as can no longer manage this solution.");
     }
 
+    [Theory]
+    [InlineData(ProjectBuildTrigger.Push)]
+    [InlineData(ProjectBuildTrigger.PreviewCheck)]
+    public async Task Retrying_a_finished_build_runs_as_the_person_who_asked_whatever_the_pipeline_says(string trigger)
+    {
+        var alice = await SeedUserAsync("alice@cronus.test");
+        var admin = await SeedUserAsync("admin@cronus.test");
+        var (projectId, pipelineId) = await SeedPipelineAsync(alice);
+        var releaseId = await SeedBuildAsync(projectId, pipelineId, trigger, alice, finished: true);
+        await UpdatePipelineAsync(pipelineId, p => { p.BuildOnPush = false; p.PreviewCheck = false; });
+
+        var refusal = await RefusalAsync(projectId, releaseId, admin);
+
+        refusal.Should().BeNull("a retry is a person's choice, not the pipeline's automation");
+        (await StatusAsync(releaseId)).Should().Be(ProjectBuildStatus.Building);
+    }
+
     /// <summary>
     /// Runs the build as <paramref name="userId"/>, the way the worker does, and returns
     /// the refusal it gave, or null when it got past the check. Past it, the build goes
@@ -206,7 +223,7 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
         return (project.Id, pipeline.Id);
     }
 
-    private async Task<int> SeedBuildAsync(int projectId, int pipelineId, string trigger, int startedBy)
+    private async Task<int> SeedBuildAsync(int projectId, int pipelineId, string trigger, int startedBy, bool finished = false)
     {
         await using var ctx = _db.NewContext();
         var release = new OeRelease
@@ -220,6 +237,8 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
             Status = ProjectBuildStatus.Queued, Trigger = trigger, StartedByUserId = startedBy,
             BcTarget = trigger == ProjectBuildTrigger.PreviewCheck ? ProjectBuildTarget.NextMajor : ProjectBuildTarget.Current,
             StartedAt = DateTime.UtcNow, Release = release,
+            // A finished build put back in the queue by Retry keeps its finish time.
+            FinishedAt = finished ? DateTime.UtcNow : null,
         });
         await ctx.SaveChangesAsync();
         return release.Id;

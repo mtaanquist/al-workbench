@@ -867,7 +867,9 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   setting turned off, someone else has taken the automatic builds over, or the person it
   runs as is no longer active or can no longer manage the solution
   (`ProjectBuildService.EnsureAutomationStillOnAsync`). The build fails with that reason
-  and clones nothing.
+  and clones nothing. Such a refusal sends no build email and is not the build the next
+  one is compared with. Only the first run is checked: Retry or Recover symbols on a
+  finished build is a person's own choice and runs as them.
 - **What does not build.** A forced push (it may have removed others' work, so a person
   decides), a deleted branch, a push to any other branch, and a redelivery of a push whose
   commit this pipeline already built on push. A pipeline with no branch builds pushes to
