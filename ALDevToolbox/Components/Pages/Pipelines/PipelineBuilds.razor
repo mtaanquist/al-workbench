@@ -1304,13 +1304,17 @@
         if (_deleteConfirm is null) return;
         var confirmed = await _deleteConfirm.OpenAsync(
             "Delete pipeline?",
-            $"Delete \"{_header?.Name}\"? Its past builds stay downloadable; only this build configuration is removed.",
+            $"Delete \"{_header?.Name}\"? It stops building, and its builds no longer show in Pipelines.",
             "Delete pipeline", "btn--danger", "trash-2");
         if (!confirmed) return;
         try
         {
             await Pipelines.SoftDeletePipelineAsync(PipelineId);
             Nav.NavigateTo("/pipelines/builds");
+        }
+        catch (PlanValidationException ex)
+        {
+            _buildError = ex.Errors.Values.FirstOrDefault() ?? "Could not delete the pipeline.";
         }
         catch (Exception ex)
         {
