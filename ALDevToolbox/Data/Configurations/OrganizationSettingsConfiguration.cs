@@ -78,6 +78,8 @@ internal sealed class OrganizationSettingsConfiguration : IEntityTypeConfigurati
         entity.Property(e => e.AutoImportLastRunAt).HasColumnName("auto_import_last_run_at");
         entity.Property(e => e.AutoImportPreviewsEnabled)
             .HasColumnName("auto_import_previews_enabled").IsRequired().HasDefaultValue(false);
+        entity.Property(e => e.AgentsMayDeployToProduction)
+            .HasColumnName("agents_may_deploy_to_production").IsRequired().HasDefaultValue(false);
         // text[] like default_supported_countries; empty array default so the
         // NOT NULL column backfills on existing rows (empty = all providers allowed).
         entity.Property(e => e.AllowedRepositoryProviders)

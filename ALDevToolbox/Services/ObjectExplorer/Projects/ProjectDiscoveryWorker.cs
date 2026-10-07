@@ -1,3 +1,4 @@
+using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using ALDevToolbox.Services.Workers;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -43,6 +44,10 @@ public sealed class ProjectDiscoveryWorker : QueueDrainWorker<ProjectDiscoveryJo
         await using var scope = _services.CreateAsyncScope();
         var buildService = scope.ServiceProvider.GetRequiredService<ProjectBuildService>();
         await buildService.DiscoverExtensionsForCacheAsync(job.ProjectId, ct).ConfigureAwait(false);
+        // A one-extension pipeline is named after its extension, so a rename that
+        // discovery just picked up carries through to the pipelines' names (#1135).
+        var pipelines = scope.ServiceProvider.GetRequiredService<PipelineService>();
+        await pipelines.RefreshGeneratedNamesAsync(job.ProjectId, ct).ConfigureAwait(false);
     }
 
     protected override void OnJobFinished(ProjectDiscoveryJob job) => _queue.Complete(job.ProjectId);

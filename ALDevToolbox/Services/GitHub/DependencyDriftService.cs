@@ -488,6 +488,10 @@ public sealed class DependencyDriftService
                 continue;
             }
 
+            // A test app is left out wherever its folder is, as the build and discovery
+            // leave it out (#1193).
+            if (AppJsonManifestParser.IsTestApp(manifest)) continue;
+
             // A manifest with no application version states no Business Central
             // it targets, so there is nothing to say it is behind.
             if (string.IsNullOrWhiteSpace(manifest.Application)) continue;

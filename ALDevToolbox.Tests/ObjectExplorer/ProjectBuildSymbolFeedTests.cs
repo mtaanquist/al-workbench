@@ -238,6 +238,30 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         _tools.Checkouts.Should().Equal(FirstRun);
     }
 
+    [Fact]
+    public async Task A_second_run_never_records_todays_default_branch_for_its_first_runs_commits()
+    {
+        // The first run left no default branch behind (it built before the column was
+        // written). Today's default is "main", but the pinned commits may have come from
+        // another branch, and a deployment branch rule reads the column (#1193).
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        await using (var seed = _db.NewContext())
+        {
+            var repo = await seed.OeProjectRepositories.SingleAsync(r => r.ProjectId == projectId);
+            seed.OeProjectBuildRepoCommits.Add(new OeProjectBuildRepoCommit
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = buildId, ProjectRepositoryId = repo.Id,
+                RepoUrl = repo.Url, RepoDisplayName = repo.DisplayName, CommitHash = "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.SingleAsync(b => b.Id == buildId)).DefaultBranch.Should().BeNull();
+    }
+
     private async Task SetBuildAsync(int buildId, string branch, string trigger)
     {
         await using var seed = _db.NewContext();

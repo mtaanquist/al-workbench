@@ -127,6 +127,13 @@ public class OeProjectDelivery
     public bool DeployedWithoutApproval { get; set; }
 
     /// <summary>
+    /// True when an AI assistant started this deployment, which has no confirmation step
+    /// (#1122). The run refuses it when the environment is no longer a sandbox and the
+    /// organisation does not let assistants deploy to production.
+    /// </summary>
+    public bool StartedByAgent { get; set; }
+
+    /// <summary>
     /// The newer build that replaced this prepared release before anyone approved it
     /// (#934), for a <see cref="ProjectDeliveryStatus.Dismissed"/> row; null when a person
     /// dismissed it, and on every other row. A plain id, not a foreign key: it is a fact

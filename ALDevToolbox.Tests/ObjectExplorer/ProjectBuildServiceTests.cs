@@ -205,7 +205,9 @@ public sealed class ProjectBuildServiceTests
     [InlineData("dd0be2ea-f733-4d65-bb34-a28f4624fb14", "Library Assert", true)]
     [InlineData("{23DE40A6-DFE8-4F80-80DB-D70F83CE8CAF}", "", true)]
     [InlineData("", "Any", true)]
-    [InlineData("11111111-0000-0000-0000-000000000001", "Tests-TestLibraries", true)]
+    [InlineData("11111111-0000-0000-0000-000000000001", "Tests-TestLibraries", false)]
+    [InlineData("11111111-0000-0000-0000-000000000002", "Any", false)]
+    [InlineData("{ }", "Test Runner", true)]
     [InlineData("63ca2fa4-4f03-4f2b-a480-172fef340d3f", "System Application", false)]
     [InlineData("11111111-0000-0000-0000-000000000001", "CRONUS Test Helpers", false)]
     public void An_app_that_depends_on_Microsofts_test_framework_is_a_test_app(string id, string name, bool expected)

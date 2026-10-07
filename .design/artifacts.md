@@ -68,8 +68,16 @@ included, shows the solution beside it.
 
 Names stay unique per solution. Two pipelines set up the same way are expected to be rare, so a clash
 is refused with a message and the editor then offers a name field; a typed name is stored with
-`name_is_custom` and kept on later saves until it is cleared. Renaming a build pipeline renames the
-deployment pipelines named after it, except typed ones and any whose new name is taken. Nothing else renames a pipeline on its own: an environment, repository or extension renamed
+`name_is_custom` and kept on later saves until it is cleared, or until a save changes what the name
+was typed for (a build pipeline's branch or extensions, a deployment pipeline's source or
+environment) while leaving the typed name as it was: that save goes back to the generated name, and
+the editor says so under the name field. A name typed afresh in that same save is kept, and so is the
+old typed name when the generated one is taken (#1135). Renaming a build pipeline renames the
+deployment pipelines named after it, except typed ones and any whose new name is taken. Discovery
+renames too: after it refreshes a solution's extension list, every build pipeline with a generated
+name is given the name it now calls for (an extension renamed in its `app.json`), carried through to
+the deployment pipelines named after it; one whose new name is taken keeps its old name and the log
+says so (#1135). Nothing else renames a pipeline on its own: an environment or repository renamed
 elsewhere shows in the name the next time the pipeline is saved. When a deployment pipeline's name is
 too long, the source is shortened so the environment stays. Migration
 `GeneratePipelineNames` renamed every existing active pipeline the same way; one whose generated name

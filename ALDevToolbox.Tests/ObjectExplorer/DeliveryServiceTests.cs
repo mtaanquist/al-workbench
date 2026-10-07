@@ -463,6 +463,7 @@ public sealed class DeliveryServiceTests : IDisposable
     [InlineData("not due yet")]
     [InlineData("waiting for approval")]
     [InlineData("pipeline deleted")]
+    [InlineData("pipeline disabled")]
     public async Task RunDeliveryAsync_does_not_wait_for_an_earlier_deployment_that_cannot_run_now(string why)
     {
         await using var ctx = _db.NewContext();
@@ -483,13 +484,18 @@ public sealed class DeliveryServiceTests : IDisposable
                     .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.Proposed));
                 break;
             case "pipeline deleted":
+            case "pipeline disabled":
                 // Only the earlier one's pipeline: give the later one a pipeline of its own.
                 var other = await NewReleasePipelineService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
                     seed.ProjectId, null, seed.BuildPipelineId, seed.EnvironmentId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
                 await ctx.OeProjectDeliveries.Where(d => d.Id == later)
                     .ExecuteUpdateAsync(s => s.SetProperty(d => d.ReleasePipelineId, other));
-                await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
-                    .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+                if (why == "pipeline deleted")
+                    await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                        .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+                else
+                    await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                        .ExecuteUpdateAsync(s => s.SetProperty(r => r.DisabledAt, DateTime.UtcNow));
                 break;
         }
 
@@ -3292,6 +3298,51 @@ public sealed class DeliveryServiceTests : IDisposable
         delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
         delivery.FailureMessage.Should().Contain("no longer a sandbox");
         _apps.UploadedOrder.Should().BeEmpty("an unapproved deployment never reaches a production environment");
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task RunDeliveryAsync_refuses_an_agent_deployment_to_an_environment_that_became_production_unless_the_organisation_allows_it(
+        bool allowed, bool refused)
+    {
+        int id;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+            id = (await NewService(ctx).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId))!.Value;
+            // Started by an AI assistant rather than by a new build: only the setting stands
+            // between it and a production environment.
+            await ctx.OeProjectDeliveries.Where(d => d.Id == id).ExecuteUpdateAsync(u => u
+                .SetProperty(d => d.DeployedWithoutApproval, false)
+                .SetProperty(d => d.StartedByAgent, true));
+            var settings = await ctx.OrganizationSettings.FirstOrDefaultAsync(s => s.OrganizationId == TestDb.DefaultOrgId);
+            if (settings is null)
+            {
+                settings = new ALDevToolbox.Domain.Entities.OrganizationSettings { OrganizationId = TestDb.DefaultOrgId };
+                ctx.OrganizationSettings.Add(settings);
+            }
+            settings.AgentsMayDeployToProduction = allowed;
+            await ctx.SaveChangesAsync();
+        }
+        DrainQueue();
+        _admin.OnGet = name => new BcEnvironment(name, "Production") { Status = "Active" };
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(id);
+
+        var delivery = await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == id);
+        if (refused)
+        {
+            delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+            delivery.FailureMessage.Should().Contain("does not let AI assistants deploy to production");
+            _apps.UploadedOrder.Should().BeEmpty();
+        }
+        else
+        {
+            delivery.Status.Should().NotBe(ProjectDeliveryStatus.Failed);
+            _apps.UploadedOrder.Should().NotBeEmpty();
+        }
     }
 
     [Fact]

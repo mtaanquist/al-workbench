@@ -229,6 +229,31 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_test_app_outside_a_test_folder_is_left_alone()
+    {
+        // Folder rules alone would read it; its dependency on the test framework says
+        // it is not something the solution ships (#1193).
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA);
+        var releaseId = await SeedReleaseAsync();
+        var api = BaseApi()
+            .On(HttpMethod.Get, "/installation/repositories", HttpStatusCode.OK,
+                FakeGitHubApi.InstallationRepositoriesJson(RepoA))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK, TreeJson(("App.Test/app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/App.Test/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("App.Test/app.json", """
+                    {"id":"x","name":"Payment Import Test","publisher":"CRONUS","version":"1.0.0.0",
+                     "application":"27.0.0.0","platform":"27.0.0.0",
+                     "dependencies":[{"id":"dd0be2ea-f733-4d65-bb34-a28f4624fb14","name":"Library Assert","publisher":"Microsoft","version":"27.0.0.0"}]}
+                    """));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.ScanForReleaseAsync(releaseId)).Should().Be(0);
+    }
+
+    [Fact]
     public async Task A_repository_no_solution_tracks_is_not_even_read()
     {
         await ReadyAsync();

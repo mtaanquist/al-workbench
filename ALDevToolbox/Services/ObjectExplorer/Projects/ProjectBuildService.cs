@@ -257,10 +257,11 @@ public sealed class ProjectBuildService
 
             // A build of the default branch records which branch that was, so the
             // pipeline can name it. A pull-request build is labelled by its head ref.
-            // A rerun builds its first run's commits, so it keeps the first run's answer
-            // (the deployment branch rule reads it, #1129).
+            // A rerun builds its first run's commits, so it keeps the first run's answer,
+            // even when that was none: today's default may not be where those commits came
+            // from (the deployment branch rule reads it, #1129, #1193).
             if (build is not null && build.Branch is null && build.Trigger != ProjectBuildTrigger.PullRequest
-                && (build.DefaultBranch is null || options.PinnedCommits is null))
+                && options.PinnedCommits is null)
             {
                 var names = clones.Select(c => c.Branch).OfType<string>().Distinct(StringComparer.Ordinal).ToList();
                 build.DefaultBranch = names.Count == 0 ? null : Truncate(string.Join(", ", names), 250);
@@ -1591,13 +1592,6 @@ public sealed class ProjectBuildService
         return (result, used, DescribeCloneFailures(attempts, credentials));
     }
 
-    /// <summary>
-    /// The whole-build error when nothing was found to compile. The per-repository
-    /// reasons are the only record of why, and a thrown build keeps only this
-    /// message, so a repository that could not be checked out (no credential for
-    /// the person who started the build, a failed clone) is named here rather than
-    /// reported as a repository without extensions.
-    /// </summary>
     /// <summary>The build log's note for extensions left out as test apps (#1130).</summary>
     internal static string DescribeSkippedTestApps(IReadOnlyList<string> names)
     {
@@ -1607,6 +1601,13 @@ public sealed class ProjectBuildService
             : $"Not built: {string.Join(", ", distinct)}. They depend on Microsoft's test framework, so they are test apps rather than extensions to ship.";
     }
 
+    /// <summary>
+    /// The whole-build error when nothing was found to compile. The per-repository
+    /// reasons are the only record of why, and a thrown build keeps only this
+    /// message, so a repository that could not be checked out (no credential for
+    /// the person who started the build, a failed clone) is named here rather than
+    /// reported as a repository without extensions.
+    /// </summary>
     internal static string DescribeNothingToBuild(IReadOnlyList<BuildAppResult> failures)
     {
         if (failures.Count == 0)
