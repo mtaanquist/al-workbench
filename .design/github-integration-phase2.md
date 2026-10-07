@@ -1105,13 +1105,17 @@ Business Central, the way Dependabot does it, instead of remembering to press th
   (`auto_update_pull_requests_blocked`) with "Resume with my GitHub account", which makes
   whoever presses it the new person. A repository GitHub refused shows the same way; the
   next night tries again either way.
-- **Changing the repositories takes it over (#1177).** Whoever saves a change to the
-  solution's GitHub repositories while the setting is on becomes the person the pull
-  requests are opened as - the "whoever last saved" rule of building on push - so nobody
-  can add a repository they cannot write to and have it written to with somebody else's
-  account. When that person has no GitHub account connected, the solution shows it as
+- **Adding a repository takes it over (#1177).** Whoever saves the solution with a GitHub
+  repository it did not have before - added, or an address changed - while the setting is
+  on becomes the person the pull requests are opened as - the "whoever last saved" rule of
+  building on push - so nobody can add a repository they cannot write to and have it
+  written to with somebody else's account. Removing a repository does not change who it
+  is. When the new person has no GitHub account connected, the solution shows it as
   stopped straight away, with the same Resume button; nothing is opened as the previous
-  person in between.
+  person in between. While the list has such an unsaved change, the section tells the
+  person that saving will use their GitHub account. Resume refuses a person with no
+  GitHub account connected rather than clearing the warning, and the warning is worded
+  to the person it is about ("you have not connected your GitHub account").
 - **`DependencyDriftScheduler` runs once a night at 05:00 UTC**, after the environment
   refresh, for every organisation with an imported first-party release: it rescans (so a
   customer moved to a new version during the day is measured against it, and the
@@ -1122,10 +1126,16 @@ Business Central, the way Dependabot does it, instead of remembering to press th
   once, against one of their environments. The automatic run of a solution acts only on
   findings measured against one of that solution's own environments, so a customer still
   on 25 is never offered the 27 the other customer moved to. The panel and the button are
-  unchanged.
+  unchanged. To keep that from silencing a solution that asked for automatic pull
+  requests, the scan measures a shared repository against a solution with the setting on
+  before one without it (then the oldest, as before). When two solutions sharing a
+  repository both have it on, only the older one's run opens pull requests there; the
+  other's customer is not measured for it.
 - **Paced, and stopped by a rate limit (#1177).** The automatic run leaves a second between
   the writes it makes to GitHub (GitHub's guidance for requests that create content; its
-  secondary limit is about 80 a minute per account), and stops at the first rate-limit
+  secondary limit is about 80 a minute per account) - closing a superseded pull request
+  and commenting on it count as two - and the spacing is kept per person across all their
+  solutions in one nightly pass. It stops at the first rate-limit
   refusal. The solution does not show that as stopped - there is nothing for it to fix -
   and the person's other solutions wait for the next night too. The button stops at a
   rate limit as well, and says to try again in a few minutes.

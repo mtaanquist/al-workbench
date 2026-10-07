@@ -135,6 +135,11 @@ public sealed class DependencyDriftScheduler : PolledScheduler
         // People GitHub is rate limiting tonight: every write on their account is refused
         // until it cools down, so their other solutions wait for the next night.
         var rateLimited = new HashSet<int>();
+        // Each person's write pace, carried from one of their solutions to the next so
+        // the spacing between writes on their account holds across the whole pass.
+        var paces = new Dictionary<int, GitHubWritePace>();
+        GitHubWritePace PaceFor(int userId) =>
+            paces.TryGetValue(userId, out var pace) ? pace : paces[userId] = new GitHubWritePace();
         foreach (var solution in solutions)
         {
             string? blocked;
@@ -153,7 +158,7 @@ public sealed class DependencyDriftScheduler : PolledScheduler
             {
                 // An unexpected failure is the log's to explain, not the solution's;
                 // whatever it said before stays until a run says otherwise.
-                if (await OpenAsAsync(orgId, isSystem, userId, solution.Id, ct).ConfigureAwait(false) is not { } result) continue;
+                if (await OpenAsAsync(orgId, isSystem, userId, solution.Id, PaceFor(userId), ct).ConfigureAwait(false) is not { } result) continue;
                 opened += result.Opened;
                 if (result.RateLimited)
                 {
@@ -174,7 +179,7 @@ public sealed class DependencyDriftScheduler : PolledScheduler
     /// <paramref name="userId"/>. Null when it failed unexpectedly.
     /// </summary>
     private async Task<AutomaticUpdatePullRequests?> OpenAsAsync(
-        int orgId, bool isSystem, int userId, int projectId, CancellationToken ct)
+        int orgId, bool isSystem, int userId, int projectId, GitHubWritePace pace, CancellationToken ct)
     {
         using var ambient = AmbientOrganizationScope.Enter(
             AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem, userId));
@@ -182,7 +187,7 @@ public sealed class DependencyDriftScheduler : PolledScheduler
         try
         {
             var result = await scope.ServiceProvider.GetRequiredService<DependencyDriftService>()
-                .OpenAutomaticPullRequestsAsync(projectId, ct).ConfigureAwait(false);
+                .OpenAutomaticPullRequestsAsync(projectId, pace, ct).ConfigureAwait(false);
             if (result.Blocked is { } reason)
             {
                 _logger.LogInformation(

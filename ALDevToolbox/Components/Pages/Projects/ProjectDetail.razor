@@ -20,6 +20,7 @@
 @inject IJSRuntime JS
 @implements IAsyncDisposable
 @inject ILogger<ProjectDetail> Log
+@inject IOrganizationContext OrgContext
 @using ALDevToolbox.Domain.Entities.ObjectExplorer
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Domain.ValueObjects.ObjectExplorer
@@ -255,6 +256,7 @@
                                                CanPickFromGitHub="_canPickFromGitHub"
                                                RepoErrors="_repoErrors"
                                                LoadedProject="_loadedProject"
+                                               ViewerUserId="OrgContext.CurrentUserId"
                                                OnResumeAutoUpdates="ResumeAutoUpdatesAsync"
                                                OnDirty="MarkDirty" />
                 }
@@ -1042,7 +1044,8 @@
         }
         catch (PlanValidationException ex)
         {
-            _errors = new(ex.Errors);
+            // Shown at the top of the page: the Resume button has no field of its own.
+            _errors = new() { ["_"] = ex.Errors.Values.FirstOrDefault() ?? "The solution could not be resumed." };
         }
     }
 

@@ -34,11 +34,14 @@ public sealed class ProjectDetailAutoUpdatesTests : IDisposable
         bool editOn,
         bool canManage = true,
         RepositoryProvider provider = RepositoryProvider.GitHub,
-        Action? onResume = null) =>
+        Action? onResume = null,
+        int? viewer = null,
+        string? unsavedRepository = null) =>
         _ctx.Render<ProjectDetailRepositories>(p => p
             .Add(c => c.CanManage, canManage)
             .Add(c => c.Providers, new[] { RepositoryProvider.GitHub, RepositoryProvider.AzureDevOps })
             .Add(c => c.LoadedProject, saved)
+            .Add(c => c.ViewerUserId, viewer)
             .Add(c => c.OnResumeAutoUpdates, EventCallback.Factory.Create(this, onResume ?? (() => { })))
             .Add(c => c.Edit, new ProjectDetail.EditModel
             {
@@ -52,8 +55,13 @@ public sealed class ProjectDetailAutoUpdatesTests : IDisposable
                         SavedUrl = UrlFor(provider),
                         DisplayName = "Payments",
                     },
+                    .. unsavedRepository is null
+                        ? Array.Empty<ProjectDetail.RepoRow>()
+                        : [new ProjectDetail.RepoRow { Provider = RepositoryProvider.GitHub, Url = unsavedRepository, DisplayName = "New" }],
                 ],
             }));
+
+    private const int RunAsUserId = 77;
 
     private static string UrlFor(RepositoryProvider provider) => provider == RepositoryProvider.GitHub
         ? "https://github.com/cronus-dk/payment-import"
@@ -65,6 +73,7 @@ public sealed class ProjectDetailAutoUpdatesTests : IDisposable
         Name = "CRONUS A/S",
         AutoUpdatePullRequests = on,
         AutoUpdatePullRequestsBlocked = blocked,
+        AutoUpdatePullRequestsByUserId = on ? RunAsUserId : null,
         AutoUpdatePullRequestsByUser = on ? new ALDevToolbox.Domain.Entities.User { DisplayName = "Mette" } : null,
     };
 
@@ -140,5 +149,41 @@ public sealed class ProjectDetailAutoUpdatesTests : IDisposable
 
         cut.Markup.Should().NotContain("Pull requests have stopped");
         cut.Markup.Should().Contain("Pull requests are opened with Mette's GitHub account.");
+    }
+
+    [Fact]
+    public void The_person_it_is_about_reads_the_warning_about_themselves()
+    {
+        var cut = Render(Saved(on: true, blocked: ALDevToolbox.Services.GitHub.DependencyDriftService.AutomaticNotLinkedMessage),
+            editOn: true, viewer: RunAsUserId);
+
+        cut.Markup.Should().Contain("Pull requests have stopped: you have not connected your GitHub account.");
+        cut.Markup.Should().NotContain("the person they are opened as");
+        cut.Markup.Should().Contain("Pull requests are opened with your GitHub account.");
+    }
+
+    [Fact]
+    public void Someone_else_reads_the_warning_about_the_person_it_is_about()
+    {
+        Render(Saved(on: true, blocked: ALDevToolbox.Services.GitHub.DependencyDriftService.AutomaticNotLinkedMessage),
+                editOn: true, viewer: 12)
+            .Markup.Should().Contain("Pull requests have stopped: the person they are opened as has not connected their GitHub account.");
+    }
+
+    [Fact]
+    public void Adding_a_repository_unsaved_says_saving_will_use_your_GitHub_account()
+    {
+        var cut = Render(Saved(on: true), editOn: true, viewer: 12, unsavedRepository: "https://github.com/cronus-dk/warehouse-ext");
+
+        cut.Find("small.field__hint").TextContent
+            .Should().Contain("once you save, pull requests will be opened with your GitHub account");
+    }
+
+    [Fact]
+    public void Adding_a_repository_as_the_person_they_are_already_opened_as_changes_nothing_to_say()
+    {
+        var cut = Render(Saved(on: true), editOn: true, viewer: RunAsUserId, unsavedRepository: "https://github.com/cronus-dk/warehouse-ext");
+
+        cut.Find("small.field__hint").TextContent.Should().Contain("Pull requests are opened with your GitHub account.");
     }
 }

@@ -304,6 +304,31 @@ public sealed class DependencyDriftServiceTests : IDisposable
     // ── Measured against production (issue #1081) ───────────────────────
 
     [Fact]
+    public async Task A_shared_repository_is_measured_against_the_solution_that_opens_pull_requests_on_its_own()
+    {
+        // The older solution's customer is on 28.2, but it does not open pull requests on
+        // its own; the newer one does, and its customer is on 28.0. Measured against the
+        // older one, the newer one's run would have nothing it may act on.
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        var olderId = await SeedSolutionAsync(RepoA, name: "CRONUS A/S", withProduction: false);
+        await SeedEnvironmentAsync(olderId, "Production", "28.2.45123.0");
+        var automaticId = await SeedSolutionAsync(RepoA, name: "CRONUS UK Ltd.", withProduction: false);
+        var automaticEnvironment = await SeedEnvironmentAsync(automaticId, "Production", "28.0.45123.0");
+        await EnableAutoUpdatesAsync(automaticId);
+        var releaseId = await SeedReleaseAsync();
+        var (service, ctx) = NewService(ScannableApi(RepoA));
+        await using var _ = ctx;
+
+        await service.ScanForReleaseAsync(releaseId);
+
+        await using var read = _db.NewContext();
+        var rows = await read.GitHubRepositoryDrift.AsNoTracking().Where(r => r.Field == "application").ToListAsync();
+        rows.Should().ContainSingle().Which.EnvironmentId.Should().Be(automaticEnvironment);
+        rows[0].Proposed.Should().Be("28.0.0.0");
+    }
+
+    [Fact]
     public async Task A_repository_is_measured_against_its_solutions_production_environment_not_the_release()
     {
         await ReadyAsync();
@@ -914,6 +939,67 @@ public sealed class DependencyDriftServiceTests : IDisposable
         api.Calls.Should().NotContain(c => c.Contains(RepoB), "every write on the account is refused until it cools down");
     }
 
+    [Fact]
+    public async Task The_spacing_holds_across_one_persons_solutions_in_a_pass()
+    {
+        await ReadyAsync();
+        var first = await SeedSolutionAsync(RepoA, name: "CRONUS A/S");
+        var second = await SeedSolutionAsync(RepoB, name: "CRONUS warehouse");
+        await EnableAutoUpdatesAsync(first);
+        await EnableAutoUpdatesAsync(second);
+        var releaseId = await SeedReleaseAsync();
+        await SeedDriftAsync(RepoA, releaseId, await EnvironmentOfAsync(first));
+        await SeedDriftAsync(RepoB, releaseId, await EnvironmentOfAsync(second));
+        var clock = new ALDevToolbox.Tests.Auth.FakeTimeProvider(DateTimeOffset.UtcNow);
+        var api = WritableApi(RepoB, onto: WritableApi(RepoA));
+        var pace = new GitHubWritePace();
+
+        var (service, ctx) = NewService(api, clock);
+        await using (ctx)
+        {
+            (await service.OpenAutomaticPullRequestsAsync(first, pace)).Opened.Should().Be(1);
+        }
+        _pauses.Should().HaveCount(4);
+
+        _pauses.Clear();
+        var (next, nextCtx) = NewService(api, clock);
+        await using (nextCtx)
+        {
+            (await next.OpenAutomaticPullRequestsAsync(second, pace)).Opened.Should().Be(1);
+        }
+        _pauses.Should().HaveCount(5, "its first write is a second after the other solution's last one");
+    }
+
+    [Fact]
+    public async Task Closing_a_superseded_pull_request_and_commenting_on_it_are_spaced_as_two_writes()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
+        await SeedOfferedAsync(RepoA, "28.0", 70, automatic: true);
+        var api = WritableApi(RepoA)
+            .On(HttpMethod.Get, $"/repos/{RepoA}/pulls/70", HttpStatusCode.OK, "{\"number\":70,\"state\":\"open\"}")
+            .On(HttpMethod.Post, $"/repos/{RepoA}/issues/70/comments", HttpStatusCode.Created, "{\"id\":1}")
+            .On(HttpMethod.Patch, $"/repos/{RepoA}/pulls/70", HttpStatusCode.OK, "{\"number\":70}");
+        var clock = new ALDevToolbox.Tests.Auth.FakeTimeProvider(DateTimeOffset.UtcNow);
+        var (service, ctx) = NewService(api, clock);
+        await using var _ = ctx;
+        // Which call each wait came straight after.
+        var after = new List<string>();
+        service.PauseAsync = (_, _) =>
+        {
+            after.Add(api.Calls[^1]);
+            return Task.CompletedTask;
+        };
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Opened.Should().Be(1);
+
+        after.Should().Contain(c => c.StartsWith("PATCH") && c.EndsWith("/pulls/70"),
+            "the comment waits for the close before it");
+    }
+
     /// <summary><see cref="WritableApi"/> where an <c>aldt/bump-bc-28.2</c> branch exists with no open pull request, and <c>-2</c> does not.</summary>
     private static FakeGitHubApi WithKeptBranch(FakeGitHubApi api) =>
         api.On(HttpMethod.Get, $"/repos/{RepoA}/git/ref/heads/aldt/bump-bc-28.2", HttpStatusCode.OK,
@@ -1123,9 +1209,10 @@ public sealed class DependencyDriftServiceTests : IDisposable
     /// repository somebody cannot see.
     /// </summary>
     private static FakeGitHubApi WritableApi(
-        string fullName, bool openPullRequest = false, string? manifest = null, string branch = "aldt/bump-bc-28.2")
+        string fullName, bool openPullRequest = false, string? manifest = null, string branch = "aldt/bump-bc-28.2",
+        FakeGitHubApi? onto = null)
     {
-        var api = BaseApi();
+        var api = onto ?? BaseApi();
         api.On(HttpMethod.Get, "/repos/", HttpStatusCode.NotFound, "{\"message\":\"Not Found\"}");
         api.On(HttpMethod.Get, $"/repos/{fullName}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(fullName));
         api.On(HttpMethod.Get, $"/repos/{fullName}/pulls", HttpStatusCode.OK,

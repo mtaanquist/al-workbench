@@ -103,6 +103,17 @@ public sealed record DependencyDriftPullRequest(
 public sealed record AutomaticUpdatePullRequests(int Opened, string? Blocked, bool RateLimited = false);
 
 /// <summary>
+/// When the automatic run last wrote to GitHub with one person's account. The nightly
+/// pass keeps one per person and hands it to each of their solutions in turn, so the
+/// spacing holds across solutions, not only within one.
+/// </summary>
+public sealed class GitHubWritePace
+{
+    /// <summary>When the last write started, on the service's clock; null before the first.</summary>
+    public DateTimeOffset? LastWriteAt { get; set; }
+}
+
+/// <summary>
 /// Which tracked repositories still target last year's Business Central, and
 /// the pull requests that move them on (issue #630).
 ///
@@ -173,11 +184,11 @@ public sealed class DependencyDriftService
     /// </summary>
     internal Func<TimeSpan, CancellationToken, Task> PauseAsync { get; set; }
 
-    /// <summary>Whether writes are paced - only the automatic run, which nobody is waiting on.</summary>
-    private bool _pacing;
-
-    /// <summary>When the last paced write started, on the service's clock.</summary>
-    private DateTimeOffset? _lastWriteAt;
+    /// <summary>
+    /// The pace writes are kept to, or null when they are not paced - only the automatic
+    /// run is, which nobody is waiting on.
+    /// </summary>
+    private GitHubWritePace? _pace;
 
     private readonly AppDbContext _db;
     private readonly GitHubAppClient _github;
@@ -375,16 +386,21 @@ public sealed class DependencyDriftService
     /// The environment each tracked GitHub repository is measured against, keyed by
     /// <c>owner/name</c>. Per solution the first production environment by name that is
     /// not deleted and has a version, else the first such sandbox; a repository tracked by
-    /// more than one solution takes the oldest solution that has one, so the answer does
-    /// not change from one scan to the next. A repository missing from the result is not
-    /// checked.
+    /// more than one solution takes the oldest solution that has one - preferring the
+    /// solutions with automatic update pull requests on - so the answer does not change
+    /// from one scan to the next. A repository missing from the result is not checked.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, EnvironmentTarget>> EnvironmentTargetsAsync(CancellationToken ct)
     {
         var tracking = await _db.OeProjectRepositories.AsNoTracking()
             .Where(r => r.Provider == RepositoryProvider.GitHub)
             .Where(r => _db.OeProjects.Any(p => p.Id == r.ProjectId && p.DeletedAt == null))
-            .Select(r => new { r.ProjectId, r.Url })
+            .Select(r => new
+            {
+                r.ProjectId,
+                r.Url,
+                AutoUpdates = _db.OeProjects.Where(p => p.Id == r.ProjectId).Select(p => p.AutoUpdatePullRequests).FirstOrDefault(),
+            })
             .ToListAsync(ct);
         if (tracking.Count == 0) return new Dictionary<string, EnvironmentTarget>();
 
@@ -406,7 +422,10 @@ public sealed class DependencyDriftService
                     .First());
 
         var result = new Dictionary<string, EnvironmentTarget>(StringComparer.OrdinalIgnoreCase);
-        foreach (var row in tracking.OrderBy(t => t.ProjectId))
+        // A solution with automatic update pull requests on goes first: the automatic run
+        // acts only on findings measured against its own solution, so measuring a shared
+        // repository against a solution without it would leave the one with it silent.
+        foreach (var row in tracking.OrderByDescending(t => t.AutoUpdates).ThenBy(t => t.ProjectId))
         {
             if (ToFullName(row.Url) is not { } name || result.ContainsKey(name)) continue;
             if (perProject.TryGetValue(row.ProjectId, out var target)) result[name] = target;
@@ -898,8 +917,12 @@ public sealed class DependencyDriftService
     /// <para>Writes are paced (<see cref="WriteSpacing"/>), and the run stops at the first
     /// sign that GitHub is rate limiting the person's account.</para>
     /// </summary>
+    /// <param name="pace">
+    /// The person's pace so far in this pass, shared with their other solutions; null
+    /// starts a fresh one.
+    /// </param>
     public async Task<AutomaticUpdatePullRequests> OpenAutomaticPullRequestsAsync(
-        int projectId, CancellationToken ct = default)
+        int projectId, GitHubWritePace? pace = null, CancellationToken ct = default)
     {
         RequireOrganizationId();
         var userId = RequireUserId();
@@ -947,7 +970,7 @@ public sealed class DependencyDriftService
         var opened = 0;
         string? blocked = null;
         var rateLimited = false;
-        _pacing = true;
+        _pace = pace ?? new GitHubWritePace();
         foreach (var name in due)
         {
             ct.ThrowIfCancellationRequested();
@@ -1003,6 +1026,19 @@ public sealed class DependencyDriftService
         "the person they are opened as has not connected their GitHub account. They connect it on their "
         + "account page under Repository access.";
 
+    /// <summary>
+    /// <paramref name="blocked"/> as the person the pull requests are opened as should read
+    /// it about themselves: "you have not connected your GitHub account" rather than "the
+    /// person they are opened as has not". Any other reason is returned unchanged.
+    /// </summary>
+    public static string ForTheRunAsPerson(string blocked) => blocked switch
+    {
+        AutomaticNotLinkedMessage =>
+            "you have not connected your GitHub account. Connect it on your account page under Repository access.",
+        AutomaticNoAccessMessage => "you can no longer manage this solution.",
+        _ => blocked,
+    };
+
     /// <summary>What a person pressing the button is told when GitHub is rate limiting their account.</summary>
     private const string RateLimitedRefusal =
         "GitHub is limiting how fast your account can make changes just now. Wait a few minutes, then try again.";
@@ -1054,7 +1090,7 @@ public sealed class DependencyDriftService
                 await PaceWriteAsync(ct);
                 await _github.ClosePullRequestAsync(token, owner, name, record.PullRequestNumber,
                     $"Superseded by #{current.Number}, which targets Business Central {replacing.Version}.\n\n"
-                    + "Closed by AL Workbench.", ct);
+                    + "Closed by AL Workbench.", ct, beforeComment: PaceWriteAsync);
                 record.SupersededAt = _clock.GetUtcNow().UtcDateTime;
             }
             catch (Exception ex) when (ex is GitHubApiException or HttpRequestException
@@ -1080,13 +1116,13 @@ public sealed class DependencyDriftService
     /// </summary>
     private async Task PaceWriteAsync(CancellationToken ct)
     {
-        if (!_pacing) return;
-        if (_lastWriteAt is { } last)
+        if (_pace is null) return;
+        if (_pace.LastWriteAt is { } last)
         {
             var wait = WriteSpacing - (_clock.GetUtcNow() - last);
             if (wait > TimeSpan.Zero) await PauseAsync(wait, ct);
         }
-        _lastWriteAt = _clock.GetUtcNow();
+        _pace.LastWriteAt = _clock.GetUtcNow();
     }
 
     /// <summary>
@@ -1602,10 +1638,17 @@ public sealed class DependencyDriftService
         GitHubRepositoryReadiness.LinkNeedsRepair =>
             "Your GitHub account is no longer connected to the workbench. Connect it again on your account page "
             + "under Repository access, then try this again.",
-        _ =>
-            "Connect your own GitHub account first, on your account page under Repository access. The pull request "
-            + "is opened in your name, so the workbench needs your GitHub account to do it.",
+        _ => NotLinkedRefusal,
     };
+
+    /// <summary>
+    /// What a person is told when something they asked for is opened with their GitHub
+    /// account and they have none connected - the button, and "Resume with my GitHub
+    /// account" on a solution.
+    /// </summary>
+    public const string NotLinkedRefusal =
+        "Connect your own GitHub account first, on your account page under Repository access. The pull request "
+        + "is opened in your name, so the workbench needs your GitHub account to do it.";
 
     private static PlanValidationException Refuse(string message) =>
         new(new Dictionary<string, string> { ["GitHubRepository"] = message });

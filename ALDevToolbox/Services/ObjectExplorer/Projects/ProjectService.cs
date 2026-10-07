@@ -291,7 +291,9 @@ public sealed class ProjectService
 
         var gitHubBefore = GitHubRepositoryKeys(project);
         ReconcileRepositories(project, repos, orgId);
-        if (!toggled && !gitHubBefore.SetEquals(GitHubRepositoryKeys(project)))
+        // Only a repository that was not there before - added, or its URL changed - is
+        // somewhere the previous person never agreed to write. Removing one is not.
+        if (!toggled && GitHubRepositoryKeys(project).Except(gitHubBefore).Any())
         {
             await FollowRepositoryChangeAsync(project, ct);
         }
@@ -310,7 +312,7 @@ public sealed class ProjectService
     /// and clears whatever held the last run up - "Resume with my GitHub account" on the
     /// Repositories tab (#1104). Nothing happens when the setting is off.
     /// </summary>
-    /// <exception cref="PlanValidationException">The solution is gone.</exception>
+    /// <exception cref="PlanValidationException">The solution is gone, or the caller has no GitHub account connected.</exception>
     /// <exception cref="ProjectAccessDeniedException">The caller may not manage this solution.</exception>
     public async Task ResumeAutoUpdatePullRequestsAsync(int projectId, CancellationToken ct = default)
     {
@@ -322,6 +324,12 @@ public sealed class ProjectService
             ?? throw Validation("Name", "This solution no longer exists.");
         await _access.EnsureCanManageAsync(project.Id, project.CreatedByUserId, ct);
         if (!project.AutoUpdatePullRequests) return;
+        // Taking it over without a GitHub account would only swap one reason it has
+        // stopped for another, and clear the warning until the night says so again.
+        if (!await HasGitHubAccountAsync(userId, ct))
+        {
+            throw Validation("AutoUpdatePullRequests", DependencyDriftService.NotLinkedRefusal);
+        }
 
         project.AutoUpdatePullRequestsByUserId = userId;
         project.AutoUpdatePullRequestsBlocked = null;
@@ -415,7 +423,8 @@ public sealed class ProjectService
 
     /// <summary>
     /// Makes the acting person the one automatic update pull requests are opened as,
-    /// when they change the solution's GitHub repositories while it is on - the "whoever
+    /// when they add a GitHub repository to the solution (or change one's address) while
+    /// it is on - the "whoever
     /// last saved" rule building on push follows (#1101). Otherwise anyone who manages a
     /// Public solution could add a repository they cannot write to and have the nightly
     /// run open pull requests there with somebody else's GitHub account, which the
@@ -432,14 +441,18 @@ public sealed class ProjectService
         if (!project.AutoUpdatePullRequests) return;
         if (_orgContext.CurrentUserId is not { } userId || userId == project.AutoUpdatePullRequestsByUserId) return;
 
-        var linked = await _db.UserExternalLogins.AsNoTracking()
-            .AnyAsync(l => l.UserId == userId && l.Provider == GitHubAccessService.ProviderName, ct);
+        var linked = await HasGitHubAccountAsync(userId, ct);
         project.AutoUpdatePullRequestsByUserId = userId;
         project.AutoUpdatePullRequestsBlocked = linked ? null : DependencyDriftService.AutomaticNotLinkedMessage;
         _logger.LogInformation(
             "User {UserId} changed the repositories of solution {ProjectId}, so its automatic update pull requests are now opened as them (GitHub account connected: {Linked}).",
             userId, project.Id, linked);
     }
+
+    /// <summary>Whether <paramref name="userId"/> has connected a GitHub account - read from the database, without asking GitHub.</summary>
+    private Task<bool> HasGitHubAccountAsync(int userId, CancellationToken ct) =>
+        _db.UserExternalLogins.AsNoTracking()
+            .AnyAsync(l => l.UserId == userId && l.Provider == GitHubAccessService.ProviderName, ct);
 
     /// <summary>
     /// Brings <paramref name="project"/>'s repository rows in line with the posted
