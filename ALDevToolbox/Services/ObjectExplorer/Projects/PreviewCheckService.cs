@@ -62,11 +62,23 @@ public sealed class PreviewCheckService
         if (pipelines.Count == 0) return [];
 
         var pipelineIds = pipelines.Select(p => p.Id).ToList();
-        var builds = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value))
-            .Select(b => new { PipelineId = b.PipelineId!.Value, b.BcTarget, b.Status, b.StartedAt, b.BcArtifactVersion })
-            .ToListAsync(ct).ConfigureAwait(false);
-        var byPipeline = builds.ToLookup(b => b.PipelineId);
+        // One row per pipeline and target, summed up in SQL rather than reading every
+        // build of every checked pipeline each night (#1138).
+        var history = (await _db.OeProjectBuilds.AsNoTracking()
+                .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value))
+                .GroupBy(b => new { PipelineId = b.PipelineId!.Value, b.BcTarget })
+                .Select(g => new BuildHistorySummary(
+                    g.Key.PipelineId,
+                    g.Key.BcTarget,
+                    // In flight only while its release is still ingesting, as in
+                    // ProjectBuildImporter.BlocksManualBuild: nothing resets a row whose job
+                    // was lost, and trusting the row alone would stop the check for good (#1111).
+                    g.Any(b => (b.Status == ProjectBuildStatus.Queued || b.Status == ProjectBuildStatus.Building)
+                               && b.Release != null && b.Release.Status == "ingesting"),
+                    g.Max(b => b.StartedAt),
+                    g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).Select(b => b.BcArtifactVersion).First()))
+                .ToListAsync(ct).ConfigureAwait(false))
+            .ToDictionary(h => (h.PipelineId, h.BcTarget));
 
         var today = DateOnly.FromDateTime(nowUtc);
         var versions = new Dictionary<(string Country, string Target), string?>();
@@ -91,19 +103,13 @@ public sealed class PreviewCheckService
             }
 
             due.Add(new PreviewCheckDue(pipeline.Id, userId, null, null));
-            var history = byPipeline[pipeline.Id].ToList();
-            var lastCurrentBuild = history
-                .Where(b => b.BcTarget == ProjectBuildTarget.Current)
-                .Select(b => (DateTime?)b.StartedAt)
-                .Max();
+            var lastCurrentBuild = history.GetValueOrDefault((pipeline.Id, ProjectBuildTarget.Current))?.LastStartedAt;
 
             foreach (var target in ProjectBuildTarget.Previews)
             {
-                var checks = history.Where(b => b.BcTarget == target).ToList();
-                if (checks.Any(b => b.Status is ProjectBuildStatus.Queued or ProjectBuildStatus.Building)) continue;
-
-                var last = checks.MaxBy(b => b.StartedAt);
-                if (last is not null && DateOnly.FromDateTime(last.StartedAt) == today) continue;
+                var last = history.GetValueOrDefault((pipeline.Id, target));
+                if (last is { InFlight: true }) continue;
+                if (last is not null && DateOnly.FromDateTime(last.LastStartedAt) == today) continue;
 
                 var key = (country, target);
                 if (!versions.TryGetValue(key, out var version))
@@ -116,9 +122,9 @@ public sealed class PreviewCheckService
                 if (version is null) continue;
 
                 var unchanged = last is not null
-                    && last.BcArtifactVersion == version
-                    && (lastCurrentBuild is null || lastCurrentBuild < last.StartedAt)
-                    && nowUtc - last.StartedAt < MaxQuietPeriod;
+                    && last.LastBcArtifactVersion == version
+                    && (lastCurrentBuild is null || lastCurrentBuild < last.LastStartedAt)
+                    && nowUtc - last.LastStartedAt < MaxQuietPeriod;
                 if (unchanged) continue;
 
                 due.Add(new PreviewCheckDue(pipeline.Id, userId, target, null));
@@ -126,6 +132,10 @@ public sealed class PreviewCheckService
         }
         return due;
     }
+
+    /// <summary>One pipeline's builds for one target, summed up: what <see cref="ListDueAsync"/> needs of them.</summary>
+    private sealed record BuildHistorySummary(
+        int PipelineId, string BcTarget, bool InFlight, DateTime LastStartedAt, string? LastBcArtifactVersion);
 
     /// <summary>
     /// Records why <paramref name="pipelineId"/>'s check could not start, or clears it

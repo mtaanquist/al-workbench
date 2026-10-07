@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using ALDevToolbox.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -13,9 +14,11 @@ using NpgsqlTypes;
 namespace ALDevToolbox.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20270101000000_RecordStagedReleaseRepository")]
+    partial class RecordStagedReleaseRepository
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -5706,10 +5709,6 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<string>("BannerText")
                         .HasColumnType("text")
                         .HasColumnName("banner_text");
-
-                    b.Property<int?>("BuildConcurrency")
-                        .HasColumnType("integer")
-                        .HasColumnName("build_concurrency");
 
                     b.Property<int?>("DefaultStorageQuotaMb")
                         .HasColumnType("integer")

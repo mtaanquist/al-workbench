@@ -127,7 +127,7 @@
         </span>
         <span class="meta-item">
             <span class="meta-item__label">Builds</span>
-            <span class="meta-item__value">@_builds.Count</span>
+            <span class="meta-item__value">@_counts.Total</span>
         </span>
         @if (_header!.PreviewCheck)
         {
@@ -204,7 +204,7 @@
             </Alert>
         }
 
-        @if (_builds.Count == 0)
+        @if (_counts.Total == 0)
         {
             <div class="empty-state">
                 <span class="empty-state__icon"><Icon Name="box" Width="21" Height="21" /></span>
@@ -582,10 +582,14 @@
                             <h2 class="card__title">Build history</h2>
                             @* The nightly preview check adds two builds a night that
                                nobody deploys, so they stay out of the list until asked for. *@
-                            @if (_builds.Any(b => b.IsPreview))
+                            @if (_counts.Preview > 0)
                             {
-                                <label class="check @(_showPreviewBuilds ? "is-checked" : "")">
-                                    <input type="checkbox" @bind="_showPreviewBuilds" />
+                                @* A preview build in the hero is listed below it too, so the box
+                                   stays ticked while one is shown. *@
+                                <label class="check @(_listingPreview ? "is-checked" : "")"
+                                       title="@(PreviewForcedByHero ? "The build shown above is a preview build" : null)">
+                                    <input type="checkbox" checked="@_listingPreview" disabled="@PreviewForcedByHero"
+                                           @onchange="TogglePreviewBuildsAsync" />
                                     <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
                                     <span>Show preview builds</span>
                                 </label>
@@ -684,6 +688,17 @@
                                 }
                             </tbody>
                         </table>
+                        @if (_builds.Count < HistoryTotal)
+                        {
+                            @* The newest builds only (#1138): a pipeline that builds on every
+                               push gathers thousands, and the page re-reads them while a build runs. *@
+                            <div class="card__body">
+                                <button type="button" class="btn btn--sm" @onclick="ShowMoreBuildsAsync" disabled="@_loadingMore">
+                                    <span>Show more builds</span>
+                                </button>
+                                <span class="u-muted">Showing @_builds.Count of @HistoryTotal</span>
+                            </div>
+                        }
                     </section>
 
                     @* ── Build log ─────────────────────────────────────── *@
@@ -910,13 +925,36 @@
     private sealed record ReleaseNote(bool Sent, string Text, int ReleasePipelineId, string LinkText);
 
     private PipelineHeader? _header;
+
+    /// <summary>The newest builds Build history lists, at most <see cref="_historyLimit"/> of them.</summary>
     private List<BuildRow> _builds = new();
 
-    /// <summary>Whether Build history lists the nightly preview check's builds. Off by default.</summary>
+    /// <summary>How many builds the pipeline has in all, and how many are preview check builds.</summary>
+    private BuildCounts _counts = new(0, 0);
+
+    /// <summary>How many builds Build history lists; Show more raises it.</summary>
+    private int _historyLimit = HistoryPageSize;
+    private const int HistoryPageSize = 25;
+    private bool _loadingMore;
+
+    /// <summary>Whether the person asked Build history to list the nightly preview check's builds. Off by default.</summary>
     private bool _showPreviewBuilds;
 
-    /// <summary>The rows Build history lists: every build, or all but the preview check's.</summary>
-    private List<BuildRow> HistoryRows => _showPreviewBuilds ? _builds : _builds.Where(b => !b.IsPreview).ToList();
+    /// <summary>Whether the history read lists them: when asked, or when the hero shows one.</summary>
+    private bool _listingPreview;
+    private bool PreviewForcedByHero => _listingPreview && !_showPreviewBuilds;
+
+    /// <summary>
+    /// Bumped by every load the person sets off. A poll tick that started before one
+    /// read the page's settings as they were then, so its answer is dropped.
+    /// </summary>
+    private int _loadGeneration;
+
+    /// <summary>The rows Build history lists: the builds read, already without preview builds unless asked for.</summary>
+    private List<BuildRow> HistoryRows => _builds;
+
+    /// <summary>How many builds Build history would list with no limit.</summary>
+    private int HistoryTotal => _listingPreview ? _counts.Total : _counts.Total - _counts.Preview;
     private BuildRow? _latest;
     private BuildDetail? _latestDetail;
     private List<ComparableBuildRow> _comparable = new();
@@ -958,22 +996,37 @@
     protected override async Task OnParametersSetAsync()
     {
         if (_loading || (BuildId == _loadedBuildId && PipelineId == _loadedPipelineId)) return;
+        if (PipelineId != _loadedPipelineId)
+        {
+            // Another pipeline starts from the defaults, not this one's settings.
+            _historyLimit = HistoryPageSize;
+            _showPreviewBuilds = false;
+        }
         _loadedBuildId = BuildId;
         _loadedPipelineId = PipelineId;
         await LoadAsync();
         if (_inFlight) StartPoll();
     }
 
-    /// <summary>
-    /// The build the hero shows: the one asked for, else the newest build of the
-    /// pipeline's own. The nightly preview check's builds are left out of "latest",
-    /// so a red check never reads as the pipeline being broken - unless they are all
-    /// there is.
-    /// </summary>
-    private static BuildRow? Shown(List<BuildRow> builds, int? buildId) =>
-        (buildId is { } id ? builds.FirstOrDefault(b => b.Id == id) : null)
-        ?? builds.FirstOrDefault(b => !b.IsPreview)
-        ?? builds.FirstOrDefault();
+    private async Task TogglePreviewBuildsAsync(ChangeEventArgs e)
+    {
+        _showPreviewBuilds = e.Value is true;
+        await LoadAsync();
+    }
+
+    private async Task ShowMoreBuildsAsync()
+    {
+        _loadingMore = true;
+        try
+        {
+            _historyLimit += HistoryPageSize;
+            await LoadAsync();
+        }
+        finally
+        {
+            _loadingMore = false;
+        }
+    }
 
     /// <summary>True when the hero shows something other than the latest build.</summary>
     private bool _showingOther;
@@ -1018,6 +1071,10 @@
         bool NotFound,
         bool CanManage,
         List<BuildRow> Builds,
+        BuildRow? Latest,
+        bool ShowingOther,
+        BuildCounts Counts,
+        bool ShowPreview,
         BuildDetail? LatestDetail,
         List<ComparableBuildRow> Comparable,
         bool InFlight,
@@ -1026,7 +1083,10 @@
 
     /// <summary>The user-driven load: reads through the circuit's own services.</summary>
     private async Task LoadAsync()
-        => Apply(await FetchAsync(Artifacts, Pipelines, Freshness, CancellationToken.None));
+    {
+        _loadGeneration++;
+        Apply(await FetchAsync(Artifacts, Pipelines, Freshness, CancellationToken.None));
+    }
 
     /// <summary>
     /// Reads the page's data through whichever <paramref name="artifacts"/> /
@@ -1041,25 +1101,43 @@
         {
             var header = await artifacts.GetPipelineHeaderAsync(PipelineId, ct);
             if (header is null)
-                return new PageState(null, NotFound: true, false, new(), null, new(), false);
+                return NotFoundState;
 
             var canManage = await pipelines.CanManageAsync(PipelineId, ct);
-            var builds = await artifacts.ListBuildsAsync(PipelineId, ct);
-            var latest = Shown(builds, BuildId);
+            var counts = await artifacts.CountBuildsAsync(PipelineId, ct);
+            // The build asked for may be older than the history lists; it is read on its own.
+            var requested = BuildId is { } id ? await artifacts.GetPipelineBuildRowAsync(PipelineId, id, ct) : null;
+            // A preview build in the hero is listed below it too.
+            var showPreview = _showPreviewBuilds || requested is { IsPreview: true };
+            var builds = await artifacts.ListBuildsAsync(PipelineId, _historyLimit, showPreview, ct);
+            // The hero shows the build asked for, else the newest of the pipeline's own. The
+            // nightly preview check's builds are left out of "latest", so a red check never
+            // reads as the pipeline being broken - unless they are all there is.
+            // The history is only the newest few, which may all be preview builds.
+            var newest = builds.FirstOrDefault(b => !b.IsPreview)
+                ?? (counts.Total > counts.Preview ? (await artifacts.ListBuildsAsync(PipelineId, 1, false, ct)).FirstOrDefault() : null)
+                ?? builds.FirstOrDefault()
+                ?? (counts.Total > 0 ? (await artifacts.ListBuildsAsync(PipelineId, 1, true, ct)).FirstOrDefault() : null);
+            var latest = requested ?? newest;
+            var showingOther = latest is not null && latest.Id != newest?.Id;
             var latestDetail = latest is null ? null : await artifacts.GetBuildDetailAsync(latest.Id, ct);
             var comparable = await artifacts.ListComparableBuildsAsync(PipelineId, ct);
             var inFlight = await artifacts.HasBuildInFlightAsync(PipelineId, ct);
             var running = inFlight && await artifacts.IsBuildRunningAsync(PipelineId, ct);
             var fresh = await freshness.GetAsync(PipelineId, ct);
-            return new PageState(header, false, canManage, builds, latestDetail, comparable, inFlight, fresh, running);
+            return new PageState(header, false, canManage, builds, latest, showingOther, counts, showPreview,
+                latestDetail, comparable, inFlight, fresh, running);
         }
         catch (ProjectAccessDeniedException)
         {
             // The pipeline belongs to a private solution this person isn't on the
             // team for. Same answer as a pipeline that isn't there.
-            return new PageState(null, NotFound: true, false, new(), null, new(), false);
+            return NotFoundState;
         }
     }
+
+    private static readonly PageState NotFoundState =
+        new(null, NotFound: true, false, new(), null, false, new(0, 0), false, null, new(), false);
 
     private void Apply(PageState s)
     {
@@ -1067,10 +1145,10 @@
         _header = s.Header;
         _canManage = s.CanManage;
         _builds = s.Builds;
-        _latest = Shown(s.Builds, BuildId);
-        // A preview build in the hero is listed below it too.
-        if (_latest is { IsPreview: true }) _showPreviewBuilds = true;
-        _showingOther = _latest is not null && _latest.Id != Shown(s.Builds, null)?.Id;
+        _counts = s.Counts;
+        _listingPreview = s.ShowPreview;
+        _latest = s.Latest;
+        _showingOther = s.ShowingOther;
         _latestDetail = s.LatestDetail;
         _comparable = s.Comparable;
         // Preselect the pipeline's own two newest builds; the nightly preview check's
@@ -1255,7 +1333,14 @@
             }
 
             var env = rp.ProjectEnvironment;
-            var options = ReleaseBuildDialog.OptionsFrom(_builds, await Artifacts.ListBuildAppsAsync(PipelineId), Zone);
+            // The newest successful builds, plus the one Deploy was pressed on when it is older.
+            var deployable = await Artifacts.ListDeployableBuildsAsync(PipelineId);
+            if (deployable.All(b => b.Id != buildId) && _builds.Concat(_latest is null ? [] : [_latest]).FirstOrDefault(b => b.Id == buildId) is { } pressed)
+            {
+                deployable.Add(pressed);
+            }
+            var apps = await Artifacts.ListBuildAppsAsync(PipelineId, deployable.Select(b => b.Id).ToList());
+            var options = ReleaseBuildDialog.OptionsFrom(deployable, apps, Zone);
             _releasingThrough = (rp.Id, env.Name, buildId);
             await _releaseDialog.OpenAsync(
                 rp.Id, rp.Project?.Name ?? _header?.ProjectName ?? "", env.Name, env.Type,
@@ -1341,6 +1426,7 @@
                 // the circuit's dispatcher, so sharing the circuit's DbContext would let
                 // a tick and a click have two commands in flight on one context. See #679.
                 PageState state;
+                var generation = _loadGeneration;
                 await using (var scope = ScopeFactory.CreateAsyncScope())
                 {
                     state = await FetchAsync(
@@ -1353,7 +1439,13 @@
                 // Disposal can happen while we were parked on the queries; touching the
                 // renderer after that logs an error for what is a normal navigate-away.
                 if (token.IsCancellationRequested) break;
-                await InvokeAsync(() => { Apply(state); StateHasChanged(); });
+                await InvokeAsync(() =>
+                {
+                    // A load the person set off meanwhile has newer settings and data.
+                    if (generation != _loadGeneration) return;
+                    Apply(state);
+                    StateHasChanged();
+                });
                 if (!_inFlight) break;
             }
         }

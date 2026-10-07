@@ -114,13 +114,15 @@ public sealed class PipelinesDashboardService
         var checkedPipelineIds = pipelines.Where(p => p.PreviewCheck).Select(p => p.Id).ToList();
         var previewChecks = checkedPipelineIds.Count == 0
             ? []
-            : (await builds
+            : await builds
                 .Where(b => b.BcTarget != ProjectBuildTarget.Current && checkedPipelineIds.Contains(b.PipelineId!.Value))
-                .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.BcTarget, b.Status, b.ReleaseId, b.StartedAt })
-                .ToListAsync(ct))
-                .GroupBy(b => (b.PipelineId, b.BcTarget))
-                .Select(g => g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).First())
-                .ToList();
+                // The newest per pipeline and target, picked in SQL (#1138).
+                .GroupBy(b => new { PipelineId = b.PipelineId!.Value, b.BcTarget })
+                .Select(g => g
+                    .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
+                    .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.BcTarget, b.Status, b.ReleaseId, b.StartedAt })
+                    .First())
+                .ToListAsync(ct);
         var checkedReleaseIds = previewChecks
             .Where(b => b.Status == ProjectBuildStatus.Ready && b.ReleaseId != null)
             .Select(b => b.ReleaseId!.Value)
