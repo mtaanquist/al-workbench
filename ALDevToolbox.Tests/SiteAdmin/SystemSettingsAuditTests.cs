@@ -182,5 +182,6 @@ public sealed class SystemSettingsAuditTests : IDisposable
         IndexSizeMultiplier: 0.5m,
         McpEnabled: false,
         SignupEmailDomainAllowlist: null,
-        ReleaseDownloadDomainAllowlist: null, DisabledTools: System.Array.Empty<ALDevToolbox.Domain.Tools.ToolKey>());
+        ReleaseDownloadDomainAllowlist: null, DisabledTools: System.Array.Empty<ALDevToolbox.Domain.Tools.ToolKey>(),
+        BuildConcurrency: null);
 }

@@ -38,7 +38,8 @@ public sealed class ToolToggleServiceTests : IDisposable
         McpEnabled: true,
         SignupEmailDomainAllowlist: null,
         ReleaseDownloadDomainAllowlist: null,
-        DisabledTools: disabled);
+        DisabledTools: disabled,
+        BuildConcurrency: null);
 
     [Fact]
     public async Task Site_disabled_tools_default_empty()

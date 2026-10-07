@@ -1,0 +1,94 @@
+@page "/site-admin/settings/builds"
+@attribute [Authorize(Roles = HttpOrganizationContext.SiteAdminRole)]
+@using ALDevToolbox.Components.Shared
+@using ALDevToolbox.Services
+@using ALDevToolbox.Services.ObjectExplorer.Import
+@using ALDevToolbox.Services.Operations
+@inject SystemSettingsService Settings
+@inject ProjectBuildQueue Builds
+
+<PageTitle>Builds · Site administration · AL Workbench</PageTitle>
+
+@*
+    How many pipeline and pull request builds run at once (#1164). The site admin
+    is the one who resizes the server, so the page says what this server has and what that
+    suggests, and the saved value applies at once - no restart. The recommendation
+    is advice only; nothing is set from it.
+*@
+
+<SiteAdminSettingsPage ActiveTab="SiteAdminSettingsPage.Tab.Builds">
+    <Alerts>
+        <SettingsBanner Message="@Message" Ok="@Ok" SavedText="Build settings saved." />
+    </Alerts>
+    <Body>
+        @if (_view is null)
+        {
+            <div class="loading-block"><span class="spinner"></span><span>Loading...</span></div>
+        }
+        else
+        {
+            <form method="post" action="/site-admin/settings/builds/save" id="settings-builds-form">
+                <AntiforgeryToken />
+                <div class="setting-list">
+                    <SettingRow Name="Pipeline builds that run at once">
+                        <HintContent>
+                            Covers pipeline and pull request builds. This server gives AL Workbench
+                            @Plural(_capacity.Cores, "processor") and @_capacity.MemoryGb GB of memory. Each
+                            build uses about one processor and 1 GB while it compiles, and the app itself
+                            needs one. <strong>Recommended: @_capacity.Recommended.</strong> Going
+                            higher makes builds slower, not faster. Takes effect when you save, with
+                            no restart; running builds are never stopped.
+                        </HintContent>
+                        <ChildContent>
+                            <span class="u-row">
+                                <input class="input input--num" type="number" name="BuildConcurrency"
+                                       min="@ProjectBuildQueue.MinConcurrency" max="@ProjectBuildQueue.MaxConcurrency" step="1"
+                                       style="width: 92px" aria-label="Pipeline builds that run at once"
+                                       value="@(_view.BuildConcurrency?.ToString() ?? string.Empty)" />
+                                <span class="form-actions__note">
+                                    From @ProjectBuildQueue.MinConcurrency to @ProjectBuildQueue.MaxConcurrency.
+                                    Leave empty to use the default of @Builds.DefaultLimit.
+                                </span>
+                            </span>
+                        </ChildContent>
+                    </SettingRow>
+                </div>
+            </form>
+        }
+    </Body>
+    <Foot>
+        @if (_view is not null)
+        {
+            <button type="submit" form="settings-builds-form" class="btn btn--primary">
+                <Icon Name="save" Width="16" Height="16" />
+                <span>Save changes</span>
+            </button>
+        }
+    </Foot>
+    <Aside>
+        <SettingsAside UpdatedAt="@_view?.UpdatedAt">
+            <Alert Tone="AlertTone.Info">
+                <span>
+                    Right now up to <strong>@Plural(Builds.Limit, "build")</strong> run at once.
+                    A change takes effect as soon as you save. Lowering the number never stops
+                    a build that is running; new builds wait until fewer are running.
+                </span>
+            </Alert>
+        </SettingsAside>
+    </Aside>
+</SiteAdminSettingsPage>
+
+@code {
+    [SupplyParameterFromQuery(Name = "msg")] public string? Message { get; set; }
+    [SupplyParameterFromQuery(Name = "ok")] public string? Ok { get; set; }
+
+    private SystemSettingsView? _view;
+    private readonly BuildConcurrencyAdvice.Capacity _capacity = BuildConcurrencyAdvice.ForThisServer();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _view = await Settings.GetViewAsync();
+    }
+
+    private static string Plural(int n, string noun) => n == 1 ? $"1 {noun}" : $"{n} {noun}s";
+}

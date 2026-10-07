@@ -139,6 +139,100 @@ public sealed class ProjectBuildQueueTests
         TakeAll(queue).Should().Equal(1);
     }
 
+    [Fact]
+    public void No_more_builds_start_than_the_limit_allows()
+    {
+        var queue = new ProjectBuildQueue(defaultLimit: 2);
+        for (var i = 1; i <= 4; i++) queue.Enqueue(Build(i, pipelineId: i, ProjectBuildTrigger.Push));
+
+        var taken = new List<ReleaseImportJob>();
+        while (queue.Reader.TryRead(out var job)) taken.Add(job);
+
+        taken.Select(j => j.ReleaseId).Should().Equal(1, 2);
+        queue.RunningCount.Should().Be(2);
+
+        queue.Complete(taken[0]);
+        TakeAll(queue).Should().Equal(3);
+    }
+
+    [Fact]
+    public void The_limit_keeps_the_order_people_first()
+    {
+        var queue = new ProjectBuildQueue(defaultLimit: 1);
+        queue.Enqueue(Build(1, pipelineId: 1, ProjectBuildTrigger.PreviewCheck, ProjectBuildTarget.NextMinor));
+        queue.Enqueue(Build(2, pipelineId: 2, ProjectBuildTrigger.Push));
+        queue.Enqueue(Build(3, pipelineId: 3, ProjectBuildTrigger.Manual));
+
+        queue.Reader.TryRead(out var first).Should().BeTrue();
+        first!.ReleaseId.Should().Be(3);
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Raising_the_limit_wakes_a_waiting_worker()
+    {
+        var queue = new ProjectBuildQueue(defaultLimit: 1);
+        queue.Enqueue(Build(1, pipelineId: 1, ProjectBuildTrigger.Manual));
+        queue.Enqueue(Build(2, pipelineId: 2, ProjectBuildTrigger.Manual));
+        queue.Reader.TryRead(out _).Should().BeTrue();
+
+        var waiting = queue.Reader.WaitToReadAsync().AsTask();
+        await Task.Delay(50);
+        waiting.IsCompleted.Should().BeFalse("one build is running and the limit is one");
+
+        queue.SetLimit(2);
+
+        (await waiting.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+        TakeAll(queue).Should().Equal(2);
+    }
+
+    [Fact]
+    public void Lowering_the_limit_leaves_running_builds_alone_and_holds_back_new_ones()
+    {
+        var queue = new ProjectBuildQueue(defaultLimit: 3);
+        for (var i = 1; i <= 5; i++) queue.Enqueue(Build(i, pipelineId: i, ProjectBuildTrigger.Push));
+        var running = new List<ReleaseImportJob>();
+        while (queue.Reader.TryRead(out var job)) running.Add(job);
+        running.Should().HaveCount(3);
+
+        queue.SetLimit(1);
+
+        queue.RunningCount.Should().Be(3, "lowering the limit never stops a running build");
+        queue.Complete(running[0]);
+        TakeAll(queue).Should().BeEmpty("two builds still run, more than the new limit of one");
+        queue.Complete(running[1]);
+        TakeAll(queue).Should().BeEmpty();
+        queue.Complete(running[2]);
+        TakeAll(queue).Should().Equal(4);
+    }
+
+    [Fact]
+    public void A_saved_setting_wins_and_clearing_it_goes_back_to_the_default()
+    {
+        var queue = new ProjectBuildQueue(defaultLimit: ProjectBuildQueue.Concurrency("3"));
+        queue.Limit.Should().Be(3);
+
+        queue.ApplySetting(6);
+        queue.Limit.Should().Be(6);
+
+        queue.ApplySetting(null);
+        queue.Limit.Should().Be(3);
+    }
+
+    [Theory]
+    [InlineData(5, 2, 5)]
+    [InlineData(null, 2, 2)]
+    [InlineData(null, 7, 7)]
+    [InlineData(1, 7, 1)]
+    [InlineData(0, 2, 1)]
+    [InlineData(40, 2, ProjectBuildQueue.MaxConcurrency)]
+    public void The_effective_limit_is_the_setting_over_the_default(int? saved, int defaultLimit, int expected) =>
+        ProjectBuildQueue.EffectiveLimit(saved, defaultLimit).Should().Be(expected);
+
+    [Fact]
+    public void Without_the_setting_or_the_variable_the_default_is_two() =>
+        ProjectBuildQueue.EffectiveLimit(null, ProjectBuildQueue.Concurrency(null)).Should().Be(2);
+
     [Theory]
     [InlineData(null, ProjectBuildQueue.DefaultConcurrency)]
     [InlineData("", ProjectBuildQueue.DefaultConcurrency)]

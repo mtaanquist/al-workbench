@@ -25,14 +25,28 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// order would publish and prepare deployments out of order. The key lives in memory
 /// only, which is safe because the app runs as one instance.
 /// </para>
+///
+/// <para>
+/// <see cref="MaxConcurrency"/> workers always drain it; <see cref="Limit"/> is what
+/// decides how many builds run at once. A site admin changes it without a restart
+/// (#1164): raising it wakes the waiting workers, lowering it lets the running builds
+/// finish and holds back new ones until fewer than the new limit are running.
+/// </para>
 /// </summary>
 public sealed class ProjectBuildQueue
 {
-    /// <summary>Builds that run at once when <c>OE_BUILD_CONCURRENCY</c> is not set.</summary>
+    /// <summary>Builds that run at once when neither the site setting nor <c>OE_BUILD_CONCURRENCY</c> is set.</summary>
     public const int DefaultConcurrency = 2;
 
-    /// <summary>The most builds that may run at once, whatever <c>OE_BUILD_CONCURRENCY</c> says.</summary>
+    /// <summary>
+    /// The most builds that may run at once, whatever the site setting or
+    /// <c>OE_BUILD_CONCURRENCY</c> says. Also the number of workers registered, so
+    /// any limit up to it can take effect without a restart.
+    /// </summary>
     public const int MaxConcurrency = 16;
+
+    /// <summary>The fewest builds that may run at once.</summary>
+    public const int MinConcurrency = 1;
 
     private readonly object _lock = new();
     private readonly List<Waiting> _waiting = [];
@@ -40,8 +54,25 @@ public sealed class ProjectBuildQueue
     private readonly HashSet<string> _runningKeys = [];
     private TaskCompletionSource _changed = NewSignal();
     private long _sequence;
+    private int _limit;
 
-    public ProjectBuildQueue() => Reader = new BuildReader(this);
+    /// <summary>
+    /// A queue whose only limit is <see cref="MaxConcurrency"/>, for tests and callers
+    /// that never start workers. The app registers one with
+    /// <see cref="ProjectBuildQueue(int)"/>.
+    /// </summary>
+    public ProjectBuildQueue() : this(MaxConcurrency) { }
+
+    /// <param name="defaultLimit">
+    /// The limit used until a site admin saves one, and again when they clear it:
+    /// <see cref="Concurrency"/> of <c>OE_BUILD_CONCURRENCY</c>.
+    /// </param>
+    public ProjectBuildQueue(int defaultLimit)
+    {
+        DefaultLimit = Math.Clamp(defaultLimit, MinConcurrency, MaxConcurrency);
+        _limit = DefaultLimit;
+        Reader = new BuildReader(this);
+    }
 
     /// <summary>
     /// The read half the workers drain. A read hands out the best build that may start
@@ -61,12 +92,50 @@ public sealed class ProjectBuildQueue
         get { lock (_lock) return _runningByRelease.Count; }
     }
 
+    /// <summary>The limit that applies when no site admin value is saved.</summary>
+    public int DefaultLimit { get; }
+
+    /// <summary>How many builds may run at once right now.</summary>
+    public int Limit
+    {
+        get { lock (_lock) return _limit; }
+    }
+
     /// <summary>
-    /// How many builds run at once: <c>OE_BUILD_CONCURRENCY</c>, else
+    /// The default limit: <c>OE_BUILD_CONCURRENCY</c>, else
     /// <see cref="DefaultConcurrency"/>, held between 1 and <see cref="MaxConcurrency"/>.
     /// </summary>
     public static int Concurrency(string? raw) =>
-        int.TryParse(raw, out var n) ? Math.Clamp(n, 1, MaxConcurrency) : DefaultConcurrency;
+        int.TryParse(raw, out var n) ? Math.Clamp(n, MinConcurrency, MaxConcurrency) : DefaultConcurrency;
+
+    /// <summary>
+    /// The limit that applies: the site admin's saved value when there is one, else
+    /// <paramref name="defaultLimit"/>, held between 1 and <see cref="MaxConcurrency"/>.
+    /// </summary>
+    public static int EffectiveLimit(int? saved, int defaultLimit) =>
+        Math.Clamp(saved ?? defaultLimit, MinConcurrency, MaxConcurrency);
+
+    /// <summary>
+    /// Applies the site admin's saved value, or <see cref="DefaultLimit"/> when it is
+    /// empty. Called at startup and after the setting is saved.
+    /// </summary>
+    public void ApplySetting(int? saved) => SetLimit(EffectiveLimit(saved, DefaultLimit));
+
+    /// <summary>
+    /// Changes how many builds may run at once. Running builds are never stopped: a
+    /// lower limit only holds back new ones. A higher one wakes the waiting workers.
+    /// </summary>
+    public void SetLimit(int limit)
+    {
+        limit = Math.Clamp(limit, MinConcurrency, MaxConcurrency);
+        lock (_lock)
+        {
+            if (limit == _limit) return;
+            var raised = limit > _limit;
+            _limit = limit;
+            if (raised) Signal();
+        }
+    }
 
     /// <summary>Adds <paramref name="job"/> to the line. Never waits.</summary>
     public void Enqueue(ReleaseImportJob job)
@@ -111,12 +180,14 @@ public sealed class ProjectBuildQueue
         }
     }
 
-    // Caller holds _lock. A build whose key is running is skipped, and so is every
-    // later build with the same key, which keeps the key's builds in queue order. A
-    // release already building is skipped too: two Retry clicks on a build with no
-    // pipeline must not build into the same release at once.
+    // Caller holds _lock. Nothing starts while the limit is reached. A build whose key
+    // is running is skipped, and so is every later build with the same key, which
+    // keeps the key's builds in queue order. A release already building is skipped
+    // too: two Retry clicks on a build with no pipeline must not build into the same
+    // release at once.
     private Waiting? NextStartable()
     {
+        if (_runningByRelease.Count >= _limit) return null;
         Waiting? best = null;
         HashSet<string>? passed = null;
         foreach (var w in _waiting.OrderBy(w => w.Sequence))

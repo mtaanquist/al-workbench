@@ -337,7 +337,8 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             IndexSizeMultiplier: 0.5m,
             McpEnabled: false,
             SignupEmailDomainAllowlist: null,
-            ReleaseDownloadDomainAllowlist: hosts, DisabledTools: Array.Empty<ALDevToolbox.Domain.Tools.ToolKey>()));
+            ReleaseDownloadDomainAllowlist: hosts, DisabledTools: Array.Empty<ALDevToolbox.Domain.Tools.ToolKey>(),
+            BuildConcurrency: null));
     }
 
     // A queued URL is only validated, never fetched, in these tests.
