@@ -183,7 +183,7 @@
             @if (LoadedProject.AutoUpdatePullRequests && Edit.AutoUpdatePullRequests && LoadedProject.AutoUpdatePullRequestsBlocked is { Length: > 0 } held)
             {
                 <Alert Tone="AlertTone.Warn">
-                    <span>Pull requests have stopped: @held@(CanManage ? "" : " Ask someone who manages this solution to resume them.")</span>
+                    <span>Pull requests have stopped: @HeldText(held)@(CanManage ? "" : " Ask someone who manages this solution to resume them.")</span>
                     @if (CanManage)
                     {
                         <button type="button" class="btn btn--sm" @onclick="ResumeAsync" disabled="@(Saving || _resuming)">
@@ -245,7 +245,10 @@
     /// <summary>The solution as last saved, or null while it is being created - which is when the update section is hidden.</summary>
     [Parameter] public ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject? LoadedProject { get; set; }
 
-    /// <summary>"Resume with my access": the page makes this person the one update pull requests are opened as.</summary>
+    /// <summary>The signed-in person, so text about the person the pull requests are opened as can be worded to them when it is them.</summary>
+    [Parameter] public int? ViewerUserId { get; set; }
+
+    /// <summary>"Resume with my GitHub account": the page makes this person the one update pull requests are opened as.</summary>
     [Parameter] public EventCallback OnResumeAutoUpdates { get; set; }
 
     private bool _resuming;
@@ -260,11 +263,44 @@
             {
                 return "Pull requests will be opened with your GitHub account.";
             }
-            return LoadedProject!.AutoUpdatePullRequestsByUser is { } owner
+            if (ViewerUserId is { } viewer && viewer != LoadedProject!.AutoUpdatePullRequestsByUserId && AddsGitHubRepository)
+            {
+                // Saving hands the pull requests to whoever adds a repository; say so
+                // before they press Save rather than after.
+                return "You are adding a repository, so once you save, pull requests will be opened with your GitHub account.";
+            }
+            if (LoadedProject!.AutoUpdatePullRequestsByUserId is { } runAs && runAs == ViewerUserId)
+            {
+                return "Pull requests are opened with your GitHub account.";
+            }
+            return LoadedProject.AutoUpdatePullRequestsByUser is { } owner
                 ? $"Pull requests are opened with {owner.DisplayName}'s GitHub account."
-                : "Pull requests are opened with the GitHub account of whoever last turned this on.";
+                : "Pull requests are opened with the GitHub account of whoever last turned this on or changed the repositories.";
         }
     }
+
+    /// <summary>
+    /// Whether the unsaved list has a GitHub repository the saved one does not - added, or
+    /// its address changed - which is what makes saving take the pull requests over.
+    /// </summary>
+    private bool AddsGitHubRepository
+    {
+        get
+        {
+            var saved = Edit.Repos
+                .Where(r => r.SavedUrl is not null)
+                .Select(r => ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(r.SavedUrl!))
+                .ToHashSet(StringComparer.Ordinal);
+            return Edit.Repos.Any(r => r.Provider == RepositoryProvider.GitHub && !string.IsNullOrWhiteSpace(r.Url)
+                && !saved.Contains(ALDevToolbox.Services.GitHub.GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(r.Url)));
+        }
+    }
+
+    /// <summary>What held the last run up, worded to the viewer when they are the person it is about.</summary>
+    private string HeldText(string held) =>
+        ViewerUserId is { } viewer && viewer == LoadedProject?.AutoUpdatePullRequestsByUserId
+            ? ALDevToolbox.Services.GitHub.DependencyDriftService.ForTheRunAsPerson(held)
+            : held;
 
     private async Task ToggleAutoUpdates(ChangeEventArgs e)
     {
