@@ -370,7 +370,7 @@ public sealed class PipelinesDashboardServiceTests : IDisposable
         var access = new ProjectAccess(ctx, _db.OrgContext);
         var service = new PipelinesDashboardService(
             ctx, access,
-            new ReleasePipelineService(ctx, _db.OrgContext, access, NullLogger<ReleasePipelineService>.Instance),
+            new ReleasePipelineService(ctx, _db.OrgContext, access, _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance),
             new DeliveryFeedService(ctx, access),
             new BuildFreshnessService(ctx, access),
             new DisplayTimeZone(_db.NewContextFactory(), _db.OrgContext, NullLogger<DisplayTimeZone>.Instance),

@@ -8,6 +8,7 @@ using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Services.Tools;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 
@@ -26,13 +27,15 @@ public sealed class ReleasePipelineService
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
+    private readonly ToolEnablement _tools;
     private readonly ILogger<ReleasePipelineService> _logger;
 
-    public ReleasePipelineService(AppDbContext db, IOrganizationContext orgContext, ProjectAccess access, ILogger<ReleasePipelineService> logger)
+    public ReleasePipelineService(AppDbContext db, IOrganizationContext orgContext, ProjectAccess access, ToolEnablement tools, ILogger<ReleasePipelineService> logger)
     {
         _db = db;
         _orgContext = orgContext;
         _access = access;
+        _tools = tools;
         _logger = logger;
     }
 
@@ -297,6 +300,8 @@ public sealed class ReleasePipelineService
         var orgId = RequireOrganizationId();
         var v = await ValidateAsync(input, existingId: null, ct);
 
+        if (v.DeployWithoutApproval) await EnsureStepUpToDeployWithoutApprovalAsync(ct);
+
         var now = DateTime.UtcNow;
         var pipeline = new OeReleasePipeline
         {
@@ -337,6 +342,7 @@ public sealed class ReleasePipelineService
 
         // A deployment pipeline can't move between projects; validate against its own.
         var v = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
+        if (v.DeployWithoutApproval) await EnsureStepUpToDeployWithoutApprovalAsync(ct);
 
         pipeline.Name = v.Name;
         pipeline.NameIsCustom = v.NameIsCustom;
@@ -358,6 +364,15 @@ public sealed class ReleasePipelineService
         await SaveTranslatingNameClashAsync(ct);
         _logger.LogInformation("Updated deployment pipeline {ReleasePipelineId} ({Name}).", pipeline.Id, v.Name);
     }
+
+    /// <summary>
+    /// Saving a pipeline with "deploy without approval" on makes the saver the person its
+    /// later deployments run as, which spends the customer's Business Central credential
+    /// as deploying does, so it takes the same step-up rule (#1127). Every such save asks,
+    /// not only the first: each one hands the deployments to whoever saved it.
+    /// </summary>
+    private Task EnsureStepUpToDeployWithoutApprovalAsync(CancellationToken ct) =>
+        _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
 
     /// <summary>
     /// Soft-deletes a deployment pipeline and sets aside what it still had waiting:

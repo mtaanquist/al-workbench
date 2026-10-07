@@ -1476,7 +1476,7 @@ public sealed class DeliveryServiceTests : IDisposable
     {
         await using var ctx = _db.NewContext();
         var rows = await new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
-            NullLogger<ReleasePipelineService>.Instance).ListReleasePipelineOverviewAsync();
+            _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance).ListReleasePipelineOverviewAsync();
         return rows.Single(r => r.Id == seed.ReleasePipelineId).LastDelivery!;
     }
 
@@ -2544,7 +2544,7 @@ public sealed class DeliveryServiceTests : IDisposable
                 await using (var del = _db.NewContext())
                 {
                     await new ReleasePipelineService(del, _db.OrgContext, new ProjectAccess(del, _db.OrgContext),
-                        NullLogger<ReleasePipelineService>.Instance).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+                        _db.NewToolEnablement(del), NullLogger<ReleasePipelineService>.Instance).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
                 }
                 break;
             default:
@@ -3105,7 +3105,7 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     private ReleasePipelineService NewReleasePipelineService(AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleasePipelineService>.Instance);
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
 
     private DeliveryService NewService(AppDbContext ctx, ALDevToolbox.Services.Tools.ToolEnablement? tools = null)
     {
