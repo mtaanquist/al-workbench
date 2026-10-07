@@ -13,6 +13,8 @@ public static class ObjectExplorerRegistration
     {
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.TranslationImportService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.CallSiteReferenceEmitter>();
+        // One per process: what is importing now, and the gate whole-release imports share (#1180).
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseIngests>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.CalImportService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.DvdDownloadService>();

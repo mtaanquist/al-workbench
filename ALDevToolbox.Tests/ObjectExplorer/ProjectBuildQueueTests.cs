@@ -344,6 +344,26 @@ public sealed class ProjectBuildQueueTests
     }
 
     [Fact]
+    public async Task A_build_that_got_the_import_gate_comes_back_at_once_even_over_the_limit()
+    {
+        // Waiting for a place while holding the gate would hold up every other import.
+        var queue = OneAtATime(1, 2, 3);
+        Take(queue);
+        var ingests = new ReleaseIngests();
+        var held = ingests.TryEnterHeavy()!;
+        var aside = queue.StepAsideAsync(1, () => ingests.EnterHeavyAsync(CancellationToken.None), CancellationToken.None, comeBackAtOnce: true);
+        var second = Take(queue);
+
+        held.Dispose();
+        using var gate = await aside.WaitAsync(TimeSpan.FromSeconds(5));
+
+        queue.RunningCount.Should().Be(2, "build 1 came back while build 2 still runs");
+        TakeAll(queue).Should().BeEmpty("nothing more starts until the builds are under the limit again");
+        queue.Complete(second);
+        TakeAll(queue).Should().BeEmpty("build 1 alone fills the limit of one");
+    }
+
+    [Fact]
     public async Task A_release_the_queue_is_not_running_just_waits()
     {
         var queue = OneAtATime(1, 2);

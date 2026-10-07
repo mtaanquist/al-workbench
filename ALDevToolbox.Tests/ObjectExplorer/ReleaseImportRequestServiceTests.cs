@@ -81,6 +81,53 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
+    // ── A retried release reads as importing until its job is queued (#1180) ──
+
+    [Fact]
+    public async Task A_retried_release_reads_as_importing_while_it_is_reopened_and_requeued()
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "BC 29.0 (DK)", Kind = "first_party", Status = "failed",
+            ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        var ingests = new ReleaseIngests();
+        // A full queue holds the retry at its last step, the enqueue, after the
+        // release is reopened and wiped but before its job is queued.
+        var queue = new ReleaseImportQueue();
+        var filler = new ReleaseImportJob(int.MaxValue, new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new ReleaseImportSource.Backfill());
+        for (var i = 0; i < 16; i++) await queue.EnqueueAsync(filler);
+
+        var retry = NewService(ctx, queue, ingests: ingests).RetryAsync(release.Id, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false,
+            FolderZip: EmptyZip("applications.zip"), CalTxtFile: null));
+        while (!retry.IsCompleted && !(ingests.IsRunning(release.Id) && await StatusAsync(release.Id) == "ingesting"))
+        {
+            await Task.Delay(20);
+        }
+        retry.IsCompleted.Should().BeFalse("the full queue holds the retry at its enqueue");
+        ingests.IsRunning(release.Id).Should().BeTrue("a build polling the release must not take it for abandoned");
+
+        queue.Reader.TryRead(out _).Should().BeTrue();
+        (await retry.WaitAsync(TimeSpan.FromMinutes(1))).Should().BeOfType<ReleaseImportOutcome.Queued>();
+        ingests.IsRunning(release.Id).Should().BeFalse("its queued job says it is being worked on from here");
+        while (queue.Reader.TryRead(out var job))
+        {
+            if (job.Source is ReleaseImportSource.StagedZip staged) Track(staged.TempPath);
+        }
+    }
+
+    private async Task<string?> StatusAsync(int releaseId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeReleases.AsNoTracking().Where(r => r.Id == releaseId).Select(r => r.Status).SingleAsync();
+    }
+
     // ── C/AL TXT wins, and decides the kind server-side ──────────────────
 
     [Fact]
@@ -291,7 +338,8 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
 
     private void Track(string tempPath) => _tempPaths.Add(tempPath);
 
-    private ReleaseImportRequestService NewService(Data.AppDbContext ctx, ReleaseImportQueue queue, ProjectBuildQueue? builds = null)
+    private ReleaseImportRequestService NewService(
+        Data.AppDbContext ctx, ReleaseImportQueue queue, ProjectBuildQueue? builds = null, ReleaseIngests? ingests = null)
     {
         var translations = new TranslationImportService(
             ctx, _db.OrgContext,
@@ -301,7 +349,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         var importer = new ReleaseImportService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, ingests: ingests);
         var management = new ReleaseManagementService(
             ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance);
         var downloads = new DvdDownloadService(

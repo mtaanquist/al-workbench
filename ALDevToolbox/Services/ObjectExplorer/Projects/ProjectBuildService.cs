@@ -1961,12 +1961,13 @@ public sealed class ProjectBuildService
         int? stalePreviewId = null;
         if (existing is not null)
         {
-            // A failed preview is replaced straight away rather than after the
-            // refresh age: it holds no objects to parent onto.
-            var refresh = resolved.IsPrerelease
-                && existing.Status != "ingesting"
+            // A failed release is replaced straight away, preview or not: it holds
+            // no objects to parent onto, and keeping it would hand every later build
+            // of this version a broken parent (#1180).
+            var refresh = existing.Status != "ingesting"
                 && (existing.Status == "failed"
-                    || (!string.Equals(existing.BcVersion, resolved.Version, StringComparison.OrdinalIgnoreCase)
+                    || (resolved.IsPrerelease
+                        && !string.Equals(existing.BcVersion, resolved.Version, StringComparison.OrdinalIgnoreCase)
                         && _clock.GetUtcNow().UtcDateTime - existing.ImportedAt >= ArtifactReleaseImporter.PreviewRefreshAge));
             if (!refresh)
             {
@@ -1994,7 +1995,7 @@ public sealed class ProjectBuildService
             {
                 parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
                 createdId = parentId;
-                tracked = ReleaseIngests.Track(parentId);
+                tracked = _importer.Ingests.Track(parentId);
             }
             else
             {
@@ -2007,9 +2008,9 @@ public sealed class ProjectBuildService
                 parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
                 await tx.CommitAsync(ct).ConfigureAwait(false);
                 createdId = parentId;
-                tracked = ReleaseIngests.Track(parentId);
-                _logger.LogInformation("Replaced preview release {OldReleaseId} with build {Version} for a project build.",
-                    stalePreviewId.Value, resolved.Version);
+                tracked = _importer.Ingests.Track(parentId);
+                _logger.LogInformation("Replaced release {OldReleaseId} ({Status}) with build {Version} for a project build.",
+                    stalePreviewId.Value, existing!.Status, resolved.Version);
             }
 
             // Whole Business Central releases import one at a time, here and on the
@@ -2062,11 +2063,11 @@ public sealed class ProjectBuildService
             // good parent release now exists, adopt it rather than losing the
             // cross-release link by returning null. See issue #431.
             _db.ChangeTracker.Clear();
-            // A preview whose ingest just failed is not adopted: the next build
+            // A release whose ingest just failed is not adopted: the next build
             // replaces it, and until then the build carries on without a parent.
             var adopted = await _db.OeReleases.AsNoTracking()
                 .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null)
-                .Where(r => !resolved.IsPrerelease || r.Status != "failed")
+                .Where(r => r.Status != "failed")
                 .Select(r => (int?)r.Id)
                 .FirstOrDefaultAsync(ct).ConfigureAwait(false);
             if (adopted is not null)
@@ -2119,15 +2120,18 @@ public sealed class ProjectBuildService
 
     /// <summary>
     /// Takes the import gate of <see cref="ReleaseIngests"/>. When another import
-    /// holds it, the build gives up its place in the build queue while it waits.
+    /// holds it, the build gives up its place in the build queue while it waits, and
+    /// takes the place back at once when it gets the gate, over the limit if need be:
+    /// waiting for a place while holding the gate would stall every other import.
     /// </summary>
     private async Task<IDisposable> EnterHeavyImportAsync(int buildReleaseId, CancellationToken ct) =>
-        ReleaseIngests.TryEnterHeavy()
-        ?? await StepAsideAsync(buildReleaseId, () => ReleaseIngests.EnterHeavyAsync(ct), ct).ConfigureAwait(false);
+        _importer.Ingests.TryEnterHeavy()
+        ?? await StepAsideAsync(buildReleaseId, () => _importer.Ingests.EnterHeavyAsync(ct), ct, comeBackAtOnce: true)
+            .ConfigureAwait(false);
 
     /// <summary>Runs <paramref name="wait"/> without holding this build's place in the queue, when there is a queue.</summary>
-    private Task<T> StepAsideAsync<T>(int buildReleaseId, Func<Task<T>> wait, CancellationToken ct) =>
-        _buildQueue is null ? wait() : _buildQueue.StepAsideAsync(buildReleaseId, wait, ct);
+    private Task<T> StepAsideAsync<T>(int buildReleaseId, Func<Task<T>> wait, CancellationToken ct, bool comeBackAtOnce = false) =>
+        _buildQueue is null ? wait() : _buildQueue.StepAsideAsync(buildReleaseId, wait, ct, comeBackAtOnce);
 
     /// <summary>
     /// How long a build waits for a release another import is still ingesting. Kept
@@ -2171,7 +2175,7 @@ public sealed class ProjectBuildService
                 return new IngestState(
                     status,
                     WaitingForWorker: jobs.Contains("queued"),
-                    ImportRunning: jobs.Contains("running") || ReleaseIngests.IsRunning(releaseId));
+                    ImportRunning: jobs.Contains("running") || _importer.Ingests.IsRunning(releaseId));
             },
             async token =>
             {

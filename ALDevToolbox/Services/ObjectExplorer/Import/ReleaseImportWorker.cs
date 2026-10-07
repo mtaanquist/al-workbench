@@ -364,7 +364,7 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                 var calImporter = scope.ServiceProvider.GetRequiredService<CalImportService>();
                 try
                 {
-                    using (await ReleaseIngests.EnterHeavyAsync(ct).ConfigureAwait(false))
+                    using (await importer.Ingests.EnterHeavyAsync(ct).ConfigureAwait(false))
                     {
                         await calImporter.ProcessReleaseAsync(job.ReleaseId, calTxt.TempPath, calTxt.EncodingName, ct).ConfigureAwait(false);
                     }
@@ -397,7 +397,7 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                     var isCal = await db.OeModuleFiles.AsNoTracking()
                         .Where(f => f.Module!.ReleaseId == job.ReleaseId)
                         .AnyAsync(f => f.Path.StartsWith("CAL/"), ct).ConfigureAwait(false);
-                    using (await ReleaseIngests.EnterHeavyAsync(ct).ConfigureAwait(false))
+                    using (await importer.Ingests.EnterHeavyAsync(ct).ConfigureAwait(false))
                     {
                         if (isCal)
                         {
@@ -592,7 +592,7 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
             {
                 // One whole-release import at a time, shared with the builds' inline
                 // parent imports, so they never bulk-insert side by side (#1180).
-                using (await ReleaseIngests.EnterHeavyAsync(ct).ConfigureAwait(false))
+                using (await importer.Ingests.EnterHeavyAsync(ct).ConfigureAwait(false))
                 {
                     await importer.ProcessReleaseAsync(job.ReleaseId, uploads, job.StoreSymbolReference, ct).ConfigureAwait(false);
                 }

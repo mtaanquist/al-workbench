@@ -4,8 +4,8 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 
 /// <summary>
 /// What this process is importing right now, and the one-at-a-time gate for the
-/// heavy imports. Both live in memory only, which is enough because the app runs as
-/// one instance (#1180).
+/// heavy imports. Registered as a singleton; both halves live in memory only, which is
+/// enough because the app runs as one instance (#1180).
 ///
 /// <para>
 /// <see cref="Track"/> answers "is anyone still working on this <c>ingesting</c>
@@ -23,66 +23,70 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// take it, so a build is never held behind a 30-minute import for its own ingest.
 /// </para>
 /// </summary>
-public static class ReleaseIngests
+public sealed class ReleaseIngests
 {
-    private static readonly ConcurrentDictionary<int, int> Running = new();
-    private static readonly SemaphoreSlim HeavyGate = new(1, 1);
+    private readonly ConcurrentDictionary<int, int> _running = new();
+    private readonly SemaphoreSlim _heavyGate = new(1, 1);
 
     /// <summary>
     /// Records that this process is importing <paramref name="releaseId"/> until the
     /// result is disposed. Nested calls for the same release are counted.
     /// </summary>
-    public static IDisposable Track(int releaseId)
+    public IDisposable Track(int releaseId)
     {
-        Running.AddOrUpdate(releaseId, 1, (_, n) => n + 1);
-        return new Tracked(releaseId);
+        _running.AddOrUpdate(releaseId, 1, (_, n) => n + 1);
+        return new Tracked(this, releaseId);
     }
 
     /// <summary>Whether something in this process is importing <paramref name="releaseId"/>.</summary>
-    public static bool IsRunning(int releaseId) => Running.ContainsKey(releaseId);
+    public bool IsRunning(int releaseId) => _running.ContainsKey(releaseId);
 
     /// <summary>
     /// Waits until no other heavy import is running; disposing the result lets the
     /// next one in.
     /// </summary>
-    public static async Task<IDisposable> EnterHeavyAsync(CancellationToken ct)
+    public async Task<IDisposable> EnterHeavyAsync(CancellationToken ct)
     {
-        await HeavyGate.WaitAsync(ct).ConfigureAwait(false);
-        return new Held();
+        await _heavyGate.WaitAsync(ct).ConfigureAwait(false);
+        return new Held(_heavyGate);
     }
 
     /// <summary>Takes the heavy-import gate if nobody holds it, else returns null without waiting.</summary>
-    public static IDisposable? TryEnterHeavy() => HeavyGate.Wait(0) ? new Held() : null;
+    public IDisposable? TryEnterHeavy() => _heavyGate.Wait(0) ? new Held(_heavyGate) : null;
 
-    private sealed class Tracked(int releaseId) : IDisposable
+    private void Untrack(int releaseId)
     {
-        private int _disposed;
-
-        public void Dispose()
+        while (true)
         {
-            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-            while (true)
+            if (!_running.TryGetValue(releaseId, out var n)) return;
+            if (n <= 1)
             {
-                if (!Running.TryGetValue(releaseId, out var n)) return;
-                if (n <= 1)
-                {
-                    if (Running.TryRemove(new KeyValuePair<int, int>(releaseId, n))) return;
-                }
-                else if (Running.TryUpdate(releaseId, n - 1, n))
-                {
-                    return;
-                }
+                if (_running.TryRemove(new KeyValuePair<int, int>(releaseId, n))) return;
+            }
+            else if (_running.TryUpdate(releaseId, n - 1, n))
+            {
+                return;
             }
         }
     }
 
-    private sealed class Held : IDisposable
+    private sealed class Tracked(ReleaseIngests owner, int releaseId) : IDisposable
     {
         private int _disposed;
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _disposed, 1) == 0) HeavyGate.Release();
+            if (Interlocked.Exchange(ref _disposed, 1) == 0) owner.Untrack(releaseId);
+        }
+    }
+
+    private sealed class Held(SemaphoreSlim gate) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0) gate.Release();
         }
     }
 }

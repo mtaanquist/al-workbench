@@ -37,6 +37,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     private readonly FakeSymbolFeeds _http = new();
     private readonly FakeToolchain _tools;
     private readonly FakePackage _core;
+    private readonly ReleaseIngests _ingests = new();
 
     public ProjectBuildSymbolFeedTests()
     {
@@ -1260,27 +1261,48 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     {
         var (projectId, releaseId, _) = await SeedAsync(parentStatus: null);
         using var cts = new CancellationTokenSource();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
 
         // Holding the import gate keeps the build waiting inside the parent import it
         // has just started, which is where a newer push or a shutdown can stop it.
         Task<ProjectBuildOutcome> build;
         int parentId;
-        using (await ReleaseIngests.EnterHeavyAsync(CancellationToken.None))
+        using (await _ingests.EnterHeavyAsync(timeout.Token))
         {
             build = BuildAsync(projectId, releaseId, ct: cts.Token);
             parentId = await ParentCreatedAsync().WaitAsync(TimeSpan.FromMinutes(2));
-            ReleaseIngests.IsRunning(parentId).Should().BeTrue("a build waiting on it must not take it for abandoned");
+            _ingests.IsRunning(parentId).Should().BeTrue("a build waiting on it must not take it for abandoned");
 
             await cts.CancelAsync();
             var act = () => build;
             await act.Should().ThrowAsync<OperationCanceledException>();
         }
 
-        ReleaseIngests.IsRunning(parentId).Should().BeFalse();
+        _ingests.IsRunning(parentId).Should().BeFalse();
         await using var read = _db.NewContext();
         var parent = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == parentId);
         parent.Status.Should().Be("failed");
         parent.StatusMessage.Should().Be(ProjectBuildService.StoppedImportMessage);
+    }
+
+    [Fact]
+    public async Task A_failed_parent_is_imported_again_rather_than_handed_to_the_build()
+    {
+        var (projectId, releaseId, _) = await SeedAsync(parentStatus: "failed");
+        int failedId;
+        await using (var seeded = _db.NewContext())
+        {
+            failedId = await seeded.OeReleases.AsNoTracking().Where(r => r.DedupKey == ParentDedupKey).Select(r => r.Id).SingleAsync();
+        }
+
+        var outcome = await BuildAsync(projectId, releaseId);
+
+        outcome.ParentReleaseId.Should().NotBeNull().And.NotBe(failedId);
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().NotBeNull();
+        var parent = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == outcome.ParentReleaseId);
+        parent.DedupKey.Should().Be(ParentDedupKey);
+        parent.Status.Should().Be("ready");
     }
 
     private async Task<int> ParentCreatedAsync()
@@ -1293,7 +1315,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                     .Where(r => r.DedupKey == ParentDedupKey)
                     .Select(r => (int?)r.Id)
                     .FirstOrDefaultAsync();
-                if (id is { } found && ReleaseIngests.IsRunning(found)) return found;
+                if (id is { } found && _ingests.IsRunning(found)) return found;
             }
             await Task.Delay(50);
         }
@@ -1312,7 +1334,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             NullLogger<TranslationImportService>.Instance);
         var importer = new ReleaseImportService(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, ingests: _ingests);
         var service = new ProjectBuildService(
             ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             new BcArtifactService(_http, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance),

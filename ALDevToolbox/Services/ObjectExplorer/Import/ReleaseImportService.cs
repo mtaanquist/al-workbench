@@ -59,7 +59,8 @@ public class ReleaseImportService
         TranslationImportService translations,
         CallSiteReferenceEmitter callSites,
         ILogger<ReleaseImportService> logger,
-        ALDevToolbox.Services.GitHub.DependencyDriftService? drift = null)
+        ALDevToolbox.Services.GitHub.DependencyDriftService? drift = null,
+        ReleaseIngests? ingests = null)
     {
         _db = db;
         _orgContext = orgContext;
@@ -68,7 +69,16 @@ public class ReleaseImportService
         _callSites = callSites;
         _logger = logger;
         _drift = drift;
+        Ingests = ingests ?? new ReleaseIngests();
     }
+
+    /// <summary>
+    /// The process's record of running imports and its whole-release import gate
+    /// (#1180), for this service and the callers that build on it. The app injects
+    /// its one singleton; a service built by hand without one gets its own, so tests
+    /// never share it by accident.
+    /// </summary>
+    public ReleaseIngests Ingests { get; }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
         ?? throw new InvalidOperationException("No organization in scope; ReleaseImportService called outside an authenticated request.");
@@ -150,7 +160,7 @@ public class ReleaseImportService
     {
         var orgId = RequireOrganizationId();
         // A build waiting on this release tells a running import from an abandoned one by this (#1180).
-        using var tracked = ReleaseIngests.Track(releaseId);
+        using var tracked = Ingests.Track(releaseId);
         var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Release {releaseId} not found for processing.");
 
@@ -359,7 +369,7 @@ public class ReleaseImportService
         var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Release {releaseId} disappeared between the pre-check and the load.");
 
-        using var tracked = ReleaseIngests.Track(release.Id);
+        using var tracked = Ingests.Track(release.Id);
         release.Status = "ingesting";
         release.StatusMessage = null;
         release.UpdatedAt = DateTime.UtcNow;

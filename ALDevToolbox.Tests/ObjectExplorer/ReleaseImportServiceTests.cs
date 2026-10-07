@@ -635,7 +635,7 @@ public sealed class ReleaseImportServiceTests : IDisposable
         var runningWhileImporting = false;
         await using var upload = new FailingStream(() =>
         {
-            runningWhileImporting = ReleaseIngests.IsRunning(releaseId);
+            runningWhileImporting = svc.Ingests.IsRunning(releaseId);
             cts.Cancel();
             return new InvalidDataException("Not a NAVX package.");
         });
@@ -644,7 +644,7 @@ public sealed class ReleaseImportServiceTests : IDisposable
 
         await act.Should().ThrowAsync<InvalidDataException>();
         runningWhileImporting.Should().BeTrue("a build waiting on this release must see it being imported");
-        ReleaseIngests.IsRunning(releaseId).Should().BeFalse();
+        svc.Ingests.IsRunning(releaseId).Should().BeFalse();
         await using var read = _db.NewContext();
         var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
         release.Status.Should().Be("failed");
@@ -689,7 +689,7 @@ public sealed class ReleaseImportServiceTests : IDisposable
         var act = () => svc.AmendReleaseAsync(releaseId, [new AppFileUpload("CRONUS.app", upload, null)], cts.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
-        ReleaseIngests.IsRunning(releaseId).Should().BeFalse();
+        svc.Ingests.IsRunning(releaseId).Should().BeFalse();
         await using var read = _db.NewContext();
         (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId)).Status.Should().Be("failed");
     }

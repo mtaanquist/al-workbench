@@ -186,7 +186,13 @@ public sealed class ProjectBuildQueue
     /// <paramref name="ct"/> is cancelled the build is unwinding, so it takes its place
     /// back at once rather than queueing for it.
     /// </remarks>
-    public async Task<T> StepAsideAsync<T>(int releaseId, Func<Task<T>> wait, CancellationToken ct)
+    /// <param name="comeBackAtOnce">
+    /// Take the place back as soon as the wait succeeds, even over the limit, instead
+    /// of waiting for one. For a wait that ends holding something others queue for,
+    /// such as the import gate: idling on it until a build finishes would hold up
+    /// every import behind it. The limit is kept again as running builds finish.
+    /// </param>
+    public async Task<T> StepAsideAsync<T>(int releaseId, Func<Task<T>> wait, CancellationToken ct, bool comeBackAtOnce = false)
     {
         ArgumentNullException.ThrowIfNull(wait);
         bool stepped;
@@ -211,6 +217,11 @@ public sealed class ProjectBuildQueue
         {
             await RejoinAsync(releaseId, ct).ConfigureAwait(false);
             throw;
+        }
+        if (comeBackAtOnce)
+        {
+            Rejoin(releaseId);
+            return result;
         }
         try
         {
