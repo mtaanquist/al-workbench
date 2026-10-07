@@ -196,6 +196,10 @@
                                             }
                                         </select>
                                     </SelectBox>
+                                    @if (_deletedSourceName is { } deletedSource && _buildPipelineId == 0)
+                                    {
+                                        <FieldError Message="@($"\"{deletedSource}\" was deleted. Choose the build pipeline to deploy from now.")" />
+                                    }
                                     <small class="field__hint">Its successful builds are what this pipeline deploys.</small>
                                 </div>
                             }
@@ -617,6 +621,9 @@
     }
 
     /// <summary>Save is live once the required fields are chosen and any Force-Sync acknowledgement is given.</summary>
+    /// <summary>The name of the deleted build pipeline this one drew from, when it did; null otherwise.</summary>
+    private string? _deletedSourceName;
+
     private bool CanSave =>
         _canManage && _solutionManageable && !_saving && !_loading
         && _environments is { Count: > 0 }
@@ -669,7 +676,10 @@
             _customName = rp.NameIsCustom ? rp.Name : string.Empty;
             _showCustomName = rp.NameIsCustom;
             _artifactSource = ReleaseArtifactSource.IsValid(rp.ArtifactSource) ? rp.ArtifactSource : ReleaseArtifactSource.Build;
-            _buildPipelineId = rp.BuildPipelineId ?? 0;
+            // A deleted source can't be picked again (#1123): start the choice empty and
+            // say why, rather than showing a placeholder over a value Save would send.
+            _deletedSourceName = rp.BuildPipeline?.DeletedAt is not null ? rp.BuildPipeline.Name : null;
+            _buildPipelineId = _deletedSourceName is null ? rp.BuildPipelineId ?? 0 : 0;
             _releaseRepositoryId = rp.GithubReleaseRepositoryId ?? 0;
             _environmentId = rp.ProjectEnvironmentId;
             _deploymentSchedule = rp.DeploymentSchedule;

@@ -1278,7 +1278,7 @@
         if (_deleteConfirm is null) return;
         var confirmed = await _deleteConfirm.OpenAsync(
             "Delete pipeline?",
-            $"Delete \"{_header?.Name}\"? It stops building, and it and its build history are removed from Pipelines.",
+            $"Delete \"{_header?.Name}\"? It stops building, and its builds no longer show in Pipelines.",
             "Delete pipeline", "btn--danger", "trash-2");
         if (!confirmed) return;
         try
