@@ -327,6 +327,45 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_401_while_waiting_asks_for_a_token_past_the_cache()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        _apps.AfterUpload = () =>
+        {
+            _apps.ExpiredTokens.Add(_tokens.Token);
+            _tokens.Token = "fresh-token";
+        };
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        _tokens.Forced.Should().Be(1, "the cached token was just refused, so the cache can't be trusted for the next one");
+    }
+
+    [Fact]
+    public async Task When_signing_in_again_fails_partway_the_reason_is_kept_and_the_rest_are_skipped()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core", "CRONUS Sales", "CRONUS Service" });
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        // The secret expires while the first app installs.
+        _apps.AfterUpload = () => _tokens.Throw = new BcApiException(null, "This solution's own Business Central client secret has expired.");
+
+        await using (var run = _db.NewContext()) await NewService(run).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
+        results[0].Status.Should().Be(ProjectDeliveryResultStatus.Completed);
+        results[1].Status.Should().Be(ProjectDeliveryResultStatus.Failed);
+        results[1].Message.Should().Contain("client secret has expired");
+        results[2].Status.Should().Be(ProjectDeliveryResultStatus.Skipped);
+        _apps.UploadedOrder.Should().Equal("CRONUS Core");
+    }
+
+    [Fact]
     public async Task RunDeliveryAsync_is_a_noop_when_the_delivery_is_not_scheduled()
     {
         await using var ctx = _db.NewContext();
@@ -2865,6 +2904,13 @@ public sealed class DeliveryServiceTests : IDisposable
         {
             Acquired++;
             return Throw is not null ? throw Throw : Task.FromResult(new BcDeliveryContext(Token, TenantId));
+        }
+        /// <summary>How many times a new token was demanded past the cache.</summary>
+        public int Forced;
+        public Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, bool forceRefresh, CancellationToken ct = default)
+        {
+            if (forceRefresh) Forced++;
+            return AcquireDeliveryContextAsync(projectId, ct);
         }
     }
 

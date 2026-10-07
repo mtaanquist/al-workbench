@@ -70,10 +70,11 @@ public static class BcAppOperationPoller
                 {
                     accessToken = await refreshToken(ct).ConfigureAwait(false);
                 }
-                catch (BcApiException)
+                catch (BcApiException signInFailed)
                 {
+                    // The sign-in's own reason (an expired secret, say) is what to act on.
                     return BcAppOperationResult.Unconfirmed(
-                        "Business Central accepted the app, but the sign-in to ask whether the install had finished failed, so it wasn't confirmed here.");
+                        "Business Central accepted the app, but signing in again to ask whether the install had finished failed, so it wasn't confirmed here. " + signInFailed.Message);
                 }
                 continue;
             }

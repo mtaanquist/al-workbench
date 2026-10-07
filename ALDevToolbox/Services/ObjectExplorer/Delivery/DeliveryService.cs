@@ -2168,7 +2168,8 @@ public sealed class DeliveryService
     {
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
             _apps, bc.AccessToken,
-            async token => (await _tokens.AcquireDeliveryContextAsync(delivery.ProjectId, token)).AccessToken,
+            // Business Central refused the token in hand, so a cached one is no use.
+            async token => (await _tokens.AcquireDeliveryContextAsync(delivery.ProjectId, forceRefresh: true, token)).AccessToken,
             family, delivery.EnvironmentName, started, PollDelay, PollTimeoutPerApp, ct);
         // A delivery needs a clean yes: an install it could not see finish (no id, a run
         // of failed polls, the wait ran out) is not one it reports as done. A missing app
