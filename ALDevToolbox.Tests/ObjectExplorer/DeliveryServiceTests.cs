@@ -514,6 +514,69 @@ public sealed class DeliveryServiceTests : IDisposable
         delivery.ScheduledOutsideWindow.Should().BeTrue();
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_deployment_the_window_chose_is_moved_when_its_turn_comes_after_the_window_closed(bool personOverrode)
+    {
+        int deliveryId;
+        // Whole minutes, as people set windows: the database keeps microseconds, not ticks.
+        var twoHoursAgo = DateTime.UtcNow.AddHours(-2);
+        var closed = new TimeOnly(twoHoursAgo.Hour, twoHoursAgo.Minute);
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" }, deploymentSchedule: BcDeploymentSchedule.OurDeliveryWindow);
+            // A one-hour window that closed an hour ago (#1124).
+            await SetWindowAsync(ctx, seed.EnvironmentId, closed, closed.AddHours(1));
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddHours(-2))
+                    .SetProperty(d => d.ScheduledByDeliveryWindow, true)
+                    .SetProperty(d => d.ScheduledOutsideWindow, personOverrode));
+        }
+
+        var ran = await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId);
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
+        if (personOverrode)
+        {
+            ran.Should().BeTrue("someone placed it outside the window on purpose");
+            delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
+            return;
+        }
+        ran.Should().BeFalse();
+        _apps.UploadedOrder.Should().BeEmpty();
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        delivery.ScheduledFor.Should().BeAfter(DateTime.UtcNow);
+        UpdateWindow.IsWithin(closed, closed.AddHours(1), TimeZoneInfo.Utc, delivery.ScheduledFor).Should().BeTrue();
+        delivery.DiagnosticsLog.Should().Contain("window had closed");
+    }
+
+    [Fact]
+    public async Task A_deployment_the_window_chose_runs_while_the_window_is_open()
+    {
+        int deliveryId;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" }, deploymentSchedule: BcDeploymentSchedule.OurDeliveryWindow);
+            var opened = TimeOnly.FromDateTime(DateTime.UtcNow.AddMinutes(-30));
+            await SetWindowAsync(ctx, seed.EnvironmentId, opened, opened.AddHours(2));
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddMinutes(-10))
+                    .SetProperty(d => d.ScheduledByDeliveryWindow, true)
+                    .SetProperty(d => d.ScheduledOutsideWindow, false));
+        }
+
+        (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeTrue();
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status.Should().Be(ProjectDeliveryStatus.Deployed);
+    }
+
     [Fact]
     public async Task EnqueueDueDeliveriesAsync_enqueues_due_rows_and_skips_future_ones()
     {
