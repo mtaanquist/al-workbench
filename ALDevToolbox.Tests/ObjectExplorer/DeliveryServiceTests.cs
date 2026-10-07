@@ -425,6 +425,124 @@ public sealed class DeliveryServiceTests : IDisposable
         enqueued.Should().Be(1);
     }
 
+    // ── Deleting a deployment pipeline (#1108) ────────────────────────────────
+
+    [Fact]
+    public async Task Deleting_the_pipeline_cancels_its_scheduled_and_dismisses_its_prepared_deployments()
+    {
+        int scheduledId, proposedId;
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+            proposedId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+            scheduledId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            DrainQueue();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var counts = await NewReleasePipelineService(ctx).CountWaitingDeploymentsAsync(seed.ReleasePipelineId);
+            counts.Should().Be(new WaitingDeploymentCounts(2, 0));
+            await NewReleasePipelineService(ctx).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+        }
+
+        // The time comes: neither the sweep nor a stale queue entry runs it.
+        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow.AddHours(2))).Should().Be(0);
+        (await NewService(_db.NewContext()).RunDeliveryAsync(scheduledId)).Should().BeFalse();
+        _apps.UploadedOrder.Should().BeEmpty();
+
+        await using var read = _db.NewContext();
+        var rows = await read.OeProjectDeliveries.Include(d => d.Results)
+            .Where(d => d.Id == scheduledId || d.Id == proposedId)
+            .ToDictionaryAsync(d => d.Id);
+        rows[scheduledId].Status.Should().Be(ProjectDeliveryStatus.Cancelled);
+        rows[scheduledId].FinishedAt.Should().NotBeNull();
+        rows[scheduledId].DiagnosticsLog.Should().Contain("The deployment pipeline was deleted");
+        rows[proposedId].Status.Should().Be(ProjectDeliveryStatus.Dismissed);
+        rows[proposedId].DismissReason.Should().Be("The deployment pipeline was deleted");
+        rows.Values.SelectMany(d => d.Results).Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
+    }
+
+    [Fact]
+    public async Task Deleting_the_pipeline_leaves_a_deployment_already_running_alone()
+    {
+        int deliveryId;
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.Installing));
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewReleasePipelineService(ctx).CountWaitingDeploymentsAsync(seed.ReleasePipelineId))
+                .Should().Be(new WaitingDeploymentCounts(0, 0));
+            await NewReleasePipelineService(ctx).SoftDeleteReleasePipelineAsync(seed.ReleasePipelineId);
+        }
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status
+            .Should().Be(ProjectDeliveryStatus.Installing, "a deployment already under way is not cancelled under the worker");
+    }
+
+    [Fact]
+    public async Task CountWaitingDeploymentsAsync_counts_only_what_business_central_still_holds()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var svc = NewService(ctx);
+        // An old handed-off run a later one replaced, and the newest, which BC still holds.
+        var replaced = await svc.ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+        var held = await svc.ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(2));
+        foreach (var id in new[] { replaced, held })
+        {
+            await ctx.OeProjectDeliveries.Where(d => d.Id == id)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.HandedOff));
+            await ctx.OeProjectDeliveryResults.Where(r => r.ProjectDeliveryId == id)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(r => r.Status, ProjectDeliveryResultStatus.Scheduled)
+                    .SetProperty(r => r.AppId, Guid.NewGuid().ToString()));
+        }
+        await svc.ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(3));
+
+        var counts = await NewReleasePipelineService(_db.NewContext()).CountWaitingDeploymentsAsync(seed.ReleasePipelineId);
+
+        counts.Should().Be(new WaitingDeploymentCounts(1, 1), "the older handed-off run was replaced, so Business Central no longer holds it");
+    }
+
+    [Fact]
+    public async Task A_scheduled_deployment_left_on_a_deleted_pipeline_is_cancelled_by_the_sweep()
+    {
+        int deliveryId;
+        await using (var ctx = _db.NewContext())
+        {
+            var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(5));
+            DrainQueue();
+            // Deleted before the delete cancelled anything, or while a deployment was being made.
+            await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedAt, DateTime.UtcNow));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddMinutes(-1)));
+        }
+
+        // A queue entry from before the delete is refused by the claim...
+        (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeFalse();
+        // ...and the sweep cancels the row, due or not.
+        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow)).Should().Be(0);
+
+        _apps.UploadedOrder.Should().BeEmpty();
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Cancelled);
+        delivery.Results.Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
+    }
+
     [Fact]
     public async Task FailInterruptedDeliveriesAsync_fails_orphaned_in_progress_runs()
     {
@@ -2557,6 +2675,9 @@ public sealed class DeliveryServiceTests : IDisposable
                 .SetProperty(e => e.UpdateWindowStart, start)
                 .SetProperty(e => e.UpdateWindowEnd, end));
     }
+
+    private ReleasePipelineService NewReleasePipelineService(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleasePipelineService>.Instance);
 
     private DeliveryService NewService(AppDbContext ctx)
     {
