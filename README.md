@@ -180,6 +180,7 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `DISABLE_APPLICATION_VERSION_SYNC`            | `1` to stop adding newly shipped Business Central release waves to each organisation's application versions list every day. | unset |
 | `DISABLE_DELIVERY_SCHEDULER`                  | `1` to disable the scheduler that enqueues due deliveries, so scheduled publishes never fire. | unset |
 | `DISABLE_PREVIEW_CHECK_SCHEDULER`             | `1` to disable the nightly preview check, so pipelines never build against the next minor or next major preview. | unset |
+| `DISABLE_BUILD_RESOURCE_MONITOR`              | `1` to stop warning when running pipeline builds are short of processor or memory. | unset |
 | `DISABLE_ENVIRONMENT_REFRESH_SCHEDULER`       | `1` to disable the nightly refresh of Business Central environment data behind the Upgrades page. | unset |
 | `DISABLE_NOTIFICATION_DIGEST_SCHEDULER`       | `1` to stop sending the daily and weekly notification digests. Items for them wait until it is turned back on, which then drops any older than 30 days, along with in-app notifications of that age. | unset |
 | `DISABLE_DEPENDENCY_DRIFT_SCHEDULER`          | `1` to disable the nightly check of tracked repositories against their solutions' Business Central environments, and with it the update pull requests opened automatically. | unset |

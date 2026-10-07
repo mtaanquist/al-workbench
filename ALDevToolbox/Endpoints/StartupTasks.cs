@@ -237,6 +237,7 @@ internal static class StartupTasks
             .Select(s => s.BuildConcurrency)
             .FirstOrDefaultAsync(stopping);
         buildQueue.ApplySetting(buildConcurrency);
+        ALDevToolbox.Services.ObjectExplorer.Import.BuildConcurrencyAdvice.WarnIfAboveRecommendation(buildQueue.Limit, logger);
 
         // Flip /readyz to green now that migrations, seed and bootstrap have
         // all run. Resolved from the root service provider so the flag

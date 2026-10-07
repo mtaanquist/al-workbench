@@ -47,6 +47,24 @@ public static class BuildConcurrencyAdvice
     public static Capacity ForThisServer() =>
         For(Environment.ProcessorCount, ContainerMemoryBytes() ?? GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
 
+    /// <summary>
+    /// Logs a warning when <paramref name="limit"/> is above what this server is
+    /// recommended to run (#1169). Above it is allowed, and sometimes right; the warning
+    /// is there so a slow build can be traced back to the setting.
+    /// </summary>
+    /// <returns>Whether it warned.</returns>
+    public static bool WarnIfAboveRecommendation(int limit, ILogger logger) =>
+        WarnIfAboveRecommendation(limit, ForThisServer(), logger);
+
+    internal static bool WarnIfAboveRecommendation(int limit, Capacity capacity, ILogger logger)
+    {
+        if (limit <= capacity.Recommended) return false;
+        logger.LogWarning(
+            "Pipeline builds that run at once is {Limit}, above the {Recommended} recommended for this server ({Cores} processors, {MemoryGb} GB). Builds may run short of processor or memory.",
+            limit, capacity.Recommended, capacity.Cores, capacity.MemoryGb);
+        return true;
+    }
+
     private static long? ContainerMemoryBytes() =>
         ReadLimit("/sys/fs/cgroup/memory.max") ?? ReadLimit("/sys/fs/cgroup/memory/memory.limit_in_bytes");
 

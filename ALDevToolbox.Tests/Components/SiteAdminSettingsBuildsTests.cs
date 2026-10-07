@@ -25,6 +25,7 @@ public sealed class SiteAdminSettingsBuildsTests : IDisposable
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
     private readonly ProjectBuildQueue _queue = new(defaultLimit: 2);
+    private readonly BuildResourceState _resources = new();
 
     public SiteAdminSettingsBuildsTests()
     {
@@ -41,6 +42,7 @@ public sealed class SiteAdminSettingsBuildsTests : IDisposable
         _ctx.Services.AddScoped<OrganizationConfigService>();
         _ctx.Services.AddDataProtection();
         _ctx.Services.AddSingleton(_queue);
+        _ctx.Services.AddSingleton(_resources);
         _ctx.Services.AddScoped<SystemSettingsService>();
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
@@ -103,5 +105,31 @@ public sealed class SiteAdminSettingsBuildsTests : IDisposable
 
         cut.WaitForAssertion(() =>
             cut.Find("input[name=BuildConcurrency]").GetAttribute("value").Should().Be("5"));
+    }
+
+    [Fact]
+    public void The_last_time_builds_were_short_of_resources_is_shown_with_what_to_do()
+    {
+        _resources.Last = new BuildResourceWarning(
+            new DateTime(2026, 10, 7, 12, 0, 0, DateTimeKind.Utc), Running: 4, Limit: 4,
+            new BuildResourceShortage(CpuWait: 0.6, Throttled: null, MemoryWait: null, MemoryUsed: null, OomKills: 0));
+
+        var cut = _ctx.Render<SiteAdminSettingsBuilds>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var text = System.Text.RegularExpressions.Regex.Replace(cut.Markup, @"\s+", " ");
+            text.Should().Contain("with 4 builds running and the limit at 4, builds waited for a processor 60% of the time.");
+            text.Should().Contain("Lower this setting or give the server more processors and memory.");
+        });
+    }
+
+    [Fact]
+    public void With_no_shortage_seen_there_is_no_warning()
+    {
+        var cut = _ctx.Render<SiteAdminSettingsBuilds>();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Right now up to"));
+        cut.Markup.Should().NotContain("give the server more");
     }
 }

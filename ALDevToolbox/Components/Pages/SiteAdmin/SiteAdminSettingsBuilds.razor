@@ -6,6 +6,7 @@
 @using ALDevToolbox.Services.Operations
 @inject SystemSettingsService Settings
 @inject ProjectBuildQueue Builds
+@inject BuildResourceState Resources
 
 <PageTitle>Builds · Site administration · AL Workbench</PageTitle>
 
@@ -13,7 +14,8 @@
     How many pipeline and pull request builds run at once (#1164). The site admin
     is the one who resizes the server, so the page says what this server has and what that
     suggests, and the saved value applies at once - no restart. The recommendation
-    is advice only; nothing is set from it.
+    is advice only; nothing is set from it. The aside also shows the latest time running
+    builds were short of processor or memory since the app started (#1169).
 *@
 
 <SiteAdminSettingsPage ActiveTab="SiteAdminSettingsPage.Tab.Builds">
@@ -74,6 +76,17 @@
                     a build that is running; new builds wait until fewer are running.
                 </span>
             </Alert>
+            @if (Resources.Last is { } warning)
+            {
+                <Alert Tone="AlertTone.Warn">
+                    <span>
+                        On <Timestamp Value="@warning.At" Format="d MMM 'at' HH:mm" />, with
+                        @Plural(warning.Running, "build") running and the limit at @warning.Limit,
+                        @warning.Shortage.Describe().
+                        Lower this setting or give the server more processors and memory.
+                    </span>
+                </Alert>
+            }
         </SettingsAside>
     </Aside>
 </SiteAdminSettingsPage>
