@@ -18,8 +18,22 @@ public static class BcAppOperationPoller
     internal const int MaxConsecutivePollErrors = 4;
 
     /// <param name="onPoll">Called before each read, so a long install can keep a worker's heartbeat alive.</param>
-    public static async Task<BcAppOperationResult> PollUntilTerminalAsync(
+    public static Task<BcAppOperationResult> PollUntilTerminalAsync(
         IBcAppManagementClient apps, string accessToken, string applicationFamily, string environmentName,
+        BcAppOperation started, TimeSpan pollDelay, TimeSpan timeout, CancellationToken ct, Action? onPoll = null) =>
+        PollUntilTerminalAsync(apps, accessToken, refreshToken: null, applicationFamily, environmentName,
+            started, pollDelay, timeout, ct, onPoll);
+
+    /// <param name="refreshToken">
+    /// Fetches a token again when Business Central answers a poll with 401. A cached token
+    /// is handed out while it has a few minutes left, and one install can be polled for
+    /// longer than that, so the token can run out mid-wait (#1113). Retried once per run of
+    /// errors; null keeps <paramref name="accessToken"/> throughout.
+    /// </param>
+    /// <param name="onPoll">Called before each read, so a long install can keep a worker's heartbeat alive.</param>
+    public static async Task<BcAppOperationResult> PollUntilTerminalAsync(
+        IBcAppManagementClient apps, string accessToken, Func<CancellationToken, Task<string>>? refreshToken,
+        string applicationFamily, string environmentName,
         BcAppOperation started, TimeSpan pollDelay, TimeSpan timeout, CancellationToken ct, Action? onPoll = null)
     {
         if (started.AppId is not { } appId)
@@ -32,6 +46,7 @@ public static class BcAppOperationPoller
 
         var deadline = DateTime.UtcNow + timeout;
         var consecutiveErrors = 0;
+        var refreshed = false;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -43,6 +58,24 @@ public static class BcAppOperationPoller
                 operation = await apps.GetAppOperationAsync(
                     accessToken, applicationFamily, environmentName, appId, started.Id, ct).ConfigureAwait(false);
                 consecutiveErrors = 0;
+                refreshed = false;
+            }
+            catch (BcApiException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized
+                                            && refreshToken is not null && !refreshed)
+            {
+                // The token ran out while Business Central was installing: get a new one
+                // and ask again straight away. Not counted as a failed poll.
+                refreshed = true;
+                try
+                {
+                    accessToken = await refreshToken(ct).ConfigureAwait(false);
+                }
+                catch (BcApiException)
+                {
+                    return BcAppOperationResult.Unconfirmed(
+                        "Business Central accepted the app, but the sign-in to ask whether the install had finished failed, so it wasn't confirmed here.");
+                }
+                continue;
             }
             catch (BcApiException) when (++consecutiveErrors < MaxConsecutivePollErrors)
             {

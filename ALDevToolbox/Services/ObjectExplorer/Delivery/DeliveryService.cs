@@ -1893,6 +1893,14 @@ public sealed class DeliveryService
 
             try
             {
+                // Each app can be polled for minutes, so the token read at the start may
+                // be close to running out by now: fetch it again for every app (#1113).
+                // The token source hands back its cached one while that still has time left.
+                if (i > 0)
+                {
+                    bc = await _tokens.AcquireDeliveryContextAsync(delivery.ProjectId, ct);
+                }
+
                 var artifact = artifacts[i];
                 var bytes = await _db.OeProjectBuildArtifacts.AsNoTracking()
                     .Where(a => a.Id == artifact.Id)
@@ -2159,7 +2167,9 @@ public sealed class DeliveryService
         BcDeliveryContext bc, string family, OeProjectDelivery delivery, BcAppOperation started, CancellationToken ct)
     {
         var result = await BcAppOperationPoller.PollUntilTerminalAsync(
-            _apps, bc.AccessToken, family, delivery.EnvironmentName, started, PollDelay, PollTimeoutPerApp, ct);
+            _apps, bc.AccessToken,
+            async token => (await _tokens.AcquireDeliveryContextAsync(delivery.ProjectId, token)).AccessToken,
+            family, delivery.EnvironmentName, started, PollDelay, PollTimeoutPerApp, ct);
         // A delivery needs a clean yes: an install it could not see finish (no id, a run
         // of failed polls, the wait ran out) is not one it reports as done. A missing app
         // id is the one caveat it has always carried as a success.
