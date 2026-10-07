@@ -695,7 +695,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await SeedCatalogueAsync("28.2.0.0");
         var projectId = await SeedSolutionAsync(RepoA);
         await EnableAutoUpdatesAsync(projectId);
-        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
         var api = WritableApi(RepoA);
         var (service, ctx) = NewService(api);
         await using var _ = ctx;
@@ -714,7 +714,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
     {
         await ReadyAsync();
         var projectId = await SeedSolutionAsync(RepoA);
-        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
         var api = WritableApi(RepoA);
         var (service, ctx) = NewService(api);
         await using var _ = ctx;
@@ -731,7 +731,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await ReadyAsync();
         var projectId = await SeedSolutionAsync(RepoA);
         await EnableAutoUpdatesAsync(projectId);
-        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
         await SeedOfferedAsync(RepoA, "28.2", 70, automatic: true);
         var api = WritableApi(RepoA);
         var (service, ctx) = NewService(api);
@@ -742,22 +742,190 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_closed_pull_request_whose_branch_was_kept_is_not_stepped_past_by_the_automatic_run()
+    public async Task A_closed_pull_request_whose_branch_was_kept_is_not_offered_again_under_the_next_name()
     {
         await ReadyAsync();
         var projectId = await SeedSolutionAsync(RepoA);
         await EnableAutoUpdatesAsync(projectId);
-        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
-        var api = WritableApi(RepoA)
-            .On(HttpMethod.Get, $"/repos/{RepoA}/git/ref/heads/aldt/bump-bc-28.2", HttpStatusCode.OK,
-                "{\"object\":{\"sha\":\"old-branch\"}}");
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
+        await SeedOfferedAsync(RepoA, "28.2", 70, automatic: true);
+        var api = WithKeptBranch(WritableApi(RepoA));
         var (service, ctx) = NewService(api);
         await using var _ = ctx;
 
         (await service.OpenAutomaticPullRequestsAsync(projectId)).Should().Be(new AutomaticUpdatePullRequests(0, null));
-        api.Calls.Should().NotContain(c => c.Contains("bump-bc-28.2-2"));
-        api.Calls.Should().NotContain(c => c.StartsWith("POST") && c.EndsWith("/pulls"));
+        api.Calls.Should().NotContain(c => c.StartsWith("POST"));
     }
+
+    [Fact]
+    public async Task A_branch_left_by_a_run_that_failed_before_its_pull_request_does_not_strand_the_version()
+    {
+        // Last night created aldt/bump-bc-28.2, then GitHub refused the pull request, so
+        // nothing was recorded. The version was never offered; tonight offers it.
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
+        var api = WithKeptBranch(WritableApi(RepoA));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Should().Be(new AutomaticUpdatePullRequests(1, null));
+
+        api.Bodies.Single(b => b.Call.EndsWith("/git/refs")).Body.Should().Contain("refs/heads/aldt/bump-bc-28.2-2");
+        api.Bodies.Single(b => b.Call.EndsWith("/pulls")).Body.Should().Contain("aldt/bump-bc-28.2-2");
+        await using var read = _db.NewContext();
+        (await read.GitHubUpdatePullRequests.AsNoTracking().SingleAsync()).Version.Should().Be("28.2");
+    }
+
+    [Fact]
+    public async Task The_automatic_run_joins_an_open_pull_request_on_a_later_branch_name()
+    {
+        // The first branch's pull request was closed, and a person asked again by hand,
+        // which opened aldt/bump-bc-28.2-2. Tonight adds to that one.
+        await ReadyAsync();
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
+        await SeedOfferedAsync(RepoA, "28.2", 70, automatic: true);
+        var api = WithKeptBranch(WritableApi(RepoA))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/ref/heads/aldt/bump-bc-28.2-2", HttpStatusCode.OK,
+                "{\"object\":{\"sha\":\"second-branch\"}}")
+            .On(HttpMethod.Get, $"/repos/{RepoA}/pulls", request =>
+                Uri.UnescapeDataString(request.RequestUri!.Query).EndsWith("bump-bc-28.2-2")
+                    ? (HttpStatusCode.OK, $"[{{\"number\":81,\"html_url\":\"https://github.com/{RepoA}/pull/81\"}}]")
+                    : (HttpStatusCode.OK, "[]"));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Should().Be(new AutomaticUpdatePullRequests(0, null));
+
+        api.Calls.Should().Contain(c => c.StartsWith("PATCH") && c.Contains("/git/refs/heads/aldt/bump-bc-28.2-2"));
+        api.Calls.Should().NotContain(c => c.StartsWith("POST") && c.EndsWith("/pulls"));
+        await using var read = _db.NewContext();
+        (await read.GitHubUpdatePullRequests.AsNoTracking().AnyAsync(r => r.PullRequestNumber == 81)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_repository_shared_with_another_solution_is_only_bumped_by_the_solution_it_was_measured_against()
+    {
+        // Two customers share one repository. It was measured against the first one's
+        // production, on 28.2; the second customer is still on 25.0, so its run must not
+        // open a pull request moving them onto 28.2.
+        await ReadyAsync();
+        var measuredId = await SeedSolutionAsync(RepoA, name: "CRONUS A/S");
+        var otherId = await SeedSolutionAsync(RepoA, name: "CRONUS UK Ltd.", withProduction: false);
+        await SeedEnvironmentAsync(otherId, "Production", "25.0.12345.0");
+        await EnableAutoUpdatesAsync(measuredId);
+        await EnableAutoUpdatesAsync(otherId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(measuredId));
+        var api = WritableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(otherId)).Should().Be(new AutomaticUpdatePullRequests(0, null));
+        api.Calls.Should().NotContain(c => c.Contains("/pulls"));
+
+        (await service.OpenAutomaticPullRequestsAsync(measuredId)).Opened.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task The_automatic_run_leaves_a_second_between_its_writes_and_the_button_does_not()
+    {
+        await ReadyAsync();
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
+        // A clock that never moves, so every gap is the whole second.
+        var clock = new ALDevToolbox.Tests.Auth.FakeTimeProvider(DateTimeOffset.UtcNow);
+        var (service, ctx) = NewService(WritableApi(RepoA), clock);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Opened.Should().Be(1);
+
+        // Blob, tree, commit, branch, pull request: five writes, four gaps.
+        _pauses.Should().HaveCount(4).And.OnlyContain(p => p == DependencyDriftService.WriteSpacing);
+
+        _pauses.Clear();
+        var (button, buttonCtx) = NewService(WritableApi(RepoA), clock);
+        await using var __ = buttonCtx;
+        await button.OpenUpdatePullRequestsAsync([RepoA]);
+        _pauses.Should().BeEmpty("a person is waiting on the button");
+    }
+
+    [Fact]
+    public async Task A_write_already_a_second_after_the_last_one_is_not_held_back()
+    {
+        await ReadyAsync();
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
+        var clock = new ALDevToolbox.Tests.Auth.FakeTimeProvider(DateTimeOffset.UtcNow);
+        // GitHub takes two seconds over the blob, so the tree that follows it is already
+        // well past the gap.
+        var api = WritableApi(RepoA)
+            .On(HttpMethod.Post, $"/repos/{RepoA}/git/blobs", _ =>
+            {
+                clock.Advance(TimeSpan.FromSeconds(2));
+                return (HttpStatusCode.Created, FakeGitHubApi.ShaJson("new-blob"));
+            });
+        var (service, ctx) = NewService(api, clock);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId)).Opened.Should().Be(1);
+
+        _pauses.Should().HaveCount(3, "the tree went out two seconds after the blob; commit, branch and pull request each waited");
+    }
+
+    [Fact]
+    public async Task The_automatic_run_stops_when_GitHub_rate_limits_the_person_and_does_not_say_the_solution_is_stuck()
+    {
+        await ReadyAsync();
+        var projectId = await SeedSolutionAsync(RepoA);
+        await EnableAutoUpdatesAsync(projectId);
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
+        var api = RateLimitedApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenAutomaticPullRequestsAsync(projectId))
+            .Should().Be(new AutomaticUpdatePullRequests(0, null, RateLimited: true));
+        api.Calls.Should().NotContain(c => c.Contains("/git/trees") && c.StartsWith("POST"));
+        api.Calls.Should().NotContain(c => c.Contains("/git/refs") || c.EndsWith("/pulls") && c.StartsWith("POST"));
+    }
+
+    [Fact]
+    public async Task The_button_stops_at_a_rate_limit_rather_than_trying_every_other_repository()
+    {
+        await ReadyAsync();
+        await SeedSolutionAsync(RepoA);
+        await SeedSolutionAsync(RepoB, name: "CRONUS warehouse");
+        var releaseId = await SeedReleaseAsync();
+        await SeedDriftAsync(RepoA, releaseId);
+        await SeedDriftAsync(RepoB, releaseId);
+        var api = RateLimitedApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var results = await service.OpenUpdatePullRequestsAsync([RepoA, RepoB]);
+
+        results.Should().OnlyContain(r => r.IsRateLimited && r.Refusal!.Contains("Wait a few minutes"));
+        api.Calls.Should().NotContain(c => c.Contains(RepoB), "every write on the account is refused until it cools down");
+    }
+
+    /// <summary><see cref="WritableApi"/> where an <c>aldt/bump-bc-28.2</c> branch exists with no open pull request, and <c>-2</c> does not.</summary>
+    private static FakeGitHubApi WithKeptBranch(FakeGitHubApi api) =>
+        api.On(HttpMethod.Get, $"/repos/{RepoA}/git/ref/heads/aldt/bump-bc-28.2", HttpStatusCode.OK,
+                "{\"object\":{\"sha\":\"old-branch\"}}")
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/ref/heads/aldt/bump-bc-28.2-2", HttpStatusCode.NotFound,
+                "{\"message\":\"Not Found\"}");
+
+    /// <summary><see cref="WritableApi"/> where GitHub's secondary rate limit refuses the first write.</summary>
+    private static FakeGitHubApi RateLimitedApi(string fullName) =>
+        WritableApi(fullName)
+            .On(HttpMethod.Post, $"/repos/{fullName}/git/blobs", HttpStatusCode.Forbidden,
+                "{\"message\":\"You have exceeded a secondary rate limit. Please wait a few minutes before you try again.\"}");
 
     [Fact]
     public async Task A_newer_version_closes_the_older_automatic_pull_request_with_a_note()
@@ -766,7 +934,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await SeedCatalogueAsync("28.2.0.0");
         var projectId = await SeedSolutionAsync(RepoA);
         await EnableAutoUpdatesAsync(projectId);
-        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
         await SeedOfferedAsync(RepoA, "28.0", 70, automatic: true);
         await SeedOfferedAsync(RepoA, "27.5", 60, automatic: false);
         var api = WritableApi(RepoA)
@@ -795,7 +963,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await ReadyAsync();
         var projectId = await SeedSolutionAsync(RepoA);
         await EnableAutoUpdatesAsync(projectId);
-        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
         await SeedOfferedAsync(RepoA, "28.0", 70, automatic: true);
         var api = WritableApi(RepoA)
             .On(HttpMethod.Get, $"/repos/{RepoA}/pulls/70", HttpStatusCode.OK, "{\"number\":70,\"state\":\"closed\"}");
@@ -835,7 +1003,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await ReadyAsync();
         var projectId = await SeedSolutionAsync(RepoA.ToUpperInvariant());
         await EnableAutoUpdatesAsync(projectId);
-        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
         var api = WritableApi(RepoA);
         var (service, ctx) = NewService(api);
         await using var _ = ctx;
@@ -849,7 +1017,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await ReadyAsync();
         var projectId = await SeedSolutionAsync(RepoA);
         await EnableAutoUpdatesAsync(projectId);
-        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
         await SeedOfferedAsync(RepoA, "28.2", 77, automatic: true);
         var api = WritableApi(RepoA, openPullRequest: true);
         var (service, ctx) = NewService(api);
@@ -866,7 +1034,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         await ConnectOrganisationAsync();
         var projectId = await SeedSolutionAsync(RepoA);
         await EnableAutoUpdatesAsync(projectId);
-        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
         var (service, ctx) = NewService(BaseApi());
         await using var _ = ctx;
 
@@ -883,7 +1051,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
         // A Private solution with no owner: only an admin or an assigned team manages it.
         var projectId = await SeedSolutionAsync(RepoA, ProjectVisibility.Private);
         await EnableAutoUpdatesAsync(projectId);
-        await SeedDriftAsync(RepoA, await SeedReleaseAsync());
+        await SeedDriftAsync(RepoA, await SeedReleaseAsync(), await EnvironmentOfAsync(projectId));
         var (service, ctx) = NewService(BaseApi());
         await using var _ = ctx;
 
@@ -893,13 +1061,24 @@ public sealed class DependencyDriftServiceTests : IDisposable
 
     // ── Fixtures ─────────────────────────────────────────────────────────
 
-    private (DependencyDriftService Service, AppDbContext Context) NewService(FakeGitHubApi api)
+    private (DependencyDriftService Service, AppDbContext Context) NewService(FakeGitHubApi api, TimeProvider? clock = null)
     {
         var ctx = _db.NewContext();
         var client = _db.NewGitHubAppClient(ctx, api);
         var access = _db.NewGitHubAccessService(ctx, client);
-        return (_db.NewDependencyDriftService(ctx, client, access, publicOrigin: "https://workbench.cronus.example"), ctx);
+        var service = _db.NewDependencyDriftService(
+            ctx, client, access, publicOrigin: "https://workbench.cronus.example", clock: clock);
+        // The automatic run paces its writes; here each wait is recorded instead of slept.
+        service.PauseAsync = (wait, _) =>
+        {
+            _pauses.Add(wait);
+            return Task.CompletedTask;
+        };
+        return (service, ctx);
     }
+
+    /// <summary>Every wait the automatic run asked for between two writes, in order.</summary>
+    private readonly List<TimeSpan> _pauses = new();
 
     /// <summary>The body of the one blob the run pushed.</summary>
     private static string CommittedBlob(FakeGitHubApi api)
@@ -1067,8 +1246,20 @@ public sealed class DependencyDriftServiceTests : IDisposable
         return environment.Id;
     }
 
-    /// <summary>The three findings a scan of <see cref="BehindManifest"/> leaves.</summary>
-    private async Task SeedDriftAsync(string fullName, int releaseId)
+    /// <summary>The production environment <see cref="SeedSolutionAsync"/> gave a solution.</summary>
+    private async Task<int> EnvironmentOfAsync(int projectId)
+    {
+        await using var ctx = _db.NewContext();
+        return await ctx.OeProjectEnvironments.AsNoTracking()
+            .Where(e => e.ProjectId == projectId).OrderBy(e => e.Id).Select(e => e.Id).FirstAsync();
+    }
+
+    /// <summary>
+    /// The three findings a scan of <see cref="BehindManifest"/> leaves, measured against
+    /// <paramref name="environmentId"/> - the environment the automatic run checks is the
+    /// solution's own. Null is a finding from before environments were the yardstick.
+    /// </summary>
+    private async Task SeedDriftAsync(string fullName, int releaseId, int? environmentId = null)
     {
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -1088,6 +1279,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
                 Current = current,
                 Proposed = proposed,
                 ReleaseId = releaseId,
+                EnvironmentId = environmentId,
                 DetectedAt = now,
             });
         }

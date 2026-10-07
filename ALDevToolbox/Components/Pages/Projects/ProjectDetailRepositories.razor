@@ -245,7 +245,7 @@
     /// <summary>The solution as last saved, or null while it is being created - which is when the update section is hidden.</summary>
     [Parameter] public ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject? LoadedProject { get; set; }
 
-    /// <summary>"Resume with my access": the page makes this person the one update pull requests are opened as.</summary>
+    /// <summary>"Resume with my GitHub account": the page makes this person the one update pull requests are opened as.</summary>
     [Parameter] public EventCallback OnResumeAutoUpdates { get; set; }
 
     private bool _resuming;
@@ -262,7 +262,7 @@
             }
             return LoadedProject!.AutoUpdatePullRequestsByUser is { } owner
                 ? $"Pull requests are opened with {owner.DisplayName}'s GitHub account."
-                : "Pull requests are opened with the GitHub account of whoever last turned this on.";
+                : "Pull requests are opened with the GitHub account of whoever last turned this on or changed the repositories.";
         }
     }
 

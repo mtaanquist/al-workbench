@@ -76,21 +76,31 @@ public sealed record DependencyDriftSummary(
 /// True when the refusal only means there was nothing left to change - the repository
 /// has caught up since the scan - rather than something somebody has to fix.
 /// </param>
+/// <param name="IsRateLimited">
+/// True when GitHub refused because the person's account is making changes too fast.
+/// Every further write on that account is refused too until it cools down.
+/// </param>
 public sealed record DependencyDriftPullRequest(
     string Repository,
     GitHubPullRequest? PullRequest,
     bool IsNewPullRequest,
     int FileCount,
     string? Refusal,
-    bool IsUpToDate = false);
+    bool IsUpToDate = false,
+    bool IsRateLimited = false);
 
 /// <summary>What one solution's automatic run did (issue #1104).</summary>
 /// <param name="Opened">How many pull requests it opened.</param>
 /// <param name="Blocked">
-/// What stopped it, worded to follow "Update pull requests are not being opened
-/// automatically:" on the solution. Null when nothing did.
+/// What stopped it, worded to follow "Pull requests have stopped:" on the solution. Null
+/// when nothing did.
 /// </param>
-public sealed record AutomaticUpdatePullRequests(int Opened, string? Blocked);
+/// <param name="RateLimited">
+/// True when GitHub said the person's account was making changes too fast, so the run
+/// stopped where it was. That is not something the solution has to fix: the next night
+/// carries on, and nothing else is opened as that person in the meantime.
+/// </param>
+public sealed record AutomaticUpdatePullRequests(int Opened, string? Blocked, bool RateLimited = false);
 
 /// <summary>
 /// Which tracked repositories still target last year's Business Central, and
@@ -147,6 +157,28 @@ public sealed class DependencyDriftService
     /// </summary>
     private const int MaxBranchAttempts = 10;
 
+    /// <summary>
+    /// The gap the automatic run leaves between two writes to GitHub. GitHub asks
+    /// integrations to wait at least a second between requests that create content, and
+    /// enforces about 80 a minute per account with its secondary rate limit; one
+    /// repository's pull request is five or more such writes, so the morning a Business
+    /// Central wave lands and many customers move at once, a run that does not pace
+    /// itself reaches that limit within a minute.
+    /// </summary>
+    internal static readonly TimeSpan WriteSpacing = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// How the automatic run waits out <see cref="WriteSpacing"/>. A delay on the
+    /// service's clock; tests swap it for one that records the wait and returns at once.
+    /// </summary>
+    internal Func<TimeSpan, CancellationToken, Task> PauseAsync { get; set; }
+
+    /// <summary>Whether writes are paced - only the automatic run, which nobody is waiting on.</summary>
+    private bool _pacing;
+
+    /// <summary>When the last paced write started, on the service's clock.</summary>
+    private DateTimeOffset? _lastWriteAt;
+
     private readonly AppDbContext _db;
     private readonly GitHubAppClient _github;
     private readonly GitHubAccessService _access;
@@ -186,6 +218,7 @@ public sealed class DependencyDriftService
         _orgContext = orgContext;
         _clock = clock;
         _logger = logger;
+        PauseAsync = (delay, ct) => Task.Delay(delay, _clock, ct);
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
@@ -816,15 +849,24 @@ public sealed class DependencyDriftService
 
         var visible = await VisibleRepositoryNamesAsync(ct);
         var results = new List<DependencyDriftPullRequest>(wanted.Count);
+        var rateLimited = false;
         foreach (var name in wanted)
         {
             ct.ThrowIfCancellationRequested();
+            if (rateLimited)
+            {
+                // Every write on this account is refused until GitHub lets up, so the
+                // rest are not tried; asking again in a few minutes picks them up.
+                results.Add(new DependencyDriftPullRequest(name, null, false, 0, RateLimitedRefusal, IsRateLimited: true));
+                continue;
+            }
             var result = await TryOpenOneAsync(token, name, visible, automatic: false, ct);
             if (result.PullRequest is { } pullRequest)
             {
                 // A version opened by hand replaces an older automatic one just the same.
-                await SupersedeOlderAsync(token, result.Repository, pullRequest, ct);
+                rateLimited = await SupersedeOlderAsync(token, result.Repository, pullRequest, ct);
             }
+            rateLimited |= result.IsRateLimited;
             results.Add(result);
         }
 
@@ -847,6 +889,14 @@ public sealed class DependencyDriftService
     /// closed, the version is left alone, even when GitHub deleted the branch with it.
     /// Once a newer version's pull request is open, the older ones the automatic run
     /// opened are closed with a note pointing at it.</para>
+    ///
+    /// <para>Only findings measured against one of this solution's own environments are
+    /// acted on. A repository two solutions share is measured once, against one of their
+    /// environments; the other solution's customer may be on a different Business
+    /// Central, and a pull request moving them onto it is not this solution's to open.</para>
+    ///
+    /// <para>Writes are paced (<see cref="WriteSpacing"/>), and the run stops at the first
+    /// sign that GitHub is rate limiting the person's account.</para>
     /// </summary>
     public async Task<AutomaticUpdatePullRequests> OpenAutomaticPullRequestsAsync(
         int projectId, CancellationToken ct = default)
@@ -871,9 +921,12 @@ public sealed class DependencyDriftService
 
         // Keyed without case but carrying the scan's own spelling, which is GitHub's: a
         // solution's URL is however somebody pasted it, and the findings are looked up
-        // by the stored name.
+        // by the stored name. Only the findings measured against this solution's own
+        // environments count (see above).
         var behind = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var stored in await _db.GitHubRepositoryDrift.AsNoTracking()
+                     .Where(d => d.EnvironmentId != null
+                                 && _db.OeProjectEnvironments.Any(e => e.Id == d.EnvironmentId && e.ProjectId == project.Id))
                      .Select(d => d.Repository).Distinct().ToListAsync(ct))
         {
             behind.TryAdd(stored, stored);
@@ -893,6 +946,8 @@ public sealed class DependencyDriftService
         var visible = await VisibleRepositoryNamesAsync(ct);
         var opened = 0;
         string? blocked = null;
+        var rateLimited = false;
+        _pacing = true;
         foreach (var name in due)
         {
             ct.ThrowIfCancellationRequested();
@@ -900,20 +955,35 @@ public sealed class DependencyDriftService
             if (result.PullRequest is { } pullRequest)
             {
                 if (result.IsNewPullRequest) opened++;
-                await SupersedeOlderAsync(token, result.Repository, pullRequest, ct);
+                rateLimited = await SupersedeOlderAsync(token, result.Repository, pullRequest, ct);
+            }
+            else if (result.IsRateLimited)
+            {
+                rateLimited = true;
             }
             else if (!result.IsUpToDate)
             {
                 // One repository's trouble does not stop the others; the first one is
                 // what the solution shows, and tomorrow night tries again.
-                blocked ??= $"{name}: {result.Refusal}";
+                blocked ??= $"{name} — {result.Refusal}";
+            }
+
+            if (rateLimited)
+            {
+                // Every further write on this account is refused until GitHub lets up.
+                // Stop here rather than spend the rest of the list on refusals; the next
+                // night carries on.
+                _logger.LogWarning(
+                    "GitHub is rate limiting user {UserId}, so the automatic update pull requests of solution {ProjectId} stopped at {RepoFullName}.",
+                    userId, projectId, name);
+                break;
             }
         }
 
         _logger.LogInformation(
             "Automatic update pull requests for solution {ProjectId} as user {UserId}: {DueCount} repositories behind, {OpenedCount} pull requests opened.",
             projectId, userId, due.Count, opened);
-        return new AutomaticUpdatePullRequests(opened, blocked);
+        return new AutomaticUpdatePullRequests(opened, blocked, rateLimited);
     }
 
     /// <summary>The pause when the person automatic update pull requests are opened as can no longer manage the solution.</summary>
@@ -924,24 +994,36 @@ public sealed class DependencyDriftService
     public const string AutomaticNoOwnerMessage =
         "the person they are opened as no longer has an active account.";
 
+    /// <summary>
+    /// The pause when that person has no GitHub account connected - also what a solution
+    /// shows straight away when somebody without one changes its repositories and so
+    /// becomes that person (see <c>ProjectService.UpdateProjectAsync</c>).
+    /// </summary>
+    public const string AutomaticNotLinkedMessage =
+        "the person they are opened as has not connected their GitHub account. They connect it on their "
+        + "account page under Repository access.";
+
+    /// <summary>What a person pressing the button is told when GitHub is rate limiting their account.</summary>
+    private const string RateLimitedRefusal =
+        "GitHub is limiting how fast your account can make changes just now. Wait a few minutes, then try again.";
+
     private static string AutomaticReadinessRefusal(GitHubRepositoryReadiness readiness) => readiness switch
     {
         GitHubRepositoryReadiness.NotConfigured => "GitHub is not set up on this server.",
         GitHubRepositoryReadiness.NotConnected =>
             "your organisation has not connected a GitHub organisation. An administrator connects one under "
-            + "Administration -> Repositories.",
-        _ =>
-            "the person they are opened as has not connected their GitHub account. They connect it on their "
-            + "account page under Repository access.",
+            + "Administration → Repositories.",
+        _ => AutomaticNotLinkedMessage,
     };
 
     /// <summary>
     /// Closes the older automatic pull requests on <paramref name="repository"/> that
     /// <paramref name="current"/> replaces, the way Dependabot does: two pull requests
     /// moving the same lines to different versions only conflict with each other. A
-    /// pull request a person opened is theirs to close.
+    /// pull request a person opened is theirs to close. Returns true when GitHub rate
+    /// limited the person's account part-way, which stops the closing too.
     /// </summary>
-    private async Task SupersedeOlderAsync(
+    private async Task<bool> SupersedeOlderAsync(
         string token, string repository, GitHubPullRequest current, CancellationToken ct)
     {
         var key = repository.ToLowerInvariant();
@@ -949,13 +1031,13 @@ public sealed class DependencyDriftService
             .Where(r => r.Repository == key && r.SupersededAt == null)
             .ToListAsync(ct);
         var replacing = records.FirstOrDefault(r => r.PullRequestNumber == current.Number);
-        if (replacing is null) return;
+        if (replacing is null) return false;
 
         var older = records
             .Where(r => r.IsAutomatic && r.PullRequestNumber != current.Number
                         && BcVersionComparer.Instance.Compare(r.Version, replacing.Version) < 0)
             .ToList();
-        if (older.Count == 0) return;
+        if (older.Count == 0) return false;
 
         var (owner, name) = (repository.Split('/')[0], repository.Split('/')[1]);
         foreach (var record in older)
@@ -969,6 +1051,7 @@ public sealed class DependencyDriftService
                     record.SupersededAt = _clock.GetUtcNow().UtcDateTime;
                     continue;
                 }
+                await PaceWriteAsync(ct);
                 await _github.ClosePullRequestAsync(token, owner, name, record.PullRequestNumber,
                     $"Superseded by #{current.Number}, which targets Business Central {replacing.Version}.\n\n"
                     + "Closed by AL Workbench.", ct);
@@ -980,9 +1063,30 @@ public sealed class DependencyDriftService
                 _logger.LogWarning(ex,
                     "Could not close pull request #{PullRequestNumber} on {RepoFullName}, which #{Replacement} replaces; it stays open.",
                     record.PullRequestNumber, repository, current.Number);
+                if (ex is GitHubApiException { IsRateLimited: true })
+                {
+                    await _db.SaveChangesAsync(ct);
+                    return true;
+                }
             }
         }
         await _db.SaveChangesAsync(ct);
+        return false;
+    }
+
+    /// <summary>
+    /// Waits until <see cref="WriteSpacing"/> has passed since the last write, when the
+    /// run is pacing itself. Called before every request that creates something on GitHub.
+    /// </summary>
+    private async Task PaceWriteAsync(CancellationToken ct)
+    {
+        if (!_pacing) return;
+        if (_lastWriteAt is { } last)
+        {
+            var wait = WriteSpacing - (_clock.GetUtcNow() - last);
+            if (wait > TimeSpan.Zero) await PauseAsync(wait, ct);
+        }
+        _lastWriteAt = _clock.GetUtcNow();
     }
 
     /// <summary>
@@ -1073,6 +1177,11 @@ public sealed class DependencyDriftService
             return new DependencyDriftPullRequest(
                 name, null, false, 0, ex.Errors.Values.FirstOrDefault() ?? "The pull request was refused.");
         }
+        catch (GitHubApiException ex) when (ex.IsRateLimited)
+        {
+            _logger.LogWarning(ex, "GitHub rate limited the update pull request on {RepoFullName}.", name);
+            return new DependencyDriftPullRequest(name, null, false, 0, RateLimitedRefusal, IsRateLimited: true);
+        }
         catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException or TaskCanceledException
                                    && !ct.IsCancellationRequested)
         {
@@ -1120,15 +1229,14 @@ public sealed class DependencyDriftService
             : null;
         var version = await TargetVersionAsync(rows, release, ct);
 
-        var target = await ChooseBranchAsync(token, repo, version, automatic, ct);
+        var target = await ChooseBranchAsync(token, repo, version, ct);
         // The automatic run offers each version once (issue #1104): an open pull
         // request is added to, but one somebody merged or closed is their answer, and
-        // its branch is usually gone with it.
-        if (automatic && target is { ExistingPullRequest: null } && await WasOfferedAsync(fullName, version, ct))
-        {
-            target = null;
-        }
-        if (target is null)
+        // its branch is usually gone with it - or kept, which is why this asks the
+        // record rather than the branch. A branch with no open pull request and no
+        // record is a run that failed before it opened one; it was stepped past like
+        // any other, so one failed night does not strand the version.
+        if (automatic && target.ExistingPullRequest is null && await WasOfferedAsync(fullName, version, ct))
         {
             return new DependencyDriftPullRequest(fullName, null, false, 0,
                 $"An update pull request for Business Central {version} was already opened here and closed.",
@@ -1152,6 +1260,7 @@ public sealed class DependencyDriftService
             var applied = ApplyChanges(file.Text, byPath.ToList(), repo.FullName, byPath.Key, out var moved);
             if (moved.Count == 0) continue;
 
+            await PaceWriteAsync(ct);
             blobs.Add((byPath.Key, await _github.CreateBlobAsync(
                 token, repo.Owner, repo.Name, Encoding.UTF8.GetBytes(applied), ct)));
             edited.Add((byPath.Key, moved));
@@ -1165,10 +1274,13 @@ public sealed class DependencyDriftService
         }
 
         var baseTree = await _github.GetCommitTreeShaAsync(token, repo.Owner, repo.Name, target.ParentSha, ct);
+        await PaceWriteAsync(ct);
         var tree = await _github.CreateTreeAsync(token, repo.Owner, repo.Name, baseTree, blobs, ct);
+        await PaceWriteAsync(ct);
         var commit = await _github.CreateCommitAsync(
             token, repo.Owner, repo.Name, $"Target Business Central {version}", tree, target.ParentSha, ct: ct);
 
+        await PaceWriteAsync(ct);
         if (target.ExistingPullRequest is null)
         {
             if (!await _github.CreateBranchAsync(token, repo.Owner, repo.Name, target.Branch, commit, ct))
@@ -1185,6 +1297,7 @@ public sealed class DependencyDriftService
                 + "was committed. Try again to build on what is there now.");
         }
 
+        if (target.ExistingPullRequest is null) await PaceWriteAsync(ct);
         var pullRequest = target.ExistingPullRequest ?? await _github.CreatePullRequestAsync(
             token, repo.Owner, repo.Name,
             title: $"Target Business Central {version}",
@@ -1305,12 +1418,13 @@ public sealed class DependencyDriftService
     /// <c>aldt/bump-bc-&lt;major.minor&gt;</c>, <c>-2</c>, <c>-3</c> until one
     /// has a pull request still open (join it, so a second run lands in the
     /// review already running) or does not exist at all (start it from the
-    /// default branch). A branch whose pull request has been merged or closed is
-    /// stepped past rather than reused - except by the automatic run, for which it
-    /// means the version was already offered and answered, so it returns null.
+    /// default branch). A branch with no open pull request - merged, closed, or never
+    /// opened because a run failed half-way - is stepped past rather than reused, so an
+    /// open <c>-2</c> is still found behind it. Whether the version should be offered at
+    /// all is the caller's question, answered from the record of what was opened.
     /// </summary>
-    private async Task<BranchTarget?> ChooseBranchAsync(
-        string token, GitHubRepositorySummary repo, string version, bool automatic, CancellationToken ct)
+    private async Task<BranchTarget> ChooseBranchAsync(
+        string token, GitHubRepositorySummary repo, string version, CancellationToken ct)
     {
         var baseName = BranchPrefix + version;
         for (var attempt = 1; attempt <= MaxBranchAttempts; attempt++)
@@ -1335,14 +1449,6 @@ public sealed class DependencyDriftService
                         $"'{repo.FullName}' has no commits on {repo.DefaultBranch} yet, so there is nothing to open "
                         + "a pull request against.");
                 return new BranchTarget(branch, defaultHead, null);
-            }
-
-            if (automatic)
-            {
-                _logger.LogInformation(
-                    "Branch {Branch} on {RepoFullName} exists with no open pull request, so the automatic run leaves Business Central {Version} alone.",
-                    branch, repo.FullName, version);
-                return null;
             }
 
             _logger.LogInformation(
@@ -1492,7 +1598,7 @@ public sealed class DependencyDriftService
             + "AL Workbench to set it up.",
         GitHubRepositoryReadiness.NotConnected =>
             "Your organisation has not connected a GitHub organisation yet, so there is nowhere to open a pull "
-            + "request. An administrator connects one under Administration -> Repositories.",
+            + "request. An administrator connects one under Administration → Repositories.",
         GitHubRepositoryReadiness.LinkNeedsRepair =>
             "Your GitHub account is no longer connected to the workbench. Connect it again on your account page "
             + "under Repository access, then try this again.",
