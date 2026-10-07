@@ -205,6 +205,54 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ReleaseBuildNowAsync_accepts_a_release_staged_through_another_row_for_the_same_github_repository()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await MakeReleaseSourcedAsync(ctx, seed.ReleasePipelineId);
+        var staged = await SeedStagedBuildAsync(ctx, seed.ProjectId, "v1.0.0.0", new[] { "CRONUS Core" });
+        // The solution lists the same repository a second time, typed differently, and the
+        // deployment pipeline draws from that row (#1178).
+        var twin = new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId,
+            Provider = RepositoryProvider.GitHub, Url = "https://www.github.com/CRONUS-dk/cronus-customer",
+            DisplayName = "cronus-customer (again)",
+        };
+        ctx.OeProjectRepositories.Add(twin);
+        await ctx.SaveChangesAsync();
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.GithubReleaseRepositoryId, (int?)twin.Id));
+
+        var deliveryId = await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, staged);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.AsNoTracking().SingleAsync(d => d.Id == deliveryId)).ProjectBuildId.Should().Be(staged);
+    }
+
+    [Fact]
+    public async Task Removing_the_repository_a_release_was_staged_from_clears_the_record_and_keeps_the_build()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var repository = new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId,
+            Provider = RepositoryProvider.GitHub, Url = "https://github.com/cronus-dk/cronus-customer.git",
+            DisplayName = "cronus-customer",
+        };
+        ctx.OeProjectRepositories.Add(repository);
+        await ctx.SaveChangesAsync();
+        var staged = await SeedStagedBuildAsync(ctx, seed.ProjectId, "v1.0.0.0", new[] { "CRONUS Core" }, repositoryId: repository.Id);
+
+        await ctx.OeProjectRepositories.Where(r => r.Id == repository.Id).ExecuteDeleteAsync();
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.Id == staged))
+            .StagedFromRepositoryId.Should().BeNull();
+    }
+
+    [Fact]
     public async Task ReleaseBuildNowAsync_rejects_a_staged_build_on_a_pipeline_that_releases_builds()
     {
         await using var ctx = _db.NewContext();

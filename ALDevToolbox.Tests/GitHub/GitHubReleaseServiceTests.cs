@@ -466,6 +466,107 @@ public sealed class GitHubReleaseServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Staging_again_after_the_repository_was_removed_and_added_back_records_the_new_row()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi();
+        int first;
+        await using (var ctx = _db.NewContext())
+        {
+            first = await NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+        }
+
+        // The repository is removed from the solution and added back as a new row, and
+        // the deployment pipeline is pointed at it (#1178).
+        int readded;
+        await using (var ctx = _db.NewContext())
+        {
+            var rp = await ctx.OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId);
+            var oldId = rp.GithubReleaseRepositoryId!.Value;
+            var row = new OeProjectRepository
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId,
+                Provider = RepositoryProvider.GitHub, Url = RepoUrl, DisplayName = RepoName,
+            };
+            ctx.OeProjectRepositories.Add(row);
+            await ctx.SaveChangesAsync();
+            rp.GithubReleaseRepositoryId = row.Id;
+            await ctx.SaveChangesAsync();
+            await ctx.OeProjectRepositories.Where(r => r.Id == oldId).ExecuteDeleteAsync();
+            readded = row.Id;
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0")).Should().Be(first);
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.Id == first))
+            .StagedFromRepositoryId.Should().Be(readded);
+    }
+
+    [Fact]
+    public async Task Staging_again_through_a_second_row_for_the_same_repository_records_that_row()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi();
+        int first;
+        await using (var ctx = _db.NewContext())
+        {
+            first = await NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+        }
+
+        // The solution lists the same GitHub repository twice; a second deployment
+        // pipeline draws from the second row (#1178).
+        int twinPipelineId, twinId;
+        await using (var ctx = _db.NewContext())
+        {
+            var rp = await ctx.OeReleasePipelines.AsNoTracking().SingleAsync(r => r.Id == seed.ReleasePipelineId);
+            var twin = new OeProjectRepository
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId,
+                Provider = RepositoryProvider.GitHub, Url = RepoUrl, DisplayName = RepoName + " (again)",
+            };
+            ctx.OeProjectRepositories.Add(twin);
+            await ctx.SaveChangesAsync();
+            var now = DateTime.UtcNow;
+            var twinPipeline = new OeReleasePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "CRONUS App -> Production (again)",
+                ArtifactSource = ReleaseArtifactSource.GithubRelease, GithubReleaseRepositoryId = twin.Id,
+                ProjectEnvironmentId = rp.ProjectEnvironmentId,
+                DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
+                CreatedAt = now, UpdatedAt = now,
+            };
+            ctx.OeReleasePipelines.Add(twinPipeline);
+            await ctx.SaveChangesAsync();
+            (twinPipelineId, twinId) = (twinPipeline.Id, twin.Id);
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewService(ctx, api).StageReleaseAsync(twinPipelineId, "v1.0.0.0")).Should().Be(first);
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.Id == first))
+            .StagedFromRepositoryId.Should().Be(twinId);
+    }
+
+    [Theory]
+    [InlineData("https://github.com/cronus-dk/cronus-customer", "https://www.github.com/CRONUS-dk/cronus-customer.git/", true)]
+    [InlineData("https://github.com/cronus-dk/cronus-customer", "https://github.com/cronus-dk/cronus-warehouse", false)]
+    [InlineData("https://github.com/cronus-dk/cronus-customer", null, false)]
+    [InlineData("https://dev.azure.com/cronus/customer/_git/customer", "https://dev.azure.com/cronus/customer/_git/customer", false)]
+    public void IsSameRepository_compares_the_github_owner_and_name(string? first, string? second, bool expected)
+    {
+        GitHubReleaseService.IsSameRepository(first, second).Should().Be(expected);
+    }
+
+    [Fact]
     public async Task A_release_with_no_app_files_is_refused_at_staging_time()
     {
         await ConnectOrganisationAsync();
