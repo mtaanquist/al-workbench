@@ -177,6 +177,44 @@ public sealed class GitHubWebhookQueueTests
     }
 
     [Fact]
+    public void An_older_head_announced_after_a_newer_one_does_not_become_the_latest()
+    {
+        // GitHub does not promise order: the delivery for the earlier push can be
+        // handled after the later one (#1120).
+        var queue = new GitHubWebhookQueue();
+        var job = Job("aaa");
+        var at = new DateTimeOffset(2026, 10, 7, 9, 0, 0, TimeSpan.Zero);
+        using var running = new CancellationTokenSource();
+
+        queue.Announce(job.Key, "bbb", at.AddMinutes(1)).Should().BeTrue();
+        queue.BeginBuild(job.Key, running);
+
+        queue.Announce(job.Key, "aaa", at).Should().BeFalse();
+
+        queue.IsLatest(job.Key, "bbb").Should().BeTrue();
+        queue.IsLatest(job.Key, "aaa").Should().BeFalse();
+        running.IsCancellationRequested.Should().BeFalse("the build of the newer head keeps going");
+    }
+
+    [Fact]
+    public async Task Two_deliveries_announced_at_once_always_leave_the_newer_head_as_the_latest()
+    {
+        var at = new DateTimeOffset(2026, 10, 7, 9, 0, 0, TimeSpan.Zero);
+        for (var round = 0; round < 200; round++)
+        {
+            var queue = new GitHubWebhookQueue();
+            var key = Job("aaa").Key;
+            using var start = new ManualResetEventSlim();
+            var older = Task.Run(() => { start.Wait(); queue.Announce(key, "aaa", at); });
+            var newer = Task.Run(() => { start.Wait(); queue.Announce(key, "bbb", at.AddSeconds(5)); });
+            start.Set();
+            await Task.WhenAll(older, newer);
+
+            queue.IsLatest(key, "bbb").Should().BeTrue($"round {round}");
+        }
+    }
+
+    [Fact]
     public async Task Enqueued_jobs_come_back_off_the_channel_in_order()
     {
         var queue = new GitHubWebhookQueue();

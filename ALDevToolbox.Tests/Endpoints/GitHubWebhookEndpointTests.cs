@@ -76,7 +76,8 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
         bool headIsFork = false,
         string authorLogin = "erik",
         string? authorAssociation = "MEMBER",
-        string? headOwner = null)
+        string? headOwner = null,
+        string updatedAt = "2026-10-07T09:00:00Z")
     {
         var owner = headOwner ?? headRepository.Split('/')[0];
         var association = authorAssociation is null
@@ -105,7 +106,8 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
                 "owner": { "login": "{{owner}}" }
               }
             },
-            "base": { "ref": "main" }
+            "base": { "ref": "main" },
+            "updated_at": "{{updatedAt}}"
           }
         }
         """;
@@ -631,6 +633,27 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
         (await response.Content.ReadAsStringAsync()).Should().Contain("requested again");
         queue.IsLatest("42:cronus-dk/customer-app:7", "something-else").Should().BeTrue(
             "a delivery that was never queued must not cancel the build that is running");
+    }
+
+    [Fact]
+    public async Task A_delivery_for_an_older_head_arriving_late_does_not_replace_the_newer_one()
+    {
+        // GitHub does not promise delivery order; the pull request's own updated_at
+        // says which head is newer (#1120).
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        var queue = _factory.Services.GetRequiredService<GitHubWebhookQueue>();
+
+        using var newer = await client.SendAsync(Delivery(
+            PullRequestPayload(action: "synchronize", headSha: "bbbbbbb", updatedAt: "2026-10-07T09:05:00Z"), Secret));
+        using var older = await client.SendAsync(Delivery(
+            PullRequestPayload(action: "synchronize", headSha: "aaaaaaa", updatedAt: "2026-10-07T09:00:00Z"), Secret));
+
+        newer.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        older.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        queue.IsLatest("42:cronus-dk/customer-app:7", "bbbbbbb").Should().BeTrue();
+        queue.IsLatest("42:cronus-dk/customer-app:7", "aaaaaaa").Should().BeFalse(
+            "the older head is skipped when the worker reaches it");
     }
 
     [Fact]
