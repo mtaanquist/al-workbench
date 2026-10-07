@@ -103,7 +103,13 @@ public static class ObjectExplorerRegistration
         // The Pipelines dashboard at /pipelines (#955): the two lists' numbers on one page; read-only.
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.PipelinesDashboardService>();
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryQueue>();
-        services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryWorker>();
+        // Deployments to different environments run side by side (#1139).
+        for (var slot = 1; slot <= ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryWorker.Lanes; slot++)
+        {
+            var workerSlot = slot;
+            services.AddSingleton<IHostedService>(sp =>
+                ActivatorUtilities.CreateInstance<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryWorker>(sp, workerSlot));
+        }
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ArtifactService>();
         // Project-build pipeline: the compile/ingest service, its release coordinator,
         // and the (stateless) external-process seam for git + alc.
