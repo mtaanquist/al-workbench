@@ -1,10 +1,20 @@
 /* The submitting search's own row: the box and the button it submits, side by
    side. Takes the flex-item role in .filter-bar that the box has when there is
-   no form, so the bar lays out the same either way (#805). */
+   no form, so the bar lays out the same either way (#805).
+   Holding only the box (and hidden inputs), the form sizes exactly as the bare
+   box does in pages.css. A wider form left a gap between the search and the
+   selects after it that the bare box never has (build pipelines, #1078). */
 .filter-bar-form {
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    flex: 1;
+    min-width: 220px;
+    max-width: 380px;
+}
+
+/* Room for what the page puts beside the box inside the form: a button, a select. */
+.filter-bar-form:has(> :not(.filter-bar__search, input[type="hidden"])) {
     flex: 1 1 auto;
     min-width: 260px;
     max-width: 480px;
