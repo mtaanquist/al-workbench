@@ -722,9 +722,11 @@ and it accepted work it should not have. What changed:
   delivery is resent only while GitHub still reports its head as the open pull request's
   head (read from the logged payload, then `GET /repos/{owner}/{repo}/pulls/{n}`).
   Attempt counts are in memory, so a restart allows five more. An attempt is counted only
-  once GitHub takes the resend: a 404 or 422 settles the event, while a 5xx, a timeout,
-  rate limiting or no answer leaves it (and the rest of that sweep) for the next one
-  (#1175). Each sweep reads at most twenty pages: the newest stretch back to where the
+  once GitHub takes the resend: a 404, 410 or 422 settles the event; a 401 or a 403 that is
+  not rate limiting is the App being turned away, so it leaves that event and the rest of
+  the sweep for the next one; a 5xx, a timeout, rate limiting or no answer leaves the event
+  for the next sweep and moves it behind the events GitHub has not refused, and the sweep
+  stops once two different events have been refused that way (#1175). Each sweep reads at most twenty pages: the newest stretch back to where the
   last complete read began, then whatever older stretch an earlier sweep's page budget
   did not reach, resumed from its cursor; failures it found but did not get to are carried
   to the next sweep by id rather than by reading the window again.
