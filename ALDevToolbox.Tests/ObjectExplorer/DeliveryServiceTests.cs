@@ -632,9 +632,11 @@ public sealed class DeliveryServiceTests : IDisposable
         var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
         // Simulate a crash mid-publish.
         await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
-            .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, ProjectDeliveryStatus.Uploading));
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.Status, ProjectDeliveryStatus.Uploading)
+                .SetProperty(d => d.ClaimedAt, DateTime.UtcNow.AddMinutes(-5)));
 
-        var failed = await NewService(_db.NewContext()).FailInterruptedDeliveriesAsync();
+        var failed = await NewService(_db.NewContext()).FailInterruptedDeliveriesAsync(claimedBeforeUtc: DateTime.UtcNow);
 
         failed.Should().HaveCount(1);
         await using var read = _db.NewContext();
@@ -642,6 +644,34 @@ public sealed class DeliveryServiceTests : IDisposable
         d.Status.Should().Be(ProjectDeliveryStatus.Failed);
         d.FailureMessage.Should().Contain("interrupted");
         d.Results.Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
+    }
+
+    [Fact]
+    public async Task FailInterruptedDeliveriesAsync_leaves_a_deployment_claimed_since_the_restart_running()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var svc = NewService(ctx);
+        var orphan = await svc.ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+        var running = await svc.ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(2));
+        var startedAt = DateTime.UtcNow;
+        // One was mid-publish when the old process died; the other was claimed by this
+        // process's worker before the scheduler's first sweep came round (#1114).
+        await ctx.OeProjectDeliveries.Where(d => d.Id == orphan)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.Status, ProjectDeliveryStatus.Installing)
+                .SetProperty(d => d.ClaimedAt, startedAt.AddMinutes(-3)));
+        await ctx.OeProjectDeliveries.Where(d => d.Id == running)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.Status, ProjectDeliveryStatus.Installing)
+                .SetProperty(d => d.ClaimedAt, startedAt.AddSeconds(10)));
+
+        var failed = await NewService(_db.NewContext()).FailInterruptedDeliveriesAsync(startedAt);
+
+        failed.Should().Equal(orphan);
+        await using var read = _db.NewContext();
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == running)).Status.Should().Be(ProjectDeliveryStatus.Installing);
+        (await read.OeProjectDeliveries.SingleAsync(d => d.Id == running)).FailureMessage.Should().BeNull();
     }
 
     [Fact]

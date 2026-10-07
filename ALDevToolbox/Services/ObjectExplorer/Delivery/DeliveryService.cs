@@ -1552,18 +1552,21 @@ public sealed class DeliveryService
 
     /// <summary>
     /// Fails every delivery in the current org left in a non-terminal <em>in-progress</em>
-    /// state (<c>claimed</c>/<c>uploading</c>/<c>installing</c>) — orphaned when the process
-    /// died mid-publish. Called once per org on the scheduler's first sweep after startup,
-    /// when nothing is running yet, so it never trips an actively-running delivery. The
-    /// publish isn't safely resumable (partial uploads to BC), so these are failed, not
-    /// retried. Returns the ids it failed, so the people behind them can be told (#1036).
+    /// state (<c>claimed</c>/<c>uploading</c>/<c>installing</c>) and claimed before
+    /// <paramref name="claimedBeforeUtc"/>, the time this process started — orphaned when
+    /// the previous one died mid-publish. Called once per org by the scheduler after
+    /// startup, when the worker may already be running a deployment claimed since; the
+    /// cut-off keeps that one alone (#1114). The publish isn't safely resumable (partial
+    /// uploads to BC), so these are failed, not retried. Returns the ids it failed, so the
+    /// people behind them can be told (#1036).
     /// </summary>
-    public async Task<List<int>> FailInterruptedDeliveriesAsync(CancellationToken ct = default)
+    public async Task<List<int>> FailInterruptedDeliveriesAsync(DateTime claimedBeforeUtc, CancellationToken ct = default)
     {
         var orphans = await _db.OeProjectDeliveries
-            .Where(d => d.Status == ProjectDeliveryStatus.Claimed
-                        || d.Status == ProjectDeliveryStatus.Uploading
-                        || d.Status == ProjectDeliveryStatus.Installing)
+            .Where(d => (d.Status == ProjectDeliveryStatus.Claimed
+                         || d.Status == ProjectDeliveryStatus.Uploading
+                         || d.Status == ProjectDeliveryStatus.Installing)
+                        && (d.ClaimedAt == null || d.ClaimedAt < claimedBeforeUtc))
             .Include(d => d.Results)
             .ToListAsync(ct);
         if (orphans.Count == 0) return [];
