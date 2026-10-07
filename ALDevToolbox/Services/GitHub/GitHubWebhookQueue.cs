@@ -183,7 +183,8 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     /// forward (#1120): a head whose <paramref name="updatedAt"/> is older than the
     /// one already recorded is left out, and the swap itself is a compare-and-set,
     /// so the older of two racing deliveries cannot win by writing last. Without a
-    /// time on either side, the later announcement wins, as before. Returns whether
+    /// time on either side, or with the same time (GitHub's has whole seconds), the later
+    /// announcement wins, as before. Returns whether
     /// <paramref name="headSha"/> is the newest head once this returns; the job it
     /// came with is then skipped by <see cref="IsLatest"/> if not.</para>
     /// </summary>
@@ -202,7 +203,10 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
             {
                 return string.Equals(previous.Sha, headSha, StringComparison.OrdinalIgnoreCase);
             }
-            if (_latestSha.TryUpdate(key, mark, previous)) break;
+            // A delivery without a time cannot be ordered, but it must not wipe the
+            // time already known, or every older delivery after it would get through.
+            var next = updatedAt is null && previous.UpdatedAt is not null ? mark with { UpdatedAt = previous.UpdatedAt } : mark;
+            if (_latestSha.TryUpdate(key, next, previous)) break;
         }
 
         if (previous is not null && string.Equals(previous.Sha, headSha, StringComparison.OrdinalIgnoreCase)) return true;
@@ -243,7 +247,10 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     /// the process: every pull request the workbench ever built would otherwise
     /// leave an entry behind. It is only safe when the head just built is still
     /// the newest one - a newer head announced mid-build owns the entry, and
-    /// dropping it would make the superseded build look current again.</para>
+    /// dropping it would make the superseded build look current again. A head that
+    /// carries GitHub's time is kept for <see cref="KeepDatedHeadsFor"/> instead, so
+    /// an older delivery resent after the newer build finished is still recognised
+    /// as older (#1120); entries past that age are dropped here.</para>
     /// </summary>
     public void EndBuild(string key, CancellationTokenSource cts, string? headSha = null)
     {
@@ -251,12 +258,27 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
             .Remove(new KeyValuePair<string, CancellationTokenSource>(key, cts));
         if (headSha is null) return;
         if (_latestSha.TryGetValue(key, out var latest)
+            && latest.UpdatedAt is null
             && string.Equals(latest.Sha, headSha, StringComparison.OrdinalIgnoreCase))
         {
             ((ICollection<KeyValuePair<string, HeadMark>>)_latestSha)
                 .Remove(new KeyValuePair<string, HeadMark>(key, latest));
         }
+
+        var cutoff = DateTimeOffset.UtcNow - KeepDatedHeadsFor;
+        foreach (var entry in _latestSha)
+        {
+            if (entry.Value.UpdatedAt < cutoff && !_running.ContainsKey(entry.Key))
+                ((ICollection<KeyValuePair<string, HeadMark>>)_latestSha).Remove(entry);
+        }
     }
+
+    /// <summary>
+    /// How long a built head with GitHub's time is remembered after its build ends:
+    /// as long as <see cref="GitHubWebhookRecoveryScheduler"/> looks back for
+    /// deliveries to resend.
+    /// </summary>
+    internal static TimeSpan KeepDatedHeadsFor => GitHubWebhookRecoveryScheduler.Lookback;
 
     /// <summary>How many pull requests this queue is still holding a newest-head record for. Test seam.</summary>
     internal int TrackedHeadCount => _latestSha.Count;

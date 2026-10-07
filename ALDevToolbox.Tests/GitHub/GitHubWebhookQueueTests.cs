@@ -197,6 +197,64 @@ public sealed class GitHubWebhookQueueTests
     }
 
     [Fact]
+    public void An_older_head_resent_after_the_newer_build_finished_is_still_older()
+    {
+        // A redelivery can come long after the newer head was built; forgetting the
+        // head when its build ends would let the old commit build again.
+        var queue = new GitHubWebhookQueue();
+        var job = Job("bbb");
+        var at = DateTimeOffset.UtcNow.AddMinutes(-10);
+        using var cts = new CancellationTokenSource();
+        queue.Announce(job.Key, "bbb", at.AddMinutes(1));
+        queue.BeginBuild(job.Key, cts);
+        queue.EndBuild(job.Key, cts, "bbb");
+
+        queue.Announce(job.Key, "aaa", at).Should().BeFalse();
+
+        queue.IsLatest(job.Key, "aaa").Should().BeFalse();
+    }
+
+    [Fact]
+    public void A_dated_head_is_forgotten_once_it_is_older_than_any_resend()
+    {
+        var queue = new GitHubWebhookQueue();
+        var job = Job("aaa");
+        using var cts = new CancellationTokenSource();
+        queue.Announce(job.Key, "aaa", DateTimeOffset.UtcNow - GitHubWebhookQueue.KeepDatedHeadsFor - TimeSpan.FromHours(1));
+        queue.BeginBuild(job.Key, cts);
+
+        queue.EndBuild(job.Key, cts, "aaa");
+
+        queue.TrackedHeadCount.Should().Be(0);
+    }
+
+    [Fact]
+    public void A_delivery_without_a_time_keeps_the_time_already_known()
+    {
+        var queue = new GitHubWebhookQueue();
+        var job = Job("aaa");
+        var at = DateTimeOffset.UtcNow.AddMinutes(-10);
+        queue.Announce(job.Key, "bbb", at.AddMinutes(1));
+        queue.Announce(job.Key, "ccc");
+
+        queue.Announce(job.Key, "aaa", at).Should().BeFalse("it is still older than the last time GitHub gave");
+        queue.IsLatest(job.Key, "ccc").Should().BeTrue();
+    }
+
+    [Fact]
+    public void Two_heads_with_the_same_time_cannot_be_ordered_so_the_later_announcement_wins()
+    {
+        // GitHub's time has whole seconds; within one there is nothing to order by.
+        var queue = new GitHubWebhookQueue();
+        var job = Job("aaa");
+        var at = DateTimeOffset.UtcNow;
+        queue.Announce(job.Key, "aaa", at);
+
+        queue.Announce(job.Key, "bbb", at).Should().BeTrue();
+        queue.IsLatest(job.Key, "bbb").Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Two_deliveries_announced_at_once_always_leave_the_newer_head_as_the_latest()
     {
         var at = new DateTimeOffset(2026, 10, 7, 9, 0, 0, TimeSpan.Zero);
