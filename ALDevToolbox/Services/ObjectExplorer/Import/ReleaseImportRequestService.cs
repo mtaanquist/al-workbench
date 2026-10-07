@@ -320,6 +320,9 @@ public sealed class ReleaseImportRequestService
             // manage the solution, and no other build of its pipeline may be running.
             // The rerun builds the commits the first run did (#1110). The check and the
             // reopen happen under the pipeline's build lock (#1119).
+            // The release reads as importing from the reopen on, before its job is
+            // queued: a build polling it must not take it for abandoned (#1180).
+            using var rebuilding = _importer.Ingests.Track(releaseId);
             await using (var rebuild = await _projectBuilds.BeginRebuildAsync(releaseId, retryProjectId, "Retry", ct).ConfigureAwait(false))
             {
                 await _importer.ReopenForRebuildAsync(releaseId, ct).ConfigureAwait(false);
@@ -364,7 +367,10 @@ public sealed class ReleaseImportRequestService
 
         // Flip failed → ingesting (validates state) and wipe the previous
         // attempt's partial modules so the re-run can't skip a
-        // half-written module on the idempotency check.
+        // half-written module on the idempotency check. Wiping can take a while, and
+        // the job is queued only after it: until then nothing else says the release
+        // is being worked on, so a build polling it would take it for abandoned (#1180).
+        using var reopened = _importer.Ingests.Track(releaseId);
         await _importer.ReopenForRetryAsync(releaseId, ct).ConfigureAwait(false);
         await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
 

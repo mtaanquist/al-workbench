@@ -242,4 +242,141 @@ public sealed class ProjectBuildQueueTests
     [InlineData("500", ProjectBuildQueue.MaxConcurrency)]
     public void Concurrency_comes_from_the_setting_within_bounds(string? raw, int expected) =>
         ProjectBuildQueue.Concurrency(raw).Should().Be(expected);
+
+    // ── Standing aside while waiting on another import (#1180) ──────────
+
+    private static ProjectBuildQueue OneAtATime(params int[] releaseIds)
+    {
+        var queue = new ProjectBuildQueue(defaultLimit: 1);
+        foreach (var id in releaseIds) queue.Enqueue(Build(id, pipelineId: id, ProjectBuildTrigger.Push));
+        return queue;
+    }
+
+    private static ReleaseImportJob Take(ProjectBuildQueue queue)
+    {
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        return job!;
+    }
+
+    [Fact]
+    public async Task A_build_waiting_on_another_import_lets_the_next_build_start_in_its_place()
+    {
+        var queue = OneAtATime(1, 2);
+        Take(queue);
+        TakeAll(queue).Should().BeEmpty("one build may run at once");
+
+        var wait = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var aside = queue.StepAsideAsync(1, () => wait.Task, CancellationToken.None);
+
+        var second = Take(queue);
+        second.ReleaseId.Should().Be(2);
+
+        wait.SetResult("parent ready");
+        await Task.Delay(50);
+        aside.IsCompleted.Should().BeFalse("the build waits for a place before it carries on");
+
+        queue.Complete(second);
+        (await aside.WaitAsync(TimeSpan.FromSeconds(5))).Should().Be("parent ready");
+    }
+
+    [Fact]
+    public async Task A_wait_that_ends_at_once_keeps_the_build_its_place()
+    {
+        var queue = OneAtATime(1, 2, 3);
+        Take(queue);
+
+        (await queue.StepAsideAsync(1, () => Task.FromResult(true), CancellationToken.None)).Should().BeTrue();
+        TakeAll(queue).Should().BeEmpty("build 1 holds the only place again");
+    }
+
+    [Fact]
+    public async Task A_build_that_comes_back_while_its_place_is_taken_waits_ahead_of_new_builds()
+    {
+        var queue = OneAtATime(1, 2, 3);
+        Take(queue);
+        var wait = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var aside = queue.StepAsideAsync(1, () => wait.Task, CancellationToken.None);
+        var second = Take(queue);
+
+        wait.SetResult(7);
+        await Task.Delay(50);
+        queue.Complete(second);
+
+        (await aside.WaitAsync(TimeSpan.FromSeconds(5))).Should().Be(7);
+        TakeAll(queue).Should().BeEmpty("build 3 waits behind the build that came back");
+    }
+
+    [Fact]
+    public async Task A_cancelled_build_takes_its_place_back_at_once()
+    {
+        var queue = OneAtATime(1, 2, 3);
+        Take(queue);
+        using var cts = new CancellationTokenSource();
+        var wait = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var aside = queue.StepAsideAsync(1, () => wait.Task.WaitAsync(cts.Token), cts.Token);
+        Take(queue);
+
+        await cts.CancelAsync();
+
+        var act = () => aside.WaitAsync(TimeSpan.FromSeconds(5));
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        TakeAll(queue).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_lock_taken_while_standing_aside_is_let_go_when_the_build_is_cancelled_on_its_way_back()
+    {
+        var queue = OneAtATime(1, 2);
+        Take(queue);
+        using var cts = new CancellationTokenSource();
+        var released = new Released();
+        var wait = new TaskCompletionSource<IDisposable>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var aside = queue.StepAsideAsync(1, () => wait.Task, cts.Token);
+        Take(queue);
+
+        wait.SetResult(released);
+        await Task.Delay(50);
+        await cts.CancelAsync();
+
+        var act = () => aside.WaitAsync(TimeSpan.FromSeconds(5));
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        released.Disposed.Should().BeTrue("nobody else will ever release it");
+    }
+
+    [Fact]
+    public async Task A_build_that_got_the_import_gate_comes_back_at_once_even_over_the_limit()
+    {
+        // Waiting for a place while holding the gate would hold up every other import.
+        var queue = OneAtATime(1, 2, 3);
+        Take(queue);
+        var ingests = new ReleaseIngests();
+        var held = ingests.TryEnterHeavy()!;
+        var aside = queue.StepAsideAsync(1, () => ingests.EnterHeavyAsync(CancellationToken.None), CancellationToken.None, comeBackAtOnce: true);
+        var second = Take(queue);
+
+        held.Dispose();
+        using var gate = await aside.WaitAsync(TimeSpan.FromSeconds(5));
+
+        queue.RunningCount.Should().Be(2, "build 1 came back while build 2 still runs");
+        TakeAll(queue).Should().BeEmpty("nothing more starts until the builds are under the limit again");
+        queue.Complete(second);
+        TakeAll(queue).Should().BeEmpty("build 1 alone fills the limit of one");
+    }
+
+    [Fact]
+    public async Task A_release_the_queue_is_not_running_just_waits()
+    {
+        var queue = OneAtATime(1, 2);
+        Take(queue);
+
+        (await queue.StepAsideAsync(99, () => Task.FromResult(5), CancellationToken.None)).Should().Be(5);
+        TakeAll(queue).Should().BeEmpty("nothing stood aside, so the limit still holds");
+    }
+
+    private sealed class Released : IDisposable
+    {
+        public bool Disposed { get; private set; }
+
+        public void Dispose() => Disposed = true;
+    }
 }
