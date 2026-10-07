@@ -13,6 +13,38 @@ public static class DeploymentBranchRule
     public static bool Allows(string? allowedBranch, string? buildBranch) =>
         string.Equals(Normalize(allowedBranch), Normalize(buildBranch), StringComparison.Ordinal);
 
+    /// <summary>
+    /// <see cref="Allows(string?, string?)"/>, with "the default branch" read as the branch
+    /// it is, so a build pipeline that names <c>main</c> and a deployment pipeline that
+    /// allows the default branch agree when <c>main</c> is the default, and the other way
+    /// round (#1129). <paramref name="buildDefaultBranches"/> is what the build found the
+    /// repositories on when it named no branch; <paramref name="solutionDefaultBranches"/>
+    /// is each repository's default branch as GitHub last reported it. A default branch
+    /// counts only when every repository agrees on one name; when nothing says which it
+    /// is, the names are compared as written.
+    /// </summary>
+    public static bool Allows(string? allowedBranch, string? buildBranch,
+        IReadOnlyCollection<string> buildDefaultBranches, IReadOnlyCollection<string> solutionDefaultBranches)
+    {
+        if (Allows(allowedBranch, buildBranch)) return true;
+        var built = Resolve(buildBranch, buildDefaultBranches.Count > 0 ? buildDefaultBranches : solutionDefaultBranches);
+        var allowed = Resolve(allowedBranch, solutionDefaultBranches);
+        return built is not null && string.Equals(built, allowed, StringComparison.Ordinal);
+    }
+
+    /// <summary>The build's recorded default branches as a list: they are stored comma-separated.</summary>
+    public static IReadOnlyList<string> SplitRecorded(string? recorded) =>
+        (recorded ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    // A named branch is itself; the default branch is the one name every repository has
+    // as its default, or unknown.
+    private static string? Resolve(string? branch, IReadOnlyCollection<string> defaults)
+    {
+        if (Normalize(branch) is { } named) return named;
+        var distinct = defaults.Select(d => d.Trim()).Where(d => d.Length > 0).Distinct(StringComparer.Ordinal).ToList();
+        return distinct.Count == 1 ? distinct[0] : null;
+    }
+
     /// <summary>The branch as a person reads it: "branch release/25.0", or "the repositories' default branch".</summary>
     public static string Describe(string? branch) =>
         Normalize(branch) is { } name ? $"branch {name}" : "the repositories' default branch";

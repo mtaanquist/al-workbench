@@ -1985,6 +1985,45 @@ public sealed class DeliveryServiceTests : IDisposable
         }
     }
 
+    [Theory]
+    // The deployment pipeline allows the default branch; the build pipeline names it.
+    [InlineData(null, "main", null, true)]
+    [InlineData(null, "develop", null, false)]
+    // The other way round: the build recorded which branch "default" was.
+    [InlineData("main", null, "main", true)]
+    [InlineData("main", null, "master", false)]
+    public async Task The_branch_rule_reads_the_default_branch_as_the_branch_it_is(
+        string? allowed, string? built, string? builtDefault, bool accepted)
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RestrictBranch, true).SetProperty(r => r.AllowedBranch, allowed));
+        await ctx.OeProjectBuilds.Where(b => b.Id == seed.BuildId)
+            .ExecuteUpdateAsync(s => s.SetProperty(b => b.Branch, built).SetProperty(b => b.DefaultBranch, builtDefault));
+        // GitHub reported main as the repository's default branch (#1129).
+        var repository = new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId,
+            Provider = RepositoryProvider.GitHub, Url = "https://github.com/cronus-dk/cronus-customer.git",
+            DisplayName = "cronus-customer",
+        };
+        ctx.OeProjectRepositories.Add(repository);
+        await ctx.SaveChangesAsync();
+        ctx.OeRepositoryBranchHeads.Add(new OeRepositoryBranchHead
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectRepositoryId = repository.Id,
+            Branch = "main", HeadSha = new string('a', 40), PushedAt = DateTime.UtcNow,
+            IsDefaultBranch = true, UpdatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+
+        var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        if (accepted) await act.Should().NotThrowAsync();
+        else await act.Should().ThrowAsync<PlanValidationException>();
+    }
+
     [Fact]
     public async Task Without_the_branch_rule_a_build_from_any_branch_deploys()
     {

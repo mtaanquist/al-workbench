@@ -378,7 +378,7 @@ public sealed class DeliveryService
 
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.Id == projectBuildId)
-            .Select(b => new { b.Id, b.ProjectId, b.PipelineId, b.Status, b.GithubReleaseTag, b.StagedFromRepositoryId, b.BcTarget, b.Branch })
+            .Select(b => new { b.Id, b.ProjectId, b.PipelineId, b.Status, b.GithubReleaseTag, b.StagedFromRepositoryId, b.BcTarget, b.Branch, b.DefaultBranch })
             .FirstOrDefaultAsync(ct)
             ?? throw Validation("Build", "That build no longer exists.");
 
@@ -423,7 +423,10 @@ public sealed class DeliveryService
         // .design/saas-delivery.md, "Which branch may reach an environment".
         if (rp.ArtifactSource == ReleaseArtifactSource.Build
             && rp.RestrictBranch
-            && !DeploymentBranchRule.Allows(rp.AllowedBranch, build.Branch))
+            && !DeploymentBranchRule.Allows(rp.AllowedBranch, build.Branch)
+            && !DeploymentBranchRule.Allows(rp.AllowedBranch, build.Branch,
+                DeploymentBranchRule.SplitRecorded(build.DefaultBranch),
+                await SolutionDefaultBranchesAsync(rp.ProjectId, ct)))
         {
             throw Validation("Build",
                 $"Build #{build.Id} was built from {DeploymentBranchRule.Describe(build.Branch)}, but this deployment pipeline only deploys builds from "
@@ -517,6 +520,17 @@ public sealed class DeliveryService
         }
         return null;
     }
+
+    /// <summary>
+    /// Each of the solution's repositories' default branch, as GitHub last reported it on a
+    /// push. Empty when no push has said, which leaves the branch rule comparing names as written.
+    /// </summary>
+    private async Task<List<string>> SolutionDefaultBranchesAsync(int projectId, CancellationToken ct) =>
+        await _db.OeRepositoryBranchHeads.AsNoTracking()
+            .Where(h => h.ProjectRepository!.ProjectId == projectId && h.IsDefaultBranch && h.DeletedAt == null)
+            .Select(h => h.Branch)
+            .Distinct()
+            .ToListAsync(ct);
 
     /// <summary>A deployment checked and ready to be written: see <see cref="ResolveReleaseAsync"/>.</summary>
     private sealed record ReleasePlan(

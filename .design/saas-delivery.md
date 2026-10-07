@@ -382,7 +382,11 @@ the build pipeline at that branch, or points the production deployment pipeline 
 pipeline. The branch rule closes that: with `restrict_branch` on, `DeliveryService.ResolveReleaseAsync`
 (which every deployment passes through: the dialog, an approval, a prepared deployment,
 `deploy_build`) refuses a build whose branch is not `allowed_branch`, compared exactly
-(`DeploymentBranchRule`). The version number is deliberately not the guard: Business Central installs
+(`DeploymentBranchRule`). "The default branch" on either side is read as the branch it is before
+comparing (#1129): on the build's side, the branch its clones were on (`OeProjectBuild.DefaultBranch`),
+on the pipeline's, each repository's default branch as GitHub last reported it on a push. It counts
+only when every repository agrees on one name; when nothing says which branch it is, the names are
+compared as written. The version number is deliberately not the guard: Business Central installs
 anything higher than what it has, so a "test" pattern in a version would not stop it.
 
 - **On for production.** The editor turns the rule on when the target is a Production environment,
