@@ -612,6 +612,65 @@ public sealed class DeliveryServiceTests : IDisposable
         (await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status.Should().Be(ProjectDeliveryStatus.Deployed);
     }
 
+    [Theory]
+    [InlineData("still-allowed")]
+    [InlineData("disabled")]
+    [InlineData("removed")]
+    public async Task A_waiting_deployment_checks_again_that_its_person_may_still_deploy(string change)
+    {
+        var personId = await SeedUserAsync("Ann");
+        int deliveryId;
+        Seed seed;
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = personId;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(p => p.CreatedByUserId, personId)
+                    .SetProperty(p => p.Visibility, ProjectVisibility.Private));
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddMinutes(-1)));
+        }
+
+        // Hours later (#1125).
+        await using (var ctx = _db.NewContext())
+        {
+            if (change == "disabled")
+            {
+                await ctx.Users.Where(u => u.Id == personId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(u => u.Status, ALDevToolbox.Domain.Entities.UserStatus.Disabled));
+            }
+            if (change == "removed")
+            {
+                // The solution was handed to someone else; Ann is on none of its teams.
+                var otherId = await SeedUserAsync("Bo");
+                await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(p => p.CreatedByUserId, otherId));
+            }
+        }
+
+        // The worker runs it as the person who scheduled it.
+        await using (var run = _db.NewContext())
+        {
+            (await NewService(run).RunDeliveryAsync(deliveryId)).Should().BeTrue();
+        }
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == deliveryId);
+        if (change == "still-allowed")
+        {
+            delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
+            return;
+        }
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        delivery.FailureMessage.Should().Be(DeliveryService.SchedulerLostAccess);
+        delivery.Results.Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
+        _apps.UploadedOrder.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task EnqueueDueDeliveriesAsync_enqueues_due_rows_and_skips_future_ones()
     {
