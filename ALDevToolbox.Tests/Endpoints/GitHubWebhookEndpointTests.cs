@@ -295,6 +295,38 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task A_push_over_a_megabyte_is_still_queued()
+    {
+        // Twenty commits each touching a few thousand files, as a large import or a
+        // symbol refresh does. Refusing it was a build that never happened (#1126).
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        var payload = GitHubWebhookPayloads.Push(commitCount: 20, filesPerCommit: 3000);
+        Encoding.UTF8.GetByteCount(payload).Should().BeGreaterThan(GitHubWebhookEndpoints.MaxRequestBodyBytes);
+
+        using var response = await client.SendAsync(Delivery(payload, Secret, eventName: "push"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        var queue = _factory.Services.GetRequiredService<GitHubWebhookQueue>();
+        queue.Reader.TryRead(out var read).Should().BeTrue();
+        read.Should().BeOfType<GitHubPushJob>().Which.CommitCount.Should().Be(20);
+    }
+
+    [Fact]
+    public async Task Only_a_signed_push_may_be_larger_than_a_megabyte()
+    {
+        await StoreSecretAsync();
+        using var client = _factory.CreateClient();
+        var payload = GitHubWebhookPayloads.Push(commitCount: 20, filesPerCommit: 3000);
+
+        using var unsigned = await client.SendAsync(Delivery(payload, secret: null, eventName: "push"));
+        using var pullRequest = await client.SendAsync(Delivery(payload, Secret, eventName: "pull_request"));
+
+        unsigned.StatusCode.Should().Be(HttpStatusCode.RequestEntityTooLarge);
+        pullRequest.StatusCode.Should().Be(HttpStatusCode.RequestEntityTooLarge);
+    }
+
+    [Fact]
     public async Task A_tag_push_is_answered_and_dropped()
     {
         await StoreSecretAsync();
@@ -586,7 +618,8 @@ public sealed class GitHubWebhookEndpointTests : IDisposable
 
         var limit = webhook.Metadata.GetMetadata<Microsoft.AspNetCore.Http.Metadata.IRequestSizeLimitMetadata>();
         limit.Should().NotBeNull();
-        limit!.MaxRequestBodySize.Should().Be(GitHubWebhookEndpoints.MaxRequestBodyBytes);
+        limit!.MaxRequestBodySize.Should().Be(GitHubWebhookEndpoints.MaxPushBodyBytes,
+            "a push may be as large as GitHub sends; every other event is held to a megabyte as it is read");
     }
 
     [Fact]
