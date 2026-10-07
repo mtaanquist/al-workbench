@@ -265,6 +265,21 @@
             var disabled = _storedDisabled.Where(k => !visibleKeys.Contains(k))
                 .Concat(_visible.Where(t => t.Key != ToolKey.Mcp && !_enabled[t.Key]).Select(t => t.Key))
                 .ToList();
+            // Same preservation rule for the step-up set: keep entries for tools
+            // hidden site-wide, and keep a rule on a tool that is merely switched
+            // off here so switching it back on restores it.
+            var stepUp = _storedStepUp.Where(k => !visibleKeys.Contains(k))
+                .Concat(_visible.Where(t => _enabled[t.Key] ? _stepUp[t.Key] : _storedStepUp.Contains(t.Key)).Select(t => t.Key))
+                .ToList();
+
+            // Allowing agents into production needs a fresh session whenever the saved
+            // step-up rules ask for one. Check it before the first write, so a refusal
+            // leaves the whole page unsaved (#1196); the setter checks again below.
+            if (_enabled.ContainsKey(ToolKey.Mcp) && _agentsMayDeployToProduction && !_agentsBaseline && stepUp.Count > 0)
+            {
+                await OrgAdmin.RequireFreshSessionAsync();
+            }
+
             await OrgAdmin.SetDisabledToolsAsync(disabled);
 
             // MCP rides its own flag; only touch it when MCP is on site-wide
@@ -274,12 +289,6 @@
                 await OrgAdmin.SetMcpEnabledAsync(_enabled[ToolKey.Mcp]);
             }
 
-            // Same preservation rule for the step-up set: keep entries for tools
-            // hidden site-wide, and keep a rule on a tool that is merely switched
-            // off here so switching it back on restores it.
-            var stepUp = _storedStepUp.Where(k => !visibleKeys.Contains(k))
-                .Concat(_visible.Where(t => _enabled[t.Key] ? _stepUp[t.Key] : _storedStepUp.Contains(t.Key)).Select(t => t.Key))
-                .ToList();
             await OrgAdmin.SetStepUpToolsAsync(stepUp);
             await OrgAdmin.SetStepUpWindowAsync(_windowMinutes);
             _windowBaseline = _windowMinutes;

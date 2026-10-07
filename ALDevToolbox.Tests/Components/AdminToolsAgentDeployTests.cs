@@ -1,6 +1,7 @@
 using ALDevToolbox.Components.Pages.Admin.Administration;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Tools;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Organizations;
 using ALDevToolbox.Tests.Infrastructure;
@@ -139,6 +140,33 @@ public sealed class AdminToolsAgentDeployTests : IDisposable
 
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("Tools saved."));
         (await StoredAsync()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_refused_confirmation_saves_nothing_on_the_page()
+    {
+        // The organisation asks for a recent second factor, and this session has none,
+        // so turning the switch on is refused. The tool switched off in the same save
+        // must not be stored either (#1196).
+        await using (var ctx = _db.NewContext())
+        {
+            var org = await ctx.Organizations.FirstAsync(o => o.Id == TestDb.DefaultOrgId);
+            org.StepUpTools = ToolCatalog.Format(new[] { ToolKey.Releases });
+            await ctx.SaveChangesAsync();
+        }
+        var cut = _ctx.Render<AdminAdministrationTools>();
+        cut.WaitForAssertion(() => cut.Find($"input[aria-label='{SwitchLabel}']"));
+
+        await cut.Find($"input[aria-label='{SwitchLabel}']").ChangeAsync(new Microsoft.AspNetCore.Components.ChangeEventArgs { Value = true });
+        await cut.FindAll("input[type=checkbox]")[0].ChangeAsync(new Microsoft.AspNetCore.Components.ChangeEventArgs { Value = false });
+        await cut.Find("button.btn--primary").ClickAsync(new Microsoft.AspNetCore.Components.Web.MouseEventArgs());
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("you before changing this: open"));
+        (await StoredAsync()).Should().BeFalse();
+        await using var read = _db.NewContext();
+        var stored = await read.Organizations.AsNoTracking().SingleAsync(o => o.Id == TestDb.DefaultOrgId);
+        stored.DisabledTools.Should().BeEmpty();
+        stored.McpEnabled.Should().BeTrue();
     }
 
     private static AuditInterceptor NewInterceptor(string name)

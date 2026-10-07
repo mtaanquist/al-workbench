@@ -280,7 +280,7 @@ public sealed class DeliveryService
         // A parked delivery (the replacement a move writes before Business Central's copy is
         // cancelled) waits for approval, so nothing runs it if the move never finishes.
         var parked = parkedLog is not null;
-        var openingLog = forAgent ? LogLine(DeliveryProposalLog.StartedByAgent(await CurrentUserNameAsync(ct))) : parkedLog;
+        var openingLog = forAgent ? LogLine(DeliveryProposalLog.StartedByAgent(await CurrentUserNameAsync(ct), BcEnvironmentTypes.IsSandbox(plan.EnvType))) : parkedLog;
         var delivery = await WriteDeliveryAsync(orgId, plan, scheduledForUtc, forceSyncOnce, proposed: parked, ct,
             openingLog: openingLog, startedByAgent: forAgent);
 
@@ -2727,9 +2727,13 @@ public static class DeliveryProposalLog
     public static string DeployedWithoutApproval(int buildId, string who) =>
         $"Started by build #{buildId} when it succeeded, without waiting for approval, because the pipeline deploys to this sandbox automatically. Runs as {who}, who turned that on.";
 
-    /// <summary>The first line of a deployment an AI assistant started (#1122).</summary>
-    public static string StartedByAgent(string who) =>
-        $"Started by an AI assistant acting for {who}, without the confirmation step.";
+    /// <summary>
+    /// The first line of a deployment an AI assistant started (#1122). Only a production
+    /// deployment skips anything: a person gets no confirmation step on a sandbox either (#1196).
+    /// </summary>
+    public static string StartedByAgent(string who, bool sandbox) => sandbox
+        ? $"Started by an AI assistant acting for {who}."
+        : $"Started by an AI assistant acting for {who}, without the confirmation step.";
 
     /// <summary>Why a pipeline set to deploy without approval prepared this one for approval instead.</summary>
     public static string NotDeployedWithoutApproval(string reason) =>

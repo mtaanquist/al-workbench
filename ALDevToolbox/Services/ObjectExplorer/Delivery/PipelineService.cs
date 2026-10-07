@@ -341,8 +341,8 @@ public sealed class PipelineService
 
         // The name follows from the branch and the selection. A typed name is only
         // needed when that one is taken; typing the generated name is not a custom one.
-        var generated = PipelineNames.ForBuildPipeline(
-            branch, input.SelectedAppIds, ExtensionNames(owner.DiscoveredExtensionsJson));
+        var discovered = ExtensionNames(owner.DiscoveredExtensionsJson);
+        var generated = PipelineNames.ForBuildPipeline(branch, input.SelectedAppIds, discovered);
         var custom = string.IsNullOrWhiteSpace(input.CustomName) ? null : input.CustomName.Trim();
         if (custom is not null && string.Equals(custom, generated, StringComparison.Ordinal)) custom = null;
         // A typed name was given for the branch and extensions it was typed under. A
@@ -355,7 +355,7 @@ public sealed class PipelineService
             && string.Equals(custom, existing.Name, StringComparison.Ordinal)
             && !errors.ContainsKey("Branch")
             && (!string.Equals(branch, existing.Branch, StringComparison.Ordinal)
-                || !SameSelection(input.SelectedAppIds, existing.RequestedAppIdsJson))
+                || !SameSelection(input.SelectedAppIds, existing.RequestedAppIdsJson, discovered.Keys))
             && generated.Length <= PipelineNames.MaxLength
             && !await NameTakenAsync(input.ProjectId, existing.Id, generated, ct))
         {
@@ -396,13 +396,30 @@ public sealed class PipelineService
     /// <summary>
     /// Whether <paramref name="selected"/> picks the same extensions as the stored
     /// <paramref name="storedJson"/>, ignoring order and how the ids are written.
-    /// Null or empty on either side means every extension.
+    /// Null or empty on either side means every extension. When the solution has been
+    /// discovered, both sides are compared as what they would build from
+    /// <paramref name="discoveredIds"/> (normalised ids): the editor pre-fills the stored
+    /// selection narrowed to what is discovered now and sends "every extension" when
+    /// that covers them all, so an extension that has since come or gone is not a change
+    /// the person made (#1196).
     /// </summary>
-    internal static bool SameSelection(IReadOnlyCollection<string>? selected, string? storedJson)
+    internal static bool SameSelection(
+        IReadOnlyCollection<string>? selected, string? storedJson, IReadOnlyCollection<string>? discoveredIds = null)
     {
         var before = Normalized(ReadSelection(storedJson));
         var after = Normalized(selected);
+        if (discoveredIds is { Count: > 0 })
+        {
+            before = Effective(before, discoveredIds);
+            after = Effective(after, discoveredIds);
+        }
         return before.SetEquals(after);
+
+        // Empty means every extension, so it stands for the whole discovered set.
+        static HashSet<string> Effective(HashSet<string> ids, IReadOnlyCollection<string> discovered) =>
+            ids.Count == 0
+                ? discovered.ToHashSet(StringComparer.Ordinal)
+                : ids.Where(discovered.Contains).ToHashSet(StringComparer.Ordinal);
 
         static HashSet<string> Normalized(IEnumerable<string>? ids) =>
             (ids ?? []).Where(id => !string.IsNullOrWhiteSpace(id))
