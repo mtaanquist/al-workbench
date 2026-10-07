@@ -327,6 +327,28 @@ public sealed class StepUpEnforcementTests : IDisposable
     }
 
     [Fact]
+    public async Task Letting_ai_assistants_deploy_to_production_needs_a_fresh_session_once_any_tool_is_marked()
+    {
+        await using var ctx = _db.NewContext();
+        var stale = new TestDb.FixedHttpContextAccessor(new DefaultHttpContext { User = CookieUser(1, 1) });
+        var fresh = new TestDb.FixedHttpContextAccessor(new DefaultHttpContext { User = CookieUser(1, 1, strongAt: Now) });
+        var tools = new ToolEnablement(TestDb.EverythingEnabled(), fresh, ctx, _db.OrgContext, _clock);
+
+        // Nothing marked: the organisation asks for no second factor, so neither does this.
+        await NewOrgAdmin(ctx, tools, stale).SetAgentsMayDeployToProductionAsync(true);
+        await NewOrgAdmin(ctx, tools, stale).SetAgentsMayDeployToProductionAsync(false);
+
+        await MarkAsync(ToolKey.Cookbook);
+        var allow = () => NewOrgAdmin(ctx, tools, stale).SetAgentsMayDeployToProductionAsync(true);
+        (await allow.Should().ThrowAsync<Domain.ValueObjects.PlanValidationException>()).Which.Errors.Keys.Should().Contain("StepUp");
+
+        await NewOrgAdmin(ctx, tools, fresh).SetAgentsMayDeployToProductionAsync(true);
+        await NewOrgAdmin(ctx, tools, stale).SetAgentsMayDeployToProductionAsync(false);
+        (await NewOrgAdmin(ctx, tools, fresh).GetToolsViewAsync()).AgentsMayDeployToProduction
+            .Should().BeFalse("turning a protection back on never needs a second factor");
+    }
+
+    [Fact]
     public async Task The_window_must_be_between_a_minute_and_a_day()
     {
         await using var ctx = _db.NewContext();
