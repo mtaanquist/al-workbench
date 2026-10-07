@@ -159,6 +159,232 @@ public sealed class PipelineServiceTests : IDisposable
         (await read.OeReleasePipelines.SingleAsync(r => r.Id == typed)).Name.Should().Be("Hotfixes to Test");
     }
 
+    // ── Names that follow what changed (#1135) ─────────────────────────────
+
+    private const string SalesId = "11111111-1111-1111-1111-111111111111";
+    private const string BaseId = "22222222-2222-2222-2222-222222222222";
+
+    private static string Discovered(string salesName = "CRONUS Sales", string baseName = "CRONUS Base") =>
+        JsonSerializer.Serialize(new[]
+        {
+            new DiscoveredExtension(SalesId, salesName, "CRONUS", "1.0.0.0", "", ""),
+            new DiscoveredExtension(BaseId, baseName, "CRONUS", "1.0.0.0", "", ""),
+        });
+
+    private async Task RediscoverAsync(int projectId, string discoveredJson)
+    {
+        await using (var write = _db.NewContext())
+        {
+            var project = await write.OeProjects.SingleAsync(p => p.Id == projectId);
+            project.DiscoveredExtensionsJson = discoveredJson;
+            await write.SaveChangesAsync();
+        }
+        await using var ctx = _db.NewContext();
+        await NewService(ctx).RefreshGeneratedNamesAsync(projectId);
+    }
+
+    [Fact]
+    public async Task A_renamed_extension_renames_the_pipelines_named_after_it_when_discovery_refreshes()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, Discovered());
+        var svc = NewService(ctx);
+        var buildId = await svc.CreatePipelineAsync(new PipelineInput(projectId, null, [SalesId], Branch: "main"));
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var deployments = new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
+        var deploymentId = await deployments.CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, null, buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await RediscoverAsync(projectId, Discovered(salesName: "CRONUS Sales and Marketing"));
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == buildId);
+        pipeline.Name.Should().Be("main (CRONUS Sales and Marketing)");
+        pipeline.NameIsCustom.Should().BeFalse();
+        (await read.OeReleasePipelines.SingleAsync(r => r.Id == deploymentId)).Name
+            .Should().Be("main (CRONUS Sales and Marketing) to Production");
+    }
+
+    [Fact]
+    public async Task Discovery_leaves_a_typed_name_alone()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, Discovered());
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, "Sales nightly", [SalesId], Branch: "main"));
+
+        await RediscoverAsync(projectId, Discovered(salesName: "CRONUS Sales and Marketing"));
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.Name.Should().Be("Sales nightly");
+        pipeline.NameIsCustom.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Discovery_keeps_the_old_name_when_the_new_one_is_taken()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, Discovered());
+        var svc = NewService(ctx);
+        var sales = await svc.CreatePipelineAsync(new PipelineInput(projectId, null, [SalesId], Branch: "main"));
+        var other = await svc.CreatePipelineAsync(new PipelineInput(projectId, "main (CRONUS Sales and Marketing)", [BaseId], Branch: "main"));
+
+        var act = () => RediscoverAsync(projectId, Discovered(salesName: "CRONUS Sales and Marketing"));
+
+        await act.Should().NotThrowAsync();
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == sales)).Name.Should().Be("main (CRONUS Sales)");
+        (await read.OePipelines.SingleAsync(p => p.Id == other)).Name.Should().Be("main (CRONUS Sales and Marketing)");
+    }
+
+    [Fact]
+    public async Task An_extension_missing_from_a_partial_discovery_does_not_rename_its_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, Discovered());
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, null, [SalesId], Branch: "main"));
+
+        // The repository holding CRONUS Sales failed to clone this time.
+        await RediscoverAsync(projectId, JsonSerializer.Serialize(new[]
+        {
+            new DiscoveredExtension(BaseId, "CRONUS Base", "CRONUS", "1.0.0.0", "", ""),
+        }));
+
+        (await _db.NewContext().OePipelines.SingleAsync(p => p.Id == id)).Name.Should().Be("main (CRONUS Sales)");
+    }
+
+    [Fact]
+    public async Task Refreshing_a_deleted_or_undiscovered_solution_renames_nothing()
+    {
+        await using var ctx = _db.NewContext();
+        var deletedId = await SeedProjectAsync(ctx, Discovered());
+        var deletedPipeline = await NewService(ctx).CreatePipelineAsync(new PipelineInput(deletedId, null, [SalesId], Branch: "main"));
+        await ctx.OeProjects.Where(p => p.Id == deletedId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        var undiscoveredId = await SeedProjectAsync(ctx, Discovered());
+        var undiscoveredPipeline = await NewService(ctx).CreatePipelineAsync(new PipelineInput(undiscoveredId, null, [SalesId], Branch: "main"));
+        await ctx.OeProjects.Where(p => p.Id == undiscoveredId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DiscoveredExtensionsJson, (string?)null));
+
+        await NewService(_db.NewContext()).RefreshGeneratedNamesAsync(deletedId);
+        await NewService(_db.NewContext()).RefreshGeneratedNamesAsync(undiscoveredId);
+
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == deletedPipeline)).Name.Should().Be("main (CRONUS Sales)");
+        (await read.OePipelines.SingleAsync(p => p.Id == undiscoveredPipeline)).Name.Should().Be("main (CRONUS Sales)");
+    }
+
+    [Fact]
+    public async Task Discovery_renames_a_build_pipeline_but_leaves_a_typed_deployment_name_and_a_deleted_pipeline_alone()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, Discovered());
+        var svc = NewService(ctx);
+        var buildId = await svc.CreatePipelineAsync(new PipelineInput(projectId, null, [SalesId], Branch: "main"));
+        var deletedId = await svc.CreatePipelineAsync(new PipelineInput(projectId, null, [SalesId], Branch: "test"));
+        await ctx.OePipelines.Where(p => p.Id == deletedId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var deployments = new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
+        var typed = await deployments.CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, "Sales hotfixes", buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await RediscoverAsync(projectId, Discovered(salesName: "CRONUS Sales and Marketing"));
+
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == buildId)).Name.Should().Be("main (CRONUS Sales and Marketing)");
+        (await read.OePipelines.IgnoreQueryFilters().SingleAsync(p => p.Id == deletedId)).Name.Should().Be("test (CRONUS Sales)");
+        (await read.OeReleasePipelines.SingleAsync(r => r.Id == typed)).Name.Should().Be("Sales hotfixes");
+    }
+
+    [Fact]
+    public async Task Changing_the_branch_drops_a_typed_name_left_as_it_was()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "main - nightly", null, Branch: "main"));
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var deployments = new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
+        var deploymentId = await deployments.CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, null, id, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "main - nightly", null, Branch: "release/26"));
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.Name.Should().Be("release/26");
+        pipeline.NameIsCustom.Should().BeFalse();
+        (await read.OeReleasePipelines.SingleAsync(r => r.Id == deploymentId)).Name.Should().Be("release/26 to Production");
+    }
+
+    [Fact]
+    public async Task Changing_the_extensions_drops_a_typed_name_left_as_it_was()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, Discovered());
+        var svc = NewService(ctx);
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Sales nightly", [SalesId], Branch: "main"));
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Sales nightly", [BaseId], Branch: "main"));
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.Name.Should().Be("main (CRONUS Base)");
+        pipeline.NameIsCustom.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_name_typed_in_the_same_save_as_a_branch_change_is_kept()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "main - nightly", null, Branch: "main"));
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "release/26 - nightly", null, Branch: "release/26"));
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.Name.Should().Be("release/26 - nightly");
+        pipeline.NameIsCustom.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task The_same_branch_and_extensions_written_differently_keep_a_typed_name()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, Discovered());
+        var svc = NewService(ctx);
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "Both nightly", [SalesId, BaseId], Branch: "main"));
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "Both nightly",
+            ["{" + BaseId.ToUpperInvariant() + "}", SalesId], Branch: " main ", PreviewCheck: true));
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.Name.Should().Be("Both nightly");
+        pipeline.NameIsCustom.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_typed_name_stays_when_the_generated_name_for_the_new_branch_is_taken()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var svc = NewService(ctx);
+        await svc.CreatePipelineAsync(new PipelineInput(projectId, null, null, Branch: "release/26"));
+        var id = await svc.CreatePipelineAsync(new PipelineInput(projectId, "main - nightly", null, Branch: "main"));
+
+        await svc.UpdatePipelineAsync(id, new PipelineInput(projectId, "main - nightly", null, Branch: "release/26"));
+
+        await using var read = _db.NewContext();
+        var pipeline = await read.OePipelines.SingleAsync(p => p.Id == id);
+        pipeline.Name.Should().Be("main - nightly");
+        pipeline.NameIsCustom.Should().BeTrue();
+        pipeline.Branch.Should().Be("release/26");
+    }
+
     [Fact]
     public async Task CreatePipelineAsync_rejects_a_duplicate_name_in_the_same_project_case_insensitively()
     {
