@@ -38,4 +38,13 @@ public sealed class BuildConcurrencyAdviceTests
         capacity.Cores.Should().BeGreaterThan(0);
         capacity.Recommended.Should().BeInRange(1, ProjectBuildQueue.MaxConcurrency);
     }
+
+    [Theory]
+    [InlineData("4294967296\n", 4294967296L)]
+    [InlineData("max\n", null)]
+    [InlineData("9223372036854771712", null)] // cgroup v1 with no limit
+    [InlineData("", null)]
+    [InlineData("lots", null)]
+    public void A_container_memory_limit_is_read_from_the_cgroup_file(string text, long? expected) =>
+        BuildConcurrencyAdvice.ParseLimit(text).Should().Be(expected);
 }

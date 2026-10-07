@@ -37,9 +37,40 @@ public static class BuildConcurrencyAdvice
 
     /// <summary>
     /// The figures for this process. <see cref="Environment.ProcessorCount"/> follows the
-    /// container's CPU limit, and the garbage collector's available memory follows its
-    /// memory limit, so both describe the container rather than the machine under it.
+    /// container's CPU limit. Memory is the container's own limit, read from the cgroup
+    /// files, because the garbage collector's figure is its heap limit, which .NET sets
+    /// to 75% of the container's by default and would make a 4 GB container read as 3.
+    /// Outside a container (or with no limit) it is what the runtime says it can use.
     /// </summary>
     public static Capacity ForThisServer() =>
-        For(Environment.ProcessorCount, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
+        For(Environment.ProcessorCount, ContainerMemoryBytes() ?? GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
+
+    private static long? ContainerMemoryBytes() =>
+        ReadLimit("/sys/fs/cgroup/memory.max") ?? ReadLimit("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+
+    /// <summary>
+    /// A cgroup memory limit from <paramref name="text"/>: null for <c>max</c> (cgroup v2's
+    /// "no limit"), for cgroup v1's near-<see cref="long.MaxValue"/> stand-in, or for
+    /// anything unreadable.
+    /// </summary>
+    internal static long? ParseLimit(string? text)
+    {
+        var value = text?.Trim();
+        if (string.IsNullOrEmpty(value) || value == "max") return null;
+        if (!long.TryParse(value, out var bytes) || bytes <= 0) return null;
+        // cgroup v1 writes a page-rounded long.MaxValue when there is no limit.
+        return bytes >= long.MaxValue / 2 ? null : bytes;
+    }
+
+    private static long? ReadLimit(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? ParseLimit(File.ReadAllText(path)) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
 }
