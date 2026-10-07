@@ -833,9 +833,19 @@
     private async Task DeleteAsync(ReleasePipelineRow row)
     {
         if (_deleteConfirm is null) return;
+        WaitingDeploymentCounts waiting;
+        try
+        {
+            waiting = await Releases.CountWaitingDeploymentsAsync(row.Id);
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Failed to count waiting deployments of deployment pipeline {ReleasePipelineId}.", row.Id);
+            waiting = new WaitingDeploymentCounts(0, 0);
+        }
         var confirmed = await _deleteConfirm.OpenAsync(
             "Delete deployment pipeline?",
-            $"Delete \"{row.Name}\"? This removes the deployment target. Build pipelines and past builds are untouched.",
+            DeleteMessage(row.Name, waiting),
             "Delete deployment pipeline");
         if (!confirmed) return;
 
@@ -852,6 +862,28 @@
             Log.LogError(ex, "Failed to delete deployment pipeline {ReleasePipelineId}.", row.Id);
             _error = $"Couldn't delete \"{row.Name}\". Try again, and if it keeps failing tell an administrator.";
         }
+    }
+
+    /// <summary>
+    /// The delete confirmation, saying what happens to deployments still waiting: the
+    /// delete cancels them (#1108), except ones Business Central already holds.
+    /// </summary>
+    internal static string DeleteMessage(string name, WaitingDeploymentCounts waiting)
+    {
+        var text = $"Delete \"{name}\"? This removes the deployment target. Build pipelines and past builds are untouched.";
+        if (waiting.Waiting > 0)
+        {
+            text += waiting.Waiting == 1
+                ? " 1 deployment is waiting to run and will be cancelled."
+                : $" {waiting.Waiting} deployments are waiting to run and will be cancelled.";
+        }
+        if (waiting.HeldByBusinessCentral > 0)
+        {
+            text += waiting.HeldByBusinessCentral == 1
+                ? " 1 deployment is already booked in Business Central and will still install; cancel it from the environment's page if you don't want it."
+                : $" {waiting.HeldByBusinessCentral} deployments are already booked in Business Central and will still install; cancel them from the environment's page if you don't want them.";
+        }
+        return text;
     }
 
     // ── Live polling while something ships ───────────────────────────────────

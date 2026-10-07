@@ -1115,7 +1115,7 @@ public sealed class DeliveryService
             .Where(d => d.ProjectId == projectId
                 && d.ReleasePipeline!.ProjectEnvironmentId == environmentId
                 && d.EnvironmentName == envName
-                && (d.Status == ProjectDeliveryStatus.Scheduled
+                && ((d.Status == ProjectDeliveryStatus.Scheduled && d.ReleasePipeline!.DeletedAt == null)
                     || (d.Status == ProjectDeliveryStatus.HandedOff
                         && !_db.OeProjectDeliveries.Any(o => o.ReleasePipelineId == d.ReleasePipelineId
                             && o.EnvironmentName == envName
@@ -1504,8 +1504,11 @@ public sealed class DeliveryService
     /// </summary>
     public async Task<int> EnqueueDueDeliveriesAsync(DateTime nowUtc, CancellationToken ct = default)
     {
+        await CancelDeletedPipelinesDeliveriesAsync(ct);
         var due = await _db.OeProjectDeliveries.AsNoTracking()
-            .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= nowUtc)
+            // A deleted pipeline's deployments are cancelled with it (#1108); this is the backstop.
+            .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= nowUtc
+                        && d.ReleasePipeline!.DeletedAt == null)
             .Select(d => new { d.Id, d.OrganizationId, d.TriggeredByUserId })
             .ToListAsync(ct);
 
@@ -1516,6 +1519,35 @@ public sealed class DeliveryService
                     d.OrganizationId, _orgContext.IsSystemOrganization, d.TriggeredByUserId)), ct);
         }
         return due.Count;
+    }
+
+    /// <summary>
+    /// Cancels scheduled deliveries whose deployment pipeline is deleted (#1108). The delete
+    /// cancels them itself; this catches one made while the delete was committing, and
+    /// those left behind by deletes from before it did. Compare-and-set, like every cancel.
+    /// </summary>
+    private async Task CancelDeletedPipelinesDeliveriesAsync(CancellationToken ct)
+    {
+        var ids = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ReleasePipeline!.DeletedAt != null)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        if (ids.Count == 0) return;
+        var line = LogLine(ReleasePipelineService.DeletedPipelineReason + ".");
+        foreach (var id in ids)
+        {
+            var now = DateTime.UtcNow;
+            var changed = await _db.OeProjectDeliveries
+                .Where(d => d.Id == id && d.Status == ProjectDeliveryStatus.Scheduled)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(d => d.Status, ProjectDeliveryStatus.Cancelled)
+                    .SetProperty(d => d.FinishedAt, now)
+                    .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line)
+                    .SetProperty(d => d.UpdatedAt, now), ct);
+            if (changed == 0) continue;
+            await MarkAppsNotSentAsync(id, "Not sent: the deployment pipeline was deleted.", ct);
+            _logger.LogInformation("Cancelled scheduled delivery {DeliveryId} because its deployment pipeline was deleted.", id);
+        }
     }
 
     /// <summary>
@@ -1563,7 +1595,8 @@ public sealed class DeliveryService
 
     /// <summary>
     /// Claims the delivery (atomic <c>scheduled → claimed</c>) and runs the publish.
-    /// Returns false if the row was already taken or cancelled, or is not due yet - a job
+    /// Returns false if the row was already taken or cancelled, its pipeline was deleted, or
+    /// it is not due yet - a job
     /// still waiting in the queue for a delivery that was since rescheduled to later must
     /// not run it; the scheduler queues it again when it is due - and true once this call
     /// ran it. All failures are recorded on the row; this method does not throw on a publish
@@ -1574,14 +1607,15 @@ public sealed class DeliveryService
         var claimedAt = DateTime.UtcNow;
         var dueBy = claimedAt + ClaimEarlySlack;
         var claimed = await _db.OeProjectDeliveries
-            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy)
+            .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= dueBy
+                        && d.ReleasePipeline!.DeletedAt == null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.Status, ProjectDeliveryStatus.Claimed)
                 .SetProperty(d => d.ClaimedAt, claimedAt)
                 .SetProperty(d => d.UpdatedAt, claimedAt), ct);
         if (claimed == 0)
         {
-            _logger.LogInformation("Delivery {DeliveryId} was already claimed, cancelled or moved to later; skipping.", deliveryId);
+            _logger.LogInformation("Delivery {DeliveryId} was already claimed, cancelled, moved to later or its pipeline deleted; skipping.", deliveryId);
             return false;
         }
 
