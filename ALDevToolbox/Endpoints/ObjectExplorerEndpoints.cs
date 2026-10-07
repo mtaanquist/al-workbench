@@ -311,6 +311,10 @@ internal static class ObjectExplorerEndpoints
                 var first = ex.Errors.First();
                 RedirectManage(ctx, id, first.Key, first.Value);
             }
+            catch (ProjectAccessDeniedException)
+            {
+                RedirectManage(ctx, id, "Retry", CannotRebuild);
+            }
         })
         .RequireObjectExplorerAuthoring()
         .WithMetadata(new RequestSizeLimitAttribute(MaxUploadBytes))
@@ -334,6 +338,7 @@ internal static class ObjectExplorerEndpoints
             ReleaseManagementService management,
             ReleaseImportRequestService imports,
             PersistedImportJobs persistedJobs,
+            ProjectBuildImporter projectBuilds,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
@@ -372,6 +377,7 @@ internal static class ObjectExplorerEndpoints
                 // Persist the symbols first so they survive even if the rebuild
                 // can't be queued, and so every later build of this project
                 // benefits. Then rebuild this release in place.
+                await projectBuilds.EnsureCanRebuildAsync(id, projectId, "Symbols", ct);
                 await projects.AddSupplementalSymbolsAsync(projectId, uploads, ct);
 
                 await importer.ReopenForRebuildAsync(id, ct);
@@ -385,6 +391,10 @@ internal static class ObjectExplorerEndpoints
             {
                 var first = ex.Errors.First();
                 RedirectManage(ctx, id, first.Key, first.Value);
+            }
+            catch (ProjectAccessDeniedException)
+            {
+                RedirectManage(ctx, id, "Symbols", CannotRebuild);
             }
         })
         .RequireObjectExplorerAuthoring()
@@ -534,6 +544,9 @@ internal static class ObjectExplorerEndpoints
         form.Files.GetFiles(name)
             .Select(f => new UploadedFile(f.FileName, f.Length, f.OpenReadStream))
             .ToList();
+
+    private const string CannotRebuild =
+        "Only someone who can manage this solution can build it again.";
 
     private static void RedirectManage(HttpContext ctx, int releaseId, string errKey, string message)
     {
