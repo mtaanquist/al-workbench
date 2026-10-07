@@ -70,8 +70,9 @@ public abstract record ReleaseImportSource
     /// matching Microsoft symbols, compile each extension with <c>alc</c>, and
     /// ingest the resulting <c>.app</c>s into the (already-created) project
     /// Release. Resumable like <see cref="BcArtifact"/> — the project id is
-    /// enough to re-clone HEAD and rebuild idempotently after a restart, since
-    /// nothing on disk survives. See <c>ProjectBuildService</c>.
+    /// enough to re-clone and rebuild idempotently after a restart, since nothing
+    /// on disk survives; a build that already cloned once checks out the commits it
+    /// recorded then (#1110). See <c>ProjectBuildService</c>.
     /// </summary>
     public sealed record ProjectBuild(int ProjectId) : ReleaseImportSource;
 

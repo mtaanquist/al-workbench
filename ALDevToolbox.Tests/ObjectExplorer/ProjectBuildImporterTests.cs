@@ -499,6 +499,90 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await act.Should().NotThrowAsync();
     }
 
+    // ── Running an existing build again (#1110) ───────────────────────
+
+    [Fact]
+    public async Task A_finished_build_can_be_built_again_when_nothing_else_of_its_pipeline_runs()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
+
+        await act.Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task A_build_is_not_built_again_while_another_build_of_its_pipeline_runs()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Retry");
+    }
+
+    [Fact]
+    public async Task A_build_is_not_built_again_by_someone_who_cannot_manage_its_solution()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await using (var write = _db.NewContext())
+        {
+            var project = await write.OeProjects.SingleAsync(p => p.Id == projectId);
+            project.Visibility = ProjectVisibility.Private;
+            write.Users.Add(new User
+            {
+                Id = 9631, OrganizationId = TestDb.DefaultOrgId, Email = "nils@example.com", PasswordHash = "x",
+                DisplayName = "Nils", Role = UserRole.Editor, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            });
+            await write.SaveChangesAsync();
+        }
+        // An Editor who is not on the private solution's team.
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = 9631;
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
+
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+    }
+
+    [Fact]
+    public async Task A_build_is_not_built_again_by_someone_with_nothing_to_clone_with()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, null, clear: true);
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Symbols");
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Symbols"]
+            .Should().Be(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.GitHub));
+    }
+
+    private async Task FinishAsync(int releaseId)
+    {
+        await SetStatusAsync(releaseId, ProjectBuildStatus.Ready);
+        await using var write = _db.NewContext();
+        var release = await write.OeReleases.SingleAsync(r => r.Id == releaseId);
+        release.Status = "ready";
+        await write.SaveChangesAsync();
+    }
+
     private async Task SetStatusAsync(int releaseId, string status)
     {
         await using var write = _db.NewContext();

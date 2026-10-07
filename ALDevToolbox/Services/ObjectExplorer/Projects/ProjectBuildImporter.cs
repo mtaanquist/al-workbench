@@ -131,6 +131,63 @@ public sealed class ProjectBuildImporter
         && b.BcTarget == ProjectBuildTarget.Current
         && b.Release != null && b.Release.Status == "ingesting";
 
+    /// <summary>
+    /// Refuses to run an existing build again (an admin Retry, the symbol-recovery
+    /// rebuild) when the person could not have started it with Build: they must be able
+    /// to manage its solution, have something to clone each of its repositories with,
+    /// and no other build of its pipeline may be running (#1110). The rebuild clones
+    /// with the person's own credentials and first wipes what the build holds, so the
+    /// refusal has to come before anything is touched.
+    /// </summary>
+    /// <param name="projectId">The solution the release was built from, for a release with no build row.</param>
+    /// <param name="errorKey">The form field a refusal is shown against.</param>
+    public async Task EnsureCanRebuildAsync(int releaseId, int projectId, string errorKey, CancellationToken ct = default)
+    {
+        var build = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.ReleaseId == releaseId)
+            .Select(b => new { b.Id, b.PipelineId, b.ProjectId })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        var solutionId = build?.ProjectId ?? projectId;
+        var solution = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == solutionId && p.DeletedAt == null)
+            .Select(p => new
+            {
+                p.CreatedByUserId,
+                Providers = p.Repositories.Select(r => r.Provider).Distinct().ToList(),
+            })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        await _access.EnsureCanManageAsync(solutionId, solution?.CreatedByUserId, ct).ConfigureAwait(false);
+
+        if (solution is null || solution.Providers.Count == 0)
+        {
+            throw Refuse(solution is null
+                ? "This solution no longer exists."
+                : "Add at least one repository to this solution before building.");
+        }
+
+        if (build is { PipelineId: { } pipelineId }
+            && await _db.OeProjectBuilds.AsNoTracking()
+                .Where(b => b.PipelineId == pipelineId && b.Id != build.Id)
+                .AnyAsync(BlocksManualBuild, ct)
+                .ConfigureAwait(false))
+        {
+            throw Refuse("Another build of this pipeline is running. Wait for it to finish, then try again.");
+        }
+
+        var missing = new List<string>();
+        foreach (var provider in solution.Providers.OrderBy(p => p))
+        {
+            if ((await _credentials.ResolveAsync(provider, ct).ConfigureAwait(false)).Count == 0)
+            {
+                missing.Add(CloneCredentialResolver.NothingToCloneWith(provider));
+            }
+        }
+        if (missing.Count > 0) throw Refuse(string.Join(" ", missing));
+
+        PlanValidationException Refuse(string message) =>
+            new(new Dictionary<string, string> { [errorKey] = message });
+    }
+
     /// <summary>The advisory-lock namespace for manual builds, keyed per pipeline id ("PBLD").</summary>
     private const int ManualBuildLockClass = 0x50_42_4C_44;
 
