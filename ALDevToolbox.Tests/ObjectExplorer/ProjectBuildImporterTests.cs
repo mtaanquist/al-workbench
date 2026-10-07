@@ -466,7 +466,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
         await FinishAsync(first);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId);
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
 
         await act.Should().NotThrowAsync();
     }
@@ -481,7 +481,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await FinishAsync(first);
         await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId);
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Retry");
     }
@@ -509,9 +509,25 @@ public sealed class ProjectBuildImporterTests : IDisposable
         _db.OrgContext.IsSiteAdmin = false;
         _db.OrgContext.CurrentUserId = 9631;
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId);
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Retry");
 
         await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+    }
+
+    [Fact]
+    public async Task A_build_is_not_built_again_by_someone_with_nothing_to_clone_with()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, null, clear: true);
+
+        var act = () => NewImporter(ctx, new ReleaseImportQueue()).EnsureCanRebuildAsync(first, projectId, "Symbols");
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Symbols"]
+            .Should().Be(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.GitHub));
     }
 
     private async Task FinishAsync(int releaseId)

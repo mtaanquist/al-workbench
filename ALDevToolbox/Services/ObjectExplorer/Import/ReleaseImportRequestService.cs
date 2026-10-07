@@ -313,7 +313,7 @@ public sealed class ReleaseImportRequestService
             // Held to the same rules as pressing Build: the person must be able to
             // manage the solution, and no other build of its pipeline may be running.
             // The rerun builds the commits the first run did (#1110).
-            await _projectBuilds.EnsureCanRebuildAsync(releaseId, retryProjectId, ct).ConfigureAwait(false);
+            await _projectBuilds.EnsureCanRebuildAsync(releaseId, retryProjectId, "Retry", ct).ConfigureAwait(false);
             await _importer.ReopenForRebuildAsync(releaseId, ct).ConfigureAwait(false);
             await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
             var buildSource = new ReleaseImportSource.ProjectBuild(retryProjectId);

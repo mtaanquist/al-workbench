@@ -1504,7 +1504,7 @@ public sealed class ProjectBuildService
             $"Could not check out the commit this build was asked to build ({Short(commitSha)}). It may have been replaced since.",
             RepoUrl: repo.Url));
         logs.Add(new PendingLog(repo.Id, repo.DisplayName, $"Could not check out {commitSha}: {detail}".Trim()));
-        _logger.LogWarning("Pull-request build: could not check out {CommitSha} in {Repo}.", commitSha, repo.DisplayName);
+        _logger.LogWarning("Build: could not check out {CommitSha} in {Repo}.", commitSha, repo.DisplayName);
         return false;
     }
 

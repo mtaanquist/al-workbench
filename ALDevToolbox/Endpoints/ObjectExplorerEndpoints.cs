@@ -377,7 +377,7 @@ internal static class ObjectExplorerEndpoints
                 // Persist the symbols first so they survive even if the rebuild
                 // can't be queued, and so every later build of this project
                 // benefits. Then rebuild this release in place.
-                await projectBuilds.EnsureCanRebuildAsync(id, projectId, ct);
+                await projectBuilds.EnsureCanRebuildAsync(id, projectId, "Symbols", ct);
                 await projects.AddSupplementalSymbolsAsync(projectId, uploads, ct);
 
                 await importer.ReopenForRebuildAsync(id, ct);
