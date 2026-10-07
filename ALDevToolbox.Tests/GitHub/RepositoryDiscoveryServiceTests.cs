@@ -124,6 +124,33 @@ public sealed class RepositoryDiscoveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_test_app_outside_a_test_folder_does_not_name_the_repository()
+    {
+        // "App.Test" sorts before "Payment" and no folder rule catches it; its
+        // dependency on the test framework does (#1193).
+        await ReadyAsync();
+        var api = SweepableApi()
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.OK,
+                TreeJson(("App.Test/app.json", "blob"), ("Payment/app.json", "blob")))
+            .On(HttpMethod.Get, $"/repos/{RepoB}/git/trees/main", HttpStatusCode.OK, TreeJson())
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/App.Test/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("App.Test/app.json", """
+                    {"id":"1c0ffee0-0000-4000-8000-000000000009","name":"Payment Import Test","publisher":"CRONUS","version":"1.0.0.0",
+                     "dependencies":[{"id":"23de40a6-dfe8-4f80-80db-d70f83ce8caf","name":"Test Runner","publisher":"Microsoft","version":"27.0.0.0"}]}
+                    """))
+            .On(HttpMethod.Get, $"/repos/{RepoA}/contents/Payment/app.json", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson("Payment/app.json", ManifestA));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.SweepCurrentOrganisationAsync()).Should().Be(1);
+        await using var read = _db.NewContext();
+        var row = await read.GitHubRepositoryCandidates.SingleAsync();
+        row.AppName.Should().Be("Payment Import");
+        row.AppJsonPath.Should().Be("Payment/app.json");
+    }
+
+    [Fact]
     public async Task The_probe_and_the_manifest_read_both_carry_the_installation_token()
     {
         await ReadyAsync();

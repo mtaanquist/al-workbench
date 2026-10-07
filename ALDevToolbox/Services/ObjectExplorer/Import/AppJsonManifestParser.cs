@@ -71,7 +71,8 @@ public static class AppJsonManifestParser
         || TestFolderSuffixes.Any(suf => segment.EndsWith(suf, StringComparison.OrdinalIgnoreCase));
 
     // Microsoft's test framework apps, by id, so a test app is recognised whatever its
-    // folder is called (#1130). Names stand in for a manifest that leaves the id out.
+    // folder is called (#1130). Names stand in only for a dependency that leaves the id
+    // out: another publisher's app may well be called "Any" or "Test Runner" (#1193).
     private static readonly HashSet<string> TestFrameworkAppIds = new(StringComparer.OrdinalIgnoreCase)
     {
         "dd0be2ea-f733-4d65-bb34-a28f4624fb14", // Library Assert
@@ -96,8 +97,13 @@ public static class AppJsonManifestParser
     /// folder holding it is called (#1130). A shipped extension never needs them.
     /// </summary>
     public static bool IsTestApp(AppJsonManifest manifest) =>
-        manifest.Dependencies.Any(d => TestFrameworkAppIds.Contains(d.Id.Trim('{', '}', ' '))
-            || TestFrameworkAppNames.Contains(d.Name.Trim()));
+        manifest.Dependencies.Any(d =>
+        {
+            var id = d.Id.Trim('{', '}', ' ');
+            return id.Length > 0
+                ? TestFrameworkAppIds.Contains(id)
+                : TestFrameworkAppNames.Contains(d.Name.Trim());
+        });
 
     /// <summary>True when a walk should not descend into <paramref name="segment"/> at all.</summary>
     public static bool IsExcludedSegment(string segment) => ExcludedFolderNames.Contains(segment);
