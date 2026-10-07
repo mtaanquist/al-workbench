@@ -2396,7 +2396,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// or Entra rejects the credentials — the worker records that as the failure reason.
     /// See <c>.design/saas-delivery.md</c> ("Authentication", "Expired-secret behaviour").
     /// </summary>
-    public async Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, CancellationToken ct = default)
+    public Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, CancellationToken ct = default) =>
+        AcquireDeliveryContextAsync(projectId, forceRefresh: false, ct);
+
+    /// <inheritdoc cref="IDeliveryTokenSource.AcquireDeliveryContextAsync(int, bool, CancellationToken)"/>
+    public async Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, bool forceRefresh, CancellationToken ct = default)
     {
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
@@ -2415,7 +2419,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 : "This solution's own Business Central client secret has expired. Rotate it in Entra and re-enter it on the solution's Business Central tab, or switch the solution to your organisation's app registration there.");
         }
 
-        var token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, ct: ct)
+        var token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh, ct)
             .ConfigureAwait(false);
         return new BcDeliveryContext(token, creds.TenantId);
     }
