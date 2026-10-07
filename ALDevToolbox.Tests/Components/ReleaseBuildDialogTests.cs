@@ -97,6 +97,7 @@ public sealed class ReleaseBuildDialogTests : IDisposable
             new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
             new ALDevToolbox.Services.Tools.ToolEnablement(TestDb.EverythingEnabled(),
                 new Microsoft.AspNetCore.Http.HttpContextAccessor(), db, org, TimeProvider.System),
+            TimeProvider.System,
             NullLogger<DeliveryService>.Instance);
     }
 

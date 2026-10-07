@@ -49,11 +49,23 @@ public sealed class DeliveryWorker : QueueDrainWorker<DeliveryJob>
         if (await deliveries.RunDeliveryAsync(job.DeliveryId, ct).ConfigureAwait(false))
         {
             // Only when this run claimed it, so a delivery another run already took is
-            // never announced twice (#1036). The notifier never throws.
+            // never announced twice (#1036). A run cut off by a shutdown has saved its
+            // failure, and nothing after the restart reports it, so the notification gets a
+            // short grace once shutdown starts, whether it began before or after (#1179).
+            // The notifier never throws.
+            using var grace = new CancellationTokenSource();
+            using var onShutdown = ct.Register(() => grace.CancelAfter(ShutdownNotifyGrace));
             await scope.ServiceProvider.GetRequiredService<Notifications.DeploymentNotifier>()
-                .NotifyAsync(job.DeliveryId, ct).ConfigureAwait(false);
+                .NotifyAsync(job.DeliveryId, grace.Token).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// How long a deployment's notification may take once shutdown has started. Short:
+    /// the lanes stop one after another, and <c>docker stop</c> kills the process ten
+    /// seconds after asking it to stop.
+    /// </summary>
+    private static readonly TimeSpan ShutdownNotifyGrace = TimeSpan.FromSeconds(3);
 
     protected override void OnJobFinished(DeliveryJob job) => _queue.Complete(job.DeliveryId);
 

@@ -146,6 +146,7 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
 
     private readonly ConcurrentDictionary<string, HeadMark> _latestSha = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _running = new(StringComparer.Ordinal);
+    private readonly TimeProvider _clock;
 
     /// <summary>How many deliveries the queue holds before the endpoint refuses more.</summary>
     public const int Capacity = 128;
@@ -155,7 +156,9 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     // A busy organisation pushing to a hundred pull requests at once still queues;
     // beyond that the endpoint refuses, and GitHubWebhookRecoveryScheduler asks
     // GitHub to resend once there is room (#1121).
-    public GitHubWebhookQueue() : base(capacity: Capacity) { }
+    public GitHubWebhookQueue(TimeProvider clock) : base(capacity: Capacity) => _clock = clock;
+
+    public GitHubWebhookQueue() : this(TimeProvider.System) { }
 
     /// <summary>How many deliveries are waiting for the worker right now.</summary>
     public int Backlog => Reader.Count;
@@ -266,7 +269,7 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
                 .Remove(new KeyValuePair<string, HeadMark>(key, latest));
         }
 
-        var cutoff = DateTimeOffset.UtcNow - KeepDatedHeadsFor;
+        var cutoff = _clock.GetUtcNow() - KeepDatedHeadsFor;
         foreach (var entry in _latestSha)
         {
             if (entry.Value.UpdatedAt < cutoff && !_running.ContainsKey(entry.Key))
