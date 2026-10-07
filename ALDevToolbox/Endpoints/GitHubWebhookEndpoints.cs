@@ -211,7 +211,7 @@ public static class GitHubWebhookEndpoints
             // cancel the build running for the previous head on the strength of a
             // job that then never arrived, leaving the pull request with no answer
             // at all.
-            queue.Announce(job.Key, job.HeadSha);
+            queue.Announce(job.Key, job.HeadSha, job.UpdatedAt);
 
             log.LogInformation(
                 "Queued a pull-request build for {Repository}#{Number} at {HeadSha} (installation {InstallationId}, delivery {DeliveryId}).",
@@ -437,7 +437,14 @@ public static class GitHubWebhookEndpoints
                 BaseRef: baseRef ?? string.Empty,
                 DeliveryId: deliveryId,
                 AuthorLogin: authorLogin ?? string.Empty,
-                IsMemberFork: isMemberFork);
+                IsMemberFork: isMemberFork,
+                // Moves forward with every push to the pull request, so the queue can
+                // tell which of two deliveries is newer whichever arrived first (#1120).
+                UpdatedAt: Text(pullRequest, "updated_at") is { } updated
+                           && DateTimeOffset.TryParse(updated, System.Globalization.CultureInfo.InvariantCulture,
+                               System.Globalization.DateTimeStyles.None, out var updatedAt)
+                    ? updatedAt
+                    : null);
         }
         catch (JsonException ex)
         {

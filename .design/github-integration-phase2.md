@@ -560,7 +560,11 @@ on every pull request, inline in the Files tab.
   `CancellationTokenSource` of the build in flight for that key: announcing a newer
   SHA cancels the running build, and a job dequeued for an older SHA is skipped. A
   key it has never heard of counts as current, so a restart's lost bookkeeping
-  builds rather than refuses. The superseded build is recorded as failed with
+  builds rather than refuses. The record only moves forward: each delivery carries the
+  pull request's `updated_at`, a head older than the one recorded is not announced, and
+  the swap is a compare-and-set, so two deliveries handled at once (GitHub does not
+  promise order) cannot leave the older head as the latest (#1120); a built head is remembered
+  for the three days the resend sweep looks back, so a late redelivery of an older one is still recognised. The superseded build is recorded as failed with
   "Superseded by a newer commit on the same pull request" - the newer job carries
   its own check run.
 - **No durable job row for a pull-request build.** `StartPullRequestBuildAsync`
