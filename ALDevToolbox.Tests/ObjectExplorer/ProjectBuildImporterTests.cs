@@ -636,12 +636,37 @@ public sealed class ProjectBuildImporterTests : IDisposable
         job.JobRowId.Should().NotBe(0, "the rebuild resumes after a restart like any build");
     }
 
+    // A second Retry while the first is still queued, or a maintenance job on the
+    // same release, would run beside it now that builds have workers of their own (#1137).
+    [Fact]
+    public async Task A_build_is_not_rebuilt_while_a_job_for_it_is_still_waiting()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await NewImporter(ctx, new ProjectBuildQueue()).QueueRebuildAsync(first, projectId);
+        // The build row is ready again, as after a refused or failed earlier attempt.
+        await SetStatusAsync(first, ProjectBuildStatus.Ready);
+
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Retry"]
+            .Should().Contain("already being worked on");
+    }
+
     private async Task FinishAsync(int releaseId)
     {
         await SetStatusAsync(releaseId, ProjectBuildStatus.Ready);
         await using var write = _db.NewContext();
         var release = await write.OeReleases.SingleAsync(r => r.Id == releaseId);
         release.Status = "ready";
+        // As the worker does once a build is done.
+        foreach (var job in await write.OeImportJobs.Where(j => j.ReleaseId == releaseId).ToListAsync())
+        {
+            job.Status = "completed";
+        }
         await write.SaveChangesAsync();
     }
 

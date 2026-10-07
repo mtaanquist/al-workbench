@@ -197,6 +197,18 @@ public sealed class ProjectBuildImporter
                 throw Refuse("Another build of this pipeline is running. Wait for it to finish, then try again.");
             }
 
+            // Whatever the pipeline, one job at a time per release: a second Retry, or a
+            // maintenance job on the same release, would otherwise run beside this one now
+            // that builds and imports have workers of their own (#1137).
+            await _db.Database.ExecuteSqlAsync(
+                $"SELECT pg_advisory_xact_lock({RebuildLockClass}, {releaseId})", ct).ConfigureAwait(false);
+            if (await _db.OeImportJobs.AsNoTracking()
+                    .AnyAsync(j => j.ReleaseId == releaseId && (j.Status == "queued" || j.Status == "running"), ct)
+                    .ConfigureAwait(false))
+            {
+                throw Refuse("This build is already being worked on. Wait for that to finish, then try again.");
+            }
+
             if (build is not null)
             {
                 await _db.OeProjectBuilds
@@ -218,6 +230,9 @@ public sealed class ProjectBuildImporter
 
     /// <summary>The advisory-lock namespace for manual builds, keyed per pipeline id ("PBLD").</summary>
     private const int ManualBuildLockClass = 0x50_42_4C_44;
+
+    // "PBRL": one rebuild or maintenance job per release at a time.
+    private const int RebuildLockClass = 0x50_42_52_4C;
 
     /// <summary>
     /// Opens a transaction holding a lock on <paramref name="pipelineId"/> that a second
