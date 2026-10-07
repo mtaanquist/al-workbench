@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
@@ -75,6 +76,7 @@ public sealed class ProjectBuildService
 
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
+    private readonly ProjectAccess _access;
     private readonly BcArtifactService _artifacts;
     private readonly ReleaseImportService _importer;
     private readonly AlCompilerProvisioner _compiler;
@@ -87,6 +89,7 @@ public sealed class ProjectBuildService
     public ProjectBuildService(
         AppDbContext db,
         IOrganizationContext orgContext,
+        ProjectAccess access,
         BcArtifactService artifacts,
         ReleaseImportService importer,
         AlCompilerProvisioner compiler,
@@ -98,6 +101,7 @@ public sealed class ProjectBuildService
     {
         _db = db;
         _orgContext = orgContext;
+        _access = access;
         _artifacts = artifacts;
         _importer = importer;
         _compiler = compiler;
@@ -136,6 +140,10 @@ public sealed class ProjectBuildService
         // persistence then no-ops, leaving the old per-app report as the record.
         var build = await _db.OeProjectBuilds
             .FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
+        if (build is { Trigger: ProjectBuildTrigger.Push or ProjectBuildTrigger.PreviewCheck })
+        {
+            await EnsureAutomationStillOnAsync(build, project.CreatedByUserId, ct).ConfigureAwait(false);
+        }
         if (build is not null)
         {
             build.Status = ProjectBuildStatus.Building;
@@ -991,6 +999,47 @@ public sealed class ProjectBuildService
         build.BcVersion = bcVersion ?? build.BcVersion;
         build.FinishedAt = _clock.GetUtcNow().UtcDateTime;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Refuses a build the pipeline started on its own once that is no longer what the
+    /// pipeline asks for. Pipeline state and access are checked when the build is
+    /// queued, but up to five can wait behind a running one (#1112): in the meantime the
+    /// pipeline may have been deleted, the setting turned off, someone else may have
+    /// taken the automatic builds over, or the person they run as may have lost access.
+    /// None of those should still clone with that person's credentials, publish a
+    /// release or prepare a deployment. The worker fails the build with the reason.
+    /// </summary>
+    private async Task EnsureAutomationStillOnAsync(OeProjectBuild build, int? projectOwnerId, CancellationToken ct)
+    {
+        var push = build.Trigger == ProjectBuildTrigger.Push;
+        var pipeline = build.PipelineId is not { } pipelineId ? null : await _db.OePipelines.AsNoTracking()
+            .Where(p => p.Id == pipelineId && p.DeletedAt == null)
+            .Select(p => new
+            {
+                On = push ? p.BuildOnPush : p.PreviewCheck,
+                RunsAs = push ? p.BuildOnPushByUserId : p.PreviewCheckByUserId,
+            })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+
+        string? reason;
+        if (pipeline is null)
+            reason = "The pipeline was deleted before this build started.";
+        else if (!pipeline.On)
+            reason = push
+                ? "Building automatically on push was turned off before this build started."
+                : "The nightly preview check was turned off before this build started.";
+        else if (pipeline.RunsAs != build.StartedByUserId)
+            reason = "Someone else took over this pipeline's automatic builds before this build started.";
+        else if (build.StartedByUserId is not { } userId
+                 || !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct).ConfigureAwait(false))
+            reason = "The person this build runs as no longer has an active account.";
+        else if (!await _access.CanManageAsync(build.ProjectId, projectOwnerId, ct).ConfigureAwait(false))
+            reason = "The person this build runs as can no longer manage this solution.";
+        else
+            return;
+
+        throw new PlanValidationException(new Dictionary<string, string> { ["Build"] = reason });
     }
 
     /// <summary>
