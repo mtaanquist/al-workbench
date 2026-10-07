@@ -338,6 +338,26 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Editing_a_deleted_deployment_pipeline_is_not_reported_as_a_name_clash()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId);
+        var svc = NewService(ctx);
+        var input = new ReleasePipelineInput(projectId, "Production", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add);
+        var id = await svc.CreateReleasePipelineAsync(input);
+        await svc.SoftDeleteReleasePipelineAsync(id);
+
+        var act = () => svc.UpdateReleasePipelineAsync(id, input);
+
+        // The editor opens a custom-name field for any Name error, so this must not be one.
+        var errors = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors;
+        errors.Should().NotContainKey("Name");
+        errors["ReleasePipeline"].Should().Be("This deployment pipeline no longer exists.");
+    }
+
+    [Fact]
     public async Task ListReleasePipelinesAsync_resolves_source_and_target_names()
     {
         await using var ctx = _db.NewContext();

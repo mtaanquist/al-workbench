@@ -12,7 +12,8 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// against the commit the build pinned (<c>oe_project_build_repo_commits</c>).
 ///
 /// <para>Read-only and passive. Nothing here asks GitHub anything and nothing is
-/// built: a person reads the answer and decides whether to press Build. The
+/// built: a person reads the answer and decides whether to press Build (a pipeline
+/// that builds on push is built on each push instead, see <see cref="PushBuildService"/>, #1079). The
 /// comparison is by commit SHA only - a force push makes any count of commits
 /// meaningless, and the head row's <c>forced</c> flag is what says so. See
 /// <c>.design/github-integration-phase2.md</c>, "Branch watching" (#963).</para>
