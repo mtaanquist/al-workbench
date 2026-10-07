@@ -4,7 +4,8 @@ namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 /// Which builds a deployment pipeline with a branch rule accepts. A branch is the one
 /// the build pipeline checked out, as recorded on the build; null on either side means
 /// the repositories' default branch, which is what a build pipeline with no branch
-/// builds. Branch names are compared exactly, the way git does. See
+/// builds. Branch names are compared exactly, the way git does, after "the default
+/// branch" is read as the branch it was where that is known (#1129). See
 /// <c>.design/saas-delivery.md</c>, "Which branch may reach an environment".
 /// </summary>
 public static class DeploymentBranchRule
@@ -18,16 +19,18 @@ public static class DeploymentBranchRule
     /// it is, so a build pipeline that names <c>main</c> and a deployment pipeline that
     /// allows the default branch agree when <c>main</c> is the default, and the other way
     /// round (#1129). <paramref name="buildDefaultBranches"/> is what the build found the
-    /// repositories on when it named no branch; <paramref name="solutionDefaultBranches"/>
-    /// is each repository's default branch as GitHub last reported it. A default branch
-    /// counts only when every repository agrees on one name; when nothing says which it
-    /// is, the names are compared as written.
+    /// repositories on when it named no branch: only what the build itself recorded
+    /// counts on its side, since the default may have changed since it was made.
+    /// <paramref name="solutionDefaultBranches"/> is each repository's default branch as
+    /// GitHub last reported it, empty unless every repository has reported. A default
+    /// branch counts only when the names agree on one; when nothing says which it is,
+    /// the names are compared as written.
     /// </summary>
     public static bool Allows(string? allowedBranch, string? buildBranch,
         IReadOnlyCollection<string> buildDefaultBranches, IReadOnlyCollection<string> solutionDefaultBranches)
     {
         if (Allows(allowedBranch, buildBranch)) return true;
-        var built = Resolve(buildBranch, buildDefaultBranches.Count > 0 ? buildDefaultBranches : solutionDefaultBranches);
+        var built = Resolve(buildBranch, buildDefaultBranches);
         var allowed = Resolve(allowedBranch, solutionDefaultBranches);
         return built is not null && string.Equals(built, allowed, StringComparison.Ordinal);
     }
@@ -44,6 +47,15 @@ public static class DeploymentBranchRule
         var distinct = defaults.Select(d => d.Trim()).Where(d => d.Length > 0).Distinct(StringComparer.Ordinal).ToList();
         return distinct.Count == 1 ? distinct[0] : null;
     }
+
+    /// <summary>
+    /// <see cref="Describe(string?)"/> for a build, naming the default branch it was on
+    /// when it recorded one: "the repositories' default branch (main)".
+    /// </summary>
+    public static string DescribeBuild(string? branch, IReadOnlyCollection<string> recordedDefaults) =>
+        Normalize(branch) is null && Resolve(null, recordedDefaults) is { } name
+            ? $"the repositories' default branch ({name})"
+            : Describe(branch);
 
     /// <summary>The branch as a person reads it: "branch release/25.0", or "the repositories' default branch".</summary>
     public static string Describe(string? branch) =>

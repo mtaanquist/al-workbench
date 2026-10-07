@@ -15,12 +15,25 @@ public sealed class DeploymentBranchRuleTests
 
     [Theory]
     [InlineData(null, "main", true)]
-    [InlineData("main", null, true)]
     [InlineData(null, "develop", false)]
-    [InlineData("develop", null, false)]
-    public void The_default_branch_is_the_branch_it_names(string? allowed, string? built, bool expected) =>
+    public void A_pipeline_allowing_the_default_branch_reads_it_as_the_solutions_default(string? allowed, string? built, bool expected) =>
         DeploymentBranchRule.Allows(allowed, built, buildDefaultBranches: None, solutionDefaultBranches: Main)
             .Should().Be(expected);
+
+    [Theory]
+    [InlineData("main", true)]
+    [InlineData("develop", false)]
+    public void A_default_branch_build_reads_as_the_branch_it_recorded(string allowed, bool expected) =>
+        DeploymentBranchRule.Allows(allowed, null, buildDefaultBranches: Main, solutionDefaultBranches: None)
+            .Should().Be(expected);
+
+    [Fact]
+    public void A_build_that_recorded_nothing_is_not_read_as_todays_default()
+    {
+        // The default may have been another branch when it was built.
+        DeploymentBranchRule.Allows("main", null, buildDefaultBranches: None, solutionDefaultBranches: Main)
+            .Should().BeFalse();
+    }
 
     [Fact]
     public void What_the_build_found_wins_over_what_github_last_said()
@@ -47,6 +60,15 @@ public sealed class DeploymentBranchRuleTests
     public void The_recorded_default_branches_are_split_on_commas()
     {
         DeploymentBranchRule.SplitRecorded("main, master").Should().Equal("main", "master");
+        DeploymentBranchRule.SplitRecorded(" , main, ").Should().Equal("main");
         DeploymentBranchRule.SplitRecorded(null).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_refused_default_branch_build_names_the_branch_it_was_on()
+    {
+        DeploymentBranchRule.DescribeBuild(null, Main).Should().Be("the repositories' default branch (main)");
+        DeploymentBranchRule.DescribeBuild(null, ["main", "master"]).Should().Be("the repositories' default branch");
+        DeploymentBranchRule.DescribeBuild("release/25.0", Main).Should().Be("branch release/25.0");
     }
 }

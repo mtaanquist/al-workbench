@@ -248,7 +248,10 @@ public sealed class ProjectBuildService
 
             // A build of the default branch records which branch that was, so the
             // pipeline can name it. A pull-request build is labelled by its head ref.
-            if (build is not null && build.Branch is null && build.Trigger != ProjectBuildTrigger.PullRequest)
+            // A rerun builds its first run's commits, so it keeps the first run's answer
+            // (the deployment branch rule reads it, #1129).
+            if (build is not null && build.Branch is null && build.Trigger != ProjectBuildTrigger.PullRequest
+                && (build.DefaultBranch is null || options.PinnedCommits is null))
             {
                 var names = clones.Select(c => c.Branch).OfType<string>().Distinct(StringComparer.Ordinal).ToList();
                 build.DefaultBranch = names.Count == 0 ? null : Truncate(string.Join(", ", names), 250);

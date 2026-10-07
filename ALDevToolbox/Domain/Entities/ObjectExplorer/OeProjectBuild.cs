@@ -67,7 +67,8 @@ public class OeProjectBuild
     /// read from each clone, so a build of the default branch can still say which one
     /// that was. Several names, comma-separated, when repositories differ. Null for a
     /// pull-request build, a build that named its branch, and builds made before this
-    /// was recorded. Display only: the deployment branch rule reads <see cref="Branch"/>.
+    /// was recorded. The deployment branch rule reads it as the branch a default-branch
+    /// build came from (#1129); a rerun keeps its first run's value.
     /// </summary>
     public string? DefaultBranch { get; set; }
 

@@ -1987,13 +1987,17 @@ public sealed class DeliveryServiceTests : IDisposable
 
     [Theory]
     // The deployment pipeline allows the default branch; the build pipeline names it.
-    [InlineData(null, "main", null, true)]
-    [InlineData(null, "develop", null, false)]
+    [InlineData(null, "main", null, false, true)]
+    [InlineData(null, "develop", null, false, false)]
+    // A second repository that never reported could have another default branch.
+    [InlineData(null, "main", null, true, false)]
     // The other way round: the build recorded which branch "default" was.
-    [InlineData("main", null, "main", true)]
-    [InlineData("main", null, "master", false)]
+    [InlineData("main", null, "main", false, true)]
+    [InlineData("main", null, "master", false, false)]
+    // A build that recorded nothing is not read as today's default.
+    [InlineData("main", null, null, false, false)]
     public async Task The_branch_rule_reads_the_default_branch_as_the_branch_it_is(
-        string? allowed, string? built, string? builtDefault, bool accepted)
+        string? allowed, string? built, string? builtDefault, bool silentRepository, bool accepted)
     {
         await using var ctx = _db.NewContext();
         var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
@@ -2016,6 +2020,15 @@ public sealed class DeliveryServiceTests : IDisposable
             Branch = "main", HeadSha = new string('a', 40), PushedAt = DateTime.UtcNow,
             IsDefaultBranch = true, UpdatedAt = DateTime.UtcNow,
         });
+        if (silentRepository)
+        {
+            ctx.OeProjectRepositories.Add(new OeProjectRepository
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId,
+                Provider = RepositoryProvider.GitHub, Url = "https://github.com/cronus-dk/cronus-extras.git",
+                DisplayName = "cronus-extras",
+            });
+        }
         await ctx.SaveChangesAsync();
 
         var act = () => NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
