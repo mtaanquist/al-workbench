@@ -211,8 +211,9 @@ unchanged. The lifecycle is wrapped in `OeProjectBuild`:
 2. The worker runs `BuildAsync`, which now also:
    - clones each repo with the **triggering user's** token and records HEAD per repo
      (`OeProjectBuildRepoCommit`);
-   - computes the changelog per repo as `git log <prev>..<new>` against the project's **last
-     successful build**, with a merge-base ancestry check and guards for first-build /
+   - computes the changelog per repo as `git log <prev>..<new>` against the **pipeline's last
+     successful build** (each pipeline clones only its own branch, so another pipeline's commit
+     is usually not in the clone; preview and pull-request builds are never the baseline), with a merge-base ancestry check and guards for first-build /
      force-push (non-ancestor) / very large ranges (cap ~100, "…and N more")
      (`OeProjectBuildCommit`);
    - captures clone + `alc` output (`OeProjectBuildLog`);
