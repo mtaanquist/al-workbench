@@ -468,8 +468,6 @@ public sealed class ReleasePipelineService
         var id = pipeline.Id;
         var userId = _orgContext.CurrentUserId;
         var now = DateTime.UtcNow;
-        var line = now.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
-                   + "  " + reason + "." + Environment.NewLine;
 
         await using var tx = await _db.Database.BeginTransactionAsync(ct);
         mark(pipeline, now);
@@ -477,30 +475,19 @@ public sealed class ReleasePipelineService
         await _db.SaveChangesAsync(ct);
 
         // Prepared ones first: one approved in between becomes scheduled, and the next
-        // pass still catches it. Anything that slips past both (a deployment made while
-        // this commits) is cancelled by the scheduler's sweep.
+        // pass still catches it. Anything that slips past both (a deployment made or
+        // prepared while this commits) is set aside the same way by the scheduler's sweep.
         var dismissed = await _db.OeProjectDeliveries
             .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.Proposed)
             .Select(d => d.Id)
             .ToListAsync(ct);
-        dismissed = await SetAsideAsync(dismissed, ProjectDeliveryStatus.Proposed, ProjectDeliveryStatus.Dismissed, ct);
+        dismissed = await SetAsideForStoppedPipelineAsync(_db, dismissed, ProjectDeliveryStatus.Proposed, reason, userId, now, ct);
 
         var cancelled = await _db.OeProjectDeliveries
             .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.Scheduled)
             .Select(d => d.Id)
             .ToListAsync(ct);
-        cancelled = await SetAsideAsync(cancelled, ProjectDeliveryStatus.Scheduled, ProjectDeliveryStatus.Cancelled, ct);
-
-        var setAside = cancelled.Concat(dismissed).ToList();
-        if (setAside.Count > 0)
-        {
-            await _db.OeProjectDeliveryResults
-                .Where(r => setAside.Contains(r.ProjectDeliveryId) && r.Status == ProjectDeliveryResultStatus.Pending)
-                .ExecuteUpdateAsync(u => u
-                    .SetProperty(r => r.Status, ProjectDeliveryResultStatus.Skipped)
-                    .SetProperty(r => r.Message, "Not sent: " + reason.ToLowerInvariant() + ".")
-                    .SetProperty(r => r.UpdatedAt, now), ct);
-        }
+        cancelled = await SetAsideForStoppedPipelineAsync(_db, cancelled, ProjectDeliveryStatus.Scheduled, reason, userId, now, ct);
         await tx.CommitAsync(ct);
 
         // A deployment waiting on a stopped pipeline can no longer be approved from anywhere.
@@ -514,27 +501,56 @@ public sealed class ReleasePipelineService
         {
             _logger.LogInformation("Dismissed prepared delivery {DeliveryId} because its deployment pipeline {ReleasePipelineId} was {Verb}.", deliveryId, id, verb);
         }
+    }
 
-        // Each one moves only if it is still in the state it was read in, so a deployment
-        // a worker claimed in between runs on rather than being cancelled under it.
-        async Task<List<int>> SetAsideAsync(List<int> ids, string from, string to, CancellationToken token)
+    /// <summary>
+    /// Sets aside deployments of a stopped (deleted or disabled) pipeline: each of
+    /// <paramref name="ids"/> still <paramref name="from"/> is dismissed (prepared) or
+    /// cancelled (scheduled) with <paramref name="reason"/>, and its apps are marked as not
+    /// sent. Each one moves only if it is still in the state it was read in, so a deployment
+    /// a worker claimed in between runs on rather than being cancelled under it. Shared by
+    /// the delete and disable and by the scheduler's backstop
+    /// (<see cref="DeliveryService.EnqueueDueDeliveriesAsync"/>) so both leave the same
+    /// record (#1179). Returns the ids it moved; closing the approval requests of the
+    /// dismissed ones is the caller's, once any transaction has committed.
+    /// </summary>
+    internal static async Task<List<int>> SetAsideForStoppedPipelineAsync(
+        AppDbContext db, IReadOnlyList<int> ids, string from, string reason, int? byUserId, DateTime now, CancellationToken ct)
+    {
+        var to = from switch
         {
-            var moved = new List<int>(ids.Count);
-            foreach (var deliveryId in ids)
-            {
-                var changed = await _db.OeProjectDeliveries
-                    .Where(d => d.Id == deliveryId && d.Status == from)
-                    .ExecuteUpdateAsync(u => u
-                        .SetProperty(d => d.Status, to)
-                        .SetProperty(d => d.CancelledByUserId, userId)
-                        .SetProperty(d => d.DismissReason, to == ProjectDeliveryStatus.Dismissed ? reason : null)
-                        .SetProperty(d => d.FinishedAt, now)
-                        .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line)
-                        .SetProperty(d => d.UpdatedAt, now), token);
-                if (changed > 0) moved.Add(deliveryId);
-            }
-            return moved;
+            ProjectDeliveryStatus.Proposed => ProjectDeliveryStatus.Dismissed,
+            ProjectDeliveryStatus.Scheduled => ProjectDeliveryStatus.Cancelled,
+            _ => throw new ArgumentOutOfRangeException(nameof(from), from, "Only prepared and scheduled deployments are set aside."),
+        };
+        var dismissReason = to == ProjectDeliveryStatus.Dismissed ? reason : null;
+        var line = now.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
+                   + "  " + reason + "." + Environment.NewLine;
+
+        var moved = new List<int>(ids.Count);
+        foreach (var deliveryId in ids)
+        {
+            var changed = await db.OeProjectDeliveries
+                .Where(d => d.Id == deliveryId && d.Status == from)
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(d => d.Status, to)
+                    .SetProperty(d => d.CancelledByUserId, byUserId)
+                    .SetProperty(d => d.DismissReason, dismissReason)
+                    .SetProperty(d => d.FinishedAt, now)
+                    .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line)
+                    .SetProperty(d => d.UpdatedAt, now), ct);
+            if (changed > 0) moved.Add(deliveryId);
         }
+        if (moved.Count > 0)
+        {
+            await db.OeProjectDeliveryResults
+                .Where(r => moved.Contains(r.ProjectDeliveryId) && r.Status == ProjectDeliveryResultStatus.Pending)
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(r => r.Status, ProjectDeliveryResultStatus.Skipped)
+                    .SetProperty(r => r.Message, "Not sent: " + reason.ToLowerInvariant() + ".")
+                    .SetProperty(r => r.UpdatedAt, now), ct);
+        }
+        return moved;
     }
 
     /// <summary>Why a deployment was set aside when its pipeline was deleted, for its history.</summary>

@@ -258,6 +258,47 @@ public sealed class ReleaseManagementServiceTests : IDisposable
             .Should().BeFalse("the module cascade wiped the dependent file rows");
     }
 
+    // A wipe or a delete reclaims the source blobs nothing references any more. One
+    // that another import has just stored for its own files must survive it, or that
+    // import fails on the foreign key when it saves them (#1181).
+    [Fact]
+    public async Task ClearIngestedDataAsync_leaves_a_blob_another_import_is_saving()
+    {
+        var id = await SeedReleaseAsync(label: "Shared source");
+        List<OeFileContent> blobs;
+        await using (var read = _db.NewContext())
+        {
+            var hashes = await read.OeModuleFiles.AsNoTracking()
+                .Where(f => f.Module!.ReleaseId == id).Select(f => f.ContentHash).Distinct().ToListAsync();
+            blobs = await read.OeFileContents.AsNoTracking().Where(c => hashes.Contains(c.ContentHash)).ToListAsync();
+        }
+        blobs.Count.Should().BeGreaterThan(1, "the seed import stored more than one source file");
+        var shared = blobs[0];
+
+        await using var importing = _db.NewContext();
+        await using var tx = await importing.Database.BeginTransactionAsync();
+        await OeIngestHelpers.UpsertFileContentsAsync(importing,
+            new Dictionary<string, (string Content, int Length, int LineCount)>
+            {
+                [shared.ContentHash] = (shared.Content, shared.ContentLength, shared.LineCount),
+            },
+            CancellationToken.None);
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewManagement(ctx).ClearIngestedDataAsync(id).WaitAsync(TimeSpan.FromMinutes(1));
+        }
+
+        await using (var after = _db.NewContext())
+        {
+            var left = await after.OeFileContents.AsNoTracking()
+                .Where(c => blobs.Select(b => b.ContentHash).Contains(c.ContentHash))
+                .Select(c => c.ContentHash).ToListAsync();
+            left.Should().Equal([shared.ContentHash], "only the blob the other import holds is kept");
+        }
+        await tx.CommitAsync();
+    }
+
     [Fact]
     public async Task HardDeleteAsync_works_on_an_already_soft_deleted_release()
     {

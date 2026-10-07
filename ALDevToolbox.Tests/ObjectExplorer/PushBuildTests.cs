@@ -388,6 +388,9 @@ public sealed class PushBuildTests : IDisposable
             NullLogger<ReleaseImportService>.Instance));
         services.AddScoped<PersistedImportJobs>();
         services.AddScoped<ProjectAccess>();
+        services.AddScoped(sp => new ReleaseManagementService(
+            sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>(),
+            NullLogger<ReleaseManagementService>.Instance));
         services.AddScoped<ProjectBuildImporter>();
         services.AddScoped(sp => new UserRepositoryTokenService(
             sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>(),

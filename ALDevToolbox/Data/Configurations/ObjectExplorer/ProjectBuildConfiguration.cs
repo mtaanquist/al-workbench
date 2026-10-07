@@ -68,6 +68,13 @@ internal sealed class ProjectBuildConfiguration : IEntityTypeConfiguration<OePro
             .HasForeignKey(e => e.PipelineId)
             .OnDelete(DeleteBehavior.SetNull);
 
+        // The repository a staged GitHub release came from (#1118). SET NULL so removing
+        // the repository keeps the build; staging the tag again records the current row.
+        entity.HasOne(e => e.StagedFromRepository)
+            .WithMany()
+            .HasForeignKey(e => e.StagedFromRepositoryId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         entity.HasMany(e => e.RepoCommits)
             .WithOne(c => c.ProjectBuild!)
             .HasForeignKey(c => c.ProjectBuildId)
@@ -96,5 +103,10 @@ internal sealed class ProjectBuildConfiguration : IEntityTypeConfiguration<OePro
         entity.HasIndex(e => new { e.PipelineId, e.StartedAt }).HasDatabaseName("ix_oe_project_builds_pipeline_started");
         // The build that produced a given release (deep-link "back to artifact").
         entity.HasIndex(e => e.ReleaseId).HasDatabaseName("ix_oe_project_builds_release");
+        // Covers the staged-from foreign key's SET NULL when a repository is removed. Only
+        // staged builds carry one, so the index skips every other build.
+        entity.HasIndex(e => e.StagedFromRepositoryId)
+            .HasDatabaseName("ix_oe_project_builds_staged_from_repository")
+            .HasFilter("staged_from_repository_id IS NOT NULL");
     }
 }

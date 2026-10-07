@@ -912,7 +912,10 @@ whole. The page reads the log line back through the same parser, so a deployment
   Any choice that installs within the minute (Now, a picked time that has come, a delivery window that
   is open) asks who is signed in first. Rescheduling takes the Deployment pipelines step-up rule, like
   deploying. The worker only claims a delivery whose time has come, so a run still waiting in the queue
-  does nothing to a deployment moved to later; the scheduler queues it again when it is due. The same
+  does nothing to a deployment moved to later; the scheduler queues it again when it is due. It also
+  only claims a delivery that still runs as the person the queued run was queued for: rescheduling
+  hands the deployment to whoever rescheduled it, so a run queued for someone else leaves it for the
+  next sweep, which queues it as its new person (#1179). The same
   dialog opens from "Reschedule next deployment" in the deployment pipelines list's row menu, and
   from the environment's Scheduled installs card, which lists the pipeline runs booked for that
   environment (with Reschedule and Cancel deployment) and offers Reschedule beside the install

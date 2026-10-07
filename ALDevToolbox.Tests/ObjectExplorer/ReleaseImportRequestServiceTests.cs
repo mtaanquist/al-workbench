@@ -358,7 +358,7 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             NullLogger<DvdDownloadService>.Instance);
         var persistedJobs = new PersistedImportJobs(ctx, TimeProvider.System);
         var projectBuilds = new ProjectBuildImporter(
-            importer, builds ?? new ProjectBuildQueue(), persistedJobs, ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
+            importer, management, builds ?? new ProjectBuildQueue(), persistedJobs, ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             new CloneCredentialResolver(
                 new UserRepositoryTokenService(ctx, _db.OrgContext, NullLogger<UserRepositoryTokenService>.Instance, _db.DataProtectionProvider),
                 _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new FakeGitHubApi())),

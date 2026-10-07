@@ -12,6 +12,9 @@ namespace ALDevToolbox.Tests.GitHub;
 /// </summary>
 public sealed class GitHubWebhookQueueTests
 {
+    /// <summary>The queue's own clock in the tests that age a head out, whatever today is.</summary>
+    private static readonly DateTimeOffset Noon = new(2026, 3, 29, 12, 0, 0, TimeSpan.Zero);
+
     private static GitHubPullRequestJob Job(string sha, int number = 7) =>
         new(
             InstallationId: 42,
@@ -201,9 +204,10 @@ public sealed class GitHubWebhookQueueTests
     {
         // A redelivery can come long after the newer head was built; forgetting the
         // head when its build ends would let the old commit build again.
-        var queue = new GitHubWebhookQueue();
+        var clock = new ALDevToolbox.Tests.Auth.FakeTimeProvider(Noon);
+        var queue = new GitHubWebhookQueue(clock);
         var job = Job("bbb");
-        var at = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var at = Noon.AddMinutes(-10);
         using var cts = new CancellationTokenSource();
         queue.Announce(job.Key, "bbb", at.AddMinutes(1));
         queue.BeginBuild(job.Key, cts);
@@ -217,13 +221,22 @@ public sealed class GitHubWebhookQueueTests
     [Fact]
     public void A_dated_head_is_forgotten_once_it_is_older_than_any_resend()
     {
-        var queue = new GitHubWebhookQueue();
+        var clock = new ALDevToolbox.Tests.Auth.FakeTimeProvider(Noon);
+        var queue = new GitHubWebhookQueue(clock);
         var job = Job("aaa");
+        var other = Job("zzz", number: 8);
         using var cts = new CancellationTokenSource();
-        queue.Announce(job.Key, "aaa", DateTimeOffset.UtcNow - GitHubWebhookQueue.KeepDatedHeadsFor - TimeSpan.FromHours(1));
+        queue.Announce(job.Key, "aaa", Noon.AddMinutes(-1));
         queue.BeginBuild(job.Key, cts);
-
         queue.EndBuild(job.Key, cts, "aaa");
+        queue.TrackedHeadCount.Should().Be(1, "a resend of an older head may still come");
+
+        // Once the clock is past the look-back, the next build to end clears it out.
+        clock.Advance(GitHubWebhookQueue.KeepDatedHeadsFor + TimeSpan.FromMinutes(1));
+        using var later = new CancellationTokenSource();
+        queue.Announce(other.Key, "zzz");
+        queue.BeginBuild(other.Key, later);
+        queue.EndBuild(other.Key, later, "zzz");
 
         queue.TrackedHeadCount.Should().Be(0);
     }

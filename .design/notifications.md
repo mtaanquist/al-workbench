@@ -151,7 +151,9 @@ untouched, so it applies again if access comes back.
 - After a run the delivery worker claimed ends deployed, accepted by Business Central for a
   scheduled install, or failed. Goes to the person it ran as (who started it, or who
   approved a prepared one), or the pipeline's creator when nobody did. A run that found the
-  deployment already claimed sends nothing, so nothing is announced twice.
+  deployment already claimed sends nothing, so nothing is announced twice. A run cut off by a
+  shutdown saves its failure and is announced then, on a short grace of its own, since the
+  check after the restart only fails deployments still in progress and passes over it (#1179).
 - After the delivery scheduler fails deployments a restart cut off, for each one: the
   person behind it needs to hear about that failure as much as any other.
 

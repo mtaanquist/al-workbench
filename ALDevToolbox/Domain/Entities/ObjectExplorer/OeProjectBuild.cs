@@ -162,11 +162,12 @@ public class OeProjectBuild
     /// <summary>
     /// For a <em>staged</em> build: the solution repository whose GitHub release it was
     /// downloaded from, so a deployment pipeline that installs one repository's releases
-    /// refuses another's (#1118). Null for every other build, and for a staged build whose
-    /// repository could not be told from its release link. Deliberately not a foreign key,
-    /// like <see cref="HeadRepositoryId"/>: a removed repository leaves the build as it was.
+    /// refuses another's (#1118). Null for every other build, for a staged build whose
+    /// repository could not be told from its release link, and once that repository is
+    /// removed from the solution (SET NULL); staging the tag again records the current one.
     /// </summary>
     public int? StagedFromRepositoryId { get; set; }
+    public OeProjectRepository? StagedFromRepository { get; set; }
 
     /// <summary>
     /// Why the build was not published as a Release - GitHub's own refusal, for
