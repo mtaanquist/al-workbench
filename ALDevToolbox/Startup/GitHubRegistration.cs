@@ -47,6 +47,11 @@ public static class GitHubRegistration
         // is the hosted service that drains it.
         services.AddScoped<GitHubCheckRunService>();
         services.AddSingleton<GitHubWebhookQueue>();
+        // The endpoint's slots for reading a push body past a megabyte (#1126, #1174).
+        services.AddSingleton<GitHubWebhookBodyGate>();
+        // GitHub's published webhook address ranges, checked before a delivery's body
+        // is read; filled at start-up and daily by GitHubHookAddressRefreshScheduler (#1201).
+        services.AddSingleton<GitHubHookAddressAllowList>();
         services.AddHostedService<GitHubPullRequestBuildWorker>();
         // Branch watching (#963): the same worker records push and merged-pull-
         // request deliveries through this, inside the organisation it resolved.

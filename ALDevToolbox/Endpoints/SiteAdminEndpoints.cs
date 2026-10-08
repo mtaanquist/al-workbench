@@ -143,6 +143,13 @@ internal static class SiteAdminEndpoints
                     "/site-admin/settings/tools"))
             .RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
 
+        app.MapPost("/site-admin/settings/builds/save", (
+            HttpContext ctx, SystemSettingsService settings, IAntiforgery antiforgery, CancellationToken ct) =>
+                SaveSectionAsync(ctx, settings, antiforgery, ct,
+                    (current, form) => SettingsInputBuilder.WithBuilds(current, form),
+                    "/site-admin/settings/builds"))
+            .RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
+
         app.MapPost("/site-admin/settings/entra/save", async (
             HttpContext ctx, SystemSettingsService settings, IAntiforgery antiforgery, CancellationToken ct) =>
         {

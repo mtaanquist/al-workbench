@@ -5,6 +5,7 @@ using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Services.Mcp.Tools;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol;
 
@@ -101,6 +102,24 @@ public sealed class ArtifactsToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task Compare_project_builds_rejects_a_preview_check_that_indexed_nothing()
+    {
+        int b1, b2;
+        await using (var ctx = _db.NewContext())
+        {
+            var p = await SeedProjectAsync(ctx, "CRONUS A/S");
+            b1 = await SeedBuildAsync(ctx, p, ProjectBuildStatus.Ready, DateTime.UtcNow, releaseId: await SeedReleaseAsync(ctx));
+            b2 = await SeedBuildAsync(ctx, p, ProjectBuildStatus.Ready, DateTime.UtcNow, releaseId: await SeedReleaseAsync(ctx));
+            (await ctx.OeProjectBuilds.SingleAsync(b => b.Id == b2)).BcTarget = ProjectBuildTarget.NextMajor;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var act = () => NewTools(read).CompareProjectBuildsAsync(b1, b2);
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("preview check");
+    }
+
+    [Fact]
     public async Task Compare_project_builds_rejects_a_non_ready_build()
     {
         int b1, b2;
@@ -129,6 +148,30 @@ public sealed class ArtifactsToolsTests : IDisposable
     {
         _db.OrgContext.CurrentUserId = userId;
         _db.OrgContext.IsSiteAdmin = siteAdmin;
+    }
+
+    [Fact]
+    public async Task List_builds_returns_the_newest_twenty_unless_asked_for_more()
+    {
+        int projectId;
+        await using (var ctx = _db.NewContext())
+        {
+            projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            for (var i = 0; i < 25; i++)
+            {
+                await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, DateTime.UtcNow.AddHours(-i));
+            }
+        }
+
+        await using var read = _db.NewContext();
+        var tools = NewTools(read);
+
+        var newest = await tools.ListProjectBuildsAsync("CRONUS A/S");
+        newest.Should().HaveCount(20);
+        newest.Select(b => b.StartedAt).Should().BeInDescendingOrder();
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 5)).Should().HaveCount(5);
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 1000)).Should().HaveCount(25, "the cap is far above what there is");
+        (await tools.ListProjectBuildsAsync("CRONUS A/S", limit: 0)).Should().HaveCount(1, "a limit below one still returns the newest");
     }
 
     private async Task SeedUsersAsync()

@@ -54,6 +54,20 @@ public sealed class PreviewCheckTests : IDisposable
     }
 
     [Fact]
+    public async Task A_disabled_pipeline_is_never_due()
+    {
+        var owner = await SeedUserAsync();
+        var (_, pipelineId) = await SeedPipelineAsync(owner);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OePipelines.Where(p => p.Id == pipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+        }
+
+        (await ListDueAsync()).Should().NotContain(d => d.PipelineId == pipelineId);
+    }
+
+    [Fact]
     public async Task A_first_check_is_due_against_both_upcoming_versions_as_its_owner()
     {
         var owner = await SeedUserAsync();
@@ -80,6 +94,118 @@ public sealed class PreviewCheckTests : IDisposable
         var due = await ListDueAsync();
 
         due.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("none")]
+    public async Task A_check_stuck_without_a_live_release_does_not_stop_tonights_check(string releaseStatus)
+    {
+        // Its job was lost (a restart, or the release deleted mid-build) and nothing
+        // reset the row. It must not hold the target back for good (#1111).
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-1), NextMinor);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-5), "30.0.1.1",
+            status: ProjectBuildStatus.Building, releaseStatus: releaseStatus);
+
+        var due = await ListDueAsync();
+
+        due.Where(d => d.BcTarget is not null).Select(d => d.BcTarget)
+            .Should().Equal(ProjectBuildTarget.NextMajor);
+    }
+
+    [Fact]
+    public async Task The_startup_sweep_fails_build_rows_left_without_an_importing_release()
+    {
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        // Interrupted at this start, left behind by an earlier one, its release deleted,
+        // being resumed, and a pull-request build.
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-1), NextMajor,
+            status: ProjectBuildStatus.Building, releaseStatus: "failed");
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-2), NextMinor,
+            status: ProjectBuildStatus.Queued, releaseStatus: "failed");
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-3), NextMinor,
+            status: ProjectBuildStatus.Queued, releaseStatus: "none");
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-1), NextMinor,
+            status: ProjectBuildStatus.Queued);
+        int deleted, resumed, pullRequest;
+        await using (var ctx = _db.NewContext())
+        {
+            var rows = await ctx.OeProjectBuilds.OrderBy(b => b.Id).ToListAsync();
+            deleted = rows[2].Id;
+            resumed = rows[3].Id;
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
+                Status = ProjectBuildStatus.Building, Trigger = ProjectBuildTrigger.PullRequest, StartedAt = Tonight,
+                Release = new OeRelease
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS pr", Kind = "project", Status = "failed",
+                    ImportedAt = Tonight, CreatedAt = Tonight, UpdatedAt = Tonight,
+                },
+            });
+            await ctx.SaveChangesAsync();
+            pullRequest = (await ctx.OeProjectBuilds.SingleAsync(b => b.Trigger == ProjectBuildTrigger.PullRequest)).Id;
+        }
+
+        var failed = await InterruptedBuilds.FailAsync(NewProvider(), Tonight, TestContext.Current.CancellationToken);
+
+        failed.Should().Be(3);
+        await using var check = _db.NewContext();
+        var builds = await check.OeProjectBuilds.AsNoTracking().OrderBy(b => b.Id).ToListAsync();
+        foreach (var build in builds.Take(3))
+        {
+            build.Status.Should().Be(ProjectBuildStatus.Failed);
+            build.FailureMessage.Should().Be(InterruptedBuilds.RestartedMessage);
+            build.FinishedAt.Should().Be(Tonight);
+        }
+        builds.Single(b => b.Id == deleted).ReleaseId.Should().BeNull();
+        builds.Single(b => b.Id == resumed).Status.Should().Be(ProjectBuildStatus.Queued, "its release is still importing");
+        builds.Single(b => b.Id == pullRequest).Status.Should().Be(ProjectBuildStatus.Building, "pull-request builds are closed with their check runs");
+    }
+
+    [Fact]
+    public async Task The_startup_sweep_skips_an_organisation_still_pending_approval_like_the_other_sweeps()
+    {
+        int pendingBuild, activeBuild;
+        await using (var ctx = _db.NewContext())
+        {
+            var other = await ctx.Organizations.SingleAsync(o => o.Id == TestDb.OtherOrgId);
+            other.IsPending = true;
+            pendingBuild = await AddInterruptedBuildAsync(ctx, TestDb.OtherOrgId);
+            activeBuild = await AddInterruptedBuildAsync(ctx, TestDb.DefaultOrgId);
+        }
+
+        var failed = await InterruptedBuilds.FailAsync(NewProvider(), Tonight, TestContext.Current.CancellationToken);
+
+        failed.Should().Be(1);
+        await using var check = _db.NewContext();
+        var statuses = await check.OeProjectBuilds.IgnoreQueryFilters().AsNoTracking()
+            .Where(b => b.Id == pendingBuild || b.Id == activeBuild)
+            .ToDictionaryAsync(b => b.Id, b => b.Status);
+        statuses[activeBuild].Should().Be(ProjectBuildStatus.Failed);
+        statuses[pendingBuild].Should().Be(ProjectBuildStatus.Queued, "an organisation awaiting approval is not swept");
+
+        static async Task<int> AddInterruptedBuildAsync(AppDbContext ctx, int orgId)
+        {
+            var project = new OeProject
+            {
+                OrganizationId = orgId, Name = "CRONUS " + orgId, CreatedAt = Tonight, UpdatedAt = Tonight,
+            };
+            ctx.OeProjects.Add(project);
+            await ctx.SaveChangesAsync();
+            // Queued with no release: what a restart leaves behind.
+            var build = new OeProjectBuild
+            {
+                OrganizationId = orgId, ProjectId = project.Id, Status = ProjectBuildStatus.Queued,
+                Trigger = ProjectBuildTrigger.Manual, StartedAt = Tonight.AddHours(-1),
+            };
+            ctx.OeProjectBuilds.Add(build);
+            await ctx.SaveChangesAsync();
+            return build.Id;
+        }
     }
 
     [Fact]
@@ -134,6 +260,120 @@ public sealed class PreviewCheckTests : IDisposable
         var due = await ListDueAsync();
 
         due.Select(d => d.BcTarget).Should().Equal(ProjectBuildTarget.NextMinor);
+    }
+
+    private const string ShaA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string ShaB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    [Fact]
+    public async Task A_clean_check_of_the_same_commit_and_preview_is_not_run_again_however_long_ago()
+    {
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedHeadAsync(projectId, ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-30), NextMinor, commit: ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-30), NextMajor, commit: ShaA);
+        // A build of the same commit since says nothing new either.
+        await SeedBuildAsync(projectId, pipelineId, Tonight.AddDays(-2));
+
+        var due = await ListDueAsync();
+
+        due.Where(d => d.BcTarget is not null).Should().BeEmpty("neither the code nor Microsoft's preview changed (#1140)");
+    }
+
+    [Fact]
+    public async Task A_new_commit_on_the_branch_makes_both_due_without_a_build_of_the_pipeline()
+    {
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedHeadAsync(projectId, ShaB, pushedAt: Tonight.AddHours(-5));
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-1), NextMinor, commit: ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-1), NextMajor, commit: ShaA);
+
+        var due = await ListDueAsync();
+
+        due.Select(d => d.BcTarget).Should().Equal(ProjectBuildTarget.NextMinor, ProjectBuildTarget.NextMajor);
+    }
+
+    [Fact]
+    public async Task A_head_stored_before_the_check_that_differs_from_it_does_not_make_it_due()
+    {
+        // A push the app missed: the check cloned the newer tip, the stored head is behind it.
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedHeadAsync(projectId, ShaA, pushedAt: Tonight.AddDays(-5));
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-2), NextMinor, commit: ShaB);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-2), NextMajor, commit: ShaB);
+
+        var due = await ListDueAsync();
+
+        due.Where(d => d.BcTarget is not null).Should().BeEmpty("nothing pushed since the check, so the quiet period decides");
+    }
+
+    [Fact]
+    public async Task A_check_that_went_ready_with_an_extension_that_failed_is_not_clean()
+    {
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedHeadAsync(projectId, ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-8), NextMinor,
+            commit: ShaA, failedApp: true);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-8), NextMajor, commit: ShaA);
+
+        var due = await ListDueAsync();
+
+        due.Where(d => d.BcTarget is not null).Select(d => d.BcTarget).Should().Equal(ProjectBuildTarget.NextMinor);
+    }
+
+    [Theory]
+    [InlineData(3, false)]
+    [InlineData(8, true)]
+    public async Task A_failed_check_of_the_same_code_is_tried_again_after_the_quiet_period(int daysAgo, bool expectDue)
+    {
+        var owner = await SeedUserAsync();
+        var (projectId, pipelineId) = await SeedPipelineAsync(owner);
+        await SeedHeadAsync(projectId, ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMinor, Tonight.AddDays(-daysAgo), NextMinor,
+            status: ProjectBuildStatus.Failed, commit: ShaA);
+        await SeedCheckAsync(projectId, pipelineId, ProjectBuildTarget.NextMajor, Tonight.AddDays(-1), NextMajor, commit: ShaA);
+
+        var due = await ListDueAsync();
+
+        due.Where(d => d.BcTarget is not null).Select(d => d.BcTarget).Should()
+            .Equal(expectDue ? [ProjectBuildTarget.NextMinor] : Array.Empty<string>());
+    }
+
+    private static readonly DateTime CheckedAt = Tonight.AddDays(-1);
+
+    private static PreviewCheckService.BranchHead Head(int repo, string branch, string sha, bool isDefault = false, int pushedHoursAgo = 48) =>
+        new(repo, branch, isDefault, sha, Tonight.AddHours(-pushedHoursAgo));
+
+    [Fact]
+    public void SameCode_reads_the_pipelines_named_branch_rather_than_the_default()
+    {
+        var heads = new[] { Head(1, "main", ShaB, isDefault: true, pushedHoursAgo: 2), Head(1, "release", ShaA) };
+
+        PreviewCheckService.SameCode([1], new Dictionary<int, string> { [1] = ShaA }, heads, "release", CheckedAt)
+            .Should().BeTrue();
+        PreviewCheckService.SameCode([1], new Dictionary<int, string> { [1] = ShaA }, heads, null, CheckedAt)
+            .Should().BeFalse("the default branch moved after the check");
+    }
+
+    [Fact]
+    public void SameCode_across_repositories_needs_every_one_to_say()
+    {
+        var checkedCommits = new Dictionary<int, string> { [1] = ShaA, [2] = ShaA };
+        var bothSame = new[] { Head(1, "main", ShaA, isDefault: true), Head(2, "main", ShaA, isDefault: true) };
+        var oneMissing = new[] { Head(1, "main", ShaA, isDefault: true) };
+        var oneMoved = new[] { Head(1, "main", ShaB, isDefault: true, pushedHoursAgo: 2) };
+
+        PreviewCheckService.SameCode([1, 2], checkedCommits, bothSame, null, CheckedAt).Should().BeTrue();
+        PreviewCheckService.SameCode([1, 2], checkedCommits, oneMissing, null, CheckedAt).Should().BeNull();
+        PreviewCheckService.SameCode([1, 2], checkedCommits, oneMoved, null, CheckedAt).Should().BeFalse(
+            "a push after the check is a change, whatever the other repository says");
+        // A repository added after the check has no commit in it.
+        PreviewCheckService.SameCode([1, 2, 3], checkedCommits,
+            [.. bothSame, Head(3, "main", ShaA, isDefault: true)], null, CheckedAt).Should().BeNull();
     }
 
     [Fact]
@@ -304,6 +544,16 @@ public sealed class PreviewCheckTests : IDisposable
         new(ctx, new BcArtifactService(_cdn, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance),
             NullLogger<PreviewCheckService>.Instance);
 
+    /// <summary>A service provider with only the database, scoped by the ambient organisation.</summary>
+    private ServiceProvider NewProvider()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<IOrganizationContext>(new AmbientOnlyOrganizationContext());
+        services.AddDbContext<AppDbContext>(opts =>
+            opts.UseNpgsql(_db.ConnectionString).AddInterceptors(_db.CommandTracker));
+        return services.BuildServiceProvider();
+    }
+
     /// <summary>The scheduler over a service provider shaped like the app's, with no request behind it.</summary>
     private PreviewCheckScheduler NewScheduler()
     {
@@ -315,7 +565,7 @@ public sealed class PreviewCheckTests : IDisposable
         services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
         _db.AddStorageServices(services);
         services.AddSingleton<IHttpClientFactory>(_cdn);
-        services.AddSingleton(new ReleaseImportQueue());
+        services.AddSingleton(new ProjectBuildQueue());
         services.AddScoped<ProjectAccess>();
         services.AddScoped<TranslationMemoryService>();
         services.AddScoped<TranslationImportService>();
@@ -324,6 +574,9 @@ public sealed class PreviewCheckTests : IDisposable
         services.AddScoped<PersistedImportJobs>();
         services.AddScoped<BcArtifactService>();
         services.AddScoped<PreviewCheckService>();
+        services.AddScoped(sp => new ReleaseManagementService(
+            sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>(),
+            NullLogger<ReleaseManagementService>.Instance));
         services.AddScoped<ProjectBuildImporter>();
         // The importer's credential check, which a preview check never consults.
         services.AddScoped<CloneCredentialResolver>(_ => null!);
@@ -406,14 +659,63 @@ public sealed class PreviewCheckTests : IDisposable
     }
 
     private async Task SeedCheckAsync(int projectId, int pipelineId, string target, DateTime startedAt, string version,
-        string status = ProjectBuildStatus.Ready)
+        string status = ProjectBuildStatus.Ready, string? releaseStatus = null, string? commit = null, bool failedApp = false)
     {
         await using var ctx = _db.NewContext();
-        ctx.OeProjectBuilds.Add(new OeProjectBuild
+        // A check in flight has a live release by default; pass another status (or
+        // "none") for a row whose job was lost. One with a failed extension needs a
+        // release to hang the result on.
+        releaseStatus ??= status is ProjectBuildStatus.Queued or ProjectBuildStatus.Building ? "ingesting"
+            : failedApp ? "ready" : "none";
+        OeRelease? release = releaseStatus == "none" ? null : new OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Label = "CRONUS " + Guid.NewGuid().ToString("N"),
+            Kind = "project",
+            Status = releaseStatus,
+            ImportedAt = startedAt,
+            CreatedAt = startedAt,
+            UpdatedAt = startedAt,
+        };
+        var build = new OeProjectBuild
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipelineId,
             Status = status, BcTarget = target, Trigger = ProjectBuildTrigger.PreviewCheck, BcArtifactVersion = version,
             StartedAt = startedAt, FinishedAt = status == ProjectBuildStatus.Ready ? startedAt.AddMinutes(3) : null,
+            Release = release,
+        };
+        ctx.OeProjectBuilds.Add(build);
+        await ctx.SaveChangesAsync();
+        if (failedApp)
+        {
+            ctx.OeProjectBuildResults.Add(new OeProjectBuildResult
+            {
+                OrganizationId = TestDb.DefaultOrgId, ReleaseId = release!.Id, AppName = "CRONUS Sales",
+                Status = ProjectBuildResultStatus.Failed, Message = "A dependency could not be found.",
+            });
+        }
+        if (commit is not null)
+        {
+            var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+            ctx.OeProjectBuildRepoCommits.Add(new OeProjectBuildRepoCommit
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = build.Id, ProjectRepositoryId = repositoryId,
+                RepoUrl = "https://github.com/cronus/core", RepoDisplayName = "core", CommitHash = commit,
+            });
+        }
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>The head of the repository's default branch, as the push webhook last reported it.</summary>
+    private async Task SeedHeadAsync(int projectId, string sha, DateTime? pushedAt = null)
+    {
+        await using var ctx = _db.NewContext();
+        var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+        ctx.OeRepositoryBranchHeads.Add(new OeRepositoryBranchHead
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectRepositoryId = repositoryId, Branch = "main", HeadSha = sha,
+            PushedAt = pushedAt ?? Tonight.AddDays(-40), PusherLogin = "erik", CommitCount = 1, IsDefaultBranch = true,
+            UpdatedAt = Tonight.AddDays(-20),
         });
         await ctx.SaveChangesAsync();
     }

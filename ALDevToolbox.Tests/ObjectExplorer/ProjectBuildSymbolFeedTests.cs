@@ -37,6 +37,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     private readonly FakeSymbolFeeds _http = new();
     private readonly FakeToolchain _tools;
     private readonly FakePackage _core;
+    private readonly ReleaseIngests _ingests = new();
 
     public ProjectBuildSymbolFeedTests()
     {
@@ -202,6 +203,65 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         _tools.Clones.Should().BeEmpty();
     }
 
+    // ── Running the same build again (#1110) ───────────────────────────
+
+    [Fact]
+    public async Task A_first_run_builds_where_the_branch_is_now()
+    {
+        var (projectId, releaseId, _) = await SeedAsync();
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.Checkouts.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_second_run_of_the_same_build_checks_out_the_commit_its_first_run_built()
+    {
+        // Retry, symbol recovery and a restart resume all run the same build again; its
+        // number, and every app's version, belongs to the code the first run cloned.
+        const string FirstRun = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        await using (var seed = _db.NewContext())
+        {
+            var repo = await seed.OeProjectRepositories.SingleAsync(r => r.ProjectId == projectId);
+            seed.OeProjectBuildRepoCommits.Add(new OeProjectBuildRepoCommit
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = buildId, ProjectRepositoryId = repo.Id,
+                RepoUrl = repo.Url, RepoDisplayName = repo.DisplayName, CommitHash = FirstRun,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.Checkouts.Should().Equal(FirstRun);
+    }
+
+    [Fact]
+    public async Task A_second_run_never_records_todays_default_branch_for_its_first_runs_commits()
+    {
+        // The first run left no default branch behind (it built before the column was
+        // written). Today's default is "main", but the pinned commits may have come from
+        // another branch, and a deployment branch rule reads the column (#1193).
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        await using (var seed = _db.NewContext())
+        {
+            var repo = await seed.OeProjectRepositories.SingleAsync(r => r.ProjectId == projectId);
+            seed.OeProjectBuildRepoCommits.Add(new OeProjectBuildRepoCommit
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = buildId, ProjectRepositoryId = repo.Id,
+                RepoUrl = repo.Url, RepoDisplayName = repo.DisplayName, CommitHash = "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.SingleAsync(b => b.Id == buildId)).DefaultBranch.Should().BeNull();
+    }
+
     private async Task SetBuildAsync(int buildId, string branch, string trigger)
     {
         await using var seed = _db.NewContext();
@@ -341,6 +401,29 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         _tools.SeenVersions["CRONUS On Base"]["33333333-0000-0000-0000-000000000003"].Should().Be("1.0.0.0",
             "the sibling this build compiles is the one its dependents see");
         (await SymbolsLogAsync(buildId)).Should().NotContain("Resolved CRONUS Base Extension");
+    }
+
+    [Fact]
+    public async Task A_test_app_in_a_folder_of_any_name_is_not_built_and_the_log_says_why()
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        _tools.Extensions =
+        [
+            new("base-ext", "33333333-0000-0000-0000-000000000003", "CRONUS Base Extension", []),
+            // MyApp.Test is not a test folder by name; its dependency on Library Assert gives it away (#1130).
+            new("MyApp.Test", "55555555-0000-0000-0000-000000000005", "CRONUS Base Extension Tests",
+                [("33333333-0000-0000-0000-000000000003", "CRONUS Base Extension", "1.0.0.0"),
+                 ("dd0be2ea-f733-4d65-bb34-a28f4624fb14", "Library Assert", "29.0.0.0")]),
+        ];
+
+        var outcome = await BuildAsync(projectId, releaseId);
+
+        outcome.Results.Select(r => r.AppName).Should().Equal("CRONUS Base Extension");
+        _tools.SeenVersions.Keys.Should().NotContain("CRONUS Base Extension Tests");
+        await using var read = _db.NewContext();
+        var buildLog = string.Join("\n", await read.OeProjectBuildLogs.AsNoTracking()
+            .Where(l => l.ProjectBuildId == buildId && l.Section == "Build").Select(l => l.Content).ToListAsync());
+        buildLog.Should().Contain("Not built: CRONUS Base Extension Tests. It depends on Microsoft's test framework");
     }
 
     [Fact]
@@ -506,6 +589,8 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         fresh.AppVersion.Should().Be($"1.0.{buildId}.0");
         _tools.SeenVersions["CRONUS Sales Extension"][BaseId].Should().Be("1.0.500.0",
             "the changed app compiles against the version of its sibling that is deployed beside it");
+        _tools.SeenVersions.Should().NotContainKey("CRONUS Base Extension", "an unchanged app is not compiled again (#1140)");
+        (await LogAsync(buildId, "Compile: CRONUS Base Extension")).Should().Contain("Not compiled").And.Contain($"build #{priorId}");
 
         var log = await LogAsync(buildId, "Changes");
         log.Should().Contain($"CRONUS Base Extension: unchanged since build #{priorId}, so it keeps 1.0.500.0")
@@ -668,6 +753,177 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
 
         _tools.DiffedFolders.Should().BeEmpty();
         (await ArtifactsAsync(buildId)).Should().OnlyContain(a => a.CarriedFromBuildId == null);
+    }
+
+    // ── The changelog baseline ──────────────────────────────────────────
+
+    // The build worker is shared by every build and import, so one process that never
+    // exits would stop all of them until a restart (#1132).
+    [Fact]
+    public async Task Every_process_a_build_starts_has_a_time_limit()
+    {
+        var (projectId, releaseId, _, _) = await SeedChangedOnlyAsync(changedAppsOnly: true);
+        _tools.Diffs["sales-ext"] = "sales-ext/src/Sales.Codeunit.al\n";
+        _tools.Ancestors.Add(PriorSha);
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.Requests.Should().Contain(r => r.FileName == _tools.AlcPath || r.FileName == "dotnet");
+        _tools.Requests.Should().Contain(r => r.Arguments.Contains("diff"));
+        _tools.Requests.Should().Contain(r => r.Arguments.Contains("log"));
+        _tools.Requests.Should().OnlyContain(r => r.Timeout != null && r.Timeout > TimeSpan.Zero);
+    }
+
+    [Theory]
+    [InlineData("45", 45)]
+    [InlineData(null, 30)]
+    [InlineData("", 30)]
+    [InlineData("0", 30)]
+    [InlineData("-5", 30)]
+    [InlineData("soon", 30)]
+    public void A_time_limit_override_must_be_a_positive_number_of_minutes(string? raw, int expectedMinutes)
+    {
+        ProjectBuildService.MinutesOrDefault(raw, 30).Should().Be(TimeSpan.FromMinutes(expectedMinutes));
+    }
+
+    [Fact]
+    public async Task The_changelog_is_measured_from_the_same_pipelines_last_build()
+    {
+        // Another pipeline of the solution watches another branch and built since; its
+        // commit isn't in this pipeline's single-branch clone.
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        await SeedOtherBuildAsync(projectId, pipelineName: "test", OtherSha);
+        _tools.Ancestors.Add(PriorSha);
+        _tools.LogOutput = "2222222\u001fCRONUS Developer\u001f2026-10-01T00:00:00+00:00\u001fAdd the sales report\n";
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().Equal([$"{PriorSha}..HEAD"]);
+        (await ChangelogAsync(buildId)).Should().Equal(["Add the sales report"]);
+    }
+
+    [Theory]
+    [InlineData(ProjectBuildTarget.NextMajor, ProjectBuildTrigger.Manual)]
+    [InlineData(ProjectBuildTarget.Current, ProjectBuildTrigger.PullRequest)]
+    public async Task A_preview_or_pull_request_build_is_never_the_changelog_baseline(string target, string trigger)
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        await SeedOtherBuildAsync(projectId, pipelineName: null, OtherSha, target, trigger);
+        _tools.Ancestors.Add(PriorSha);
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().Equal([$"{PriorSha}..HEAD"]);
+        (await ChangelogAsync(buildId)).Should().Equal(["No new commits since the last successful build."]);
+    }
+
+    [Fact]
+    public async Task A_previous_commit_that_left_the_branch_says_so()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().BeEmpty();
+        (await ChangelogAsync(buildId)).Should().ContainSingle().Which.Should().Contain("is no longer in history");
+    }
+
+    [Fact]
+    public async Task A_retried_build_records_its_commits_and_changelog_once()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        _tools.Ancestors.Add(PriorSha);
+        await using (var seed = _db.NewContext())
+        {
+            // What the first, interrupted attempt left behind.
+            var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+            seed.OeProjectBuildRepoCommits.Add(Commit(buildId, repoId, HeadSha));
+            seed.OeProjectBuildCommits.Add(new OeProjectBuildCommit
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = buildId, ProjectRepositoryId = repoId,
+                Message = "No new commits since the last successful build.",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ChangelogAsync(buildId)).Should().ContainSingle();
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuildRepoCommits.CountAsync(c => c.ProjectBuildId == buildId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_pull_request_build_points_at_the_pull_request_for_its_commits()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        _tools.Ancestors.Add(PriorSha);
+        await using (var seed = _db.NewContext())
+        {
+            await seed.OeProjectBuilds.Where(b => b.Id == buildId)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.Trigger, ProjectBuildTrigger.PullRequest));
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        _tools.LoggedRanges.Should().BeEmpty();
+        (await ChangelogAsync(buildId)).Should().Equal(["Pull request build: its commits are listed on the pull request."]);
+    }
+
+    [Fact]
+    public async Task A_pipeline_moved_to_another_branch_starts_its_changelog_over()
+    {
+        var (projectId, releaseId, buildId, _) = await SeedChangedOnlyAsync(changedAppsOnly: false);
+        _tools.Ancestors.Add(PriorSha);
+        await using (var seed = _db.NewContext())
+        {
+            await seed.OeProjectBuilds.Where(b => b.Id == buildId)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.Branch, "develop"));
+        }
+
+        await BuildAsync(projectId, releaseId);
+
+        (await ChangelogAsync(buildId)).Should().ContainSingle().Which.Should().StartWith("First build of this repository");
+    }
+
+    private const string OtherSha = "3333333333333333333333333333333333333333";
+
+    /// <summary>
+    /// A finished build newer than the seeded prior one at <paramref name="sha"/>: of a new
+    /// pipeline called <paramref name="pipelineName"/>, or of the seeded pipeline when null.
+    /// </summary>
+    private async Task SeedOtherBuildAsync(int projectId, string? pipelineName, string sha,
+        string target = ProjectBuildTarget.Current, string trigger = ProjectBuildTrigger.Manual)
+    {
+        await using var seed = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var pipelineId = await seed.OePipelines.Where(p => p.ProjectId == projectId).Select(p => p.Id).SingleAsync();
+        if (pipelineName is not null)
+        {
+            var other = new OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = pipelineName,
+                CreatedAt = now, UpdatedAt = now,
+            };
+            seed.OePipelines.Add(other);
+            await seed.SaveChangesAsync();
+            pipelineId = other.Id;
+        }
+        var build = PriorBuild(projectId, pipelineId, now.AddMinutes(-30), [], "1.0.600.0");
+        build.BcTarget = target;
+        build.Trigger = trigger;
+        seed.OeProjectBuilds.Add(build);
+        await seed.SaveChangesAsync();
+        var repoId = await seed.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
+        seed.OeProjectBuildRepoCommits.Add(Commit(build.Id, repoId, sha));
+        await seed.SaveChangesAsync();
+    }
+
+    private async Task<List<string>> ChangelogAsync(int buildId)
+    {
+        await using var read = _db.NewContext();
+        return await read.OeProjectBuildCommits.AsNoTracking()
+            .Where(c => c.ProjectBuildId == buildId).OrderBy(c => c.Ordering).Select(c => c.Message).ToListAsync();
     }
 
     /// <summary>
@@ -916,6 +1172,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         outcome.BcVersion.Should().Be("30.0");
         outcome.FinalLabel.Should().Be("CRONUS on BC 30.0");
         outcome.ParentReleaseId.Should().Be(previewId, "the build parents onto the catalogue's preview of that version");
+        outcome.IsPreview.Should().BeTrue("the worker skips the Object Explorer index for it (#1140)");
         _tools.CompilersRun.Should().NotBeEmpty().And.OnlyContain(p => p.Contains("/30.0.42.32495-beta/"));
         _http.Requests.Should().Contain($"https://{BcArtifactIndex.InsiderCdnHost}/sandbox/{NextMajorVersion}/dk");
         // The feed picks third-party symbols for the target version, not the manifests' 29.0.
@@ -987,31 +1244,32 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
     }
 
     [Fact]
-    public async Task A_next_version_build_replaces_a_stale_preview_parent_with_the_current_insider_build()
+    public async Task A_next_version_build_leaves_refreshing_a_stale_preview_parent_to_the_daily_sweep()
     {
+        // It indexes nothing of its own (#1140), so importing 2 GB of preview to parent
+        // onto would buy it nothing; it links what is there.
         var (projectId, releaseId, _) = await SeedAsync();
         var staleId = await SeedPreviewAsync("bc-insider:30.0:dk", "30.0.1.1", DateTime.UtcNow.AddDays(-20));
 
-        await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
+        var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
 
+        outcome.ParentReleaseId.Should().Be(staleId);
         await using var read = _db.NewContext();
-        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == staleId)).DeletedAt.Should().NotBeNull();
-        var current = await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == "bc-insider:30.0:dk" && r.DeletedAt == null);
-        current.Id.Should().NotBe(staleId);
-        current.IsPrerelease.Should().BeTrue();
+        (await read.OeReleases.AsNoTracking().CountAsync(r => r.DedupKey == "bc-insider:30.0:dk")).Should().Be(1);
     }
 
     [Fact]
-    public async Task A_failed_preview_parent_is_replaced_at_once_and_never_adopted()
+    public async Task A_next_version_build_never_adopts_a_failed_preview_parent_nor_imports_one()
     {
         var (projectId, releaseId, _) = await SeedAsync();
         var failedId = await SeedPreviewAsync("bc-insider:30.0:dk", null, DateTime.UtcNow, status: "failed");
 
         var outcome = await BuildAsync(projectId, releaseId, BcBuildTarget.NextMajor);
 
-        outcome.ParentReleaseId.Should().NotBe(failedId);
+        outcome.ParentReleaseId.Should().BeNull();
         await using var read = _db.NewContext();
-        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().NotBeNull();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().BeNull();
+        (await read.OeReleases.AsNoTracking().CountAsync(r => r.DedupKey == "bc-insider:30.0:dk")).Should().Be(1);
     }
 
     [Fact]
@@ -1025,10 +1283,96 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         outcome.ParentReleaseId.Should().Be(recentId);
     }
 
+    // ── A parent import nobody finishes (#1180) ────────────────────────
+
+    private const string ParentDedupKey = "bc-onprem:29.0:dk";
+
+    [Fact]
+    public async Task A_parent_left_importing_with_nothing_working_on_it_is_failed_rather_than_waited_on()
+    {
+        var (projectId, releaseId, _) = await SeedAsync(parentStatus: "ingesting");
+        var clock = new SkippingClock();
+
+        var outcome = await BuildAsync(projectId, releaseId, clock: clock).WaitAsync(TimeSpan.FromMinutes(2));
+
+        outcome.ParentReleaseId.Should().BeNull("a half-imported parent would drop this build's references into it");
+        clock.Waited.Should().BeLessThan(TimeSpan.FromMinutes(1), "nothing is importing it, so there is nothing to wait for");
+        await using var read = _db.NewContext();
+        var parent = await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == ParentDedupKey);
+        parent.Status.Should().Be("failed");
+        parent.StatusMessage.Should().Be(ProjectBuildService.AbandonedImportMessage);
+    }
+
+    [Fact]
+    public async Task A_build_stopped_during_its_parent_import_fails_that_import_instead_of_leaving_it_importing()
+    {
+        var (projectId, releaseId, _) = await SeedAsync(parentStatus: null);
+        using var cts = new CancellationTokenSource();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+
+        // Holding the import gate keeps the build waiting inside the parent import it
+        // has just started, which is where a newer push or a shutdown can stop it.
+        Task<ProjectBuildOutcome> build;
+        int parentId;
+        using (await _ingests.EnterHeavyAsync(timeout.Token))
+        {
+            build = BuildAsync(projectId, releaseId, ct: cts.Token);
+            parentId = await ParentCreatedAsync().WaitAsync(TimeSpan.FromMinutes(2));
+            _ingests.IsRunning(parentId).Should().BeTrue("a build waiting on it must not take it for abandoned");
+
+            await cts.CancelAsync();
+            var act = () => build;
+            await act.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        _ingests.IsRunning(parentId).Should().BeFalse();
+        await using var read = _db.NewContext();
+        var parent = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == parentId);
+        parent.Status.Should().Be("failed");
+        parent.StatusMessage.Should().Be(ProjectBuildService.StoppedImportMessage);
+    }
+
+    [Fact]
+    public async Task A_failed_parent_is_imported_again_rather_than_handed_to_the_build()
+    {
+        var (projectId, releaseId, _) = await SeedAsync(parentStatus: "failed");
+        int failedId;
+        await using (var seeded = _db.NewContext())
+        {
+            failedId = await seeded.OeReleases.AsNoTracking().Where(r => r.DedupKey == ParentDedupKey).Select(r => r.Id).SingleAsync();
+        }
+
+        var outcome = await BuildAsync(projectId, releaseId);
+
+        outcome.ParentReleaseId.Should().NotBeNull().And.NotBe(failedId);
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failedId)).DeletedAt.Should().NotBeNull();
+        var parent = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == outcome.ParentReleaseId);
+        parent.DedupKey.Should().Be(ParentDedupKey);
+        parent.Status.Should().Be("ready");
+    }
+
+    private async Task<int> ParentCreatedAsync()
+    {
+        while (true)
+        {
+            await using (var read = _db.NewContext())
+            {
+                var id = await read.OeReleases.AsNoTracking()
+                    .Where(r => r.DedupKey == ParentDedupKey)
+                    .Select(r => (int?)r.Id)
+                    .FirstOrDefaultAsync();
+                if (id is { } found && _ingests.IsRunning(found)) return found;
+            }
+            await Task.Delay(50);
+        }
+    }
+
     // ── Harness ────────────────────────────────────────────────────────
 
     private async Task<ProjectBuildOutcome> BuildAsync(int projectId, int releaseId,
-        BcBuildTarget target = BcBuildTarget.Current, AlCompilerProvisioner? compiler = null)
+        BcBuildTarget target = BcBuildTarget.Current, AlCompilerProvisioner? compiler = null,
+        TimeProvider? clock = null, CancellationToken ct = default)
     {
         await using var ctx = _db.NewContext();
         var translations = new TranslationImportService(ctx, _db.OrgContext,
@@ -1037,10 +1381,12 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             NullLogger<TranslationImportService>.Instance);
         var importer = new ReleaseImportService(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
-            NullLogger<ReleaseImportService>.Instance);
+            NullLogger<ReleaseImportService>.Instance, ingests: _ingests);
         var service = new ProjectBuildService(
-            ctx, _db.OrgContext,
+            ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             new BcArtifactService(_http, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance),
+            new BcArtifactCache(new BcArtifactCacheOptions { Directory = Path.Combine(_root, "artifact-cache") },
+                NullLogger<BcArtifactCache>.Instance),
             importer,
             compiler ?? new AlCompilerProvisioner(_http, NullLogger<AlCompilerProvisioner>.Instance,
                 new AlCompilerOptions { ExplicitAlcPath = _tools.AlcPath }),
@@ -1053,12 +1399,13 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             // Never reached: a build started with an installation token clones as the installation.
             null!,
             _tools,
-            TimeProvider.System,
+            clock ?? TimeProvider.System,
             NullLogger<ProjectBuildService>.Instance);
-        return await service.BuildAsync(projectId, releaseId, new ProjectBuildOptions(InstallationToken: "installation-token", Target: target));
+        return await service.BuildAsync(projectId, releaseId, new ProjectBuildOptions(InstallationToken: "installation-token", Target: target), ct);
     }
 
-    private async Task<(int ProjectId, int ReleaseId, int BuildId)> SeedAsync()
+    /// <param name="parentStatus">The Microsoft release the build parents onto, or null for none.</param>
+    private async Task<(int ProjectId, int ReleaseId, int BuildId)> SeedAsync(string? parentStatus = "ready")
     {
         await using var seed = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -1080,17 +1427,20 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         seed.OeProjects.Add(project);
         // The Microsoft release the build parents onto already exists, so the
         // build does not try to ingest the (empty) fake artifact.
-        seed.OeReleases.Add(new OeRelease
+        if (parentStatus is not null)
         {
-            OrganizationId = TestDb.DefaultOrgId,
-            Label = "Business Central 29.0 (DK)",
-            DedupKey = "bc-onprem:29.0:dk",
-            Kind = "first_party",
-            Status = "ready",
-            ImportedAt = now,
-            CreatedAt = now,
-            UpdatedAt = now,
-        });
+            seed.OeReleases.Add(new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Label = "Business Central 29.0 (DK)",
+                DedupKey = ParentDedupKey,
+                Kind = "first_party",
+                Status = parentStatus,
+                ImportedAt = now,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        }
         var release = new OeRelease
         {
             OrganizationId = TestDb.DefaultOrgId,
@@ -1173,6 +1523,9 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         /// <summary>The compiler each compile ran: the apphost path, or the <c>alc.dll</c> <c>dotnet</c> was handed.</summary>
         public List<string> CompilersRun { get; } = new();
 
+        /// <summary>Every process the build started, in order.</summary>
+        public List<ProcessRunRequest> Requests { get; } = new();
+
         /// <summary>The argument list of every <c>git clone</c> run.</summary>
         public List<IReadOnlyList<string>> Clones { get; } = new();
 
@@ -1191,8 +1544,21 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         /// <summary>The folder of every <c>git diff</c> run.</summary>
         public List<string> DiffedFolders { get; } = new();
 
+        /// <summary>The commit of every <c>git checkout --detach</c> run.</summary>
+        public List<string> Checkouts { get; } = new();
+
+        /// <summary>The commits <c>git merge-base --is-ancestor</c> finds in the clone's history; any other fails it.</summary>
+        public HashSet<string> Ancestors { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>What <c>git log</c> prints for the changelog.</summary>
+        public string LogOutput { get; set; } = string.Empty;
+
+        /// <summary>The range of every changelog <c>git log</c> run.</summary>
+        public List<string> LoggedRanges { get; } = new();
+
         public Task<ProcessRunResult> RunAsync(ProcessRunRequest request, CancellationToken ct = default)
         {
+            Requests.Add(request);
             if (request.FileName == AlcPath)
             {
                 CompilersRun.Add(AlcPath);
@@ -1223,6 +1589,15 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                 }
                 return Task.FromResult(new ProcessRunResult(0, string.Empty, string.Empty));
             }
+            if (request.Arguments.Contains("fetch"))
+            {
+                return Task.FromResult(new ProcessRunResult(0, string.Empty, string.Empty));
+            }
+            if (request.Arguments.Contains("checkout") && request.Arguments.Contains("--detach"))
+            {
+                Checkouts.Add(request.Arguments[^1]);
+                return Task.FromResult(new ProcessRunResult(0, string.Empty, string.Empty));
+            }
             if (request.Arguments.Contains("show") && HeadSha is not null)
             {
                 return Task.FromResult(new ProcessRunResult(0, $"{HeadSha}\t2026-10-01T00:00:00+00:00\n", string.Empty));
@@ -1234,6 +1609,18 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                 return Task.FromResult(DiffFails
                     ? new ProcessRunResult(128, string.Empty, "fatal: bad object")
                     : new ProcessRunResult(0, Diffs.GetValueOrDefault(folder, string.Empty), string.Empty));
+            }
+            if (request.Arguments.Contains("merge-base"))
+            {
+                var ancestor = request.Arguments[request.Arguments.ToList().IndexOf("--is-ancestor") + 1];
+                return Task.FromResult(Ancestors.Contains(ancestor)
+                    ? new ProcessRunResult(0, string.Empty, string.Empty)
+                    : new ProcessRunResult(1, string.Empty, string.Empty));
+            }
+            if (request.Arguments.Contains("log"))
+            {
+                LoggedRanges.Add(request.Arguments[^1]);
+                return Task.FromResult(new ProcessRunResult(0, LogOutput, string.Empty));
             }
             // The branch a clone without --branch landed on: its default branch.
             if (request.Arguments.Contains("symbolic-ref"))

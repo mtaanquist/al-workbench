@@ -6,6 +6,7 @@ using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Operations;
+using ALDevToolbox.Services.ObjectExplorer.Import;
 
 namespace ALDevToolbox.Tests.SiteAdmin;
 
@@ -37,6 +38,59 @@ public sealed class SystemSettingsServiceTests : IDisposable
         var view = await svc.GetViewAsync();
         view.SmtpHost.Should().BeNull();
         view.HasSmtpPassword.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Build_concurrency_saves_and_applies_to_the_queue_at_once()
+    {
+        // #1164: the SiteAdmin resizes the server and sets the limit without a restart.
+        var queue = new ProjectBuildQueue(defaultLimit: 2);
+
+        await NewService(builds: queue).SaveAsync(NewInput(buildConcurrency: 5));
+
+        (await NewService().GetViewAsync()).BuildConcurrency.Should().Be(5);
+        queue.Limit.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task Clearing_build_concurrency_goes_back_to_the_default()
+    {
+        var queue = new ProjectBuildQueue(defaultLimit: 3);
+        await NewService(builds: queue).SaveAsync(NewInput(buildConcurrency: 8));
+
+        await NewService(builds: queue).SaveAsync(NewInput(buildConcurrency: null));
+
+        (await NewService().GetViewAsync()).BuildConcurrency.Should().BeNull();
+        queue.Limit.Should().Be(3);
+    }
+
+    [Theory]
+    [InlineData(ProjectBuildQueue.MinConcurrency - 1)]
+    [InlineData(-1)]
+    [InlineData(ProjectBuildQueue.MaxConcurrency + 1)]
+    public async Task Build_concurrency_outside_the_queues_bounds_is_refused_on_its_field(int value)
+    {
+        var queue = new ProjectBuildQueue(defaultLimit: 2);
+        var svc = NewService(builds: queue);
+
+        var act = () => svc.SaveAsync(NewInput(buildConcurrency: value));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["BuildConcurrency"].Should().Be(
+                $"Enter a number from {ProjectBuildQueue.MinConcurrency} to {ProjectBuildQueue.MaxConcurrency}, or leave it empty to use the default.",
+                "the message names the queue's own bounds, the ones the field enforces");
+        (await NewService().GetViewAsync()).BuildConcurrency.Should().BeNull();
+        queue.Limit.Should().Be(2);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(16)]
+    public async Task Build_concurrency_accepts_the_ends_of_the_range(int value)
+    {
+        await NewService().SaveAsync(NewInput(buildConcurrency: value));
+
+        (await NewService().GetViewAsync()).BuildConcurrency.Should().Be(value);
     }
 
     [Fact]
@@ -262,11 +316,11 @@ public sealed class SystemSettingsServiceTests : IDisposable
         SystemSettingsService.IsHostAllowed("download.microsoft.com", System.Array.Empty<string>()).Should().BeFalse();
     }
 
-    private SystemSettingsService NewService(SmtpFallbackOptions? smtpFallback = null)
+    private SystemSettingsService NewService(SmtpFallbackOptions? smtpFallback = null, ProjectBuildQueue? builds = null)
     {
         var ctx = _db.NewContextWithAudit(TestDb.NewAuditInterceptor());
         return new SystemSettingsService(ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, TimeProvider.System,
-            smtpFallback: smtpFallback);
+            smtpFallback: smtpFallback, buildQueue: builds);
     }
 
     private static SystemSettingsInput NewInput(
@@ -275,7 +329,8 @@ public sealed class SystemSettingsServiceTests : IDisposable
         int? port = 587,
         string? from = "noreply@example.com",
         string? fromName = null,
-        bool clear = false)
+        bool clear = false,
+        int? buildConcurrency = null)
         => new(
             SmtpHost: host,
             SmtpPort: port,
@@ -294,5 +349,6 @@ public sealed class SystemSettingsServiceTests : IDisposable
             IndexSizeMultiplier: 0.5m,
             McpEnabled: false,
             SignupEmailDomainAllowlist: null,
-            ReleaseDownloadDomainAllowlist: null, DisabledTools: System.Array.Empty<ALDevToolbox.Domain.Tools.ToolKey>());
+            ReleaseDownloadDomainAllowlist: null, DisabledTools: System.Array.Empty<ALDevToolbox.Domain.Tools.ToolKey>(),
+            BuildConcurrency: buildConcurrency);
 }

@@ -336,6 +336,7 @@ public sealed partial class PaletteContextService
             // The Releases source's filter: a failed import holds no objects.
             var rows = await _db.OeReleases.AsNoTracking()
                 .Where(r => releaseIds.Contains(r.Id) && r.DeletedAt == null && r.Status != "failed")
+                .Where(OeRelease.NotACheckOnlyBuild(_db.OeProjectBuilds))
                 .Where(_access.VisibleReleasePredicate(snapshot))
                 .Select(r => new { r.Id, r.Label, r.BcVersion })
                 .ToListAsync(ct).ConfigureAwait(false);

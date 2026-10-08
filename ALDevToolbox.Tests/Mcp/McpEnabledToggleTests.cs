@@ -49,7 +49,8 @@ public sealed class McpEnabledToggleTests : IDisposable
                 IndexSizeMultiplier: 0.5m,
                 McpEnabled: true,
                 SignupEmailDomainAllowlist: null,
-                ReleaseDownloadDomainAllowlist: null, DisabledTools: System.Array.Empty<ALDevToolbox.Domain.Tools.ToolKey>()));
+                ReleaseDownloadDomainAllowlist: null, DisabledTools: System.Array.Empty<ALDevToolbox.Domain.Tools.ToolKey>(),
+            BuildConcurrency: null));
         }
 
         await using var readCtx = _db.NewContext();
@@ -126,7 +127,8 @@ public sealed class McpEnabledToggleTests : IDisposable
             IndexSizeMultiplier: 0.5m,
             McpEnabled: true,
             SignupEmailDomainAllowlist: null,
-            ReleaseDownloadDomainAllowlist: null, DisabledTools: System.Array.Empty<ALDevToolbox.Domain.Tools.ToolKey>()));
+            ReleaseDownloadDomainAllowlist: null, DisabledTools: System.Array.Empty<ALDevToolbox.Domain.Tools.ToolKey>(),
+            BuildConcurrency: null));
     }
 
     private async Task<string> IssuePatAsync(IServiceProvider services)

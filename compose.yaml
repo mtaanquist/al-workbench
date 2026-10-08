@@ -80,7 +80,12 @@ services:
       # ignores those headers from anything but loopback, so per-IP rate limits
       # and the login audit see the real connection address. Uncomment when you
       # enable the `caddy` service below (or any other proxy) — it sits on the
-      # compose bridge network, so trust that subnet:
+      # compose bridge network, so trust that subnet. Without it the GitHub
+      # webhook sees every delivery as coming from the proxy and refuses it.
+      # Trusting that range also trusts anything that reaches the published
+      # 8080 port (Docker can hand those connections over from the bridge
+      # gateway), so with the proxy in front remove the `ports:` mapping above
+      # or bind it to 127.0.0.1 ("127.0.0.1:${HOST_PORT:-8080}:8080"):
       # TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12}
       # The public address this install is reached on. Credential email links
       # (password reset, magic link, invite, email verification) are built from
@@ -138,6 +143,22 @@ services:
       # DISABLE_BACKUP_SCHEDULER: "1"           # daily pg_dump + per-tenant snapshots
       # DISABLE_OE_VACUUM_SCHEDULER: "1"        # nightly VACUUM over Object Explorer tables
       # DISABLE_USAGE_SNAPSHOT_SCHEDULER: "1"   # 15-min storage-usage snapshots (StorageBar)
+      # DISABLE_DEPENDENCY_DRIFT_SCHEDULER: "1" # app.json dependency drift checks after BC releases
+      # DISABLE_GITHUB_WEBHOOK_RECOVERY_SCHEDULER: "1" # resend failed GitHub deliveries, close interrupted PR builds
+      # DISABLE_GITHUB_HOOK_ADDRESS_REFRESH: "1" # daily read of GitHub's webhook addresses; unset, other senders are refused
+      # DISABLE_BUILD_RESOURCE_MONITOR: "1"     # warn when running builds are short of CPU or memory
+      #
+      # Pipeline builds. OE_BUILD_CONCURRENCY is how many run at once (1-16,
+      # default 2) until a site admin sets it under /site-admin/settings/builds.
+      # OE_BUILD_COMPILE_TIMEOUT_MINUTES stops a compiler run that never exits
+      # (default 30); OE_BUILD_CLONE_TIMEOUT_MINUTES does the same for a clone
+      # (default 30). BC_ARTIFACT_CACHE_GB is how much disk the downloaded
+      # Business Central artifacts may keep between builds (default 15; 0
+      # turns the cache off).
+      # OE_BUILD_CONCURRENCY: "2"
+      # OE_BUILD_COMPILE_TIMEOUT_MINUTES: "30"
+      # OE_BUILD_CLONE_TIMEOUT_MINUTES: "30"
+      # BC_ARTIFACT_CACHE_GB: "15"
       #
       # SMTP bootstrap. SMTP is normally configured in the SiteAdmin UI
       # (/site-admin/settings/smtp, stored encrypted); these env vars are the
@@ -183,8 +204,10 @@ services:
     # modules need during the recursive unwrap). 1 GiB OOM'd on BC 28.1.1;
     # 4 GiB lands comfortably and leaves headroom for future Base App
     # growth. CPU is bumped to 4 so server GC has more workers during
-    # those big parses — ingestion itself is sequential, but GC throughput
-    # at this heap size benefits from the extra cores.
+    # those big parses. Imports of whole Business Central releases still run
+    # one at a time, but pipeline builds run side by side (two by default,
+    # OE_BUILD_CONCURRENCY or the site setting), each with its own compiler
+    # and clone: raise both limits before raising the number of builds.
     deploy:
       resources:
         limits:
@@ -200,8 +223,11 @@ services:
   #   1. Point a DNS A/AAAA record at this host and open ports 80 + 443.
   #   2. Set SITE_ADDRESS (your domain) and ACME_EMAIL in .env.
   #   3. Uncomment this service AND the caddy-data / caddy-config volumes below.
-  #   4. (recommended) remove the aldevtoolbox `ports:` mapping above so the app
-  #      is reachable only through the proxy.
+  #   4. Remove the aldevtoolbox `ports:` mapping above, or bind it to
+  #      127.0.0.1, so the app is reachable only through the proxy. With
+  #      TRUSTED_PROXIES set, a client reaching 8080 directly could otherwise
+  #      claim any address in X-Forwarded-For - past the rate limits, the login
+  #      audit and the GitHub webhook's address check.
   #   5. (passkeys) set AUTH_WEBAUTHN_RP_ID + AUTH_WEBAUTHN_ORIGINS to the domain.
   # Email links (verify/reset/invite) automatically use https://<domain> because
   # Caddy preserves the inbound Host header and the app honours X-Forwarded-Proto

@@ -68,6 +68,205 @@ public sealed class ProjectServiceTests : IDisposable
             : repos);
 
     [Fact]
+    public async Task Turning_on_automatic_update_pull_requests_makes_the_saver_the_person_they_are_opened_as()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        var id = await svc.CreateProjectAsync(NewInput("CRONUS A/S"));
+        await ctx.OeProjects.Where(p => p.Id == id)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.AutoUpdatePullRequestsBlocked, "stale"));
+
+        await using (var save = _db.NewContext())
+        {
+            await Svc(save).UpdateProjectAsync(id, NewInput("CRONUS A/S") with { AutoUpdatePullRequests = true });
+        }
+
+        await using var read = _db.NewContext();
+        var saved = await read.OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequests.Should().BeTrue();
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId);
+        saved.AutoUpdatePullRequestsBlocked.Should().BeNull();
+
+        // A save that does not mention it leaves it alone; turning it off forgets who.
+        await Svc(read).UpdateProjectAsync(id, NewInput("CRONUS A/S"));
+        (await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id)).AutoUpdatePullRequests.Should().BeTrue();
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S") with { AutoUpdatePullRequests = false });
+        var off = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        off.AutoUpdatePullRequests.Should().BeFalse();
+        off.AutoUpdatePullRequestsByUserId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Resuming_automatic_update_pull_requests_takes_them_over_and_clears_the_hold_up()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        var id = await svc.CreateProjectAsync(NewInput("CRONUS A/S"));
+        await ctx.OeProjects.Where(p => p.Id == id).ExecuteUpdateAsync(s => s
+            .SetProperty(p => p.AutoUpdatePullRequests, true)
+            .SetProperty(p => p.AutoUpdatePullRequestsByUserId, (int?)null)
+            .SetProperty(p => p.AutoUpdatePullRequestsBlocked, "the person they are opened as no longer has an active account."));
+        await LinkGitHubAsync(OwnerUserId);
+
+        await Svc(_db.NewContext()).ResumeAutoUpdatePullRequestsAsync(id);
+
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId);
+        saved.AutoUpdatePullRequestsBlocked.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Resuming_without_a_GitHub_account_is_refused_and_keeps_the_warning()
+    {
+        await using var ctx = _db.NewContext();
+        var id = await Svc(ctx).CreateProjectAsync(NewInput("CRONUS A/S"));
+        const string held = "the person they are opened as no longer has an active account.";
+        await ctx.OeProjects.Where(p => p.Id == id).ExecuteUpdateAsync(s => s
+            .SetProperty(p => p.AutoUpdatePullRequests, true)
+            .SetProperty(p => p.AutoUpdatePullRequestsByUserId, (int?)null)
+            .SetProperty(p => p.AutoUpdatePullRequestsBlocked, held));
+
+        var act = () => Svc(_db.NewContext()).ResumeAutoUpdatePullRequestsAsync(id);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Values
+            .Should().ContainSingle(ALDevToolbox.Services.GitHub.DependencyDriftService.NotLinkedRefusal);
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequestsByUserId.Should().BeNull();
+        saved.AutoUpdatePullRequestsBlocked.Should().Be(held);
+    }
+
+    /// <summary>Connects a GitHub account for <paramref name="userId"/>, as the account page would leave it.</summary>
+    private async Task LinkGitHubAsync(int userId)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.UserExternalLogins.Add(new UserExternalLogin
+        {
+            UserId = userId,
+            Provider = ALDevToolbox.Services.GitHub.GitHubAccessService.ProviderName,
+            Issuer = "https://github.com",
+            Subject = $"gh-{userId}",
+            DisplayIdentity = $"user-{userId}",
+            CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>A second person who manages the (Public) solution, optionally with a GitHub account connected.</summary>
+    private async Task<int> SeedColleagueAsync(bool gitHubLinked)
+    {
+        await using var ctx = _db.NewContext();
+        var colleague = new User
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Email = "colleague@cronus.example",
+            PasswordHash = "x",
+            DisplayName = "Colleague",
+            Role = UserRole.Editor,
+            Status = UserStatus.Active,
+            CreatedAt = DateTime.UtcNow,
+        };
+        ctx.Users.Add(colleague);
+        await ctx.SaveChangesAsync();
+        if (gitHubLinked) await LinkGitHubAsync(colleague.Id);
+        return colleague.Id;
+    }
+
+    [Fact]
+    public async Task Someone_else_only_removing_a_repository_leaves_automatic_update_pull_requests_alone()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core, Payments));
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == id).ExecuteUpdateAsync(s => s
+                .SetProperty(p => p.AutoUpdatePullRequests, true)
+                .SetProperty(p => p.AutoUpdatePullRequestsByUserId, (int?)OwnerUserId));
+        }
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: false);
+
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core));
+
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId, "a repository taken away is nowhere new to write");
+        saved.AutoUpdatePullRequestsBlocked.Should().BeNull();
+    }
+
+    /// <summary>A solution with automatic update pull requests on, opened as the owner.</summary>
+    private async Task<int> SeedAutoUpdatingSolutionAsync()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S"));
+        await using var ctx = _db.NewContext();
+        await ctx.OeProjects.Where(p => p.Id == id).ExecuteUpdateAsync(s => s
+            .SetProperty(p => p.AutoUpdatePullRequests, true)
+            .SetProperty(p => p.AutoUpdatePullRequestsByUserId, (int?)OwnerUserId));
+        return id;
+    }
+
+    private static readonly ProjectRepositoryInput Core =
+        new(RepositoryProvider.GitHub, "https://github.com/acme/core", "Core");
+
+    private static readonly ProjectRepositoryInput Payments =
+        new(RepositoryProvider.GitHub, "https://github.com/cronus-dk/payment-import", "Payments");
+
+    [Theory]
+    [InlineData(true, null)]
+    [InlineData(false, ALDevToolbox.Services.GitHub.DependencyDriftService.AutomaticNotLinkedMessage)]
+    public async Task Someone_else_changing_the_repositories_takes_over_automatic_update_pull_requests(
+        bool gitHubLinked, string? expectedBlocked)
+    {
+        var id = await SeedAutoUpdatingSolutionAsync();
+        var colleagueId = await SeedColleagueAsync(gitHubLinked);
+        _db.OrgContext.CurrentUserId = colleagueId;
+
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core, Payments));
+
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequests.Should().BeTrue();
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(colleagueId,
+            "the repository they added must not be written to with the owner's GitHub account");
+        saved.AutoUpdatePullRequestsBlocked.Should().Be(expectedBlocked);
+    }
+
+    [Fact]
+    public async Task Someone_else_saving_without_changing_the_repositories_leaves_automatic_update_pull_requests_alone()
+    {
+        var id = await SeedAutoUpdatingSolutionAsync();
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+
+        // A rename, and the one repository re-spelled with .git, is not a change to the set.
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S Denmark", "dk", null,
+            Core with { Url = "https://github.com/acme/core.git" }));
+
+        (await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id))
+            .AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId);
+    }
+
+    [Fact]
+    public async Task The_person_they_are_opened_as_changing_the_repositories_stays_that_person()
+    {
+        var id = await SeedAutoUpdatingSolutionAsync();
+
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core, Payments));
+
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(OwnerUserId);
+        saved.AutoUpdatePullRequestsBlocked.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Someone_else_adding_one_repository_takes_over_automatic_update_pull_requests()
+    {
+        var id = await SeedAutoUpdatingSolutionAsync();
+        var colleagueId = await SeedColleagueAsync(gitHubLinked: false);
+        _db.OrgContext.CurrentUserId = colleagueId;
+
+        await Svc(_db.NewContext()).AddRepositoryAsync(id, Payments);
+
+        var saved = await _db.NewContext().OeProjects.AsNoTracking().SingleAsync(p => p.Id == id);
+        saved.AutoUpdatePullRequestsByUserId.Should().Be(colleagueId);
+        saved.AutoUpdatePullRequestsBlocked.Should().Be(ALDevToolbox.Services.GitHub.DependencyDriftService.AutomaticNotLinkedMessage);
+    }
+
+    [Fact]
     public async Task Create_persists_project_and_repositories()
     {
         await using var ctx = _db.NewContext();
@@ -150,6 +349,171 @@ public sealed class ProjectServiceTests : IDisposable
 
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors.Should().ContainKey("Url");
+    }
+
+    // --- One solution per repository (#1200) --------------------------------
+
+    private static ProjectRepositoryInput Repo(string url) => new(RepositoryProvider.GitHub, url, "");
+
+    private const string ClaimedByCronus =
+        "This repository already belongs to the solution CRONUS A/S. A repository can only belong to one solution, so remove it from CRONUS A/S first.";
+
+    [Theory]
+    [InlineData("https://github.com/cronus-dk/core")]
+    [InlineData("https://github.com/cronus-dk/core.git")]
+    [InlineData("https://github.com/Cronus-DK/Core/")]
+    public async Task Adding_a_repository_another_solution_has_is_refused_naming_it(string url)
+    {
+        var svc = Svc(_db.NewContext());
+        await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        var other = await svc.CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+
+        var act = () => Svc(_db.NewContext()).AddRepositoryAsync(other, Repo(url));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().Equal(new Dictionary<string, string> { ["Url"] = ClaimedByCronus });
+        (await _db.NewContext().OeProjectRepositories.CountAsync(r => r.ProjectId == other)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Saving_a_repository_another_solution_has_is_refused_under_its_row()
+    {
+        var svc = Svc(_db.NewContext());
+        await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        var other = await svc.CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+
+        var act = () => Svc(_db.NewContext()).UpdateProjectAsync(other, NewInput("CRONUS Retail", "dk", null,
+            Repo("https://github.com/cronus-dk/retail"), Repo("https://github.com/CRONUS-DK/core.git")));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().Equal(new Dictionary<string, string> { ["Repositories[1].Url"] = ClaimedByCronus });
+    }
+
+    [Fact]
+    public async Task Changing_a_repository_url_to_one_another_solution_has_is_refused()
+    {
+        var svc = Svc(_db.NewContext());
+        await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        var other = await svc.CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+
+        var act = () => Svc(_db.NewContext()).UpdateProjectAsync(other, NewInput("CRONUS Retail", "dk", null,
+            Repo("https://github.com/cronus-dk/core")));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("Repositories[0].Url");
+    }
+
+    [Fact]
+    public async Task Creating_a_solution_with_a_repository_another_solution_has_is_refused()
+    {
+        var svc = Svc(_db.NewContext());
+        await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+
+        var act = () => Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS Retail", "dk", null,
+            Repo("https://github.com/cronus-dk/core.git")));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().Equal(new Dictionary<string, string> { ["Repositories[0].Url"] = ClaimedByCronus });
+        (await _db.NewContext().OeProjects.CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_deleted_solution_does_not_keep_its_repository()
+    {
+        var svc = Svc(_db.NewContext());
+        var gone = await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        var other = await svc.CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+        await svc.SoftDeleteProjectAsync(gone);
+
+        await Svc(_db.NewContext()).AddRepositoryAsync(other, Repo("https://github.com/cronus-dk/core"));
+
+        (await _db.NewContext().OeProjectRepositories.CountAsync(r => r.ProjectId == other)).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task A_pair_that_already_shares_a_repository_keeps_saving_until_the_row_changes()
+    {
+        var svc = Svc(_db.NewContext());
+        await svc.CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        var other = await svc.CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+        // Shared before the rule existed - written past the service, the way old data is.
+        await using (var seed = _db.NewContext())
+        {
+            seed.OeProjectRepositories.Add(new OeProjectRepository
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = other,
+                Provider = RepositoryProvider.GitHub,
+                Url = "https://github.com/cronus-dk/core",
+                DisplayName = "core",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        // An unrelated edit, with the shared row re-spelled cosmetically, still saves.
+        await Svc(_db.NewContext()).UpdateProjectAsync(other, NewInput("CRONUS Retail Renamed", "dk", null,
+            Repo("https://github.com/cronus-dk/retail"), Repo("https://github.com/cronus-dk/core.git")));
+        (await _db.NewContext().OeProjects.SingleAsync(p => p.Id == other)).Name.Should().Be("CRONUS Retail Renamed");
+
+        // Taking the shared row away and putting it back is a change, and is refused.
+        await Svc(_db.NewContext()).UpdateProjectAsync(other, NewInput("CRONUS Retail Renamed", "dk", null,
+            Repo("https://github.com/cronus-dk/retail")));
+        var act = () => Svc(_db.NewContext()).UpdateProjectAsync(other, NewInput("CRONUS Retail Renamed", "dk", null,
+            Repo("https://github.com/cronus-dk/retail"), Repo("https://github.com/cronus-dk/core")));
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("Repositories[1].Url");
+    }
+
+    [Fact]
+    public async Task A_repository_on_a_private_solution_is_refused_without_naming_it()
+    {
+        var colleague = await SeedColleagueAsync(gitHubLinked: false);
+        var hidden = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS Secret", "dk", null, Repo("https://github.com/cronus-dk/core")));
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == hidden).ExecuteUpdateAsync(s => s
+                .SetProperty(p => p.Visibility, ProjectVisibility.Private)
+                .SetProperty(p => p.CreatedByUserId, (int?)colleague));
+        }
+        var mine = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS Retail", "dk", null, Repo("https://github.com/cronus-dk/retail")));
+
+        var act = () => Svc(_db.NewContext()).AddRepositoryAsync(mine, Repo("https://github.com/cronus-dk/core"));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Url"].Should().Be(
+                "This repository already belongs to another solution. A repository can only belong to one solution, so ask an Admin to remove it from the other one first.");
+    }
+
+    [Fact]
+    public async Task A_repository_on_another_organisations_solution_is_not_claimed()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.OeProjects.Add(new OeProject
+            {
+                OrganizationId = TestDb.OtherOrgId,
+                Name = "CRONUS A/S",
+                DefaultArtifactCountry = "dk",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+                Repositories =
+                [
+                    new OeProjectRepository
+                    {
+                        OrganizationId = TestDb.OtherOrgId,
+                        Provider = RepositoryProvider.GitHub,
+                        Url = "https://github.com/cronus-dk/core",
+                        DisplayName = "core",
+                    },
+                ],
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var act = () => Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null,
+            Repo("https://github.com/cronus-dk/core")));
+
+        await act.Should().NotThrowAsync();
     }
 
     [Fact]

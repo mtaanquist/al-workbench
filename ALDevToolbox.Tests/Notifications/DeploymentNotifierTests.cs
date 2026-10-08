@@ -129,6 +129,19 @@ public sealed class DeploymentNotifierTests : IDisposable
         _email.Sent.Should().ContainSingle().Which.To.Should().Be("creator@cronus.example");
     }
 
+    [Fact]
+    public async Task A_deployment_refused_because_its_person_lost_access_goes_to_the_owners()
+    {
+        await SeedAsync();
+        var id = await AddDeliveryAsync(ProjectDeliveryStatus.Failed, triggeredBy: _approver,
+            failure: ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryService.SchedulerLostAccess);
+
+        await Notifier().NotifyAsync(id);
+
+        // #1125: the person it ran as can no longer deploy it; the people who can hear instead.
+        _email.Sent.Select(s => s.To).Should().BeEquivalentTo(["owner@cronus.example", "creator@cronus.example"]);
+    }
+
     [Theory]
     [InlineData(ProjectDeliveryStatus.Scheduled)]
     [InlineData(ProjectDeliveryStatus.Cancelled)]

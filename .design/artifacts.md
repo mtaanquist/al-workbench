@@ -68,8 +68,16 @@ included, shows the solution beside it.
 
 Names stay unique per solution. Two pipelines set up the same way are expected to be rare, so a clash
 is refused with a message and the editor then offers a name field; a typed name is stored with
-`name_is_custom` and kept on later saves until it is cleared. Renaming a build pipeline renames the
-deployment pipelines named after it, except typed ones and any whose new name is taken. Nothing else renames a pipeline on its own: an environment, repository or extension renamed
+`name_is_custom` and kept on later saves until it is cleared, or until a save changes what the name
+was typed for (a build pipeline's branch or extensions, a deployment pipeline's source or
+environment) while leaving the typed name as it was: that save goes back to the generated name, and
+the editor says so under the name field. A name typed afresh in that same save is kept, and so is the
+old typed name when the generated one is taken (#1135). Renaming a build pipeline renames the
+deployment pipelines named after it, except typed ones and any whose new name is taken. Discovery
+renames too: after it refreshes a solution's extension list, every build pipeline with a generated
+name is given the name it now calls for (an extension renamed in its `app.json`), carried through to
+the deployment pipelines named after it; one whose new name is taken keeps its old name and the log
+says so (#1135). Nothing else renames a pipeline on its own: an environment or repository renamed
 elsewhere shows in the name the next time the pipeline is saved. When a deployment pipeline's name is
 too long, the source is shortened so the environment stays. Migration
 `GeneratePipelineNames` renamed every existing active pipeline the same way; one whose generated name
@@ -133,6 +141,14 @@ Build **trigger** (the **New build** action with its extension picker) is a Pipe
   owner, an org **Admin**, a SiteAdmin, or a member of a team assigned to the project.
 - **Deleting** is deliberately stricter: owner, org Admin, SiteAdmin only. A team grant is about
   doing the work on a project, not about ending it.
+- **Pipelines are disabled, not deleted** (#1131). Anyone who manages the solution can disable or
+  enable a build pipeline or a deployment pipeline (`disabled_at`); only an org Admin or a
+  SiteAdmin can delete one. A disabled build pipeline refuses a Build and is skipped by building on
+  push and the nightly preview check, and a push or preview build that was already waiting fails
+  with the reason when the worker reaches it; a manual build already queued still runs. A disabled
+  deployment pipeline refuses Deploy and the agent's deploy tool, prepares nothing from new builds,
+  and disabling it cancels its scheduled deployments and dismisses its prepared ones, as a delete
+  does. Enabling puts it back as it was; nothing that was cancelled comes back.
 - Enforced in the service layer (source of truth, via `ProjectAccess`) and mirrored in the UI —
   the affordances are hidden for everyone else, but hiding a button is a courtesy, not the gate.
 - No new role: "Admin" is the existing org `Admin`. Teams are not a role; they are a named group
@@ -211,8 +227,9 @@ unchanged. The lifecycle is wrapped in `OeProjectBuild`:
 2. The worker runs `BuildAsync`, which now also:
    - clones each repo with the **triggering user's** token and records HEAD per repo
      (`OeProjectBuildRepoCommit`);
-   - computes the changelog per repo as `git log <prev>..<new>` against the project's **last
-     successful build**, with a merge-base ancestry check and guards for first-build /
+   - computes the changelog per repo as `git log <prev>..<new>` against the **pipeline's last
+     successful build** (each pipeline clones only its own branch, so another pipeline's commit
+     is usually not in the clone; preview and pull-request builds are never the baseline), with a merge-base ancestry check and guards for first-build /
      force-push (non-ancestor) / very large ranges (cap ~100, "…and N more")
      (`OeProjectBuildCommit`);
    - captures clone + `alc` output (`OeProjectBuildLog`);

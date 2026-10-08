@@ -19,6 +19,14 @@ public interface IDeliveryTokenSource
     /// credentials.
     /// </summary>
     Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, CancellationToken ct = default);
+
+    /// <summary>
+    /// As <see cref="AcquireDeliveryContextAsync(int, CancellationToken)"/>; with
+    /// <paramref name="forceRefresh"/> a new token is fetched even when a cached one looks
+    /// valid, for after Business Central refused the cached one with a 401 (#1113).
+    /// </summary>
+    Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, bool forceRefresh, CancellationToken ct = default) =>
+        AcquireDeliveryContextAsync(projectId, ct);
 }
 
 /// <summary>

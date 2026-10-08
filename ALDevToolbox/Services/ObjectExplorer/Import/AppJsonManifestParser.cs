@@ -70,6 +70,41 @@ public static class AppJsonManifestParser
         TestFolderNames.Contains(segment)
         || TestFolderSuffixes.Any(suf => segment.EndsWith(suf, StringComparison.OrdinalIgnoreCase));
 
+    // Microsoft's test framework apps, by id, so a test app is recognised whatever its
+    // folder is called (#1130). Names stand in only for a dependency that leaves the id
+    // out: another publisher's app may well be called "Any" or "Test Runner" (#1193).
+    private static readonly HashSet<string> TestFrameworkAppIds = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "dd0be2ea-f733-4d65-bb34-a28f4624fb14", // Library Assert
+        "23de40a6-dfe8-4f80-80db-d70f83ce8caf", // Test Runner
+        "e7320ebb-08b3-4406-b1ec-b4927d3e280b", // Any
+        "5095f467-0a01-4b99-99d1-9ff1237d286f", // Library Variable Storage
+        "40860557-a18d-42ad-aecb-22b7dd80dc80", // Permissions Mock
+        "9856ae4f-d1a7-46ef-89bb-6ef056398228", // System Application Test Library
+        "5d86850b-0d76-4eca-bd7b-951ad998e997", // Tests-TestLibraries
+        "2156302a-872f-4568-be0b-60968696f0d5", // AI Test Toolkit
+    };
+
+    private static readonly HashSet<string> TestFrameworkAppNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Library Assert", "Test Runner", "Any", "Library Variable Storage", "Permissions Mock",
+        "System Application Test Library", "Tests-TestLibraries", "AI Test Toolkit",
+    };
+
+    /// <summary>
+    /// True when <paramref name="manifest"/> depends on one of Microsoft's test framework
+    /// apps (Library Assert, Test Runner, Any and the like): a test app, whatever the
+    /// folder holding it is called (#1130). A shipped extension never needs them.
+    /// </summary>
+    public static bool IsTestApp(AppJsonManifest manifest) =>
+        manifest.Dependencies.Any(d =>
+        {
+            var id = d.Id.Trim('{', '}', ' ');
+            return id.Length > 0
+                ? TestFrameworkAppIds.Contains(id)
+                : TestFrameworkAppNames.Contains(d.Name.Trim());
+        });
+
     /// <summary>True when a walk should not descend into <paramref name="segment"/> at all.</summary>
     public static bool IsExcludedSegment(string segment) => ExcludedFolderNames.Contains(segment);
 

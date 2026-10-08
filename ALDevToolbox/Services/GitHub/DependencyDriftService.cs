@@ -72,12 +72,46 @@ public sealed record DependencyDriftSummary(
 
 /// <summary>What "Open update pull requests" did to one repository.</summary>
 /// <param name="Refusal">Why nothing was opened, in words the person can act on. Null when one was.</param>
+/// <param name="IsUpToDate">
+/// True when the refusal only means there was nothing left to change - the repository
+/// has caught up since the scan - rather than something somebody has to fix.
+/// </param>
+/// <param name="IsRateLimited">
+/// True when GitHub refused because the person's account is making changes too fast.
+/// Every further write on that account is refused too until it cools down.
+/// </param>
 public sealed record DependencyDriftPullRequest(
     string Repository,
     GitHubPullRequest? PullRequest,
     bool IsNewPullRequest,
     int FileCount,
-    string? Refusal);
+    string? Refusal,
+    bool IsUpToDate = false,
+    bool IsRateLimited = false);
+
+/// <summary>What one solution's automatic run did (issue #1104).</summary>
+/// <param name="Opened">How many pull requests it opened.</param>
+/// <param name="Blocked">
+/// What stopped it, worded to follow "Pull requests have stopped:" on the solution. Null
+/// when nothing did.
+/// </param>
+/// <param name="RateLimited">
+/// True when GitHub said the person's account was making changes too fast, so the run
+/// stopped where it was. That is not something the solution has to fix: the next night
+/// carries on, and nothing else is opened as that person in the meantime.
+/// </param>
+public sealed record AutomaticUpdatePullRequests(int Opened, string? Blocked, bool RateLimited = false);
+
+/// <summary>
+/// When the automatic run last wrote to GitHub with one person's account. The nightly
+/// pass keeps one per person and hands it to each of their solutions in turn, so the
+/// spacing holds across solutions, not only within one.
+/// </summary>
+public sealed class GitHubWritePace
+{
+    /// <summary>When the last write started, on the service's clock; null before the first.</summary>
+    public DateTimeOffset? LastWriteAt { get; set; }
+}
 
 /// <summary>
 /// Which tracked repositories still target last year's Business Central, and
@@ -134,6 +168,28 @@ public sealed class DependencyDriftService
     /// </summary>
     private const int MaxBranchAttempts = 10;
 
+    /// <summary>
+    /// The gap the automatic run leaves between two writes to GitHub. GitHub asks
+    /// integrations to wait at least a second between requests that create content, and
+    /// enforces about 80 a minute per account with its secondary rate limit; one
+    /// repository's pull request is five or more such writes, so the morning a Business
+    /// Central wave lands and many customers move at once, a run that does not pace
+    /// itself reaches that limit within a minute.
+    /// </summary>
+    internal static readonly TimeSpan WriteSpacing = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// How the automatic run waits out <see cref="WriteSpacing"/>. A delay on the
+    /// service's clock; tests swap it for one that records the wait and returns at once.
+    /// </summary>
+    internal Func<TimeSpan, CancellationToken, Task> PauseAsync { get; set; }
+
+    /// <summary>
+    /// The pace writes are kept to, or null when they are not paced - only the automatic
+    /// run is, which nobody is waiting on.
+    /// </summary>
+    private GitHubWritePace? _pace;
+
     private readonly AppDbContext _db;
     private readonly GitHubAppClient _github;
     private readonly GitHubAccessService _access;
@@ -173,6 +229,7 @@ public sealed class DependencyDriftService
         _orgContext = orgContext;
         _clock = clock;
         _logger = logger;
+        PauseAsync = (delay, ct) => Task.Delay(delay, _clock, ct);
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
@@ -198,6 +255,9 @@ public sealed class DependencyDriftService
     public async Task<int> ScanForReleaseAsync(int releaseId, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
+        // Two imports can finish at once now that builds run side by side (#1137), and
+        // each replaces the organisation's whole set of findings.
+        using var scanning = await ScanGate.EnterAsync(orgId, ct);
         var release = await _db.OeReleases.AsNoTracking().FirstOrDefaultAsync(r => r.Id == releaseId, ct);
         if (release is null || release.Kind != "first_party" || release.IsPrerelease)
         {
@@ -293,6 +353,9 @@ public sealed class DependencyDriftService
         return stored;
     }
 
+    /// <summary>One scan per organisation at a time, keyed by its id. Internal for tests.</summary>
+    internal static readonly ALDevToolbox.Services.Workers.KeyedGate<int> ScanGate = new();
+
     /// <summary>
     /// The newest first-party release that has finished importing, or null when
     /// the organisation has none - what "Check again" scans against.
@@ -324,16 +387,21 @@ public sealed class DependencyDriftService
     /// The environment each tracked GitHub repository is measured against, keyed by
     /// <c>owner/name</c>. Per solution the first production environment by name that is
     /// not deleted and has a version, else the first such sandbox; a repository tracked by
-    /// more than one solution takes the oldest solution that has one, so the answer does
-    /// not change from one scan to the next. A repository missing from the result is not
-    /// checked.
+    /// more than one solution takes the oldest solution that has one - preferring the
+    /// solutions with automatic update pull requests on - so the answer does not change
+    /// from one scan to the next. A repository missing from the result is not checked.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, EnvironmentTarget>> EnvironmentTargetsAsync(CancellationToken ct)
     {
         var tracking = await _db.OeProjectRepositories.AsNoTracking()
             .Where(r => r.Provider == RepositoryProvider.GitHub)
             .Where(r => _db.OeProjects.Any(p => p.Id == r.ProjectId && p.DeletedAt == null))
-            .Select(r => new { r.ProjectId, r.Url })
+            .Select(r => new
+            {
+                r.ProjectId,
+                r.Url,
+                AutoUpdates = _db.OeProjects.Where(p => p.Id == r.ProjectId).Select(p => p.AutoUpdatePullRequests).FirstOrDefault(),
+            })
             .ToListAsync(ct);
         if (tracking.Count == 0) return new Dictionary<string, EnvironmentTarget>();
 
@@ -355,7 +423,10 @@ public sealed class DependencyDriftService
                     .First());
 
         var result = new Dictionary<string, EnvironmentTarget>(StringComparer.OrdinalIgnoreCase);
-        foreach (var row in tracking.OrderBy(t => t.ProjectId))
+        // A solution with automatic update pull requests on goes first: the automatic run
+        // acts only on findings measured against its own solution, so measuring a shared
+        // repository against a solution without it would leave the one with it silent.
+        foreach (var row in tracking.OrderByDescending(t => t.AutoUpdates).ThenBy(t => t.ProjectId))
         {
             if (ToFullName(row.Url) is not { } name || result.ContainsKey(name)) continue;
             if (perProject.TryGetValue(row.ProjectId, out var target)) result[name] = target;
@@ -416,6 +487,10 @@ public sealed class DependencyDriftService
                     repo.FullName, path);
                 continue;
             }
+
+            // A test app is left out wherever its folder is, as the build and discovery
+            // leave it out (#1193).
+            if (AppJsonManifestParser.IsTestApp(manifest)) continue;
 
             // A manifest with no application version states no Business Central
             // it targets, so there is nothing to say it is behind.
@@ -789,43 +864,34 @@ public sealed class DependencyDriftService
             .ToList();
         if (wanted.Count == 0) return [];
 
-        // Why-not before what, as everywhere else: "that is not a repository we
-        // can offer you" is a poor way to say "connect your GitHub account".
-        var access = await _repositories.GetAccessAsync(ct);
-        if (!access.IsReady)
-        {
-            var reason = ReadinessRefusal(access.Readiness);
-            return wanted.Select(r => new DependencyDriftPullRequest(r, null, false, 0, reason)).ToList();
-        }
-
-        var token = await _access.ResolveUserTokenAsync(userId, ct);
+        var (token, readiness) = await ResolveWriteTokenAsync(userId, ct);
         if (token is null)
         {
-            var reason = ReadinessRefusal(GitHubRepositoryReadiness.NotLinked);
+            var reason = ReadinessRefusal(readiness);
             return wanted.Select(r => new DependencyDriftPullRequest(r, null, false, 0, reason)).ToList();
         }
 
         var visible = await VisibleRepositoryNamesAsync(ct);
         var results = new List<DependencyDriftPullRequest>(wanted.Count);
+        var rateLimited = false;
         foreach (var name in wanted)
         {
             ct.ThrowIfCancellationRequested();
-            try
+            if (rateLimited)
             {
-                results.Add(await OpenOneAsync(token, name, visible, ct));
+                // Every write on this account is refused until GitHub lets up, so the
+                // rest are not tried; asking again in a few minutes picks them up.
+                results.Add(new DependencyDriftPullRequest(name, null, false, 0, RateLimitedRefusal, IsRateLimited: true));
+                continue;
             }
-            catch (PlanValidationException ex)
+            var result = await TryOpenOneAsync(token, name, visible, automatic: false, ct);
+            if (result.PullRequest is { } pullRequest)
             {
-                results.Add(new DependencyDriftPullRequest(
-                    name, null, false, 0, ex.Errors.Values.FirstOrDefault() ?? "The pull request was refused."));
+                // A version opened by hand replaces an older automatic one just the same.
+                rateLimited = await SupersedeOlderAsync(token, result.Repository, pullRequest, ct);
             }
-            catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException or TaskCanceledException)
-            {
-                _logger.LogWarning(ex, "Could not open the update pull request on {RepoFullName}.", name);
-                results.Add(new DependencyDriftPullRequest(
-                    name, null, false, 0,
-                    "GitHub would not take the change to this repository just now. Try again in a moment."));
-            }
+            rateLimited |= result.IsRateLimited;
+            results.Add(result);
         }
 
         _logger.LogInformation(
@@ -834,8 +900,341 @@ public sealed class DependencyDriftService
         return results;
     }
 
+    // ── Opening them on their own (issue #1104) ──────────────────────────
+
+    /// <summary>
+    /// Opens the update pull request on each of <paramref name="projectId"/>'s GitHub
+    /// repositories that the last scan found behind, as the person in scope - the one
+    /// who turned automatic update pull requests on. Run by
+    /// <see cref="DependencyDriftScheduler"/> after the nightly scan.
+    ///
+    /// <para>Each Business Central version is offered once per repository: while its
+    /// pull request is open, new findings are added to it; once it has been merged or
+    /// closed, the version is left alone, even when GitHub deleted the branch with it.
+    /// Once a newer version's pull request is open, the older ones the automatic run
+    /// opened are closed with a note pointing at it.</para>
+    ///
+    /// <para>Only findings measured against one of this solution's own environments are
+    /// acted on. A repository two solutions share is measured once, against one of their
+    /// environments; the other solution's customer may be on a different Business
+    /// Central, and a pull request moving them onto it is not this solution's to open.</para>
+    ///
+    /// <para>Writes are paced (<see cref="WriteSpacing"/>), and the run stops at the first
+    /// sign that GitHub is rate limiting the person's account.</para>
+    /// </summary>
+    /// <param name="pace">
+    /// The person's pace so far in this pass, shared with their other solutions; null
+    /// starts a fresh one.
+    /// </param>
+    public async Task<AutomaticUpdatePullRequests> OpenAutomaticPullRequestsAsync(
+        int projectId, GitHubWritePace? pace = null, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var userId = RequireUserId();
+        var project = await _db.OeProjects.AsNoTracking()
+            .Where(p => p.Id == projectId && p.DeletedAt == null)
+            .Select(p => new
+            {
+                p.Id,
+                p.CreatedByUserId,
+                p.AutoUpdatePullRequests,
+                Urls = p.Repositories.Where(r => r.Provider == RepositoryProvider.GitHub).Select(r => r.Url).ToList(),
+            })
+            .FirstOrDefaultAsync(ct);
+        if (project is null || !project.AutoUpdatePullRequests) return new AutomaticUpdatePullRequests(0, null);
+        if (!await _projectAccess.CanManageAsync(project.Id, project.CreatedByUserId, ct))
+        {
+            return new AutomaticUpdatePullRequests(0, AutomaticNoAccessMessage);
+        }
+
+        // Keyed without case but carrying the scan's own spelling, which is GitHub's: a
+        // solution's URL is however somebody pasted it, and the findings are looked up
+        // by the stored name. Only the findings measured against this solution's own
+        // environments count (see above).
+        var behind = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var stored in await _db.GitHubRepositoryDrift.AsNoTracking()
+                     .Where(d => d.EnvironmentId != null
+                                 && _db.OeProjectEnvironments.Any(e => e.Id == d.EnvironmentId && e.ProjectId == project.Id))
+                     .Select(d => d.Repository).Distinct().ToListAsync(ct))
+        {
+            behind.TryAdd(stored, stored);
+        }
+        var due = project.Urls
+            .Select(ToFullName)
+            .Where(n => n is not null && behind.ContainsKey(n))
+            .Select(n => behind[n!])
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (due.Count == 0) return new AutomaticUpdatePullRequests(0, null);
+
+        var (token, readiness) = await ResolveWriteTokenAsync(userId, ct);
+        if (token is null) return new AutomaticUpdatePullRequests(0, AutomaticReadinessRefusal(readiness));
+
+        var visible = await VisibleRepositoryNamesAsync(ct);
+        var opened = 0;
+        string? blocked = null;
+        var rateLimited = false;
+        _pace = pace ?? new GitHubWritePace();
+        foreach (var name in due)
+        {
+            ct.ThrowIfCancellationRequested();
+            var result = await TryOpenOneAsync(token, name, visible, automatic: true, ct);
+            if (result.PullRequest is { } pullRequest)
+            {
+                if (result.IsNewPullRequest) opened++;
+                rateLimited = await SupersedeOlderAsync(token, result.Repository, pullRequest, ct);
+            }
+            else if (result.IsRateLimited)
+            {
+                rateLimited = true;
+            }
+            else if (!result.IsUpToDate)
+            {
+                // One repository's trouble does not stop the others; the first one is
+                // what the solution shows, and tomorrow night tries again.
+                blocked ??= $"{name} — {result.Refusal}";
+            }
+
+            if (rateLimited)
+            {
+                // Every further write on this account is refused until GitHub lets up.
+                // Stop here rather than spend the rest of the list on refusals; the next
+                // night carries on.
+                _logger.LogWarning(
+                    "GitHub is rate limiting user {UserId}, so the automatic update pull requests of solution {ProjectId} stopped at {RepoFullName}.",
+                    userId, projectId, name);
+                break;
+            }
+        }
+
+        _logger.LogInformation(
+            "Automatic update pull requests for solution {ProjectId} as user {UserId}: {DueCount} repositories behind, {OpenedCount} pull requests opened.",
+            projectId, userId, due.Count, opened);
+        return new AutomaticUpdatePullRequests(opened, blocked, rateLimited);
+    }
+
+    /// <summary>The pause when the person automatic update pull requests are opened as can no longer manage the solution.</summary>
+    public const string AutomaticNoAccessMessage =
+        "the person they are opened as can no longer manage this solution.";
+
+    /// <summary>The pause when that person no longer has an active account.</summary>
+    public const string AutomaticNoOwnerMessage =
+        "the person they are opened as no longer has an active account.";
+
+    /// <summary>
+    /// The pause when that person has no GitHub account connected - also what a solution
+    /// shows straight away when somebody without one changes its repositories and so
+    /// becomes that person (see <c>ProjectService.UpdateProjectAsync</c>).
+    /// </summary>
+    public const string AutomaticNotLinkedMessage =
+        "the person they are opened as has not connected their GitHub account. They connect it on their "
+        + "account page under Repository access.";
+
+    /// <summary>
+    /// <paramref name="blocked"/> as the person the pull requests are opened as should read
+    /// it about themselves: "you have not connected your GitHub account" rather than "the
+    /// person they are opened as has not". Any other reason is returned unchanged.
+    /// </summary>
+    public static string ForTheRunAsPerson(string blocked) => blocked switch
+    {
+        AutomaticNotLinkedMessage =>
+            "you have not connected your GitHub account. Connect it on your account page under Repository access.",
+        AutomaticNoAccessMessage => "you can no longer manage this solution.",
+        _ => blocked,
+    };
+
+    /// <summary>What a person pressing the button is told when GitHub is rate limiting their account.</summary>
+    private const string RateLimitedRefusal =
+        "GitHub is limiting how fast your account can make changes just now. Wait a few minutes, then try again.";
+
+    private static string AutomaticReadinessRefusal(GitHubRepositoryReadiness readiness) => readiness switch
+    {
+        GitHubRepositoryReadiness.NotConfigured => "GitHub is not set up on this server.",
+        GitHubRepositoryReadiness.NotConnected =>
+            "your organisation has not connected a GitHub organisation. An administrator connects one under "
+            + "Administration → Repositories.",
+        _ => AutomaticNotLinkedMessage,
+    };
+
+    /// <summary>
+    /// Closes the older automatic pull requests on <paramref name="repository"/> that
+    /// <paramref name="current"/> replaces, the way Dependabot does: two pull requests
+    /// moving the same lines to different versions only conflict with each other. A
+    /// pull request a person opened is theirs to close. Returns true when GitHub rate
+    /// limited the person's account part-way, which stops the closing too.
+    /// </summary>
+    private async Task<bool> SupersedeOlderAsync(
+        string token, string repository, GitHubPullRequest current, CancellationToken ct)
+    {
+        var key = repository.ToLowerInvariant();
+        var records = await _db.GitHubUpdatePullRequests
+            .Where(r => r.Repository == key && r.SupersededAt == null)
+            .ToListAsync(ct);
+        var replacing = records.FirstOrDefault(r => r.PullRequestNumber == current.Number);
+        if (replacing is null) return false;
+
+        var older = records
+            .Where(r => r.IsAutomatic && r.PullRequestNumber != current.Number
+                        && BcVersionComparer.Instance.Compare(r.Version, replacing.Version) < 0)
+            .ToList();
+        if (older.Count == 0) return false;
+
+        var (owner, name) = (repository.Split('/')[0], repository.Split('/')[1]);
+        foreach (var record in older)
+        {
+            try
+            {
+                // One already merged or closed has nothing left to close; it only stops
+                // being a candidate.
+                if (!await _github.IsPullRequestOpenAsync(token, owner, name, record.PullRequestNumber, ct))
+                {
+                    record.SupersededAt = _clock.GetUtcNow().UtcDateTime;
+                    continue;
+                }
+                await PaceWriteAsync(ct);
+                await _github.ClosePullRequestAsync(token, owner, name, record.PullRequestNumber,
+                    $"Superseded by #{current.Number}, which targets Business Central {replacing.Version}.\n\n"
+                    + "Closed by AL Workbench.", ct, beforeComment: PaceWriteAsync);
+                record.SupersededAt = _clock.GetUtcNow().UtcDateTime;
+            }
+            catch (Exception ex) when (ex is GitHubApiException or HttpRequestException
+                                       || (ex is TaskCanceledException && !ct.IsCancellationRequested))
+            {
+                _logger.LogWarning(ex,
+                    "Could not close pull request #{PullRequestNumber} on {RepoFullName}, which #{Replacement} replaces; it stays open.",
+                    record.PullRequestNumber, repository, current.Number);
+                if (ex is GitHubApiException { IsRateLimited: true })
+                {
+                    await _db.SaveChangesAsync(ct);
+                    return true;
+                }
+            }
+        }
+        await _db.SaveChangesAsync(ct);
+        return false;
+    }
+
+    /// <summary>
+    /// Waits until <see cref="WriteSpacing"/> has passed since the last write, when the
+    /// run is pacing itself. Called before every request that creates something on GitHub.
+    /// </summary>
+    private async Task PaceWriteAsync(CancellationToken ct)
+    {
+        if (_pace is null) return;
+        if (_pace.LastWriteAt is { } last)
+        {
+            var wait = WriteSpacing - (_clock.GetUtcNow() - last);
+            if (wait > TimeSpan.Zero) await PauseAsync(wait, ct);
+        }
+        _pace.LastWriteAt = _clock.GetUtcNow();
+    }
+
+    /// <summary>
+    /// The Business Central version a repository's findings move it to, as
+    /// <c>major.minor</c>. Without an application finding (only the platform or a
+    /// dependency moved), it is the version the repository was measured against.
+    /// </summary>
+    private async Task<string> TargetVersionAsync(
+        IReadOnlyList<GitHubRepositoryDrift> rows, OeRelease? release, CancellationToken ct)
+    {
+        var environmentId = rows.Select(r => r.EnvironmentId).FirstOrDefault(id => id != null);
+        return BcArtifactIndex.ToMajorMinor(
+            rows.Where(r => r.Field == ApplicationField).Select(r => r.Proposed).FirstOrDefault()
+            ?? (environmentId is { } measuredId ? await EnvironmentVersionAsync(measuredId, ct) : null)
+            ?? release?.BcVersion
+            ?? "0.0");
+    }
+
+    /// <summary>Whether the workbench has opened an update pull request for <paramref name="version"/> on this repository before.</summary>
+    private Task<bool> WasOfferedAsync(string repository, string version, CancellationToken ct)
+    {
+        var key = repository.ToLowerInvariant();
+        return _db.GitHubUpdatePullRequests.AsNoTracking()
+            .AnyAsync(r => r.Repository == key && r.Version == version, ct);
+    }
+
+    /// <summary>
+    /// Remembers an update pull request the workbench opened or joined, once per pull
+    /// request. Losing the race to another run saving the same one is harmless.
+    /// </summary>
+    private async Task RecordPullRequestAsync(
+        string repository, string version, GitHubPullRequest pullRequest, bool automatic, CancellationToken ct)
+    {
+        var key = repository.ToLowerInvariant();
+        if (await _db.GitHubUpdatePullRequests.AsNoTracking()
+                .AnyAsync(r => r.Repository == key && r.PullRequestNumber == pullRequest.Number, ct))
+        {
+            return;
+        }
+
+        var record = new GitHubUpdatePullRequest
+        {
+            OrganizationId = RequireOrganizationId(),
+            Repository = key,
+            Version = version,
+            PullRequestNumber = pullRequest.Number,
+            HtmlUrl = pullRequest.HtmlUrl,
+            IsAutomatic = automatic,
+            OpenedAt = _clock.GetUtcNow().UtcDateTime,
+        };
+        _db.GitHubUpdatePullRequests.Add(record);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation })
+        {
+            _db.Entry(record).State = EntityState.Detached;
+            _logger.LogInformation(ex,
+                "Pull request #{PullRequestNumber} on {RepoFullName} was already recorded.", pullRequest.Number, repository);
+        }
+    }
+
+    /// <summary>
+    /// The acting person's GitHub token, or why there is none. Why-not before what, as
+    /// everywhere else: "that is not a repository we can offer you" is a poor way to
+    /// say "connect your GitHub account".
+    /// </summary>
+    private async Task<(string? Token, GitHubRepositoryReadiness Readiness)> ResolveWriteTokenAsync(
+        int userId, CancellationToken ct)
+    {
+        var access = await _repositories.GetAccessAsync(ct);
+        if (!access.IsReady) return (null, access.Readiness);
+        var token = await _access.ResolveUserTokenAsync(userId, ct);
+        return token is null ? (null, GitHubRepositoryReadiness.NotLinked) : (token, access.Readiness);
+    }
+
+    /// <summary><see cref="OpenOneAsync"/>, with every refusal turned into an answer rather than an exception.</summary>
+    private async Task<DependencyDriftPullRequest> TryOpenOneAsync(
+        string token, string name, IReadOnlySet<string> visible, bool automatic, CancellationToken ct)
+    {
+        try
+        {
+            return await OpenOneAsync(token, name, visible, automatic, ct);
+        }
+        catch (PlanValidationException ex)
+        {
+            return new DependencyDriftPullRequest(
+                name, null, false, 0, ex.Errors.Values.FirstOrDefault() ?? "The pull request was refused.");
+        }
+        catch (GitHubApiException ex) when (ex.IsRateLimited)
+        {
+            _logger.LogWarning(ex, "GitHub rate limited the update pull request on {RepoFullName}.", name);
+            return new DependencyDriftPullRequest(name, null, false, 0, RateLimitedRefusal, IsRateLimited: true);
+        }
+        catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException or TaskCanceledException
+                                   && !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Could not open the update pull request on {RepoFullName}.", name);
+            return new DependencyDriftPullRequest(
+                name, null, false, 0,
+                "GitHub would not take the change to this repository just now. Try again in a moment.");
+        }
+    }
+
     private async Task<DependencyDriftPullRequest> OpenOneAsync(
-        string token, string fullName, IReadOnlySet<string> visible, CancellationToken ct)
+        string token, string fullName, IReadOnlySet<string> visible, bool automatic, CancellationToken ct)
     {
         if (!visible.Contains(fullName))
         {
@@ -850,7 +1249,8 @@ public sealed class DependencyDriftService
         if (rows.Count == 0)
         {
             return new DependencyDriftPullRequest(fullName, null, false, 0,
-                "There is nothing left to change in this repository. Check again to see where it stands now.");
+                "There is nothing left to change in this repository. Check again to see where it stands now.",
+                IsUpToDate: true);
         }
 
         var repo = await _repositories.ResolveAsync(fullName, ct);
@@ -868,15 +1268,21 @@ public sealed class DependencyDriftService
         var environment = environmentId is { } envId
             ? await EnvironmentForBodyAsync(envId, ct)
             : null;
-        // Without an application finding (only the platform or a dependency moved),
-        // the version is the one the repository was measured against.
-        var version = BcArtifactIndex.ToMajorMinor(
-            rows.Where(r => r.Field == ApplicationField).Select(r => r.Proposed).FirstOrDefault()
-            ?? (environmentId is { } measuredId ? await EnvironmentVersionAsync(measuredId, ct) : null)
-            ?? release?.BcVersion
-            ?? "0.0");
+        var version = await TargetVersionAsync(rows, release, ct);
 
         var target = await ChooseBranchAsync(token, repo, version, ct);
+        // The automatic run offers each version once (issue #1104): an open pull
+        // request is added to, but one somebody merged or closed is their answer, and
+        // its branch is usually gone with it - or kept, which is why this asks the
+        // record rather than the branch. A branch with no open pull request and no
+        // record is a run that failed before it opened one; it was stepped past like
+        // any other, so one failed night does not strand the version.
+        if (automatic && target.ExistingPullRequest is null && await WasOfferedAsync(fullName, version, ct))
+        {
+            return new DependencyDriftPullRequest(fullName, null, false, 0,
+                $"An update pull request for Business Central {version} was already opened here and closed.",
+                IsUpToDate: true);
+        }
 
         var blobs = new List<(string Path, string BlobSha)>();
         var edited = new List<(string Path, IReadOnlyList<GitHubRepositoryDrift> Changes)>();
@@ -895,6 +1301,7 @@ public sealed class DependencyDriftService
             var applied = ApplyChanges(file.Text, byPath.ToList(), repo.FullName, byPath.Key, out var moved);
             if (moved.Count == 0) continue;
 
+            await PaceWriteAsync(ct);
             blobs.Add((byPath.Key, await _github.CreateBlobAsync(
                 token, repo.Owner, repo.Name, Encoding.UTF8.GetBytes(applied), ct)));
             edited.Add((byPath.Key, moved));
@@ -904,14 +1311,17 @@ public sealed class DependencyDriftService
         {
             return new DependencyDriftPullRequest(fullName, null, false, 0,
                 "Every value the workbench would have changed here is already up to date. Check again to refresh "
-                + "what it knows.");
+                + "what it knows.", IsUpToDate: true);
         }
 
         var baseTree = await _github.GetCommitTreeShaAsync(token, repo.Owner, repo.Name, target.ParentSha, ct);
+        await PaceWriteAsync(ct);
         var tree = await _github.CreateTreeAsync(token, repo.Owner, repo.Name, baseTree, blobs, ct);
+        await PaceWriteAsync(ct);
         var commit = await _github.CreateCommitAsync(
             token, repo.Owner, repo.Name, $"Target Business Central {version}", tree, target.ParentSha, ct: ct);
 
+        await PaceWriteAsync(ct);
         if (target.ExistingPullRequest is null)
         {
             if (!await _github.CreateBranchAsync(token, repo.Owner, repo.Name, target.Branch, commit, ct))
@@ -928,6 +1338,7 @@ public sealed class DependencyDriftService
                 + "was committed. Try again to build on what is there now.");
         }
 
+        if (target.ExistingPullRequest is null) await PaceWriteAsync(ct);
         var pullRequest = target.ExistingPullRequest ?? await _github.CreatePullRequestAsync(
             token, repo.Owner, repo.Name,
             title: $"Target Business Central {version}",
@@ -936,11 +1347,14 @@ public sealed class DependencyDriftService
             body: await BuildBodyAsync(version, edited, release, environment, ct),
             ct);
 
+        await RecordPullRequestAsync(
+            repo.FullName, version, pullRequest, automatic && target.ExistingPullRequest is null, ct);
+
         _logger.LogInformation(
             "Bumped {FileCount} manifest(s) in {RepoFullName} to Business Central {Version} on {Branch} as pull "
-            + "request #{PullRequestNumber} ({PullRequestState}).",
+            + "request #{PullRequestNumber} ({PullRequestState}, {Trigger}).",
             edited.Count, repo.FullName, version, target.Branch, pullRequest.Number,
-            target.ExistingPullRequest is null ? "opened" : "already open");
+            target.ExistingPullRequest is null ? "opened" : "already open", automatic ? "automatic" : "by hand");
 
         return new DependencyDriftPullRequest(
             repo.FullName, pullRequest, target.ExistingPullRequest is null, edited.Count, null);
@@ -1045,8 +1459,10 @@ public sealed class DependencyDriftService
     /// <c>aldt/bump-bc-&lt;major.minor&gt;</c>, <c>-2</c>, <c>-3</c> until one
     /// has a pull request still open (join it, so a second run lands in the
     /// review already running) or does not exist at all (start it from the
-    /// default branch). A branch whose pull request has been merged or closed is
-    /// stepped past rather than reused.
+    /// default branch). A branch with no open pull request - merged, closed, or never
+    /// opened because a run failed half-way - is stepped past rather than reused, so an
+    /// open <c>-2</c> is still found behind it. Whether the version should be offered at
+    /// all is the caller's question, answered from the record of what was opened.
     /// </summary>
     private async Task<BranchTarget> ChooseBranchAsync(
         string token, GitHubRepositorySummary repo, string version, CancellationToken ct)
@@ -1223,14 +1639,21 @@ public sealed class DependencyDriftService
             + "AL Workbench to set it up.",
         GitHubRepositoryReadiness.NotConnected =>
             "Your organisation has not connected a GitHub organisation yet, so there is nowhere to open a pull "
-            + "request. An administrator connects one under Administration -> Repositories.",
+            + "request. An administrator connects one under Administration → Repositories.",
         GitHubRepositoryReadiness.LinkNeedsRepair =>
             "Your GitHub account is no longer connected to the workbench. Connect it again on your account page "
             + "under Repository access, then try this again.",
-        _ =>
-            "Connect your own GitHub account first, on your account page under Repository access. The pull request "
-            + "is opened in your name, so the workbench needs your GitHub account to do it.",
+        _ => NotLinkedRefusal,
     };
+
+    /// <summary>
+    /// What a person is told when something they asked for is opened with their GitHub
+    /// account and they have none connected - the button, and "Resume with my GitHub
+    /// account" on a solution.
+    /// </summary>
+    public const string NotLinkedRefusal =
+        "Connect your own GitHub account first, on your account page under Repository access. The pull request "
+        + "is opened in your name, so the workbench needs your GitHub account to do it.";
 
     private static PlanValidationException Refuse(string message) =>
         new(new Dictionary<string, string> { ["GitHubRepository"] = message });

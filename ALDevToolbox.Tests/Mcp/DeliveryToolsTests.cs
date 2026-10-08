@@ -40,9 +40,10 @@ public sealed class DeliveryToolsTests : IDisposable
                 new ThrowingTokenSource(), new ThrowingAppManagementClient(), new ThrowingAdminClient(), _queue,
                 new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
                 _db.NewToolEnablement(ctx),
+                TimeProvider.System,
                 NullLogger<DeliveryService>.Instance),
             new ReleasePipelineService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
-                NullLogger<ReleasePipelineService>.Instance),
+                _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance),
             _db.NewGitHubReleaseService(ctx, _db.NewGitHubAppClient(ctx, api ?? new UnreachableGitHub()),
                 _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, api ?? new UnreachableGitHub()))),
             new ArtifactService(ctx, new ProjectAccess(ctx, _db.OrgContext)));
@@ -59,7 +60,7 @@ public sealed class DeliveryToolsTests : IDisposable
     {
         await using (var ctx = _db.NewContext())
         {
-            await SeedAsync(ctx, new[] { "CRONUS Core" });
+            await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Production");
         }
 
         await using var read = _db.NewContext();
@@ -87,6 +88,9 @@ public sealed class DeliveryToolsTests : IDisposable
             .SingleAsync(d => d.Id == result.DeploymentId);
         delivery.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
         delivery.ReleasePipelineId.Should().Be(seed.ReleasePipelineId);
+        delivery.StartedByAgent.Should().BeTrue("the run checks the environment type again for agent deployments");
+        delivery.DiagnosticsLog.Should().Contain("Started by an AI assistant")
+            .And.NotContain("confirmation step", "a person gets no confirmation step on a sandbox either");
     }
 
     [Fact]
@@ -118,6 +122,58 @@ public sealed class DeliveryToolsTests : IDisposable
         delivery.DeploymentSchedule.Should().Be(BcDeploymentSchedule.Immediate);
         delivery.ScheduledByDeliveryWindow.Should().BeTrue();
         delivery.ScheduledOutsideWindow.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Publish_build_refuses_a_production_environment_while_the_organisation_does_not_allow_it()
+    {
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Production");
+        }
+
+        await using var read = _db.NewContext();
+        var act = () => NewTools(read).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        (await act.Should().ThrowAsync<McpException>()).Which.Message
+            .Should().Contain(DeliveryService.ProductionRefusedForAgents("Production"));
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectDeliveries.AsNoTracking().AnyAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId))
+            .Should().BeFalse("nothing is queued when the agent is refused");
+    }
+
+    [Fact]
+    public async Task Publish_build_deploys_to_production_immediately_once_the_organisation_allows_it()
+    {
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Production");
+            await AllowAgentsToDeployToProductionAsync(ctx);
+        }
+
+        await using var read = _db.NewContext();
+        var result = await NewTools(read).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        await using var verify = _db.NewContext();
+        var delivery = await verify.OeProjectDeliveries.AsNoTracking()
+            .SingleAsync(d => d.Id == result.DeploymentId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
+        delivery.ScheduledFor.Should().BeBefore(DateTime.UtcNow.AddMinutes(1), "an allowed agent deployment runs now, unconfirmed");
+        delivery.DiagnosticsLog.Should().Contain("Started by an AI assistant").And.Contain("without the confirmation step");
+    }
+
+    private static async Task AllowAgentsToDeployToProductionAsync(AppDbContext ctx)
+    {
+        var row = await ctx.OrganizationSettings.FirstOrDefaultAsync(s => s.OrganizationId == TestDb.DefaultOrgId);
+        if (row is null)
+        {
+            row = new ALDevToolbox.Domain.Entities.OrganizationSettings { OrganizationId = TestDb.DefaultOrgId };
+            ctx.OrganizationSettings.Add(row);
+        }
+        row.AgentsMayDeployToProduction = true;
+        await ctx.SaveChangesAsync();
     }
 
     [Fact]
@@ -420,7 +476,8 @@ public sealed class DeliveryToolsTests : IDisposable
 
     private sealed record Seed(int ProjectId, int ReleasePipelineId, int BuildId);
 
-    private static async Task<Seed> SeedAsync(AppDbContext ctx, string[] appNames, string buildStatus = ProjectBuildStatus.Ready)
+    private static async Task<Seed> SeedAsync(AppDbContext ctx, string[] appNames, string buildStatus = ProjectBuildStatus.Ready,
+        string envType = "Sandbox")
     {
         var now = DateTime.UtcNow;
         var project = new OeProject { OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS " + Guid.NewGuid().ToString("N"), CreatedAt = now, UpdatedAt = now };
@@ -433,7 +490,7 @@ public sealed class DeliveryToolsTests : IDisposable
 
         var env = new OeProjectEnvironment
         {
-            OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = "Production", Type = "Production",
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = envType, Type = envType,
             FetchedAt = now,
         };
         ctx.OeProjectEnvironments.Add(env);
@@ -441,7 +498,7 @@ public sealed class DeliveryToolsTests : IDisposable
 
         var releasePipeline = new OeReleasePipeline
         {
-            OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = "CRONUS App → Production",
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Name = "CRONUS App → " + envType,
             BuildPipelineId = pipeline.Id, ProjectEnvironmentId = env.Id,
             DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
             CreatedAt = now, UpdatedAt = now,

@@ -12,7 +12,8 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// against the commit the build pinned (<c>oe_project_build_repo_commits</c>).
 ///
 /// <para>Read-only and passive. Nothing here asks GitHub anything and nothing is
-/// built: a person reads the answer and decides whether to press Build. The
+/// built: a person reads the answer and decides whether to press Build (a pipeline
+/// that builds on push is built on each push instead, see <see cref="PushBuildService"/>, #1079). The
 /// comparison is by commit SHA only - a force push makes any count of commits
 /// meaningless, and the head row's <c>forced</c> flag is what says so. See
 /// <c>.design/github-integration-phase2.md</c>, "Branch watching" (#963).</para>
@@ -98,26 +99,51 @@ public sealed class BuildFreshnessService
         // The last successful build of each pipeline, and the commit it pinned in
         // each repository. A repository added after that build, or whose clone
         // failed in it, has no commit there and reads as never built.
-        var readyBuilds = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value) && b.Status == ProjectBuildStatus.Ready
-                && b.BcTarget == ProjectBuildTarget.Current)
-            .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.StartedAt, b.FinishedAt })
-            .ToListAsync(ct).ConfigureAwait(false);
-        var lastBuilds = readyBuilds
-            .GroupBy(b => b.PipelineId)
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id).First());
+        // Picked in SQL: the pipelines' whole build history is not read for one row each (#1138).
+        var lastBuilds = (await _db.OeProjectBuilds.AsNoTracking()
+                .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value) && b.Status == ProjectBuildStatus.Ready
+                    && b.BcTarget == ProjectBuildTarget.Current)
+                .GroupBy(b => b.PipelineId!.Value)
+                .Select(g => g
+                    .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
+                    .Select(b => new { b.Id, PipelineId = b.PipelineId!.Value, b.StartedAt, b.FinishedAt })
+                    .First())
+                .ToListAsync(ct).ConfigureAwait(false))
+            .ToDictionary(b => b.PipelineId);
         var lastBuildIds = lastBuilds.Values.Select(b => b.Id).ToList();
         var pinned = await _db.OeProjectBuildRepoCommits.AsNoTracking()
             .Where(c => lastBuildIds.Contains(c.ProjectBuildId) && c.ProjectRepositoryId != null && c.CommitHash != "")
             .Select(c => new { c.ProjectBuildId, RepositoryId = c.ProjectRepositoryId!.Value, c.CommitHash, c.CommittedAt })
             .ToListAsync(ct).ConfigureAwait(false);
 
+        // Builds of these pipelines still queued or running against the current
+        // version: one that already covers a repository's new head means the branch
+        // is being built, not waiting for somebody to press Build (#1128). Same test
+        // as the running guard, so a row whose job was lost does not read as building.
+        var activeBuilds = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.PipelineId != null && pipelineIds.Contains(b.PipelineId.Value))
+            .Where(ProjectBuildImporter.BlocksManualBuild)
+            .Select(b => new ActiveBuild(b.PipelineId!.Value, b.Branch, b.HeadSha, b.HeadRepositoryId, b.StartedAt))
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        // Only the branches a pipeline watches: its own, or the repository's default.
+        var namedBranches = pipelines.Where(p => p.Branch is not null).Select(p => p.Branch!).Distinct().ToList();
         var heads = await _db.OeRepositoryBranchHeads.AsNoTracking()
-            .Where(h => repositoryIds.Contains(h.ProjectRepositoryId))
+            .Where(h => repositoryIds.Contains(h.ProjectRepositoryId)
+                        && ((h.IsDefaultBranch && h.DeletedAt == null) || namedBranches.Contains(h.Branch)))
             .ToListAsync(ct).ConfigureAwait(false);
-        var merged = await _db.OeRepositoryMergedPullRequests.AsNoTracking()
-            .Where(m => repositoryIds.Contains(m.ProjectRepositoryId))
-            .ToListAsync(ct).ConfigureAwait(false);
+
+        // Only pull requests that merged after the oldest commit any of these builds
+        // pinned: nothing earlier can be "merged since" for any of them.
+        var lastBuildStarted = lastBuilds.Values.ToDictionary(b => b.Id, b => b.StartedAt);
+        var mergedAfter = pinned.Count == 0
+            ? (DateTime?)null
+            : pinned.Min(c => c.CommittedAt ?? lastBuildStarted[c.ProjectBuildId]);
+        var merged = mergedAfter is not { } after
+            ? []
+            : await _db.OeRepositoryMergedPullRequests.AsNoTracking()
+                .Where(m => repositoryIds.Contains(m.ProjectRepositoryId) && m.MergedAt > after)
+                .ToListAsync(ct).ConfigureAwait(false);
 
         var answers = new List<PipelineFreshness>(pipelines.Count);
         foreach (var pipeline in pipelines)
@@ -148,6 +174,11 @@ public sealed class BuildFreshnessService
                     : head is null ? BuildFreshnessState.Unknown
                     : string.Equals(head.HeadSha, built.Value.Sha, StringComparison.OrdinalIgnoreCase) ? BuildFreshnessState.UpToDate
                     : BuildFreshnessState.Ahead;
+
+                var beingBuilt = state == BuildFreshnessState.Ahead && head is not null
+                    && activeBuilds.Any(a => a.PipelineId == pipeline.Id
+                                             && string.Equals(a.Branch, pipeline.Branch, StringComparison.Ordinal)
+                                             && Covers(a, repository.Id, head));
 
                 IReadOnlyList<MergedPullRequestSummary> mergedSince = [];
                 IReadOnlyList<CommitSummary> commitsSince = [];
@@ -192,6 +223,7 @@ public sealed class BuildFreshnessService
                     Commits: commitsSince,
                     CommitsComplete: commitsComplete)
                 {
+                    BeingBuilt = beingBuilt,
                     WebUrl = repository.Provider == RepositoryProvider.GitHub ? GitHubWebUrl(repository.Url) : null,
                 });
             }
@@ -208,6 +240,22 @@ public sealed class BuildFreshnessService
         }
         return answers;
     }
+
+    private sealed record ActiveBuild(int PipelineId, string? Branch, string? HeadSha, int? HeadRepositoryId, DateTime StartedAt);
+
+    /// <summary>
+    /// Whether a queued or running build will build <paramref name="head"/>. A build
+    /// on push names its commit in the pushed repository, and covers that repository's
+    /// head when it is that commit. Every other repository, and every repository of a
+    /// build that names no commit (Build pressed by a person), is cloned at the branch
+    /// as it is when the build starts, so it covers every push recorded before the
+    /// build was queued. The caller has already matched the branch the build
+    /// snapshotted against the pipeline's current one.
+    /// </summary>
+    private static bool Covers(ActiveBuild build, int repositoryId, OeRepositoryBranchHead head) =>
+        build.HeadSha is { Length: > 0 } sha && build.HeadRepositoryId == repositoryId
+            ? string.Equals(sha, head.HeadSha, StringComparison.OrdinalIgnoreCase)
+            : build.StartedAt >= head.PushedAt;
 
     /// <summary>
     /// The repository's page on GitHub, from its clone URL (https or scp-style), for
@@ -284,6 +332,12 @@ public sealed record RepositoryFreshness(
 {
     /// <summary>The repository's page on GitHub (https://github.com/owner/name), for links to commits and pull requests; null for any other host.</summary>
     public string? WebUrl { get; init; }
+
+    /// <summary>
+    /// For <see cref="BuildFreshnessState.Ahead"/>: a build of the pipeline that is
+    /// queued or running already covers the branch's newest commit (#1128).
+    /// </summary>
+    public bool BeingBuilt { get; init; }
 }
 
 /// <summary>A pull request that merged into a watched branch.</summary>

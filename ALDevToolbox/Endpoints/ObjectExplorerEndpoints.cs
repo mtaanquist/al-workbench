@@ -311,6 +311,10 @@ internal static class ObjectExplorerEndpoints
                 var first = ex.Errors.First();
                 RedirectManage(ctx, id, first.Key, first.Value);
             }
+            catch (ProjectAccessDeniedException)
+            {
+                RedirectManage(ctx, id, "Retry", CannotRebuild);
+            }
         })
         .RequireObjectExplorerAuthoring()
         .WithMetadata(new RequestSizeLimitAttribute(MaxUploadBytes))
@@ -331,9 +335,8 @@ internal static class ObjectExplorerEndpoints
             HttpContext ctx,
             ProjectService projects,
             ReleaseImportService importer,
-            ReleaseManagementService management,
-            ReleaseImportRequestService imports,
             PersistedImportJobs persistedJobs,
+            ProjectBuildImporter projectBuilds,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
@@ -369,15 +372,20 @@ internal static class ObjectExplorerEndpoints
                     uploads.Add(new SupplementalSymbolUpload(SanitiseFileName(file.FileName), buffer.ToArray()));
                 }
 
-                // Persist the symbols first so they survive even if the rebuild
-                // can't be queued, and so every later build of this project
-                // benefits. Then rebuild this release in place.
-                await projects.AddSupplementalSymbolsAsync(projectId, uploads, ct);
-
-                await importer.ReopenForRebuildAsync(id, ct);
-                await management.ClearIngestedDataAsync(id, ct);
-                var source = new ReleaseImportSource.ProjectBuild(projectId);
-                await imports.EnqueueImportAsync(id, source, storeSymbolReference: false, ct);
+                // Store the symbols, so every later build of this project benefits,
+                // then rebuild this release in place. The checks, the stored symbols
+                // and the reopen commit together under the pipeline's build lock
+                // (#1119), so a refused rebuild stores nothing. The release reads
+                // as importing from the reopen on, through the wipe, until its job
+                // is queued, as in a retry (#1180).
+                using var rebuilding = importer.Ingests.Track(id);
+                await using (var rebuild = await projectBuilds.BeginRebuildAsync(id, projectId, "Symbols", ct))
+                {
+                    await projects.AddSupplementalSymbolsAsync(projectId, uploads, ct);
+                    await importer.ReopenForRebuildAsync(id, ct);
+                    await rebuild.CommitAsync(ct);
+                }
+                await projectBuilds.QueueRebuildAsync(id, projectId, ct);
 
                 ctx.Response.Redirect($"/admin/object-explorer/release/{id}/manage?ok=recover-queued");
             }
@@ -385,6 +393,10 @@ internal static class ObjectExplorerEndpoints
             {
                 var first = ex.Errors.First();
                 RedirectManage(ctx, id, first.Key, first.Value);
+            }
+            catch (ProjectAccessDeniedException)
+            {
+                RedirectManage(ctx, id, "Symbols", CannotRebuild);
             }
         })
         .RequireObjectExplorerAuthoring()
@@ -534,6 +546,9 @@ internal static class ObjectExplorerEndpoints
         form.Files.GetFiles(name)
             .Select(f => new UploadedFile(f.FileName, f.Length, f.OpenReadStream))
             .ToList();
+
+    private const string CannotRebuild =
+        "Only someone who can manage this solution can build it again.";
 
     private static void RedirectManage(HttpContext ctx, int releaseId, string errKey, string message)
     {

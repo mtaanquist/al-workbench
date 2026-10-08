@@ -149,6 +149,7 @@ public sealed class ProjectService
             .AsNoTracking()
             .Where(c => c.Id == id && c.DeletedAt == null)
             .Include(c => c.Repositories)
+            .Include(c => c.AutoUpdatePullRequestsByUser)
             .FirstOrDefaultAsync(ct);
     }
 
@@ -182,6 +183,7 @@ public sealed class ProjectService
     {
         var orgId = RequireOrganizationId();
         var (name, shortName, country, repos, slug) = await ValidateAsync(input, existingId: null, orgId, ct);
+        await EnsureRepositoriesUnclaimedAsync(repos, projectId: null, existing: null, ct);
 
         // The level is chosen on the create form, and it is written in the same
         // SaveChanges as the solution itself. Not a create followed by SetAccessAsync:
@@ -268,6 +270,7 @@ public sealed class ProjectService
         // Only the owner, an org Admin, or an assigned team may edit settings /
         // change the repo set.
         await _access.EnsureCanManageAsync(project.Id, project.CreatedByUserId, ct);
+        await EnsureRepositoriesUnclaimedAsync(repos, project.Id, project.Repositories, ct);
 
         project.Name = name;
         project.ShortName = shortName;
@@ -277,8 +280,25 @@ public sealed class ProjectService
         else if (input.Slug is not null) project.Slug = await FreeSlugAsync(SolutionSlug.Derive(shortName ?? name), existingId: id, ct);
         project.DefaultArtifactCountry = country;
         project.UpdatedAt = DateTime.UtcNow;
+        var toggled = false;
+        if (input.AutoUpdatePullRequests is { } auto && auto != project.AutoUpdatePullRequests)
+        {
+            // Turning it on makes the saver the person the pull requests are opened
+            // as, the same rule as building on push (#1104).
+            project.AutoUpdatePullRequests = auto;
+            project.AutoUpdatePullRequestsByUserId = auto ? _orgContext.CurrentUserId : null;
+            project.AutoUpdatePullRequestsBlocked = null;
+            toggled = true;
+        }
 
+        var gitHubBefore = GitHubRepositoryKeys(project);
         ReconcileRepositories(project, repos, orgId);
+        // Only a repository that was not there before - added, or its URL changed - is
+        // somewhere the previous person never agreed to write. Removing one is not.
+        if (!toggled && GitHubRepositoryKeys(project).Except(gitHubBefore).Any())
+        {
+            await FollowRepositoryChangeAsync(project, ct);
+        }
 
         await SaveTranslatingNameClashAsync(ct);
         _logger.LogInformation("Updated project {ProjectId} ({Name}); now {RepoCount} repo(s).",
@@ -287,6 +307,38 @@ public sealed class ProjectService
         // The repo set may have changed — re-warm the discovery cache in the
         // background so the pipeline editor reflects it. Best-effort.
         if (project.Repositories.Count > 0) await WarmDiscoveryAsync(project.Id, ct);
+    }
+
+    /// <summary>
+    /// Makes the acting person the one automatic update pull requests are opened as,
+    /// and clears whatever held the last run up - "Resume with my GitHub account" on the
+    /// Repositories tab (#1104). Nothing happens when the setting is off.
+    /// </summary>
+    /// <exception cref="PlanValidationException">The solution is gone, or the caller has no GitHub account connected.</exception>
+    /// <exception cref="ProjectAccessDeniedException">The caller may not manage this solution.</exception>
+    public async Task ResumeAutoUpdatePullRequestsAsync(int projectId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var userId = _orgContext.CurrentUserId
+            ?? throw new InvalidOperationException("No user in scope; resuming automatic update pull requests needs a signed-in person.");
+        var project = await _db.OeProjects
+            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
+            ?? throw Validation("Name", "This solution no longer exists.");
+        await _access.EnsureCanManageAsync(project.Id, project.CreatedByUserId, ct);
+        if (!project.AutoUpdatePullRequests) return;
+        // Taking it over without a GitHub account would only swap one reason it has
+        // stopped for another, and clear the warning until the night says so again.
+        if (!await HasGitHubAccountAsync(userId, ct))
+        {
+            throw Validation("AutoUpdatePullRequests", DependencyDriftService.NotLinkedRefusal);
+        }
+
+        project.AutoUpdatePullRequestsByUserId = userId;
+        project.AutoUpdatePullRequestsBlocked = null;
+        project.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation(
+            "User {UserId} took over automatic update pull requests for solution {ProjectId}.", userId, projectId);
     }
 
     /// <summary>
@@ -343,6 +395,10 @@ public sealed class ProjectService
             return project.Name;
         }
 
+        var claimed = await RepositoryClaimErrorsAsync(
+            [new ProjectRepositoryInput(repository.Provider, url, display)], project.Id, existing: null, ct);
+        if (claimed.TryGetValue(0, out var claimedBy)) throw Validation("Url", claimedBy);
+
         project.Repositories.Add(new OeProjectRepository
         {
             OrganizationId = orgId,
@@ -352,6 +408,7 @@ public sealed class ProjectService
             DisplayName = display,
         });
         project.UpdatedAt = DateTime.UtcNow;
+        if (repository.Provider == RepositoryProvider.GitHub) await FollowRepositoryChangeAsync(project, ct);
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Added {Url} to project {ProjectId} ({Name}).", url, project.Id, project.Name);
@@ -362,6 +419,131 @@ public sealed class ProjectService
         await WarmDiscoveryAsync(project.Id, ct);
         return project.Name;
     }
+
+    /// <summary>
+    /// Refuses a posted repository that another active solution in this organisation
+    /// already has (#1200), keyed <c>Repositories[i].Url</c> so the editor shows it under
+    /// the row. See <see cref="RepositoryClaimErrorsAsync"/>.
+    /// </summary>
+    private async Task EnsureRepositoriesUnclaimedAsync(
+        IReadOnlyList<ProjectRepositoryInput> repos, int? projectId,
+        ICollection<OeProjectRepository>? existing, CancellationToken ct)
+    {
+        var claimed = await RepositoryClaimErrorsAsync(repos, projectId, existing, ct);
+        if (claimed.Count > 0)
+        {
+            throw new PlanValidationException(
+                claimed.ToDictionary(c => $"Repositories[{c.Key}].Url", c => c.Value));
+        }
+    }
+
+    /// <summary>
+    /// The refusal for each of <paramref name="repos"/> (by index) that another active
+    /// solution in this organisation already has: several features resolve a repository
+    /// to one solution, so a second would be picked arbitrarily (#1200). Only a repository
+    /// this save adds - new, or its URL changed - is checked: <paramref name="existing"/>
+    /// is the solution's current set, and a pair of solutions that already shared a
+    /// repository before the rule existed keeps saving until somebody touches that row.
+    /// </summary>
+    private async Task<Dictionary<int, string>> RepositoryClaimErrorsAsync(
+        IReadOnlyList<ProjectRepositoryInput> repos, int? projectId,
+        ICollection<OeProjectRepository>? existing, CancellationToken ct)
+    {
+        var had = (existing ?? []).Select(r => RepositoryKey(r.Provider, r.Url)).ToHashSet(StringComparer.Ordinal);
+        var added = repos
+            .Select((r, i) => (Index: i, Key: RepositoryKey(r.Provider, r.Url)))
+            .Where(r => !had.Contains(r.Key))
+            .ToList();
+        var errors = new Dictionary<int, string>();
+        if (added.Count == 0) return errors;
+
+        // Read every other active solution's repositories, org-scoped by the ambient
+        // query filter. The URL is normalised in memory, which is why every row is read -
+        // an organisation has tens of repositories, not thousands.
+        var rows = await (
+                from r in _db.OeProjectRepositories.AsNoTracking()
+                join p in _db.OeProjects.AsNoTracking() on r.ProjectId equals p.Id
+                where p.DeletedAt == null && p.Id != (projectId ?? 0)
+                orderby p.Id
+                select new { r.Provider, r.Url, ProjectId = p.Id, p.Name })
+            .ToListAsync(ct);
+        var owners = new Dictionary<string, (int Id, string Name)>(StringComparer.Ordinal);
+        foreach (var row in rows) owners.TryAdd(RepositoryKey(row.Provider, row.Url), (row.ProjectId, row.Name));
+
+        var claims = added
+            .Where(a => owners.ContainsKey(a.Key))
+            .Select(a => (a.Index, Owner: owners[a.Key]))
+            .ToList();
+        if (claims.Count == 0) return errors;
+
+        // A solution private to people the caller is not among is not named, so the
+        // refusal does not give its name away.
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        var ids = claims.Select(c => c.Owner.Id).Distinct().ToList();
+        var visible = (await _db.OeProjects.AsNoTracking()
+                .Where(ProjectAccess.VisibleProjectPredicate(snapshot))
+                .Where(p => ids.Contains(p.Id))
+                .Select(p => p.Id)
+                .ToListAsync(ct))
+            .ToHashSet();
+        foreach (var (index, owner) in claims)
+        {
+            errors[index] = RepositoryClaimedMessage(visible.Contains(owner.Id) ? owner.Name : null);
+        }
+        return errors;
+    }
+
+    private static string RepositoryClaimedMessage(string? owner) =>
+        owner is null
+            ? "This repository already belongs to another solution. A repository can only belong to one solution, so ask an Admin to remove it from the other one first."
+            : $"This repository already belongs to the solution {owner}. A repository can only belong to one solution, so remove it from {owner} first.";
+
+    /// <summary>
+    /// Repository identity: provider plus normalised URL, so the same repository typed
+    /// with and without <c>.git</c>, or in another case, is one repository.
+    /// </summary>
+    private static string RepositoryKey(RepositoryProvider provider, string url) =>
+        $"{provider}|{GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(url)}";
+
+    /// <summary>The solution's GitHub repositories, keyed the way <see cref="ReconcileRepositories"/> matches them.</summary>
+    private static HashSet<string> GitHubRepositoryKeys(OeProject project) =>
+        project.Repositories
+            .Where(r => r.Provider == RepositoryProvider.GitHub)
+            .Select(r => GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(r.Url))
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Makes the acting person the one automatic update pull requests are opened as,
+    /// when they add a GitHub repository to the solution (or change one's address) while
+    /// it is on - the "whoever
+    /// last saved" rule building on push follows (#1101). Otherwise anyone who manages a
+    /// Public solution could add a repository they cannot write to and have the nightly
+    /// run open pull requests there with somebody else's GitHub account, which the
+    /// button, running as whoever presses it, would refuse them.
+    ///
+    /// <para>When the acting person has no GitHub account connected, they still take it
+    /// over, and the solution shows it as stopped straight away, with "Resume with my
+    /// GitHub account" for anyone who manages it - the same pause the nightly run would
+    /// reach. Nothing is opened as the previous person in between. See
+    /// <c>.design/github-integration-phase2.md</c>.</para>
+    /// </summary>
+    private async Task FollowRepositoryChangeAsync(OeProject project, CancellationToken ct)
+    {
+        if (!project.AutoUpdatePullRequests) return;
+        if (_orgContext.CurrentUserId is not { } userId || userId == project.AutoUpdatePullRequestsByUserId) return;
+
+        var linked = await HasGitHubAccountAsync(userId, ct);
+        project.AutoUpdatePullRequestsByUserId = userId;
+        project.AutoUpdatePullRequestsBlocked = linked ? null : DependencyDriftService.AutomaticNotLinkedMessage;
+        _logger.LogInformation(
+            "User {UserId} changed the repositories of solution {ProjectId}, so its automatic update pull requests are now opened as them (GitHub account connected: {Linked}).",
+            userId, project.Id, linked);
+    }
+
+    /// <summary>Whether <paramref name="userId"/> has connected a GitHub account - read from the database, without asking GitHub.</summary>
+    private Task<bool> HasGitHubAccountAsync(int userId, CancellationToken ct) =>
+        _db.UserExternalLogins.AsNoTracking()
+            .AnyAsync(l => l.UserId == userId && l.Provider == GitHubAccessService.ProviderName, ct);
 
     /// <summary>
     /// Brings <paramref name="project"/>'s repository rows in line with the posted
@@ -375,17 +557,14 @@ public sealed class ProjectService
     /// </summary>
     private void ReconcileRepositories(OeProject project, IReadOnlyList<ProjectRepositoryInput> repos, int orgId)
     {
-        static string Key(RepositoryProvider provider, string url) =>
-            $"{provider}|{GitHubPullRequestBuildWorker.NormaliseRepositoryUrl(url)}";
-
         var existing = project.Repositories.ToList();
         var kept = new HashSet<int>();
         var wanted = new List<OeProjectRepository>(repos.Count);
 
         foreach (var repo in repos)
         {
-            var key = Key(repo.Provider, repo.Url);
-            var match = existing.FirstOrDefault(e => !kept.Contains(e.Id) && Key(e.Provider, e.Url) == key);
+            var key = RepositoryKey(repo.Provider, repo.Url);
+            var match = existing.FirstOrDefault(e => !kept.Contains(e.Id) && RepositoryKey(e.Provider, e.Url) == key);
             if (match is not null)
             {
                 kept.Add(match.Id);
@@ -956,12 +1135,21 @@ public sealed class ProjectService
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => _db.OeProjects.Where(visible).Any(p => p.Id == b.ProjectId))
             .Where(b => b.Id == buildId)
-            .Select(b => new { b.ProjectId, b.Status, b.ReleaseId })
+            .Select(b => new
+            {
+                b.ProjectId, b.Status, b.ReleaseId,
+                HasObjects = _db.OeProjectBuilds.Where(OeProjectBuild.HasIndexedObjects).Any(x => x.Id == b.Id),
+            })
             .FirstOrDefaultAsync(ct)
             ?? throw new McpException($"Build {buildId} was not found in this organisation.");
         if (build.Status != ProjectBuildStatus.Ready || build.ReleaseId is null)
         {
             throw new McpException($"Build {buildId} can't be compared — only 'ready' builds that produced a release can be diffed.");
+        }
+        if (!build.HasObjects)
+        {
+            // Preview checks only record whether the code compiles (#1140).
+            throw new McpException($"Build {buildId} is a preview check: it records compile results only, so it can't be compared. Use get_solution_build for its errors.");
         }
         return (build.ProjectId, build.ReleaseId.Value);
     }
@@ -974,12 +1162,17 @@ public sealed class ProjectService
 /// one from the name); blank derives a fresh one from the name; anything else is used
 /// as typed, lowercased, and must be free. See <see cref="SolutionSlug"/>.
 /// </param>
+/// <param name="AutoUpdatePullRequests">
+/// Whether the nightly drift check opens update pull requests on its own (#1104). Null
+/// leaves it as it is; a create always starts with it off.
+/// </param>
 public sealed record ProjectInput(
     string Name,
     string? ShortName,
     string? DefaultArtifactCountry,
     IReadOnlyList<ProjectRepositoryInput> Repositories,
-    string? Slug = null);
+    string? Slug = null,
+    bool? AutoUpdatePullRequests = null);
 
 /// <summary>
 /// One solution as the generator's Solution picker sees it: what it searches on

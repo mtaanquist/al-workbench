@@ -287,6 +287,13 @@ delivering to an environment that has one set, outside it) is **audited** — re
 deliberate, traceable act. Production targets, which already get an extra confirm, are the case this
 most matters for.
 
+**A time the window chose stays inside the window** (#1124). Deployments run one at a time per
+environment, so one booked for the window's opening can come up after the window has closed. When
+its turn comes, a deployment the window chose (`scheduled_by_delivery_window`, not
+`scheduled_outside_window`) is judged at that moment against the environment's window as it is
+now; outside it, the deployment moves to the next opening and a log line says so. One a person
+placed outside the window on purpose runs when they said.
+
 **The organisation can set the window a new environment starts with** (#962). Administration →
 Business Central holds one default for Production and one for Sandbox, each start-and-end or "any
 time", in four nullable `time` columns on `organization_settings`
@@ -310,8 +317,9 @@ asked once per solution - and **Missing or being deleted**), and
 `SetUpdateWindowForManyAsync` writes each changing row through `SetUpdateWindowAsync`, so the
 both-or-neither rule, the access check and the log line are the single-environment ones, and
 returns a result per row that the dialog shows. A deployment already scheduled for an
-environment's current window (`scheduled_by_delivery_window`) keeps its time; the preview says
-so, and the next deployment uses the new window.
+environment's current window (`scheduled_by_delivery_window`) keeps its time if that time falls
+in the new window, and otherwise moves to the new window's next opening when its turn comes (the
+rule below); the preview says so.
 
 This **supersedes `OeReleasePipeline.default_publish_time`** as the source of the schedule prefill: the
 window lives on the environment (where it's reused across every deployment pipeline targeting it and
@@ -374,7 +382,13 @@ the build pipeline at that branch, or points the production deployment pipeline 
 pipeline. The branch rule closes that: with `restrict_branch` on, `DeliveryService.ResolveReleaseAsync`
 (which every deployment passes through: the dialog, an approval, a prepared deployment,
 `deploy_build`) refuses a build whose branch is not `allowed_branch`, compared exactly
-(`DeploymentBranchRule`). The version number is deliberately not the guard: Business Central installs
+(`DeploymentBranchRule`). "The default branch" on either side is read as the branch it is before
+comparing (#1129): on the build's side, only the branch its clones were on (`OeProjectBuild.DefaultBranch`,
+kept from the first run on a rerun), never today's default, which may have changed since; on the
+pipeline's, each repository's default branch as GitHub last reported it on a push, and only when every
+repository of the solution has reported one. Either side counts only when it comes to one name; when
+nothing says which branch it is, the names are compared as written, so an older build that recorded
+nothing still needs the exact name. The version number is deliberately not the guard: Business Central installs
 anything higher than what it has, so a "test" pattern in a version would not stop it.
 
 - **On for production.** The editor turns the rule on when the target is a Production environment,
@@ -835,6 +849,11 @@ whole. The page reads the log line back through the same parser, so a deployment
 - **`DeliveryScheduler`** (`BackgroundService`) — polls for due `scheduled` rows, enqueues to
   **`DeliveryQueue`** (bounded `Channel`); **`DeliveryWorker`** drains and runs the publish under the
   triggering user's captured `AmbientOrganizationScope` identity. Persisted rows = restart-resume.
+  The worker runs a few deployments at once, never two to one Business Central environment (two
+  solutions on one tenant share it), and within a solution to one environment in the order they fell
+  due: a run that finds its environment busy, or an earlier deployment to it still waiting, leaves the row
+  `scheduled` for the next sweep. Nothing waits on a full queue;
+  a due row that doesn't fit is picked up by the next sweep too (#1139).
 
 ## UI surfaces
 
@@ -893,7 +912,10 @@ whole. The page reads the log line back through the same parser, so a deployment
   Any choice that installs within the minute (Now, a picked time that has come, a delivery window that
   is open) asks who is signed in first. Rescheduling takes the Deployment pipelines step-up rule, like
   deploying. The worker only claims a delivery whose time has come, so a run still waiting in the queue
-  does nothing to a deployment moved to later; the scheduler queues it again when it is due. The same
+  does nothing to a deployment moved to later; the scheduler queues it again when it is due. It also
+  only claims a delivery that still runs as the person the queued run was queued for: rescheduling
+  hands the deployment to whoever rescheduled it, so a run queued for someone else leaves it for the
+  next sweep, which queues it as its new person (#1179). The same
   dialog opens from "Reschedule next deployment" in the deployment pipelines list's row menu, and
   from the environment's Scheduled installs card, which lists the pipeline runs booked for that
   environment (with Reschedule and Cancel deployment) and offers Reschedule beside the install
@@ -1122,7 +1144,16 @@ worker as the web "Deploy now", so `deploy_build` returns the new delivery id to
 blocking. Access-gating + validation come from `DeliveryService`/`ProjectAccess` unchanged; the tool
 only maps `ProjectAccessDeniedException`/`PlanValidationException` to `McpException`. Scheduling a
 *future* delivery and the Production extra-confirm stay web-only — the agent path is deploy-now,
-including for a pipeline that installs in the delivery window (#928): the tool deploys immediately
+through `DeliveryService.DeployNowForAgentAsync`. Because an agent has no confirm step, that path
+refuses a Production (or any other non-sandbox) environment unless the organisation has switched on
+`organization_settings.agents_may_deploy_to_production` ("Let AI assistants deploy to production
+environments" on Administration → Tools, off by default, #1122); when it is on, the agent's
+Production deployment runs immediately, unconfirmed. The delivery is marked `started_by_agent` and
+its log opens with a line saying so, and the run checks the environment's type again before it
+uploads, as it does for a deployment started without approval: one that is no longer a sandbox is
+refused while the setting is off. Turning the setting on takes a recent second factor whenever the
+organisation asks for one for any tool. Deploy-now holds
+even for a pipeline that installs in the delivery window (#928): the tool deploys immediately
 and the delivery records that it ran outside the window when it did. `deploy_build` always uses
 the pipeline's own schema sync mode and has no parameter to change it: a one-time Force sync
 (#931) is a person's decision, taken in the web UI behind its acknowledgement, and no agent or
@@ -1204,9 +1235,10 @@ class and fail on anything that is not `ReadOnly = true`. `get_solution`, `list_
     the system org the way the release auto-importer does, because in single-tenant (and fresh
     bootstrap-admin) deployments the working org **is** the system org, so its deliveries have to run.
   - **Restart-resume:** scheduled rows survive a restart (re-picked on the next due sweep); a delivery
-    orphaned mid-publish is failed on the scheduler's first per-org sweep (nothing runs yet at startup,
-    so an active delivery is never tripped) — folded into the scheduler to avoid a second
-    cross-org startup site.
+    orphaned mid-publish is failed on the scheduler's first per-org sweep that gets through (an org
+    whose check fails is tried again next sweep). Only deliveries claimed before the process started
+    count, because the worker is already draining by then and one it claimed since is running, not
+    orphaned (#1114) — folded into the scheduler to avoid a second cross-org startup site.
   - Times are entered/displayed in the project's `bc_time_zone` (customer's local time). The window
     may wrap past midnight.
 

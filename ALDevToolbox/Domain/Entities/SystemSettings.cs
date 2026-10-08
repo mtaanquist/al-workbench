@@ -238,5 +238,13 @@ public class SystemSettings
     /// </summary>
     public string? GitHubWebhookSecretEncrypted { get; set; }
 
+    /// <summary>
+    /// How many project and pull request builds run at once, set by a SiteAdmin on
+    /// <c>/site-admin/settings/builds</c> (1 to 16). Null means "use the default":
+    /// <c>OE_BUILD_CONCURRENCY</c>, else 2. Applied to the running build queue on
+    /// save, without a restart (#1164).
+    /// </summary>
+    public int? BuildConcurrency { get; set; }
+
     public DateTime UpdatedAt { get; set; }
 }

@@ -16,8 +16,9 @@ namespace ALDevToolbox.Endpoints;
 /// <para>Phase 1 had no such route on purpose - "nothing needs GitHub to call us".
 /// This one exists because a check run is by definition something GitHub asks for,
 /// and it is written to be the smallest inbound surface that can be: anonymous,
-/// antiforgery-disabled (there is no browser and no cookie), rate-limited per
-/// source address, capped at a megabyte, and doing nothing at all until an
+/// antiforgery-disabled (there is no browser and no cookie), open only to the
+/// addresses GitHub publishes for its webhooks (#1201), rate-limited per
+/// source address, capped at a megabyte (25 MB for a push), and doing nothing at all until an
 /// HMAC-SHA256 over the raw body matches the deployment's stored webhook secret.
 /// A delivery that verifies is parsed and enqueued; nothing here reads or writes
 /// the database, and nothing here decides which organisation a delivery belongs
@@ -25,8 +26,10 @@ namespace ALDevToolbox.Endpoints;
 ///
 /// <para>The same route also takes <c>push</c> deliveries and merged pull
 /// requests (#963), so a build pipeline can tell when the branch it watches has
-/// moved past what it last built. Those are recorded by the worker and nothing is
-/// built on them; they pass the same secret, size and signature checks first.</para>
+/// moved past what it last built. The worker records those, and a push also starts
+/// a build on each pipeline that builds on push, unless it was forced or deleted
+/// the branch (#1079); they pass the same secret,
+/// size and signature checks first.</para>
 /// </summary>
 public static class GitHubWebhookEndpoints
 {
@@ -37,13 +40,29 @@ public static class GitHubWebhookEndpoints
     public const string WebhookRateLimitPolicy = "github-webhook";
 
     /// <summary>
-    /// A megabyte. GitHub's own documented ceiling for a delivery payload is
-    /// 25&#160;MB, but a <c>pull_request</c> event is a few kilobytes of metadata
-    /// and we read the whole body into memory to hash it - so the cap is set to
-    /// what this event actually is, not to what the largest event could be. An
-    /// oversized body is dropped at the socket rather than materialised.
+    /// A megabyte: the cap for every event except <c>push</c>. A
+    /// <c>pull_request</c> event is a few kilobytes of metadata and we read the
+    /// whole body into memory to hash it, so the cap is set to what the event
+    /// actually is, not to what the largest event could be.
     /// </summary>
     public const int MaxRequestBodyBytes = 1_000_000;
+
+    /// <summary>
+    /// GitHub's own documented ceiling for a delivery, 25&#160;MB, and the cap for a
+    /// <c>push</c> (#1126). A push lists up to twenty commits with every file each
+    /// one added, removed or changed, so a large import or a merge touching
+    /// thousands of files goes well past a megabyte, and a refused push is a build
+    /// that never happens. This is also the route's socket-level limit; the
+    /// smaller cap for every other event is applied while the body is read.
+    /// </summary>
+    public const int MaxPushBodyBytes = 25 * 1024 * 1024;
+
+    /// <summary>
+    /// Where a body read starts before it grows. The buffer follows the bytes that
+    /// have actually arrived, never the declared length, so a delivery that claims
+    /// 25 MB and then trickles costs only what it has sent (#1174).
+    /// </summary>
+    private const int InitialBodyBufferBytes = 64 * 1024;
 
     /// <summary>The pull-request actions worth a build. Everything else is a no-op we answer 204 to.</summary>
     private static readonly HashSet<string> BuildableActions =
@@ -64,10 +83,39 @@ public static class GitHubWebhookEndpoints
             HttpContext ctx,
             SystemSettingsService settings,
             GitHubWebhookQueue queue,
+            GitHubWebhookBodyGate gate,
+            GitHubHookAddressAllowList senders,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             var log = loggerFactory.CreateLogger("ALDevToolbox.GitHubWebhook");
+
+            // Only GitHub's published webhook addresses may deliver (#1201), and that
+            // is decided before anything else: before the body is read and before a
+            // large-body slot is taken, so a stranger costs one header parse however
+            // many addresses it has. The address is the forwarded client address when
+            // the proxy in front is trusted, else the connection's - which behind an
+            // untrusted proxy is the proxy itself, hence the hint in the warning.
+            var sender = ctx.Connection.RemoteIpAddress;
+            switch (senders.Check(sender))
+            {
+                case GitHubHookAddressVerdict.Refused:
+                    if (senders.ShouldWarnRefusal(sender, out var suppressed))
+                    {
+                        log.LogWarning(
+                            "Refused a GitHub webhook delivery from {Sender}: not one of the addresses GitHub sends webhooks from ({Suppressed} more refused since the last warning). If every delivery is refused from the same address, it is probably the reverse proxy's: list the proxy in TRUSTED_PROXIES.",
+                            sender?.ToString() ?? "unknown", suppressed);
+                    }
+                    return Results.Text("This address is not one GitHub sends webhooks from.", "text/plain", statusCode: 403);
+                case GitHubHookAddressVerdict.NotLoaded:
+                    if (senders.ShouldWarnUnloaded())
+                    {
+                        log.LogWarning(
+                            "Accepting GitHub webhook deliveries from any address, {Sender} included: GitHub's webhook address ranges have not been loaded yet.",
+                            sender?.ToString() ?? "unknown");
+                    }
+                    break;
+            }
 
             // Every response writes a body. UseStatusCodePagesWithReExecute
             // re-runs the pipeline at GET /not-found for a bare 4xx, and for a
@@ -83,20 +131,63 @@ public static class GitHubWebhookEndpoints
                 return Results.Text("This deployment has no GitHub webhook secret configured.", "text/plain", statusCode: 401);
             }
 
-            var body = await ReadBodyAsync(ctx.Request, ct);
-            if (body is null)
-            {
-                return Results.Text("The delivery body is too large.", "text/plain", statusCode: 413);
-            }
-
+            // Only a push is allowed past a megabyte, and only when it carries a
+            // well-formed signature: anything else is refused below whatever its
+            // size, so there is no reason to read 25 MB of it first. The body has
+            // to be read before the signature can be checked, so a body that may
+            // be past a megabyte - no declared length, or a larger one - takes a
+            // slot at the gate, waits for one only briefly, and gets a deadline for
+            // arriving (#1174). An ordinary push declares a smaller length and never
+            // queues behind a stranger holding the slots, and one address holds at
+            // most one slot, so filling them all takes as many addresses as slots.
             var signature = ctx.Request.Headers["X-Hub-Signature-256"].ToString();
+            var eventName = ctx.Request.Headers["X-GitHub-Event"].ToString();
+            var mayBeLarge = string.Equals(eventName, "push", StringComparison.OrdinalIgnoreCase)
+                && IsWellFormedSignature(signature);
+            var declared = ctx.Request.ContentLength;
+            byte[]? body;
+            IResult? refusal;
+            if (mayBeLarge && (declared is null || declared > MaxRequestBodyBytes))
+            {
+                // The address the rate limiter partitions on: the forwarded client
+                // address when the proxy in front is trusted, else the connection's.
+                var source = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                if (!await gate.TryEnterAsync(source, ct))
+                {
+                    log.LogWarning(
+                        "Refused a large push delivery from {Source}: no large-body slot is free for it.", source);
+                    return Results.Text("Busy; the delivery will be requested again.", "text/plain", statusCode: 503);
+                }
+                try
+                {
+                    using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    deadline.CancelAfter(gate.ReadDeadline);
+                    (body, refusal) = await ReadBodyAsync(ctx.Request, MaxPushBodyBytes, deadline.Token);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    log.LogWarning(
+                        "Refused a large push delivery: the body did not arrive within {Deadline}.", gate.ReadDeadline);
+                    return TooSlow();
+                }
+                finally
+                {
+                    gate.Release(source);
+                }
+            }
+            else
+            {
+                (body, refusal) = await ReadBodyAsync(ctx.Request, MaxRequestBodyBytes, ct);
+            }
+            if (refusal is not null) return refusal;
+            if (body is null) return TooLarge();
+
             if (!SignatureMatches(secret, body, signature))
             {
                 log.LogWarning("Refused a GitHub webhook delivery: the X-Hub-Signature-256 header did not match.");
                 return Results.Text("The delivery signature did not match.", "text/plain", statusCode: 401);
             }
 
-            var eventName = ctx.Request.Headers["X-GitHub-Event"].ToString();
             var deliveryId = ctx.Request.Headers["X-GitHub-Delivery"].ToString();
 
             // GitHub sends a ping the moment the hook is saved, and shows the
@@ -108,8 +199,9 @@ public static class GitHubWebhookEndpoints
                 return Results.Text("pong", "text/plain");
             }
 
-            // A branch moved. Recorded, never built: see "Branch watching" in the
-            // design doc (#963). A tag push, or a payload we cannot read, is 204.
+            // A branch moved. Recorded, and built only by pipelines that build on
+            // push: see "Branch watching" (#963) and "Building on push" (#1079) in
+            // the design doc. A tag push, or a payload we cannot read, is 204.
             if (string.Equals(eventName, "push", StringComparison.OrdinalIgnoreCase))
             {
                 var push = TryReadPush(body, deliveryId, log);
@@ -119,7 +211,7 @@ public static class GitHubWebhookEndpoints
                     log.LogWarning(
                         "Refused a push delivery for {Repository} ({Branch}): the webhook queue is full.",
                         push.RepositoryFullName, push.Branch);
-                    return Results.Text("Busy; GitHub will retry.", "text/plain", statusCode: 503);
+                    return Results.Text("Busy; the delivery will be requested again.", "text/plain", statusCode: 503);
                 }
                 log.LogInformation(
                     "Queued a push to {Repository} ({Branch} at {HeadSha}, installation {InstallationId}, delivery {DeliveryId}).",
@@ -142,7 +234,7 @@ public static class GitHubWebhookEndpoints
                     log.LogWarning(
                         "Refused a merged pull-request delivery for {Repository}#{Number}: the webhook queue is full.",
                         merged.RepositoryFullName, merged.Number);
-                    return Results.Text("Busy; GitHub will retry.", "text/plain", statusCode: 503);
+                    return Results.Text("Busy; the delivery will be requested again.", "text/plain", statusCode: 503);
                 }
                 log.LogInformation(
                     "Queued a merged pull request {Repository}#{Number} into {Branch} (delivery {DeliveryId}).",
@@ -154,21 +246,23 @@ public static class GitHubWebhookEndpoints
             if (job is null) return Results.NoContent();
 
             // A full channel means the workbench is already behind on builds.
-            // Waiting here would hold GitHub's request open behind that backlog;
-            // saying so lets GitHub redeliver, which is what it does with a 5xx.
+            // Waiting here would hold GitHub's request open behind that backlog.
+            // GitHub does not resend a 5xx by itself: the refusal stays in the
+            // App's delivery log, and GitHubWebhookRecoveryScheduler asks GitHub
+            // to send it again once the queue has room (#1121).
             if (!queue.TryEnqueue(job))
             {
                 log.LogWarning(
                     "Refused a pull-request delivery for {Repository}#{Number}: the build queue is full.",
                     job.RepositoryFullName, job.PullRequestNumber);
-                return Results.Text("Busy; GitHub will retry.", "text/plain", statusCode: 503);
+                return Results.Text("Busy; the delivery will be requested again.", "text/plain", statusCode: 503);
             }
 
             // Announced only once the job is really queued. Announcing first would
             // cancel the build running for the previous head on the strength of a
             // job that then never arrived, leaving the pull request with no answer
             // at all.
-            queue.Announce(job.Key, job.HeadSha);
+            queue.Announce(job.Key, job.HeadSha, job.UpdatedAt);
 
             log.LogInformation(
                 "Queued a pull-request build for {Repository}#{Number} at {HeadSha} (installation {InstallationId}, delivery {DeliveryId}).",
@@ -180,29 +274,85 @@ public static class GitHubWebhookEndpoints
         // delivery; the HMAC over the raw body is what authenticates it.
         .DisableAntiforgery()
         .RequireRateLimiting(WebhookRateLimitPolicy)
-        .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxRequestBodyBytes));
+        .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxPushBodyBytes));
 
         return app;
     }
 
     /// <summary>
-    /// Reads the whole body, or <see langword="null"/> when it exceeds
-    /// <see cref="MaxRequestBodyBytes"/>. The signature is over the raw bytes, so
-    /// the body has to be read once and hashed before it is parsed - there is no
-    /// streaming shortcut here.
+    /// Reads the whole body, or answers why it could not: 413 when it exceeds
+    /// <paramref name="cap"/>, 408 when the server gave up on a body arriving below
+    /// its minimum data rate. The signature is over the raw bytes, so the body has
+    /// to be read once and hashed before it is parsed - there is no streaming
+    /// shortcut here.
     /// </summary>
-    private static async Task<byte[]?> ReadBodyAsync(HttpRequest request, CancellationToken ct)
+    private static async Task<(byte[]? Body, IResult? Refusal)> ReadBodyAsync(
+        HttpRequest request, int cap, CancellationToken ct)
     {
-        using var buffer = new MemoryStream();
-        var chunk = new byte[8192];
-        int read;
-        while ((read = await request.Body.ReadAsync(chunk, ct)) > 0)
+        try
         {
-            if (buffer.Length + read > MaxRequestBodyBytes) return null;
-            buffer.Write(chunk, 0, read);
+            var body = await ReadBodyAsync(request.Body, request.ContentLength, cap, ct);
+            return body is null ? (null, TooLarge()) : (body, null);
         }
-        return buffer.ToArray();
+        catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
+        {
+            // The server's own limit tripped first; answer it the same way.
+            return (null, TooLarge());
+        }
+        catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status408RequestTimeout)
+        {
+            // Kestrel's minimum request body data rate: the same verdict as our own
+            // deadline, and a status GitHub's redelivery treats as worth resending.
+            return (null, TooSlow());
+        }
     }
+
+    private static IResult TooLarge() =>
+        Results.Text("The delivery body is too large.", "text/plain", statusCode: 413);
+
+    private static IResult TooSlow() =>
+        Results.Text("The delivery body arrived too slowly.", "text/plain", statusCode: 408);
+
+    /// <summary>
+    /// Reads <paramref name="body"/> to its end, or <see langword="null"/> when it
+    /// declares or sends more than <paramref name="cap"/>.
+    ///
+    /// <para>The buffer starts small and doubles as bytes arrive, up to the declared
+    /// length when there is one, rather than being allocated from that length up
+    /// front: the length is only what the sender claimed, and before the signature
+    /// is checked the sender may be anybody (#1174). A body that fills its declared
+    /// length exactly is returned without a further copy.</para>
+    /// </summary>
+    internal static async Task<byte[]?> ReadBodyAsync(Stream body, long? declaredLength, int cap, CancellationToken ct)
+    {
+        if (declaredLength > cap) return null;
+
+        // With no declared length, read one byte past the cap so "more than the
+        // cap" can be told apart from "exactly the cap".
+        var limit = declaredLength ?? (long)cap + 1;
+        var buffer = new byte[(int)Math.Min(limit, InitialBodyBufferBytes)];
+        var filled = 0;
+        while (true)
+        {
+            if (filled == buffer.Length)
+            {
+                if (filled == limit) break;
+                Array.Resize(ref buffer, (int)Math.Min(limit, (long)buffer.Length * 2));
+            }
+            var got = await body.ReadAsync(buffer.AsMemory(filled), ct);
+            if (got == 0) break;
+            filled += got;
+        }
+
+        if (filled > cap) return null;
+        return filled == buffer.Length ? buffer : buffer[..filled];
+    }
+
+    /// <summary>Whether <paramref name="signature"/> has the shape of GitHub's header, <c>sha256=</c> and 64 hex digits.</summary>
+    internal static bool IsWellFormedSignature(string? signature) =>
+        signature is { Length: 71 }
+        && signature.StartsWith("sha256=", StringComparison.OrdinalIgnoreCase)
+        && !signature.AsSpan(7).ContainsAnyExcept("0123456789abcdefABCDEF");
 
     /// <summary>
     /// Whether <paramref name="signature"/> is GitHub's <c>sha256=&lt;hex&gt;</c>
@@ -365,7 +515,14 @@ public static class GitHubWebhookEndpoints
                 BaseRef: baseRef ?? string.Empty,
                 DeliveryId: deliveryId,
                 AuthorLogin: authorLogin ?? string.Empty,
-                IsMemberFork: isMemberFork);
+                IsMemberFork: isMemberFork,
+                // Moves forward with every push to the pull request, so the queue can
+                // tell which of two deliveries is newer whichever arrived first (#1120).
+                UpdatedAt: Text(pullRequest, "updated_at") is { } updated
+                           && DateTimeOffset.TryParse(updated, System.Globalization.CultureInfo.InvariantCulture,
+                               System.Globalization.DateTimeStyles.None, out var updatedAt)
+                    ? updatedAt
+                    : null);
         }
         catch (JsonException ex)
         {

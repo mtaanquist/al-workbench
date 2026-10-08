@@ -202,7 +202,12 @@ public sealed class GitHubReleaseService
         GitHubReleasePublishResult result;
         try
         {
-            result = await TryPublishAsync(projectBuildId, build.RepositoryId.Value, build.RepositoryProvider, build.RepositoryUrl, ct);
+            // Builds run side by side (#1137): two of them publishing the same tag to
+            // one repository would race between finding the release and creating it.
+            using (await PublishGate.EnterAsync(build.RepositoryId.Value, ct))
+            {
+                result = await TryPublishAsync(projectBuildId, build.RepositoryId.Value, build.RepositoryProvider, build.RepositoryUrl, ct);
+            }
         }
         catch (GitHubApiException ex)
         {
@@ -226,6 +231,9 @@ public sealed class GitHubReleaseService
         await RecordOutcomeAsync(projectBuildId, result, ct);
         return result;
     }
+
+    /// <summary>One publish per GitHub repository at a time, keyed by its repository id. Internal for tests.</summary>
+    internal static readonly ALDevToolbox.Services.Workers.KeyedGate<int> PublishGate = new();
 
     private async Task<GitHubReleasePublishResult> TryPublishAsync(
         int projectBuildId, int repositoryId, RepositoryProvider? provider, string repositoryUrl, CancellationToken ct)
@@ -428,6 +436,11 @@ public sealed class GitHubReleaseService
         // Fetches the files that will be deployed; same rule as deploying.
         await _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
         var source = await ResolveSourceAsync(releasePipelineId, ct);
+        // Staging is the first half of a deployment, and a disabled pipeline refuses the second (#1131).
+        if (await _db.OeReleasePipelines.AsNoTracking().AnyAsync(r => r.Id == releasePipelineId && r.DisabledAt != null, ct))
+        {
+            throw Validation("ReleasePipeline", ObjectExplorer.Delivery.DeliveryService.DisabledRefusal);
+        }
         tag = (tag ?? string.Empty).Trim();
         if (tag.Length == 0) throw Validation("Tag", "Choose a release to deploy.");
 
@@ -450,6 +463,13 @@ public sealed class GitHubReleaseService
             .FirstOrDefaultAsync(ct);
         if (alreadyStaged is { } existingId)
         {
+            // The release link matched, so this is the same GitHub repository. Record the
+            // row it was just fetched through: the build may predate the column, its old row
+            // may have been removed and added back, or the solution may list the repository
+            // twice. Leaving a stale id would refuse this pipeline for good (#1178).
+            await _db.OeProjectBuilds
+                .Where(b => b.Id == existingId && b.StagedFromRepositoryId != source.RepositoryId)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.StagedFromRepositoryId, source.RepositoryId), ct);
             _logger.LogInformation(
                 "Release {Tag} on {Owner}/{Repo} is already staged as build {BuildId}.",
                 tag, source.Owner, source.Name, existingId);
@@ -467,6 +487,7 @@ public sealed class GitHubReleaseService
             Status = ProjectBuildStatus.Ready,
             GithubReleaseTag = tag,
             GithubReleaseUrl = release.HtmlUrl,
+            StagedFromRepositoryId = source.RepositoryId,
             StartedAt = now,
             FinishedAt = now,
         };
@@ -498,7 +519,7 @@ public sealed class GitHubReleaseService
     }
 
     /// <summary>A release pipeline that draws from GitHub Releases, resolved to a repository we may act on.</summary>
-    private sealed record ReleaseSource(int ProjectId, string Owner, string Name, long InstallationId);
+    private sealed record ReleaseSource(int ProjectId, int RepositoryId, string Owner, string Name, long InstallationId);
 
     /// <summary>
     /// The access gate both Release-sourced calls share: the caller must be able to
@@ -553,7 +574,7 @@ public sealed class GitHubReleaseService
                 $"{owner}/{name} is outside the connected GitHub organisation ({connection.OrgLogin}).");
         }
 
-        return new ReleaseSource(rp.ProjectId, owner, name, installationId);
+        return new ReleaseSource(rp.ProjectId, rp.GithubReleaseRepositoryId.Value, owner, name, installationId);
     }
 
     // ── Shared helpers ──────────────────────────────────────────────────────
@@ -581,6 +602,17 @@ public sealed class GitHubReleaseService
             : segments[1];
         return owner.Length > 0 && name.Length > 0;
     }
+
+    /// <summary>
+    /// Whether two repository links name the same GitHub repository, however they were
+    /// typed (www., a .git ending, a trailing path, letter case). False when either is not
+    /// a GitHub link. A solution may list one repository twice (#1178).
+    /// </summary>
+    public static bool IsSameRepository(string? first, string? second) =>
+        TryParseRepository(first, out var firstOwner, out var firstName)
+        && TryParseRepository(second, out var secondOwner, out var secondName)
+        && string.Equals(firstOwner, secondOwner, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(firstName, secondName, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>A Release asset the workbench can install: a compiled extension, not a packaging by-product.</summary>
     private static bool IsAppAsset(GitHubReleaseAsset asset) =>

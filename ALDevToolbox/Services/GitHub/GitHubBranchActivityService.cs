@@ -12,9 +12,10 @@ namespace ALDevToolbox.Services.GitHub;
 /// the organisation it resolved from the installation id, so every read and write
 /// here runs under that organisation's ordinary query filter.
 ///
-/// <para>Nothing is built because of anything written here. The rows are what
-/// <c>BuildFreshnessService</c> compares a pipeline's last build against. See
-/// <c>.design/github-integration-phase2.md</c>, "Branch watching" (#963).</para>
+/// <para>Nothing is built because of anything written here; which pipelines build on a
+/// push is decided separately by <see cref="ALDevToolbox.Services.ObjectExplorer.Projects.PushBuildService"/>
+/// and started by <see cref="GitHubPullRequestBuildWorker"/> (#1079). The rows are what <c>BuildFreshnessService</c> compares a pipeline's last
+/// build against. See <c>.design/github-integration-phase2.md</c>, "Branch watching" (#963).</para>
 /// </summary>
 public sealed class GitHubBranchActivityService
 {
@@ -162,6 +163,14 @@ public sealed class GitHubBranchActivityService
         }
 
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+
+        // Retention (#1138): these rows only name what merged since a pipeline's last
+        // build, so ones far older than any build anyone still reads are dropped as new
+        // ones arrive rather than kept forever.
+        var cutoff = merged.MergedAt - MergedPullRequestRetention;
+        await _db.OeRepositoryMergedPullRequests
+            .Where(m => repositoryIds.Contains(m.ProjectRepositoryId) && m.MergedAt < cutoff)
+            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
         _logger.LogInformation(
             "Recorded merged pull request {Repository}#{Number} into {Branch} for {Count} solution repositories.",
             merged.RepositoryFullName, merged.Number, merged.BaseBranch, repositoryIds.Count);
@@ -181,6 +190,9 @@ public sealed class GitHubBranchActivityService
             return [];
         }
     }
+
+    /// <summary>How long a merged pull request is kept for the "merged since the last build" lists.</summary>
+    public static readonly TimeSpan MergedPullRequestRetention = TimeSpan.FromDays(180);
 
     /// <summary>How many commits a head row keeps. Ten is what a "what changed" line can use.</summary>
     public const int MaxStoredCommits = 10;

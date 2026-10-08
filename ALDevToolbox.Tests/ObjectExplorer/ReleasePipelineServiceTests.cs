@@ -129,6 +129,84 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Changing_the_environment_drops_a_typed_name_left_as_it_was()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId, "main");
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var test = await SeedEnvironmentAsync(ctx, projectId, "Test");
+        var svc = NewService(ctx);
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, "main - hotfixes", buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await svc.UpdateReleasePipelineAsync(id, new ReleasePipelineInput(projectId, "main - hotfixes", buildId, test, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.Name.Should().Be("main to Test");
+        rp.NameIsCustom.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Changing_the_source_drops_a_typed_name_left_as_it_was()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var main = await SeedBuildPipelineAsync(ctx, projectId, "main");
+        var release = await SeedBuildPipelineAsync(ctx, projectId, "release/26");
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var svc = NewService(ctx);
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, "main - hotfixes", main, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await svc.UpdateReleasePipelineAsync(id, new ReleasePipelineInput(projectId, "main - hotfixes", release, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.Name.Should().Be("release/26 to Production");
+        rp.NameIsCustom.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_name_typed_in_the_same_save_as_an_environment_change_is_kept()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId, "main");
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var test = await SeedEnvironmentAsync(ctx, projectId, "Test");
+        var svc = NewService(ctx);
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, "main - hotfixes", buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await svc.UpdateReleasePipelineAsync(id, new ReleasePipelineInput(projectId, "main - hotfixes to Test", buildId, test, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.Name.Should().Be("main - hotfixes to Test");
+        rp.NameIsCustom.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_typed_name_stays_when_the_generated_name_for_the_new_environment_is_taken()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId, "main");
+        var prod = await SeedEnvironmentAsync(ctx, projectId, "Production");
+        var test = await SeedEnvironmentAsync(ctx, projectId, "Test");
+        var svc = NewService(ctx);
+        await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, null, buildId, test, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+        var id = await svc.CreateReleasePipelineAsync(new ReleasePipelineInput(projectId, "main - hotfixes", buildId, prod, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await svc.UpdateReleasePipelineAsync(id, new ReleasePipelineInput(projectId, "main - hotfixes", buildId, test, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        await using var read = _db.NewContext();
+        var rp = await read.OeReleasePipelines.SingleAsync(r => r.Id == id);
+        rp.Name.Should().Be("main - hotfixes");
+        rp.NameIsCustom.Should().BeTrue();
+        rp.ProjectEnvironmentId.Should().Be(test);
+    }
+
+    [Fact]
     public async Task CreateReleasePipelineAsync_rejects_a_duplicate_name_in_the_same_project_case_insensitively()
     {
         await using var ctx = _db.NewContext();
@@ -338,6 +416,26 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Editing_a_deleted_deployment_pipeline_is_not_reported_as_a_name_clash()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId);
+        var svc = NewService(ctx);
+        var input = new ReleasePipelineInput(projectId, "Production", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add);
+        var id = await svc.CreateReleasePipelineAsync(input);
+        await svc.SoftDeleteReleasePipelineAsync(id);
+
+        var act = () => svc.UpdateReleasePipelineAsync(id, input);
+
+        // The editor opens a custom-name field for any Name error, so this must not be one.
+        var errors = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors;
+        errors.Should().NotContainKey("Name");
+        errors["ReleasePipeline"].Should().Be("This deployment pipeline no longer exists.");
+    }
+
+    [Fact]
     public async Task ListReleasePipelinesAsync_resolves_source_and_target_names()
     {
         await using var ctx = _db.NewContext();
@@ -355,6 +453,26 @@ public sealed class ReleasePipelineServiceTests : IDisposable
         row.BuildPipelineName.Should().Be("Nightly");
         row.EnvironmentName.Should().Be("Production");
         row.EnvironmentMissing.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_pipeline_says_so_when_its_build_pipeline_was_deleted()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId, name: "Nightly");
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "Production");
+        await NewService(ctx).CreateReleasePipelineAsync(new ReleasePipelineInput(
+            projectId, "Nightly to Production", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+        (await NewService(_db.NewContext()).ListReleasePipelinesAsync(projectId)).Single().BuildPipelineDeleted.Should().BeFalse();
+
+        // Deleted before deleting one in use was refused.
+        await ctx.OePipelines.Where(p => p.Id == buildId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+
+        var row = (await NewService(_db.NewContext()).ListReleasePipelinesAsync(projectId)).Single();
+        row.BuildPipelineDeleted.Should().BeTrue();
+        row.BuildPipelineName.Should().Be("Nightly");
     }
 
     [Theory]
@@ -752,6 +870,47 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Turning_on_deploying_without_approval_takes_the_step_up_rule_deploying_takes()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, type: "Sandbox");
+        var input = new ReleasePipelineInput(
+            projectId, null, buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add,
+            PrepareReleaseOnNewBuild: true, DeployWithoutApproval: false);
+        var id = await NewService(ctx).CreateReleasePipelineAsync(input);
+        // The organisation asks for a recent second factor before deploying (#1127).
+        await ctx.Organizations.Where(o => o.Id == TestDb.DefaultOrgId)
+            .ExecuteUpdateAsync(s => s.SetProperty(o => o.StepUpTools,
+                ALDevToolbox.Domain.Tools.ToolCatalog.Format(new[] { ALDevToolbox.Domain.Tools.ToolKey.Releases })));
+        // A cookie session with no recent second factor.
+        var session = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(new[]
+        {
+            new System.Security.Claims.Claim(ALDevToolbox.Services.HttpOrganizationContext.UserIdClaim, "1"),
+            new System.Security.Claims.Claim(ALDevToolbox.Services.HttpOrganizationContext.OrganizationIdClaim, TestDb.DefaultOrgId.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            new System.Security.Claims.Claim(ALDevToolbox.Endpoints.EndpointHelpers.DisabledToolsClaim, string.Empty),
+            new System.Security.Claims.Claim(ALDevToolbox.Endpoints.EndpointHelpers.StepUpToolsClaim, string.Empty),
+        }, "test"));
+        ReleasePipelineService Svc(AppDbContext c) => new(c, _db.OrgContext, new ProjectAccess(c, _db.OrgContext),
+            new ALDevToolbox.Services.Tools.ToolEnablement(TestDb.EverythingEnabled(),
+                new TestDb.FixedHttpContextAccessor(new Microsoft.AspNetCore.Http.DefaultHttpContext { User = session }),
+                c, _db.OrgContext, TimeProvider.System),
+            NullLogger<ReleasePipelineService>.Instance);
+
+        // Saving with it off needs nothing more.
+        await Svc(_db.NewContext()).UpdateReleasePipelineAsync(id, input with { PrepareReleaseOnNewBuild = false });
+
+        var turnOn = () => Svc(_db.NewContext()).UpdateReleasePipelineAsync(id, input with { DeployWithoutApproval = true });
+        await turnOn.Should().ThrowAsync<ALDevToolbox.Services.Tools.StepUpRequiredException>();
+        var otherEnvId = await SeedEnvironmentAsync(ctx, projectId, name: "Sandbox2", type: "Sandbox");
+        var create = () => Svc(_db.NewContext()).CreateReleasePipelineAsync(input with { ProjectEnvironmentId = otherEnvId, DeployWithoutApproval = true });
+        await create.Should().ThrowAsync<ALDevToolbox.Services.Tools.StepUpRequiredException>();
+
+        (await _db.NewContext().OeReleasePipelines.SingleAsync(r => r.Id == id)).DeployWithoutApproval.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task Deploying_without_approval_is_refused_for_an_environment_that_is_not_a_sandbox()
     {
         await using var ctx = _db.NewContext();
@@ -816,7 +975,7 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     private ReleasePipelineService NewService(AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleasePipelineService>.Instance);
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
 
     private static async Task<int> SeedProjectAsync(AppDbContext ctx)
     {

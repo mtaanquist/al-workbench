@@ -180,9 +180,13 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `DISABLE_APPLICATION_VERSION_SYNC`            | `1` to stop adding newly shipped Business Central release waves to each organisation's application versions list every day. | unset |
 | `DISABLE_DELIVERY_SCHEDULER`                  | `1` to disable the scheduler that enqueues due deliveries, so scheduled publishes never fire. | unset |
 | `DISABLE_PREVIEW_CHECK_SCHEDULER`             | `1` to disable the nightly preview check, so pipelines never build against the next minor or next major preview. | unset |
+| `DISABLE_BUILD_RESOURCE_MONITOR`              | `1` to stop warning when running pipeline builds are short of processor or memory. | unset |
 | `DISABLE_ENVIRONMENT_REFRESH_SCHEDULER`       | `1` to disable the nightly refresh of Business Central environment data behind the Upgrades page. | unset |
 | `DISABLE_NOTIFICATION_DIGEST_SCHEDULER`       | `1` to stop sending the daily and weekly notification digests. Items for them wait until it is turned back on, which then drops any older than 30 days, along with in-app notifications of that age. | unset |
+| `DISABLE_DEPENDENCY_DRIFT_SCHEDULER`          | `1` to disable the nightly check of tracked repositories against their solutions' Business Central environments, and with it the update pull requests opened automatically. | unset |
 | `DISABLE_GITHUB_REPOSITORY_DISCOVERY_SCHEDULER` | `1` to disable the daily sweep that lists the connected GitHub organisation's repositories and offers the AL ones no solution tracks yet. | unset |
+| `DISABLE_GITHUB_HOOK_ADDRESS_REFRESH` | `1` to stop reading the addresses GitHub sends webhooks from. With it set, webhook deliveries are accepted from any address (the signature check still applies). | unset |
+| `DISABLE_GITHUB_WEBHOOK_RECOVERY_SCHEDULER` | `1` to stop asking GitHub every five minutes to resend webhook deliveries that did not get through, and to stop closing pull request checks a restart interrupted. | unset |
 | `DISABLE_TRANSLATION_MEMORY_INGEST_SCHEDULER` | `1` to disable the nightly pass that fills the translation memory from the `.xlf` files in each organisation's own repositories. | unset |
 | `DISABLE_LOGIN_ATTEMPT_PRUNE_SCHEDULER`       | `1` to disable the periodic prune of old login-attempt rows. | unset                |
 | `DISABLE_EMAIL_OUTBOX_SCHEDULER`              | `1` to stop sending queued transactional email (resets, invites, sign-in links). Messages still queue up, nothing goes out, and nothing is cleaned up - queued messages keep their encrypted bodies until sending is switched back on. | unset |
@@ -196,10 +200,13 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `AL_COMPILER_VERSION`                         | Pin the AL compiler version (a version of the `Microsoft.Dynamics.BusinessCentral.Development.Tools` NuGet package) instead of taking the newest stable one that actually contains a compiler; this is also how to opt into a prerelease. Builds against the next major version always use the newest prerelease compiler, installed alongside, and ignore this pin. | newest stable with a compiler |
 | `AL_SYMBOLS_APPSOURCE_FEED`                   | NuGet v3 service index project builds search for AppSource dependency symbols. Fetched packages are cached under `AL_COMPILER_DIR`/`symbol-cache`. | Microsoft's public `AppSourceSymbols` feed |
 | `AL_SYMBOLS_MICROSOFT_FEED`                   | NuGet v3 service index for Microsoft symbols the Business Central artifact does not carry. | Microsoft's public `MSSymbols` feed |
+| `BC_ARTIFACT_CACHE_GB`                        | How much disk project builds may use to keep downloaded Business Central artifacts under `AL_COMPILER_DIR`/`artifact-cache`, in GB, so the next build of the same version skips the download (about 2 GB per version and country). `0` turns it off. | `15` |
 | `GIT_PATH`                                    | Path to the `git` binary used to clone project repositories. | `git` on `PATH`     |
 | `BC_ARTIFACT_CDN_HOST`                        | Host serving Microsoft's Business Central artifact indexes; override for a mirror. | Microsoft's artifact CDN |
 | `BC_INSIDER_CDN_HOST`                         | Host serving Microsoft's pre-release (insider) artifact indexes, used when an organisation opts into preview builds and by builds against the next Business Central version; override for a mirror. | Microsoft's insider artifact CDN |
 | `OE_BUILD_CLONE_TIMEOUT_MINUTES`              | Ceiling, in minutes, on a project build's repository clone step. | `30`                |
+| `OE_BUILD_COMPILE_TIMEOUT_MINUTES`            | Ceiling, in minutes, on compiling one extension in a project build. | `30`                |
+| `OE_BUILD_CONCURRENCY`                        | The default for how many project and pull request builds run at the same time (1 to 16), used until a site admin sets "Pipeline builds that run at once" under Site administration → Settings → Builds, which applies without a restart. Raise either together with the app container's CPU and memory limits; see `.design/deployment.md`, "Resource sizing". | `2`                 |
 | `SITE_ADDRESS` / `ACME_EMAIL`                 | Domain, and Let's Encrypt contact address, for the optional `caddy` service. Both required once it's enabled. | none |
 | `AllowedHosts`                                | Semicolon-separated host names the app answers for; a foreign `Host` is refused before any handler runs. Include `localhost` so the image `HEALTHCHECK` still passes, and make sure any proxy health probe sends the public host (the shipped `Caddyfile` does). | `*` |
 | `ASPNETCORE_URLS`                             | Standard ASP.NET Core binding.                            | `http://+:8080`        |
@@ -252,6 +259,10 @@ To build the image locally instead of pulling it, comment out `image:` and uncom
 5. `docker compose up -d`. Caddy issues a cert for `SITE_ADDRESS`, reverse-proxies to the app, and gates traffic on `/readyz` until startup finishes. The proxy config lives in the repo's [`Caddyfile`](./Caddyfile).
 
 No public domain handy? Set `SITE_ADDRESS=localhost` (Caddy mints an internal-CA cert, so your browser will warn) or `SITE_ADDRESS=:80` (plain HTTP) to exercise the same service locally.
+
+**GitHub webhooks.** The webhook accepts deliveries only from the addresses GitHub publishes for its webhooks, read from GitHub once a day. Behind Caddy that check sees Caddy's address unless the app trusts it as a proxy, so set `TRUSTED_PROXIES` when you enable the `caddy` service (the commented default in `compose.yaml`, `172.16.0.0/12`, covers the compose network). If it is missing, every delivery is refused with 403; the log warns about it, and Site administration → Settings → GitHub shows the last refused address.
+
+**Close the direct port.** Once `TRUSTED_PROXIES` trusts the compose network, a connection to the app's published `8080` port can arrive from that network too (Docker's port forwarding hands it over from the bridge gateway), and its `X-Forwarded-For` would be believed. So when Caddy fronts the app, remove the app's `ports:` mapping in `compose.yaml`, or bind it to loopback (`"127.0.0.1:${HOST_PORT:-8080}:8080"`), so the only way in is through Caddy.
 
 **Email links and passkeys.** Links in outbound emails are built from the request host; Caddy preserves it while the app honours `X-Forwarded-Proto`, so they render as `https://<your-domain>/`. Make sure users reach the app through the domain, not the raw `:8080` host port. To enable passkeys on the domain, set `AUTH_WEBAUTHN_RP_ID` to it and `AUTH_WEBAUTHN_ORIGINS` to `https://<your-domain>`.
 

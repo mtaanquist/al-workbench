@@ -5,7 +5,8 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 
 /// <summary>
 /// In-process hand-off from the import endpoint to <see cref="ReleaseImportWorker"/>
-/// for the DVD-scale paths (folder-ZIP upload, URL download). A bounded
+/// for the DVD-scale paths (folder-ZIP upload, URL download). Builds have their own
+/// line, <see cref="ProjectBuildQueue"/> (#1137). A bounded
 /// <see cref="System.Threading.Channels.Channel{T}"/> — not an external queue — keeps the "no external
 /// services" fence intact while giving the worker a clean back-pressure point.
 ///
@@ -36,6 +37,9 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
 /// the worker materialises the uploads from <see cref="Source"/> and runs the
 /// ingest under the captured <see cref="Identity"/>.
 ///
+/// <para><see cref="BuildOrder"/> is set on project and pull request builds only:
+/// where the build stands in <see cref="ProjectBuildQueue"/>.</para>
+///
 /// <para><see cref="JobRowId"/> points at the durable <c>oe_import_jobs</c>
 /// row managed by <see cref="PersistedImportJobs"/>. The worker updates that
 /// row's status (running → completed / failed) as it progresses so the admin
@@ -47,7 +51,8 @@ public sealed record ReleaseImportJob(
     AmbientOrganizationScope.OrganizationIdentity Identity,
     ReleaseImportSource Source,
     bool StoreSymbolReference = false,
-    long JobRowId = 0);
+    long JobRowId = 0,
+    ProjectBuildOrder? BuildOrder = null);
 
 /// <summary>Where the worker gets the bytes from.</summary>
 public abstract record ReleaseImportSource
@@ -70,8 +75,9 @@ public abstract record ReleaseImportSource
     /// matching Microsoft symbols, compile each extension with <c>alc</c>, and
     /// ingest the resulting <c>.app</c>s into the (already-created) project
     /// Release. Resumable like <see cref="BcArtifact"/> — the project id is
-    /// enough to re-clone HEAD and rebuild idempotently after a restart, since
-    /// nothing on disk survives. See <c>ProjectBuildService</c>.
+    /// enough to re-clone and rebuild idempotently after a restart, since nothing
+    /// on disk survives; a build that already cloned once checks out the commits it
+    /// recorded then (#1110). See <c>ProjectBuildService</c>.
     /// </summary>
     public sealed record ProjectBuild(int ProjectId) : ReleaseImportSource;
 
@@ -82,7 +88,7 @@ public abstract record ReleaseImportSource
     /// authenticates as the app's installation rather than as a user (there is no
     /// user), and the result is reported back as a check run on the pull request.
     ///
-    /// <para>It rides the same queue and the same worker branch as a manual build
+    /// <para>It rides the same build queue and the same worker branch as a manual build
     /// on purpose: symbol resolution, the parent-release import and the Object
     /// Explorer ingest are exactly what a reviewer wants a pull request measured
     /// against, and a second code path would drift from the first. See

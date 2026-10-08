@@ -93,12 +93,19 @@ public abstract record ReleaseImportOutcome
 /// </summary>
 public sealed class ReleaseImportRequestService
 {
+    /// <summary>Temp-file prefix for an uploaded folder ZIP staged for the worker.</summary>
+    public const string FolderZipTempPrefix = "oe-folder-";
+
+    /// <summary>Temp-file prefix for an uploaded C/AL TXT staged for the worker.</summary>
+    public const string CalTxtTempPrefix = "oe-cal-";
+
     private readonly ReleaseImportService _importer;
     private readonly ReleaseManagementService _management;
     private readonly DvdDownloadService _dvdDownloader;
     private readonly ReleaseImportQueue _queue;
     private readonly PersistedImportJobs _persistedJobs;
     private readonly IOrganizationContext _orgContext;
+    private readonly ProjectBuildImporter _projectBuilds;
 
     public ReleaseImportRequestService(
         ReleaseImportService importer,
@@ -106,7 +113,8 @@ public sealed class ReleaseImportRequestService
         DvdDownloadService dvdDownloader,
         ReleaseImportQueue queue,
         PersistedImportJobs persistedJobs,
-        IOrganizationContext orgContext)
+        IOrganizationContext orgContext,
+        ProjectBuildImporter projectBuilds)
     {
         _importer = importer;
         _management = management;
@@ -114,6 +122,7 @@ public sealed class ReleaseImportRequestService
         _queue = queue;
         _persistedJobs = persistedJobs;
         _orgContext = orgContext;
+        _projectBuilds = projectBuilds;
     }
 
     /// <summary>
@@ -176,7 +185,7 @@ public sealed class ReleaseImportRequestService
         if (isCalImport)
         {
             var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
-            var tempPath = await TryStageAsync(releaseId, submission.CalTxtFile!, "oe-cal-", ".txt", "C/AL file", ct).ConfigureAwait(false);
+            var tempPath = await TryStageAsync(releaseId, submission.CalTxtFile!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
             if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
             var source = new ReleaseImportSource.CalTxt(tempPath, calEncoding);
             await EnqueueImportAsync(releaseId, source, storeSymbolReference: false, ct).ConfigureAwait(false);
@@ -197,7 +206,7 @@ public sealed class ReleaseImportRequestService
         if (folderZip is not null)
         {
             var releaseId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
-            var tempPath = await TryStageAsync(releaseId, folderZip, "oe-folder-", ".zip", "ZIP", ct).ConfigureAwait(false);
+            var tempPath = await TryStageAsync(releaseId, folderZip, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
             if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
             var source = new ReleaseImportSource.StagedZip(tempPath, IsDvd: false);
             await EnqueueImportAsync(releaseId, source, storeSymbolReference, ct).ConfigureAwait(false);
@@ -307,10 +316,20 @@ public sealed class ReleaseImportRequestService
             // build — which lands `ready`, not `failed` — can be plainly
             // re-run without a symbol upload when its failure was
             // transient. See issue #433.
-            await _importer.ReopenForRebuildAsync(releaseId, ct).ConfigureAwait(false);
-            await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
-            var buildSource = new ReleaseImportSource.ProjectBuild(retryProjectId);
-            await EnqueueImportAsync(releaseId, buildSource, storeSymbolReference: false, ct).ConfigureAwait(false);
+            // Held to the same rules as pressing Build: the person must be able to
+            // manage the solution, and no other build of its pipeline may be running.
+            // The rerun builds the commits the first run did (#1110). The check and the
+            // reopen happen under the pipeline's build lock (#1119).
+            // The release reads as importing from the reopen on, before its job is
+            // queued: a build polling it must not take it for abandoned (#1180).
+            using var rebuilding = _importer.Ingests.Track(releaseId);
+            await using (var rebuild = await _projectBuilds.BeginRebuildAsync(releaseId, retryProjectId, "Retry", ct).ConfigureAwait(false))
+            {
+                await _importer.ReopenForRebuildAsync(releaseId, ct).ConfigureAwait(false);
+                await rebuild.CommitAsync(ct).ConfigureAwait(false);
+            }
+            // Wipes the previous attempt first, and fails the build if it cannot queue it.
+            await _projectBuilds.QueueRebuildAsync(releaseId, retryProjectId, ct).ConfigureAwait(false);
             return new ReleaseImportOutcome.Queued(releaseId);
         }
 
@@ -348,7 +367,10 @@ public sealed class ReleaseImportRequestService
 
         // Flip failed → ingesting (validates state) and wipe the previous
         // attempt's partial modules so the re-run can't skip a
-        // half-written module on the idempotency check.
+        // half-written module on the idempotency check. Wiping can take a while, and
+        // the job is queued only after it: until then nothing else says the release
+        // is being worked on, so a build polling it would take it for abandoned (#1180).
+        using var reopened = _importer.Ingests.Track(releaseId);
         await _importer.ReopenForRetryAsync(releaseId, ct).ConfigureAwait(false);
         await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
 
@@ -359,7 +381,7 @@ public sealed class ReleaseImportRequestService
         }
         else if (hasFolderZip)
         {
-            var tempPath = await TryStageAsync(releaseId, folderZip!, "oe-folder-", ".zip", "ZIP", ct).ConfigureAwait(false);
+            var tempPath = await TryStageAsync(releaseId, folderZip!, FolderZipTempPrefix, ".zip", "ZIP", ct).ConfigureAwait(false);
             if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
             // A URL-origin DVD re-uploaded as a zip is still a DVD subset;
             // otherwise honour the original staged flag (defaults to the
@@ -369,7 +391,7 @@ public sealed class ReleaseImportRequestService
         }
         else
         {
-            var tempPath = await TryStageAsync(releaseId, calTxt!, "oe-cal-", ".txt", "C/AL file", ct).ConfigureAwait(false);
+            var tempPath = await TryStageAsync(releaseId, calTxt!, CalTxtTempPrefix, ".txt", "C/AL file", ct).ConfigureAwait(false);
             if (tempPath is null) return new ReleaseImportOutcome.StagingFailed(releaseId);
             source = new ReleaseImportSource.CalTxt(tempPath, submission.CalEncoding);
         }
@@ -459,7 +481,7 @@ public sealed class ReleaseImportRequestService
             List<Stream> openedStreams,
             CancellationToken ct)
     {
-        var tempPath = await StageUploadToTempAsync(folderZip, "oe-folder-", ".zip", ct).ConfigureAwait(false);
+        var tempPath = await StageUploadToTempAsync(folderZip, FolderZipTempPrefix, ".zip", ct).ConfigureAwait(false);
         var (uploads, archive) = ReleaseZipStaging.OpenStagedZip(tempPath, isDvd: false, openedStreams);
         return (uploads, archive, tempPath);
     }

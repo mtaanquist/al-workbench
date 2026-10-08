@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 
 using ALDevToolbox.Services.Configuration;
+using ALDevToolbox.Services.Workers;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 
@@ -49,6 +50,9 @@ public sealed class AlCompilerProvisioner
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILogger<AlCompilerProvisioner> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    // Compilers a running build is using, by version, so a prune never deletes one
+    // under it now that builds run side by side (#1137).
+    private readonly InUseLeases<string> _inUse = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly string _installDir;
     private readonly string? _versionPin;
@@ -158,6 +162,24 @@ public sealed class AlCompilerProvisioner
         .Select(Installed)
         .FirstOrDefault(i => i is not null);
 
+    /// <summary>
+    /// <see cref="ResolveAsync"/> for a build: the compiler comes with a lease that
+    /// keeps its folder on the volume until the lease is disposed. Null when there is
+    /// no compiler.
+    /// </summary>
+    public async Task<InUseLease<AlCompilerInfo>?> UseAsync(bool prerelease = false, CancellationToken ct = default)
+    {
+        // A newer beta can replace the one just resolved before the lease is taken;
+        // resolving again finds the newer one.
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var compiler = await ResolveAsync(prerelease, ct).ConfigureAwait(false);
+            if (compiler is null) return null;
+            if (_inUse.TryHold(compiler.Version, () => File.Exists(compiler.AlcPath), compiler) is { } lease) return lease;
+        }
+        return null;
+    }
+
     /// <summary>The newest prerelease compiler, provisioned when needed, or null when the stable line should answer instead.</summary>
     private async Task<AlCompilerInfo?> ResolvePrereleaseAsync(CancellationToken ct)
     {
@@ -239,24 +261,28 @@ public sealed class AlCompilerProvisioner
     /// Drops every installed prerelease but <paramref name="keep"/> (and the pin,
     /// if an operator pinned a beta), so weekly betas do not pile up on the
     /// volume. Best-effort; runs under the gate after a new beta is in place.
-    /// Builds run one at a time, so no compile is using the folders being removed.
+    /// A beta a running build holds a lease on stays; a later prune removes it.
     /// </summary>
     private void PruneOtherPrereleases(string keep)
     {
-        foreach (var version in InstalledVersions().Where(IsPrerelease))
+        _inUse.Locked(isHeld =>
         {
-            if (string.Equals(version, keep, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(version, _versionPin, StringComparison.OrdinalIgnoreCase)) continue;
-            try
+            foreach (var version in InstalledVersions().Where(IsPrerelease))
             {
-                Directory.Delete(VersionDir(version), recursive: true);
-                _logger.LogInformation("Removed AL compiler {Version}; {Keep} replaces it for next-major builds.", version, keep);
+                if (string.Equals(version, keep, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(version, _versionPin, StringComparison.OrdinalIgnoreCase)
+                    || isHeld(version)) continue;
+                try
+                {
+                    Directory.Delete(VersionDir(version), recursive: true);
+                    _logger.LogInformation("Removed AL compiler {Version}; {Keep} replaces it for next-major builds.", version, keep);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not remove the older AL compiler {Version}.", version);
+                }
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Could not remove the older AL compiler {Version}.", version);
-            }
-        }
+        });
     }
 
     /// <summary>

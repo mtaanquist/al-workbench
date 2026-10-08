@@ -8,6 +8,7 @@ using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Services.Tools;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 
@@ -26,13 +27,15 @@ public sealed class ReleasePipelineService
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
+    private readonly ToolEnablement _tools;
     private readonly ILogger<ReleasePipelineService> _logger;
 
-    public ReleasePipelineService(AppDbContext db, IOrganizationContext orgContext, ProjectAccess access, ILogger<ReleasePipelineService> logger)
+    public ReleasePipelineService(AppDbContext db, IOrganizationContext orgContext, ProjectAccess access, ToolEnablement tools, ILogger<ReleasePipelineService> logger)
     {
         _db = db;
         _orgContext = orgContext;
         _access = access;
+        _tools = tools;
         _logger = logger;
     }
 
@@ -52,6 +55,29 @@ public sealed class ReleasePipelineService
             .FirstOrDefaultAsync(ct);
         return owner is not null && await _access.CanManageAsync(owner.ProjectId, owner.OwnerId, ct);
     }
+
+    /// <summary>
+    /// Of <paramref name="projectIds"/>, the ones the current user may manage: what the
+    /// deployment pipelines list asks once, so it offers Disable and Enable only on rows
+    /// the person can act on. The service re-checks on every write.
+    /// </summary>
+    public async Task<HashSet<int>> ListManageableProjectIdsAsync(IReadOnlyCollection<int> projectIds, CancellationToken ct = default)
+    {
+        if (projectIds.Count == 0) return [];
+        var manageable = ProjectAccess.ManageProjectPredicate(await _access.GetSnapshotAsync(ct));
+        var ids = await _db.OeProjects.AsNoTracking()
+            .Where(p => projectIds.Contains(p.Id))
+            .Where(manageable)
+            .Select(p => p.Id)
+            .ToListAsync(ct);
+        return ids.ToHashSet();
+    }
+
+    /// <summary>
+    /// True when the current user may delete deployment pipelines: an org Admin or a
+    /// SiteAdmin. Everyone else who manages a solution disables them instead (#1131).
+    /// </summary>
+    public Task<bool> CanDeleteAsync(CancellationToken ct = default) => _access.CanDeletePipelinesAsync(ct);
 
     /// <summary>
     /// Active deployment pipelines for the current org, optionally scoped to one project,
@@ -98,6 +124,9 @@ public sealed class ReleasePipelineService
                 RestrictBranch = r.RestrictBranch,
                 AllowedBranch = r.AllowedBranch,
                 NameIsCustom = r.NameIsCustom,
+                BuildPipelineDeleted = r.BuildPipeline != null && r.BuildPipeline.DeletedAt != null,
+                Disabled = r.DisabledAt != null,
+                BuildPipelineDisabled = r.BuildPipeline != null && r.BuildPipeline.DisabledAt != null,
             })
             .ToListAsync(ct);
     }
@@ -294,7 +323,9 @@ public sealed class ReleasePipelineService
     public async Task<int> CreateReleasePipelineAsync(ReleasePipelineInput input, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        var v = await ValidateAsync(input, existingId: null, ct);
+        var v = await ValidateAsync(input, existing: null, ct);
+
+        if (v.DeployWithoutApproval) await EnsureStepUpToDeployWithoutApprovalAsync(ct);
 
         var now = DateTime.UtcNow;
         var pipeline = new OeReleasePipeline
@@ -332,10 +363,11 @@ public sealed class ReleasePipelineService
         RequireOrganizationId();
         var pipeline = await _db.OeReleasePipelines
             .FirstOrDefaultAsync(r => r.Id == id && r.DeletedAt == null, ct)
-            ?? throw Validation("Name", "This deployment pipeline no longer exists.");
+            ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
 
         // A deployment pipeline can't move between projects; validate against its own.
-        var v = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existingId: id, ct);
+        var v = await ValidateAsync(input with { ProjectId = pipeline.ProjectId }, existing: pipeline, ct);
+        if (v.DeployWithoutApproval) await EnsureStepUpToDeployWithoutApprovalAsync(ct);
 
         pipeline.Name = v.Name;
         pipeline.NameIsCustom = v.NameIsCustom;
@@ -358,13 +390,52 @@ public sealed class ReleasePipelineService
         _logger.LogInformation("Updated deployment pipeline {ReleasePipelineId} ({Name}).", pipeline.Id, v.Name);
     }
 
-    /// <summary>Soft-deletes a deployment pipeline.</summary>
+    /// <summary>
+    /// Saving a pipeline with "deploy without approval" on makes the saver the person its
+    /// later deployments run as, which spends the customer's Business Central credential
+    /// as deploying does, so it takes the same step-up rule (#1127). Every such save asks,
+    /// not only the first: each one hands the deployments to whoever saved it.
+    /// </summary>
+    private Task EnsureStepUpToDeployWithoutApprovalAsync(CancellationToken ct) =>
+        _tools.EnsureStepUpAsync(Domain.Tools.ToolKey.Releases, ct);
+
+    /// <summary>
+    /// Soft-deletes a deployment pipeline and sets aside what it still had waiting:
+    /// scheduled deployments are cancelled and prepared ones dismissed, each by
+    /// compare-and-set so a deployment a worker already claimed runs on (#1108). People
+    /// delete a pipeline to stop it, so leaving tonight's install booked would do the
+    /// opposite of what they asked. Deployments already handed to Business Central are
+    /// held there and stay booked; <see cref="CountWaitingDeploymentsAsync"/> lets the
+    /// confirmation say so. Admins only: anyone else who manages the solution can
+    /// disable it instead (#1131).
+    /// </summary>
     public async Task SoftDeleteReleasePipelineAsync(int id, CancellationToken ct = default)
     {
         RequireOrganizationId();
         var pipeline = await _db.OeReleasePipelines
             .FirstOrDefaultAsync(r => r.Id == id && r.DeletedAt == null, ct)
-            ?? throw Validation("Name", "This deployment pipeline no longer exists.");
+            ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
+
+        await _access.EnsureCanDeletePipelinesAsync(ct);
+
+        await StopAsync(pipeline, (p, now) => p.DeletedAt = now, DeletedPipelineReason, "deleted", ct);
+        _logger.LogInformation("Soft-deleted deployment pipeline {ReleasePipelineId}.", id);
+    }
+
+    /// <summary>
+    /// Disables or enables a deployment pipeline. A disabled pipeline deploys nothing: no
+    /// deployment can be made or approved through it, new builds are neither prepared nor
+    /// deployed, and what it still had waiting is set aside the way deleting does, so a
+    /// booked install does not run the moment it is enabled again. Its settings and history
+    /// stay (#1131). Anyone who may manage the solution may do it. Doing it twice changes
+    /// nothing.
+    /// </summary>
+    public async Task SetReleasePipelineDisabledAsync(int id, bool disabled, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var pipeline = await _db.OeReleasePipelines
+            .FirstOrDefaultAsync(r => r.Id == id && r.DeletedAt == null, ct)
+            ?? throw Validation("ReleasePipeline", "This deployment pipeline no longer exists.");
 
         var ownerId = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == pipeline.ProjectId)
@@ -372,17 +443,150 @@ public sealed class ReleasePipelineService
             .FirstOrDefaultAsync(ct);
         await _access.EnsureCanManageAsync(pipeline.ProjectId, ownerId, ct);
 
-        pipeline.DeletedAt = DateTime.UtcNow;
-        pipeline.UpdatedAt = pipeline.DeletedAt.Value;
+        if ((pipeline.DisabledAt is not null) == disabled) return;
+        if (disabled)
+        {
+            await StopAsync(pipeline, (p, now) => p.DisabledAt = now, DisabledPipelineReason, "disabled", ct);
+        }
+        else
+        {
+            pipeline.DisabledAt = null;
+            pipeline.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync(ct);
+        }
+        _logger.LogInformation("{Action} deployment pipeline {ReleasePipelineId} as user {UserId}.",
+            disabled ? "Disabled" : "Enabled", id, _orgContext.CurrentUserId);
+    }
+
+    /// <summary>
+    /// Marks <paramref name="pipeline"/> stopped (deleted or disabled) and sets aside what
+    /// it still had waiting, in one transaction. See <see cref="SoftDeleteReleasePipelineAsync"/>.
+    /// </summary>
+    private async Task StopAsync(
+        OeReleasePipeline pipeline, Action<OeReleasePipeline, DateTime> mark, string reason, string verb, CancellationToken ct)
+    {
+        var id = pipeline.Id;
+        var userId = _orgContext.CurrentUserId;
+        var now = DateTime.UtcNow;
+
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        mark(pipeline, now);
+        pipeline.UpdatedAt = now;
         await _db.SaveChangesAsync(ct);
-        // A deployment waiting on a deleted pipeline can no longer be approved from anywhere.
-        var waiting = await _db.OeProjectDeliveries.AsNoTracking()
+
+        // Prepared ones first: one approved in between becomes scheduled, and the next
+        // pass still catches it. Anything that slips past both (a deployment made or
+        // prepared while this commits) is set aside the same way by the scheduler's sweep.
+        var dismissed = await _db.OeProjectDeliveries
             .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.Proposed)
             .Select(d => d.Id)
             .ToListAsync(ct);
+        dismissed = await SetAsideForStoppedPipelineAsync(_db, dismissed, ProjectDeliveryStatus.Proposed, reason, userId, now, ct);
+
+        var cancelled = await _db.OeProjectDeliveries
+            .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.Scheduled)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        cancelled = await SetAsideForStoppedPipelineAsync(_db, cancelled, ProjectDeliveryStatus.Scheduled, reason, userId, now, ct);
+        await tx.CommitAsync(ct);
+
+        // A deployment waiting on a stopped pipeline can no longer be approved from anywhere.
         await NotificationSubject.MarkDoneAsync(
-            _db, waiting.Select(NotificationSubject.Delivery).ToList(), pipeline.UpdatedAt, _logger, ct);
-        _logger.LogInformation("Soft-deleted deployment pipeline {ReleasePipelineId}.", id);
+            _db, dismissed.Select(NotificationSubject.Delivery).ToList(), now, _logger, ct);
+        foreach (var deliveryId in cancelled)
+        {
+            _logger.LogInformation("Cancelled scheduled delivery {DeliveryId} because its deployment pipeline {ReleasePipelineId} was {Verb}.", deliveryId, id, verb);
+        }
+        foreach (var deliveryId in dismissed)
+        {
+            _logger.LogInformation("Dismissed prepared delivery {DeliveryId} because its deployment pipeline {ReleasePipelineId} was {Verb}.", deliveryId, id, verb);
+        }
+    }
+
+    /// <summary>
+    /// Sets aside deployments of a stopped (deleted or disabled) pipeline: each of
+    /// <paramref name="ids"/> still <paramref name="from"/> is dismissed (prepared) or
+    /// cancelled (scheduled) with <paramref name="reason"/>, and its apps are marked as not
+    /// sent. Each one moves only if it is still in the state it was read in, so a deployment
+    /// a worker claimed in between runs on rather than being cancelled under it. Shared by
+    /// the delete and disable and by the scheduler's backstop
+    /// (<see cref="DeliveryService.EnqueueDueDeliveriesAsync"/>) so both leave the same
+    /// record (#1179). Returns the ids it moved; closing the approval requests of the
+    /// dismissed ones is the caller's, once any transaction has committed.
+    /// </summary>
+    internal static async Task<List<int>> SetAsideForStoppedPipelineAsync(
+        AppDbContext db, IReadOnlyList<int> ids, string from, string reason, int? byUserId, DateTime now, CancellationToken ct)
+    {
+        var to = from switch
+        {
+            ProjectDeliveryStatus.Proposed => ProjectDeliveryStatus.Dismissed,
+            ProjectDeliveryStatus.Scheduled => ProjectDeliveryStatus.Cancelled,
+            _ => throw new ArgumentOutOfRangeException(nameof(from), from, "Only prepared and scheduled deployments are set aside."),
+        };
+        var dismissReason = to == ProjectDeliveryStatus.Dismissed ? reason : null;
+        var line = now.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
+                   + "  " + reason + "." + Environment.NewLine;
+
+        var moved = new List<int>(ids.Count);
+        foreach (var deliveryId in ids)
+        {
+            var changed = await db.OeProjectDeliveries
+                .Where(d => d.Id == deliveryId && d.Status == from)
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(d => d.Status, to)
+                    .SetProperty(d => d.CancelledByUserId, byUserId)
+                    .SetProperty(d => d.DismissReason, dismissReason)
+                    .SetProperty(d => d.FinishedAt, now)
+                    .SetProperty(d => d.DiagnosticsLog, d => (d.DiagnosticsLog ?? string.Empty) + line)
+                    .SetProperty(d => d.UpdatedAt, now), ct);
+            if (changed > 0) moved.Add(deliveryId);
+        }
+        if (moved.Count > 0)
+        {
+            await db.OeProjectDeliveryResults
+                .Where(r => moved.Contains(r.ProjectDeliveryId) && r.Status == ProjectDeliveryResultStatus.Pending)
+                .ExecuteUpdateAsync(u => u
+                    .SetProperty(r => r.Status, ProjectDeliveryResultStatus.Skipped)
+                    .SetProperty(r => r.Message, "Not sent: " + reason.ToLowerInvariant() + ".")
+                    .SetProperty(r => r.UpdatedAt, now), ct);
+        }
+        return moved;
+    }
+
+    /// <summary>Why a deployment was set aside when its pipeline was deleted, for its history.</summary>
+    internal const string DeletedPipelineReason = "The deployment pipeline was deleted";
+
+    /// <summary>Why a deployment was set aside when its pipeline was disabled, for its history.</summary>
+    internal const string DisabledPipelineReason = "The deployment pipeline was disabled";
+
+    /// <summary>
+    /// What deleting this deployment pipeline would affect: deployments waiting to run here
+    /// (scheduled or prepared), which the delete sets aside, and deployments already handed
+    /// to Business Central, which it can't reach. For the delete confirmation.
+    /// </summary>
+    public async Task<WaitingDeploymentCounts> CountWaitingDeploymentsAsync(int id, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var projectId = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.Id == id)
+            .Select(r => (int?)r.ProjectId)
+            .FirstOrDefaultAsync(ct);
+        if (projectId is null) return new WaitingDeploymentCounts(0, 0);
+        await _access.EnsureCanViewAsync(projectId.Value, ct);
+
+        var waiting = await _db.OeProjectDeliveries.AsNoTracking()
+            .CountAsync(d => d.ReleasePipelineId == id
+                             && (d.Status == ProjectDeliveryStatus.Scheduled || d.Status == ProjectDeliveryStatus.Proposed), ct);
+        // Handed-off runs stay handed off for good, long after Business Central installed
+        // them; only the ones it still holds are booked. Read the way the pipelines list
+        // reads it, which can only tell for a run that left one app with Business Central.
+        var handedOff = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.ReleasePipelineId == id && d.Status == ProjectDeliveryStatus.HandedOff)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        var held = (await HeldInstalls.CheckAsync(_db, handedOff, ct)).Values
+            .Count(c => c.Verdict is HeldInstalls.Verdict.Held or HeldInstalls.Verdict.PipelineMoved);
+        return new WaitingDeploymentCounts(waiting, held);
     }
 
     /// <summary>
@@ -391,10 +595,13 @@ public sealed class ReleasePipelineService
     /// environment (both must belong to the same project, and the environment's status
     /// must not block installs), and the deployment schedule and schema-sync mode. Returns the normalised values. Throws
     /// <see cref="PlanValidationException"/> with field-keyed errors otherwise.
+    /// <paramref name="existing"/> is the pipeline being updated (null on create), whose
+    /// typed name is dropped when its source or environment changes under it (#1135).
     /// </summary>
     private async Task<ValidatedReleasePipeline> ValidateAsync(
-        ReleasePipelineInput input, int? existingId, CancellationToken ct)
+        ReleasePipelineInput input, OeReleasePipeline? existing, CancellationToken ct)
     {
+        var existingId = existing?.Id;
         // The parent project must exist in this org and be manageable by the user.
         var owner = await _db.OeProjects.AsNoTracking()
             .Where(p => p.Id == input.ProjectId && p.DeletedAt == null)
@@ -529,6 +736,23 @@ public sealed class ReleasePipelineService
                 ? PipelineNames.ForDeploymentFromBuild(sourceName, environment.Name)
                 : PipelineNames.ForDeploymentFromReleases(sourceName, environment.Name);
             if (custom is not null && string.Equals(custom, generated, StringComparison.Ordinal)) custom = null;
+            // A typed name was given for the source and environment it was typed under.
+            // A save that changes either and leaves the typed name exactly as it was goes
+            // back to the generated name (#1135); a name typed afresh in the same save is
+            // kept. When the generated name is taken the typed one stays, since asking
+            // for a name would only be answered by the same typed name.
+            if (custom is not null
+                && existing is { NameIsCustom: true }
+                && string.Equals(custom, existing.Name, StringComparison.Ordinal)
+                && (artifactSource != existing.ArtifactSource
+                    || buildPipelineId != existing.BuildPipelineId
+                    || releaseRepositoryId != existing.GithubReleaseRepositoryId
+                    || input.ProjectEnvironmentId != existing.ProjectEnvironmentId)
+                && generated.Length <= PipelineNames.MaxLength
+                && !await NameTakenAsync(input.ProjectId, existing.Id, generated, ct))
+            {
+                custom = null;
+            }
             name = custom ?? generated;
         }
         if (name is null)
@@ -541,12 +765,7 @@ public sealed class ReleasePipelineService
         }
         else
         {
-            var clash = await _db.OeReleasePipelines.AsNoTracking()
-                .AnyAsync(r => r.DeletedAt == null
-                               && r.ProjectId == input.ProjectId
-                               && r.Id != (existingId ?? 0)
-                               && r.Name.ToLower() == name.ToLower(), ct);
-            if (clash)
+            if (await NameTakenAsync(input.ProjectId, existingId ?? 0, name, ct))
             {
                 errors["Name"] = $"Another deployment pipeline in this solution is already called '{name}'. Type a different name for this one.";
             }
@@ -570,6 +789,17 @@ public sealed class ReleasePipelineService
             name!, custom is not null, deploymentSchedule, schemaSyncMode, artifactSource, buildPipelineId, releaseRepositoryId,
             prepare, deployWithoutApproval, restrictBranch, allowedBranch);
     }
+
+    /// <summary>
+    /// Whether another active deployment pipeline in the project already has
+    /// <paramref name="name"/>, compared the way the case-insensitive unique index compares it.
+    /// </summary>
+    private Task<bool> NameTakenAsync(int projectId, int exceptId, string name, CancellationToken ct) =>
+        _db.OeReleasePipelines.AsNoTracking()
+            .AnyAsync(r => r.DeletedAt == null
+                           && r.ProjectId == projectId
+                           && r.Id != exceptId
+                           && r.Name.ToLower() == name.ToLower(), ct);
 
     /// <summary>The normalised values a validated deployment-pipeline input settles on.</summary>
     private sealed record ValidatedReleasePipeline(
@@ -730,6 +960,19 @@ public sealed record ReleasePipelineRow(
     /// <summary>The branch it then allows; null is the repositories' default branch.</summary>
     public string? AllowedBranch { get; init; }
 
+    /// <summary>
+    /// True when the build pipeline it draws from has been deleted, so nothing new will
+    /// ever reach it. Deleting a build pipeline in use is refused (#1123); this covers the
+    /// ones deleted before that.
+    /// </summary>
+    public bool BuildPipelineDeleted { get; init; }
+
+    /// <summary>True when the pipeline is disabled, so it deploys nothing (#1131).</summary>
+    public bool Disabled { get; init; }
+
+    /// <summary>True when the build pipeline it draws from is disabled, so no new builds reach it for now.</summary>
+    public bool BuildPipelineDisabled { get; init; }
+
     /// <summary>True when a person typed the name because the generated one was taken; the editor shows it for editing.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public bool NameIsCustom { get; init; }
@@ -850,3 +1093,10 @@ public sealed record ReleasePipelineProposedDelivery(int DeliveryId, int BuildId
 /// <param name="Version">The version it moves to, e.g. <c>27.6</c>.</param>
 /// <param name="Type">The API's target version type (major / minor), verbatim.</param>
 public sealed record EnvironmentNextUpdate(DateTime? Date, string Version, string? Type);
+
+/// <summary>
+/// Deployments a deployment pipeline still has waiting: <paramref name="Waiting"/> here
+/// (scheduled or prepared) and <paramref name="HeldByBusinessCentral"/> already handed to
+/// Business Central. See <see cref="ReleasePipelineService.CountWaitingDeploymentsAsync"/>.
+/// </summary>
+public sealed record WaitingDeploymentCounts(int Waiting, int HeldByBusinessCentral);

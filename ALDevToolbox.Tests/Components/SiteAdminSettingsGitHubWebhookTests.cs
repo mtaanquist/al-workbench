@@ -3,6 +3,8 @@ using ALDevToolbox.Components.Pages.SiteAdmin;
 using ALDevToolbox.Components.Shared;
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.GitHub;
+using System.Net;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Bunit;
@@ -31,6 +33,7 @@ public sealed class SiteAdminSettingsGitHubWebhookTests : IDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly GitHubHookAddressAllowList _senders = new(TimeProvider.System);
 
     public SiteAdminSettingsGitHubWebhookTests()
     {
@@ -50,6 +53,8 @@ public sealed class SiteAdminSettingsGitHubWebhookTests : IDisposable
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>));
+        _ctx.Services.AddSingleton(_senders);
+        _ctx.Services.AddSingleton(TimeProvider.System);
     }
 
     public void Dispose()
@@ -155,6 +160,58 @@ public sealed class SiteAdminSettingsGitHubWebhookTests : IDisposable
         // page renders explicitly, and neither is a bare empty form.
         cut.WaitForAssertion(() =>
             (cut.Markup.Contains("Loading...") || cut.Markup.Contains("Webhook URL")).Should().BeTrue());
+    }
+
+    // --- GitHub's webhook addresses (#1201) ----------------------------------
+
+    [Fact]
+    public void Before_the_address_list_is_read_the_page_says_every_address_is_accepted()
+    {
+        UsePublicOrigin(null);
+
+        var cut = _ctx.Render<SiteAdminSettingsGitHub>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("#github-hook-addresses").TextContent.Should().Contain("has not been read yet");
+            cut.FindAll("#github-hook-refusal").Should().BeEmpty();
+        });
+    }
+
+    [Fact]
+    public void Once_the_address_list_is_read_the_page_says_when()
+    {
+        UsePublicOrigin(null);
+        _senders.Replace(GitHubHookAddressAllowList.Parse(["192.30.252.0/22"]).Ranges);
+
+        var cut = _ctx.Render<SiteAdminSettingsGitHub>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var text = cut.Find("#github-hook-addresses");
+            text.TextContent.Should().Contain("was last read");
+            text.QuerySelector("time").Should().NotBeNull();
+            cut.FindAll("#github-hook-refusal").Should().BeEmpty("nothing was refused");
+        });
+    }
+
+    [Fact]
+    public void A_refused_delivery_is_shown_with_its_address_and_what_to_do()
+    {
+        // The proxy case: every delivery arrives from the proxy's own address.
+        UsePublicOrigin(null);
+        _senders.Replace(GitHubHookAddressAllowList.Parse(["192.30.252.0/22"]).Ranges);
+        _senders.ShouldWarnRefusal(IPAddress.Parse("172.18.0.5"), out _);
+
+        var cut = _ctx.Render<SiteAdminSettingsGitHub>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var text = cut.Find("#github-hook-refusal").TextContent;
+            text.Should().Contain("172.18.0.5");
+            text.Should().Contain("reverse proxy").And.Contain("TRUSTED_PROXIES");
+            cut.Find("#github-hook-refusal time").Should().NotBeNull();
+        });
     }
 
     private async Task StoreWebhookSecretAsync()

@@ -16,6 +16,12 @@ public enum PipelineFreshnessHeadline
     /// <summary>At least one repository's branch moved past the last successful build.</summary>
     Ahead,
 
+    /// <summary>
+    /// The branch moved past the last successful build, and a build that is queued or
+    /// running already covers every new head: nothing for a person to start (#1128).
+    /// </summary>
+    Building,
+
     /// <summary>GitHub reported the watched branch deleted in a repository.</summary>
     BranchGone,
 
@@ -51,7 +57,8 @@ public sealed record PipelineFreshnessSummary(
 
     /// <summary>
     /// Folds the repositories into one answer, strongest first: any repository ahead
-    /// makes the pipeline ahead; then a deleted branch; then no successful build; then a
+    /// makes the pipeline ahead, or building when a queued or running build already
+    /// covers every repository that is ahead; then a deleted branch; then no successful build; then a
     /// repository missing from the last build; then up to date. A repository whose head is
     /// unknown (not on GitHub, or no push yet) says nothing, so it neither blocks nor
     /// makes the "up to date" claim.
@@ -64,6 +71,14 @@ public sealed record PipelineFreshnessSummary(
         string? BranchOf(IEnumerable<RepositoryFreshness> some) =>
             freshness.Branch ?? some.Select(r => r.Branch).FirstOrDefault(b => !string.IsNullOrEmpty(b))
                              ?? repos.Select(r => r.Branch).FirstOrDefault(b => !string.IsNullOrEmpty(b));
+
+        if (ahead.Count > 0 && ahead.All(r => r.BeingBuilt))
+        {
+            return Plain(PipelineFreshnessHeadline.Building, BranchOf(ahead), freshness.LastBuildId) with
+            {
+                PushedAt = ahead.Max(r => r.PushedAt),
+            };
+        }
 
         if (ahead.Count > 0)
         {

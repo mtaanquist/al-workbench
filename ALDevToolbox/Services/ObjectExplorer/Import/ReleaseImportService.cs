@@ -59,7 +59,8 @@ public class ReleaseImportService
         TranslationImportService translations,
         CallSiteReferenceEmitter callSites,
         ILogger<ReleaseImportService> logger,
-        ALDevToolbox.Services.GitHub.DependencyDriftService? drift = null)
+        ALDevToolbox.Services.GitHub.DependencyDriftService? drift = null,
+        ReleaseIngests? ingests = null)
     {
         _db = db;
         _orgContext = orgContext;
@@ -68,7 +69,16 @@ public class ReleaseImportService
         _callSites = callSites;
         _logger = logger;
         _drift = drift;
+        Ingests = ingests ?? new ReleaseIngests();
     }
+
+    /// <summary>
+    /// The process's record of running imports and its whole-release import gate
+    /// (#1180), for this service and the callers that build on it. The app injects
+    /// its one singleton; a service built by hand without one gets its own, so tests
+    /// never share it by accident.
+    /// </summary>
+    public ReleaseIngests Ingests { get; }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
         ?? throw new InvalidOperationException("No organization in scope; ReleaseImportService called outside an authenticated request.");
@@ -149,6 +159,8 @@ public class ReleaseImportService
         CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
+        // A build waiting on this release tells a running import from an abandoned one by this (#1180).
+        using var tracked = Ingests.Track(releaseId);
         var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Release {releaseId} not found for processing.");
 
@@ -249,25 +261,41 @@ public class ReleaseImportService
                 SourceFilesImported: totals.SourceFilesImported,
                 TranslationsImported: totals.TranslationsImported);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The caller's own cancellation: the caller decides what the release
+            // becomes. The import worker leaves it importing on shutdown so the
+            // startup reconciler resumes the job (#483); a build that gives up on a
+            // parent or vendor import it started marks that release failed itself (#1180).
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex,
                 "Release ingest failed: ReleaseId={ReleaseId} ModulesImportedBeforeFailure={ModulesImported}",
                 release.Id, totals.ModulesImported);
             // Stamp the release as failed so the UI can show the operator which
-            // upload didn't make it. SaveChanges in a fresh tracker state so
-            // we don't drag the failed entity's tracker into the status update.
-            _db.ChangeTracker.Clear();
-            var failed = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct).ConfigureAwait(false);
-            if (failed is not null)
-            {
-                failed.Status = "failed";
-                failed.StatusMessage = ex.Message;
-                failed.UpdatedAt = DateTime.UtcNow;
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-            }
+            // upload didn't make it.
+            await StampFailedAsync(release.Id, ex.Message).ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Flips a release to <c>failed</c> on a fresh tracker, so the failed entity's
+    /// state is not dragged into the status update. Never cancelled: a status write
+    /// that does not land leaves the release <c>ingesting</c> with nobody importing
+    /// it, and builds parenting onto it wait for it (#1180).
+    /// </summary>
+    private async Task StampFailedAsync(int releaseId, string message)
+    {
+        _db.ChangeTracker.Clear();
+        var failed = await _db.OeReleases.FindAsync(new object?[] { releaseId }, CancellationToken.None).ConfigureAwait(false);
+        if (failed is null) return;
+        failed.Status = "failed";
+        failed.StatusMessage = message;
+        failed.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -341,6 +369,7 @@ public class ReleaseImportService
         var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Release {releaseId} disappeared between the pre-check and the load.");
 
+        using var tracked = Ingests.Track(release.Id);
         release.Status = "ingesting";
         release.StatusMessage = null;
         release.UpdatedAt = DateTime.UtcNow;
@@ -427,15 +456,9 @@ public class ReleaseImportService
             _logger.LogError(ex,
                 "Release amend failed: ReleaseId={ReleaseId} ModulesImportedBeforeFailure={ModulesImported}",
                 release.Id, totals.ModulesImported);
-            _db.ChangeTracker.Clear();
-            var failed = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct).ConfigureAwait(false);
-            if (failed is not null)
-            {
-                failed.Status = "failed";
-                failed.StatusMessage = ex.Message;
-                failed.UpdatedAt = DateTime.UtcNow;
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-            }
+            // Cancelled or not: an amend has no job to resume it, so leaving it
+            // importing would only strand it until the next restart (#1180).
+            await StampFailedAsync(release.Id, ex.Message).ConfigureAwait(false);
             throw;
         }
     }
@@ -611,6 +634,27 @@ public class ReleaseImportService
         release.StatusMessage = message;
         release.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Flips a project build's Release to <c>ready</c> without indexing what it
+    /// compiled. A preview check only has to say whether the code still compiles
+    /// against the next Business Central version; its build results and
+    /// diagnostics carry that, and the source it would index is a commit the
+    /// current build indexes anyway (#1140). The release stays so the build keeps
+    /// its results, but holds no files.
+    /// </summary>
+    public async Task MarkReadyWithoutIngestAsync(int releaseId, CancellationToken ct = default)
+    {
+        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
+            ?? throw new InvalidOperationException($"Release {releaseId} not found.");
+        release.Status = "ready";
+        release.StatusMessage = null;
+        release.SourceFileCount = 0;
+        release.SourceContentLength = 0;
+        release.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        _logger.LogInformation("Release {ReleaseId} marked ready without indexing its objects.", releaseId);
     }
 
     /// <summary>
@@ -842,21 +886,17 @@ public class ReleaseImportService
         CancellationToken ct)
     {
         // Optionally persist the raw SymbolReference.json for resolver
-        // debugging. Upsert the content into the shared store FIRST so the
-        // module's FK on symbol_reference_content_hash is satisfied when the
-        // row is inserted below. Deduped by hash like source files, so a
-        // re-import of the same module version doesn't duplicate the blob.
+        // debugging. The content goes into the shared store with the module
+        // row, so the module's FK on symbol_reference_content_hash is
+        // satisfied. Deduped by hash like source files, so a re-import of the
+        // same module version doesn't duplicate the blob.
         string? symbolReferenceHash = null;
+        var symbolReferenceContent = new Dictionary<string, (string Content, int Length, int LineCount)>(StringComparer.Ordinal);
         if (storeSymbolReference && !string.IsNullOrEmpty(pkg.SymbolReferenceJson))
         {
             var json = pkg.SymbolReferenceJson;
             symbolReferenceHash = HashHex(json);
-            await UpsertFileContentsAsync(
-                new Dictionary<string, (string Content, int Length, int LineCount)>(StringComparer.Ordinal)
-                {
-                    [symbolReferenceHash] = (json, json.Length, CountLines(json)),
-                },
-                ct).ConfigureAwait(false);
+            symbolReferenceContent[symbolReferenceHash] = (json, json.Length, CountLines(json));
         }
 
         var module = new OeModule
@@ -883,7 +923,7 @@ public class ReleaseImportService
             CreatedAt = DateTime.UtcNow,
         };
         _db.OeModules.Add(module);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await SaveWithFileContentsAsync(symbolReferenceContent, ct).ConfigureAwait(false);
 
         // Files first so we can resolve ModuleObject.SourceFileId on the way.
         // Symbol-package ReferenceSourceFileName is the full relative path
@@ -921,16 +961,14 @@ public class ReleaseImportService
             filesPending++;
             if (filesPending >= FileChunkSize)
             {
-                await UpsertFileContentsAsync(pendingContent, ct).ConfigureAwait(false);
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                await SaveWithFileContentsAsync(pendingContent, ct).ConfigureAwait(false);
                 pendingContent.Clear();
                 filesPending = 0;
             }
         }
         if (filesPending > 0)
         {
-            await UpsertFileContentsAsync(pendingContent, ct).ConfigureAwait(false);
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await SaveWithFileContentsAsync(pendingContent, ct).ConfigureAwait(false);
         }
 
         // Build the (Kind, Name) → (File, Line) index used to link
@@ -1568,10 +1606,10 @@ public class ReleaseImportService
     // unchanged.
     private static string HashHex(string content) => OeIngestHelpers.HashHex(content);
     private static int CountLines(string content) => OeIngestHelpers.CountLines(content);
-    private Task UpsertFileContentsAsync(
+    private Task SaveWithFileContentsAsync(
         IReadOnlyDictionary<string, (string Content, int Length, int LineCount)> contents,
         CancellationToken ct)
-        => OeIngestHelpers.UpsertFileContentsAsync(_db, contents, ct);
+        => OeIngestHelpers.SaveWithFileContentsAsync(_db, contents, ct);
 
     // ── BC version inference ────────────────────────────────────────────
 

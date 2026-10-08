@@ -13,6 +13,8 @@ public static class ObjectExplorerRegistration
     {
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.TranslationImportService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.CallSiteReferenceEmitter>();
+        // One per process: what is importing now, and the gate whole-release imports share (#1180).
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseIngests>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.CalImportService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.DvdDownloadService>();
@@ -34,6 +36,11 @@ public static class ObjectExplorerRegistration
         services.AddSingleton(sp => ALDevToolbox.Services.Configuration.AlSymbolFeedOptions
             .FromConfiguration(sp.GetRequiredService<IConfiguration>()));
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Projects.AlSymbolFeedResolver>();
+        // Business Central artifacts project builds downloaded, kept on the same volume so
+        // the next build of that version skips the download; singleton for its gates (#1140).
+        services.AddSingleton(sp => ALDevToolbox.Services.Configuration.BcArtifactCacheOptions
+            .FromConfiguration(sp.GetRequiredService<IConfiguration>()));
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.BcArtifactCache>();
         // Redirects are followed by the resolver itself (the .nupkg answers 303 to a blob
         // URL), so it can refuse a hop off HTTPS; the handler must not follow them first.
         services.AddHttpClient(ALDevToolbox.Services.ObjectExplorer.Projects.AlSymbolFeedResolver.HttpClientName, client =>
@@ -47,6 +54,22 @@ public static class ObjectExplorerRegistration
         // form and redirect on the outcome.
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportRequestService>();
         services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportWorker>();
+        // Builds have their own line (#1137). Every possible worker is registered, and the
+        // queue's limit decides how many build at once: the site setting, else
+        // OE_BUILD_CONCURRENCY, changed at runtime without a restart (#1164).
+        services.AddSingleton(_ => new ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue(
+            ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue
+                .Concurrency(Environment.GetEnvironmentVariable("OE_BUILD_CONCURRENCY"))));
+        // What the container reports about processor and memory, and the latest warning
+        // that builds were short of either (#1169).
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.ContainerResources>();
+        services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Import.BuildResourceState>();
+        for (var slot = 1; slot <= ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue.MaxConcurrency; slot++)
+        {
+            var workerSlot = slot;
+            services.AddSingleton<IHostedService>(sp =>
+                ActivatorUtilities.CreateInstance<ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildWorker>(sp, workerSlot));
+        }
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseManagementService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Explore.ObjectExplorerService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>();
@@ -80,7 +103,13 @@ public static class ObjectExplorerRegistration
         // The Pipelines dashboard at /pipelines (#955): the two lists' numbers on one page; read-only.
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.PipelinesDashboardService>();
         services.AddSingleton<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryQueue>();
-        services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryWorker>();
+        // Deployments to different environments run side by side (#1139).
+        for (var slot = 1; slot <= ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryWorker.Lanes; slot++)
+        {
+            var workerSlot = slot;
+            services.AddSingleton<IHostedService>(sp =>
+                ActivatorUtilities.CreateInstance<ALDevToolbox.Services.ObjectExplorer.Delivery.DeliveryWorker>(sp, workerSlot));
+        }
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ArtifactService>();
         // Project-build pipeline: the compile/ingest service, its release coordinator,
         // and the (stateless) external-process seam for git + alc.

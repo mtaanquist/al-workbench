@@ -166,6 +166,23 @@ public sealed class ReleaseImportServiceTests : IDisposable
         row.StatusMessage.Should().Be("Download was unreachable.");
     }
 
+    [Fact]
+    public async Task MarkReadyWithoutIngestAsync_flips_a_build_release_ready_holding_no_files()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+
+        var releaseId = await svc.BeginReleaseAsync(new ReleaseImportMetadata(
+            "CRONUS on BC 30.0", "project", null, null));
+        await svc.MarkReadyWithoutIngestAsync(releaseId);
+
+        await using var read = _db.NewContext();
+        var row = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+        row.Status.Should().Be("ready");
+        row.SourceFileCount.Should().Be(0);
+        (await read.OeModules.AsNoTracking().AnyAsync(m => m.ReleaseId == releaseId)).Should().BeFalse();
+    }
+
     // ── Happy path ──────────────────────────────────────────────────────
 
     [Fact]
@@ -604,6 +621,95 @@ public sealed class ReleaseImportServiceTests : IDisposable
         release.Status.Should().Be("failed");
         release.StatusMessage.Should().NotBeNullOrEmpty();
         release.StatusMessage.Should().Contain("NAVX");
+    }
+
+    // ── Cancellation and the status it leaves (#1180) ──────────────────
+
+    [Fact]
+    public async Task A_failure_is_recorded_even_when_the_token_is_cancelled_meanwhile()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var releaseId = await svc.BeginReleaseAsync(new ReleaseImportMetadata("Cancelled meanwhile", "first_party", null, null));
+        using var cts = new CancellationTokenSource();
+        var runningWhileImporting = false;
+        await using var upload = new FailingStream(() =>
+        {
+            runningWhileImporting = svc.Ingests.IsRunning(releaseId);
+            cts.Cancel();
+            return new InvalidDataException("Not a NAVX package.");
+        });
+
+        var act = () => svc.ProcessReleaseAsync(releaseId, [new AppFileUpload("broken.app", upload, null)], ct: cts.Token);
+
+        await act.Should().ThrowAsync<InvalidDataException>();
+        runningWhileImporting.Should().BeTrue("a build waiting on this release must see it being imported");
+        svc.Ingests.IsRunning(releaseId).Should().BeFalse();
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+        release.Status.Should().Be("failed");
+        release.StatusMessage.Should().Be("Not a NAVX package.");
+    }
+
+    [Fact]
+    public async Task Its_own_cancellation_leaves_the_release_to_the_caller()
+    {
+        // The import worker relies on this: a shutdown leaves the release importing
+        // so the startup reconciler can resume its job.
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var releaseId = await svc.BeginReleaseAsync(new ReleaseImportMetadata("Shut down", "first_party", null, null));
+        using var cts = new CancellationTokenSource();
+        await using var upload = new FailingStream(() =>
+        {
+            cts.Cancel();
+            return new OperationCanceledException(cts.Token);
+        });
+
+        var act = () => svc.ProcessReleaseAsync(releaseId, [new AppFileUpload("CRONUS.app", upload, null)], ct: cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId)).Status.Should().Be("ingesting");
+    }
+
+    [Fact]
+    public async Task A_cancelled_amend_is_failed_rather_than_left_importing()
+    {
+        var releaseId = await SeedReadyReleaseAsync("Amend cancelled", "Microsoft_DK_Core.app");
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        using var cts = new CancellationTokenSource();
+        await using var upload = new FailingStream(() =>
+        {
+            cts.Cancel();
+            return new OperationCanceledException(cts.Token);
+        });
+
+        var act = () => svc.AmendReleaseAsync(releaseId, [new AppFileUpload("CRONUS.app", upload, null)], cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        svc.Ingests.IsRunning(releaseId).Should().BeFalse();
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId)).Status.Should().Be("failed");
+    }
+
+    /// <summary>An upload whose first read runs <c>onRead</c> and throws what it returns.</summary>
+    private sealed class FailingStream(Func<Exception> onRead) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => false;
+        public override long Length => 1024;
+        public override long Position { get; set; }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw onRead();
+        public override int Read(Span<byte> buffer) => throw onRead();
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => throw onRead();
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => throw onRead();
+        public override long Seek(long offset, SeekOrigin origin) => Position = origin == SeekOrigin.End ? Length + offset : offset;
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     // ── Per-upload flag propagation ────────────────────────────────────

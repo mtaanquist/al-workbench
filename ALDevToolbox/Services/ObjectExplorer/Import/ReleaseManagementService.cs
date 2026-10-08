@@ -2,6 +2,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Import;
 
@@ -244,15 +245,56 @@ public class ReleaseManagementService
     /// <c>NOT EXISTS</c> check sees ALL orgs (the EF query filter doesn't apply)
     /// — a blob still used by another tenant must survive. Returns the count
     /// reclaimed. Shared by hard-delete and retry-clear.
+    /// <para>
+    /// A blob an import is saving at that moment is locked by it
+    /// (<see cref="OeIngestHelpers.UpsertFileContentsAsync"/>) and is skipped, not
+    /// waited for: the import is about to reference it. Should an import commit its
+    /// references between a statement's snapshot and its delete, the foreign key
+    /// refuses that statement. The candidates go in chunks so such a race loses one
+    /// chunk rather than the whole reclaim, and a refused chunk is retried: each
+    /// statement runs on its own (never inside an open transaction), so a retry takes
+    /// a fresh snapshot that sees the import's references. A chunk that keeps losing
+    /// stays, which costs only space (#1181).
+    /// </para>
     /// </summary>
     private async Task<int> ReclaimOrphanedBlobsAsync(IReadOnlyList<string> candidateHashes, CancellationToken ct)
     {
-        if (candidateHashes.Count == 0) return 0;
-        return await _db.Database.ExecuteSqlRawAsync(
-            "DELETE FROM oe_file_contents c WHERE c.content_hash = ANY({0}) " +
-            "AND NOT EXISTS (SELECT 1 FROM oe_module_files f WHERE f.content_hash = c.content_hash)",
-            new object[] { candidateHashes.ToArray() }, ct).ConfigureAwait(false);
+        var reclaimed = 0;
+        foreach (var chunk in candidateHashes.Chunk(ReclaimChunkSize))
+        {
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    reclaimed += await _db.Database.ExecuteSqlRawAsync(
+                        "DELETE FROM oe_file_contents c WHERE c.content_hash IN (" +
+                        "SELECT o.content_hash FROM oe_file_contents o WHERE o.content_hash = ANY({0}) " +
+                        "AND NOT EXISTS (SELECT 1 FROM oe_module_files f WHERE f.content_hash = o.content_hash) " +
+                        "FOR UPDATE SKIP LOCKED)",
+                        new object[] { chunk }, ct).ConfigureAwait(false);
+                    break;
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation && attempt < ReclaimAttempts)
+                {
+                    // An import started using one of these blobs; the next statement's snapshot sees it.
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+                {
+                    _logger.LogWarning(
+                        "Left up to {Candidates} shared content blob(s) in place after {Attempts} attempts: imports kept starting to use them.",
+                        chunk.Length, attempt);
+                    break;
+                }
+            }
+        }
+        return reclaimed;
     }
+
+    /// <summary>Hashes per reclaim statement: a lost race costs one chunk, and a large wipe still takes few round trips.</summary>
+    private const int ReclaimChunkSize = 5_000;
+
+    /// <summary>Statements tried per chunk before its blobs are left in place.</summary>
+    private const int ReclaimAttempts = 3;
 
     private static PlanValidationException NotFound(int releaseId) =>
         new(new Dictionary<string, string> { ["Release"] = $"Release {releaseId} not found in this organisation." });

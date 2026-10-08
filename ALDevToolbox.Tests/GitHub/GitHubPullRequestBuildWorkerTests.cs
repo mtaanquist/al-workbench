@@ -146,7 +146,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
         await SeedSolutionTrackingTheRepositoryAsync();
         var api = ApiAnswering(HttpStatusCode.NoContent);
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
 
         await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(isMemberFork: true), CancellationToken.None);
 
@@ -172,7 +172,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
         await SeedSolutionTrackingTheRepositoryAsync();
         var api = ApiAnswering(membership);
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
 
         await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(isMemberFork: true), CancellationToken.None);
 
@@ -189,7 +189,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
         await SeedSolutionTrackingTheRepositoryAsync();
         var api = ApiAnswering(HttpStatusCode.NoContent);
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
 
         await NewWorker(api: api, builds: builds).RunOneAsync(NewJob(), CancellationToken.None);
 
@@ -207,7 +207,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConfigureDeploymentAsync();
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
         await SeedSolutionTrackingTheRepositoryAsync();
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
 
         await NewWorker(builds: builds).RunOneAsync(ReplayPush(GitHubWebhookPayloads.Push(commitCount: 3)), CancellationToken.None);
 
@@ -395,7 +395,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
         await SeedSolutionTrackingTheRepositoryAsync();
         var worker = NewWorker();
-        var builds = new ReleaseImportQueue();
+        var builds = new ProjectBuildQueue();
         var job = GitHubWebhookEndpoints.TryReadMergedPullRequest(
             System.Text.Encoding.UTF8.GetBytes(GitHubWebhookPayloads.MergedPullRequest(number: 12)), "delivery", NullLogger.Instance);
         job.Should().NotBeNull();
@@ -412,6 +412,30 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         row.MergedAt.Should().Be(new DateTime(2026, 9, 24, 8, 30, 0, DateTimeKind.Utc));
         row.AuthorLogin.Should().Be("erik");
         builds.Reader.TryRead(out _).Should().BeFalse("a merged pull request is recorded, not built");
+    }
+
+    [Fact]
+    public async Task Merged_pull_requests_far_older_than_a_new_one_are_dropped()
+    {
+        await ConfigureDeploymentAsync();
+        await ConnectAsync(TestDb.DefaultOrgId, ConnectedInstallation, "cronus-dk");
+        await SeedSolutionTrackingTheRepositoryAsync();
+        var worker = NewWorker();
+        var merged = DateTime.UtcNow;
+        var old = merged - GitHubBranchActivityService.MergedPullRequestRetention - TimeSpan.FromDays(1);
+        var recent = merged - GitHubBranchActivityService.MergedPullRequestRetention + TimeSpan.FromDays(1);
+
+        foreach (var (number, at) in new[] { (10, old), (11, recent), (12, merged) })
+        {
+            var job = GitHubWebhookEndpoints.TryReadMergedPullRequest(
+                System.Text.Encoding.UTF8.GetBytes(GitHubWebhookPayloads.MergedPullRequest(number: number, mergedAt: at.ToString("yyyy-MM-ddTHH:mm:ssZ"))),
+                "delivery", NullLogger.Instance);
+            await worker.RunOneAsync(job!, CancellationToken.None);
+        }
+
+        await using var ctx = _db.NewContext();
+        (await ctx.OeRepositoryMergedPullRequests.AsNoTracking().Select(m => m.Number).OrderBy(n => n).ToListAsync())
+            .Should().Equal(11, 12);
     }
 
     [Fact]
@@ -500,7 +524,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         GitHubWebhookQueue? queue = null,
         MaintenanceModeState? maintenance = null,
         FakeGitHubApi? api = null,
-        ReleaseImportQueue? builds = null)
+        ProjectBuildQueue? builds = null)
     {
         var services = new ServiceCollection();
         services.AddSingleton<IOrganizationContext>(_db.OrgContext);
@@ -520,7 +544,7 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
         // has to reach a real OpenAsync and a real StartPullRequestBuildAsync, or
         // "it was built" is only the absence of a log line.
         services.AddScoped<GitHubCheckRunService>();
-        services.AddSingleton(builds ?? new ReleaseImportQueue());
+        services.AddSingleton(builds ?? new ProjectBuildQueue());
         services.AddScoped<ALDevToolbox.Services.Translation.TranslationMemoryService>();
         services.AddScoped<TranslationImportService>();
         services.AddScoped<CallSiteReferenceEmitter>();
@@ -536,6 +560,9 @@ public sealed class GitHubPullRequestBuildWorkerTests : IDisposable
             NullLogger<ReleaseImportService>.Instance));
         services.AddScoped<PersistedImportJobs>();
         services.AddScoped<ProjectAccess>();
+        services.AddScoped(sp => new ReleaseManagementService(
+            sp.GetRequiredService<AppDbContext>(), sp.GetRequiredService<IOrganizationContext>(),
+            NullLogger<ReleaseManagementService>.Instance));
         services.AddScoped<ProjectBuildImporter>();
         // The importer's credential check is for manual builds; a pull-request build never consults it.
         services.AddScoped<CloneCredentialResolver>(_ => null!);

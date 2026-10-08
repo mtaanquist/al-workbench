@@ -86,6 +86,29 @@ public sealed class AlCompilerProvisionerTests : IDisposable
         Directory.Exists(Path.Combine(_root, "18.0.41.62505")).Should().BeTrue();
     }
 
+    // Builds run side by side (#1137): a beta a running build compiles with stays
+    // until that build lets go of it, and the next newer beta removes it then.
+    [Fact]
+    public async Task A_beta_a_running_build_uses_survives_a_newer_beta()
+    {
+        var feed = new FakeNuGet("18.0.41.62505", "30.0.42.11883-beta");
+        var provisioner = NewProvisioner(feed);
+        var older = Path.Combine(_root, "30.0.42.11883-beta");
+
+        using (var lease = await provisioner.UseAsync(prerelease: true))
+        {
+            lease!.Value.Version.Should().Be("30.0.42.11883-beta");
+
+            feed.Versions.Add("30.0.42.32495-beta");
+            (await provisioner.ResolveAsync(prerelease: true))!.Version.Should().Be("30.0.42.32495-beta");
+            File.Exists(lease.Value.AlcPath).Should().BeTrue();
+        }
+
+        feed.Versions.Add("30.0.43.1-beta");
+        await provisioner.ResolveAsync(prerelease: true);
+        Directory.Exists(older).Should().BeFalse();
+    }
+
     [Fact]
     public async Task A_next_major_build_takes_the_stable_compiler_when_no_beta_is_ahead_of_it()
     {

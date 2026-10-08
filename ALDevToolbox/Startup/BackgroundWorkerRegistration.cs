@@ -51,6 +51,16 @@ public static class BackgroundWorkerRegistration
         // no solution tracks yet, so the Solutions page can offer them without probing
         // GitHub on a page render. See .design/github-integration-phase2.md.
         services.AddHostedService<ALDevToolbox.Services.GitHub.RepositoryDiscoveryScheduler>();
+        // Asks GitHub to resend webhook deliveries the endpoint refused or never
+        // answered, and closes pull-request builds a restart cut short (#1121).
+        services.AddHostedService<ALDevToolbox.Services.GitHub.GitHubWebhookRecoveryScheduler>();
+        // Reads the address ranges GitHub sends webhooks from, at start-up and daily,
+        // so the webhook can refuse other senders before reading a body (#1201).
+        services.AddHostedService<ALDevToolbox.Services.GitHub.GitHubHookAddressRefreshScheduler>();
+        // Nightly drift check after the environment refresh: measures every tracked
+        // repository against its solution's environment again, then opens the update
+        // pull requests of the solutions that asked for that (#1104).
+        services.AddHostedService<ALDevToolbox.Services.GitHub.DependencyDriftScheduler>();
         // Periodic prune of old login_attempts rows so the table doesn't grow
         // unbounded (the rate-limiter only reads a ~15-minute window). See issue #403.
         services.AddHostedService<ALDevToolbox.Services.Account.LoginAttemptPruneScheduler>();
@@ -63,6 +73,9 @@ public static class BackgroundWorkerRegistration
         // Adds each newly shipped Business Central release wave to every org's
         // application-version catalogue, read daily off the Microsoft symbol feed.
         services.AddHostedService<ALDevToolbox.Services.Templates.ApplicationVersionSyncScheduler>();
+        // Warns when running pipeline builds are short of processor or memory, the sign
+        // the build limit is set higher than the server can carry (#1169).
+        services.AddHostedService<ALDevToolbox.Services.ObjectExplorer.Import.BuildResourceMonitor>();
         return services;
     }
 }

@@ -90,6 +90,18 @@ internal static class SettingsInputBuilder
     };
 
     /// <summary>
+    /// The Builds tab. An empty box clears the value, so the default applies again;
+    /// a value that is not a whole number is passed on as 0, which the service
+    /// refuses with the field's own message rather than silently clearing it.
+    /// </summary>
+    public static SystemSettingsInput WithBuilds(SystemSettingsView current, IFormCollection form) => Base(current) with
+    {
+        BuildConcurrency = string.IsNullOrWhiteSpace(form["BuildConcurrency"])
+            ? null
+            : int.TryParse(form["BuildConcurrency"], out var bc) ? bc : 0,
+    };
+
+    /// <summary>
     /// Carries every field from the current view across into an Input —
     /// the per-section overlays then use <c>with</c> to mutate just the
     /// fields they own. SMTP password is intentionally left empty +
@@ -115,7 +127,8 @@ internal static class SettingsInputBuilder
         McpEnabled: current.McpEnabled,
         SignupEmailDomainAllowlist: current.SignupEmailDomainAllowlist,
         ReleaseDownloadDomainAllowlist: current.ReleaseDownloadDomainAllowlist,
-        DisabledTools: ToolCatalog.ParseDisabled(current.DisabledTools).ToList());
+        DisabledTools: ToolCatalog.ParseDisabled(current.DisabledTools).ToList(),
+        BuildConcurrency: current.BuildConcurrency);
 
     /// <summary>
     /// The offset the backups page showed its time with, in minutes; null when

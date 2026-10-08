@@ -34,7 +34,9 @@ internal sealed class ProjectBuildConfiguration : IEntityTypeConfiguration<OePro
         entity.Property(e => e.GithubReleaseTag).HasColumnName("github_release_tag").HasMaxLength(200);
         entity.Property(e => e.GithubReleaseUrl).HasColumnName("github_release_url").HasMaxLength(500);
         entity.Property(e => e.GithubReleaseError).HasColumnName("github_release_error").HasMaxLength(2000);
+        entity.Property(e => e.StagedFromRepositoryId).HasColumnName("staged_from_repository_id");
         entity.Property(e => e.StartedAt).HasColumnName("started_at").IsRequired();
+        entity.Property(e => e.BuildingStartedAt).HasColumnName("building_started_at");
         entity.Property(e => e.FinishedAt).HasColumnName("finished_at");
 
         entity.HasOne(e => e.Organization)
@@ -66,6 +68,13 @@ internal sealed class ProjectBuildConfiguration : IEntityTypeConfiguration<OePro
             .HasForeignKey(e => e.PipelineId)
             .OnDelete(DeleteBehavior.SetNull);
 
+        // The repository a staged GitHub release came from (#1118). SET NULL so removing
+        // the repository keeps the build; staging the tag again records the current row.
+        entity.HasOne(e => e.StagedFromRepository)
+            .WithMany()
+            .HasForeignKey(e => e.StagedFromRepositoryId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         entity.HasMany(e => e.RepoCommits)
             .WithOne(c => c.ProjectBuild!)
             .HasForeignKey(c => c.ProjectBuildId)
@@ -94,5 +103,10 @@ internal sealed class ProjectBuildConfiguration : IEntityTypeConfiguration<OePro
         entity.HasIndex(e => new { e.PipelineId, e.StartedAt }).HasDatabaseName("ix_oe_project_builds_pipeline_started");
         // The build that produced a given release (deep-link "back to artifact").
         entity.HasIndex(e => e.ReleaseId).HasDatabaseName("ix_oe_project_builds_release");
+        // Covers the staged-from foreign key's SET NULL when a repository is removed. Only
+        // staged builds carry one, so the index skips every other build.
+        entity.HasIndex(e => e.StagedFromRepositoryId)
+            .HasDatabaseName("ix_oe_project_builds_staged_from_repository")
+            .HasFilter("staged_from_repository_id IS NOT NULL");
     }
 }

@@ -231,6 +231,32 @@ public sealed partial class GitHubAppClient
         return token;
     }
 
+    /// <summary>
+    /// The address ranges GitHub sends webhook deliveries from: the <c>hooks</c> list of
+    /// <c>GET /meta</c>, as CIDR strings (#1201). Asked without a credential - the route
+    /// is public and a deployment with no App registered still has a webhook to guard -
+    /// which GitHub allows sixty times an hour per address; this is asked once a day.
+    /// </summary>
+    /// <exception cref="GitHubApiException">GitHub refused the call or the answer had no <c>hooks</c> list.</exception>
+    /// <exception cref="HttpRequestException">GitHub could not be reached.</exception>
+    public async Task<IReadOnlyList<string>> GetHookAddressRangesAsync(CancellationToken ct = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, "meta");
+        using var document = await SendAsync(request, ct);
+        // TryGetProperty throws on a root that is not an object, so check that first:
+        // an array or a bare string is as unusable an answer as one with no list.
+        if (document.RootElement.ValueKind != JsonValueKind.Object
+            || !document.RootElement.TryGetProperty("hooks", out var hooks)
+            || hooks.ValueKind != JsonValueKind.Array)
+        {
+            throw new GitHubApiException(HttpStatusCode.BadGateway, "GitHub did not list the addresses it sends webhooks from.");
+        }
+        return hooks.EnumerateArray()
+            .Where(e => e.ValueKind == JsonValueKind.String)
+            .Select(e => e.GetString()!)
+            .ToList();
+    }
+
     // ── User-to-server: acting as one person rather than as the organisation ──
 
     /// <summary>
@@ -791,6 +817,46 @@ public sealed partial class GitHubAppClient
             "Opened pull request #{PullRequestNumber} on {Owner}/{Repo} from {Head} into {Base}.",
             number, owner, repo, head, baseBranch);
         return new GitHubPullRequest(number, htmlUrl!, head);
+    }
+
+    /// <summary>
+    /// Whether pull request <paramref name="number"/> is still open. False for one that
+    /// was merged or closed, and for one GitHub no longer shows.
+    /// </summary>
+    public async Task<bool> IsPullRequestOpenAsync(
+        string credential, string owner, string repo, int number, CancellationToken ct = default)
+    {
+        using var request = NewRequest(HttpMethod.Get, $"{RepoPath(owner, repo)}/pulls/{number}", credential);
+        using var document = await SendOrNotFoundAsync(request, ct);
+        return document is not null
+            && document.RootElement.TryGetProperty("state", out var state)
+            && state.GetString() == "open";
+    }
+
+    /// <summary>
+    /// Closes pull request <paramref name="number"/> and then leaves
+    /// <paramref name="comment"/> on it, as <paramref name="credential"/>'s owner. Closed
+    /// first, so a comment saying it was closed never sits on one that is still open.
+    /// <paramref name="beforeComment"/> runs between the two writes, for a caller that
+    /// spaces out its writes to GitHub.
+    /// </summary>
+    public async Task ClosePullRequestAsync(
+        string credential, string owner, string repo, int number, string comment, CancellationToken ct = default,
+        Func<CancellationToken, Task>? beforeComment = null)
+    {
+        using (var close = NewJsonRequest(
+            HttpMethod.Patch, $"{RepoPath(owner, repo)}/pulls/{number}", credential, new { state = "closed" }))
+        using (await SendAsync(close, ct))
+        {
+        }
+
+        if (beforeComment is not null) await beforeComment(ct);
+
+        // A pull request is an issue to GitHub's comment API.
+        using var commentRequest = NewJsonRequest(
+            HttpMethod.Post, $"{RepoPath(owner, repo)}/issues/{number}/comments", credential, new { body = comment });
+        using var _ = await SendAsync(commentRequest, ct);
+        _logger.LogInformation("Closed pull request #{PullRequestNumber} on {Owner}/{Repo}.", number, owner, repo);
     }
 
     /// <summary>

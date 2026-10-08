@@ -12,7 +12,8 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// Drains <see cref="ReleaseImportQueue"/> and runs each DVD-scale import
 /// (folder-ZIP upload, URL download) off the request thread, so the admin is
 /// returned to the releases list immediately and watches the row flip from
-/// <c>ingesting</c> to <c>ready</c> / <c>failed</c>.
+/// <c>ingesting</c> to <c>ready</c> / <c>failed</c>. Project and pull request
+/// builds run the same job code on <see cref="ProjectBuildWorker"/>s instead (#1137).
 ///
 /// <para>
 /// One job at a time (the channel is single-reader): a full DVD import is
@@ -22,7 +23,7 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// importer's org guard behave exactly as they would in the original request.
 /// </para>
 /// </summary>
-public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
+public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
 {
     private readonly IServiceProvider _services;
     private readonly ILogger<ReleaseImportWorker> _logger;
@@ -32,10 +33,21 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
         IServiceProvider services,
         ILogger<ReleaseImportWorker> logger,
         WorkerHeartbeatRegistry heartbeats)
+        : this(queue.Reader, services, logger, heartbeats, nameof(ReleaseImportWorker))
+    {
+    }
+
+    /// <summary>For a worker that runs the same jobs from another queue.</summary>
+    protected ReleaseImportWorker(
+        System.Threading.Channels.ChannelReader<ReleaseImportJob> reader,
+        IServiceProvider services,
+        ILogger<ReleaseImportWorker> logger,
+        WorkerHeartbeatRegistry heartbeats,
+        string name)
         // The active-duration ceiling is the longest legitimate single import — a fresh
         // BC base-app ingest can run 30+ minutes; 90 leaves margin while still catching
         // the hung-on-I/O case that prompted this in the first place.
-        : base(queue.Reader, logger, heartbeats, nameof(ReleaseImportWorker), TimeSpan.FromMinutes(90))
+        : base(reader, logger, heartbeats, name, TimeSpan.FromMinutes(90))
     {
         _services = services;
         _logger = logger;
@@ -352,7 +364,10 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                 var calImporter = scope.ServiceProvider.GetRequiredService<CalImportService>();
                 try
                 {
-                    await calImporter.ProcessReleaseAsync(job.ReleaseId, calTxt.TempPath, calTxt.EncodingName, ct).ConfigureAwait(false);
+                    using (await importer.Ingests.EnterHeavyAsync(ct).ConfigureAwait(false))
+                    {
+                        await calImporter.ProcessReleaseAsync(job.ReleaseId, calTxt.TempPath, calTxt.EncodingName, ct).ConfigureAwait(false);
+                    }
                     jobSucceeded = true;
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -382,14 +397,17 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                     var isCal = await db.OeModuleFiles.AsNoTracking()
                         .Where(f => f.Module!.ReleaseId == job.ReleaseId)
                         .AnyAsync(f => f.Path.StartsWith("CAL/"), ct).ConfigureAwait(false);
-                    if (isCal)
+                    using (await importer.Ingests.EnterHeavyAsync(ct).ConfigureAwait(false))
                     {
-                        var calImporter = scope.ServiceProvider.GetRequiredService<CalImportService>();
-                        await calImporter.BackfillSystemReferencesAsync(job.ReleaseId, ct).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        await importer.BackfillSystemReferencesAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                        if (isCal)
+                        {
+                            var calImporter = scope.ServiceProvider.GetRequiredService<CalImportService>();
+                            await calImporter.BackfillSystemReferencesAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await importer.BackfillSystemReferencesAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                        }
                     }
                     jobSucceeded = true;
                 }
@@ -443,8 +461,17 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                         return;
                     }
 
-                    await importer.ProcessReleaseAsync(job.ReleaseId, outcome.Uploads, job.StoreSymbolReference, ct).ConfigureAwait(false);
-                    await buildService.MarkCompiledResultsIngestedAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                    if (outcome.IsPreview)
+                    {
+                        // A preview check is compile-only: its results and diagnostics
+                        // are the answer, so the Object Explorer index is skipped (#1140).
+                        await importer.MarkReadyWithoutIngestAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await importer.ProcessReleaseAsync(job.ReleaseId, outcome.Uploads, job.StoreSymbolReference, ct).ConfigureAwait(false);
+                        await buildService.MarkCompiledResultsIngestedAsync(job.ReleaseId, ct).ConfigureAwait(false);
+                    }
                     // Flip the first-class build row ready alongside the Release.
                     await buildService.MarkBuildReadyAsync(job.ReleaseId, outcome.BcVersion, ct).ConfigureAwait(false);
                     await NotifyBuildFinishedAsync(scope.ServiceProvider, job.ReleaseId, ct).ConfigureAwait(false);
@@ -465,7 +492,12 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                 catch (Exception ex)
                 {
                     jobFailureMessage = FriendlyMessage(ex);
-                    _logger.LogError(ex, "Release {ReleaseId} project build failed.", job.ReleaseId);
+                    // A refusal (the pipeline no longer asks for this build, #1112) is
+                    // expected, not a fault worth a stack trace.
+                    if (ex is PlanValidationException)
+                        _logger.LogWarning("Release {ReleaseId} project build was refused: {Reason}", job.ReleaseId, jobFailureMessage);
+                    else
+                        _logger.LogError(ex, "Release {ReleaseId} project build failed.", job.ReleaseId);
                     await importer.MarkFailedAsync(job.ReleaseId, jobFailureMessage, ct).ConfigureAwait(false);
                     await buildService.MarkBuildFailedAsync(job.ReleaseId, jobFailureMessage, ct).ConfigureAwait(false);
                     await NotifyBuildFinishedAsync(scope.ServiceProvider, job.ReleaseId, ct).ConfigureAwait(false);
@@ -558,7 +590,12 @@ public sealed class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
 
             try
             {
-                await importer.ProcessReleaseAsync(job.ReleaseId, uploads, job.StoreSymbolReference, ct).ConfigureAwait(false);
+                // One whole-release import at a time, shared with the builds' inline
+                // parent imports, so they never bulk-insert side by side (#1180).
+                using (await importer.Ingests.EnterHeavyAsync(ct).ConfigureAwait(false))
+                {
+                    await importer.ProcessReleaseAsync(job.ReleaseId, uploads, job.StoreSymbolReference, ct).ConfigureAwait(false);
+                }
                 jobSucceeded = true;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)

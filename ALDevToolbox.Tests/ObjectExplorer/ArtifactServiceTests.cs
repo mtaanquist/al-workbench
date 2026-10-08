@@ -277,6 +277,52 @@ public sealed class ArtifactServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ListComparableBuildsAsync_offers_only_the_newest_builds_up_to_the_limit()
+    {
+        int pipelineId, oldest;
+        var first = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            pipelineId = await SeedPipelineAsync(ctx, projectId);
+            oldest = await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, first, releaseId: await SeedReleaseAsync(ctx), pipelineId: pipelineId);
+            for (var i = 1; i <= ArtifactService.ComparableBuildLimit; i++)
+            {
+                await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, first.AddHours(i), releaseId: await SeedReleaseAsync(ctx), pipelineId: pipelineId);
+            }
+        }
+
+        await using var read = _db.NewContext();
+        var comparable = await Svc(read).ListComparableBuildsAsync(pipelineId);
+
+        comparable.Should().HaveCount(ArtifactService.ComparableBuildLimit);
+        comparable.Should().BeInDescendingOrder(c => c.StartedAt);
+        comparable[0].StartedAt.Should().Be(first.AddHours(ArtifactService.ComparableBuildLimit));
+        comparable.Select(c => c.BuildId).Should().NotContain(oldest, "the oldest build is one past the limit");
+    }
+
+    [Fact]
+    public async Task A_preview_check_that_indexed_nothing_cannot_be_compared_or_explored()
+    {
+        int pipelineId, checkOnly, current;
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            pipelineId = await SeedPipelineAsync(ctx, projectId);
+            current = await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc), releaseId: await SeedReleaseAsync(ctx), pipelineId: pipelineId);
+            checkOnly = await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, new DateTime(2026, 6, 2, 0, 0, 0, DateTimeKind.Utc), releaseId: await SeedReleaseAsync(ctx), pipelineId: pipelineId);
+            var build = await ctx.OeProjectBuilds.SingleAsync(b => b.Id == checkOnly);
+            build.BcTarget = ProjectBuildTarget.NextMajor;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        (await Svc(read).ListComparableBuildsAsync(pipelineId)).Select(c => c.BuildId).Should().Equal(current);
+        (await Svc(read).GetBuildDetailAsync(checkOnly))!.HasObjects.Should().BeFalse();
+        (await Svc(read).GetBuildDetailAsync(current))!.HasObjects.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Download_fetches_return_bytes_and_a_concatenated_log()
     {
         int buildId, artifactId;
@@ -464,6 +510,92 @@ public sealed class ArtifactServiceTests : IDisposable
             Count++;
             return ValueTask.FromResult(result);
         }
+    }
+
+    // --- Bounded reads (#1138) ---------------------------------------------
+
+    /// <summary>Five builds an hour apart, oldest first: ready, preview, failed, ready, ready.</summary>
+    private async Task<(int PipelineId, int OtherPipelineId, int[] Builds)> SeedHistoryAsync()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+        var pipelineId = await SeedPipelineAsync(ctx, projectId);
+        var otherPipelineId = await SeedPipelineAsync(ctx, projectId, "Other");
+        var start = DateTime.UtcNow.AddDays(-1);
+        var ids = new List<int>();
+        string[] statuses = [ProjectBuildStatus.Ready, ProjectBuildStatus.Ready, ProjectBuildStatus.Failed, ProjectBuildStatus.Ready, ProjectBuildStatus.Ready];
+        for (var i = 0; i < statuses.Length; i++)
+        {
+            ids.Add(await SeedBuildAsync(ctx, projectId, statuses[i], start.AddHours(i), artifactCount: 1, pipelineId: pipelineId));
+        }
+        await ctx.OeProjectBuilds.Where(b => b.Id == ids[1])
+            .ExecuteUpdateAsync(u => u.SetProperty(b => b.BcTarget, ProjectBuildTarget.NextMajor));
+        return (pipelineId, otherPipelineId, ids.ToArray());
+    }
+
+    [Fact]
+    public async Task ListBuildsAsync_takes_the_newest_and_can_leave_preview_builds_out()
+    {
+        var (pipelineId, _, ids) = await SeedHistoryAsync();
+        await using var read = _db.NewContext();
+        var svc = Svc(read);
+
+        (await svc.ListBuildsAsync(pipelineId, limit: 2)).Select(b => b.Id).Should().Equal(ids[4], ids[3]);
+        (await svc.ListBuildsAsync(pipelineId, includePreview: false)).Select(b => b.Id).Should().Equal(ids[4], ids[3], ids[2], ids[0]);
+        (await svc.ListBuildsAsync(pipelineId)).Should().HaveCount(5);
+        (await svc.CountBuildsAsync(pipelineId)).Should().Be(new BuildCounts(5, 1));
+    }
+
+    [Fact]
+    public async Task ListDeployableBuildsAsync_offers_the_newest_successful_builds_only()
+    {
+        var (pipelineId, _, ids) = await SeedHistoryAsync();
+        await using var read = _db.NewContext();
+        var svc = Svc(read);
+
+        (await svc.ListDeployableBuildsAsync(pipelineId)).Select(b => b.Id).Should().Equal(ids[4], ids[3], ids[0]);
+        (await svc.ListDeployableBuildsAsync(pipelineId, limit: 1)).Select(b => b.Id).Should().Equal(ids[4]);
+        var apps = await svc.ListBuildAppsAsync(pipelineId, [ids[4]]);
+        apps.Keys.Should().Equal(ids[4]);
+    }
+
+    [Fact]
+    public async Task GetPipelineBuildRowAsync_reads_one_build_of_that_pipeline_only()
+    {
+        var (pipelineId, otherPipelineId, ids) = await SeedHistoryAsync();
+        await using var read = _db.NewContext();
+        var svc = Svc(read);
+
+        (await svc.GetPipelineBuildRowAsync(pipelineId, ids[0]))!.Id.Should().Be(ids[0]);
+        (await svc.GetPipelineBuildRowAsync(otherPipelineId, ids[0])).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ListPipelinesAsync_picks_the_newest_build_and_the_newest_successful_one()
+    {
+        var (pipelineId, otherPipelineId, ids) = await SeedHistoryAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            // A newer failed build, and a still newer preview build that must not count.
+            var projectId = await ctx.OePipelines.Where(p => p.Id == pipelineId).Select(p => p.ProjectId).SingleAsync();
+            var failed = await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Failed, DateTime.UtcNow.AddMinutes(-30), pipelineId: pipelineId);
+            var preview = await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, DateTime.UtcNow.AddMinutes(-10), pipelineId: pipelineId);
+            await ctx.OeProjectBuilds.Where(b => b.Id == preview)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.BcTarget, ProjectBuildTarget.NextMinor));
+            ids = [.. ids, failed];
+        }
+
+        await using var read = _db.NewContext();
+        var rows = await Svc(read).ListPipelinesAsync();
+
+        var row = rows.Single(r => r.Id == pipelineId);
+        row.Latest!.BuildId.Should().Be(ids[5]);
+        row.LatestSuccessfulBuildId.Should().Be(ids[4]);
+        var other = rows.Single(r => r.Id == otherPipelineId);
+        other.Latest.Should().BeNull();
+        other.LatestSuccessfulBuildId.Should().BeNull();
+        ArtifactService.MatchesSearch(row, "cronus").Should().BeTrue();
+        ArtifactService.MatchesSearch(row, "Fabrikam").Should().BeFalse();
     }
 
     private static async Task<int> SeedReleasePipelineAsync(Data.AppDbContext ctx, int projectId, string environmentType)

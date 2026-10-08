@@ -486,10 +486,51 @@ on every pull request, inline in the Files tab.
   back to the request host when unset) so the operator copies one address. Redacted in
   audit; blank keeps, a clear flag wipes.
 - **`POST /github/webhook`** is anonymous, antiforgery-disabled, rate-limited, size-capped
-  (1 MB), verifies `X-Hub-Signature-256` with a constant-time compare over the raw body,
+  (1 MB; 25 MB, GitHub's own ceiling, for a `push` with a well-formed signature header,
+  whose commit file lists can be large - #1126; at most four bodies that declare more than
+  a megabyte, or no length, are read at once, since the body must be read before a forgery
+  can be told apart. A push declaring a megabyte or less never waits for those slots; one
+  source address holds at most one slot (the address the rate limiter uses); one that
+  cannot get a slot within two seconds is answered 503, a slotted read that has not
+  finished within ten seconds, or that the server drops for its minimum data rate, is
+  answered 408, and the read buffer grows with the bytes
+  that arrive rather than from the declared length - #1174), verifies `X-Hub-Signature-256` with a constant-time compare over the raw body,
   and writes a body on every response so the status-pages middleware does not rewrite a
   401 into a 400. It is on the maintenance-mode allow-list: accepting a delivery is
   enqueueing, and GitHub disables hooks that keep failing. `ping` answers 200.
+- **Only GitHub's webhook addresses may deliver (#1201).** The slots above bound what
+  one address can hold, but someone with many addresses could still hold them all with
+  forged slow pushes. So the first thing the endpoint does, before it reads the body or
+  takes a slot, is check the sender against the `hooks` ranges of `GET /meta`, and answer
+  anything else 403 with a short text. `GitHubHookAddressRefreshScheduler` reads that list
+  (unauthenticated, through the App's API client) about twenty seconds after start-up and
+  then daily, into the singleton `GitHubHookAddressAllowList`; a failed or empty refresh
+  keeps the list in use. Until a list has loaded once the check **fails open** - every
+  sender is let through, with a rate-limited warning - so a GitHub outage or a host with
+  no outbound route does not lose deliveries; `DISABLE_GITHUB_HOOK_ADDRESS_REFRESH=1`
+  keeps it that way for good. An IPv4 sender reported as IPv4-mapped IPv6 is matched as
+  IPv4; a request with no address at all is refused once a list is loaded. Redeliveries
+  the recovery sweep asks for come from the same ranges, so they pass, and the sweep
+  treats a logged 403 as worth resending: only GitHub's own deliveries are in that log,
+  so a 403 there was a genuine delivery refused for a proxy setting or a stale list.
+  **The check depends on the trusted-proxy setting.** The sender is
+  `HttpContext.Connection.RemoteIpAddress` after `UseForwardedHeaders`, which takes the
+  `X-Forwarded-For` value only from a peer listed in `TRUSTED_PROXIES` (or loopback),
+  and only the last hop (`ForwardLimit` 1). Behind a proxy that is not listed, every
+  delivery looks like it came from the proxy and is refused; the refusal warning (at most
+  one every five minutes, with a count of the ones it skipped) names the address and
+  points at `TRUSTED_PROXIES`, and the site admin's GitHub settings page shows when the
+  list was last read and the last refused sender, for a day after the refusal. A client's
+  own `X-Forwarded-For` is ignored when it connects directly from an untrusted address,
+  and a trusted proxy appends the peer it saw last - **provided the only peers inside the
+  trusted range are proxies.** A trusted range as wide as the compose bridge network
+  (`172.16.0.0/12`) also covers Docker's port forwarding, so while the app's own port is
+  published a client can connect to it, appear to come from the bridge gateway, and name
+  a GitHub address; the README and `compose.yaml` therefore say to remove that mapping
+  or bind it to `127.0.0.1` when Caddy is in front. The signature check still applies to
+  such a request. A refusal also asks the refresh scheduler for an early read of the
+  list (at most one an hour), so a range GitHub has just added is picked up while the
+  recovery sweep still has resends left.
   `pull_request` with action `opened`, `synchronize` or `reopened` enqueues; everything
   else is 204. Since #963 it also takes `push`, and a `pull_request` `closed` with
   `merged: true`: both are parsed, enqueued and answered 202 behind exactly the same
@@ -558,14 +599,22 @@ on every pull request, inline in the Files tab.
   `CancellationTokenSource` of the build in flight for that key: announcing a newer
   SHA cancels the running build, and a job dequeued for an older SHA is skipped. A
   key it has never heard of counts as current, so a restart's lost bookkeeping
-  builds rather than refuses. The superseded build is recorded as failed with
+  builds rather than refuses. The record only moves forward: each delivery carries the
+  pull request's `updated_at`, a head older than the one recorded is not announced, and
+  the swap is a compare-and-set, so two deliveries handled at once (GitHub does not
+  promise order) cannot leave the older head as the latest (#1120); a built head is remembered
+  for the three days the resend sweep looks back, so a late redelivery of an older one is still recognised. The superseded build is recorded as failed with
   "Superseded by a newer commit on the same pull request" - the newer job carries
   its own check run.
 - **No durable job row for a pull-request build.** `StartPullRequestBuildAsync`
   enqueues with `JobRowId: 0` and writes no `oe_import_jobs` row, so the startup
   reconciler never resumes one. By the time a restarted process got to it the head
   may have moved, and re-running would complete a check run about a commit nobody is
-  reviewing. The next push, or GitHub's own redelivery, is the recovery.
+  reviewing. Instead, on its first pass after startup `GitHubWebhookRecoveryScheduler`
+  marks every pull-request build left queued or building by the previous process as
+  failed ("The workbench restarted before this build finished") and completes its check
+  run as `neutral` with the same words, so the pull request is not left spinning. The
+  next push is the recovery (#1121).
 - **The organisation is found by walking, not by querying across tenants.**
   `GitHubPullRequestBuildWorker.ResolveOrganizationAsync` reads `organizations` (no
   tenant filter, so no bypass), then enters an `AmbientOrganizationScope` and a fresh
@@ -693,8 +742,33 @@ and it accepted work it should not have. What changed:
   cancel the build that is running. `EndBuild` evicts the newest-head entry when the head
   just built is still the newest, so the map does not grow for the life of the process.
 - **The queue refuses rather than waits.** The webhook runs on a request thread GitHub is
-  timing, so a full channel is answered with 503 and a body ("Busy; GitHub will retry")
-  instead of blocking - GitHub redelivers a 5xx.
+  timing, so a full channel is answered with 503 and a body ("Busy; the delivery will be
+  requested again") instead of blocking.
+- **A refused delivery is asked for again (#1121).** GitHub does not resend a delivery
+  it logged as failed - a 503 from a full queue, a 413, a 5xx, or no answer at all while
+  the app was down; it waits for somebody to press Redeliver. So
+  `GitHubWebhookRecoveryScheduler` does that every five minutes: it reads the App's
+  delivery log (`GET /app/hook/deliveries`, as the App), and for each event the endpoint
+  acts on (every `push`; `pull_request` opened, synchronize, reopened and closed) whose
+  attempts all failed it asks GitHub for one more (`POST /app/hook/deliveries/{id}/attempts`).
+  It looks back at most three days (what GitHub keeps), asks for no more than the webhook
+  queue has room for (half its capacity, less what is waiting), stops after five attempts
+  at one event, and asks in the order the events first failed. A 4xx other than 403, 408,
+  413 and 429 is not resent: that is a delivery we read and turned away. A resent push is
+  safe because the push path ignores a push it has seen or one older than the recorded
+  head. The pull-request path has no such guard - the endpoint would take a resent older
+  head as the newest and cancel the build of the real one - so a pull-request build
+  delivery is resent only while GitHub still reports its head as the open pull request's
+  head (read from the logged payload, then `GET /repos/{owner}/{repo}/pulls/{n}`).
+  Attempt counts are in memory, so a restart allows five more. An attempt is counted only
+  once GitHub takes the resend: a 404, 410 or 422 settles the event; a 401 or a 403 that is
+  not rate limiting is the App being turned away, so it leaves that event and the rest of
+  the sweep for the next one; a 5xx, a timeout, rate limiting or no answer leaves the event
+  for the next sweep and moves it behind the events GitHub has not refused, and the sweep
+  stops once two different events have been refused that way (#1175). Each sweep reads at most twenty pages: the newest stretch back to where the
+  last complete read began, then whatever older stretch an earlier sweep's page budget
+  did not reach, resumed from its cursor; failures it found but did not get to are carried
+  to the next sweep by id rather than by reading the window again.
 - **A check run is never left spinning.** The run is opened before the build is queued, so
   a failure between the two completes it as `neutral` with the reason; and a delivery that
   arrives while a restore is in flight is held and re-queued rather than reaching the
@@ -786,6 +860,11 @@ ago", "2 pull requests merged since build #118" (preferred when merged pull requ
 stored), "main was force-pushed since build #118" (never a count after a force push, nor
 when the stored commits do not reach back to the build: then "New commits on main since
 build #118"), "No successful build yet" (the issue said "Never built", which read as a contradiction beside a failed build), "Branch main no longer exists", or nothing.
+When every repository that is ahead already has a queued or running build of the pipeline
+that will build its new head (a build on push of that exact commit, or a build somebody
+started after the push), the sentence is "Building the latest commit on main" instead, and
+the pipeline is not ahead: there is nothing for anybody to start (#1128). A preview check
+does not count.
 
 - **Builds list**: the sentence under the pipeline's name. An ahead pipeline with no build
   already queued or running takes the warning keyline, a **Build** button beside the sentence (outline, not in the kebab-only actions cell, and
@@ -830,6 +909,14 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   build onto its commit instead of adding a sixth, so a long rebase pushed piecemeal cannot
   fill the queue and the branch's latest state is still built. A build the worker has
   started is never moved.
+- **Checked again when its turn comes (#1112).** A build on push or a nightly preview
+  check that waited is refused as it starts if the pipeline has since been deleted, the
+  setting turned off, someone else has taken the automatic builds over, or the person it
+  runs as is no longer active or can no longer manage the solution
+  (`ProjectBuildService.EnsureAutomationStillOnAsync`). The build fails with that reason
+  and clones nothing. Such a refusal sends no build email and is not the build the next
+  one is compared with. Only the first run is checked: Retry or Recover symbols on a
+  finished build is a person's own choice and runs as them.
 - **What does not build.** A forced push (it may have removed others' work, so a person
   decides), a deleted branch, a push to any other branch, and a redelivery of a push whose
   commit this pipeline already built on push. A pipeline with no branch builds pushes to
@@ -1037,18 +1124,90 @@ year's Business Central after a new release lands in the Object Explorer.
   environment it was measured against, the pull request names it in its body (only
   when the person can see its solution), and the release compare link is given only
   when that release is the version being moved to. Environment refreshes do not
-  rescan; Check again does.
+  rescan by themselves; Check again does, and so does the nightly pass below.
 - **`AppJsonDependency` gained `Version` as an optional positional parameter**,
   so every existing caller compiles unchanged.
 - **No MCP tool.** `list_dependency_drift` was optional in the brief and is not
   here: the GitHub MCP surface is #633's, and adding a tool to it from this
   issue would have meant editing the same files that issue is rewriting. The
   service method it would wrap (`GetSummaryAsync`) is ready for it.
-- **Left out.** No scheduler: the scan runs when a release lands and when
-  somebody presses Check again, which is when the answer can have changed. No
-  per-repository dismissal - drift is a fact, not a proposal, and it disappears
+- **Left out.** No per-repository dismissal - drift is a fact, not a proposal, and it disappears
   when it is fixed. No auto-merge, no compile before opening, no bump of
   anything the catalogue has no default for.
+
+### Opening update pull requests on their own (#1104)
+
+Named user: a consultant responsible for a handful of customers who wants the update
+pull request waiting in GitHub the morning after a customer's environment moves to a new
+Business Central, the way Dependabot does it, instead of remembering to press the button.
+
+- **Per solution, off by default.** "Open update pull requests automatically" sits on the
+  solution's Repositories tab, saved with the rest of the solution, and only shows once
+  the solution exists and has a GitHub repository. Per solution because the yardstick is
+  already the solution's environment, and customers differ in how they want to be moved.
+- **Opened as the person who turned it on**, with their GitHub account - the same rule as
+  building on push and the nightly preview check (`oe_projects.auto_update_pull_requests_by_user_id`,
+  `SET NULL` on delete). There is no GitHub App fallback. When that person is gone, can no
+  longer manage the solution, or has no GitHub account connected, the solution says so
+  (`auto_update_pull_requests_blocked`) with "Resume with my GitHub account", which makes
+  whoever presses it the new person. A repository GitHub refused shows the same way; the
+  next night tries again either way.
+- **Adding a repository takes it over (#1177).** Whoever saves the solution with a GitHub
+  repository it did not have before - added, or an address changed - while the setting is
+  on becomes the person the pull requests are opened as - the "whoever last saved" rule of
+  building on push - so nobody can add a repository they cannot write to and have it
+  written to with somebody else's account. Removing a repository does not change who it
+  is. When the new person has no GitHub account connected, the solution shows it as
+  stopped straight away, with the same Resume button; nothing is opened as the previous
+  person in between. While the list has such an unsaved change, the section tells the
+  person that saving will use their GitHub account. Resume refuses a person with no
+  GitHub account connected rather than clearing the warning, and the warning is worded
+  to the person it is about ("you have not connected your GitHub account").
+- **`DependencyDriftScheduler` runs once a night at 05:00 UTC**, after the environment
+  refresh, for every organisation with an imported first-party release: it rescans (so a
+  customer moved to a new version during the day is measured against it, and the
+  Solutions panel stays current with nobody pressing Check again), then for each solution
+  with the setting on, opens the pull requests of its repositories that are behind, in a
+  scope signed in as that person. Opt out with `DISABLE_DEPENDENCY_DRIFT_SCHEDULER=1`.
+- **Only its own environment counts (#1177).** A repository two solutions share is measured
+  once, against one of their environments. The automatic run of a solution acts only on
+  findings measured against one of that solution's own environments, so a customer still
+  on 25 is never offered the 27 the other customer moved to. The panel and the button are
+  unchanged. To keep that from silencing a solution that asked for automatic pull
+  requests, the scan measures a shared repository against a solution with the setting on
+  before one without it (then the oldest, as before). When two solutions sharing a
+  repository both have it on, only the older one's run opens pull requests there; the
+  other's customer is not measured for it.
+  Since #1200 a repository can only be added to one solution: adding one another active
+  solution in the organisation already has (same provider and normalised URL) is refused
+  with the other solution's name. Pairs that already shared a repository before that are
+  left alone and keep saving, so the shared-repository handling above still applies to them.
+- **Paced, and stopped by a rate limit (#1177).** The automatic run leaves a second between
+  the writes it makes to GitHub (GitHub's guidance for requests that create content; its
+  secondary limit is about 80 a minute per account) - closing a superseded pull request
+  and commenting on it count as two - and the spacing is kept per person across all their
+  solutions in one nightly pass. It stops at the first rate-limit
+  refusal. The solution does not show that as stopped - there is nothing for it to fix -
+  and the person's other solutions wait for the next night too. The button stops at a
+  rate limit as well, and says to try again in a few minutes.
+- **Each version is offered once per repository.** Every update pull request the
+  workbench opens or joins, by hand or not, is recorded in `github_update_pull_requests`
+  (repository, version, number, whether it was automatic). The automatic run skips a
+  version that has a row and no open pull request, because a closed pull request is
+  somebody's answer and GitHub usually deletes its branch with it. The row, not the
+  branch, is what decides: like the button, the run walks `aldt/bump-bc-<version>`, `-2`,
+  `-3` and joins the first one with an open pull request (so one a person opened as `-2`
+  is joined too), stepping past branches with none. A branch with neither an open pull
+  request nor a row is a run that failed between creating the branch and opening the pull
+  request; it is stepped past like any other, so one failed night never strands a
+  version. An open one is joined, never doubled. The button is unaffected: a person can
+  always ask again.
+- **A newer version supersedes the older automatic pull request.** Once the pull request
+  for, say, 29.0 is open, the automatic ones for older versions on the same repository are
+  closed with a comment naming the new one, since both edit the same lines. A pull request
+  a person opened is theirs to close.
+- **Left out.** No email or in-app notification: GitHub already tells the people watching
+  the repository. No auto-merge.
 
 ## #633 MCP parity for the GitHub workflows
 

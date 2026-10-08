@@ -2302,8 +2302,9 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             })
             .ToDictionaryAsync(e => e.Id, ct);
 
-        // A deployment already booked for the environment's current window keeps its time;
-        // the preview says so, because the new window then only applies from the next one.
+        // A deployment already booked for the environment's current window keeps its time
+        // while that time falls in the new window, and otherwise moves to the new window's
+        // next opening when its turn comes (#1124); the preview says so.
         var waiting = (await _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledByDeliveryWindow)
             .Where(d => ids.Contains(d.ReleasePipeline!.ProjectEnvironmentId))
@@ -2396,7 +2397,11 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// or Entra rejects the credentials — the worker records that as the failure reason.
     /// See <c>.design/saas-delivery.md</c> ("Authentication", "Expired-secret behaviour").
     /// </summary>
-    public async Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, CancellationToken ct = default)
+    public Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, CancellationToken ct = default) =>
+        AcquireDeliveryContextAsync(projectId, forceRefresh: false, ct);
+
+    /// <inheritdoc cref="IDeliveryTokenSource.AcquireDeliveryContextAsync(int, bool, CancellationToken)"/>
+    public async Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, bool forceRefresh, CancellationToken ct = default)
     {
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
@@ -2415,7 +2420,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 : "This solution's own Business Central client secret has expired. Rotate it in Entra and re-enter it on the solution's Business Central tab, or switch the solution to your organisation's app registration there.");
         }
 
-        var token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, ct: ct)
+        var token = await _tokens.GetTokenAsync(projectId, creds.TenantId, creds.ClientId, creds.Secret, forceRefresh, ct)
             .ConfigureAwait(false);
         return new BcDeliveryContext(token, creds.TenantId);
     }
@@ -2980,7 +2985,8 @@ public enum DeliveryWindowChangeGroup
 /// </summary>
 /// <param name="HasDeploymentWaitingForWindow">
 /// True on a row that will change and already has a deployment scheduled for its current
-/// delivery window. That deployment keeps its time; the next one uses the new window.
+/// delivery window. That deployment keeps its time if it falls in the new window, and
+/// otherwise moves to the new window's next opening.
 /// </param>
 public sealed record DeliveryWindowChangePreviewRow(
     int EnvironmentId,

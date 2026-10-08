@@ -65,6 +65,15 @@ public class OeRelease
                && r.Status == "ready" && r.SourceFileCount == 0);
 
     /// <summary>
+    /// Leaves out the release of a build against a next version that indexed no objects:
+    /// those builds record compile results only (#1140), so opening one would show an
+    /// empty release. Pass the context's builds. Translates to SQL.
+    /// </summary>
+    public static Expression<Func<OeRelease, bool>> NotACheckOnlyBuild(IQueryable<OeProjectBuild> builds) =>
+        r => r.SourceFileCount > 0
+             || !builds.Any(b => b.ReleaseId == r.Id && b.BcTarget != ProjectBuildTarget.Current);
+
+    /// <summary>
     /// Explicit, source-derived identity for releases that must not import twice —
     /// first-party OnPrem artifacts (<c>bc-onprem:{Maj}.{Min}:{cc}</c>) and the vendor
     /// symbols a pipeline build ingests from the public feeds

@@ -75,7 +75,7 @@
         @if (!_canManage)
         {
             <Alert Tone="AlertTone.Warn">
-                <span>Only the solution owner or an admin can change this solution's deployment pipelines.</span>
+                <span>Only people who manage the solution can change this solution's deployment pipelines.</span>
             </Alert>
         }
         else if (!_editing && _projectOptions is { Count: 0 })
@@ -132,7 +132,7 @@
                         else if (!_solutionManageable)
                         {
                             <Alert Tone="AlertTone.Warn">
-                                <span>Only the solution owner or an admin can add deployment pipelines to @(_projectName ?? "this solution").</span>
+                                <span>Only people who manage the solution can add deployment pipelines to @(_projectName ?? "this solution").</span>
                             </Alert>
                         }
                         else if (_buildPipelines is { Count: 0 } && _releaseRepositories is not { Count: > 0 })
@@ -196,6 +196,10 @@
                                             }
                                         </select>
                                     </SelectBox>
+                                    @if (_deletedSourceName is { } deletedSource && _buildPipelineId == 0)
+                                    {
+                                        <FieldError Message="@($"\"{deletedSource}\" was deleted. Choose the build pipeline to deploy from now.")" />
+                                    }
                                     <small class="field__hint">Its successful builds are what this pipeline deploys.</small>
                                 </div>
                             }
@@ -405,7 +409,7 @@
                                         }
                                         else
                                         {
-                                            <small class="field__hint">Clear it to name the pipeline after where its apps come from and where they go.</small>
+                                            <small class="field__hint" id="rpe-name-hint">If you change where the apps come from or the target environment, this name is replaced with the automatic one. Leave it blank to use the automatic name now.</small>
                                         }
                                     </div>
                                 }
@@ -616,6 +620,9 @@
         }
     }
 
+    /// <summary>The name of the deleted build pipeline this one drew from, when it did; null otherwise.</summary>
+    private string? _deletedSourceName;
+
     /// <summary>Save is live once the required fields are chosen and any Force-Sync acknowledgement is given.</summary>
     private bool CanSave =>
         _canManage && _solutionManageable && !_saving && !_loading
@@ -669,7 +676,10 @@
             _customName = rp.NameIsCustom ? rp.Name : string.Empty;
             _showCustomName = rp.NameIsCustom;
             _artifactSource = ReleaseArtifactSource.IsValid(rp.ArtifactSource) ? rp.ArtifactSource : ReleaseArtifactSource.Build;
-            _buildPipelineId = rp.BuildPipelineId ?? 0;
+            // A deleted source can't be picked again (#1123): start the choice empty and
+            // say why, rather than showing a placeholder over a value Save would send.
+            _deletedSourceName = rp.BuildPipeline?.DeletedAt is not null ? rp.BuildPipeline.Name : null;
+            _buildPipelineId = _deletedSourceName is null ? rp.BuildPipelineId ?? 0 : 0;
             _releaseRepositoryId = rp.GithubReleaseRepositoryId ?? 0;
             _environmentId = rp.ProjectEnvironmentId;
             _deploymentSchedule = rp.DeploymentSchedule;
@@ -835,7 +845,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _saveError = "Only the solution owner or an admin can manage this solution's deployment pipelines.";
+            _saveError = "Only people who manage the solution can manage this solution's deployment pipelines.";
             _buildPipelines = new();
             _environments = new();
             _releaseRepositories = null;
@@ -905,7 +915,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _saveError = "Only the solution owner or an admin can manage this solution's deployment pipelines.";
+            _saveError = "Only people who manage the solution can manage this solution's deployment pipelines.";
         }
         catch (Exception ex)
         {

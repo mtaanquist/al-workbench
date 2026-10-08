@@ -197,7 +197,13 @@ public sealed class RepositoryDiscoveryService
             var file = await _github.GetFileAsync(
                 installationToken, repo.Owner, repo.Name, path, repo.DefaultBranch, ct);
             if (file is null) continue;
-            if (AppJsonManifestParser.Parse(file.Text) is { } manifest) return (path, manifest);
+            if (AppJsonManifestParser.Parse(file.Text) is { } manifest)
+            {
+                // A test app in a folder the folder rules miss would otherwise name the
+                // repository after itself, or offer a repository of only tests (#1193).
+                if (AppJsonManifestParser.IsTestApp(manifest)) continue;
+                return (path, manifest);
+            }
 
             _logger.LogWarning(
                 "{RepoFullName} has a {Path} that is not readable as an app.json.", repo.FullName, path);

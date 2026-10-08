@@ -59,7 +59,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         // The Build button's service. Nothing here builds, so only what it keeps
         // for itself is real.
         _ctx.Services.AddScoped(sp => new ProjectBuildImporter(
-            null!, new ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportQueue(), null!,
+            null!, null!, new ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue(), null!,
             sp.GetRequiredService<ALDevToolbox.Data.AppDbContext>(), _db.OrgContext,
             sp.GetRequiredService<ProjectAccess>(), null!, TimeProvider.System,
             NullLogger<ProjectBuildImporter>.Instance));
@@ -197,7 +197,8 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     private IRenderedComponent<PipelineBuilds> RenderPage(Seed seed)
     {
         var cut = _ctx.Render<PipelineBuilds>(p => p.Add(c => c.PipelineId, seed.PipelineId));
-        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
+        // Two builds, though Build history hides one of them when it is a preview build.
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().NotBeEmpty());
         return cut;
     }
 
@@ -311,8 +312,11 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
             editor.Markup.Should().Contain($"After you create it, you choose when build #{seed.OlderBuildId} installs.");
             editor.Find(".page-head__actions a.btn").GetAttribute("href").Should().Be($"/pipelines/{seed.PipelineId}");
         });
-        editor.Find("#rpe-env").Change(seed.SandboxEnvId.ToString());
-        editor.Find(".page-head .btn--primary").Click();
+        // The editor can still render once more after the fields above settle, which
+        // replaces the handlers a Find just read; a stale one throws before anything is
+        // sent, so the pair is retried until it lands on the current render.
+        editor.WaitForAssertion(() => editor.Find("#rpe-env").Change(seed.SandboxEnvId.ToString()));
+        editor.WaitForAssertion(() => editor.Find(".page-head .btn--primary").Click());
 
         // Saving carries on to deploying the build it was set up for.
         int releasePipelineId = 0;
@@ -418,6 +422,33 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     }
 
     [Fact]
+    public async Task The_owner_can_disable_the_pipeline_but_only_an_admin_sees_delete()
+    {
+        var seed = await SeedAsync();
+        var cut = RenderPage(seed);
+
+        cut.WaitForAssertion(() =>
+        {
+            var labels = cut.Find(".page.pb-page > .detail-head > .page-head__actions").Children.Select(c => c.TextContent.Trim()).ToList();
+            labels.Should().Contain("Disable pipeline").And.NotContain("Delete", "the owner is not an admin");
+        });
+
+        cut.FindAll(".page-head__actions button").Single(b => b.TextContent.Trim() == "Disable pipeline").Click();
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("A build that's already running finishes."));
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Disable pipeline" && b.Closest(".page-head__actions") is null).Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            var actions = cut.Find(".page.pb-page > .detail-head > .page-head__actions");
+            actions.Children[0].TextContent.Trim().Should().Be("Enable pipeline");
+            actions.Children[0].ClassList.Should().Contain("btn--primary");
+            actions.Children.Select(c => c.TextContent.Trim()).Should().NotContain("Build");
+            cut.FindAll(".status-pill").Select(p => p.TextContent.Trim()).Should().Contain("Disabled");
+        });
+        (await _db.NewContext().OePipelines.SingleAsync(p => p.Id == seed.PipelineId)).DisabledAt.Should().NotBeNull();
+    }
+
+    [Fact]
     public async Task Someone_who_cannot_manage_the_solution_gets_no_release_action()
     {
         var seed = await SeedAsync(ProjectVisibility.ReadOnly);
@@ -458,6 +489,112 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
     }
 
     [Fact]
+    public async Task Build_history_times_a_build_from_when_it_started_building_not_from_when_it_was_queued()
+    {
+        var seed = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            // Both took two minutes from being queued; the newer one waited 90 seconds
+            // for a free worker first (#1137). The older one predates the column.
+            var newer = await ctx.OeProjectBuilds.SingleAsync(b => b.Id == seed.NewerBuildId);
+            newer.BuildingStartedAt = newer.StartedAt.AddSeconds(90);
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = RenderPage(seed);
+
+        cut.WaitForAssertion(() =>
+        {
+            DurationCell(cut, seed.NewerBuildId).Should().Be("30s");
+            DurationCell(cut, seed.OlderBuildId).Should().Be("2m 00s");
+        });
+    }
+
+    /// <summary>The Duration cell of a build's row in Build history.</summary>
+    private static string DurationCell(IRenderedComponent<PipelineBuilds> cut, int buildId) =>
+        cut.FindAll(".data-table tbody tr")
+            .Single(r => r.QuerySelector($"a[href='/artifacts/build/{buildId}/all']") is not null)
+            .QuerySelectorAll("td.data-table__num")[0].TextContent.Trim();
+
+    [Fact]
+    public async Task Build_history_lists_the_newest_builds_and_shows_more_on_request()
+    {
+        var seed = await SeedAsync();
+        int oldest;
+        await using (var ctx = _db.NewContext())
+        {
+            // 28 more, all older than the seed's two: 30 in all.
+            oldest = 0;
+            for (var i = 0; i < 28; i++)
+            {
+                oldest = await SeedBuildAsync(ctx, seed.ProjectId, seed.PipelineId, DateTime.UtcNow.AddDays(-3).AddHours(-i));
+            }
+        }
+
+        var cut = RenderPage(seed);
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(25);
+            cut.Markup.Should().Contain("Showing 25 of 30");
+        });
+
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Show more builds").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(30);
+            cut.FindAll("button").Should().NotContain(b => b.TextContent.Trim() == "Show more builds");
+            cut.FindAll($"a[href='/artifacts/build/{oldest}/all']").Should().ContainSingle();
+        });
+    }
+
+    [Fact]
+    public async Task The_hero_stays_the_pipelines_own_build_when_the_newest_listed_are_all_preview_builds()
+    {
+        var seed = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            // Four weeks of nightly checks after the pipeline last built for real.
+            for (var i = 0; i < 28; i++)
+            {
+                var id = await SeedBuildAsync(ctx, seed.ProjectId, seed.PipelineId, DateTime.UtcNow.AddMinutes(-i));
+                await ctx.OeProjectBuilds.Where(b => b.Id == id)
+                    .ExecuteUpdateAsync(u => u.SetProperty(b => b.BcTarget, ProjectBuildTarget.NextMajor));
+            }
+        }
+
+        var cut = RenderPage(seed);
+        cut.WaitForAssertion(() => cut.Find(".card__head input[type=checkbox]"));
+        cut.Find(".card__head input[type=checkbox]").Change(true);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(25, "the history now lists the preview builds");
+            cut.Markup.Should().NotContain("It can't be deployed", "the hero is still the pipeline's newest real build");
+            cut.Find(".card__head input[type=checkbox]").HasAttribute("disabled").Should().BeFalse();
+        });
+    }
+
+    [Fact]
+    public async Task A_build_older_than_the_history_lists_still_opens_in_the_hero()
+    {
+        var seed = await SeedAsync();
+        int oldest = 0;
+        await using (var ctx = _db.NewContext())
+        {
+            for (var i = 0; i < 28; i++)
+            {
+                oldest = await SeedBuildAsync(ctx, seed.ProjectId, seed.PipelineId, DateTime.UtcNow.AddDays(-3).AddHours(-i));
+            }
+        }
+
+        _ctx.Services.GetRequiredService<NavigationManager>().NavigateTo($"/pipelines/{seed.PipelineId}?build={oldest}");
+        var cut = _ctx.Render<PipelineBuilds>(p => p.Add(c => c.PipelineId, seed.PipelineId));
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain($"Build #{oldest}"));
+    }
+
+    [Fact]
     public async Task The_latest_build_stays_the_pipelines_own_and_the_check_result_sits_beside_it()
     {
         var seed = await SeedAsync();
@@ -491,6 +628,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
             cut.Find(".pb-topline").TextContent.Should().Contain("on BC 29.0.52914.0");
             cut.Markup.Should().Contain($"Next major preview build #{seed.NewerBuildId}");
             cut.Markup.Should().Contain("Back to the latest build");
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(2, "the preview build shown above is listed too");
         });
     }
 
@@ -503,13 +641,45 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
 
         var cut = RenderPage(seed);
 
+        ActThen(cut,
+            () => cut.Find(".card__head .check input").Change(true),
+            () =>
+            {
+                var rows = cut.FindAll(".data-table tbody tr");
+                rows[0].TextContent.Should().Contain("Next major preview build").And.Contain("on BC 29.0.52914.0");
+                rows[1].TextContent.Should().NotContain("preview").And.Contain("on BC 28.4.47110.0");
+                cut.FindAll(ReleaseButton(seed.NewerBuildId)).Should().BeEmpty("a preview build cannot be deployed");
+                cut.FindAll(ReleaseButton(seed.OlderBuildId)).Should().ContainSingle();
+            });
+    }
+
+    [Fact]
+    public async Task Build_history_hides_preview_builds_until_asked()
+    {
+        var seed = await SeedAsync();
+        await MakeNewerAPreviewCheckAsync(seed);
+
+        var cut = RenderPage(seed);
+
         cut.WaitForAssertion(() =>
         {
             var rows = cut.FindAll(".data-table tbody tr");
-            rows[0].TextContent.Should().Contain("Next major preview build").And.Contain("on BC 29.0.52914.0");
-            rows[1].TextContent.Should().NotContain("preview").And.Contain("on BC 28.4.47110.0");
-            cut.FindAll(ReleaseButton(seed.NewerBuildId)).Should().BeEmpty("a preview build cannot be deployed");
-            cut.FindAll(ReleaseButton(seed.OlderBuildId)).Should().ContainSingle();
+            rows.Should().ContainSingle().Which.TextContent.Should().NotContain("preview build");
+            cut.Find(".card__head .check").TextContent.Should().Contain("Show preview builds");
+        });
+    }
+
+    [Fact]
+    public async Task Build_history_without_preview_builds_offers_no_toggle()
+    {
+        var seed = await SeedAsync();
+
+        var cut = RenderPage(seed);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".data-table tbody tr").Should().HaveCount(2);
+            cut.Markup.Should().NotContain("Show preview builds");
         });
     }
 

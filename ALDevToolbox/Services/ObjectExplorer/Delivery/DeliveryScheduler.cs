@@ -19,8 +19,10 @@ namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 /// <para>
 /// Restart-resume falls out for free: a scheduled row survives a restart and is picked
 /// up on the next due sweep. A delivery left mid-publish when the process died is
-/// reconciled to <c>failed</c> on the <strong>first</strong> sweep per org (nothing is
-/// running yet right after startup, so an actively-running delivery is never tripped).
+/// reconciled to <c>failed</c> on the first sweep per org that gets through it. Only rows
+/// claimed before this process started count: <see cref="DeliveryWorker"/> is already
+/// draining by the first sweep, and a deployment it claimed since is running, not
+/// orphaned (#1114).
 /// Opt out with <c>DISABLE_DELIVERY_SCHEDULER=1</c>. See <c>.design/saas-delivery.md</c>.
 /// </para>
 /// </summary>
@@ -32,8 +34,12 @@ public sealed class DeliveryScheduler : PolledScheduler
     private readonly TimeProvider _clock;
     private readonly ILogger<DeliveryScheduler> _logger;
 
-    // One-shot per process: fail orphaned in-progress deliveries on the first sweep.
-    private bool _reconciledInterrupted;
+    // When this process started: a delivery claimed before then was orphaned by the restart.
+    private readonly DateTime _startedAtUtc;
+
+    // Orgs whose orphaned deliveries have been failed. An org whose check threw is tried
+    // again on the next sweep rather than left with deliveries stuck in progress.
+    private readonly HashSet<int> _reconciledOrgs = new();
 
     public DeliveryScheduler(
         IServiceProvider services,
@@ -51,6 +57,8 @@ public sealed class DeliveryScheduler : PolledScheduler
         _services = services;
         _clock = clock;
         _logger = logger;
+        // Constructed while the host is built, before any worker drains a job.
+        _startedAtUtc = clock.GetUtcNow().UtcDateTime;
     }
 
     protected override Task TickAsync(CancellationToken ct) => SweepAsync(ct);
@@ -62,7 +70,6 @@ public sealed class DeliveryScheduler : PolledScheduler
     internal async Task SweepAsync(CancellationToken ct)
     {
         var nowUtc = _clock.GetUtcNow().UtcDateTime;
-        var reconcileThisSweep = !_reconciledInterrupted;
 
         List<(int Id, bool IsSystem)> orgs;
         await using (var scope = _services.CreateAsyncScope())
@@ -88,9 +95,10 @@ public sealed class DeliveryScheduler : PolledScheduler
                 await using var scope = _services.CreateAsyncScope();
                 var deliveries = scope.ServiceProvider.GetRequiredService<DeliveryService>();
 
-                if (reconcileThisSweep)
+                if (!_reconciledOrgs.Contains(orgId))
                 {
-                    var interrupted = await deliveries.FailInterruptedDeliveriesAsync(ct).ConfigureAwait(false);
+                    var interrupted = await deliveries.FailInterruptedDeliveriesAsync(_startedAtUtc, ct).ConfigureAwait(false);
+                    _reconciledOrgs.Add(orgId);
                     // A deployment cut off by a restart failed, and the person behind it
                     // needs to hear that as much as any other failure (#1036).
                     var notifier = scope.ServiceProvider.GetRequiredService<Notifications.DeploymentNotifier>();
@@ -101,9 +109,11 @@ public sealed class DeliveryScheduler : PolledScheduler
                 }
 
                 var enqueued = await deliveries.EnqueueDueDeliveriesAsync(nowUtc, ct).ConfigureAwait(false);
+                // Debug: a deployment waiting behind a long install is queued again on
+                // every sweep until its environment is free (#1139).
                 if (enqueued > 0)
                 {
-                    _logger.LogInformation("DeliveryScheduler enqueued {Count} due delivery(ies) for org {OrgId}.", enqueued, orgId);
+                    _logger.LogDebug("DeliveryScheduler enqueued {Count} due delivery(ies) for org {OrgId}.", enqueued, orgId);
                 }
             }
             catch (Exception ex)
@@ -111,9 +121,5 @@ public sealed class DeliveryScheduler : PolledScheduler
                 _logger.LogError(ex, "DeliveryScheduler sweep failed for org {OrgId}.", orgId);
             }
         }
-
-        // Only flip the one-shot after a clean pass over all orgs, so a sweep that threw
-        // before reaching every org still reconciles the rest next time.
-        if (reconcileThisSweep) _reconciledInterrupted = true;
     }
 }

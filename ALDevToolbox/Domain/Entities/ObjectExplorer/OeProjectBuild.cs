@@ -67,7 +67,8 @@ public class OeProjectBuild
     /// read from each clone, so a build of the default branch can still say which one
     /// that was. Several names, comma-separated, when repositories differ. Null for a
     /// pull-request build, a build that named its branch, and builds made before this
-    /// was recorded. Display only: the deployment branch rule reads <see cref="Branch"/>.
+    /// was recorded. The deployment branch rule reads it as the branch a default-branch
+    /// build came from (#1129); a rerun keeps its first run's value.
     /// </summary>
     public string? DefaultBranch { get; set; }
 
@@ -94,8 +95,9 @@ public class OeProjectBuild
     /// <summary>
     /// For a build started by a push: the solution repository that was pushed to,
     /// the one checked out at <see cref="HeadSha"/>. The solution's other
-    /// repositories are cloned at the pipeline's branch as usual. Null for every
-    /// other build. Deliberately not a foreign key: it only steers the checkout, and a
+    /// repositories are cloned at the pipeline's branch as usual. For a
+    /// pull-request build: the repository the pull request is on, which is where
+    /// its check run lives. Null for every other build. Deliberately not a foreign key: it only steers the checkout, and a
     /// repository removed while the build waits simply leaves nothing to pin.
     /// </summary>
     public int? HeadRepositoryId { get; set; }
@@ -158,6 +160,16 @@ public class OeProjectBuild
     public string? GithubReleaseUrl { get; set; }
 
     /// <summary>
+    /// For a <em>staged</em> build: the solution repository whose GitHub release it was
+    /// downloaded from, so a deployment pipeline that installs one repository's releases
+    /// refuses another's (#1118). Null for every other build, for a staged build whose
+    /// repository could not be told from its release link, and once that repository is
+    /// removed from the solution (SET NULL); staging the tag again records the current one.
+    /// </summary>
+    public int? StagedFromRepositoryId { get; set; }
+    public OeProjectRepository? StagedFromRepository { get; set; }
+
+    /// <summary>
     /// Why the build was not published as a Release - GitHub's own refusal, for
     /// instance. A publish failure is never a build failure: the
     /// <c>.app</c> files exist and download regardless, so this is a note on a build
@@ -165,7 +177,14 @@ public class OeProjectBuild
     /// </summary>
     public string? GithubReleaseError { get; set; }
 
+    /// <summary>When the build was queued. Despite the name, this includes the wait for a free worker.</summary>
     public DateTime StartedAt { get; set; }
+
+    /// <summary>
+    /// When a worker picked the build up, so a build's own time and its wait show apart
+    /// (#1137). Null while queued, and for builds made before it was recorded.
+    /// </summary>
+    public DateTime? BuildingStartedAt { get; set; }
 
     /// <summary>When the build reached a terminal state (<c>ready</c> / <c>failed</c>); null while in flight.</summary>
     public DateTime? FinishedAt { get; set; }
@@ -175,6 +194,14 @@ public class OeProjectBuild
     public ICollection<OeProjectBuildArtifact> Artifacts { get; set; } = new List<OeProjectBuildArtifact>();
     public ICollection<OeProjectBuildLog> Logs { get; set; } = new List<OeProjectBuildLog>();
     public ICollection<OeProjectBuildDiagnostic> Diagnostics { get; set; } = new List<OeProjectBuildDiagnostic>();
+
+    /// <summary>
+    /// A build whose objects are in the Object Explorer, so it can be explored and
+    /// compared. Every current-version build; a preview check only if it ran before
+    /// checks stopped indexing their objects (#1140). Translates to SQL.
+    /// </summary>
+    public static readonly System.Linq.Expressions.Expression<Func<OeProjectBuild, bool>> HasIndexedObjects =
+        b => b.BcTarget == ProjectBuildTarget.Current || (b.Release != null && b.Release.SourceFileCount > 0);
 }
 
 /// <summary>What asked for a <see cref="OeProjectBuild"/>.</summary>

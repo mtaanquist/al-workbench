@@ -66,6 +66,10 @@
         <StatusPill Tone="@(_isProduction ? "danger" : "muted")" title="Environment type">
             <span>@EnvType</span>
         </StatusPill>
+        @if (Disabled)
+        {
+            <StatusPill Tone="muted"><span>Disabled</span></StatusPill>
+        }
     </TitleRow>
     <SubtitleContent>
         In <a href="@($"/solutions/{_rp!.ProjectId}")">@(_rp.Project?.Name ?? "its solution")</a>.
@@ -77,7 +81,14 @@
         else
         {
             <text>Installs from build pipeline </text>
-            <a href="@SourceHref">"@SourceName"</a>
+            @if (SourceDeleted)
+            {
+                <text>"@SourceName" (deleted)</text>
+            }
+            else
+            {
+                <a href="@SourceHref">"@SourceName"</a>
+            }
         }
         <text> into the @EnvType environment </text><a href="@EnvHref">"@EnvName"</a>.
     </SubtitleContent>
@@ -88,6 +99,20 @@
             <a class="btn" href="@($"/pipelines/deployments/{Id}/edit")">
                 <Icon Name="pencil" Width="15" Height="15" /><span>Edit</span>
             </a>
+        }
+        @if (_canManage && Disabled)
+        {
+            @* Disabled, enabling it is the only thing left to do here, so it takes the primary. *@
+            <button type="button" class="btn btn--primary" @onclick="() => SetDisabledAsync(false)" disabled="@_switching">
+                <Icon Name="circle-play" Width="15" Height="15" /><span>Enable pipeline</span>
+            </button>
+        }
+        else if (_canManage)
+        {
+            <button type="button" class="btn" @onclick="() => SetDisabledAsync(true)" disabled="@_switching"
+                    title="Stop deployments through this pipeline for now. You can enable it again later.">
+                <Icon Name="circle-pause" Width="15" Height="15" /><span>Disable pipeline</span>
+            </button>
             @* The one primary. When there is nothing to list it moves into the empty
                state, and the head keeps an outline copy so the action never vanishes. *@
             <button type="button" class="btn@(IsEmpty ? "" : " btn--primary")" @onclick="OpenReleaseAsync" disabled="@(!HasSomethingToRelease)"
@@ -100,6 +125,42 @@
         @if (_rescheduleNotice is { } rescheduleNotice)
         {
             <Alert Tone="AlertTone.Info" Role="status"><span>@rescheduleNotice</span></Alert>
+        }
+        @if (_switchError is { } switchError)
+        {
+            <Alert Tone="AlertTone.Danger"><span>@switchError</span></Alert>
+        }
+        @if (Disabled)
+        {
+            <Alert Tone="AlertTone.Info">
+                <span>
+                    This deployment pipeline is disabled, so nothing deploys through it.
+                    @(_canManage ? "Enable it to deploy again." : "Ask someone who manages this solution to enable it.")
+                </span>
+            </Alert>
+        }
+        else if (BuildPipelineDisabled)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>
+                    Its build pipeline <a href="@SourceHref">@SourceName</a> is disabled, so no new builds will reach this deployment pipeline
+                    until it is enabled again. Builds it already made can still be deployed.
+                </span>
+            </Alert>
+        }
+        @if (SourceDeleted)
+        {
+            @* Deleting a build pipeline in use is refused (#1123); this is for the ones
+               deleted before that. Its old builds can still be deployed from here. *@
+            <Alert Tone="AlertTone.Danger">
+                <span>
+                    Its build pipeline <b>@SourceName</b> was deleted, so no new builds will reach this deployment pipeline.
+                    @if (_canManage)
+                    {
+                        <a href="@($"/pipelines/deployments/{Id}/edit")">Point it at another build pipeline</a><text>, or delete it.</text>
+                    }
+                </span>
+            </Alert>
         }
         @if (_rp!.ProjectEnvironment!.MissingSince is not null)
         {
@@ -126,7 +187,7 @@
         {
             <Alert Tone="AlertTone.Danger"><span>@gre</span></Alert>
         }
-        else if (_canManage && !HasSomethingToRelease)
+        else if (_canManage && !HasSomethingToRelease && !SourceDeleted)
         {
             <Alert Tone="AlertTone.Info">
                 @if (_fromReleases)
@@ -190,7 +251,14 @@
                                     }
                                     else
                                     {
-                                        <a href="@SourceHref">@SourceName</a> <span class="u-muted">build pipeline</span>
+                                        @if (SourceDeleted)
+                                        {
+                                            @SourceName <span class="u-muted">deleted build pipeline</span>
+                                        }
+                                        else
+                                        {
+                                            <a href="@SourceHref">@SourceName</a> <span class="u-muted">build pipeline</span>
+                                        }
                                     }
                                 </span>
                             </span>
@@ -306,13 +374,13 @@
                             }
                         </Text>
                         <Action>
-                            @if (_canManage && HasSomethingToRelease)
+                            @if (_canManage && HasSomethingToRelease && !Disabled)
                             {
                                 <button type="button" class="btn btn--primary" @onclick="OpenReleaseAsync">
                                     <Icon Name="send" Width="16" Height="16" /><span>Deploy</span>
                                 </button>
                             }
-                            else if (_canManage && !_fromReleases)
+                            else if (_canManage && !_fromReleases && !SourceDeleted)
                             {
                                 <a class="btn" href="@SourceHref"><Icon Name="hammer" Width="16" Height="16" /><span>Open the build pipeline</span></a>
                             }
@@ -651,6 +719,8 @@
 </ConfirmDialog>
 
 <RescheduleDeploymentDialog @ref="_rescheduleDialog" OnRescheduled="OnRescheduledAsync" />
+<ConfirmDialog @ref="_disableConfirm" Title="Disable deployment pipeline?"
+               ConfirmLabel="Disable deployment pipeline" ConfirmButtonClass="btn--primary" ConfirmIcon="circle-pause" />
 
 @code {
     [Parameter] public int Id { get; set; }
@@ -688,6 +758,9 @@
     private string? _releasesError;
     // Set when Reschedule on a handed-off row finds Business Central no longer holds it.
     private string? _rescheduleNotice;
+    private ConfirmDialog? _disableConfirm;
+    private bool _switching;
+    private string? _switchError;
 
     /// <summary>True when this pipeline installs apps from a repository's GitHub releases.</summary>
     private bool _fromReleases;
@@ -721,6 +794,15 @@
     private string SourceName => _fromReleases
         ? _rp?.GithubReleaseRepository?.DisplayName ?? "the repository"
         : _rp?.BuildPipeline?.Name ?? "the build pipeline";
+
+    /// <summary>True when someone disabled this deployment pipeline (#1131): nothing deploys through it.</summary>
+    private bool Disabled => _rp?.DisabledAt is not null;
+
+    /// <summary>True when the build pipeline this draws from is disabled, so no new builds arrive.</summary>
+    private bool BuildPipelineDisabled => !_fromReleases && !SourceDeleted && _rp?.BuildPipeline?.DisabledAt is not null;
+
+    /// <summary>True when the build pipeline this draws from has been deleted; its page is gone with it.</summary>
+    private bool SourceDeleted => !_fromReleases && _rp?.BuildPipeline?.DeletedAt is not null;
 
     /// <summary>
     /// Where the source lives. Same-named source and environment ("Test" into "Test") are
@@ -826,11 +908,17 @@
         }
         else if (_rp.BuildPipelineId is { } buildPipelineId)
         {
-            // The releasable builds are the source build pipeline's successful builds, newest first.
-            var builds = await Artifacts.ListBuildsAsync(buildPipelineId);
+            // The releasable builds are the source build pipeline's newest successful builds.
+            var builds = await Artifacts.ListDeployableBuildsAsync(buildPipelineId);
+            // A build offered through the address may be older than those.
+            if (DeployBuildId is { } offered && builds.All(b => b.Id != offered)
+                && await Artifacts.GetPipelineBuildRowAsync(buildPipelineId, offered) is { Status: ProjectBuildStatus.Ready, IsPreview: false } older)
+            {
+                builds.Add(older);
+            }
             // The apps each build carries, so the deployment dialog can show what is about
             // to be installed before the consultant confirms (#714).
-            var appsByBuild = await Artifacts.ListBuildAppsAsync(buildPipelineId);
+            var appsByBuild = await Artifacts.ListBuildAppsAsync(buildPipelineId, builds.Select(b => b.Id).ToList());
             _successfulBuilds = ReleaseBuildDialog.OptionsFrom(builds, appsByBuild, Zone);
         }
 
@@ -957,10 +1045,62 @@
         EnsurePolling(); // a deploy-now delivery is active → start watching
     }
 
+    // ── Disable and enable (#1131) ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Disabling cancels the deployments still waiting, so it asks first with the same
+    /// counts the list's menu shows; enabling just does it.
+    /// </summary>
+    private async Task SetDisabledAsync(bool disabled)
+    {
+        if (_rp is null || _switching) return;
+        if (disabled)
+        {
+            if (_disableConfirm is null) return;
+            WaitingDeploymentCounts waiting;
+            try
+            {
+                waiting = await Releases.CountWaitingDeploymentsAsync(Id);
+            }
+            catch (Exception ex)
+            {
+                Log.LogError(ex, "Failed to count waiting deployments of deployment pipeline {ReleasePipelineId}.", Id);
+                waiting = new WaitingDeploymentCounts(0, 0);
+            }
+            if (!await _disableConfirm.OpenAsync("Disable deployment pipeline?",
+                    ReleasePipelinesBrowser.DisableMessage(_rp.Name, waiting), "Disable deployment pipeline"))
+            {
+                return;
+            }
+        }
+
+        _switching = true;
+        _switchError = null;
+        try
+        {
+            await Releases.SetReleasePipelineDisabledAsync(Id, disabled);
+            await LoadPipelineAsync();
+            await LoadHistoryAsync();
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _switchError = "You can't change this deployment pipeline. Ask someone who manages the solution.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Failed to set deployment pipeline {ReleasePipelineId} disabled={Disabled}.", Id, disabled);
+            _switchError = $"Couldn't {(disabled ? "disable" : "enable")} this deployment pipeline. Try again, and if it keeps failing tell an administrator.";
+        }
+        finally
+        {
+            _switching = false;
+        }
+    }
+
     // ── Deploy again (failed deployments only, #931) ────────────────────────────
 
     /// <summary>A failed deployment can be deployed again by someone who manages the pipeline.</summary>
-    private bool CanReleaseAgain(DeliveryHistoryRow d) => _canManage && d.Status == ProjectDeliveryStatus.Failed;
+    private bool CanReleaseAgain(DeliveryHistoryRow d) => _canManage && !Disabled && d.Status == ProjectDeliveryStatus.Failed;
 
     /// <summary>
     /// The failure's next step offers Force sync only where it is the fix: Business Central
@@ -1096,7 +1236,7 @@
             }
             catch (ProjectAccessDeniedException)
             {
-                _approvalError = "Only the solution owner or an admin can approve deployments here.";
+                _approvalError = "Only people who manage the solution can approve deployments here.";
                 return;
             }
             finally
@@ -1127,7 +1267,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _approvalError = "Only the solution owner or an admin can approve deployments here.";
+            _approvalError = "Only people who manage the solution can approve deployments here.";
         }
         catch (Exception ex)
         {
@@ -1164,7 +1304,7 @@
         }
         catch (ProjectAccessDeniedException)
         {
-            _approvalError = "Only the solution owner or an admin can dismiss deployments here.";
+            _approvalError = "Only people who manage the solution can dismiss deployments here.";
         }
         catch (Exception ex)
         {
@@ -1529,6 +1669,7 @@
         ProjectDeliveryResultStatus.Completed => new("succeeded", "circle-check", false, "Completed"),
         ProjectDeliveryResultStatus.Failed => new("failed", "circle-x", false, "Failed"),
         ProjectDeliveryResultStatus.Skipped => new("skipped", "circle-minus", false, "Skipped"),
+        ProjectDeliveryResultStatus.Unconfirmed => new("queued", "circle-alert", false, "Not confirmed"),
         _ => new("pending", "circle-dashed", false, status),
     };
 

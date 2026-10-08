@@ -89,6 +89,106 @@ public sealed class ProjectBuildServiceTests
         });
     }
 
+    [Fact]
+    public void DiscoverAppProjectDirs_does_not_follow_symbolic_links_out_of_the_clone()
+    {
+        // A repository can commit links; a link to a folder outside the clone must
+        // not lead discovery onto the server's disk (#1109).
+        using var clone = new TempDir();
+        using var outside = new TempDir();
+        WriteAppJson(clone.Path, "Core");
+        WriteAppJson(Path.Combine(outside.Path, "Elsewhere"), "Elsewhere");
+        Directory.CreateSymbolicLink(Path.Combine(clone.Path, "escape"), outside.Path);
+        Directory.CreateDirectory(Path.Combine(clone.Path, "LinkedManifest"));
+        File.CreateSymbolicLink(
+            Path.Combine(clone.Path, "LinkedManifest", "app.json"),
+            Path.Combine(outside.Path, "Elsewhere", "app.json"));
+
+        var dirs = ProjectBuildService.DiscoverAppProjectDirs(clone.Path);
+
+        dirs.Should().ContainSingle().Which.Should().Be(clone.Path);
+    }
+
+    [Fact]
+    public void CopyCommittedSymbols_does_not_follow_symbolic_links()
+    {
+        using var clone = new TempDir();
+        using var outside = new TempDir();
+        using var symbols = new TempDir();
+        var packages = Path.Combine(clone.Path, "App", ".alpackages");
+        Directory.CreateDirectory(packages);
+        File.WriteAllText(Path.Combine(packages, "Vendor_Real_1.0.0.0.app"), "real");
+        var outsidePackages = Path.Combine(outside.Path, ".alpackages");
+        Directory.CreateDirectory(outsidePackages);
+        File.WriteAllText(Path.Combine(outsidePackages, "Vendor_Outside_1.0.0.0.app"), "outside");
+        File.CreateSymbolicLink(Path.Combine(packages, "Vendor_Linked_1.0.0.0.app"),
+            Path.Combine(outsidePackages, "Vendor_Outside_1.0.0.0.app"));
+        Directory.CreateSymbolicLink(Path.Combine(clone.Path, "escape"), outside.Path);
+
+        ProjectBuildService.CopyCommittedSymbols([clone.Path], symbols.Path);
+
+        Directory.GetFiles(symbols.Path).Select(Path.GetFileName)
+            .Should().BeEquivalentTo(["Vendor_Real_1.0.0.0.app"]);
+    }
+
+    [Fact]
+    public void Git_checks_out_a_committed_symbolic_link_as_a_plain_file()
+    {
+        // The environment every build git call runs with turns core.symlinks off, so
+        // a committed link never lands in the clone as a link at all (#1109).
+        if (!GitAvailable()) return;
+        using var temp = new TempDir();
+        var origin = Path.Combine(temp.Path, "origin");
+        Directory.CreateDirectory(origin);
+        Git(origin, null, "init", "--quiet");
+        Directory.CreateSymbolicLink(Path.Combine(origin, "escape"), "/");
+        Git(origin, null, "add", "escape");
+        Git(origin, null, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--quiet", "-m", "link");
+
+        var dest = Path.Combine(temp.Path, "clone");
+        var env = ProjectBuildService.GitAuthEnv(RepositoryProvider.GitHub, "tok");
+        Git(temp.Path, env, "clone", "--quiet", origin, dest);
+
+        var entry = new FileInfo(Path.Combine(dest, "escape"));
+        entry.Exists.Should().BeTrue();
+        entry.LinkTarget.Should().BeNull();
+        File.ReadAllText(entry.FullName).Should().Be("/");
+    }
+
+    private static bool GitAvailable()
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("git", "--version")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            });
+            p!.WaitForExit();
+            return p.ExitCode == 0;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static void Git(string workDir, IReadOnlyDictionary<string, string>? env, params string[] args)
+    {
+        var info = new System.Diagnostics.ProcessStartInfo("git")
+        {
+            WorkingDirectory = workDir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var a in args) info.ArgumentList.Add(a);
+        if (env is not null) foreach (var (k, v) in env) info.Environment[k] = v;
+        using var p = System.Diagnostics.Process.Start(info)!;
+        var stderr = p.StandardError.ReadToEnd();
+        p.WaitForExit();
+        p.ExitCode.Should().Be(0, stderr);
+    }
+
     [Theory]
     [InlineData("Test", true)]
     [InlineData("Tests", true)]
@@ -99,6 +199,37 @@ public sealed class ProjectBuildServiceTests
     public void IsTestSegment_matches_folderzipwalker_rules(string segment, bool expected)
     {
         ProjectBuildService.IsTestSegment(segment).Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData("dd0be2ea-f733-4d65-bb34-a28f4624fb14", "Library Assert", true)]
+    [InlineData("{23DE40A6-DFE8-4F80-80DB-D70F83CE8CAF}", "", true)]
+    [InlineData("", "Any", true)]
+    [InlineData("11111111-0000-0000-0000-000000000001", "Tests-TestLibraries", false)]
+    [InlineData("11111111-0000-0000-0000-000000000002", "Any", false)]
+    [InlineData("{ }", "Test Runner", true)]
+    [InlineData("63ca2fa4-4f03-4f2b-a480-172fef340d3f", "System Application", false)]
+    [InlineData("11111111-0000-0000-0000-000000000001", "CRONUS Test Helpers", false)]
+    public void An_app_that_depends_on_Microsofts_test_framework_is_a_test_app(string id, string name, bool expected)
+    {
+        var manifest = new AppJsonManifest("app", "CRONUS App", "CRONUS", "1.0.0.0", "29.0.0.0", null, null,
+            [new AppJsonDependency(id, name)]);
+
+        AppJsonManifestParser.IsTestApp(manifest).Should().Be(expected);
+    }
+
+    [Fact]
+    public void An_app_with_no_dependencies_is_not_a_test_app() =>
+        AppJsonManifestParser.IsTestApp(new AppJsonManifest("app", "CRONUS App", "CRONUS", "1.0.0.0", null, null, null, []))
+            .Should().BeFalse();
+
+    [Fact]
+    public void The_note_for_skipped_test_apps_names_each_once()
+    {
+        ProjectBuildService.DescribeSkippedTestApps(["A Tests"]).Should()
+            .Be("Not built: A Tests. It depends on Microsoft's test framework, so it is a test app rather than an extension to ship.");
+        ProjectBuildService.DescribeSkippedTestApps(["A Tests", "B Tests", "A Tests"]).Should()
+            .Be("Not built: A Tests, B Tests. They depend on Microsoft's test framework, so they are test apps rather than extensions to ship.");
     }
 
     // ── SelectTargetMajorMinor ──────────────────────────────────────────

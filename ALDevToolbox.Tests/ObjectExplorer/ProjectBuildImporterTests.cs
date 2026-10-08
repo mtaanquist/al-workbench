@@ -60,7 +60,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", JsonSerializer.Serialize(selection));
 
-        var releaseId = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var releaseId = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         await using var read = _db.NewContext();
         var build = await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId);
@@ -78,7 +78,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
 
-        var releaseId = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var releaseId = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         await using var read = _db.NewContext();
         var build = await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId);
@@ -94,7 +94,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        var queue = new ReleaseImportQueue();
+        var queue = new ProjectBuildQueue();
 
         var releaseId = await NewImporter(ctx, queue).StartPreviewCheckAsync(pipelineId, target);
 
@@ -112,7 +112,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.Current);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.Current);
 
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }
@@ -124,7 +124,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
 
-        var (_, buildId) = await NewImporter(ctx, new ReleaseImportQueue()).StartPullRequestBuildAsync(
+        var (_, buildId) = await NewImporter(ctx, new ProjectBuildQueue()).StartPullRequestBuildAsync(
             projectId, repositoryId, "cronus/core", installationId: 1, headSha: new string('a', 40),
             headRef: "feature/vat", pullRequestNumber: 7, checkRunId: null);
 
@@ -139,7 +139,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "All", requestedAppIdsJson: null);
 
-        var releaseId = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var releaseId = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         await using var read = _db.NewContext();
         var build = await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId);
@@ -153,7 +153,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectAsync(ctx); // no repositories
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         await act.Should().ThrowAsync<PlanValidationException>();
     }
@@ -163,7 +163,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
     {
         await using var ctx = _db.NewContext();
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(424242);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(424242);
 
         await act.Should().ThrowAsync<PlanValidationException>();
     }
@@ -177,7 +177,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId)
             .Select(r => r.Id).SingleAsync();
-        var queue = new ReleaseImportQueue();
+        var queue = new ProjectBuildQueue();
 
         var (releaseId, buildId) = await NewImporter(ctx, queue).StartPullRequestBuildAsync(
             projectId: projectId,
@@ -197,6 +197,8 @@ public sealed class ProjectBuildImporterTests : IDisposable
         build.HeadSha.Should().Be("abc123");
         build.Branch.Should().Be("feature/vat");
         build.CheckRunId.Should().Be(555);
+        build.HeadRepositoryId.Should().Be(repositoryId,
+            "a check run a restart leaves open is closed on the repository the pull request is on (#1121)");
         build.PipelineId.Should().BeNull("a pull-request build is not a run of a pipeline");
         build.StartedByUserId.Should().BeNull("nobody pressed a button - GitHub asked");
         build.RequestedAppIdsJson.Should().BeNull("with no selection to honour, every extension is compiled");
@@ -210,7 +212,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId)
             .Select(r => r.Id).SingleAsync();
-        var queue = new ReleaseImportQueue();
+        var queue = new ProjectBuildQueue();
 
         var (releaseId, _) = await NewImporter(ctx, queue).StartPullRequestBuildAsync(
             projectId, repositoryId, "cronus-dk/customer-app", 42, "abc123", "feature/vat", 7, 555);
@@ -237,7 +239,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId)
             .Select(r => r.Id).SingleAsync();
 
-        var (releaseId, _) = await NewImporter(ctx, new ReleaseImportQueue()).StartPullRequestBuildAsync(
+        var (releaseId, _) = await NewImporter(ctx, new ProjectBuildQueue()).StartPullRequestBuildAsync(
             projectId, repositoryId, "cronus-dk/customer-app", 42, "abc123", "feature/vat", 7, null);
 
         await using var read = _db.NewContext();
@@ -254,7 +256,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId)
             .Select(r => r.Id).SingleAsync();
 
-        var (_, buildId) = await NewImporter(ctx, new ReleaseImportQueue()).StartPullRequestBuildAsync(
+        var (_, buildId) = await NewImporter(ctx, new ProjectBuildQueue()).StartPullRequestBuildAsync(
             projectId, repositoryId, "cronus-dk/customer-app", 42, "abc123", "feature/vat", 7, checkRunId: null);
 
         await using var read = _db.NewContext();
@@ -266,7 +268,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
     {
         await using var ctx = _db.NewContext();
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartPullRequestBuildAsync(
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartPullRequestBuildAsync(
             424242, 1, "cronus-dk/customer-app", 42, "abc123", "feature/vat", 7, null);
 
         await act.Should().ThrowAsync<PlanValidationException>();
@@ -279,7 +281,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, null, clear: true);
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        var queue = new ReleaseImportQueue();
+        var queue = new ProjectBuildQueue();
 
         var act = () => NewImporter(ctx, queue).StartBuildAsync(pipelineId);
 
@@ -307,7 +309,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await ctx.SaveChangesAsync();
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
             .Should().Be(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.AzureDevOps));
@@ -330,7 +332,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await ctx.SaveChangesAsync();
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
             .Should().Contain(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.GitHub))
@@ -346,12 +348,30 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
 
-        var releaseId = await NewImporter(ctx, new ReleaseImportQueue())
+        var releaseId = await NewImporter(ctx, new ProjectBuildQueue())
             .StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.NextMinor);
 
         await using var read = _db.NewContext();
         (await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId)).Trigger
             .Should().Be(ProjectBuildTrigger.PreviewCheck);
+    }
+
+    [Fact]
+    public async Task StartBuildAsync_refuses_a_disabled_pipeline_before_a_build_exists()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        await ctx.OePipelines.Where(p => p.Id == pipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+        var queue = new ProjectBuildQueue();
+
+        var act = () => NewImporter(_db.NewContext(), queue).StartBuildAsync(pipelineId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
+            .Should().Be(ProjectBuildImporter.DisabledRefusal);
+        (await _db.NewContext().OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(0);
+        queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
     [Theory]
@@ -362,9 +382,9 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
         await SetStatusAsync(first, status);
-        var queue = new ReleaseImportQueue();
+        var queue = new ProjectBuildQueue();
 
         var act = () => NewImporter(ctx, queue).StartBuildAsync(pipelineId);
 
@@ -375,6 +395,48 @@ public sealed class ProjectBuildImporterTests : IDisposable
         queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
+    // Two tabs or two people pressing Build together both passed the running check
+    // before either build existed (#1119).
+    [Fact]
+    public async Task Builds_started_at_the_same_moment_queue_only_one()
+    {
+        int pipelineId;
+        await using (var seed = _db.NewContext())
+        {
+            var projectId = await SeedProjectWithRepoAsync(seed);
+            pipelineId = await SeedPipelineAsync(seed, projectId, "Production", requestedAppIdsJson: null);
+        }
+        var queue = new ProjectBuildQueue();
+        var contexts = Enumerable.Range(0, 6).Select(_ => _db.NewContext()).ToList();
+        try
+        {
+            using var go = new ManualResetEventSlim();
+            var starts = contexts.Select(ctx => Task.Run(async () =>
+            {
+                var importer = NewImporter(ctx, queue);
+                go.Wait();
+                try
+                {
+                    await importer.StartBuildAsync(pipelineId);
+                    return true;
+                }
+                catch (PlanValidationException ex) when (ex.Errors["Pipeline"].Contains("already running"))
+                {
+                    return false;
+                }
+            })).ToList();
+            go.Set();
+
+            (await Task.WhenAll(starts)).Count(started => started).Should().Be(1);
+        }
+        finally
+        {
+            foreach (var ctx in contexts) await ctx.DisposeAsync();
+        }
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(1);
+    }
+
     [Theory]
     [InlineData(ProjectBuildStatus.Ready)]
     [InlineData(ProjectBuildStatus.Failed)]
@@ -383,10 +445,10 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
         await SetStatusAsync(first, status);
 
-        await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         await using var read = _db.NewContext();
         (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(2);
@@ -399,9 +461,9 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var other = await SeedPipelineAsync(ctx, projectId, "Test", requestedAppIdsJson: null);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(other);
+        await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(other);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         await act.Should().NotThrowAsync();
     }
@@ -414,9 +476,9 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        await NewImporter(ctx, new ReleaseImportQueue()).StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.NextMinor);
+        await NewImporter(ctx, new ProjectBuildQueue()).StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.NextMinor);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         await act.Should().NotThrowAsync();
     }
@@ -427,9 +489,9 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.NextMajor);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartPreviewCheckAsync(pipelineId, ProjectBuildTarget.NextMajor);
 
         await act.Should().NotThrowAsync();
     }
@@ -442,7 +504,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
         await using (var write = _db.NewContext())
         {
             var release = await write.OeReleases.SingleAsync(r => r.Id == first);
@@ -450,9 +512,235 @@ public sealed class ProjectBuildImporterTests : IDisposable
             await write.SaveChangesAsync();
         }
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         await act.Should().NotThrowAsync();
+    }
+
+    // ── Running an existing build again (#1110) ───────────────────────
+
+    [Fact]
+    public async Task A_finished_build_can_be_built_again_when_nothing_else_of_its_pipeline_runs()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
+
+        await act.Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task A_build_of_a_disabled_pipeline_is_not_built_again()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await ctx.OePipelines.Where(p => p.Id == pipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+
+        var act = async () => { await using var _ = await NewImporter(_db.NewContext(), new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Retry"]
+            .Should().Be(ProjectBuildImporter.DisabledRefusal);
+    }
+
+    [Fact]
+    public async Task A_build_is_not_built_again_while_another_build_of_its_pipeline_runs()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Retry");
+    }
+
+    [Fact]
+    public async Task A_build_is_not_built_again_by_someone_who_cannot_manage_its_solution()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await using (var write = _db.NewContext())
+        {
+            var project = await write.OeProjects.SingleAsync(p => p.Id == projectId);
+            project.Visibility = ProjectVisibility.Private;
+            write.Users.Add(new User
+            {
+                Id = 9631, OrganizationId = TestDb.DefaultOrgId, Email = "nils@example.com", PasswordHash = "x",
+                DisplayName = "Nils", Role = UserRole.Editor, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            });
+            await write.SaveChangesAsync();
+        }
+        // An Editor who is not on the private solution's team.
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = 9631;
+
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
+
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+    }
+
+    [Fact]
+    public async Task A_build_is_not_built_again_by_someone_with_nothing_to_clone_with()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await NewTokens(ctx).SaveTokenAsync(RepositoryProvider.GitHub, null, clear: true);
+
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Symbols"); };
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Symbols"]
+            .Should().Be(CloneCredentialResolver.NothingToCloneWith(RepositoryProvider.GitHub));
+    }
+
+    // Retry and Build pressed together: the retried build is marked queued under the
+    // pipeline's lock, so Build sees it once the release is reopened (#1119).
+    [Fact]
+    public async Task A_build_being_retried_holds_up_a_new_build_of_its_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+
+        await using (var rebuild = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"))
+        {
+            // What reopening the release does.
+            await ctx.OeReleases.Where(r => r.Id == first)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Status, "ingesting"));
+            await rebuild.CommitAsync();
+        }
+
+        await using var other = _db.NewContext();
+        var act = () => NewImporter(other, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
+            .Should().Contain("already running");
+    }
+
+    [Fact]
+    public async Task A_refused_rebuild_leaves_the_build_as_it_was()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+
+        await using (await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"))
+        {
+            // Disposed without a commit, as when reopening the release fails.
+        }
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == first)).Status.Should().Be(ProjectBuildStatus.Ready);
+    }
+
+    // Builds go in line by who is waiting on them (#1137): a retried build is somebody's.
+    [Fact]
+    public async Task A_rebuild_goes_in_line_as_a_build_somebody_waits_on_behind_its_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+
+        var queue = new ProjectBuildQueue();
+        await NewImporter(ctx, queue).QueueRebuildAsync(first, projectId);
+
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.ReleaseId.Should().Be(first);
+        job.BuildOrder.Should().Be(new ProjectBuildOrder(0, $"{pipelineId}:{ProjectBuildTarget.Current}"));
+        job.JobRowId.Should().NotBe(0, "the rebuild resumes after a restart like any build");
+    }
+
+    // A second Retry while the first is still queued, or a maintenance job on the
+    // same release, would run beside it now that builds have workers of their own (#1137).
+    [Fact]
+    public async Task A_build_is_not_rebuilt_while_a_job_for_it_is_still_waiting()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await NewImporter(ctx, new ProjectBuildQueue()).QueueRebuildAsync(first, projectId);
+        // The build row is ready again, as after a refused or failed earlier attempt.
+        await SetStatusAsync(first, ProjectBuildStatus.Ready);
+
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Retry"]
+            .Should().Contain("already being worked on");
+    }
+
+    // A Retry whose request is cut off after the reopen committed must not leave a
+    // queued build with no job behind it: that blocks Build until a restart (#1181).
+    [Fact]
+    public async Task A_rebuild_that_cannot_be_queued_fails_rather_than_blocking_the_pipeline()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await using (var rebuild = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"))
+        {
+            await ctx.OeReleases.Where(r => r.Id == first)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.Status, "ingesting"));
+            await rebuild.CommitAsync();
+        }
+        using var cut = new CancellationTokenSource();
+        await cut.CancelAsync();
+
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).QueueRebuildAsync(first, projectId, cut.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await using (var read = _db.NewContext())
+        {
+            var build = await read.OeProjectBuilds.AsNoTracking().SingleAsync(b => b.ReleaseId == first);
+            build.Status.Should().Be(ProjectBuildStatus.Failed);
+            build.FailureMessage.Should().Be(ProjectBuildImporter.RebuildNotQueuedMessage);
+            var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == first);
+            release.Status.Should().Be("failed");
+            release.StatusMessage.Should().Be(ProjectBuildImporter.RebuildNotQueuedMessage);
+            (await read.OeImportJobs.AnyAsync(j => j.ReleaseId == first && (j.Status == "queued" || j.Status == "running")))
+                .Should().BeFalse();
+        }
+        // The pipeline builds again straight away.
+        var next = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        next.Should().NotBe(first);
+    }
+
+    private async Task FinishAsync(int releaseId)
+    {
+        await SetStatusAsync(releaseId, ProjectBuildStatus.Ready);
+        await using var write = _db.NewContext();
+        var release = await write.OeReleases.SingleAsync(r => r.Id == releaseId);
+        release.Status = "ready";
+        // As the worker does once a build is done.
+        foreach (var job in await write.OeImportJobs.Where(j => j.ReleaseId == releaseId).ToListAsync())
+        {
+            job.Status = "completed";
+        }
+        await write.SaveChangesAsync();
     }
 
     private async Task SetStatusAsync(int releaseId, string status)
@@ -470,7 +758,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
 
-        var releaseId = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var releaseId = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         await using var read = _db.NewContext();
         var build = await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == releaseId);
@@ -490,7 +778,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var repositoryId = await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId).Select(r => r.Id).SingleAsync();
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        var queue = new ReleaseImportQueue();
+        var queue = new ProjectBuildQueue();
 
         var releaseId = await NewImporter(ctx, queue).StartPushBuildAsync(pipelineId, repositoryId, PushedSha);
 
@@ -512,11 +800,11 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        var first = await NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
         await SetStatusAsync(first, ProjectBuildStatus.Building);
 
-        await NewImporter(ctx, new ReleaseImportQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha);
-        await NewImporter(ctx, new ReleaseImportQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha.Replace('1', '2'));
+        await NewImporter(ctx, new ProjectBuildQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha);
+        await NewImporter(ctx, new ProjectBuildQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha.Replace('1', '2'));
 
         await using var read = _db.NewContext();
         (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(3);
@@ -528,9 +816,9 @@ public sealed class ProjectBuildImporterTests : IDisposable
         await using var ctx = _db.NewContext();
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
-        await NewImporter(ctx, new ReleaseImportQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha);
+        await NewImporter(ctx, new ProjectBuildQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartBuildAsync(pipelineId);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
             .Should().Contain("already running");
@@ -545,10 +833,10 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var released = new List<int>();
         for (var i = 0; i < ProjectBuildImporter.MaxWaitingPushBuilds; i++)
         {
-            released.Add(await NewImporter(ctx, new ReleaseImportQueue())
+            released.Add(await NewImporter(ctx, new ProjectBuildQueue())
                 .StartPushBuildAsync(pipelineId, 1, new string((char)('a' + i), 40)));
         }
-        var queue = new ReleaseImportQueue();
+        var queue = new ProjectBuildQueue();
 
         var releaseId = await NewImporter(ctx, queue).StartPushBuildAsync(pipelineId, 7, PushedSha);
 
@@ -563,6 +851,34 @@ public sealed class ProjectBuildImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task A_push_never_moves_a_build_waiting_as_someone_else()
+    {
+        // Those are refused when they start once the automatic builds have changed
+        // hands (#1112), so riding on one would lose this push.
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var released = new List<int>();
+        for (var i = 0; i < ProjectBuildImporter.MaxWaitingPushBuilds; i++)
+        {
+            released.Add(await NewImporter(ctx, new ProjectBuildQueue())
+                .StartPushBuildAsync(pipelineId, 1, new string((char)('a' + i), 40)));
+        }
+        await using (var other = _db.NewContext())
+        {
+            await other.OeProjectBuilds.Where(b => b.PipelineId == pipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.StartedByUserId, (int?)null));
+        }
+
+        var releaseId = await NewImporter(ctx, new ProjectBuildQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha);
+
+        released.Should().NotContain(releaseId);
+        await using var read = _db.NewContext();
+        var newest = released[^1];
+        (await read.OeProjectBuilds.SingleAsync(b => b.ReleaseId == newest)).HeadSha.Should().Be(new string('e', 40));
+    }
+
+    [Fact]
     public async Task A_build_that_has_started_is_never_moved_onto_a_later_push()
     {
         await using var ctx = _db.NewContext();
@@ -571,12 +887,12 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var released = new List<int>();
         for (var i = 0; i < ProjectBuildImporter.MaxWaitingPushBuilds; i++)
         {
-            released.Add(await NewImporter(ctx, new ReleaseImportQueue())
+            released.Add(await NewImporter(ctx, new ProjectBuildQueue())
                 .StartPushBuildAsync(pipelineId, 1, new string((char)('a' + i), 40)));
         }
         await SetStatusAsync(released[0], ProjectBuildStatus.Building);
 
-        var releaseId = await NewImporter(ctx, new ReleaseImportQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha);
+        var releaseId = await NewImporter(ctx, new ProjectBuildQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha);
 
         released.Should().NotContain(releaseId, "only four are still waiting, so this push gets its own build");
         await using var read = _db.NewContext();
@@ -591,7 +907,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         var projectId = await SeedProjectWithRepoAsync(ctx);
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
 
-        var act = () => NewImporter(ctx, new ReleaseImportQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha);
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartPushBuildAsync(pipelineId, 1, PushedSha);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
             .Should().Be(ProjectBuildImporter.NothingToCloneWithOnPush(RepositoryProvider.GitHub));
@@ -599,7 +915,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
         (await read.OeProjectBuilds.AnyAsync()).Should().BeFalse();
     }
 
-    private ProjectBuildImporter NewImporter(Data.AppDbContext ctx, ReleaseImportQueue queue)
+    private ProjectBuildImporter NewImporter(Data.AppDbContext ctx, ProjectBuildQueue queue)
     {
         var translations = new TranslationImportService(
             ctx, _db.OrgContext,
@@ -617,7 +933,8 @@ public sealed class ProjectBuildImporterTests : IDisposable
             _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, new FakeGitHubApi())),
             _db.OrgContext, NullLogger<CloneCredentialResolver>.Instance);
         return new ProjectBuildImporter(
-            importer, queue, persistedJobs, ctx, _db.OrgContext, access, credentials, TimeProvider.System,
+            importer, new ReleaseManagementService(ctx, _db.OrgContext, NullLogger<ReleaseManagementService>.Instance),
+            queue, persistedJobs, ctx, _db.OrgContext, access, credentials, TimeProvider.System,
             NullLogger<ProjectBuildImporter>.Instance);
     }
 

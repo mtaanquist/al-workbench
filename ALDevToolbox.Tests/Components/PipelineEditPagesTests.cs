@@ -145,6 +145,24 @@ public sealed class PipelineEditPagesTests : IDisposable
     }
 
     [Fact]
+    public async Task A_typed_build_pipeline_name_says_that_changing_the_branch_or_extensions_resets_it()
+    {
+        var seed = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var pipeline = await ctx.OePipelines.SingleAsync(p => p.Id == seed.PipelineId);
+            pipeline.NameIsCustom = true;
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<PipelineEdit>(p => p.Add(x => x.PipelineId, seed.PipelineId));
+
+        cut.WaitForAssertion(() => cut.Find("#pe-name").GetAttribute("value").Should().Be("Nightly"));
+        cut.Find("#pe-name-hint").TextContent.Should().Be(
+            "If you change the branch or the extensions, this name is replaced with the automatic one. Leave it blank to use the automatic name now.");
+    }
+
+    [Fact]
     public async Task A_pipeline_that_is_gone_says_so_instead_of_drawing_a_form()
     {
         await SeedAsync();
@@ -165,7 +183,7 @@ public sealed class PipelineEditPagesTests : IDisposable
 
         var cut = _ctx.Render<PipelineEdit>(p => p.Add(x => x.PipelineId, seed.PipelineId));
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can change this solution's pipelines."));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only people who manage the solution can change this solution's pipelines."));
         cut.FindAll("form").Should().BeEmpty();
         cut.FindAll(".btn--primary").Should().BeEmpty();
     }
@@ -179,7 +197,7 @@ public sealed class PipelineEditPagesTests : IDisposable
         Nav.NavigateTo($"/pipelines/new?solution={seed.ProjectId}");
         var cut = _ctx.Render<PipelineEdit>();
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can add pipelines to CRONUS A/S."));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only people who manage the solution can add pipelines to CRONUS A/S."));
         cut.FindAll(".pe-picker").Should().BeEmpty();
         cut.FindAll("#pe-branch").Should().BeEmpty("there is nothing to fill in that could be saved");
         cut.FindAll(".edit-col > .card .card__title").Select(t => t.TextContent.Trim()).Should().Equal("Source", "Extensions");
@@ -243,6 +261,30 @@ public sealed class PipelineEditPagesTests : IDisposable
     }
 
     [Fact]
+    public async Task A_deployment_pipeline_whose_build_pipeline_was_deleted_asks_for_another_before_saving()
+    {
+        var seed = await SeedAsync();
+        var rpId = await SeedDeploymentPipelineAsync(seed);
+        await using (var db = _db.NewContext())
+        {
+            db.OePipelines.Add(new OePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, Name = "main",
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+            await db.OePipelines.Where(p => p.Id == seed.PipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        }
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
+
+        cut.WaitForAssertion(() => cut.Find("#rpe-build").GetAttribute("value").Should().Be("0"));
+        cut.Find("#rpe-build").ParentElement!.ParentElement!.TextContent.Should().Contain("\"Nightly\" was deleted. Choose the build pipeline to deploy from now.");
+        cut.Find(".page-head .btn--primary").HasAttribute("disabled").Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Editing_a_deployment_pipeline_saves_over_it_and_returns_to_it()
     {
         var seed = await SeedAsync();
@@ -256,6 +298,25 @@ public sealed class PipelineEditPagesTests : IDisposable
         cut.WaitForAssertion(() => Nav.ToBaseRelativePath(Nav.Uri).Should().Be($"pipelines/deployments/{rpId}"));
         await using var read = _db.NewContext();
         (await read.OeReleasePipelines.AsNoTracking().SingleAsync(r => r.Id == rpId)).PrepareReleaseOnNewBuild.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_typed_deployment_pipeline_name_says_that_changing_the_source_or_environment_resets_it()
+    {
+        var seed = await SeedAsync();
+        var rpId = await SeedDeploymentPipelineAsync(seed);
+        await using (var ctx = _db.NewContext())
+        {
+            var rp = await ctx.OeReleasePipelines.SingleAsync(r => r.Id == rpId);
+            rp.Name = "Nightly to Test - CRONUS";
+            rp.NameIsCustom = true;
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
+
+        cut.WaitForAssertion(() => cut.Find("#rpe-name-hint").TextContent.Should().Be(
+            "If you change where the apps come from or the target environment, this name is replaced with the automatic one. Leave it blank to use the automatic name now."));
     }
 
     [Fact]
@@ -320,7 +381,7 @@ public sealed class PipelineEditPagesTests : IDisposable
         Nav.NavigateTo($"/pipelines/deployments/new?solution={seed.ProjectId}");
         var cut = _ctx.Render<ReleasePipelineEdit>();
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can add deployment pipelines to CRONUS A/S."));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only people who manage the solution can add deployment pipelines to CRONUS A/S."));
         cut.FindAll("#rpe-env").Should().BeEmpty();
         cut.FindAll(".btn--primary").Should().BeEmpty();
     }
@@ -334,7 +395,7 @@ public sealed class PipelineEditPagesTests : IDisposable
 
         var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only the solution owner or an admin can change this solution's deployment pipelines."));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Only people who manage the solution can change this solution's deployment pipelines."));
         cut.FindAll("form").Should().BeEmpty();
         cut.FindAll(".btn--primary").Should().BeEmpty();
     }

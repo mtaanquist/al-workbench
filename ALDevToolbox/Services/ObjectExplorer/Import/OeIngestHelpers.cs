@@ -52,13 +52,45 @@ internal static class OeIngestHelpers
     }
 
     /// <summary>
+    /// Saves the change tracker's pending rows together with the source blobs they
+    /// reference, in one transaction (or the caller's, when one is open): the blobs
+    /// go into <c>oe_file_contents</c> through <see cref="UpsertFileContentsAsync"/>,
+    /// which holds them until the rows that reference them are committed.
+    /// </summary>
+    public static async Task SaveWithFileContentsAsync(
+        AppDbContext db,
+        IReadOnlyDictionary<string, (string Content, int Length, int LineCount)> contents,
+        CancellationToken ct)
+    {
+        if (contents.Count == 0 || db.Database.CurrentTransaction is not null)
+        {
+            await UpsertFileContentsAsync(db, contents, ct).ConfigureAwait(false);
+            await db.SaveChangesAsync(ct).ConfigureAwait(false);
+            return;
+        }
+        await using var tx = await db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+        await UpsertFileContentsAsync(db, contents, ct).ConfigureAwait(false);
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Inserts a chunk's distinct source blobs into the shared, content-addressed
-    /// <c>oe_file_contents</c> store, keyed by hash. <c>ON CONFLICT DO NOTHING</c>
-    /// makes it idempotent and race-safe: two orgs importing the same source
-    /// concurrently both succeed and the blob is stored exactly once. Must run
-    /// before the <c>ModuleFile</c> rows referencing these hashes are saved, so
-    /// their <c>content_hash</c> FK resolves. Raw SQL because EF can't express a
-    /// batch upsert and a duplicate-PK <c>Add</c> would throw.
+    /// <c>oe_file_contents</c> store, keyed by hash, and locks every one of them
+    /// until the caller's transaction ends. <c>ON CONFLICT DO NOTHING</c> makes it
+    /// idempotent: two orgs importing the same source concurrently both succeed and
+    /// the blob is stored exactly once. Must run before the <c>ModuleFile</c> rows
+    /// referencing these hashes are saved, so their <c>content_hash</c> FK resolves.
+    /// Raw SQL because EF can't express a batch upsert and a duplicate-PK
+    /// <c>Add</c> would throw.
+    /// <para>
+    /// A blob that already existed is the one a release delete or a retry's wipe may
+    /// be reclaiming as unused at that moment, so it is only safe once it is locked:
+    /// the <c>FOR KEY SHARE</c> lock stops the reclaim taking it, and does not hold
+    /// up another import of the same blob. Reclaim skips locked rows rather than wait
+    /// for them. A blob deleted between the insert and the lock is inserted again
+    /// (#1181).
+    /// </para>
     /// </summary>
     public static async Task UpsertFileContentsAsync(
         AppDbContext db,
@@ -79,10 +111,25 @@ internal static class OeIngestHelpers
             lines[i] = v.LineCount;
             i++;
         }
-        await db.Database.ExecuteSqlRawAsync(
-            "INSERT INTO oe_file_contents (content_hash, content, content_length, line_count) " +
-            "SELECT * FROM unnest({0}::text[], {1}::text[], {2}::int[], {3}::int[]) " +
-            "ON CONFLICT (content_hash) DO NOTHING",
-            new object[] { hashes, bodies, lengths, lines }, ct).ConfigureAwait(false);
+        for (var attempt = 1; ; attempt++)
+        {
+            // Sorted, so two imports running at once take the same hashes in the same
+            // order and wait on each other rather than deadlock (#1137).
+            await db.Database.ExecuteSqlRawAsync(
+                "INSERT INTO oe_file_contents (content_hash, content, content_length, line_count) " +
+                "SELECT * FROM unnest({0}::text[], {1}::text[], {2}::int[], {3}::int[]) ORDER BY 1 " +
+                "ON CONFLICT (content_hash) DO NOTHING",
+                new object[] { hashes, bodies, lengths, lines }, ct).ConfigureAwait(false);
+            var locked = await db.Database.SqlQueryRaw<int>(
+                "SELECT count(*)::int AS \"Value\" FROM (SELECT 1 FROM oe_file_contents " +
+                "WHERE content_hash = ANY({0}) ORDER BY content_hash FOR KEY SHARE) l",
+                new object[] { hashes }).SingleAsync(ct).ConfigureAwait(false);
+            if (locked == hashes.Length) return;
+            if (attempt == 3)
+            {
+                throw new InvalidOperationException(
+                    $"Could not hold {hashes.Length - locked} source blob(s) against a concurrent delete.");
+            }
+        }
     }
 }

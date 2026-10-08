@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
@@ -21,7 +22,7 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// <c>.design/object-explorer-project-builds.md</c>.
 ///
 /// <para>
-/// Run by <see cref="ReleaseImportWorker"/> inside the submitter's org scope. The
+/// Run by a <see cref="ProjectBuildWorker"/> inside the submitter's org scope. The
 /// IO (git clone, artifact download, <c>alc</c>) sits behind
 /// <see cref="IProcessRunner"/> / <see cref="BcArtifactService"/> /
 /// <see cref="AlCompilerProvisioner"/> so the orchestration and the pure helpers
@@ -48,15 +49,36 @@ public sealed class ProjectBuildService
     private const int DefaultBuildCloneTimeoutMinutes = 30;
 
     /// <summary>The build-clone ceiling (env-overridable). git's low-speed abort (~60s) catches genuine stalls; this only backstops a stuck process.</summary>
-    private static TimeSpan BuildCloneTimeout()
-    {
-        var raw = Environment.GetEnvironmentVariable("OE_BUILD_CLONE_TIMEOUT_MINUTES");
-        return int.TryParse(raw, out var m) && m > 0 ? TimeSpan.FromMinutes(m) : TimeSpan.FromMinutes(DefaultBuildCloneTimeoutMinutes);
-    }
+    private static TimeSpan BuildCloneTimeout() =>
+        MinutesOrDefault(Environment.GetEnvironmentVariable("OE_BUILD_CLONE_TIMEOUT_MINUTES"), DefaultBuildCloneTimeoutMinutes);
+
+    /// <summary>Default ceiling for compiling one extension. Override via <c>OE_BUILD_COMPILE_TIMEOUT_MINUTES</c>.</summary>
+    private const int DefaultCompileTimeoutMinutes = 30;
+
+    /// <summary>
+    /// The ceiling for one <c>alc</c> run (env-overridable). A compiler that never exits
+    /// would hold one of the build workers, and the build slot with it, until a restart
+    /// (#1132, #1137); past this it is killed and that extension fails.
+    /// </summary>
+    private static TimeSpan CompileTimeout() =>
+        MinutesOrDefault(Environment.GetEnvironmentVariable("OE_BUILD_COMPILE_TIMEOUT_MINUTES"), DefaultCompileTimeoutMinutes);
+
+    /// <summary>
+    /// The ceiling for a git command that only reads the clone (diff, log, merge-base,
+    /// show, symbolic-ref). These take seconds; the bound only stops a stuck one from
+    /// holding a build worker (#1132).
+    /// </summary>
+    private static readonly TimeSpan LocalGitTimeout = TimeSpan.FromMinutes(5);
+
+    /// <summary><paramref name="raw"/> as a positive number of minutes, else <paramref name="defaultMinutes"/>.</summary>
+    internal static TimeSpan MinutesOrDefault(string? raw, int defaultMinutes) =>
+        int.TryParse(raw, out var m) && m > 0 ? TimeSpan.FromMinutes(m) : TimeSpan.FromMinutes(defaultMinutes);
 
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
+    private readonly ProjectAccess _access;
     private readonly BcArtifactService _artifacts;
+    private readonly BcArtifactCache _artifactCache;
     private readonly ReleaseImportService _importer;
     private readonly AlCompilerProvisioner _compiler;
     private readonly AlSymbolFeedResolver _symbolFeeds;
@@ -65,21 +87,34 @@ public sealed class ProjectBuildService
     private readonly TimeProvider _clock;
     private readonly ILogger<ProjectBuildService> _logger;
 
+    /// <summary>
+    /// The build queue, so a build can give up its place while it waits on another
+    /// import (#1180). Optional so a test, or any caller that builds this service by
+    /// hand, can run a build without one; in the app it is always injected.
+    /// </summary>
+    private readonly ProjectBuildQueue? _buildQueue;
+
     public ProjectBuildService(
         AppDbContext db,
         IOrganizationContext orgContext,
+        ProjectAccess access,
         BcArtifactService artifacts,
+        BcArtifactCache artifactCache,
         ReleaseImportService importer,
         AlCompilerProvisioner compiler,
         AlSymbolFeedResolver symbolFeeds,
         CloneCredentialResolver credentials,
         IProcessRunner processRunner,
         TimeProvider clock,
-        ILogger<ProjectBuildService> logger)
+        ILogger<ProjectBuildService> logger,
+        ProjectBuildQueue? buildQueue = null)
     {
+        _buildQueue = buildQueue;
         _db = db;
         _orgContext = orgContext;
+        _access = access;
         _artifacts = artifacts;
+        _artifactCache = artifactCache;
         _importer = importer;
         _compiler = compiler;
         _symbolFeeds = symbolFeeds;
@@ -117,9 +152,18 @@ public sealed class ProjectBuildService
         // persistence then no-ops, leaving the old per-app report as the record.
         var build = await _db.OeProjectBuilds
             .FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
+        // Only on the first run: a Retry or Recover symbols is a person's own choice, made
+        // and run as them, so it is not the pipeline's automation to check.
+        if (build is { Trigger: ProjectBuildTrigger.Push or ProjectBuildTrigger.PreviewCheck, FinishedAt: null })
+        {
+            await EnsureAutomationStillOnAsync(build, project.CreatedByUserId, ct).ConfigureAwait(false);
+        }
         if (build is not null)
         {
             build.Status = ProjectBuildStatus.Building;
+            build.BuildingStartedAt = _clock.GetUtcNow().UtcDateTime;
+            // A rerun starts clean: the earlier attempt's reason is no longer the build's.
+            build.FailureMessage = null;
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
             // A push may have moved this build onto its own commit between the read
             // above and the save (ProjectBuildImporter.StartPushBuildAsync). That move
@@ -160,12 +204,39 @@ public sealed class ProjectBuildService
             options = options with { RepositoryId = pushedRepositoryId, HeadSha = build.HeadSha };
         }
 
+        // A second run of the same build (Retry, symbol recovery, a restart resume)
+        // builds the commits its first run cloned, not wherever the branches are now.
+        // The build number, and with it every app's version, belongs to that code: a
+        // rerun that picked up later commits would ship different apps under a version
+        // environments already have, and they would never be offered it (#1110).
+        if (build is not null && build.Trigger != ProjectBuildTrigger.PullRequest && options.PinnedCommits is null)
+        {
+            var earlier = await _db.OeProjectBuildRepoCommits.AsNoTracking()
+                .Where(c => c.ProjectBuildId == build.Id && c.ProjectRepositoryId != null && c.CommitHash != "")
+                .OrderBy(c => c.Id)
+                .Select(c => new { RepositoryId = c.ProjectRepositoryId!.Value, c.CommitHash })
+                .ToListAsync(ct).ConfigureAwait(false);
+            if (earlier.Count > 0)
+            {
+                // A run that recorded its commits more than once keeps the latest.
+                options = options with
+                {
+                    PinnedCommits = earlier
+                        .GroupBy(c => c.RepositoryId)
+                        .ToDictionary(g => g.Key, g => g.Last().CommitHash),
+                };
+            }
+        }
+
         // A next-major build compiles with the newest beta compiler, because the
         // stable one may not read the next major's symbols; everything else keeps
         // the stable compiler every build has used.
-        var compiler = await _compiler.ResolveAsync(prerelease: options.Target == BcBuildTarget.NextMajor, ct).ConfigureAwait(false)
+        // The lease keeps the compiler on the volume while this build uses it: another
+        // build may bring in a newer beta meanwhile (#1137).
+        using var compilerLease = await _compiler.UseAsync(prerelease: options.Target == BcBuildTarget.NextMajor, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException(
                 "The AL compiler isn't available yet. It's downloaded from NuGet on first use — check the server has outbound access, then retry.");
+        var compiler = compilerLease.Value;
 
         var buildRoot = Path.Combine(Path.GetTempPath(), TempPrefix + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(buildRoot);
@@ -186,7 +257,11 @@ public sealed class ProjectBuildService
 
             // A build of the default branch records which branch that was, so the
             // pipeline can name it. A pull-request build is labelled by its head ref.
-            if (build is not null && build.Branch is null && build.Trigger != ProjectBuildTrigger.PullRequest)
+            // A rerun builds its first run's commits, so it keeps the first run's answer,
+            // even when that was none: today's default may not be where those commits came
+            // from (the deployment branch rule reads it, #1129, #1193).
+            if (build is not null && build.Branch is null && build.Trigger != ProjectBuildTrigger.PullRequest
+                && options.PinnedCommits is null)
             {
                 var names = clones.Select(c => c.Branch).OfType<string>().Distinct(StringComparer.Ordinal).ToList();
                 build.DefaultBranch = names.Count == 0 ? null : Truncate(string.Join(", ", names), 250);
@@ -202,6 +277,7 @@ public sealed class ProjectBuildService
 
             // 2. Discover extensions across the successful clones.
             var discovered = new List<DiscoveredApp>();
+            var testApps = new List<string>();
             foreach (var clone in clones)
             {
                 foreach (var projectDir in DiscoverAppProjectDirs(clone.Dir))
@@ -214,8 +290,17 @@ public sealed class ProjectBuildService
                             RepoUrl: clone.Url, CommitSha: clone.CommitSha, CommitDate: clone.CommitDate));
                         continue;
                     }
+                    if (AppJsonManifestParser.IsTestApp(manifest))
+                    {
+                        testApps.Add(string.IsNullOrWhiteSpace(manifest.Name) ? Path.GetFileName(projectDir) : manifest.Name);
+                        continue;
+                    }
                     discovered.Add(new DiscoveredApp(projectDir, manifest, clone));
                 }
+            }
+            if (testApps.Count > 0)
+            {
+                logs.Add(new PendingLog(null, "Build", DescribeSkippedTestApps(testApps)));
             }
             if (discovered.Count == 0)
             {
@@ -245,8 +330,8 @@ public sealed class ProjectBuildService
 
             // 2c. On a pipeline that publishes only what changed, find the apps with no
             //     change since the pipeline last produced them. They keep that earlier
-            //     version (written into the clone so the compile agrees), and after the
-            //     compile the build carries the earlier .app instead of its own (#1094).
+            //     version (written into the clone so the app.json agrees), and the build
+            //     carries the earlier .app without compiling it again (#1094, #1140).
             var settings = build is not null && MayNumberApps(build.PipelineId, build.Trigger, options.Target)
                 ? await ReadPipelineBuildSettingsAsync(_db, build.PipelineId!.Value, ct).ConfigureAwait(false)
                 : null;
@@ -313,12 +398,27 @@ public sealed class ProjectBuildService
 
             var symbolsDir = Path.Combine(buildRoot, "symbols");
             Directory.CreateDirectory(symbolsDir);
-            var download = await _artifacts.DownloadArtifactSetAsync(resolved.ApplicationUrl, ct).ConfigureAwait(false);
+            // Kept between builds, so the next build of this version reads it from disk (#1140).
+            using var artifactLease = await _artifactCache.GetAsync(
+                resolved.ApplicationUrl,
+                token => _artifacts.DownloadArtifactSetAsync(resolved.ApplicationUrl, token),
+                ct).ConfigureAwait(false);
+            var download = artifactLease.Value;
             int? parentReleaseId;
             IReadOnlyList<ResolvedSymbolPackage> fromFeeds = [];
             try
             {
-                ExtractArtifactSymbols(download, symbolsDir);
+                try
+                {
+                    ExtractArtifactSymbols(download, symbolsDir);
+                }
+                catch (InvalidDataException)
+                {
+                    // A zip that cannot be read would fail every later build of this
+                    // version too; drop it so the next one downloads it again.
+                    artifactLease.Discard();
+                    throw;
+                }
                 CopyCommittedSymbols(clones.Select(c => c.Dir).ToList(), symbolsDir);
                 // Whatever is still missing comes from Microsoft's public symbol
                 // feeds, then from the organisation's own earlier builds (#901).
@@ -333,20 +433,26 @@ public sealed class ProjectBuildService
                 await WriteSupplementalSymbolsAsync(projectId, supplemental, symbolsDir, ct).ConfigureAwait(false);
                 // 4. Auto-import the parent BC release inline (best-effort) so
                 //    cross-release references into Base App resolve. Reuses the
-                //    artifact we already downloaded.
-                parentReleaseId = await EnsureParentReleaseAsync(resolved, download, ct).ConfigureAwait(false);
+                //    artifact we already downloaded. A preview check indexes no
+                //    objects of its own (#1140), so it has no references to resolve:
+                //    it links the catalogue's preview when there is one and imports
+                //    nothing.
+                parentReleaseId = options.Target == BcBuildTarget.Current
+                    ? await EnsureParentReleaseAsync(resolved, download, releaseId, ct).ConfigureAwait(false)
+                    : await ExistingParentReleaseAsync(resolved, ct).ConfigureAwait(false);
             }
             finally
             {
-                TryDelete(download.ApplicationZipPath);
-                if (download.PlatformZipPath is not null) TryDelete(download.PlatformZipPath);
+                artifactLease.Dispose();
             }
 
             // 4b. Put each vendor package the feeds resolved into the Object
             //     Explorer, once per (app id, version), so our code's references
-            //     into it resolve (#901, Part 4). Best-effort, like the parent.
-            var dependencyReleaseIds = await EnsureVendorReleasesAsync(fromFeeds, symbolsDir, parentReleaseId, logs, ct)
-                .ConfigureAwait(false);
+            //     into it resolve (#901, Part 4). Best-effort, like the parent. Not
+            //     for a preview check, which has no references to resolve (#1140).
+            IReadOnlyList<int> dependencyReleaseIds = options.Target == BcBuildTarget.Current
+                ? await EnsureVendorReleasesAsync(fromFeeds, symbolsDir, parentReleaseId, releaseId, logs, ct).ConfigureAwait(false)
+                : [];
 
             // 5. Compile each extension in dependency order; a compiled sibling
             //    becomes a symbol for the apps that depend on it.
@@ -357,6 +463,43 @@ public sealed class ProjectBuildService
             foreach (var app in TopologicalOrder(discovered))
             {
                 ct.ThrowIfCancellationRequested();
+                if (carried.TryGetValue(NormalizeAppId(app.Manifest.Id), out var earlier))
+                {
+                    // Unchanged, and so is every sibling it depends on (FindUnchangedAppsAsync
+                    // carries nothing whose dependency changed): compiling it again would only
+                    // produce what the earlier build already did, so its .app is used as it is
+                    // (#1140). It goes into the symbols folder for the apps that depend on it.
+                    var kept = await _db.OeProjectBuildArtifacts.AsNoTracking()
+                        .Where(a => a.Id == earlier.ArtifactId)
+                        .Select(a => new { a.FileName, a.AppVersion, a.RuntimeVersion, a.Content })
+                        .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                    if (kept is null)
+                    {
+                        // The earlier build was removed while this one ran. Building again
+                        // finds no earlier build and gives the app a new version.
+                        results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
+                            ProjectBuildResultStatus.Failed,
+                            $"The earlier build of {app.Manifest.Name} was removed while this one ran. Build again.",
+                            RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                        continue;
+                    }
+                    await File.WriteAllBytesAsync(Path.Combine(symbolsDir, SafeAppFileName(app.Manifest)), kept.Content, ct).ConfigureAwait(false);
+                    uploads.Add(new AppFileUpload(
+                        FileName: kept.FileName,
+                        AppStream: new MemoryStream(kept.Content, writable: false),
+                        SourceZipStream: null));
+                    // Deliver exactly the .app the earlier build produced, so an
+                    // environment already on it sees the same version and skips it.
+                    artifacts.Add(new PendingArtifact(kept.FileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name,
+                        kept.AppVersion, kept.RuntimeVersion, kept.Content, earlier.OriginBuildId));
+                    logs.Add(new PendingLog(app.Repo.RepositoryId, $"Compile: {app.Manifest.Name}",
+                        $"Not compiled: nothing in it or in the extensions it depends on changed since build #{earlier.OriginBuildId}, so this build uses that build's {kept.FileName}."));
+                    results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
+                        ProjectBuildResultStatus.Compiled, null,
+                        RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
+                    continue;
+                }
+
                 var (compiled, compileLog) = await CompileAsync(app, symbolsDir, compiler, ct).ConfigureAwait(false);
                 if (!string.IsNullOrWhiteSpace(compileLog))
                 {
@@ -411,34 +554,7 @@ public sealed class ProjectBuildService
                 // Retain the compiled .app as a downloadable deliverable. Packaging
                 // artifacts (.dep.app) are never compiler output here, but guard
                 // anyway so they can't slip in as a download. See .design/artifacts.md.
-                if (carried.TryGetValue(NormalizeAppId(app.Manifest.Id), out var earlier))
-                {
-                    // Unchanged: deliver exactly the .app the earlier build produced, so
-                    // an environment already on it sees the same version and skips it.
-                    var kept = await _db.OeProjectBuildArtifacts.AsNoTracking()
-                        .Where(a => a.Id == earlier.ArtifactId)
-                        .Select(a => new { a.FileName, a.AppVersion, a.RuntimeVersion, a.Content })
-                        .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-                    if (kept is not null)
-                    {
-                        artifacts.Add(new PendingArtifact(kept.FileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name,
-                            kept.AppVersion, kept.RuntimeVersion, kept.Content, earlier.OriginBuildId));
-                    }
-                    else
-                    {
-                        // The earlier build was removed while this one ran. What was just
-                        // compiled carries the earlier version, so storing it would publish
-                        // different bytes under a version that already exists. Fail the app
-                        // instead; building again finds no earlier build and gives it a new one.
-                        uploads.RemoveAt(uploads.Count - 1);
-                        results.Add(new BuildAppResult(app.Manifest.Name, app.Manifest.Id,
-                            ProjectBuildResultStatus.Failed,
-                            $"The earlier build of {app.Manifest.Name} was removed while this one ran. Build again.",
-                            RepoUrl: app.Repo.Url, CommitSha: app.Repo.CommitSha, CommitDate: app.Repo.CommitDate));
-                        continue;
-                    }
-                }
-                else if (!fileName.EndsWith(".dep.app", StringComparison.OrdinalIgnoreCase))
+                if (!fileName.EndsWith(".dep.app", StringComparison.OrdinalIgnoreCase))
                 {
                     artifacts.Add(new PendingArtifact(fileName, BuildArtifactAppIdBackfill.CanonicalAppId(app.Manifest.Id), app.Manifest.Name, app.Manifest.Version, app.Manifest.Runtime, bytes));
                 }
@@ -463,7 +579,8 @@ public sealed class ProjectBuildService
                 "Project build for {Project} (release {ReleaseId}): {Compiled} compiled, {Failed} failed, parent release {ParentReleaseId}.",
                 project.Name, releaseId, uploads.Count, results.Count(r => r.Status == ProjectBuildResultStatus.Failed), parentReleaseId);
 
-            return new ProjectBuildOutcome(uploads, results, parentReleaseId, finalLabel, resolved.MajorMinor);
+            return new ProjectBuildOutcome(uploads, results, parentReleaseId, finalLabel, resolved.MajorMinor,
+                IsPreview: options.Target != BcBuildTarget.Current);
         }
         finally
         {
@@ -619,7 +736,8 @@ public sealed class ProjectBuildService
                  folder == "." ? "." : ":(literal)" + folder],
                 app.Repo.Dir,
                 // Never prompt or fetch: the answer is in the clone's history or not at all.
-                new Dictionary<string, string> { ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_NO_LAZY_FETCH"] = "1" }), ct).ConfigureAwait(false);
+                new Dictionary<string, string> { ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_NO_LAZY_FETCH"] = "1" },
+                LocalGitTimeout), ct).ConfigureAwait(false);
             if (!diff.Succeeded)
             {
                 lines.Add($"{name}: changed (the commit build #{prior.ProjectBuildId} used, {Short(priorSha)}, could not be compared).");
@@ -846,6 +964,7 @@ public sealed class ProjectBuildService
                 {
                     var manifest = TryReadManifest(projectDir);
                     if (manifest is null || string.IsNullOrWhiteSpace(manifest.Id)) continue;
+                    if (AppJsonManifestParser.IsTestApp(manifest)) continue;
                     discovered.Add(new DiscoveredExtension(
                         manifest.Id, manifest.Name, manifest.Publisher, manifest.Version, repo.Url, repo.DisplayName));
                 }
@@ -855,7 +974,7 @@ public sealed class ProjectBuildService
             {
                 var reason = failures.Count > 0
                     ? string.Join(" ", failures)
-                    : "No extensions with an app.json were found outside test folders.";
+                    : "No extensions with an app.json were found outside test folders, apart from test apps.";
                 _logger.LogWarning("Discovery: found no extensions for project {ProjectId}. {Reason}", project.Id, reason);
                 return (Array.Empty<DiscoveredExtension>(), reason);
             }
@@ -943,6 +1062,67 @@ public sealed class ProjectBuildService
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
     }
 
+    private const string PipelineDeletedRefusal = "The pipeline was deleted before this build started.";
+    private const string PipelineDisabledRefusal = "The pipeline was disabled before this build started.";
+    private const string PushTurnedOffRefusal = "Building automatically on push was turned off before this build started.";
+    private const string PreviewCheckTurnedOffRefusal = "The nightly preview check was turned off before this build started.";
+    private const string TakenOverRefusal = "Someone else took over this pipeline's automatic builds before this build started.";
+    private const string InactiveRefusal = "The person this build runs as no longer has an active account.";
+    private const string NoAccessRefusal = "The person this build runs as can no longer manage this solution.";
+
+    /// <summary>
+    /// The reasons <see cref="EnsureAutomationStillOnAsync"/> fails a build with. Such a
+    /// build did not fail on its own merits, so it sends no build email and does not
+    /// count as the build before the next one (<c>BuildNotifier</c>).
+    /// </summary>
+    public static readonly IReadOnlyList<string> AutomationRefusals =
+    [
+        PipelineDeletedRefusal, PipelineDisabledRefusal, PushTurnedOffRefusal, PreviewCheckTurnedOffRefusal,
+        TakenOverRefusal, InactiveRefusal, NoAccessRefusal,
+    ];
+
+    /// <summary>
+    /// Refuses a build the pipeline started on its own once that is no longer what the
+    /// pipeline asks for. Pipeline state and access are checked when the build is
+    /// queued, but up to five can wait behind a running one (#1112): in the meantime the
+    /// pipeline may have been deleted or disabled, the setting turned off, someone else may have
+    /// taken the automatic builds over, or the person they run as may have lost access.
+    /// None of those should still clone with that person's credentials, publish a
+    /// release or prepare a deployment. The worker fails the build with the reason.
+    /// </summary>
+    private async Task EnsureAutomationStillOnAsync(OeProjectBuild build, int? projectOwnerId, CancellationToken ct)
+    {
+        var push = build.Trigger == ProjectBuildTrigger.Push;
+        var pipeline = build.PipelineId is not { } pipelineId ? null : await _db.OePipelines.AsNoTracking()
+            .Where(p => p.Id == pipelineId && p.DeletedAt == null)
+            .Select(p => new
+            {
+                On = push ? p.BuildOnPush : p.PreviewCheck,
+                RunsAs = push ? p.BuildOnPushByUserId : p.PreviewCheckByUserId,
+                Disabled = p.DisabledAt != null,
+            })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+
+        string? reason;
+        if (pipeline is null)
+            reason = PipelineDeletedRefusal;
+        else if (pipeline.Disabled)
+            reason = PipelineDisabledRefusal;
+        else if (!pipeline.On)
+            reason = push ? PushTurnedOffRefusal : PreviewCheckTurnedOffRefusal;
+        else if (pipeline.RunsAs != build.StartedByUserId)
+            reason = TakenOverRefusal;
+        else if (build.StartedByUserId is not { } userId
+                 || !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == userId && u.Status == UserStatus.Active, ct).ConfigureAwait(false))
+            reason = InactiveRefusal;
+        else if (!await _access.CanManageAsync(build.ProjectId, projectOwnerId, ct).ConfigureAwait(false))
+            reason = NoAccessRefusal;
+        else
+            return;
+
+        throw new PlanValidationException(new Dictionary<string, string> { ["Build"] = reason });
+    }
+
     /// <summary>
     /// Flips the build that produced <paramref name="releaseId"/> to <c>failed</c>
     /// with <paramref name="message"/> and a finish time. No-op when the release
@@ -966,7 +1146,7 @@ public sealed class ProjectBuildService
     /// <summary>
     /// Records the per-repo commit set (<see cref="OeProjectBuildRepoCommit"/>) and
     /// the changelog (<see cref="OeProjectBuildCommit"/>) for the build, computing the
-    /// latter as <c>git log &lt;prev&gt;..&lt;HEAD&gt;</c> against the project's last
+    /// latter as <c>git log &lt;prev&gt;..&lt;HEAD&gt;</c> against the pipeline's last
     /// <em>successful</em> build per repo. Best-effort: a provenance failure logs and
     /// returns rather than sinking the build.
     /// </summary>
@@ -975,6 +1155,12 @@ public sealed class ProjectBuildService
         try
         {
             var orgId = build.OrganizationId;
+            // A retried or resumed build records its provenance again; clear the earlier
+            // rows so its changelog isn't listed twice (same as PersistArtifactsAsync).
+            _db.OeProjectBuildRepoCommits.RemoveRange(await _db.OeProjectBuildRepoCommits
+                .Where(c => c.ProjectBuildId == build.Id).ToListAsync(ct).ConfigureAwait(false));
+            _db.OeProjectBuildCommits.RemoveRange(await _db.OeProjectBuildCommits
+                .Where(c => c.ProjectBuildId == build.Id).ToListAsync(ct).ConfigureAwait(false));
             // The commit set for this build.
             foreach (var clone in clones)
             {
@@ -991,7 +1177,7 @@ public sealed class ProjectBuildService
             }
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
 
-            await ComputeAndPersistChangelogAsync(build, project, clones, logs, ct).ConfigureAwait(false);
+            await ComputeAndPersistChangelogAsync(build, clones, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -1001,36 +1187,32 @@ public sealed class ProjectBuildService
 
     /// <summary>
     /// Computes and persists the per-repo changelog for the build. For each repo it
-    /// finds the commit the project's last successful build pinned, then records
+    /// finds the commit the pipeline's last successful build pinned, then records
     /// <c>git log &lt;prev&gt;..&lt;HEAD&gt;</c>. A repo with no prior build, or whose
     /// previous commit is no longer an ancestor (force-push / rebase), gets a single
     /// summary note instead of a commit list. Over-cap ranges are truncated with a
     /// "...and N more" note.
     /// </summary>
-    private async Task ComputeAndPersistChangelogAsync(OeProjectBuild build, OeProject project, List<ClonedRepo> clones, List<PendingLog> logs, CancellationToken ct)
+    private async Task ComputeAndPersistChangelogAsync(OeProjectBuild build, List<ClonedRepo> clones, CancellationToken ct)
     {
         var gitPath = NullIfBlank(Environment.GetEnvironmentVariable("GIT_PATH")) ?? "git";
         var orgId = build.OrganizationId;
 
-        // The previous successful build's commit per repo (the changelog baseline). A
-        // preview build is a check, not something that shipped, so it never becomes the
-        // baseline a current build's "what changed" is measured from (#994).
-        var prevBuildId = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.ProjectId == project.Id && b.Id != build.Id && b.Status == ProjectBuildStatus.Ready
-                        && b.BcTarget == ProjectBuildTarget.Current)
-            .OrderByDescending(b => b.StartedAt)
-            .Select(b => (int?)b.Id)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-
-        var prevByRepo = new Dictionary<int, string>();
-        if (prevBuildId is not null)
+        // A pull-request build is of a commit that isn't on any pipeline's branch yet, and
+        // its clone is shallow, so there is nothing to measure from; the pull request on
+        // GitHub already lists its commits.
+        if (build.Trigger == ProjectBuildTrigger.PullRequest)
         {
-            var prevCommits = await _db.OeProjectBuildRepoCommits.AsNoTracking()
-                .Where(c => c.ProjectBuildId == prevBuildId && c.ProjectRepositoryId != null && c.CommitHash != "")
-                .Select(c => new { RepoId = c.ProjectRepositoryId!.Value, c.CommitHash })
-                .ToListAsync(ct).ConfigureAwait(false);
-            foreach (var c in prevCommits) prevByRepo[c.RepoId] = c.CommitHash;
+            foreach (var clone in clones.Where(c => c.RepositoryId is not null && c.CommitSha is not null))
+            {
+                _db.OeProjectBuildCommits.Add(SummaryNote(orgId, build.Id, clone.RepositoryId,
+                    "Pull request build: its commits are listed on the pull request."));
+            }
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            return;
         }
+
+        var prevByRepo = await FindChangelogBaselineAsync(_db, build, ct).ConfigureAwait(false);
 
         foreach (var clone in clones)
         {
@@ -1050,7 +1232,8 @@ public sealed class ProjectBuildService
             else
             {
                 var ancestry = await _processRunner.RunAsync(new ProcessRunRequest(
-                    gitPath, new[] { "-C", clone.Dir, "merge-base", "--is-ancestor", prevSha, "HEAD" }, clone.Dir), ct).ConfigureAwait(false);
+                    gitPath, new[] { "-C", clone.Dir, "merge-base", "--is-ancestor", prevSha, "HEAD" }, clone.Dir,
+                    Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
                 if (!ancestry.Succeeded)
                 {
                     rows.Add(SummaryNote(orgId, build.Id, clone.RepositoryId.Value,
@@ -1062,7 +1245,7 @@ public sealed class ProjectBuildService
                         gitPath,
                         new[] { "-C", clone.Dir, "log", "--no-merges", "-n", (ChangelogCommitCap + 1).ToString(),
                                 "--pretty=format:%h%an%cI%s", $"{prevSha}..HEAD" },
-                        clone.Dir), ct).ConfigureAwait(false);
+                        clone.Dir, Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
                     var (parsed, truncated) = ParseChangelog(log.StdOut, ChangelogCommitCap);
                     var ordering = 0;
                     foreach (var entry in parsed)
@@ -1096,6 +1279,40 @@ public sealed class ProjectBuildService
             _db.OeProjectBuildCommits.AddRange(rows);
         }
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The commit per repository that <paramref name="build"/>'s changelog is measured
+    /// from: the newest finished build of the <em>same pipeline and branch</em> (a pipeline
+    /// moved to another branch starts over rather than reading as a force-push). Pipelines of one
+    /// solution watch different branches and each build clones only its own branch, so
+    /// a build of another pipeline pins a commit this clone usually doesn't have, which
+    /// read as a force-push on nearly every build. A preview build is a check, not
+    /// something that shipped (#994), and a pull-request build is of a commit that
+    /// isn't on the branch yet, so neither becomes the baseline - the same builds
+    /// <c>FindUnchangedAppsAsync</c> leaves out.
+    /// </summary>
+    internal static async Task<Dictionary<int, string>> FindChangelogBaselineAsync(AppDbContext db, OeProjectBuild build, CancellationToken ct)
+    {
+        var prevBuildId = await db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.ProjectId == build.ProjectId && b.PipelineId == build.PipelineId && b.Branch == build.Branch
+                        && b.Id != build.Id
+                        && b.Status == ProjectBuildStatus.Ready
+                        && b.BcTarget == ProjectBuildTarget.Current
+                        && b.Trigger != ProjectBuildTrigger.PullRequest)
+            .OrderByDescending(b => b.StartedAt).ThenByDescending(b => b.Id)
+            .Select(b => (int?)b.Id)
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+
+        var prevByRepo = new Dictionary<int, string>();
+        if (prevBuildId is null) return prevByRepo;
+
+        var prevCommits = await db.OeProjectBuildRepoCommits.AsNoTracking()
+            .Where(c => c.ProjectBuildId == prevBuildId && c.ProjectRepositoryId != null && c.CommitHash != "")
+            .Select(c => new { RepoId = c.ProjectRepositoryId!.Value, c.CommitHash })
+            .ToListAsync(ct).ConfigureAwait(false);
+        foreach (var c in prevCommits) prevByRepo[c.RepoId] = c.CommitHash;
+        return prevByRepo;
     }
 
     private static OeProjectBuildCommit SummaryNote(int orgId, int buildId, int? repoId, string text) => new()
@@ -1308,9 +1525,12 @@ public sealed class ProjectBuildService
                 // The branch is read before that checkout, which detaches HEAD: a build
                 // on push of the default branch still records which branch it was.
                 var clonedBranch = branch is null ? await CaptureBranchAsync(gitPath, dest, ct).ConfigureAwait(false) : branch;
-                if (options.HeadSha is { Length: > 0 } headSha && options.RepositoryId == repo.Id)
+                var commit = options.HeadSha is { Length: > 0 } headSha && options.RepositoryId == repo.Id
+                    ? headSha
+                    : options.PinnedCommits?.GetValueOrDefault(repo.Id);
+                if (commit is not null)
                 {
-                    var checkedOut = await CheckoutCommitAsync(gitPath, dest, headSha, env, pat, repo, logs, results,
+                    var checkedOut = await CheckoutCommitAsync(gitPath, dest, commit, env, pat, repo, logs, results,
                         shallow: options.InstallationToken is not null, ct)
                         .ConfigureAwait(false);
                     if (!checkedOut) continue;
@@ -1372,6 +1592,15 @@ public sealed class ProjectBuildService
         return (result, used, DescribeCloneFailures(attempts, credentials));
     }
 
+    /// <summary>The build log's note for extensions left out as test apps (#1130).</summary>
+    internal static string DescribeSkippedTestApps(IReadOnlyList<string> names)
+    {
+        var distinct = names.Distinct(StringComparer.Ordinal).ToList();
+        return distinct.Count == 1
+            ? $"Not built: {distinct[0]}. It depends on Microsoft's test framework, so it is a test app rather than an extension to ship."
+            : $"Not built: {string.Join(", ", distinct)}. They depend on Microsoft's test framework, so they are test apps rather than extensions to ship.";
+    }
+
     /// <summary>
     /// The whole-build error when nothing was found to compile. The per-repository
     /// reasons are the only record of why, and a thrown build keeps only this
@@ -1383,7 +1612,7 @@ public sealed class ProjectBuildService
     {
         if (failures.Count == 0)
         {
-            return "No buildable extensions were found. Check the repositories contain an app.json outside test folders.";
+            return "No buildable extensions were found. Check the repositories contain an app.json outside test folders, for an extension that is not a test app.";
         }
         // git's own error can run over several lines; this becomes a headline, a
         // notification's first line and a check-run summary, so keep it on one.
@@ -1461,7 +1690,10 @@ public sealed class ProjectBuildService
         if (outcome.Succeeded)
         {
             outcome = await _processRunner.RunAsync(new ProcessRunRequest(
-                gitPath, new[] { "-C", cloneDir, "checkout", "--detach", commitSha }, cloneDir, env), ct)
+                gitPath, new[] { "-C", cloneDir, "checkout", "--detach", commitSha }, cloneDir, env,
+                // The clone is blobless, so the checkout downloads the commit's files:
+                // it gets the clone's limit, not the local one.
+                BuildCloneTimeout()), ct)
                 .ConfigureAwait(false);
             if (outcome.Succeeded)
             {
@@ -1475,7 +1707,7 @@ public sealed class ProjectBuildService
             $"Could not check out the commit this build was asked to build ({Short(commitSha)}). It may have been replaced since.",
             RepoUrl: repo.Url));
         logs.Add(new PendingLog(repo.Id, repo.DisplayName, $"Could not check out {commitSha}: {detail}".Trim()));
-        _logger.LogWarning("Pull-request build: could not check out {CommitSha} in {Repo}.", commitSha, repo.DisplayName);
+        _logger.LogWarning("Build: could not check out {CommitSha} in {Repo}.", commitSha, repo.DisplayName);
         return false;
     }
 
@@ -1501,7 +1733,8 @@ public sealed class ProjectBuildService
         {
             // %H = full SHA, %cI = committer date (strict ISO-8601), tab-separated.
             var r = await _processRunner.RunAsync(new ProcessRunRequest(
-                gitPath, new[] { "-C", cloneDir, "show", "-s", "--format=%H%x09%cI", "HEAD" }, cloneDir), ct).ConfigureAwait(false);
+                gitPath, new[] { "-C", cloneDir, "show", "-s", "--format=%H%x09%cI", "HEAD" }, cloneDir,
+                Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
             if (!r.Succeeded) return (null, null);
             var parts = r.StdOut.Trim().Split('\t');
             var sha = parts.Length > 0 && parts[0].Trim().Length > 0 ? parts[0].Trim() : null;
@@ -1526,7 +1759,8 @@ public sealed class ProjectBuildService
         try
         {
             var r = await _processRunner.RunAsync(new ProcessRunRequest(
-                gitPath, new[] { "-C", cloneDir, "symbolic-ref", "--short", "-q", "HEAD" }, cloneDir), ct).ConfigureAwait(false);
+                gitPath, new[] { "-C", cloneDir, "symbolic-ref", "--short", "-q", "HEAD" }, cloneDir,
+                Timeout: LocalGitTimeout), ct).ConfigureAwait(false);
             var name = r.Succeeded ? r.StdOut.Trim() : string.Empty;
             return name.Length > 0 && GitBranchName.IsValid(name) ? name : null;
         }
@@ -1707,14 +1941,14 @@ public sealed class ProjectBuildService
         return outcome.Unresolved;
     }
 
-    /// <summary>Copies any third-party symbols the repos committed under <c>.alpackages/</c> into the symbol dir.</summary>
-    private static void CopyCommittedSymbols(IReadOnlyList<string> cloneDirs, string symbolsDir)
+    /// <summary>Copies any third-party symbols the repos committed under <c>.alpackages/</c> into the symbol dir, never through a symbolic link.</summary>
+    internal static void CopyCommittedSymbols(IReadOnlyList<string> cloneDirs, string symbolsDir)
     {
         foreach (var cloneDir in cloneDirs)
         {
-            foreach (var pkgDir in Directory.EnumerateDirectories(cloneDir, ".alpackages", SearchOption.AllDirectories))
+            foreach (var pkgDir in Directory.EnumerateDirectories(cloneDir, ".alpackages", NoLinksRecursive))
             {
-                foreach (var app in Directory.EnumerateFiles(pkgDir, "*.app", SearchOption.TopDirectoryOnly))
+                foreach (var app in Directory.EnumerateFiles(pkgDir, "*.app", NoLinks))
                 {
                     var dest = Path.Combine(symbolsDir, Path.GetFileName(app));
                     if (!File.Exists(dest)) File.Copy(app, dest);
@@ -1723,13 +1957,21 @@ public sealed class ProjectBuildService
         }
     }
 
+    /// <summary>The catalogue's ready release for <paramref name="resolved"/>, or null; never imports one.</summary>
+    private Task<int?> ExistingParentReleaseAsync(ResolvedArtifact resolved, CancellationToken ct) =>
+        _db.OeReleases.AsNoTracking()
+            .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null && r.Status == "ready")
+            .Select(r => (int?)r.Id)
+            .FirstOrDefaultAsync(ct);
+
     /// <summary>
     /// Ensures a non-deleted first-party Release exists for the resolved artifact
     /// (so the project Release's <c>ParentReleaseId</c> can point at it), importing
     /// it inline from the already-downloaded zips when absent. Best-effort: a failed
     /// parent import logs and returns null rather than sinking the project build.
     /// </summary>
-    private async Task<int?> EnsureParentReleaseAsync(ResolvedArtifact resolved, BcArtifactDownload download, CancellationToken ct)
+    private async Task<int?> EnsureParentReleaseAsync(
+        ResolvedArtifact resolved, BcArtifactDownload download, int buildReleaseId, CancellationToken ct)
     {
         var existing = await _db.OeReleases.AsNoTracking()
             .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null)
@@ -1744,17 +1986,30 @@ public sealed class ProjectBuildService
         int? stalePreviewId = null;
         if (existing is not null)
         {
-            // A failed preview is replaced straight away rather than after the
-            // refresh age: it holds no objects to parent onto.
-            var refresh = resolved.IsPrerelease
-                && existing.Status != "ingesting"
+            // A failed release is replaced straight away, preview or not: it holds
+            // no objects to parent onto, and keeping it would hand every later build
+            // of this version a broken parent (#1180).
+            var refresh = existing.Status != "ingesting"
                 && (existing.Status == "failed"
-                    || (!string.Equals(existing.BcVersion, resolved.Version, StringComparison.OrdinalIgnoreCase)
+                    || (resolved.IsPrerelease
+                        && !string.Equals(existing.BcVersion, resolved.Version, StringComparison.OrdinalIgnoreCase)
                         && _clock.GetUtcNow().UtcDateTime - existing.ImportedAt >= ArtifactReleaseImporter.PreviewRefreshAge));
-            if (!refresh) return existing.Id;
+            if (!refresh)
+            {
+                return existing.Status == "ingesting"
+                    ? await AfterIngestAsync(buildReleaseId, existing.Id, resolved.Label, ct).ConfigureAwait(false)
+                    : existing.Id;
+            }
             stalePreviewId = existing.Id;
         }
 
+        // The release this call creates, so a failure of its own import is never
+        // mistaken below for someone else's import still running.
+        int? createdId = null;
+        // Marks the release as being imported by this process from the moment it
+        // exists, through the wait for the import gate, so a build waiting on it
+        // never takes it for abandoned (#1180).
+        IDisposable? tracked = null;
         try
         {
             var metadata = new ReleaseImportMetadata(
@@ -1764,6 +2019,8 @@ public sealed class ProjectBuildService
             if (stalePreviewId is null)
             {
                 parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+                createdId = parentId;
+                tracked = _importer.Ingests.Track(parentId);
             }
             else
             {
@@ -1775,10 +2032,15 @@ public sealed class ProjectBuildService
                 await _db.SaveChangesAsync(ct).ConfigureAwait(false);
                 parentId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
                 await tx.CommitAsync(ct).ConfigureAwait(false);
-                _logger.LogInformation("Replaced preview release {OldReleaseId} with build {Version} for a project build.",
-                    stalePreviewId.Value, resolved.Version);
+                createdId = parentId;
+                tracked = _importer.Ingests.Track(parentId);
+                _logger.LogInformation("Replaced release {OldReleaseId} ({Status}) with build {Version} for a project build.",
+                    stalePreviewId.Value, existing!.Status, resolved.Version);
             }
 
+            // Whole Business Central releases import one at a time, here and on the
+            // import worker alike (#1180).
+            using var heavy = await EnterHeavyImportAsync(buildReleaseId, ct).ConfigureAwait(false);
             var openedStreams = new List<Stream>();
             System.IO.Compression.ZipArchive? appArchive = null;
             System.IO.Compression.ZipArchive? platArchive = null;
@@ -1804,6 +2066,20 @@ public sealed class ProjectBuildService
             _logger.LogInformation("Auto-imported parent BC release {Label} (release {ParentId}) for a project build.", resolved.Label, parentId);
             return parentId;
         }
+        catch (Exception) when (ct.IsCancellationRequested)
+        {
+            // This build was cancelled (a newer commit on its pull request, or a
+            // shutdown) part way through an import it started. Nothing else will
+            // finish that import, so it is failed now rather than left importing for
+            // every later build of this version to wait on (#1180). Whatever was
+            // thrown, the build is being cancelled, so that is what it hears.
+            if (createdId is { } abandoned)
+            {
+                await MarkAbandonedImportFailedAsync(abandoned).ConfigureAwait(false);
+            }
+            ct.ThrowIfCancellationRequested();
+            throw;
+        }
         catch (Exception ex)
         {
             // A concurrent first-party/artifact import (independent of the
@@ -1812,11 +2088,11 @@ public sealed class ProjectBuildService
             // good parent release now exists, adopt it rather than losing the
             // cross-release link by returning null. See issue #431.
             _db.ChangeTracker.Clear();
-            // A preview whose ingest just failed is not adopted: the next build
+            // A release whose ingest just failed is not adopted: the next build
             // replaces it, and until then the build carries on without a parent.
             var adopted = await _db.OeReleases.AsNoTracking()
                 .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null)
-                .Where(r => !resolved.IsPrerelease || r.Status != "failed")
+                .Where(r => r.Status != "failed")
                 .Select(r => (int?)r.Id)
                 .FirstOrDefaultAsync(ct).ConfigureAwait(false);
             if (adopted is not null)
@@ -1824,7 +2100,9 @@ public sealed class ProjectBuildService
                 _logger.LogInformation(
                     "Adopted concurrently-created parent BC release {Label} (release {ParentId}) for a project build.",
                     resolved.Label, adopted);
-                return adopted;
+                return adopted == createdId
+                    ? adopted
+                    : await AfterIngestAsync(buildReleaseId, adopted.Value, resolved.Label, ct).ConfigureAwait(false);
             }
 
             _logger.LogError(ex,
@@ -1832,6 +2110,181 @@ public sealed class ProjectBuildService
                 resolved.Label);
             return null;
         }
+        finally
+        {
+            tracked?.Dispose();
+        }
+    }
+
+    /// <summary>What a release says when the build importing it was stopped part way through.</summary>
+    internal const string StoppedImportMessage =
+        "The build that started this import was stopped before the import finished.";
+
+    /// <summary>What a release says when a build found it importing with nothing left working on it.</summary>
+    internal const string AbandonedImportMessage =
+        "This import stopped before it finished. Import the release again to use it.";
+
+    /// <summary>
+    /// Fails a release this build started importing and is abandoning. Never
+    /// cancelled, since the build's own token already is; a failure to write is
+    /// logged, never thrown over the cancellation that brought us here.
+    /// </summary>
+    private async Task MarkAbandonedImportFailedAsync(int releaseId)
+    {
+        try
+        {
+            _db.ChangeTracker.Clear();
+            await _importer.MarkFailedAsync(releaseId, StoppedImportMessage, CancellationToken.None).ConfigureAwait(false);
+            _logger.LogInformation("Marked release {ReleaseId} failed: the build importing it was stopped.", releaseId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not mark release {ReleaseId} failed after its build was stopped.", releaseId);
+        }
+    }
+
+    /// <summary>
+    /// Takes the import gate of <see cref="ReleaseIngests"/>. When another import
+    /// holds it, the build gives up its place in the build queue while it waits, and
+    /// takes the place back at once when it gets the gate, over the limit if need be:
+    /// waiting for a place while holding the gate would stall every other import.
+    /// </summary>
+    private async Task<IDisposable> EnterHeavyImportAsync(int buildReleaseId, CancellationToken ct) =>
+        _importer.Ingests.TryEnterHeavy()
+        ?? await StepAsideAsync(buildReleaseId, () => _importer.Ingests.EnterHeavyAsync(ct), ct, comeBackAtOnce: true)
+            .ConfigureAwait(false);
+
+    /// <summary>Runs <paramref name="wait"/> without holding this build's place in the queue, when there is a queue.</summary>
+    private Task<T> StepAsideAsync<T>(int buildReleaseId, Func<Task<T>> wait, CancellationToken ct, bool comeBackAtOnce = false) =>
+        _buildQueue is null ? wait() : _buildQueue.StepAsideAsync(buildReleaseId, wait, ct, comeBackAtOnce);
+
+    /// <summary>
+    /// How long a build waits for a release another import is still ingesting. Kept
+    /// well under the build worker's 90-minute ceiling, which also has to cover the
+    /// build's own compile and ingest.
+    /// </summary>
+    internal static readonly TimeSpan IngestWaitLimit = TimeSpan.FromMinutes(45);
+
+    internal static readonly TimeSpan IngestPollInterval = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Where a release another import owns stands: its status, whether that import is
+    /// still waiting for a worker, and whether anything in this process is working on
+    /// it (#1180).
+    /// </summary>
+    internal sealed record IngestState(string? Status, bool WaitingForWorker, bool ImportRunning = true);
+
+    /// <summary>
+    /// Waits while another import is still ingesting <paramref name="releaseId"/>
+    /// (another build's inline parent import, or the catalogue sweep), now that builds
+    /// run side by side (#1137). This build's own ingest resolves references into it,
+    /// and a half-imported parent would drop them for good. While it waits, the build
+    /// of <paramref name="buildReleaseId"/> gives its place in the build queue to
+    /// another build (#1180).
+    /// </summary>
+    private Task<int?> AfterIngestAsync(int buildReleaseId, int releaseId, string label, CancellationToken ct) =>
+        WaitForIngestAsync(
+            releaseId, label,
+            async token =>
+            {
+                // The status is read before the jobs and the in-process imports, so an
+                // import that finishes in between reads as ready on the next poll.
+                var status = await _db.OeReleases.AsNoTracking()
+                    .Where(r => r.Id == releaseId)
+                    .Select(r => r.Status)
+                    .FirstOrDefaultAsync(token).ConfigureAwait(false);
+                var jobs = await _db.OeImportJobs.AsNoTracking()
+                    .Where(j => j.ReleaseId == releaseId && (j.Status == "queued" || j.Status == "running"))
+                    .Select(j => j.Status)
+                    .ToListAsync(token).ConfigureAwait(false);
+                return new IngestState(
+                    status,
+                    WaitingForWorker: jobs.Contains("queued"),
+                    ImportRunning: jobs.Contains("running") || _importer.Ingests.IsRunning(releaseId));
+            },
+            async token =>
+            {
+                // Only while it still reads as importing: an import finishing at this
+                // moment keeps its result.
+                await _db.OeReleases
+                    .Where(r => r.Id == releaseId && r.Status == "ingesting")
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(r => r.Status, "failed")
+                        .SetProperty(r => r.StatusMessage, AbandonedImportMessage)
+                        .SetProperty(r => r.UpdatedAt, _clock.GetUtcNow().UtcDateTime), token)
+                    .ConfigureAwait(false);
+            },
+            wait => StepAsideAsync(buildReleaseId, wait, ct),
+            _clock, _logger, ct);
+
+    /// <summary>
+    /// Returns the id once the release is ready, null when its import failed, and the
+    /// id regardless, as before builds overlapped, when its import has not started
+    /// (it waits behind other imports, so waiting here would hold a build worker for
+    /// nothing) or after <see cref="IngestWaitLimit"/>.
+    ///
+    /// <para>
+    /// Returns null, after <paramref name="markAbandoned"/>, when two polls in a row
+    /// find nothing in this process importing it: a build cancelled part way through
+    /// left it behind, and waiting the full limit for it would hold the build for
+    /// nothing (#1180). Two polls rather than one, because a release exists a moment
+    /// before its import is recorded as running. Only a real wait goes through
+    /// <paramref name="stepAside"/>, so a build never gives up its place for a release
+    /// that is already settled.
+    /// </para>
+    /// </summary>
+    internal static async Task<int?> WaitForIngestAsync(
+        int releaseId, string label, Func<CancellationToken, Task<IngestState>> read,
+        Func<CancellationToken, Task> markAbandoned, Func<Func<Task<int?>>, Task<int?>> stepAside,
+        TimeProvider clock, ILogger logger, CancellationToken ct)
+    {
+        var first = await read(ct).ConfigureAwait(false);
+        if (Settled(first, releaseId, out var settled)) return settled;
+        return await stepAside(PollAsync).ConfigureAwait(false);
+
+        async Task<int?> PollAsync()
+        {
+            logger.LogInformation("Waiting for release {Label} (release {ReleaseId}) to finish importing.", label, releaseId);
+            var giveUpAt = clock.GetUtcNow() + IngestWaitLimit;
+            var state = first;
+            var unattended = false;
+            while (true)
+            {
+                if (state.ImportRunning)
+                {
+                    unattended = false;
+                }
+                else if (unattended)
+                {
+                    logger.LogWarning(
+                        "Release {Label} (release {ReleaseId}) is importing but nothing is working on it; marking it failed and carrying on without it.",
+                        label, releaseId);
+                    await markAbandoned(ct).ConfigureAwait(false);
+                    return null;
+                }
+                else
+                {
+                    unattended = true;
+                }
+                if (clock.GetUtcNow() >= giveUpAt)
+                {
+                    logger.LogWarning("Release {Label} (release {ReleaseId}) is still importing; the build carries on without waiting for it.",
+                        label, releaseId);
+                    return releaseId;
+                }
+                await Task.Delay(IngestPollInterval, clock, ct).ConfigureAwait(false);
+                state = await read(ct).ConfigureAwait(false);
+                if (Settled(state, releaseId, out var done)) return done;
+            }
+        }
+    }
+
+    // Whether a wait is over: a release gone or failed gives null, one that is ready
+    // or still waiting for a worker gives its id.
+    private static bool Settled(IngestState state, int releaseId, out int? id)
+    {
+        id = state.Status is null or "failed" ? null : releaseId;
+        return state.Status != "ingesting" || state.WaitingForWorker;
     }
 
     /// <summary>
@@ -1847,7 +2300,7 @@ public sealed class ProjectBuildService
     /// symbols").
     /// </summary>
     private async Task<IReadOnlyList<int>> EnsureVendorReleasesAsync(
-        IReadOnlyList<ResolvedSymbolPackage> packages, string symbolsDir, int? parentReleaseId,
+        IReadOnlyList<ResolvedSymbolPackage> packages, string symbolsDir, int? parentReleaseId, int buildReleaseId,
         List<PendingLog> logs, CancellationToken ct)
     {
         var ids = new List<int>();
@@ -1855,7 +2308,7 @@ public sealed class ProjectBuildService
         foreach (var package in packages)
         {
             ct.ThrowIfCancellationRequested();
-            var id = await EnsureVendorReleaseAsync(package, symbolsDir, parentReleaseId, lines, ct).ConfigureAwait(false);
+            var id = await EnsureVendorReleaseAsync(package, symbolsDir, parentReleaseId, buildReleaseId, lines, ct).ConfigureAwait(false);
             if (id is { } found && !ids.Contains(found)) ids.Add(found);
         }
         if (lines.Count > 0) logs.Add(new PendingLog(null, "Symbols", string.Join("\n", lines)));
@@ -1867,12 +2320,12 @@ public sealed class ProjectBuildService
         $"{OeRelease.SymbolFeedDedupPrefix}{NormalizeAppId(appId)}:{version.Trim()}";
 
     private async Task<int?> EnsureVendorReleaseAsync(
-        ResolvedSymbolPackage package, string symbolsDir, int? parentReleaseId, List<string> lines, CancellationToken ct)
+        ResolvedSymbolPackage package, string symbolsDir, int? parentReleaseId, int buildReleaseId, List<string> lines, CancellationToken ct)
     {
         var dedupKey = VendorDedupKey(package.AppId, package.Version);
         var label = $"{package.Name} {package.Version} (symbols)";
         var existing = await FindVendorReleaseAsync(dedupKey, ct).ConfigureAwait(false);
-        if (existing is not null) return Adopt(existing.Value, label, lines);
+        if (existing is not null) return await AdoptAsync(buildReleaseId, existing.Value, label, lines, ct).ConfigureAwait(false);
 
         byte[] bytes;
         AppManifest? manifest;
@@ -1898,12 +2351,14 @@ public sealed class ProjectBuildService
             return null;
         }
 
+        int? createdId = null;
         try
         {
             var metadata = new ReleaseImportMetadata(
                 Label: label, Kind: "third_party", ParentReleaseId: parentReleaseId, ApplicationVersionId: null,
                 Publisher: manifest.Publisher, DedupKey: dedupKey);
             var vendorId = await _importer.BeginReleaseAsync(metadata, ct).ConfigureAwait(false);
+            createdId = vendorId;
             using var stream = new MemoryStream(bytes, writable: false);
             await _importer.ProcessReleaseAsync(
                 vendorId, [new AppFileUpload(Path.GetFileName(package.FileName), stream, SourceZipStream: null)],
@@ -1912,13 +2367,28 @@ public sealed class ProjectBuildService
             lines.Add($"Added {label} to the Object Explorer.");
             return vendorId;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        catch (Exception) when (ct.IsCancellationRequested)
+        {
+            // The build was stopped part way through an import it started: fail it
+            // rather than leave it importing for later builds to wait on (#1180).
+            if (createdId is { } abandoned)
+            {
+                await MarkAbandonedImportFailedAsync(abandoned).ConfigureAwait(false);
+            }
+            ct.ThrowIfCancellationRequested();
+            throw;
+        }
+        catch (Exception ex)
         {
             // Same race as the parent (#431): another build may have won the
             // unique dedup-key insert. Adopt its Release if one now exists.
             _db.ChangeTracker.Clear();
             var adopted = await FindVendorReleaseAsync(dedupKey, ct).ConfigureAwait(false);
-            if (adopted is not null) return Adopt(adopted.Value, label, lines);
+            // Its own failed import is not waited on: nobody else is ingesting it.
+            if (adopted is not null && adopted.Value.Id != createdId)
+            {
+                return await AdoptAsync(buildReleaseId, adopted.Value, label, lines, ct).ConfigureAwait(false);
+            }
 
             _logger.LogWarning(ex, "Failed to ingest vendor symbols {Label}; the build continues without them.", label);
             lines.Add($"Could not add {label} to the Object Explorer: {ex.Message}");
@@ -1935,8 +2405,12 @@ public sealed class ProjectBuildService
         return row is null ? null : (row.Id, row.Status);
     }
 
-    private static int? Adopt((int Id, string Status) release, string label, List<string> lines)
+    private async Task<int?> AdoptAsync(int buildReleaseId, (int Id, string Status) release, string label, List<string> lines, CancellationToken ct)
     {
+        if (release.Status == "ingesting" && await AfterIngestAsync(buildReleaseId, release.Id, label, ct).ConfigureAwait(false) is null)
+        {
+            release = (release.Id, "failed");
+        }
         if (release.Status != "failed") return release.Id;
         lines.Add($"{label} is in the Object Explorer but its import failed; retry it there to link it to this build.");
         return null;
@@ -1964,7 +2438,7 @@ public sealed class ProjectBuildService
             ? new Dictionary<string, string> { ["DOTNET_ROLL_FORWARD"] = "LatestMajor" }
             : null;
 
-        var result = await _processRunner.RunAsync(new ProcessRunRequest(compiler.FileName, args, app.ProjectDir, env), ct).ConfigureAwait(false);
+        var result = await _processRunner.RunAsync(new ProcessRunRequest(compiler.FileName, args, app.ProjectDir, env, CompileTimeout()), ct).ConfigureAwait(false);
         // alc writes diagnostics to stdout; keep both streams for the build log.
         var log = string.Join("\n", new[] { result.StdOut, result.StdErr }.Where(s => !string.IsNullOrWhiteSpace(s))).Trim();
         if (result.Succeeded && File.Exists(outFile))
@@ -2062,9 +2536,35 @@ public sealed class ProjectBuildService
     internal static bool IsTestSegment(string segment) => AppJsonManifestParser.IsTestSegment(segment);
 
     /// <summary>
+    /// How every walk of a clone enumerates: never into a symbolic link, so a link
+    /// that slipped past <c>core.symlinks=false</c> (see <see cref="GitAuthEnv"/>)
+    /// still cannot lead the walk out of the clone (#1109).
+    /// </summary>
+    private static readonly EnumerationOptions NoLinks = new()
+    {
+        AttributesToSkip = FileAttributes.ReparsePoint,
+        IgnoreInaccessible = true,
+    };
+
+    private static readonly EnumerationOptions NoLinksRecursive = new()
+    {
+        AttributesToSkip = FileAttributes.ReparsePoint,
+        IgnoreInaccessible = true,
+        RecurseSubdirectories = true,
+    };
+
+    /// <summary>True for a file that exists and is not a symbolic link.</summary>
+    private static bool IsRegularFile(string path)
+    {
+        var info = new FileInfo(path);
+        return info.Exists && info.LinkTarget is null;
+    }
+
+    /// <summary>
     /// Walks <paramref name="root"/> for folders containing an <c>app.json</c>,
     /// pruning excluded (<c>.alpackages</c>, <c>.git</c>, …) and test folders during
-    /// descent. Returns the project directories (the folders holding app.json).
+    /// descent, and never following a symbolic link. Returns the project directories
+    /// (the folders holding app.json).
     /// </summary>
     internal static IReadOnlyList<string> DiscoverAppProjectDirs(string root)
     {
@@ -2074,9 +2574,9 @@ public sealed class ProjectBuildService
         while (stack.Count > 0)
         {
             var dir = stack.Pop();
-            if (File.Exists(Path.Combine(dir, "app.json"))) results.Add(dir);
+            if (IsRegularFile(Path.Combine(dir, "app.json"))) results.Add(dir);
             string[] subs;
-            try { subs = Directory.GetDirectories(dir); }
+            try { subs = Directory.GetDirectories(dir, "*", NoLinks); }
             catch { continue; }
             foreach (var sub in subs)
             {
@@ -2128,8 +2628,16 @@ public sealed class ProjectBuildService
     /// The app process is multi-tenant; an argv is visible via the world-readable
     /// <c>/proc/&lt;pid&gt;/cmdline</c>, whereas the environment block isn't.
     /// Always sets <c>GIT_TERMINAL_PROMPT=0</c> so a bad token fails fast. See #430.
+    ///
+    /// <para>
+    /// Also turns <c>core.symlinks</c> off, so a symbolic link committed to a
+    /// repository is checked out as a small text file holding its target rather than
+    /// as a link. Repository content is untrusted, and a link such as <c>x -&gt; /</c>
+    /// would otherwise lead every walk of the clone out onto the server's own disk
+    /// (#1109). AL projects have no use for links.
+    /// </para>
     /// </summary>
-    private static Dictionary<string, string> GitAuthEnv(RepositoryProvider provider, string pat) => new()
+    internal static Dictionary<string, string> GitAuthEnv(RepositoryProvider provider, string pat) => new()
     {
         // Never block on an interactive prompt or a credential helper — the PAT
         // travels in http.extraHeader. A configured helper (manager/cache/store) on
@@ -2138,7 +2646,7 @@ public sealed class ProjectBuildService
         // remote into a fast, non-zero failure instead of a forever-hang.
         ["GIT_TERMINAL_PROMPT"] = "0",
         ["GCM_INTERACTIVE"] = "never",
-        ["GIT_CONFIG_COUNT"] = "4",
+        ["GIT_CONFIG_COUNT"] = "5",
         ["GIT_CONFIG_KEY_0"] = "http.extraHeader",
         ["GIT_CONFIG_VALUE_0"] = BasicAuthHeaderValue(provider, pat),
         ["GIT_CONFIG_KEY_1"] = "credential.helper",
@@ -2147,6 +2655,8 @@ public sealed class ProjectBuildService
         ["GIT_CONFIG_VALUE_2"] = "1000",
         ["GIT_CONFIG_KEY_3"] = "http.lowSpeedTime",
         ["GIT_CONFIG_VALUE_3"] = "60",
+        ["GIT_CONFIG_KEY_4"] = "core.symlinks",
+        ["GIT_CONFIG_VALUE_4"] = "false",
     };
 
     /// <summary>
@@ -2301,11 +2811,16 @@ public sealed class ProjectBuildService
 /// <param name="HeadSha">The commit to check that repository out at.</param>
 /// <param name="InstallationToken">The GitHub installation token to clone with, in place of a per-user token.</param>
 /// <param name="Target">Which Business Central version to compile against; <see cref="BcBuildTarget.Current"/> is the version the manifests ask for.</param>
+/// <param name="PinnedCommits">
+/// Repository id to the commit to check it out at, for a rerun of a build that has
+/// already cloned once. <paramref name="HeadSha"/> wins for its own repository.
+/// </param>
 public sealed record ProjectBuildOptions(
     int? RepositoryId = null,
     string? HeadSha = null,
     string? InstallationToken = null,
-    BcBuildTarget Target = BcBuildTarget.Current)
+    BcBuildTarget Target = BcBuildTarget.Current,
+    IReadOnlyDictionary<int, string>? PinnedCommits = null)
 {
     /// <summary>The ordinary build: default branches, the acting user's own repository tokens.</summary>
     public static readonly ProjectBuildOptions Manual = new();
@@ -2356,7 +2871,8 @@ public sealed record ProjectBuildOutcome(
     IReadOnlyList<BuildAppResult> Results,
     int? ParentReleaseId,
     string? FinalLabel,
-    string? BcVersion = null);
+    string? BcVersion = null,
+    bool IsPreview = false);
 
 /// <summary>One parsed changelog commit (short hash, author, committer date, subject).</summary>
 public sealed record ChangelogEntry(string ShortHash, string Author, DateTime? CommittedAt, string Subject);

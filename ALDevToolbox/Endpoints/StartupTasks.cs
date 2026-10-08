@@ -156,17 +156,21 @@ internal static class StartupTasks
         // temp file lives in container-local /tmp and is gone. The reconciler
         // returns the jobs to re-enqueue here; we push them through the queue
         // so the worker picks them up like a fresh submission.
+        // Before anything is resumed: no worker is running yet, so every build clone and
+        // download in the temp folder older than this process belongs to a job the last
+        // process never finished (#1133) - unless another process shares the folder; see
+        // LeftoverImportTempFiles.
+        ALDevToolbox.Services.ObjectExplorer.Import.LeftoverImportTempFiles.Sweep(
+            Path.GetTempPath(), System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime(), logger);
+
         var persistedJobs = scope.ServiceProvider.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Import.PersistedImportJobs>();
         var queue = scope.ServiceProvider.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Import.ReleaseImportQueue>();
+        var buildQueue = scope.ServiceProvider.GetRequiredService<ALDevToolbox.Services.ObjectExplorer.Import.ProjectBuildQueue>();
         var resumable = await persistedJobs.ReconcileOnStartupAsync(stopping);
-        foreach (var job in resumable)
-        {
-            await queue.EnqueueAsync(job, stopping);
-        }
-        if (resumable.Count > 0)
-        {
-            logger.LogInformation("Resumed {Count} URL-source release import(s) after restart.", resumable.Count);
-        }
+        // Imports are not enqueued here: this runs before app.Run(), so the worker that
+        // drains the bounded queue has not started yet and a 17th job would wait forever
+        // (#1107). Builds go back on their own queue at once; it never waits.
+        ALDevToolbox.Services.ObjectExplorer.Import.ResumedImportJobs.QueueWhenStarted(app.Lifetime, queue, buildQueue, resumable, logger);
 
         // Belt-and-suspenders: any OeRelease row still left in "ingesting"
         // WITHOUT a re-queued durable job (synchronous individual-file imports
@@ -199,6 +203,14 @@ internal static class StartupTasks
             logger.LogWarning("Marked {Count} interrupted release import(s) as failed on startup.", stranded.Count);
         }
 
+        // Their build rows too, or a preview check would wait on one for good (#1111).
+        // Every row with no importing release, not just this start's: one left behind by
+        // an earlier start is just as stuck.
+        var interruptedBuilds = await ALDevToolbox.Services.ObjectExplorer.Projects.InterruptedBuilds.FailAsync(
+            app.Services, DateTime.UtcNow, stopping);
+        if (interruptedBuilds > 0)
+            logger.LogWarning("Marked {Count} interrupted build(s) as failed on startup.", interruptedBuilds);
+
         // Prime the in-memory MCP toggle from the singleton system_settings
         // row before any request can read it. Resolved from the root provider
         // because McpAvailabilityState is a singleton — see
@@ -218,6 +230,16 @@ internal static class StartupTasks
             .FirstOrDefaultAsync(stopping);
         app.Services.GetRequiredService<ALDevToolbox.Services.Tools.ToolAvailabilityState>()
             .Set(ALDevToolbox.Domain.Tools.ToolCatalog.ParseDisabled(disabledTools));
+
+        // Apply the SiteAdmin's build limit before the workers start taking builds
+        // (they start with app.Run(), after this). Empty keeps OE_BUILD_CONCURRENCY's
+        // default, which the queue already holds (#1164).
+        var buildConcurrency = await db.SystemSettings.AsNoTracking()
+            .Where(s => s.Id == 1)
+            .Select(s => s.BuildConcurrency)
+            .FirstOrDefaultAsync(stopping);
+        buildQueue.ApplySetting(buildConcurrency);
+        ALDevToolbox.Services.ObjectExplorer.Import.BuildConcurrencyAdvice.WarnIfAboveRecommendation(buildQueue.Limit, logger);
 
         // Flip /readyz to green now that migrations, seed and bootstrap have
         // all run. Resolved from the root service provider so the flag

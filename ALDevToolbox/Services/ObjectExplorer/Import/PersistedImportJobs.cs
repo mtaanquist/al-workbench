@@ -67,8 +67,9 @@ public sealed class PersistedImportJobs
                 row.DownloadUrl = artifact.ApplicationUrl;
                 break;
             case ReleaseImportSource.ProjectBuild build:
-                // Resumable: the project id re-clones HEAD and rebuilds from
-                // scratch into fresh temp dirs, so a restart picks it back up
+                // Resumable: the project id re-clones and rebuilds from scratch
+                // into fresh temp dirs, at the commits the build already recorded
+                // if it got that far (#1110), so a restart picks it back up
                 // idempotently like a URL/artifact import.
                 row.Kind = "project_build";
                 row.ProjectId = build.ProjectId;
@@ -133,7 +134,7 @@ public sealed class PersistedImportJobs
 
     /// <summary>
     /// Startup reconciliation. Returns the URL-source jobs to re-enqueue; the
-    /// caller (StartupTasks) pushes them back through <see cref="ReleaseImportQueue.EnqueueAsync"/>.
+    /// caller (StartupTasks) hands them to <see cref="ResumedImportJobs"/>, oldest first.
     /// Staged-zip jobs are flipped to <c>failed</c> in-place (their temp file
     /// is gone) along with their owning <c>oe_releases</c> row so the admin sees
     /// the failure reason on the list and can re-submit.
@@ -144,8 +145,20 @@ public sealed class PersistedImportJobs
         // migration / seed / interrupted-release reconciliation already
         // sits in (see StartupTasks). No user in scope at startup; reading
         // every org's job rows here is the design.
+        // A build's row comes along so it resumes in its place in the build queue (#1137).
+        // The filter is off for that read too; it is pinned to b.ReleaseId == j.ReleaseId.
         var survivors = await _db.OeImportJobs.IgnoreQueryFilters()
             .Where(j => j.Status == "queued" || j.Status == "running")
+            // Oldest first, so waiting push builds resume in the order they were pushed.
+            .OrderBy(j => j.Id)
+            .Select(j => new
+            {
+                Job = j,
+                Build = _db.OeProjectBuilds
+                    .Where(b => b.ReleaseId == j.ReleaseId)
+                    .Select(b => new { b.PipelineId, b.BcTarget, b.Trigger, b.Status })
+                    .FirstOrDefault(),
+            })
             .ToListAsync(ct).ConfigureAwait(false);
         if (survivors.Count == 0) return Array.Empty<ReleaseImportJob>();
 
@@ -155,8 +168,9 @@ public sealed class PersistedImportJobs
         // the right thing (a ZIP vs a C/AL file).
         var lostReleases = new Dictionary<int, string>();
 
-        foreach (var row in survivors)
+        foreach (var survivor in survivors)
         {
+            var row = survivor.Job;
             switch (row.Kind)
             {
                 case "url" when !string.IsNullOrEmpty(row.DownloadUrl):
@@ -187,10 +201,19 @@ public sealed class PersistedImportJobs
                         StoreSymbolReference: row.StoreSymbolReference,
                         JobRowId: row.Id));
                     break;
+                case "project_build" when survivor.Build?.Status is ProjectBuildStatus.Ready or ProjectBuildStatus.Failed:
+                    // The build had already finished: the restart landed while it was
+                    // being announced, published or prepared for release. Running it
+                    // again would rebuild and re-index a finished build and could
+                    // publish or prepare it twice, so the row is closed instead (#1181).
+                    row.Status = survivor.Build.Status == ProjectBuildStatus.Ready ? "completed" : "failed";
+                    if (row.Status == "failed") row.ErrorMessage ??= "The build had failed before the restart.";
+                    row.CompletedAt = now;
+                    break;
                 case "project_build" when row.ProjectId is int projectId:
-                    // Re-clone HEAD and rebuild from scratch; nothing on disk
-                    // survives a restart, but the project id is the whole
-                    // payload so the build is reproducible.
+                    // Re-clone and rebuild from scratch; nothing on disk survives
+                    // a restart, but the build row holds the commits its first
+                    // clone recorded, so the rebuild is of the same code (#1110).
                     row.Status = "queued";
                     row.StartedAt = null;
                     toResume.Add(new ReleaseImportJob(
@@ -199,7 +222,10 @@ public sealed class PersistedImportJobs
                             row.OrganizationId, row.UserId, row.IsSiteAdmin, row.IsSystemOrganization),
                         Source: new ReleaseImportSource.ProjectBuild(projectId),
                         StoreSymbolReference: row.StoreSymbolReference,
-                        JobRowId: row.Id));
+                        JobRowId: row.Id,
+                        BuildOrder: survivor.Build is { } build
+                            ? ProjectBuildOrder.For(build.PipelineId, build.BcTarget, build.Trigger)
+                            : ProjectBuildOrder.Unordered));
                     break;
                 case "backfill_system_references":
                     // A maintenance backfill interrupted by a restart. The
