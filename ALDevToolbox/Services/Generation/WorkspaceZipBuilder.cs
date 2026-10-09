@@ -261,8 +261,16 @@ public sealed class WorkspaceZipBuilder
             var substitutionCtx = BuildExtensionMustacheContext(standaloneExt, allExtensions, template, standaloneAsWorkspacePlan, orgConfig, logoPath);
             fileCount += EmitFolderTree(archive, folderName, scaffoldFolderRoots, plan.IncludeExamples, substitutionCtx, ct);
 
-            WriteString(archive, $"{folderName}/{WorkspaceConfigService.FileName}", _config.BuildExtension(plan));
-            fileCount++;
+            // The extension's own saved settings, so the form can be refilled
+            // from them. Left out when the workspace's settings at its root are
+            // written back listing this extension below: they then describe it,
+            // and a second file one level down would only disagree with them.
+            var rootSettingsListIt = sibling is { SavedPlan: not null, ExistingFolders.Count: > 0, SavedExtensions.Count: > 0 };
+            if (!rootSettingsListIt)
+            {
+                WriteString(archive, $"{folderName}/{WorkspaceConfigService.FileName}", _config.BuildExtension(plan));
+                fileCount++;
+            }
 
             // A workspace saved without its extension list (an older config)
             // gives no folders to rewrite the .code-workspace file from, and
@@ -291,6 +299,9 @@ public sealed class WorkspaceZipBuilder
                     ExtensionPrefix: sibling.ExtensionPrefix ?? string.Empty,
                     Affix: template.Defaults.AffixType == AffixType.None ? string.Empty : template.Defaults.Affix,
                     FolderPath: string.Empty,
+                    // The launch configurations name the workspace's tenant;
+                    // rendering it blank would wipe it from the file.
+                    TenantId: sibling.EffectiveTenantId,
                     FolderStyle: siblingFolderStyle);
                 WriteString(archive, workspaceFile,
                     BuildCodeWorkspace(

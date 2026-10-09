@@ -738,8 +738,18 @@ public record SiblingWorkspaceContext(
     /// </summary>
     ProjectPlan? SavedPlan = null,
     /// <summary>The extensions <see cref="SavedPlan"/> lists, Core first. Empty when it lists none.</summary>
-    IReadOnlyList<WorkspaceExtensionIdentity>? SavedExtensions = null)
+    IReadOnlyList<WorkspaceExtensionIdentity>? SavedExtensions = null,
+    /// <summary>
+    /// The tenant the workspace was generated for. The rewritten
+    /// <c>.code-workspace</c> file renders <c>{{tenant_id}}</c> from it, so the
+    /// launch configurations keep the tenant they already had. Null falls back
+    /// to <see cref="SavedPlan"/>'s.
+    /// </summary>
+    string? TenantId = null)
 {
+    /// <summary>The tenant with its fallback applied: this context's own, else the saved plan's, else blank.</summary>
+    public string EffectiveTenantId => TenantId ?? SavedPlan?.TenantId ?? string.Empty;
+
     /// <summary>The short name with its fallback applied - see <see cref="ProjectPlan.EffectiveShortName"/>.</summary>
     public string EffectiveShortName => CustomerNaming.ShortNameOrFallback(ShortName, WorkspaceName);
 

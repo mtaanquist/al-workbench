@@ -80,6 +80,7 @@
             <input type="hidden" name="WorkspaceName" value="@_workspaceContext.WorkspaceName" />
             <input type="hidden" name="WorkspaceShortName" value="@_workspaceContext.ShortName" />
             <input type="hidden" name="WorkspaceExtensionPrefix" value="@_workspaceContext.ExtensionPrefix" />
+            <input type="hidden" name="WorkspaceTenantId" value="@_workspaceContext.TenantId" />
             @foreach (var key in _workspaceContext.ModuleKeys)
             {
                 <input type="hidden" name="WorkspaceModuleKeys" value="@key" />
@@ -558,7 +559,8 @@
         string ExtensionPrefix,
         bool IncludeExamples,
         IReadOnlyList<string> ModuleKeys,
-        IReadOnlyList<WorkspaceExtensionIdentity> Extensions);
+        IReadOnlyList<WorkspaceExtensionIdentity> Extensions,
+        string TenantId);
 
     // Import-config feedback. _importFileName labels the picked file next to
     // the button; _importMessage is the success/seed line shown underneath;
@@ -798,7 +800,8 @@
                 ExtensionPrefixPolicy.ForExistingWorkspace(
                     _orgConfig.Settings, _workspaceContext.ExtensionPrefix,
                     _workspaceContext.ShortName, _workspaceContext.WorkspaceName),
-                SavedExtensions: _workspaceContext.Extensions);
+                SavedExtensions: _workspaceContext.Extensions,
+                TenantId: _workspaceContext.TenantId);
 
     /// <summary>
     /// Picking a repository fills the form in from the settings the workbench
@@ -1097,9 +1100,13 @@
         var folders = scaffold?.Folders ?? new List<WorkspaceExtensionFolder>();
         var (workspaceRootPaths, perExtensionPaths) = SplitIncludedFiles();
         var contents = ExtensionPreviewBuilder.BuildContents(folders, IncludeExamples, perExtensionPaths).ToList();
-        // Every generated extension folder carries its own saved config so the
-        // form can be restored from it later.
-        contents.Add(PreviewNode.File(ALDevToolbox.Services.Generation.WorkspaceConfigService.FileName));
+        // The extension carries its own saved config so the form can be
+        // restored from it later - except when it is added to a repository
+        // whose config at its root is written back listing it.
+        if (!(_repository is not null && _workspaceContext is { Extensions.Count: > 0 }))
+        {
+            contents.Add(PreviewNode.File(ALDevToolbox.Services.Generation.WorkspaceConfigService.FileName));
+        }
         if (includeWorkspaceRootFiles)
         {
             // The org logo rides along at the same path it takes in a
@@ -1384,7 +1391,8 @@
             plan.ExtensionPrefix,
             plan.IncludeExamples,
             plan.SelectedModuleKeys.ToList(),
-            extensions);
+            extensions,
+            plan.TenantId);
     }
 
     /// <summary>

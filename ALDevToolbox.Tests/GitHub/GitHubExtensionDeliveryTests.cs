@@ -322,6 +322,8 @@ public sealed class GitHubExtensionDeliveryTests : IDisposable
         tree.Should().Contain("CRONUSCustomer.code-workspace");
         tree.Should().Contain($"\"path\":\"{WorkspaceConfigService.FileName}\"",
             "the solution's saved settings list the new extension so the next one starts after it");
+        tree.Should().NotContain($"Banking/{WorkspaceConfigService.FileName}",
+            "the solution's settings at the root already describe it, so it gets no copy of its own");
     }
 
     [Fact]
