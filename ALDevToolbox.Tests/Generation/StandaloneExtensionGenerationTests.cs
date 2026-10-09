@@ -441,6 +441,138 @@ public sealed class StandaloneExtensionGenerationTests : IDisposable
             .Which.Errors["ExtensionName"].Should().Contain("202 characters");
     }
 
+    [Fact]
+    public async Task Sibling_extension_keeps_the_workspaces_tenant_in_the_rewritten_workspace_file()
+    {
+        const string tenant = "bcba8142-45b6-4bc7-af1a-09b16fadf877";
+        var template = TemplateWithExample();
+        template.CodeWorkspaceJson = """{"settings":{"cronus.tenant":"{{tenant_id}}"}}""";
+        await SeedTemplateAsync(template);
+
+        // The download posts the tenant the page read from the workspace's settings.
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"), CronusSibling() with { TenantId = tenant });
+
+        using var workspace = JsonDocument.Parse(ReadEntry(zip.GetEntry("CRONUSCustomer.code-workspace")!));
+        workspace.RootElement.GetProperty("settings").GetProperty("cronus.tenant").GetString()
+            .Should().Be(tenant, "rewriting the file must not blank the launch configurations' tenant");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_takes_the_tenant_from_the_saved_settings_when_none_is_passed()
+    {
+        const string tenant = "bcba8142-45b6-4bc7-af1a-09b16fadf877";
+        var template = TemplateWithExample();
+        template.CodeWorkspaceJson = """{"settings":{"cronus.tenant":"{{tenant_id}}"}}""";
+        await SeedTemplateAsync(template);
+        var saved = PlanBuilder.WorkspacePlan(workspaceName: "CRONUS Customer", shortName: "CRO", extensionPrefix: "CRO")
+            with { TenantId = tenant };
+
+        // The repository path: the settings read from its root carry the tenant.
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking", idFrom: 51000, idTo: 51999),
+            CronusSibling() with { SavedPlan = saved, SavedExtensions = [CoreIdentity()] });
+
+        using var workspace = JsonDocument.Parse(ReadEntry(zip.GetEntry("CRONUSCustomer.code-workspace")!));
+        workspace.RootElement.GetProperty("settings").GetProperty("cronus.tenant").GetString().Should().Be(tenant);
+        var import = await new WorkspaceConfigService(_db.NewContext())
+            .ParseAsync(ReadEntry(zip.GetEntry(WorkspaceConfigService.FileName)!));
+        import.Workspace!.TenantId.Should().Be(tenant);
+    }
+
+    [Fact]
+    public async Task Sibling_extension_is_added_to_the_workspaces_existing_file_rather_than_rebuilding_it()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+        // Hand-edited since it was generated: a launch configuration and a
+        // setting no template carries, with a comment and a trailing comma.
+        const string current = """
+            {
+              // added by hand
+              "folders": [ { "path": "Core" }, { "path": ".", "name": "Root" } ],
+              "settings": { "cronus.custom": true, "files.exclude": { "Core": true } },
+              "launch": { "configurations": [ { "name": "Hand-made", "tenant": "bcba8142-45b6-4bc7-af1a-09b16fadf877" }, ] }
+            }
+            """;
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"), CronusSibling() with { CodeWorkspaceJson = current });
+
+        using var workspace = JsonDocument.Parse(ReadEntry(zip.GetEntry("CRONUSCustomer.code-workspace")!));
+        var root = workspace.RootElement;
+        root.GetProperty("folders").EnumerateArray().Select(f => f.GetProperty("path").GetString())
+            .Should().Equal("Core", "Banking", ".");
+        root.GetProperty("settings").GetProperty("cronus.custom").GetBoolean().Should().BeTrue();
+        root.GetProperty("settings").GetProperty("files.exclude").GetProperty("Banking").GetBoolean().Should().BeTrue();
+        var launch = root.GetProperty("launch").GetProperty("configurations")[0];
+        launch.GetProperty("name").GetString().Should().Be("Hand-made");
+        launch.GetProperty("tenant").GetString().Should().Be("bcba8142-45b6-4bc7-af1a-09b16fadf877");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_rebuilds_a_workspace_file_it_cannot_read()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"), CronusSibling() with { CodeWorkspaceJson = "not json" });
+
+        using var workspace = JsonDocument.Parse(ReadEntry(zip.GetEntry("CRONUSCustomer.code-workspace")!));
+        workspace.RootElement.GetProperty("folders").EnumerateArray().Select(f => f.GetProperty("path").GetString())
+            .Should().Equal("Core", "Banking", ".");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_takes_the_publisher_the_workspaces_core_was_saved_with()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+        var core = CoreIdentity() with { Publisher = "CRONUS Partner" };
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking", publisher: "Someone Else", idFrom: 51000, idTo: 51999),
+            CronusSibling() with { SavedExtensions = [core] });
+
+        using var appJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("Banking/app.json")!));
+        appJson.RootElement.GetProperty("publisher").GetString().Should().Be("CRONUS Partner");
+    }
+
+    [Fact]
+    public async Task Sibling_extension_has_no_settings_file_of_its_own()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+        var saved = PlanBuilder.WorkspacePlan(workspaceName: "CRONUS Customer", shortName: "CRO", extensionPrefix: "CRO");
+
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking", idFrom: 51000, idTo: 51999),
+            CronusSibling() with { SavedPlan = saved, SavedExtensions = [CoreIdentity()] });
+
+        // The workspace's settings at its root already list it.
+        zip.GetEntry($"Banking/{WorkspaceConfigService.FileName}").Should().BeNull();
+        zip.GetEntry(WorkspaceConfigService.FileName).Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Sibling_extension_keeps_its_own_settings_file_when_the_workspaces_is_left_alone()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        // The download cannot rewrite the root file, so this is the only record of the extension.
+        using var zip = await GenerateSiblingAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking"), CronusSibling());
+
+        zip.GetEntry($"Banking/{WorkspaceConfigService.FileName}").Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Standalone_extension_keeps_its_own_settings_file()
+    {
+        await SeedTemplateAsync(TemplateWithExample());
+
+        using var zip = await GenerateExtensionAsync(PlanBuilder.ExtensionPlan(extensionName: "Banking"));
+
+        zip.GetEntry($"Banking/{WorkspaceConfigService.FileName}").Should().NotBeNull();
+    }
+
     private static SiblingWorkspaceContext CronusSibling() => new(
         "CRONUS Customer", Array.Empty<string>(), new[] { "Core" }, ShortName: "CRO", ExtensionPrefix: "CRO");
 

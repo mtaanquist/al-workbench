@@ -136,8 +136,10 @@ internal static class GenerationEndpoints
                     .ToList();
                 var workspaceShortName = form["WorkspaceShortName"].ToString().Trim();
                 var workspacePrefix = form["WorkspaceExtensionPrefix"].ToString().Trim();
+                var workspaceTenantId = form["WorkspaceTenantId"].ToString().Trim();
                 sibling = new SiblingWorkspaceContext(
-                    workspaceName, workspaceModules, workspaceFolders, workspaceShortName, workspacePrefix);
+                    workspaceName, workspaceModules, workspaceFolders, workspaceShortName, workspacePrefix,
+                    TenantId: workspaceTenantId);
             }
 
             try

@@ -322,6 +322,33 @@ public sealed class GitHubExtensionDeliveryTests : IDisposable
         tree.Should().Contain("CRONUSCustomer.code-workspace");
         tree.Should().Contain($"\"path\":\"{WorkspaceConfigService.FileName}\"",
             "the solution's saved settings list the new extension so the next one starts after it");
+        tree.Should().NotContain($"Banking/{WorkspaceConfigService.FileName}",
+            "the solution's settings at the root already describe it, so it gets no copy of its own");
+    }
+
+    [Fact]
+    public async Task A_repository_holding_a_solution_keeps_its_own_workspace_file_with_the_new_folder_added()
+    {
+        await ReadyAsync();
+        const string current = """{"folders":[{"path":"Core"},{"path":".","name":"Root"}],"settings":{"cronus.custom":true}}""";
+        var api = WritableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{WorkspaceConfigService.FileName}",
+                HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(WorkspaceConfigService.FileName, SavedSolutionConfig()))
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/CRONUSCustomer.code-workspace",
+                HttpStatusCode.OK, FakeGitHubApi.FileContentsJson("CRONUSCustomer.code-workspace", current));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        await service.AddExtensionAsync(
+            PlanBuilder.ExtensionPlan(extensionName: "Banking", idFrom: 51000, idTo: 51999), sibling: null, Repo);
+
+        var written = api.Bodies
+            .Where(b => b.Call.StartsWith("POST", StringComparison.Ordinal) && b.Call.Contains("/git/blobs"))
+            .Select(b => System.Text.Json.JsonDocument.Parse(b.Body).RootElement.GetProperty("content").GetString()!)
+            .Select(c => System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(c)))
+            .Single(c => c.Contains("\"folders\""));
+        written.Should().Contain("cronus.custom", "what was in the repository's file stays in it");
+        written.Should().Contain("\"Banking\"");
     }
 
     [Fact]

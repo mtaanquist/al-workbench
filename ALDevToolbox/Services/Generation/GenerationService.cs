@@ -302,7 +302,8 @@ public class GenerationService
 
     /// <summary>
     /// What changes about an extension that joins an existing workspace: it is
-    /// named with the workspace's prefix, and it leaves the example files out.
+    /// named with the workspace's prefix, takes the publisher its Core was
+    /// saved with, and it leaves the example files out.
     /// The workspace already has the template's examples, and a second copy
     /// would repeat their object names under the same prefix - which AL refuses
     /// as soon as one extension depends on the other.
@@ -312,6 +313,7 @@ public class GenerationService
         {
             ExtensionName = sibling.ExtensionNameFor(plan.ExtensionName),
             IncludeExamples = false,
+            Publisher = sibling.SavedPublisher ?? plan.Publisher,
         };
 
     /// <summary>
@@ -738,8 +740,36 @@ public record SiblingWorkspaceContext(
     /// </summary>
     ProjectPlan? SavedPlan = null,
     /// <summary>The extensions <see cref="SavedPlan"/> lists, Core first. Empty when it lists none.</summary>
-    IReadOnlyList<WorkspaceExtensionIdentity>? SavedExtensions = null)
+    IReadOnlyList<WorkspaceExtensionIdentity>? SavedExtensions = null,
+    /// <summary>
+    /// The tenant the workspace was generated for. The rewritten
+    /// <c>.code-workspace</c> file renders <c>{{tenant_id}}</c> from it, so the
+    /// launch configurations keep the tenant they already had. Null falls back
+    /// to <see cref="SavedPlan"/>'s.
+    /// </summary>
+    string? TenantId = null,
+    /// <summary>
+    /// The workspace's <c>.code-workspace</c> file as it stands, when the
+    /// caller has it - a GitHub repository's own. With it the new folder is
+    /// added to that file rather than the file being rebuilt from the
+    /// organisation's template, so whatever was changed in it by hand since it
+    /// was generated survives. Null rebuilds it (the ZIP download).
+    /// </summary>
+    string? CodeWorkspaceJson = null)
 {
+    /// <summary>The tenant with its fallback applied: this context's own, else the saved plan's, else blank.</summary>
+    public string EffectiveTenantId => TenantId ?? SavedPlan?.TenantId ?? string.Empty;
+
+    /// <summary>
+    /// The publisher the workspace's Core extension was saved with, or null
+    /// when the saved settings do not say. A new extension takes it, so it
+    /// matches the rest of the solution even if the organisation's default
+    /// publisher has changed since.
+    /// </summary>
+    public string? SavedPublisher => (SavedExtensions ?? [])
+        .FirstOrDefault(e => e.Kind == WorkspaceExtensionIdentity.CoreKind && !string.IsNullOrWhiteSpace(e.Publisher))
+        ?.Publisher;
+
     /// <summary>The short name with its fallback applied - see <see cref="ProjectPlan.EffectiveShortName"/>.</summary>
     public string EffectiveShortName => CustomerNaming.ShortNameOrFallback(ShortName, WorkspaceName);
 
