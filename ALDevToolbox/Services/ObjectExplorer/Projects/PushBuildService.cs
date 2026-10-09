@@ -34,6 +34,17 @@ public sealed class PushBuildService
         !push.Deleted && !push.Forced && push.HeadSha.Length > 0 && push.HeadSha.Any(c => c != '0');
 
     /// <summary>
+    /// Whether a push changed only documentation and so is not built: building it
+    /// would compile the same apps again and prepare a deployment of nothing new.
+    /// Only when the push carried straight on from the head already recorded
+    /// (<paramref name="followsRecordedHead"/>): otherwise an earlier push may have
+    /// been missed, or may still arrive and be dropped as older than this one, and
+    /// this push's build is the only one that would carry its code.
+    /// </summary>
+    public static bool IsDocumentationOnly(GitHubPushJob push, bool followsRecordedHead) =>
+        push.DocumentationOnly && followsRecordedHead;
+
+    /// <summary>
     /// The pipelines in the current organisation that build on push and watch the
     /// branch <paramref name="push"/> moved, each with the solution repository that
     /// was pushed to and the person the build runs as. A pipeline whose person is gone

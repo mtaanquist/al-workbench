@@ -246,14 +246,121 @@ public sealed class PushBuildTests : IDisposable
         (await read.OePipelines.SingleAsync(p => p.Id == refused)).BuildOnPushBlocked.Should().NotBeNull();
     }
 
+    // --- Documentation-only pushes ------------------------------------------
+
+    [Theory]
+    [InlineData("README.md", true)]
+    [InlineData("docs/Setup.MD", true)]
+    [InlineData("app/CHANGELOG.markdown", true)]
+    [InlineData(".gitignore", true)]
+    [InlineData("app/.gitignore", true)]
+    [InlineData(".gitattributes", true)]
+    [InlineData(".editorconfig", true)]
+    [InlineData("LICENSE", true)]
+    [InlineData(".github/CODEOWNERS", true)]
+    [InlineData(".github/workflows/ci.yml", true)]
+    [InlineData("app/src/Vat.Codeunit.al", false)]
+    [InlineData("app/app.json", false)]
+    [InlineData("app/Translations/Customer App.da-DK.xlf", false)]
+    [InlineData("app/src/Customer.PermissionSet.al", false)]
+    [InlineData("app/logo.png", false)]
+    [InlineData(".vscode/settings.json", false)]
+    [InlineData("app/.github/notes.txt", false)]
+    [InlineData("README.md.al", false)]
+    public void Documentation_is_told_from_what_the_build_compiles(string path, bool documentation) =>
+        DocumentationPaths.IsDocumentation(path).Should().Be(documentation);
+
+    [Fact]
+    public void A_push_reads_as_documentation_only_when_every_file_it_touched_is()
+    {
+        Push(paths: ["README.md", ".gitignore"]).DocumentationOnly.Should().BeTrue();
+        Push(paths: ["README.md", "app/src/Vat.Codeunit.al"]).DocumentationOnly.Should().BeFalse();
+        Push().DocumentationOnly.Should().BeFalse();
+    }
+
+    [Fact]
+    public void A_push_whose_payload_cannot_vouch_for_every_file_is_not_documentation_only()
+    {
+        Push(paths: ["README.md"], commitCount: GitHubWebhookEndpoints.ListedPushCommitLimit).DocumentationOnly
+            .Should().BeFalse("a payload listing that many commits may have been cut short");
+        Push(paths: [], commitCount: 0).DocumentationOnly
+            .Should().BeFalse("a new branch at an existing commit lists no commits at all");
+        Push(paths: []).DocumentationOnly.Should().BeFalse("a commit that touched nothing is not documentation");
+
+        var withoutFileLists = System.Text.Json.Nodes.JsonNode.Parse(GitHubWebhookPayloads.Push(paths: ["README.md"]))!;
+        withoutFileLists["commits"]![0]!.AsObject().Remove("removed");
+        GitHubWebhookEndpoints.TryReadPush(
+                System.Text.Encoding.UTF8.GetBytes(withoutFileLists.ToJsonString()), "delivery", NullLogger.Instance)!
+            .DocumentationOnly.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_documentation_only_push_after_a_built_push_is_not_built()
+    {
+        await ConnectAsync();
+        var owner = await SeedUserAsync();
+        await GiveTokenAsync(owner);
+        var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        var worker = NewWorker(new ProjectBuildQueue());
+        var docs = GitHubWebhookPayloads.Sha(77);
+
+        await worker.RunOneAsync(Push(), CancellationToken.None);
+        await worker.RunOneAsync(
+            Push(before: GitHubWebhookPayloads.After, after: docs, paths: ["README.md", ".gitignore"], pushedAt: 1_790_000_060),
+            CancellationToken.None);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.Where(b => b.PipelineId == pipelineId).Select(b => b.HeadSha).ToListAsync())
+            .Should().Equal([GitHubWebhookPayloads.After], "the documentation change compiles the same apps");
+        (await read.OeRepositoryBranchHeads.SingleAsync()).HeadSha
+            .Should().Be(docs, "the push is still recorded, so the branch head stays true");
+    }
+
+    [Fact]
+    public async Task A_documentation_only_push_that_does_not_follow_the_recorded_head_is_built()
+    {
+        await ConnectAsync();
+        var owner = await SeedUserAsync();
+        await GiveTokenAsync(owner);
+        var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        var worker = NewWorker(new ProjectBuildQueue());
+
+        // Nothing recorded before it: the push that changed code may still be on its
+        // way, and would be dropped as older when it arrives.
+        await worker.RunOneAsync(Push(paths: ["README.md"]), CancellationToken.None);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.Where(b => b.PipelineId == pipelineId).Select(b => b.HeadSha).ToListAsync())
+            .Should().Equal(GitHubWebhookPayloads.After);
+    }
+
+    [Fact]
+    public async Task A_redelivered_documentation_only_push_is_still_not_built()
+    {
+        await ConnectAsync();
+        var owner = await SeedUserAsync();
+        await GiveTokenAsync(owner);
+        var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        var worker = NewWorker(new ProjectBuildQueue());
+        var docs = Push(before: GitHubWebhookPayloads.After, after: GitHubWebhookPayloads.Sha(77), paths: ["README.md"], pushedAt: 1_790_000_060);
+
+        await worker.RunOneAsync(Push(), CancellationToken.None);
+        await worker.RunOneAsync(docs, CancellationToken.None);
+        await worker.RunOneAsync(docs, CancellationToken.None);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.CountAsync(b => b.PipelineId == pipelineId)).Should().Be(1);
+    }
+
     // --- Fixture -------------------------------------------------------------
 
     private static GitHubPushJob Push(
         string branch = "main", bool forced = false, bool deleted = false,
-        string before = GitHubWebhookPayloads.Before, string after = GitHubWebhookPayloads.After)
+        string before = GitHubWebhookPayloads.Before, string after = GitHubWebhookPayloads.After,
+        string[]? paths = null, int commitCount = 1, long pushedAt = 1_790_000_000)
     {
         var json = GitHubWebhookPayloads.Push(branch: branch, forced: forced, deleted: deleted, before: before,
-            after: deleted ? GitHubWebhookPayloads.Zero : after);
+            after: deleted ? GitHubWebhookPayloads.Zero : after, paths: paths, commitCount: commitCount, pushedAt: pushedAt);
         var job = GitHubWebhookEndpoints.TryReadPush(System.Text.Encoding.UTF8.GetBytes(json), "delivery", NullLogger.Instance);
         job.Should().NotBeNull();
         return job!;

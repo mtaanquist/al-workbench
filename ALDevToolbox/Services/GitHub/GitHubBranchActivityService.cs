@@ -35,8 +35,9 @@ public sealed class GitHubBranchActivityService
     /// <summary>
     /// Records a push against every solution repository in the current
     /// organisation that tracks the pushed repository, and returns how many it
-    /// matched. Zero is ordinary (a repository no solution tracks) and writes
-    /// nothing.
+    /// matched and whether the push carried on from the head already recorded for
+    /// each of them. Zero matched is ordinary (a repository no solution tracks) and
+    /// writes nothing.
     ///
     /// <para>A deleted branch keeps its row with <c>deleted_at</c> set, so a
     /// pipeline watching it can say the branch is gone rather than that nothing is
@@ -46,17 +47,18 @@ public sealed class GitHubBranchActivityService
     /// on the branch. A push older than the one already recorded (late or
     /// redelivered) changes nothing.</para>
     /// </summary>
-    public async Task<int> RecordPushAsync(GitHubPushJob push, CancellationToken ct = default)
+    public async Task<GitHubPushRecorded> RecordPushAsync(GitHubPushJob push, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
         var repositoryIds = await GitHubRepositoryMatch.TrackingRepositoryIdsAsync(_db, push.CloneUrl, ct).ConfigureAwait(false);
-        if (repositoryIds.Count == 0) return 0;
+        if (repositoryIds.Count == 0) return new GitHubPushRecorded(0, false);
 
         var existing = await _db.OeRepositoryBranchHeads
             .Where(h => repositoryIds.Contains(h.ProjectRepositoryId))
             .ToListAsync(ct).ConfigureAwait(false);
 
         var now = DateTime.UtcNow;
+        var followsRecordedHead = true;
         foreach (var repositoryId in repositoryIds)
         {
             var rows = existing.Where(h => h.ProjectRepositoryId == repositoryId).ToList();
@@ -82,6 +84,7 @@ public sealed class GitHubBranchActivityService
                     IsDefaultBranch = string.Equals(push.Branch, push.DefaultBranch, StringComparison.Ordinal),
                 };
                 _db.OeRepositoryBranchHeads.Add(head);
+                followsRecordedHead = false;
             }
             else if (push.PushedAt < head.PushedAt)
             {
@@ -89,6 +92,7 @@ public sealed class GitHubBranchActivityService
                 // original push. Either is older than what the row already says, so
                 // it leaves the branch where the newer push put it. GitHub's time is in
                 // whole seconds, so two pushes within one second still land in arrival order.
+                followsRecordedHead = false;
                 continue;
             }
 
@@ -106,6 +110,10 @@ public sealed class GitHubBranchActivityService
                               && head.DeletedAt is null
                               && head.HeadSha.Length > 0
                               && string.Equals(head.HeadSha, push.BeforeSha, StringComparison.OrdinalIgnoreCase);
+            // A redelivery of the push already recorded carries on from where it did.
+            var alreadyRecorded = head.DeletedAt is null
+                                  && string.Equals(head.HeadSha, push.HeadSha, StringComparison.OrdinalIgnoreCase);
+            if (!fastForward && !alreadyRecorded) followsRecordedHead = false;
             var commits = fastForward ? ReadCommits(head.CommitsJson) : [];
             commits.AddRange(push.Commits);
 
@@ -124,7 +132,7 @@ public sealed class GitHubBranchActivityService
         _logger.LogInformation(
             "Recorded a push to {Repository} ({Branch} at {HeadSha}, forced {Forced}, deleted {Deleted}) for {Count} solution repositories.",
             push.RepositoryFullName, push.Branch, push.HeadSha, push.Forced, push.Deleted, repositoryIds.Count);
-        return repositoryIds.Count;
+        return new GitHubPushRecorded(repositoryIds.Count, followsRecordedHead);
     }
 
     /// <summary>
@@ -235,3 +243,14 @@ internal static class GitHubRepositoryMatch
             .Distinct()
             .ToList();
 }
+
+/// <summary>
+/// What <see cref="GitHubBranchActivityService.RecordPushAsync"/> recorded.
+/// </summary>
+/// <param name="Matched">How many solution repositories track the pushed repository.</param>
+/// <param name="FollowsRecordedHead">
+/// True when, for every one of them, the push carried straight on from the head
+/// recorded before it (or was that same push again), so no push in between was
+/// missed or is still to arrive.
+/// </param>
+public sealed record GitHubPushRecorded(int Matched, bool FollowsRecordedHead);

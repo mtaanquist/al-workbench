@@ -130,9 +130,12 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
         await using var scope = _services.CreateAsyncScope();
         var activity = scope.ServiceProvider.GetRequiredService<GitHubBranchActivityService>();
 
+        var recordedPush = job is GitHubPushJob push
+            ? await activity.RecordPushAsync(push, ct).ConfigureAwait(false)
+            : null;
         var matched = job switch
         {
-            GitHubPushJob push => await activity.RecordPushAsync(push, ct).ConfigureAwait(false),
+            GitHubPushJob => recordedPush!.Matched,
             GitHubMergedPullRequestJob merged => await activity.RecordMergedPullRequestAsync(merged, ct).ConfigureAwait(false),
             _ => 0,
         };
@@ -146,6 +149,12 @@ public sealed class GitHubPullRequestBuildWorker : QueueDrainWorker<GitHubWebhoo
 
         if (job is GitHubPushJob buildable && PushBuildService.IsBuildable(buildable))
         {
+            if (PushBuildService.IsDocumentationOnly(buildable, recordedPush!.FollowsRecordedHead))
+            {
+                _logger.LogInformation(
+                    "Did not build {Job} on push: it changed only documentation.", Describe(buildable));
+                return;
+            }
             await StartPushBuildsAsync(buildable, identity, scope, ct).ConfigureAwait(false);
         }
     }

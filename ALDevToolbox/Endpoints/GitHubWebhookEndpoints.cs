@@ -537,6 +537,13 @@ public static class GitHubWebhookEndpoints
     /// <summary>How many of a push's commits are kept; GitHub itself lists at most twenty.</summary>
     internal const int KeptPushCommits = 10;
 
+    /// <summary>
+    /// The most commits GitHub has been documented to list on a push. A payload that
+    /// lists this many may have been cut short, so its file lists are not taken as
+    /// the whole push.
+    /// </summary>
+    internal const int ListedPushCommitLimit = 20;
+
     /// <summary>A commit message or title is stored for a one-line summary, not as an archive.</summary>
     private const int MaxMessageLength = 500;
 
@@ -599,14 +606,25 @@ public static class GitHubWebhookEndpoints
             if (pusher is null && root.TryGetProperty("sender", out var sender)) pusher = Text(sender, "login");
 
             var commits = new List<GitHubPushCommit>();
+            // Every path the push's commits added, changed or removed, or null as soon
+            // as the payload cannot vouch for the whole push: no commits listed (a new
+            // branch at an existing commit), a commit without its file lists, or a list
+            // that may have been cut short.
+            HashSet<string>? paths = new(StringComparer.Ordinal);
             if (root.TryGetProperty("commits", out var commitArray) && commitArray.ValueKind == JsonValueKind.Array)
             {
                 foreach (var commit in commitArray.EnumerateArray())
                 {
+                    if (paths is not null && !TryAddPaths(commit, paths)) paths = null;
                     var id = Text(commit, "id");
                     if (id is null || !FullShaRegex.IsMatch(id)) continue;
                     commits.Add(new GitHubPushCommit(id.ToLowerInvariant(), Clip(Text(commit, "message") ?? string.Empty)));
                 }
+                if (commitArray.GetArrayLength() is 0 or >= ListedPushCommitLimit) paths = null;
+            }
+            else
+            {
+                paths = null;
             }
 
             // repository.pushed_at is a Unix timestamp on push deliveries (and an
@@ -632,13 +650,32 @@ public static class GitHubWebhookEndpoints
                 Deleted: deleted,
                 PushedAt: pushedAt,
                 CommitCount: commits.Count,
-                Commits: commits.TakeLast(KeptPushCommits).ToList());
+                Commits: commits.TakeLast(KeptPushCommits).ToList(),
+                DocumentationOnly: paths is not null && DocumentationPaths.AreAllDocumentation(paths));
         }
         catch (JsonException ex)
         {
             log.LogWarning(ex, "A GitHub webhook delivery ({DeliveryId}) carried a body that is not JSON.", deliveryId);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Adds the paths <paramref name="commit"/> added, changed and removed to
+    /// <paramref name="paths"/>. False when any of the three lists is missing.
+    /// </summary>
+    private static bool TryAddPaths(JsonElement commit, HashSet<string> paths)
+    {
+        foreach (var list in (string[])["added", "modified", "removed"])
+        {
+            if (!commit.TryGetProperty(list, out var array) || array.ValueKind != JsonValueKind.Array) return false;
+            foreach (var path in array.EnumerateArray())
+            {
+                if (path.ValueKind != JsonValueKind.String) return false;
+                paths.Add(path.GetString()!);
+            }
+        }
+        return true;
     }
 
     /// <summary>

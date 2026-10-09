@@ -922,6 +922,20 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
   commit this pipeline already built on push. A pipeline with no branch builds pushes to
   the default branch GitHub names on the delivery. GitHub repositories only: pushes arrive
   by GitHub webhook, and Azure DevOps would need polling or a service hook.
+- **A push that changes only documentation.** When every file the push's commits added,
+  changed or removed is Markdown (`.md`, `.markdown`), `.gitignore`, `.gitattributes`,
+  `.editorconfig`, `CODEOWNERS`, `LICENSE` / `LICENSE.txt`, or anything under the root
+  `.github/` folder (`DocumentationPaths`), nothing is built, so no deployment is prepared
+  either: the apps would compile the same. Mads asked for this on 2026-10-09. It errs
+  towards building: everything not on that list counts (`app.json`, `.al`, `.xlf`, images
+  a logo may point at, `.vscode/`), and so does any push the payload cannot vouch for in
+  full - no commits listed (a new branch at an existing commit), a commit without its file
+  lists, or twenty or more commits (GitHub may have cut the list short). It also builds
+  unless the push carried straight on from the head already recorded for the branch: a
+  push that arrives before an earlier one, or after one we missed, is the only build that
+  would carry that code, since the earlier push is dropped as older when it lands. The
+  push is still recorded, so the pipeline page shows the branch ahead of its last build.
+  Only building on push skips; Build and the nightly preview check are unchanged.
 - **Whose identity.** The build runs as **the person who last saved the pipeline with
   building on push on** (`build_on_push_by_user_id`), the way a deployment pipeline's
   "deploy without approval" follows whoever saved it, so one manager cannot repoint a
