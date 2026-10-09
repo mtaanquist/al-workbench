@@ -5,7 +5,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// repository housekeeping. A push that touches nothing else is not built on push.
 /// The list is deliberately short and errs towards building: an unknown file type
 /// may be a resource the compiler packages, a logo <c>app.json</c> points at, or a
-/// translation, so anything not named here counts. See
+/// translation, so anything not named here counts. <c>.gitattributes</c> is not on the
+/// list: it can change the bytes a clone checks out. The one known gap is Markdown in a
+/// folder an app's <c>resourceFolders</c> packages, accepted as rare. See
 /// <c>.design/github-integration-phase2.md</c>, "Building on push".
 /// </summary>
 public static class DocumentationPaths
@@ -14,7 +16,7 @@ public static class DocumentationPaths
 
     private static readonly HashSet<string> FileNames = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".gitignore", ".gitattributes", ".editorconfig", "CODEOWNERS", "LICENSE", "LICENSE.txt",
+        ".gitignore", ".editorconfig", "CODEOWNERS", "LICENSE", "LICENSE.txt",
     };
 
     /// <summary>The folder at the repository root that holds only GitHub's own settings and workflows.</summary>

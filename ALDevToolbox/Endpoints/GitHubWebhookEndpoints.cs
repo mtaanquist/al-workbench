@@ -538,9 +538,9 @@ public static class GitHubWebhookEndpoints
     internal const int KeptPushCommits = 10;
 
     /// <summary>
-    /// The most commits GitHub has been documented to list on a push. A payload that
-    /// lists this many may have been cut short, so its file lists are not taken as
-    /// the whole push.
+    /// A push payload listing this many commits or more is not trusted to name every
+    /// file the push touched. GitHub caps the list (at twenty in places, higher in
+    /// others); the lowest cap is used, since a needless build costs less than a missed one.
     /// </summary>
     internal const int ListedPushCommitLimit = 20;
 

@@ -254,7 +254,7 @@ public sealed class PushBuildTests : IDisposable
     [InlineData("app/CHANGELOG.markdown", true)]
     [InlineData(".gitignore", true)]
     [InlineData("app/.gitignore", true)]
-    [InlineData(".gitattributes", true)]
+    [InlineData(".gitattributes", false)]
     [InlineData(".editorconfig", true)]
     [InlineData("LICENSE", true)]
     [InlineData(".github/CODEOWNERS", true)]
@@ -283,6 +283,8 @@ public sealed class PushBuildTests : IDisposable
     {
         Push(paths: ["README.md"], commitCount: GitHubWebhookEndpoints.ListedPushCommitLimit).DocumentationOnly
             .Should().BeFalse("a payload listing that many commits may have been cut short");
+        Push(paths: ["README.md"], commitCount: GitHubWebhookEndpoints.ListedPushCommitLimit - 1).DocumentationOnly
+            .Should().BeTrue();
         Push(paths: [], commitCount: 0).DocumentationOnly
             .Should().BeFalse("a new branch at an existing commit lists no commits at all");
         Push(paths: []).DocumentationOnly.Should().BeFalse("a commit that touched nothing is not documentation");
@@ -317,7 +319,7 @@ public sealed class PushBuildTests : IDisposable
     }
 
     [Fact]
-    public async Task A_documentation_only_push_that_does_not_follow_the_recorded_head_is_built()
+    public async Task A_documentation_only_push_from_a_commit_no_build_covers_is_built()
     {
         await ConnectAsync();
         var owner = await SeedUserAsync();
@@ -325,13 +327,84 @@ public sealed class PushBuildTests : IDisposable
         var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
         var worker = NewWorker(new ProjectBuildQueue());
 
-        // Nothing recorded before it: the push that changed code may still be on its
-        // way, and would be dropped as older when it arrives.
+        // The push that changed code may still be on its way, and would be dropped as
+        // older when it arrives; this push's build is the only one that carries it.
         await worker.RunOneAsync(Push(paths: ["README.md"]), CancellationToken.None);
 
         await using var read = _db.NewContext();
         (await read.OeProjectBuilds.Where(b => b.PipelineId == pipelineId).Select(b => b.HeadSha).ToListAsync())
             .Should().Equal(GitHubWebhookPayloads.After);
+    }
+
+    [Fact]
+    public async Task A_documentation_only_push_after_a_forced_push_is_built()
+    {
+        await ConnectAsync();
+        var owner = await SeedUserAsync();
+        await GiveTokenAsync(owner);
+        var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        var worker = NewWorker(new ProjectBuildQueue());
+        var docs = GitHubWebhookPayloads.Sha(77);
+
+        await worker.RunOneAsync(Push(forced: true), CancellationToken.None);
+        await worker.RunOneAsync(
+            Push(before: GitHubWebhookPayloads.After, after: docs, paths: ["README.md"], pushedAt: 1_790_000_060),
+            CancellationToken.None);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.Where(b => b.PipelineId == pipelineId).Select(b => b.HeadSha).ToListAsync())
+            .Should().Equal([docs], "the forced push was left to a person, so its code is still unbuilt");
+    }
+
+    [Fact]
+    public async Task A_documentation_only_push_after_a_failed_build_is_built()
+    {
+        await ConnectAsync();
+        var owner = await SeedUserAsync();
+        await GiveTokenAsync(owner);
+        var (_, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        var worker = NewWorker(new ProjectBuildQueue());
+        var docs = GitHubWebhookPayloads.Sha(77);
+
+        await worker.RunOneAsync(Push(), CancellationToken.None);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectBuilds.Where(b => b.PipelineId == pipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.Status, ProjectBuildStatus.Failed));
+        }
+        await worker.RunOneAsync(
+            Push(before: GitHubWebhookPayloads.After, after: docs, paths: ["README.md"], pushedAt: 1_790_000_060),
+            CancellationToken.None);
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.Where(b => b.PipelineId == pipelineId).OrderBy(b => b.Id).Select(b => b.HeadSha).ToListAsync())
+            .Should().Equal(GitHubWebhookPayloads.After, docs);
+    }
+
+    [Fact]
+    public async Task A_documentation_only_push_from_a_commit_a_manual_build_pinned_is_not_built()
+    {
+        var owner = await SeedUserAsync();
+        var (repositoryId, pipelineId) = await SeedSolutionAsync(owner, branch: "main");
+        await using (var ctx = _db.NewContext())
+        {
+            var build = new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = (await ctx.OePipelines.SingleAsync(p => p.Id == pipelineId)).ProjectId,
+                PipelineId = pipelineId, Status = ProjectBuildStatus.Ready, StartedAt = DateTime.UtcNow,
+            };
+            build.RepoCommits.Add(new OeProjectBuildRepoCommit
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectRepositoryId = repositoryId,
+                RepoUrl = "https://github.com/cronus-dk/customer-app.git", RepoDisplayName = "customer-app",
+                CommitHash = GitHubWebhookPayloads.Before,
+            });
+            ctx.OeProjectBuilds.Add(build);
+            await ctx.SaveChangesAsync();
+        }
+
+        (await ListDueAsync(Push(paths: ["README.md"]))).Should().BeEmpty();
+        (await ListDueAsync(Push())).Should().ContainSingle("a push that changed code still builds");
     }
 
     [Fact]
