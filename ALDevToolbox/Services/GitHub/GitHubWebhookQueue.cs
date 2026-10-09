@@ -80,6 +80,11 @@ public sealed record GitHubPushCommit(
 /// <param name="DefaultBranch">The repository's default branch as GitHub reported it on this delivery; empty when absent.</param>
 /// <param name="Commits">The last ten of the push's <c>commits[]</c>, oldest first.</param>
 /// <param name="CommitCount">How many commits the payload listed (GitHub caps the list at twenty).</param>
+/// <param name="DocumentationOnly">
+/// True when the payload listed every file the push touched and each one is
+/// documentation or housekeeping (<see cref="ALDevToolbox.Services.ObjectExplorer.Projects.DocumentationPaths"/>),
+/// so building it would compile the same apps again. False whenever the payload cannot say.
+/// </param>
 public sealed record GitHubPushJob(
     long InstallationId,
     string RepositoryFullName,
@@ -94,7 +99,8 @@ public sealed record GitHubPushJob(
     bool Deleted,
     DateTime PushedAt,
     int CommitCount,
-    IReadOnlyList<GitHubPushCommit> Commits)
+    IReadOnlyList<GitHubPushCommit> Commits,
+    bool DocumentationOnly)
     : GitHubWebhookJob(InstallationId, RepositoryFullName, CloneUrl, DeliveryId);
 
 /// <summary>

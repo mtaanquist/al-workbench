@@ -41,6 +41,14 @@ public sealed class PushBuildService
     /// already has a build on push of this exact commit is left out, so GitHub
     /// redelivering a push does not build it twice, and so is every pipeline when a
     /// newer push to the branch has already been recorded.
+    ///
+    /// <para>A push that changed only documentation (<see cref="GitHubPushJob.DocumentationOnly"/>)
+    /// is left out for a pipeline that already has a build, queued or finished and not
+    /// failed, of the commit the push started from: building it would compile the same
+    /// apps again and prepare a deployment of nothing new. Asking whether that commit was
+    /// built, rather than whether the push merely followed the last one recorded, is what
+    /// keeps code from going unbuilt when the push before it was forced, refused, missed,
+    /// still in flight, or pushed before building on push was turned on.</para>
     /// </summary>
     public async Task<List<PushBuildDue>> ListDueAsync(GitHubPushJob push, CancellationToken ct = default)
     {
@@ -86,12 +94,19 @@ public sealed class PushBuildService
                 p.BuildOnPushByUserId,
                 OwnerActive = p.BuildOnPushByUser != null && p.BuildOnPushByUser.Status == UserStatus.Active,
                 AlreadyBuilt = p.Builds.Any(b => b.Trigger == ProjectBuildTrigger.Push && b.HeadSha == push.HeadSha),
+                BeforeBuilt = push.DocumentationOnly && p.Builds.Any(b =>
+                    b.BcTarget == ProjectBuildTarget.Current
+                    && b.Status != ProjectBuildStatus.Failed
+                    && ((b.HeadSha == push.BeforeSha && b.HeadRepositoryId != null && repositoryIds.Contains(b.HeadRepositoryId.Value))
+                        || b.RepoCommits.Any(c => c.CommitHash == push.BeforeSha
+                                                  && c.ProjectRepositoryId != null
+                                                  && repositoryIds.Contains(c.ProjectRepositoryId.Value)))),
             })
             .OrderBy(p => p.Id)
             .ToListAsync(ct).ConfigureAwait(false);
 
         return pipelines
-            .Where(p => !p.AlreadyBuilt)
+            .Where(p => !p.AlreadyBuilt && !p.BeforeBuilt)
             .Select(p => p.BuildOnPushByUserId is { } userId && p.OwnerActive
                 ? new PushBuildDue(p.Id, repositoryByProject[p.ProjectId], userId, null)
                 : new PushBuildDue(p.Id, repositoryByProject[p.ProjectId], null, AutomatedBuilds.NoOwnerMessage))
