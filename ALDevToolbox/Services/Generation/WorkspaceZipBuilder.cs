@@ -294,7 +294,7 @@ public sealed class WorkspaceZipBuilder
                     // Matches the standalone extension's resolved publisher
                     // (org default, template fallback) — keep the rewritten
                     // sibling workspace in step with how it was generated.
-                    Publisher: GenerationNaming.ResolvePublisher(
+                    Publisher: sibling.SavedPublisher ?? GenerationNaming.ResolvePublisher(
                         orgConfig.Settings.DefaultPublisher, template.Defaults.Publisher),
                     ExtensionPrefix: sibling.ExtensionPrefix ?? string.Empty,
                     Affix: template.Defaults.AffixType == AffixType.None ? string.Empty : template.Defaults.Affix,
@@ -303,8 +303,13 @@ public sealed class WorkspaceZipBuilder
                     // rendering it blank would wipe it from the file.
                     TenantId: sibling.EffectiveTenantId,
                     FolderStyle: siblingFolderStyle);
+                // The file the workspace already has, with the new folder added,
+                // when the caller has it; rebuilt from the templates otherwise.
+                var codeWorkspace = sibling.CodeWorkspaceJson is { } current
+                    ? AddFolderToCodeWorkspace(current, folderName)
+                    : null;
                 WriteString(archive, workspaceFile,
-                    BuildCodeWorkspace(
+                    codeWorkspace ?? BuildCodeWorkspace(
                         orgConfig.Settings.CodeWorkspaceJson,
                         template.CodeWorkspaceJson,
                         existing,
@@ -840,6 +845,52 @@ public sealed class WorkspaceZipBuilder
         folders.Add(new JsonObject { ["path"] = ".", ["name"] = RootFolderName });
         root["folders"] = folders;
         ExcludeExtensionFoldersFromRoot(root, folderPaths);
+        return SerializeIndented(root);
+    }
+
+    /// <summary>
+    /// Adds <paramref name="folderName"/> to an existing <c>.code-workspace</c>
+    /// file, leaving everything else in it as it was: the new folder goes in
+    /// just before the workspace-root entry (or last, without one), and is
+    /// hidden under that root the way a generated workspace hides its own.
+    /// Null when the file is not a JSON object with a <c>folders</c> list,
+    /// so the caller rebuilds it instead. Comments in the file do not survive;
+    /// VS Code does not need them and the generator never writes any.
+    /// </summary>
+    private static string? AddFolderToCodeWorkspace(string json, string folderName)
+    {
+        JsonNode? parsed;
+        try
+        {
+            parsed = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            });
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        if (parsed is not JsonObject root || root["folders"] is not JsonArray folders) return null;
+
+        static string? PathOf(JsonNode? node) =>
+            node is JsonObject o && o["path"] is JsonValue v && v.TryGetValue<string>(out var path) ? path : null;
+
+        if (!folders.Any(f => string.Equals(PathOf(f), folderName, StringComparison.OrdinalIgnoreCase)))
+        {
+            var rootEntry = folders.FirstOrDefault(f => PathOf(f) == ".");
+            var entry = new JsonObject { ["path"] = folderName };
+            if (rootEntry is null)
+            {
+                folders.Add(entry);
+            }
+            else
+            {
+                folders.Insert(folders.IndexOf(rootEntry), entry);
+                ExcludeExtensionFoldersFromRoot(root, [folderName]);
+            }
+        }
         return SerializeIndented(root);
     }
 

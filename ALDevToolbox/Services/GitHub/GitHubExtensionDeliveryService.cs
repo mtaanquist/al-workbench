@@ -190,11 +190,20 @@ public sealed class GitHubExtensionDeliveryService
                 + "Give this one a different name, or add to the existing extension in your editor instead.");
         }
 
-        var (files, archiveName, archiveBytes) = await BuildFilesAsync(plan, sibling, ct);
-        // Only for the pull-request body: the sibling workspace's file is named
-        // in the organisation's folder style, the same one the generator just
-        // rewrote it under.
+        // The sibling workspace's file is named in the organisation's folder
+        // style, the same one the generator rewrites it under. Its current
+        // content goes along so the new folder is added to it rather than the
+        // file being rebuilt, which would lose whatever was changed in it by hand.
         var folderStyle = await _generation.GetFolderStyleAsync(ct);
+        if (sibling is not null)
+        {
+            var codeWorkspace = await _github.GetFileAsync(
+                token, repo.Owner, repo.Name,
+                $"{CustomerNaming.Apply(sibling.WorkspaceName, folderStyle)}.code-workspace", repo.DefaultBranch, ct);
+            sibling = sibling with { CodeWorkspaceJson = codeWorkspace?.Text };
+        }
+
+        var (files, archiveName, archiveBytes) = await BuildFilesAsync(plan, sibling, ct);
 
         var blobs = new List<(string Path, string BlobSha)>(files.Count);
         foreach (var file in files)
