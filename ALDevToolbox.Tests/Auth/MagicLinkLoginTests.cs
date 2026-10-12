@@ -25,7 +25,8 @@ public sealed class MagicLinkLoginTests : IDisposable
     private PasswordResetService NewSvc(Data.AppDbContext ctx) =>
         new(ctx,
             new AuthService(ctx, NullLogger<AuthService>.Instance, _clock),
-            _clock);
+            _clock,
+            _db.OpenIddictTokens);
 
     private async Task<User> SeedActiveUserAsync(string email = "user@example.com", int id = 700)
     {

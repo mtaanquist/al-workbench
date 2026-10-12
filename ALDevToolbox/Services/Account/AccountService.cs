@@ -5,6 +5,7 @@ using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.SingleTenant;
 using Microsoft.EntityFrameworkCore;
+using OpenIddict.Abstractions;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Services.Organizations;
 
@@ -78,8 +79,9 @@ public sealed class AccountService
     private readonly ISingleTenantMode _singleTenant;
     private readonly ILogger<AccountService> _logger;
     private readonly TimeProvider _clock;
+    private readonly IOpenIddictTokenManager _oauthTokens;
 
-    public AccountService(AppDbContext db, AuthService auth, SystemSettingsService settings, ISingleTenantMode singleTenant, ILogger<AccountService> logger, TimeProvider clock)
+    public AccountService(AppDbContext db, AuthService auth, SystemSettingsService settings, ISingleTenantMode singleTenant, ILogger<AccountService> logger, TimeProvider clock, IOpenIddictTokenManager oauthTokens)
     {
         _db = db;
         _auth = auth;
@@ -87,6 +89,7 @@ public sealed class AccountService
         _singleTenant = singleTenant;
         _logger = logger;
         _clock = clock;
+        _oauthTokens = oauthTokens;
     }
 
     /// <summary>
@@ -400,29 +403,59 @@ public sealed class AccountService
         user.PasswordHash = _auth.HashPassword(newPassword);
         var now = _clock.GetUtcNow().UtcDateTime;
         user.CredentialsChangedAt = now;
-        await RevokeSessionCredentialsAsync(_db, user.Id, now, ct);
-        await _db.SaveChangesAsync(ct);
+        // The assistants this user approved go too, so a client someone else
+        // connected while holding the old password has to be approved again.
+        // Filtered: this runs in the user's own signed-in request, so the
+        // query filter already scopes the read to their organisation.
+        var consents = await _db.OAuthConsents
+            .Where(c => c.UserId == user.Id && c.RevokedAt == null)
+            .ToListAsync(ct);
+        foreach (var consent in consents) consent.RevokedAt = now;
+        await CommitCredentialChangeAsync(_db, _oauthTokens, user.Id, now, ct);
     }
 
     /// <summary>
-    /// Revokes what a password change is supposed to take away besides the
-    /// password itself: the user's live personal access tokens. Cookies are
-    /// handled by the <c>credentials_changed_at</c> stamp the caller writes —
-    /// <see cref="Endpoints.CookieSessionRevalidation"/> drops any cookie
-    /// issued before it. The caller saves; both changes land together. #675.
+    /// Saves a password change together with what it is supposed to take away
+    /// besides the password itself: the user's live personal access tokens and
+    /// every OAuth access token, refresh token and authorization code issued to
+    /// them. Cookies are handled by the <c>credentials_changed_at</c> stamp the
+    /// caller writes; <see cref="Endpoints.CookieSessionRevalidation"/> drops
+    /// any cookie issued before it, and <see cref="OAuth.OAuthClaimsTransformer"/>
+    /// refuses any OAuth access token issued before it. #675.
     /// </summary>
     /// <remarks>
-    /// The token query skips the org filter because both callers run outside a
-    /// tenant-scoped request (a completed password reset has no session at all)
-    /// and already read the user the same way. It is scoped to this one user's
-    /// rows by id, so it cannot reach another account's tokens.
+    /// <para>
+    /// Saves the caller's pending changes (the new hash, the stamp) in the same
+    /// transaction as the revocations, so a failure part way cannot leave the
+    /// password changed with the old tokens still live. OpenIddict's token
+    /// manager shares the scoped context, so its revocations join it.
+    /// </para>
+    /// <para>
+    /// The personal-access-token query skips the org filter because a
+    /// completed password reset runs with no session at all, and the reset
+    /// path already read the user the same way. It is scoped to this one
+    /// user's rows by id, so it cannot reach another account's tokens.
+    /// OpenIddict's tables carry no org filter; the subject is the user id
+    /// (<c>OAuthEndpoints.MapAuthorizeComplete</c>), as in
+    /// <see cref="UserAdministrationService.DisableUserAsync"/>.
+    /// </para>
     /// </remarks>
-    internal static async Task RevokeSessionCredentialsAsync(AppDbContext db, int userId, DateTime now, CancellationToken ct)
+    internal static async Task CommitCredentialChangeAsync(
+        AppDbContext db, IOpenIddictTokenManager oauthTokens, int userId, DateTime now, CancellationToken ct)
     {
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // Fence category 4 (own-user lookup): pinned to p.UserId == userId, the
+        // signed-in user or the user a reset token was issued to.
         var tokens = await db.PersonalAccessTokens.IgnoreQueryFilters()
             .Where(p => p.UserId == userId && p.RevokedAt == null)
             .ToListAsync(ct);
         foreach (var token in tokens) token.RevokedAt = now;
+        await db.SaveChangesAsync(ct);
+        await foreach (var token in oauthTokens.FindBySubjectAsync(userId.ToString(System.Globalization.CultureInfo.InvariantCulture), ct))
+        {
+            await oauthTokens.TryRevokeAsync(token, ct);
+        }
+        await tx.CommitAsync(ct);
     }
 
     /// <summary>Self-service display-name change.</summary>

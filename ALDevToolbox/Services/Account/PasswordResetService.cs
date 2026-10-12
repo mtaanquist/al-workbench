@@ -2,6 +2,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
+using OpenIddict.Abstractions;
 
 namespace ALDevToolbox.Services.Account;
 
@@ -20,12 +21,14 @@ public sealed class PasswordResetService
     private readonly AppDbContext _db;
     private readonly AuthService _auth;
     private readonly TimeProvider _clock;
+    private readonly IOpenIddictTokenManager _oauthTokens;
 
-    public PasswordResetService(AppDbContext db, AuthService auth, TimeProvider clock)
+    public PasswordResetService(AppDbContext db, AuthService auth, TimeProvider clock, IOpenIddictTokenManager oauthTokens)
     {
         _db = db;
         _auth = auth;
         _clock = clock;
+        _oauthTokens = oauthTokens;
     }
 
     /// <summary>
@@ -135,11 +138,11 @@ public sealed class PasswordResetService
         row.ConsumedAt = now;
         row.User.PasswordHash = _auth.HashPassword(newPassword);
         // Reset is the documented recovery path, so it has to actually recover:
-        // stamp the credential change (which invalidates cookies issued before
-        // it) and revoke the tokens an intruder may have minted. #675
+        // stamp the credential change (which invalidates cookies and OAuth
+        // access tokens issued before it) and revoke the personal access
+        // tokens and OAuth tokens an intruder may have minted. #675
         row.User.CredentialsChangedAt = now;
-        await AccountService.RevokeSessionCredentialsAsync(_db, row.User.Id, now, ct);
-        await _db.SaveChangesAsync(ct);
+        await AccountService.CommitCredentialChangeAsync(_db, _oauthTokens, row.User.Id, now, ct);
     }
 
     /// <summary>
