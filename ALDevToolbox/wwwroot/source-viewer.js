@@ -747,13 +747,16 @@ function compareRequestError(status) {
     if (status === 413) {
         return "The texts are too large to compare. Trim them, then edit either side to retry.";
     }
+    if (status === 503) {
+        return "The server is busy comparing other texts. Edit either side to retry in a moment.";
+    }
     return "Could not compare. Edit either side to retry.";
 }
 
 // The same sentence the server answers an over-cap paste with, so the two
 // routes to it read alike. Said here first where we can: the text is already
-// in the browser, and shipping four megabytes across the wire to be told it is
-// four megabytes is a slow way to hear it.
+// in the browser, and shipping megabytes across the wire to be told they are
+// too many is a slow way to hear it.
 function compareTooLargeMessage(longest, max) {
     return `One of the texts is too large (${longest.toLocaleString()} characters). `
         + `Trim it under ${max.toLocaleString()} and try again.`;
@@ -880,6 +883,20 @@ function wireEditableCompare(left, right) {
     // Guards against an out-of-order response: a slow diff for an old keystroke
     // must not overwrite a newer one.
     let seq = 0;
+    // The request in flight, aborted the moment a newer one supersedes it.
+    // The sequence check alone only stopped a stale reply from landing; the
+    // request itself still ran to the end on the server and held one of the
+    // few diff slots there, so typing into a large text queued diff after
+    // diff behind each other. Aborting lets the server skip a superseded
+    // diff that has not started yet.
+    let inflight = null;
+    const retire = () => {
+        seq++;
+        if (inflight) {
+            inflight.abort();
+            inflight = null;
+        }
+    };
     const recompute = async () => {
         refreshActionButtons();
         const leftText = getValue(left.editorId);
@@ -895,7 +912,7 @@ function wireEditableCompare(left, right) {
             // Bumping the sequence retires any diff already in flight: its
             // reply would otherwise land on panes that have since been
             // emptied and paint the decorations straight back in.
-            seq++;
+            retire();
             clearDiff();
             setSummary(oneSidedHint(leftText, rightText), false);
             setNavEnabled(false);
@@ -905,19 +922,23 @@ function wireEditableCompare(left, right) {
         // back with this same sentence after uploading both texts to earn it.
         if (maxInputLength > 0
             && (leftText.length > maxInputLength || rightText.length > maxInputLength)) {
-            seq++;
+            retire();
             clearDiff();
             setSummary(compareTooLargeMessage(
                 Math.max(leftText.length, rightText.length), maxInputLength), true);
             setNavEnabled(false);
             return;
         }
-        const mine = ++seq;
+        retire();
+        const mine = seq;
+        const controller = new AbortController();
+        inflight = controller;
         setSummary("Comparing...", false);
         let data;
         try {
             const res = await fetch("/api/compare/diff", {
                 method: "POST",
+                signal: controller.signal,
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     left: leftText,
@@ -933,13 +954,27 @@ function wireEditableCompare(left, right) {
             // keep the diff they already have and the next edit retries.
             if (!res.ok) {
                 if (mine !== seq) return;
-                setSummary(compareRequestError(res.status), true);
+                // The handler's own refusals (too large, too many lines,
+                // busy) carry a sentence naming the limit that was hit;
+                // prefer it over the generic one for the status.
+                let message = compareRequestError(res.status);
+                try {
+                    const body = await res.json();
+                    if (body && typeof body.error === "string") message = body.error;
+                } catch { /* no JSON body: keep the generic sentence */ }
+                if (mine !== seq) return;
+                setSummary(message, true);
                 return;
             }
             data = await res.json();
         } catch {
+            // An aborted request lands here too; it was superseded, and the
+            // request that replaced it owns the read-out.
+            if (mine !== seq) return;
             setSummary("Could not compare. Check your connection, then edit either side to retry.", true);
             return;
+        } finally {
+            if (inflight === controller) inflight = null;
         }
         if (mine !== seq) return; // superseded by a newer edit
         if (data && data.error) {
