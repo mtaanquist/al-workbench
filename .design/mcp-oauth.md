@@ -148,13 +148,30 @@ plus one Razor page.
 OpenIddict 7.5.0's server builder does **not** expose a first-class
 registration endpoint. We hand-roll it as a minimal API at
 `POST /oauth/register` and write through `IOpenIddictApplicationManager`.
-Anonymous (Claude registers without a user); rejects non-https
-`redirect_uris` except for loopback (Claude Code uses
-`http://127.0.0.1:<port>/callback`); stamps registration provenance
+Anonymous (Claude registers without a user); stamps registration provenance
 ("dcr") into the application's `properties` JSON.
 
 The discovery metadata customisation in `Program.cs` adds
 `registration_endpoint` to the AS metadata so Claude finds it.
+
+### Allowed redirect URIs
+
+One rule, `Services/OAuth/OAuthRedirectUriPolicy.cs`, applies to every
+`redirect_uri` a client registers or uses:
+
+- `https` with a host — hosted clients;
+- `http` on loopback only — native clients (Claude Code uses
+  `http://127.0.0.1:<port>/callback`, RFC 8252 §7.3);
+- a private-use scheme in reverse-domain form (`com.example.app:/callback`,
+  RFC 8252 §7.1).
+
+Everything else is refused, including any URI with a fragment. DCR rejects
+the whole registration with `invalid_redirect_uri`; the CIMD resolver drops
+the refused entries and rejects the document if none are left; and an
+authorize request whose `redirect_uri` fails the rule is rejected before
+OpenIddict validates it, so a row stored before the rule existed cannot be
+used either. The `form_post` response mode is switched off — MCP clients use
+the code flow's default `query` mode.
 
 ## CIMD resolver
 
@@ -171,7 +188,8 @@ OpenIddict validator. On every authorize whose `client_id` is an HTTPS URL,
 the resolver:
 
 1. Fetches the URL with a 5 s timeout and a 64 KB body cap.
-2. Validates the document's `client_id` self-reference, `redirect_uris`,
+2. Validates the document's `client_id` self-reference, `redirect_uris`
+   (against the rule above),
    and accepts one of two `token_endpoint_auth_method` values:
    - `none` — registers as a public PKCE client (Claude).
    - `private_key_jwt` — fetches the document's `jwks_uri` (same timeout

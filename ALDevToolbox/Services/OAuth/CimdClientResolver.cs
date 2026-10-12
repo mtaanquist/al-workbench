@@ -222,11 +222,19 @@ public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthor
                 return;
         }
 
+        // Same rule as /oauth/register: an entry the policy refuses is
+        // dropped (logged), and a document left with none is rejected below.
         foreach (var uri in metadata.RedirectUris)
         {
-            if (Uri.TryCreate(uri, UriKind.Absolute, out var parsed))
+            if (Uri.TryCreate(uri, UriKind.Absolute, out var parsed) && OAuthRedirectUriPolicy.IsAllowed(parsed))
             {
                 descriptor.RedirectUris.Add(parsed);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Ignoring redirect_uri {RedirectUri} from the client metadata document for {ClientId}: not an allowed redirect URI.",
+                    uri, clientId);
             }
         }
         if (descriptor.RedirectUris.Count == 0)

@@ -179,6 +179,33 @@ public static class OAuthServerRegistration
                 o.AddEventHandler<OpenIddict.Server.OpenIddictServerEvents.ValidateAuthorizationRequestContext>(b =>
                     b.UseScopedHandler<ALDevToolbox.Services.OAuth.CimdClientResolver>()
                      .SetOrder(int.MinValue + 100_000));
+
+                // Registration (DCR and CIMD) only stores redirect URIs that
+                // OAuthRedirectUriPolicy accepts, but rows written before that
+                // rule existed may still hold a refused one. Checking the
+                // requested redirect_uri on every authorize request keeps such
+                // a row unusable; OpenIddict's own handlers then require it to
+                // match a registered URI exactly. This runs before the redirect
+                // URI is validated, so the error is shown here, never sent there.
+                o.AddEventHandler<OpenIddict.Server.OpenIddictServerEvents.ValidateAuthorizationRequestContext>(b =>
+                    b.UseInlineHandler(context =>
+                    {
+                        var redirectUri = context.Request.RedirectUri;
+                        if (!string.IsNullOrEmpty(redirectUri) && !OAuthRedirectUriPolicy.IsAllowed(redirectUri))
+                        {
+                            context.Reject(
+                                error: OpenIddict.Abstractions.OpenIddictConstants.Errors.InvalidRequest,
+                                description: "The redirect_uri must be https, http on loopback, or a reverse-domain app scheme.");
+                        }
+                        return default;
+                    })
+                    .SetOrder(int.MinValue + 100_001));
+
+                // MCP clients use the code flow's default query response mode.
+                // form_post would render an auto-submitting form whose action is
+                // the redirect URI on this app's origin, so it is switched off.
+                o.Configure(options => options.ResponseModes.Remove(
+                    OpenIddict.Abstractions.OpenIddictConstants.ResponseModes.FormPost));
             })
             .AddValidation(o =>
             {
