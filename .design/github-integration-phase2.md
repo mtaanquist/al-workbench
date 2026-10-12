@@ -941,7 +941,13 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
 - **Whose identity.** The build runs as **the person who last saved the pipeline with
   building on push on** (`build_on_push_by_user_id`), the way a deployment pipeline's
   "deploy without approval" follows whoever saved it, so one manager cannot repoint a
-  pipeline and have it clone with someone else's access. As with the nightly preview check,
+  pipeline and have it clone with someone else's access. Adding a repository to the
+  solution, of either provider, or changing one's address, likewise makes whoever saves it
+  the person building on push and the nightly preview check run as, on every pipeline of
+  the solution (`ProjectService.FollowRepositoryChangeInPipelinesAsync`); a build already
+  waiting as the previous person is then refused when its turn comes. When the new person
+  has nothing to clone one of the solution's providers with, the pipeline shows it as
+  paused straight away. As with the nightly preview check,
   the access check, the clone credential (their connected GitHub account, then their build
   token), the name on the build and its notifications are theirs. It is not the GitHub
   App's installation token, which would let builds keep running with nobody's permission
@@ -1179,6 +1185,19 @@ Business Central, the way Dependabot does it, instead of remembering to press th
   person that saving will use their GitHub account. Resume refuses a person with no
   GitHub account connected rather than clearing the warning, and the warning is worded
   to the person it is about ("you have not connected your GitHub account").
+- **A repository in the connected organisation must be one you can see.** A pull-request
+  build clones every GitHub repository on the solution with the installation's token,
+  which reaches every repository in the connected GitHub organisation. So whoever adds a
+  GitHub repository there to a solution - on create, in the editor, or through "Add
+  repository", and also by changing an address - must be able to see it with their own
+  connected GitHub account (`GitHubAccessService.CanAccessRepoAsync`). Without a
+  connected account, or when GitHub cannot be asked, the repository is refused under its
+  row with what to do next. Repositories outside the connected organisation, Azure DevOps
+  ones and the ones a solution already has are not asked about. "Create repository" puts
+  the repository it just made on the solution without asking: it holds only what that
+  person generated, and in an organisation whose members get no access by default they
+  may not see it yet. That path is internal to the service, so no page or agent can
+  name a URL to skip the check with.
 - **`DependencyDriftScheduler` runs once a night at 05:00 UTC**, after the environment
   refresh, for every organisation with an imported first-party release: it rescans (so a
   customer moved to a new version during the day is measured against it, and the

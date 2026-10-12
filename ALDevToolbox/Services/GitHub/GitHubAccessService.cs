@@ -352,6 +352,18 @@ public sealed class GitHubAccessService
     }
 
     /// <summary>
+    /// The login of the GitHub organisation this organisation connected, or null
+    /// when it has none. Repositories there are the ones the installation - and so a
+    /// pull-request build, which clones with its token - can reach. One query; never
+    /// talks to GitHub.
+    /// </summary>
+    public async Task<string?> GetConnectedOrgLoginAsync(CancellationToken ct = default)
+    {
+        var login = (await _orgConfig.GetCurrentAsync(ct)).Settings.GitHubOrgLogin;
+        return string.IsNullOrWhiteSpace(login) ? null : login;
+    }
+
+    /// <summary>
     /// Whether <paramref name="userId"/> is a member of the organisation's
     /// connected GitHub organisation. <see langword="false"/> when the
     /// organisation has not connected one, when the user has no usable link,
