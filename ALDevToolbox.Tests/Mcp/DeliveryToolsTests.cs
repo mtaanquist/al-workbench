@@ -309,6 +309,27 @@ public sealed class DeliveryToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task Stage_github_release_is_refused_when_the_persons_github_account_cannot_see_the_repository()
+    {
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" });
+            await MakeReleaseSourcedAsync(ctx, seed.ReleasePipelineId);
+        }
+        await ConnectOrganisationAsync();
+        var github = GitHubWithOneRelease(userCanSee: false);
+
+        await using var read = _db.NewContext();
+        var list = () => NewTools(read, github).ListGitHubReleasesAsync(seed.ReleasePipelineId);
+        var stage = () => NewTools(read, github).StageGitHubReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+
+        (await list.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("doesn't have access");
+        (await stage.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("doesn't have access");
+        github.Calls.Should().NotContain(c => c.Contains("/releases"));
+    }
+
+    [Fact]
     public async Task Both_release_tools_say_so_plainly_when_the_deployment_has_no_GitHub_app()
     {
         // Nothing is configured, so there is no App to act as. An agent gets the
@@ -328,10 +349,13 @@ public sealed class DeliveryToolsTests : IDisposable
             });
             await ctx.SaveChangesAsync();
         }
+        await ActAsLinkedUserAsync();
+        var github = new FakeGitHubApi()
+            .On(HttpMethod.Get, $"/repos/{GitHubRepo}", System.Net.HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(GitHubRepo));
 
         await using var read = _db.NewContext();
-        var list = () => NewTools(read).ListGitHubReleasesAsync(seed.ReleasePipelineId);
-        var stage = () => NewTools(read).StageGitHubReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+        var list = () => NewTools(read, github).ListGitHubReleasesAsync(seed.ReleasePipelineId);
+        var stage = () => NewTools(read, github).StageGitHubReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
 
         await list.Should().ThrowAsync<McpException>();
         await stage.Should().ThrowAsync<McpException>();
@@ -423,8 +447,11 @@ public sealed class DeliveryToolsTests : IDisposable
     private const string GitHubRepo = OrgLogin + "/cronus-customer";
 
     /// <summary>A GitHub with one installable release on the solution's repository.</summary>
-    private static FakeGitHubApi GitHubWithOneRelease() =>
+    private static FakeGitHubApi GitHubWithOneRelease(bool userCanSee = true) =>
         new FakeGitHubApi()
+            .On(HttpMethod.Get, $"/repos/{GitHubRepo}",
+                userCanSee ? System.Net.HttpStatusCode.OK : System.Net.HttpStatusCode.NotFound,
+                userCanSee ? FakeGitHubApi.RepositoryJson(GitHubRepo) : null)
             .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
                 System.Net.HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson("ghs_installation"))
             .On(HttpMethod.Get, $"/repos/{GitHubRepo}/releases/tags/v1.0.0.0", System.Net.HttpStatusCode.OK,
@@ -472,6 +499,29 @@ public sealed class DeliveryToolsTests : IDisposable
             UpdatedAt = DateTime.UtcNow,
         });
         await ctx.SaveChangesAsync();
+
+        await ActAsLinkedUserAsync();
+    }
+
+    /// <summary>
+    /// Seeds a person with a GitHub account connected and makes them the actor: the
+    /// release tools ask GitHub whether that person can see the repository.
+    /// </summary>
+    private async Task ActAsLinkedUserAsync()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var user = new ALDevToolbox.Domain.Entities.User
+            {
+                OrganizationId = TestDb.DefaultOrgId, Email = "agent@cronus.example", DisplayName = "Agent",
+                PasswordHash = "x", Role = ALDevToolbox.Domain.Entities.UserRole.User,
+                Status = ALDevToolbox.Domain.Entities.UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            };
+            ctx.Users.Add(user);
+            await ctx.SaveChangesAsync();
+            _db.OrgContext.CurrentUserId = user.Id;
+        }
+        await _db.LinkGitHubAccountAsync(_db.OrgContext.CurrentUserId!.Value);
     }
 
     private sealed record Seed(int ProjectId, int ReleasePipelineId, int BuildId);

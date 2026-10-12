@@ -913,7 +913,7 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
             new ALDevToolbox.Services.GitHub.GitHubConnectionService(
                 db, org, null!, settings, null!,
                 NullLogger<ALDevToolbox.Services.GitHub.GitHubConnectionService>.Instance, TimeProvider.System),
-            new ProjectAccess(db, org), org,
+            new ProjectAccess(db, org), null!, org,
             new ALDevToolbox.Endpoints.PublicOrigin(null), TimeProvider.System,
             new ALDevToolbox.Services.Tools.ToolEnablement(TestDb.EverythingEnabled(),
                 new Microsoft.AspNetCore.Http.HttpContextAccessor(), db, org, TimeProvider.System),

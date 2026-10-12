@@ -352,6 +352,38 @@ public sealed class GitHubAccessService
     }
 
     /// <summary>
+    /// Whether <paramref name="userId"/> can write to <paramref name="repoFullName"/>
+    /// (<c>owner/name</c>) on GitHub, asked with that person's own token. The gate
+    /// on choosing a repository for a pipeline to publish releases to: the
+    /// publishing itself runs on the installation token, with nobody behind it to
+    /// ask, so the person who picks the target is the one whose rights count.
+    /// Same failure rule as <see cref="CanAccessRepoAsync"/>.
+    /// </summary>
+    public async Task<bool> CanPushRepoAsync(int userId, string repoFullName, CancellationToken ct = default)
+    {
+        var parts = (repoFullName ?? string.Empty).Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2) return false;
+
+        var key = $"push:{userId}:{repoFullName!.ToLowerInvariant()}";
+        if (TryRecall(key, out var remembered)) return remembered;
+
+        var token = await ResolveUserTokenAsync(userId, ct);
+        if (token is null) return Remember(key, false);
+
+        try
+        {
+            return Remember(key, await _github.UserCanPushRepositoryAsync(token, parts[0], parts[1], ct));
+        }
+        catch (Exception ex) when (IsGitHubUnreachable(ex, ct))
+        {
+            _logger.LogWarning(ex,
+                "Could not check whether user {UserId} can write to {RepoFullName}; treating it as no access.",
+                userId, repoFullName);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Whether <paramref name="userId"/> is a member of the organisation's
     /// connected GitHub organisation. <see langword="false"/> when the
     /// organisation has not connected one, when the user has no usable link,

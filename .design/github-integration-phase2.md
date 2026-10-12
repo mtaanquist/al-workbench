@@ -361,6 +361,14 @@ Releases page, and who sometimes has to redeploy a version the workbench did not
   (delete then upload) and its body updated; the tag is never moved. Installation token
   throughout - a Release is an act of the organisation, and there may be no user (a
   webhook build).
+- **The person is checked where there is one.** The installation token can reach every
+  repository in the organisation, so it never stands in for the acting user's own rights.
+  Choosing (or changing) a build pipeline's release repository needs the person saving it
+  to have write access to that repository on GitHub, asked with their own token; the
+  publish itself then runs without a user. Listing and staging a repository's Releases
+  need the acting person to be able to see it on GitHub (`CanAccessRepoAsync`) on every
+  call, in the UI and through `list_github_releases` / `stage_github_release` alike. No
+  connected GitHub account counts as no access.
 - **Deliver from a Release is a release-pipeline source.** `oe_release_pipelines` gains
   `artifact_source` (`build` | `github_release`) and `github_release_repository_id`;
   `build_pipeline_id` becomes nullable and is required exactly when the source is

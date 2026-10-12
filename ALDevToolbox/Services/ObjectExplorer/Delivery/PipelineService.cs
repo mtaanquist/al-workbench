@@ -3,6 +3,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
+using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -23,13 +24,20 @@ public sealed class PipelineService
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
+    private readonly GitHubAccessService _githubAccess;
     private readonly ILogger<PipelineService> _logger;
 
-    public PipelineService(AppDbContext db, IOrganizationContext orgContext, ProjectAccess access, ILogger<PipelineService> logger)
+    public PipelineService(
+        AppDbContext db,
+        IOrganizationContext orgContext,
+        ProjectAccess access,
+        GitHubAccessService githubAccess,
+        ILogger<PipelineService> logger)
     {
         _db = db;
         _orgContext = orgContext;
         _access = access;
+        _githubAccess = githubAccess;
         _logger = logger;
     }
 
@@ -285,6 +293,18 @@ public sealed class PipelineService
     }
 
     /// <summary>
+    /// Whether the acting user may make <paramref name="repoFullName"/> a pipeline's
+    /// release target. The releases go up on the installation token from the build
+    /// worker, with no person behind them to ask, so whoever points a pipeline at a
+    /// repository has to be able to write to it on GitHub themselves. Asked only when
+    /// the target is new or changes: a colleague editing a pipeline somebody else
+    /// already pointed there is not re-asked.
+    /// </summary>
+    private async Task<bool> CanPublishToAsync(string repoFullName, CancellationToken ct) =>
+        _orgContext.CurrentUserId is { } userId
+        && await _githubAccess.CanPushRepoAsync(userId, repoFullName, ct);
+
+    /// <summary>
     /// Validates the input against its project (which must exist and be manageable)
     /// and the per-project name uniqueness rule. Returns the name (generated from the
     /// branch and selection, unless the person typed one) and the selection serialised
@@ -315,13 +335,22 @@ public sealed class PipelineService
         int? releaseRepositoryId = null;
         if (input.GithubReleaseRepositoryId is { } repoId && repoId != 0)
         {
-            var belongs = await _db.OeProjectRepositories.AsNoTracking()
-                .AnyAsync(r => r.Id == repoId
-                               && r.ProjectId == input.ProjectId
-                               && r.Provider == RepositoryProvider.GitHub, ct);
-            if (!belongs)
+            var repositoryUrl = await _db.OeProjectRepositories.AsNoTracking()
+                .Where(r => r.Id == repoId
+                            && r.ProjectId == input.ProjectId
+                            && r.Provider == RepositoryProvider.GitHub)
+                .Select(r => r.Url)
+                .FirstOrDefaultAsync(ct);
+            if (repositoryUrl is null)
             {
                 errors["GithubReleaseRepositoryId"] = "Choose one of this solution's GitHub repositories, or don't publish releases.";
+            }
+            else if (repoId != existing?.GithubReleaseRepositoryId
+                     && GitHubReleaseService.TryParseRepository(repositoryUrl, out var repoOwner, out var repoName)
+                     && !await CanPublishToAsync($"{repoOwner}/{repoName}", ct))
+            {
+                errors["GithubReleaseRepositoryId"] =
+                    $"Your GitHub account can't publish to {repoOwner}/{repoName}. Connect your GitHub account under Account → Repository access, or ask an owner of the repository for write access.";
             }
             else
             {

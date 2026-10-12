@@ -6,6 +6,7 @@ using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Tests.GitHub;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -940,8 +941,134 @@ public sealed class PipelineServiceTests : IDisposable
             .Should().Be(valid);
     }
 
-    private PipelineService NewService(AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), NullLogger<PipelineService>.Instance);
+    private PipelineService NewService(AppDbContext ctx, FakeGitHubApi? github = null)
+    {
+        var client = _db.NewGitHubAppClient(ctx, github ?? new FakeGitHubApi());
+        return new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
+            _db.NewGitHubAccessService(ctx, client), NullLogger<PipelineService>.Instance);
+    }
+
+    // ── Publishing releases to GitHub ───────────────────────────────────────
+
+    private const string ReleaseRepo = "cronus-dk/cronus-customer";
+
+    [Fact]
+    public async Task A_release_target_the_person_can_write_to_is_saved()
+    {
+        await using var ctx = _db.NewContext();
+        var (projectId, repositoryId) = await SeedPublishingAsync(ctx, linked: true);
+
+        var id = await NewService(ctx, RepositoryWithPush(push: true))
+            .CreatePipelineAsync(new PipelineInput(projectId, null, null, GithubReleaseRepositoryId: repositoryId));
+
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == id)).GithubReleaseRepositoryId.Should().Be(repositoryId);
+    }
+
+    [Fact]
+    public async Task A_release_target_the_person_can_only_read_is_refused()
+    {
+        await using var ctx = _db.NewContext();
+        var (projectId, repositoryId) = await SeedPublishingAsync(ctx, linked: true);
+
+        var act = () => NewService(ctx, RepositoryWithPush(push: false))
+            .CreatePipelineAsync(new PipelineInput(projectId, null, null, GithubReleaseRepositoryId: repositoryId));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId")
+            .WhoseValue.Should().Contain(ReleaseRepo);
+        await using var read = _db.NewContext();
+        (await read.OePipelines.AnyAsync(p => p.ProjectId == projectId)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_release_target_the_person_cannot_see_is_refused()
+    {
+        await using var ctx = _db.NewContext();
+        var (projectId, repositoryId) = await SeedPublishingAsync(ctx, linked: true);
+        var github = new FakeGitHubApi().On(HttpMethod.Get, $"/repos/{ReleaseRepo}", System.Net.HttpStatusCode.NotFound);
+
+        var act = () => NewService(ctx, github)
+            .CreatePipelineAsync(new PipelineInput(projectId, null, null, GithubReleaseRepositoryId: repositoryId));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId");
+    }
+
+    [Fact]
+    public async Task A_release_target_is_refused_when_the_person_has_no_github_account_connected()
+    {
+        await using var ctx = _db.NewContext();
+        var (projectId, repositoryId) = await SeedPublishingAsync(ctx, linked: false);
+
+        var act = () => NewService(ctx, RepositoryWithPush(push: true))
+            .CreatePipelineAsync(new PipelineInput(projectId, null, null, GithubReleaseRepositoryId: repositoryId));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId");
+    }
+
+    [Fact]
+    public async Task Pointing_an_existing_pipeline_at_a_release_target_needs_write_access_too()
+    {
+        await using var ctx = _db.NewContext();
+        var (projectId, repositoryId) = await SeedPublishingAsync(ctx, linked: true);
+        var id = await NewService(ctx).CreatePipelineAsync(new PipelineInput(projectId, null, null));
+
+        var act = () => NewService(ctx, RepositoryWithPush(push: false))
+            .UpdatePipelineAsync(id, new PipelineInput(projectId, null, null, GithubReleaseRepositoryId: repositoryId));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId");
+    }
+
+    [Fact]
+    public async Task Editing_a_pipeline_that_already_publishes_does_not_ask_again()
+    {
+        // Somebody who could write to the repository chose it; a colleague changing the
+        // branch is not re-asked about a target they did not pick.
+        await using var ctx = _db.NewContext();
+        var (projectId, repositoryId) = await SeedPublishingAsync(ctx, linked: false);
+        var pipeline = new OePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "Build",
+            GithubReleaseRepositoryId = repositoryId, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        ctx.OePipelines.Add(pipeline);
+        await ctx.SaveChangesAsync();
+        var github = new FakeGitHubApi();
+
+        await NewService(ctx, github).UpdatePipelineAsync(pipeline.Id,
+            new PipelineInput(projectId, null, null, GithubReleaseRepositoryId: repositoryId, Branch: "main"));
+
+        github.Calls.Should().BeEmpty();
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == pipeline.Id)).GithubReleaseRepositoryId.Should().Be(repositoryId);
+    }
+
+    /// <summary>A GitHub that answers the person's read of the repository with their write permission.</summary>
+    private static FakeGitHubApi RepositoryWithPush(bool push) =>
+        new FakeGitHubApi().On(HttpMethod.Get, $"/repos/{ReleaseRepo}", System.Net.HttpStatusCode.OK,
+            FakeGitHubApi.RepositoryJson(ReleaseRepo).TrimEnd().TrimEnd('}')
+                + $",\"permissions\":{{\"admin\":false,\"push\":{(push ? "true" : "false")},\"pull\":true}}}}");
+
+    /// <summary>A solution with one GitHub repository, and an acting person (optionally with GitHub connected).</summary>
+    private async Task<(int ProjectId, int RepositoryId)> SeedPublishingAsync(AppDbContext ctx, bool linked)
+    {
+        var projectId = await SeedProjectAsync(ctx);
+        var repository = new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Provider = RepositoryProvider.GitHub,
+            Url = $"https://github.com/{ReleaseRepo}.git", DisplayName = "cronus-customer",
+        };
+        ctx.OeProjectRepositories.Add(repository);
+        await ctx.SaveChangesAsync();
+
+        var userId = await SeedUserAsync(ctx, $"dev-{Guid.NewGuid():N}@cronus.example");
+        _db.OrgContext.CurrentUserId = userId;
+        if (linked) await _db.LinkGitHubAccountAsync(userId);
+        return (projectId, repository.Id);
+    }
 
     private static async Task<int> SeedUserAsync(AppDbContext ctx, string email)
     {

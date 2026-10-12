@@ -71,7 +71,11 @@ public sealed record GitHubReleaseOption(
 /// Release is an act of the organisation, and the publish half runs inside the build
 /// worker where there may be no user at all. The repository is therefore checked
 /// against the connected GitHub organisation here: a repository outside it, or one
-/// that is not on GitHub, is refused in words rather than attempted.</para>
+/// that is not on GitHub, is refused in words rather than attempted. The person
+/// behind the token is checked where there is one: listing and staging Releases need
+/// the caller to see the repository with their own GitHub account, and a build
+/// pipeline only publishes to a repository whose choosing was done by someone who can
+/// write to it (see <c>PipelineService</c>).</para>
 ///
 /// <para>See <c>.design/github-integration-phase2.md</c> (#632).</para>
 /// </summary>
@@ -81,6 +85,7 @@ public sealed class GitHubReleaseService
     private readonly GitHubAppClient _github;
     private readonly GitHubConnectionService _connection;
     private readonly ProjectAccess _access;
+    private readonly GitHubAccessService _githubAccess;
     private readonly IOrganizationContext _orgContext;
     private readonly PublicOrigin _publicOrigin;
     private readonly TimeProvider _clock;
@@ -92,6 +97,7 @@ public sealed class GitHubReleaseService
         GitHubAppClient github,
         GitHubConnectionService connection,
         ProjectAccess access,
+        GitHubAccessService githubAccess,
         IOrganizationContext orgContext,
         PublicOrigin publicOrigin,
         TimeProvider clock,
@@ -103,6 +109,7 @@ public sealed class GitHubReleaseService
         _github = github;
         _connection = connection;
         _access = access;
+        _githubAccess = githubAccess;
         _orgContext = orgContext;
         _publicOrigin = publicOrigin;
         _clock = clock;
@@ -523,8 +530,9 @@ public sealed class GitHubReleaseService
 
     /// <summary>
     /// The access gate both Release-sourced calls share: the caller must be able to
-    /// manage the solution, the pipeline must actually draw from Releases, and its
-    /// repository must be one inside the connected GitHub organisation.
+    /// manage the solution, the pipeline must actually draw from Releases, its
+    /// repository must be one inside the connected GitHub organisation, and the
+    /// caller must be able to see that repository on GitHub with their own account.
     /// </summary>
     private async Task<ReleaseSource> ResolveSourceAsync(int releasePipelineId, CancellationToken ct)
     {
@@ -572,6 +580,15 @@ public sealed class GitHubReleaseService
         {
             throw Validation("GithubReleaseRepositoryId",
                 $"{owner}/{name} is outside the connected GitHub organisation ({connection.OrgLogin}).");
+        }
+        // The installation token below can read every repository in the organisation,
+        // so whoever asks must be able to see this one on GitHub themselves; managing
+        // the solution that names it is not enough (.design/github-integration.md).
+        if (_orgContext.CurrentUserId is not { } userId
+            || !await _githubAccess.CanAccessRepoAsync(userId, $"{owner}/{name}", ct))
+        {
+            throw Validation("GithubReleaseRepositoryId",
+                $"Your GitHub account doesn't have access to {owner}/{name}. Connect your GitHub account under Account → Repository access, or ask an owner of the repository for access, then try again.");
         }
 
         return new ReleaseSource(rp.ProjectId, rp.GithubReleaseRepositoryId.Value, owner, name, installationId);

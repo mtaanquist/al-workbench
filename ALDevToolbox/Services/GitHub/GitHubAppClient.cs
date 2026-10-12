@@ -329,6 +329,25 @@ public sealed partial class GitHubAppClient
     }
 
     /// <summary>
+    /// Whether <paramref name="userToken"/>'s owner can write to
+    /// <paramref name="owner"/>/<paramref name="repo"/>: the <c>push</c> flag of
+    /// the <c>permissions</c> object GitHub adds to a repository read made with a
+    /// user's own token. A repository they cannot see answers 404, which is a no
+    /// like any other.
+    /// </summary>
+    public async Task<bool> UserCanPushRepositoryAsync(
+        string userToken, string owner, string repo, CancellationToken ct = default)
+    {
+        using var request = NewRequest(HttpMethod.Get, RepoPath(owner, repo), userToken);
+        using var document = await SendOrNotFoundAsync(request, ct);
+        return document is not null
+            && document.RootElement.TryGetProperty("permissions", out var permissions)
+            && permissions.ValueKind == JsonValueKind.Object
+            && permissions.TryGetProperty("push", out var push)
+            && push.ValueKind == JsonValueKind.True;
+    }
+
+    /// <summary>
     /// Whether <paramref name="username"/> is a member of <paramref name="org"/>,
     /// asked with that person's own token.
     ///

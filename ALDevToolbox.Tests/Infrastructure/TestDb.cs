@@ -362,6 +362,29 @@ public sealed class TestDb : IDisposable
     /// decide what GitHub answers; <paramref name="clock"/> lets the token-expiry
     /// tests move time without waiting eight hours.
     /// </summary>
+    /// <summary>
+    /// Gives <paramref name="userId"/> a GitHub link with a non-expiring
+    /// <paramref name="accessToken"/>, written straight to the row so a test that
+    /// only needs "this person is linked" does not replay the OAuth handshake.
+    /// </summary>
+    public async Task LinkGitHubAccountAsync(int userId, string accessToken = "ghu_access")
+    {
+        await using var ctx = NewContext();
+        ctx.UserExternalLogins.Add(new UserExternalLogin
+        {
+            UserId = userId,
+            Provider = ALDevToolbox.Services.GitHub.GitHubAccessService.ProviderName,
+            Issuer = ALDevToolbox.Services.GitHub.GitHubAccessService.IssuerValue,
+            Subject = $"gh-{userId}",
+            DisplayIdentity = $"user-{userId}",
+            CreatedAt = DateTime.UtcNow,
+            AccessTokenEncrypted = DataProtectionProvider
+                .CreateProtector(ALDevToolbox.Services.GitHub.GitHubAccessService.AccessTokenProtectionPurpose)
+                .Protect(accessToken),
+        });
+        await ctx.SaveChangesAsync();
+    }
+
     public ALDevToolbox.Services.GitHub.GitHubAccessService NewGitHubAccessService(
         AppDbContext ctx,
         ALDevToolbox.Services.GitHub.GitHubAppClient client,
@@ -476,7 +499,7 @@ public sealed class TestDb : IDisposable
             NewGitHubConnectionService(ctx, access), access, client,
             NewGitHubRepositoryStandardsService(ctx), NewProjectService(ctx),
             new ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService(
-                ctx, OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext),
+                ctx, OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext), access,
                 NullLogger<ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService>.Instance),
             NewOrganizationConfigService(ctx), NewToolEnablement(ctx, toolAvailability), ctx, OrgContext,
             logger ?? NullLogger<ALDevToolbox.Services.GitHub.GitHubWorkspaceRepositoryService>.Instance);
@@ -512,7 +535,7 @@ public sealed class TestDb : IDisposable
         string? publicOrigin = null,
         TimeProvider? clock = null) =>
         new(ctx, client, NewGitHubConnectionService(ctx, access),
-            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext), OrgContext,
+            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext), access, OrgContext,
             new ALDevToolbox.Endpoints.PublicOrigin(publicOrigin),
             clock ?? TimeProvider.System,
             NewToolEnablement(ctx),
