@@ -824,6 +824,60 @@ public sealed class ReleaseImportServiceTests : IDisposable
         rel.ParentReleaseId.Should().Be(parent.ReleaseId);
     }
 
+    [Fact]
+    public async Task Refuses_a_parent_release_from_another_organisation()
+    {
+        int foreignId;
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        try
+        {
+            await using var other = _db.NewContext();
+            foreignId = await NewService(other).BeginReleaseAsync(
+                new ReleaseImportMetadata("Other org BC 25.18", "first_party", null, null));
+        }
+        finally
+        {
+            _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+        }
+
+        await AssertParentRefusedAsync(foreignId);
+    }
+
+    [Fact]
+    public async Task Refuses_a_parent_release_that_does_not_exist()
+    {
+        await AssertParentRefusedAsync(int.MaxValue);
+    }
+
+    [Fact]
+    public async Task Refuses_a_soft_deleted_parent_release()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var parentId = await svc.BeginReleaseAsync(
+            new ReleaseImportMetadata("Deleted BC 25.18", "first_party", null, null));
+        var parent = await ctx.OeReleases.SingleAsync(r => r.Id == parentId);
+        parent.DeletedAt = DateTime.UtcNow;
+        await ctx.SaveChangesAsync();
+
+        await AssertParentRefusedAsync(parentId);
+    }
+
+    private async Task AssertParentRefusedAsync(int parentId)
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+
+        var act = async () => await svc.BeginReleaseAsync(
+            new ReleaseImportMetadata("Customer X on BC 25.18", "third_party", parentId, null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("ParentReleaseId");
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().AnyAsync(r => r.Label == "Customer X on BC 25.18"))
+            .Should().BeFalse("a refused import must not leave a release row behind");
+    }
+
     // ── Phase-2 call-site references ────────────────────────────────────
 
     [Fact]

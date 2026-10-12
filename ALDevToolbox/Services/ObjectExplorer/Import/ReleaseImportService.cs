@@ -117,6 +117,7 @@ public class ReleaseImportService
         ArgumentNullException.ThrowIfNull(metadata);
         var orgId = RequireOrganizationId();
         ValidateMetadata(metadata);
+        await EnsureParentReleaseVisibleAsync(metadata.ParentReleaseId, ct).ConfigureAwait(false);
         await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
         await EnsureDedupKeyAvailableAsync(orgId, metadata.DedupKey, ct).ConfigureAwait(false);
 
@@ -618,6 +619,27 @@ public class ReleaseImportService
             errors["Kind"] = $"Kind must be one of: {string.Join(", ", AllowedKinds)}.";
         }
         if (errors.Count > 0) throw new PlanValidationException(errors);
+    }
+
+    /// <summary>
+    /// The parent id arrives from a form field, so it is read back through the
+    /// org-filtered <c>OeReleases</c> set rather than trusted: the chain walk in
+    /// <see cref="Explore.ReleaseAncestrySql"/> follows parent pointers in raw SQL,
+    /// and its tenant fence (<see cref="Explore.ChainObjectResolution"/>) rests on
+    /// a parent always being a live release of the same organisation.
+    /// </summary>
+    private async Task EnsureParentReleaseVisibleAsync(int? parentReleaseId, CancellationToken ct)
+    {
+        if (parentReleaseId is not { } parentId) return;
+        var exists = await _db.OeReleases.AsNoTracking()
+            .AnyAsync(r => r.Id == parentId && r.DeletedAt == null, ct).ConfigureAwait(false);
+        if (!exists)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["ParentReleaseId"] = "That parent release no longer exists. Reload the page and pick another one.",
+            });
+        }
     }
 
     /// <summary>
