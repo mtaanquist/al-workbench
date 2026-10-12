@@ -9,7 +9,7 @@ using Microsoft.EntityFrameworkCore;
 namespace ALDevToolbox.Tests.Auth;
 
 /// <summary>
-/// A SiteAdmin's email, status and role can only be changed by another
+/// A SiteAdmin's email, name, status and role can only be changed by another
 /// SiteAdmin, and the last active SiteAdmin can't be disabled from the org
 /// Users page. Runs in the fixture's ambient org, as the admin endpoints and
 /// the Users page do in production (the request's own org).
@@ -78,6 +78,65 @@ public sealed class SiteAdminTargetGuardTests : IDisposable
         user.PendingEmail.Should().BeNull();
         await using var read = _db.NewContext();
         (await read.PasswordResetTokens.AnyAsync(t => t.UserId == siteAdminId)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Org_admin_cannot_change_a_site_admins_display_name()
+    {
+        var (_, siteAdminId) = await SeedOrgAdminAndSiteAdminAsync();
+
+        await using var ctx = _db.NewContext();
+        Func<Task> act = () => NewUserAdmin(ctx).ChangeDisplayNameAsync(siteAdminId, "Someone Else", OrgId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("UserId");
+        (await ReadUserAsync(siteAdminId)).DisplayName.Should().Be("operator@example.com");
+    }
+
+    [Fact]
+    public async Task Confirming_an_email_change_not_requested_by_a_site_admin_leaves_a_site_admins_email_alone()
+    {
+        // The link was issued while the account was an ordinary one (the same
+        // shape as a link an org Admin was given before such requests were
+        // refused); the account is a SiteAdmin by the time the link is opened.
+        var (orgAdminId, targetId) = await SeedOrgAdminAndSiteAdminAsync();
+        await SetSiteAdminAsync(targetId, false);
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            token = await NewUserAdmin(ctx).RequestEmailChangeAsync(targetId, "elsewhere@example.com", OrgId, orgAdminId);
+        }
+        await SetSiteAdminAsync(targetId, true);
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token)).Should().BeNull();
+        }
+
+        var user = await ReadUserAsync(targetId);
+        user.Email.Should().Be("operator@example.com");
+        user.PendingEmail.Should().BeNull("the refused change is dropped, not left waiting");
+        await using var read = _db.NewContext();
+        (await read.PasswordResetTokens.SingleAsync(t => t.UserId == targetId)).ConsumedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Confirming_an_email_change_a_site_admin_requested_swaps_a_site_admins_email()
+    {
+        var actorId = await SeedUserAsync("operator@example.com", UserRole.Admin, siteAdmin: true);
+        var otherId = await SeedUserAsync("second-operator@example.com", UserRole.Admin, siteAdmin: true);
+        ActAs(actorId, siteAdmin: true);
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            token = await NewUserAdmin(ctx).RequestEmailChangeAsync(otherId, "renamed@example.com", OrgId, actorId);
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token)).Should().NotBeNull();
+        }
+
+        (await ReadUserAsync(otherId)).Email.Should().Be("renamed@example.com");
     }
 
     [Fact]
@@ -183,6 +242,13 @@ public sealed class SiteAdminTargetGuardTests : IDisposable
         ctx.Users.Add(user);
         await ctx.SaveChangesAsync();
         return user.Id;
+    }
+
+    private async Task SetSiteAdminAsync(int id, bool siteAdmin)
+    {
+        await using var ctx = _db.NewContext();
+        (await ctx.Users.SingleAsync(u => u.Id == id)).IsSiteAdmin = siteAdmin;
+        await ctx.SaveChangesAsync();
     }
 
     private async Task<User> ReadUserAsync(int id)

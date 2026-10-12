@@ -22,6 +22,14 @@ public enum TokenPurpose
     /// mailbox before the swap takes effect. 24-hour lifetime.
     /// </summary>
     EmailChangeConfirm,
+    /// <summary>
+    /// <see cref="EmailChangeConfirm"/> on a SiteAdmin's account, issued only
+    /// when a SiteAdmin asked for it. Confirming an email change on a SiteAdmin
+    /// requires this purpose, so a link issued any other way (an org Admin's
+    /// request from before that was refused) can't complete the swap. Stored
+    /// as its name in the string <c>purpose</c> column, so no schema change.
+    /// </summary>
+    SiteAdminEmailChangeConfirm,
 }
 
 /// <summary>

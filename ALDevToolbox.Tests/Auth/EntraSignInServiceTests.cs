@@ -275,6 +275,53 @@ public sealed class EntraSignInServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Complete_refuses_to_bind_a_site_admin_by_email_even_with_verified_ownership()
+    {
+        // Both kinds of ownership evidence present: the org verified the domain
+        // and the token carries xms_edov. A SiteAdmin still has to connect the
+        // Microsoft account from their own signed-in session.
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA, domain: "cronus.com");
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "operator@cronus.com");
+        await using (var seed = _db.NewContext())
+        {
+            (await seed.Users.SingleAsync(u => u.Id == userId)).IsSiteAdmin = true;
+            await seed.SaveChangesAsync();
+        }
+        await using var ctx = _db.NewContext();
+
+        var result = await NewService(ctx).CompleteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "operator@cronus.com", "Operator", EmailVerified: true), Ip);
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.LinkFromAccountRequired);
+        result.User.Should().BeNull();
+        (await ctx.UserExternalLogins.IgnoreQueryFilters().AnyAsync(l => l.UserId == userId))
+            .Should().BeFalse("no link may be created by an email match on a SiteAdmin");
+    }
+
+    [Fact]
+    public async Task Complete_signs_in_a_site_admin_through_a_link_they_made_themselves()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA, domain: "cronus.com");
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "operator@cronus.com");
+        await using (var seed = _db.NewContext())
+        {
+            (await seed.Users.SingleAsync(u => u.Id == userId)).IsSiteAdmin = true;
+            await seed.SaveChangesAsync();
+        }
+        var token = new EntraTokenIdentity(TenantA, Oid, "operator@cronus.com", "Operator", EmailVerified: true);
+        await using (var linkCtx = _db.NewContext())
+        {
+            await NewService(linkCtx).LinkAsync(userId, token);
+        }
+        await using var ctx = _db.NewContext();
+
+        var result = await NewService(ctx).CompleteAsync(token, Ip);
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.Success);
+        result.User!.Id.Should().Be(userId);
+    }
+
+    [Fact]
     public async Task Complete_binds_an_existing_account_when_the_token_carries_xms_edov()
     {
         await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);

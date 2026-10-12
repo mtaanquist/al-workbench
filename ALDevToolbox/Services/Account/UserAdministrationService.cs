@@ -21,7 +21,7 @@ namespace ALDevToolbox.Services.Account;
 /// with field-keyed errors the UI can render inline.
 /// <para>
 /// A SiteAdmin's account is the hosting operator's way into every
-/// organisation, so its email, status and role can only be changed by another
+/// organisation, so its email, name, status and role can only be changed by another
 /// SiteAdmin, never by an org Admin who happens to share the organisation. See
 /// <see cref="RequireMayManage"/>.
 /// </para>
@@ -175,6 +175,7 @@ public sealed class UserAdministrationService
     public async Task ChangeDisplayNameAsync(int userId, string newDisplayName, int actingOrgId, CancellationToken ct = default)
     {
         var user = await LoadUserAsync(userId, actingOrgId, ct);
+        RequireMayManage(user);
         var trimmed = newDisplayName?.Trim() ?? string.Empty;
         if (trimmed.Length is < 2 or > 80)
         {
@@ -286,7 +287,7 @@ public sealed class UserAdministrationService
     }
 
     /// <summary>
-    /// Refuses an email, status or role change on a SiteAdmin's account unless
+    /// Refuses an email, name, status or role change on a SiteAdmin's account unless
     /// the actor is a SiteAdmin too. An org Admin shares the organisation with
     /// the bootstrap SiteAdmin in the usual single-org setup, and changing that
     /// account's email or status would hand them, or lock everyone out of, the
@@ -298,7 +299,7 @@ public sealed class UserAdministrationService
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["UserId"] = "Only a site administrator can change this account's email, status or role."
+                ["UserId"] = "Only a site administrator can change this account."
             });
         }
     }
@@ -369,7 +370,7 @@ public sealed class UserAdministrationService
         // the user this admin just loaded from their own org.
         var stale = await _db.PasswordResetTokens.IgnoreQueryFilters()
             .Where(t => t.UserId == user.Id
-                        && t.Purpose == TokenPurpose.EmailChangeConfirm
+                        && (t.Purpose == TokenPurpose.EmailChangeConfirm || t.Purpose == TokenPurpose.SiteAdminEmailChangeConfirm)
                         && t.ConsumedAt == null
                         && t.ExpiresAt > now)
             .ToListAsync(ct);
@@ -381,7 +382,9 @@ public sealed class UserAdministrationService
         {
             UserId = user.Id,
             TokenHash = hash,
-            Purpose = TokenPurpose.EmailChangeConfirm,
+            // RequireMayManage above means a SiteAdmin target here was asked
+            // for by a SiteAdmin; the purpose records that for the confirm step.
+            Purpose = user.IsSiteAdmin ? TokenPurpose.SiteAdminEmailChangeConfirm : TokenPurpose.EmailChangeConfirm,
             CreatedAt = now,
             ExpiresAt = now + EmailChangeTokenLifetime,
         });
@@ -404,12 +407,24 @@ public sealed class UserAdministrationService
         // possibly signed out; pinned to the token hash.
         var row = await _db.PasswordResetTokens.IgnoreQueryFilters()
             .Include(t => t.User)
-            .FirstOrDefaultAsync(t => t.TokenHash == hash && t.Purpose == TokenPurpose.EmailChangeConfirm, ct);
+            .FirstOrDefaultAsync(t => t.TokenHash == hash
+                && (t.Purpose == TokenPurpose.EmailChangeConfirm || t.Purpose == TokenPurpose.SiteAdminEmailChangeConfirm), ct);
         if (row is null || row.ConsumedAt is not null || row.ExpiresAt <= now || row.User is null)
         {
             return null;
         }
         var user = row.User;
+        if (user.IsSiteAdmin && row.Purpose != TokenPurpose.SiteAdminEmailChangeConfirm)
+        {
+            // Issued without a SiteAdmin asking for it (before such requests
+            // were refused, or before the account was promoted): burn it and
+            // drop the pending address rather than swap a SiteAdmin's email.
+            user.PendingEmail = null;
+            user.PendingEmailAt = null;
+            row.ConsumedAt = now;
+            await _db.SaveChangesAsync(ct);
+            return null;
+        }
         if (string.IsNullOrEmpty(user.PendingEmail))
         {
             // Pending email was cleared (admin reverted, account modified):
