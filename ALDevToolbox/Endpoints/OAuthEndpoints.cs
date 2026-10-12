@@ -358,12 +358,15 @@ internal static class OAuthEndpoints
                 {
                     return DcrError("invalid_redirect_uri", $"redirect_uri must be an absolute URI: {uri}");
                 }
-                // Loopback is allowed for native clients (Claude Code); HTTPS
-                // for hosted clients. Reject plain http:// on non-loopback.
-                if (parsed.Scheme == Uri.UriSchemeHttp
-                    && !IsLoopback(parsed))
+                // HTTPS for hosted clients, http on loopback for native ones
+                // (Claude Code), reverse-domain private-use schemes for apps.
+                // Anything else - javascript:, data:, file:, plain http on a
+                // public host - is refused; see OAuthRedirectUriPolicy.
+                if (!OAuthRedirectUriPolicy.IsAllowed(parsed))
                 {
-                    return DcrError("invalid_redirect_uri", $"redirect_uri must be https except for loopback: {uri}");
+                    return DcrError(
+                        "invalid_redirect_uri",
+                        $"redirect_uri must be https, http on loopback, or a reverse-domain app scheme: {uri}");
                 }
             }
 
@@ -423,12 +426,6 @@ internal static class OAuthEndpoints
 
     private static IResult DcrError(string code, string description) =>
         Results.Json(new { error = code, error_description = description }, statusCode: StatusCodes.Status400BadRequest);
-
-    private static bool IsLoopback(Uri uri) =>
-        uri.IsLoopback
-        || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(uri.Host, "127.0.0.1", StringComparison.Ordinal)
-        || string.Equals(uri.Host, "::1", StringComparison.Ordinal);
 
     /// <summary>
     /// RFC 7591 §2 client metadata. We only read the fields ALDevToolbox
