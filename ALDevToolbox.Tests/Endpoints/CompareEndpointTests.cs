@@ -150,13 +150,109 @@ public sealed class CompareEndpointTests : IDisposable
         using var response = await client.PostAsJsonAsync("/api/compare/diff",
             new { left = huge, right = "b" });
 
-        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        response.StatusCode.Should().Be(HttpStatusCode.RequestEntityTooLarge);
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         doc.RootElement.TryGetProperty("error", out var error).Should().BeTrue();
         error.GetString().Should().Contain("too large");
         // The number the reader is asked to get under is the endpoint's, and
         // the message has to name it or "trim it" is not actionable.
         error.GetString().Should().Contain(CompareEndpoints.MaxInputLength.ToString("N0"));
+    }
+
+    /// <summary>
+    /// The character cap alone does not bound the diff: its cost grows with
+    /// the square of the line count, so a text of many short lines is refused
+    /// before any diffing starts. Counted on either side, and with every line
+    /// ending DiffPlex splits on.
+    /// </summary>
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    [InlineData("\r")]
+    public async Task Too_many_lines_on_either_side_is_refused(string newline)
+    {
+        var many = string.Join(newline, Enumerable.Range(0, CompareEndpoints.MaxLines + 1).Select(i => $"l{i}"));
+
+        using var client = _factory.CreateClient();
+        foreach (var body in new[] { new { left = many, right = "b" }, new { left = "a", right = many } })
+        {
+            using var response = await client.PostAsJsonAsync("/api/compare/diff", body);
+
+            response.StatusCode.Should().Be(HttpStatusCode.RequestEntityTooLarge);
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var error = doc.RootElement.GetProperty("error").GetString();
+            error.Should().Contain("too many lines");
+            error.Should().Contain(CompareEndpoints.MaxLines.ToString("N0"));
+        }
+    }
+
+    [Fact]
+    public async Task Exactly_the_line_cap_is_still_compared()
+    {
+        var atCap = string.Join("\r\n", Enumerable.Repeat("same", CompareEndpoints.MaxLines));
+
+        using var client = _factory.CreateClient();
+        using var response = await client.PostAsJsonAsync("/api/compare/diff",
+            new { left = atCap, right = atCap + "x" });
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    /// <summary>
+    /// A changed line is word-diffed against its counterpart, at a cost that
+    /// grows with the square of its length, so one very long line is refused
+    /// even when the text as a whole is well under the character cap.
+    /// </summary>
+    [Fact]
+    public async Task A_line_over_the_length_cap_is_refused()
+    {
+        var longLine = "short\n" + string.Join(' ', Enumerable.Repeat("w", CompareEndpoints.MaxLineLength / 2 + 1)) + "\nshort";
+        longLine.Length.Should().BeLessThan(CompareEndpoints.MaxInputLength);
+
+        using var client = _factory.CreateClient();
+        using var response = await client.PostAsJsonAsync("/api/compare/diff",
+            new { left = "a", right = longLine });
+
+        response.StatusCode.Should().Be(HttpStatusCode.RequestEntityTooLarge);
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var error = doc.RootElement.GetProperty("error").GetString();
+        error.Should().Contain("line that is too long");
+        error.Should().Contain(CompareEndpoints.MaxLineLength.ToString("N0"));
+    }
+
+    /// <summary>
+    /// A diff cannot be stopped once it starts, so the number running at once
+    /// is capped app-wide whoever is asking. With every slot taken, a request
+    /// waits briefly and is then told the server is busy rather than queuing
+    /// behind work it cannot see.
+    /// </summary>
+    [Fact]
+    public async Task With_every_diff_slot_taken_a_request_is_answered_busy()
+    {
+        using var client = _factory.CreateClient();
+        var held = 0;
+        try
+        {
+            for (; held < CompareEndpoints.MaxConcurrentDiffs; held++)
+            {
+                (await CompareEndpoints.DiffSlots.WaitAsync(TimeSpan.FromSeconds(10))).Should().BeTrue();
+            }
+
+            using var response = await client.PostAsJsonAsync("/api/compare/diff",
+                new { left = "a", right = "b" });
+
+            response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            doc.RootElement.GetProperty("error").GetString().Should().Contain("busy");
+        }
+        finally
+        {
+            if (held > 0) CompareEndpoints.DiffSlots.Release(held);
+        }
+
+        using var after = await client.PostAsJsonAsync("/api/compare/diff",
+            new { left = "a", right = "b" });
+        after.StatusCode.Should().Be(HttpStatusCode.OK, "the slots are released once the work is done");
     }
 
     /// <summary>

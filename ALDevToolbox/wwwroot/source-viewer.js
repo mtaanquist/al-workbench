@@ -747,13 +747,16 @@ function compareRequestError(status) {
     if (status === 413) {
         return "The texts are too large to compare. Trim them, then edit either side to retry.";
     }
+    if (status === 503) {
+        return "The server is busy comparing other texts. Edit either side to retry in a moment.";
+    }
     return "Could not compare. Edit either side to retry.";
 }
 
 // The same sentence the server answers an over-cap paste with, so the two
 // routes to it read alike. Said here first where we can: the text is already
-// in the browser, and shipping four megabytes across the wire to be told it is
-// four megabytes is a slow way to hear it.
+// in the browser, and shipping megabytes across the wire to be told they are
+// too many is a slow way to hear it.
 function compareTooLargeMessage(longest, max) {
     return `One of the texts is too large (${longest.toLocaleString()} characters). `
         + `Trim it under ${max.toLocaleString()} and try again.`;
@@ -933,7 +936,16 @@ function wireEditableCompare(left, right) {
             // keep the diff they already have and the next edit retries.
             if (!res.ok) {
                 if (mine !== seq) return;
-                setSummary(compareRequestError(res.status), true);
+                // The handler's own refusals (too many lines, a line too
+                // long, busy) carry a sentence naming the limit that was hit;
+                // prefer it over the generic one for the status.
+                let message = compareRequestError(res.status);
+                try {
+                    const body = await res.json();
+                    if (body && typeof body.error === "string") message = body.error;
+                } catch { /* no JSON body: keep the generic sentence */ }
+                if (mine !== seq) return;
+                setSummary(message, true);
                 return;
             }
             data = await res.json();
