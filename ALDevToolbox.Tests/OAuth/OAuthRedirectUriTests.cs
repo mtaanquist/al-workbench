@@ -107,8 +107,11 @@ public sealed class OAuthRedirectUriTests : IDisposable
         stored.Should().BeEquivalentTo([CimdGoodRedirect]);
     }
 
-    [Fact]
-    public async Task Authorize_refuses_a_stored_redirect_uri_outside_the_policy()
+    [Theory]
+    [InlineData(true)]
+    // Omitted: OpenIddict would fall back to the client's single stored URI.
+    [InlineData(false)]
+    public async Task Authorize_refuses_a_stored_redirect_uri_outside_the_policy(bool sendRedirectUri)
     {
         // A client registered before the rule existed: written straight
         // through the application manager, which does not apply the policy.
@@ -137,10 +140,27 @@ public sealed class OAuthRedirectUriTests : IDisposable
         }
 
         using var client = _factory.CreateClient();
-        using var response = await client.GetAsync(AuthorizeUrl(clientId, legacyRedirect));
+        var url = sendRedirectUri
+            ? AuthorizeUrl(clientId, legacyRedirect)
+            : AuthorizeUrl(clientId, redirectUri: null);
+        using var response = await client.GetAsync(url);
 
         response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         response.Headers.Location.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Authorize_with_a_refused_redirect_uri_does_not_store_a_metadata_client()
+    {
+        using var client = _factory.CreateClient();
+
+        using var response = await client.GetAsync(AuthorizeUrl(CimdClientId, "javascript:alert(1)"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        using var scope = _factory.Services.CreateScope();
+        var applications = scope.ServiceProvider.GetRequiredService<IOpenIddictApplicationManager>();
+        (await applications.FindByClientIdAsync(CimdClientId, CancellationToken.None)).Should().BeNull(
+            "the request is refused before the metadata document is fetched and stored.");
     }
 
     [Fact]
@@ -182,10 +202,10 @@ public sealed class OAuthRedirectUriTests : IDisposable
         return client.PostAsync("/oauth/register", new StringContent(body, Encoding.UTF8, "application/json"));
     }
 
-    private static string AuthorizeUrl(string clientId, string redirectUri) =>
+    private static string AuthorizeUrl(string clientId, string? redirectUri) =>
         "/oauth/authorize"
         + "?client_id=" + Uri.EscapeDataString(clientId)
-        + "&redirect_uri=" + Uri.EscapeDataString(redirectUri)
+        + (redirectUri is null ? string.Empty : "&redirect_uri=" + Uri.EscapeDataString(redirectUri))
         + "&response_type=code&scope=mcp"
         + "&code_challenge=" + CodeChallenge
         + "&code_challenge_method=S256";

@@ -185,13 +185,24 @@ public static class OAuthServerRegistration
                 // rule existed may still hold a refused one. Checking the
                 // requested redirect_uri on every authorize request keeps such
                 // a row unusable; OpenIddict's own handlers then require it to
-                // match a registered URI exactly. This runs before the redirect
-                // URI is validated, so the error is shown here, never sent there.
+                // match a registered URI exactly. The parameter is required:
+                // without it OpenIddict falls back to a client's single stored
+                // URI, which would skip this check (OAuth 2.1 and MCP clients
+                // always send it). Ordered ahead of the CIMD resolver so a
+                // refused request fetches and stores nothing, and ahead of the
+                // redirect URI validation, so the error is shown here, never
+                // sent there.
                 o.AddEventHandler<OpenIddict.Server.OpenIddictServerEvents.ValidateAuthorizationRequestContext>(b =>
                     b.UseInlineHandler(context =>
                     {
                         var redirectUri = context.Request.RedirectUri;
-                        if (!string.IsNullOrEmpty(redirectUri) && !OAuthRedirectUriPolicy.IsAllowed(redirectUri))
+                        if (string.IsNullOrEmpty(redirectUri))
+                        {
+                            context.Reject(
+                                error: OpenIddict.Abstractions.OpenIddictConstants.Errors.InvalidRequest,
+                                description: "The redirect_uri parameter is required.");
+                        }
+                        else if (!OAuthRedirectUriPolicy.IsAllowed(redirectUri))
                         {
                             context.Reject(
                                 error: OpenIddict.Abstractions.OpenIddictConstants.Errors.InvalidRequest,
@@ -199,7 +210,7 @@ public static class OAuthServerRegistration
                         }
                         return default;
                     })
-                    .SetOrder(int.MinValue + 100_001));
+                    .SetOrder(int.MinValue + 50_000));
 
                 // MCP clients use the code flow's default query response mode.
                 // form_post would render an auto-submitting form whose action is

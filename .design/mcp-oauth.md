@@ -168,9 +168,13 @@ One rule, `Services/OAuth/OAuthRedirectUriPolicy.cs`, applies to every
 Everything else is refused, including any URI with a fragment. DCR rejects
 the whole registration with `invalid_redirect_uri`; the CIMD resolver drops
 the refused entries and rejects the document if none are left; and an
-authorize request whose `redirect_uri` fails the rule is rejected before
-OpenIddict validates it, so a row stored before the rule existed cannot be
-used either. The `form_post` response mode is switched off — MCP clients use
+authorize request whose `redirect_uri` is missing or fails the rule is
+rejected before the CIMD resolver runs and before OpenIddict validates it,
+so a row stored before the rule existed cannot be used either. (Without the
+parameter OpenIddict would fall back to a client's single stored URI; OAuth
+2.1 and MCP clients always send it.) Dot-less custom schemes such as
+`cursor://` or `vscode://` are refused on purpose; Cursor connects with a
+personal access token (`docs/mcp-clients.md`). The `form_post` response mode is switched off — MCP clients use
 the code flow's default `query` mode.
 
 ## CIMD resolver
