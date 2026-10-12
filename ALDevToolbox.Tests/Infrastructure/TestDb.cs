@@ -371,6 +371,14 @@ public sealed class TestDb : IDisposable
             NullLogger<ALDevToolbox.Services.GitHub.GitHubAccessService>.Instance);
 
     /// <summary>
+    /// The per-user GitHub account link with no GitHub behind it: every call to
+    /// GitHub fails. For a service that only needs one injected, in an organisation
+    /// that has not connected a GitHub organisation.
+    /// </summary>
+    public ALDevToolbox.Services.GitHub.GitHubAccessService NewOfflineGitHubAccessService(AppDbContext ctx) =>
+        NewGitHubAccessService(ctx, NewGitHubAppClient(ctx, new UnreachableHandler()));
+
+    /// <summary>
     /// A <see cref="ALDevToolbox.Services.GitHub.GitHubAppClient"/> whose HTTP
     /// goes to <paramref name="handler"/> instead of api.github.com, wired with
     /// the same base address and headers <c>GitHubRegistration</c> configures.
@@ -474,7 +482,7 @@ public sealed class TestDb : IDisposable
         ILogger<ALDevToolbox.Services.GitHub.GitHubWorkspaceRepositoryService>? logger = null) =>
         new(NewGenerationService(ctx), NewGitHubRepositoryService(ctx, client, access),
             NewGitHubConnectionService(ctx, access), access, client,
-            NewGitHubRepositoryStandardsService(ctx), NewProjectService(ctx),
+            NewGitHubRepositoryStandardsService(ctx), NewProjectService(ctx, access),
             new ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService(
                 ctx, OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext),
                 NullLogger<ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService>.Instance),
@@ -518,16 +526,18 @@ public sealed class TestDb : IDisposable
             NewToolEnablement(ctx),
             NullLogger<ALDevToolbox.Services.GitHub.GitHubReleaseService>.Instance);
     /// A <see cref="ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService"/> on this
-    /// fixture's context, with the discovery queue nobody drains here.
+    /// fixture's context, with the discovery queue nobody drains here. With no
+    /// <paramref name="gitHubAccess"/>, GitHub cannot be reached.
     /// </summary>
-    public ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService NewProjectService(AppDbContext ctx)
+    public ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService NewProjectService(
+        AppDbContext ctx, ALDevToolbox.Services.GitHub.GitHubAccessService? gitHubAccess = null)
     {
         var projectAccess = new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext);
         var extensionDiscovery = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService(
             ctx, OrgContext, projectAccess, new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         return new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery,
+            ctx, OrgContext, projectAccess, extensionDiscovery, gitHubAccess ?? NewOfflineGitHubAccessService(ctx),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
     }
 
@@ -547,7 +557,7 @@ public sealed class TestDb : IDisposable
             ctx, OrgContext, projectAccess, new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         var projects = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery,
+            ctx, OrgContext, projectAccess, extensionDiscovery, access,
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
         return new ALDevToolbox.Services.GitHub.RepositoryDiscoveryService(
             ctx, client, access, NewGitHubConnectionService(ctx, access), NewOrganizationConfigService(ctx),

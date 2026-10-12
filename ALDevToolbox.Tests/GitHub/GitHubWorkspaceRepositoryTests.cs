@@ -111,9 +111,11 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         // person, that the organisation ruleset lets bypass its rules.
         TokenFor(api, "PATCH", $"/repos/{Repo}/git/refs/heads/main").Should().Be(InstallationToken);
         // The person's own token is what answers "are they in this
-        // organisation", and it is used for nothing else here.
+        // organisation" and "can they see the repository" before it goes on a
+        // solution, and it is used for nothing else here.
         api.Credentials.Where(c => c.Token == UserToken)
-            .Should().OnlyContain(c => c.Call.Contains($"/orgs/{OrgLogin}/members/"));
+            .Should().OnlyContain(c => c.Call.Contains($"/orgs/{OrgLogin}/members/")
+                || c.Call == $"GET https://api.github.com/repos/{Repo}");
     }
 
     [Fact]
@@ -1230,6 +1232,9 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
             .On(HttpMethod.Get, $"/orgs/{OrgLogin}/members/", HttpStatusCode.NoContent)
             .On(HttpMethod.Post, $"/orgs/{OrgLogin}/repos", HttpStatusCode.Created,
                 FakeGitHubApi.RepositoryJson(Repo))
+            // The creator can see what they just made, which registering it on a
+            // solution asks with their own account.
+            .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(Repo))
             .On(HttpMethod.Put, $"/repos/{Repo}/contents/", HttpStatusCode.Created, FakeGitHubApi.FileWriteJson())
             .On(HttpMethod.Post, $"/repos/{Repo}/git/blobs", HttpStatusCode.Created, FakeGitHubApi.ShaJson("blob-sha"))
             .On(HttpMethod.Post, $"/repos/{Repo}/git/trees", HttpStatusCode.Created, FakeGitHubApi.ShaJson("new-tree-sha"))

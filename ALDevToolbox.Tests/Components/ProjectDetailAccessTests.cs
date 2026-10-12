@@ -479,7 +479,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
             var access = new ProjectAccess(ctx, _db.OrgContext);
             var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
                 NullLogger<ProjectDiscoveryService>.Instance);
-            await new ProjectService(ctx, _db.OrgContext, access, discovery, NullLogger<ProjectService>.Instance)
+            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), NullLogger<ProjectService>.Instance)
                 .SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId });
         }
 
@@ -627,7 +627,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
             var access = new ProjectAccess(ctx, _db.OrgContext);
             var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
                 NullLogger<ProjectDiscoveryService>.Instance);
-            await new ProjectService(ctx, _db.OrgContext, access, discovery, NullLogger<ProjectService>.Instance)
+            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), NullLogger<ProjectService>.Instance)
                 .SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId });
         }
 

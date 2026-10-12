@@ -23,6 +23,7 @@ public sealed class ProjectService
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
     private readonly ProjectDiscoveryService _discovery;
+    private readonly GitHubAccessService _gitHubAccess;
     private readonly ILogger<ProjectService> _logger;
 
     public ProjectService(
@@ -30,12 +31,14 @@ public sealed class ProjectService
         IOrganizationContext orgContext,
         ProjectAccess access,
         ProjectDiscoveryService discovery,
+        GitHubAccessService gitHubAccess,
         ILogger<ProjectService> logger)
     {
         _db = db;
         _orgContext = orgContext;
         _access = access;
         _discovery = discovery;
+        _gitHubAccess = gitHubAccess;
         _logger = logger;
     }
 
@@ -184,6 +187,7 @@ public sealed class ProjectService
         var orgId = RequireOrganizationId();
         var (name, shortName, country, repos, slug) = await ValidateAsync(input, existingId: null, orgId, ct);
         await EnsureRepositoriesUnclaimedAsync(repos, projectId: null, existing: null, ct);
+        await EnsureRepositoriesReadableAsync(repos, existing: null, ct);
 
         // The level is chosen on the create form, and it is written in the same
         // SaveChanges as the solution itself. Not a create followed by SetAccessAsync:
@@ -271,6 +275,7 @@ public sealed class ProjectService
         // change the repo set.
         await _access.EnsureCanManageAsync(project.Id, project.CreatedByUserId, ct);
         await EnsureRepositoriesUnclaimedAsync(repos, project.Id, project.Repositories, ct);
+        await EnsureRepositoriesReadableAsync(repos, project.Repositories, ct);
 
         project.Name = name;
         project.ShortName = shortName;
@@ -304,7 +309,7 @@ public sealed class ProjectService
         // the automatic builds run as never agreed to clone.
         if (RepositoryKeys(project).Except(allBefore).Any())
         {
-            await FollowRepositoryChangeInPipelinesAsync(project.Id, ct);
+            await FollowRepositoryChangeInPipelinesAsync(project, ct);
         }
 
         await SaveTranslatingNameClashAsync(ct);
@@ -405,6 +410,9 @@ public sealed class ProjectService
         var claimed = await RepositoryClaimErrorsAsync(
             [new ProjectRepositoryInput(repository.Provider, url, display)], project.Id, existing: null, ct);
         if (claimed.TryGetValue(0, out var claimedBy)) throw Validation("Url", claimedBy);
+        var unreadable = await RepositoryAccessErrorsAsync(
+            [new ProjectRepositoryInput(repository.Provider, url, display)], existing: null, ct);
+        if (unreadable.TryGetValue(0, out var notReadable)) throw Validation("Url", notReadable);
 
         project.Repositories.Add(new OeProjectRepository
         {
@@ -416,7 +424,7 @@ public sealed class ProjectService
         });
         project.UpdatedAt = DateTime.UtcNow;
         if (repository.Provider == RepositoryProvider.GitHub) await FollowRepositoryChangeAsync(project, ct);
-        await FollowRepositoryChangeInPipelinesAsync(project.Id, ct);
+        await FollowRepositoryChangeInPipelinesAsync(project, ct);
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Added {Url} to project {ProjectId} ({Name}).", url, project.Id, project.Name);
@@ -501,6 +509,94 @@ public sealed class ProjectService
         return errors;
     }
 
+    /// <summary>
+    /// Refuses a posted GitHub repository the acting person cannot see themselves,
+    /// keyed <c>Repositories[i].Url</c> so the editor shows it under the row. See
+    /// <see cref="RepositoryAccessErrorsAsync"/>.
+    /// </summary>
+    private async Task EnsureRepositoriesReadableAsync(
+        IReadOnlyList<ProjectRepositoryInput> repos, ICollection<OeProjectRepository>? existing, CancellationToken ct)
+    {
+        var errors = await RepositoryAccessErrorsAsync(repos, existing, ct);
+        if (errors.Count > 0)
+        {
+            throw new PlanValidationException(
+                errors.ToDictionary(e => $"Repositories[{e.Key}].Url", e => e.Value));
+        }
+    }
+
+    /// <summary>
+    /// The refusal for each of <paramref name="repos"/> (by index) that is a GitHub
+    /// repository in the organisation's connected GitHub organisation which the acting
+    /// person cannot see with their own GitHub account. A pull-request build clones every
+    /// GitHub repository on the solution with the installation's token, which reaches
+    /// every repository there, so a solution must only gain one the person adding it can
+    /// already read. Only a repository this save adds - new, or its URL changed - is
+    /// checked, the way <see cref="RepositoryClaimErrorsAsync"/> does; a repository
+    /// anywhere else is out of the installation's reach and passes. "Could not ask
+    /// GitHub" is not taken as a yes.
+    /// </summary>
+    private async Task<Dictionary<int, string>> RepositoryAccessErrorsAsync(
+        IReadOnlyList<ProjectRepositoryInput> repos, ICollection<OeProjectRepository>? existing, CancellationToken ct)
+    {
+        var errors = new Dictionary<int, string>();
+        var had = (existing ?? []).Select(r => RepositoryKey(r.Provider, r.Url)).ToHashSet(StringComparer.Ordinal);
+        var added = repos
+            .Select((r, i) => (Index: i, Repo: r))
+            .Where(a => a.Repo.Provider == RepositoryProvider.GitHub
+                && !had.Contains(RepositoryKey(a.Repo.Provider, a.Repo.Url)))
+            .ToList();
+        if (added.Count == 0) return errors;
+
+        var orgLogin = await _gitHubAccess.GetConnectedOrgLoginAsync(ct);
+        if (orgLogin is null) return errors;
+
+        var userId = _orgContext.CurrentUserId;
+        bool? linked = null;
+        foreach (var (index, repo) in added)
+        {
+            var fullName = GitHubFullName(repo.Url);
+            if (fullName is null
+                || !string.Equals(fullName.Split('/')[0], orgLogin, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            linked ??= userId is { } id && await HasGitHubAccountAsync(id, ct);
+            if (linked != true)
+            {
+                errors[index] = $"Connect your GitHub account under Account → Repository access first, so the workbench can check that you can see {fullName}. Then save again.";
+            }
+            else if (!await _gitHubAccess.CanAccessRepoAsync(userId!.Value, fullName, ct))
+            {
+                errors[index] = $"Your GitHub account can't see {fullName}, or GitHub couldn't be reached to check. Ask someone who can see it to add it, or try again in a moment.";
+            }
+        }
+        if (errors.Count > 0)
+        {
+            _logger.LogInformation(
+                "Refused {RefusedCount} repositories that user {UserId} could not be confirmed to see.", errors.Count, userId);
+        }
+        return errors;
+    }
+
+    /// <summary>
+    /// <c>owner/name</c> from the first two path segments of a GitHub URL, the way GitHub
+    /// routes a clone of it, with a <c>.git</c> suffix dropped. Anything after them (a
+    /// <c>/tree/main</c>, a query) does not change which repository is reached, so it
+    /// must not change which one is checked. Null when the path has fewer than two segments.
+    /// </summary>
+    private static string? GitHubFullName(string url)
+    {
+        if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri)) return null;
+        var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries)
+            .Select(Uri.UnescapeDataString)
+            .ToArray();
+        if (segments.Length < 2) return null;
+        var name = segments[1].EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? segments[1][..^4] : segments[1];
+        return $"{segments[0]}/{name}";
+    }
+
     private static string RepositoryClaimedMessage(string? owner) =>
         owner is null
             ? "This repository already belongs to another solution. A repository can only belong to one solution, so ask an Admin to remove it from the other one first."
@@ -559,15 +655,21 @@ public sealed class ProjectService
     /// preview check and building on push - run as, on every pipeline where someone
     /// else holds them, when a repository is added to the solution or one's address
     /// changes. Those builds clone every repository on the solution with that person's
-    /// access, so without this, anyone who manages the solution could add a repository
-    /// only the other person can read and have it cloned and compiled with their access.
-    /// The same "whoever last saved" rule saving a pipeline follows
+    /// access, and a repository someone else added is not one that person agreed to have
+    /// cloned with it. The same "whoever last saved" rule saving a pipeline follows
     /// (<c>PipelineService.UpdatePipelineAsync</c>); a build already waiting as the
     /// previous person is then refused when its turn comes (#1112). Any provider, since
-    /// the build clones them all. Nothing is saved here; the caller saves.
+    /// the build clones them all.
+    ///
+    /// <para>When the acting person has nothing to clone one of the solution's providers
+    /// with, the pipelines show it as paused straight away with the reason, the way
+    /// <see cref="FollowRepositoryChangeAsync"/> does for automatic update pull requests,
+    /// rather than each repository failing on the next build. Read from the database,
+    /// without asking GitHub. Nothing is saved here; the caller saves.</para>
     /// </summary>
-    private async Task FollowRepositoryChangeInPipelinesAsync(int projectId, CancellationToken ct)
+    private async Task FollowRepositoryChangeInPipelinesAsync(OeProject project, CancellationToken ct)
     {
+        var projectId = project.Id;
         var userId = _orgContext.CurrentUserId;
         var pipelines = await _db.OePipelines
             .Where(p => p.ProjectId == projectId && p.DeletedAt == null
@@ -576,24 +678,51 @@ public sealed class ProjectService
             .ToListAsync(ct);
         if (pipelines.Count == 0) return;
 
+        var blocked = await NothingToCloneWithAsync(
+            userId, project.Repositories.Select(r => r.Provider).Distinct().OrderBy(p => p).ToList(), ct);
         var now = DateTime.UtcNow;
         foreach (var pipeline in pipelines)
         {
             if (pipeline.PreviewCheck && pipeline.PreviewCheckByUserId != userId)
             {
                 pipeline.PreviewCheckByUserId = userId;
-                pipeline.PreviewCheckBlocked = null;
+                pipeline.PreviewCheckBlocked = blocked;
             }
             if (pipeline.BuildOnPush && pipeline.BuildOnPushByUserId != userId)
             {
                 pipeline.BuildOnPushByUserId = userId;
-                pipeline.BuildOnPushBlocked = null;
+                pipeline.BuildOnPushBlocked = blocked;
             }
             pipeline.UpdatedAt = now;
         }
         _logger.LogInformation(
-            "User {UserId} changed the repositories of solution {ProjectId}, so the automatic builds of {PipelineCount} pipeline(s) now run as them.",
-            userId, projectId, pipelines.Count);
+            "User {UserId} changed the repositories of solution {ProjectId}, so the automatic builds of {PipelineCount} pipeline(s) now run as them (paused: {Paused}).",
+            userId, projectId, pipelines.Count, blocked is not null);
+    }
+
+    /// <summary>
+    /// Why automatic builds running as <paramref name="userId"/> could not clone one of
+    /// <paramref name="providers"/>, in the words building on push pauses with, or null
+    /// when they have something for each: a connected GitHub account or a stored token
+    /// for GitHub, a stored token for anything else.
+    /// </summary>
+    private async Task<string?> NothingToCloneWithAsync(
+        int? userId, IReadOnlyList<RepositoryProvider> providers, CancellationToken ct)
+    {
+        var tokens = userId is { } id
+            ? await _db.UserRepositoryTokens.AsNoTracking()
+                .Where(t => t.UserId == id)
+                .Select(t => t.Provider)
+                .ToListAsync(ct)
+            : [];
+        var missing = new List<string>();
+        foreach (var provider in providers)
+        {
+            var has = tokens.Contains(provider)
+                || (provider == RepositoryProvider.GitHub && userId is { } linkedId && await HasGitHubAccountAsync(linkedId, ct));
+            if (!has) missing.Add(ProjectBuildImporter.NothingToCloneWithOnPush(provider));
+        }
+        return missing.Count == 0 ? null : string.Join(" ", missing);
     }
 
     /// <summary>Whether <paramref name="userId"/> has connected a GitHub account - read from the database, without asking GitHub.</summary>

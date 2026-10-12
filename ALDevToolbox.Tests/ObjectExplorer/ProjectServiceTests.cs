@@ -3,9 +3,12 @@ using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
+using ALDevToolbox.Tests.GitHub;
+using System.Net;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.ObjectExplorer;
@@ -55,8 +58,12 @@ public sealed class ProjectServiceTests : IDisposable
         var access = new ProjectAccess(ctx, _db.OrgContext);
         var discovery = new ProjectDiscoveryService(
             ctx, _db.OrgContext, access, _discoveryQueue, NullLogger<ProjectDiscoveryService>.Instance);
-        return new ProjectService(ctx, _db.OrgContext, access, discovery, NullLogger<ProjectService>.Instance);
+        var gitHubAccess = _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, _gitHub));
+        return new ProjectService(ctx, _db.OrgContext, access, discovery, gitHubAccess, NullLogger<ProjectService>.Instance);
     }
+
+    /// <summary>What GitHub answers. Nothing is registered until a test says so.</summary>
+    private readonly FakeGitHubApi _gitHub = new();
 
     private static ProjectInput NewInput(
         string name = "Acme",
@@ -147,6 +154,9 @@ public sealed class ProjectServiceTests : IDisposable
             Subject = $"gh-{userId}",
             DisplayIdentity = $"user-{userId}",
             CreatedAt = DateTime.UtcNow,
+            AccessTokenEncrypted = _db.DataProtectionProvider
+                .CreateProtector(ALDevToolbox.Services.GitHub.GitHubAccessService.AccessTokenProtectionPurpose)
+                .Protect($"ghu_{userId}"),
         });
         await ctx.SaveChangesAsync();
     }
@@ -314,8 +324,34 @@ public sealed class ProjectServiceTests : IDisposable
         saved.PreviewCheckByUserId.Should().Be(colleagueId,
             "the repository they added must not be cloned with the owner's access");
         saved.BuildOnPushByUserId.Should().Be(colleagueId);
-        saved.PreviewCheckBlocked.Should().BeNull();
-        saved.BuildOnPushBlocked.Should().BeNull();
+        saved.PreviewCheckBlocked.Should().Be(NothingForGitHub,
+            "they have nothing to clone with, which the pipeline shows straight away");
+        saved.BuildOnPushBlocked.Should().Be(NothingForGitHub);
+    }
+
+    private static readonly string NothingForGitHub =
+        ProjectBuildImporter.NothingToCloneWithOnPush(RepositoryProvider.GitHub);
+
+    private static readonly string NothingForAzureDevOps =
+        ProjectBuildImporter.NothingToCloneWithOnPush(RepositoryProvider.AzureDevOps);
+
+    /// <summary>Stores a build token for <paramref name="provider"/> as <paramref name="userId"/>.</summary>
+    private async Task GiveTokenAsync(int userId, RepositoryProvider provider)
+    {
+        var previous = _db.OrgContext.CurrentUserId;
+        _db.OrgContext.CurrentUserId = userId;
+        try
+        {
+            await using var ctx = _db.NewContext();
+            await new ALDevToolbox.Services.Account.UserRepositoryTokenService(
+                    ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Account.UserRepositoryTokenService>.Instance,
+                    _db.DataProtectionProvider)
+                .SaveTokenAsync(provider, "pat_pasted", clear: false);
+        }
+        finally
+        {
+            _db.OrgContext.CurrentUserId = previous;
+        }
     }
 
     [Fact]
@@ -331,6 +367,27 @@ public sealed class ProjectServiceTests : IDisposable
         var saved = await PipelineAsync(pipelineId);
         saved.PreviewCheckByUserId.Should().Be(colleagueId);
         saved.BuildOnPushByUserId.Should().Be(colleagueId);
+        saved.PreviewCheckBlocked.Should().Be(NothingForAzureDevOps,
+            "a connected GitHub account does not reach Azure DevOps");
+        saved.BuildOnPushBlocked.Should().Be(NothingForAzureDevOps);
+    }
+
+    [Fact]
+    public async Task Someone_else_with_something_to_clone_every_repository_with_takes_over_without_a_pause()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var pipelineId = await SeedAutomaticPipelineAsync(id);
+        var colleagueId = await SeedColleagueAsync(gitHubLinked: false);
+        await GiveTokenAsync(colleagueId, RepositoryProvider.GitHub);
+        await GiveTokenAsync(colleagueId, RepositoryProvider.AzureDevOps);
+        _db.OrgContext.CurrentUserId = colleagueId;
+
+        await Svc(_db.NewContext()).AddRepositoryAsync(id, AzureExtensions);
+
+        var saved = await PipelineAsync(pipelineId);
+        saved.PreviewCheckByUserId.Should().Be(colleagueId);
+        saved.PreviewCheckBlocked.Should().BeNull();
+        saved.BuildOnPushBlocked.Should().BeNull();
     }
 
     [Theory]
@@ -342,6 +399,8 @@ public sealed class ProjectServiceTests : IDisposable
         var pipelineId = await SeedAutomaticPipelineAsync(id);
         var colleagueId = await SeedColleagueAsync(gitHubLinked: true);
         _db.OrgContext.CurrentUserId = colleagueId;
+
+        await GiveTokenAsync(colleagueId, RepositoryProvider.AzureDevOps);
 
         var added = provider == RepositoryProvider.GitHub ? Payments : AzureExtensions;
         await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core, added));
@@ -400,6 +459,178 @@ public sealed class ProjectServiceTests : IDisposable
         saved.BuildOnPush.Should().BeFalse();
         saved.PreviewCheckByUserId.Should().BeNull();
         saved.BuildOnPushByUserId.Should().BeNull();
+    }
+
+    // --- Only a repository the person adding it can see ---------------------
+
+    /// <summary>Connects the organisation to the GitHub organisation <c>cronus-dk</c>.</summary>
+    private async Task ConnectGitHubOrganisationAsync()
+    {
+        await using var ctx = _db.NewContext();
+        ctx.OrganizationSettings.Add(new OrganizationSettings
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            GitHubInstallationId = 42,
+            GitHubOrgLogin = "cronus-dk",
+            GitHubConnectedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    private void GitHubSays(string repoFullName, HttpStatusCode status) =>
+        _gitHub.On(HttpMethod.Get, $"/repos/{repoFullName}", status, status == HttpStatusCode.OK ? "{}" : null);
+
+    private async Task<List<string>> RepositoryUrlsAsync(int projectId) =>
+        await _db.NewContext().OeProjectRepositories.AsNoTracking()
+            .Where(r => r.ProjectId == projectId)
+            .OrderBy(r => r.Id)
+            .Select(r => r.Url)
+            .ToListAsync();
+
+    [Fact]
+    public async Task Adding_a_repository_in_the_connected_organisation_that_the_person_cannot_see_is_refused()
+    {
+        await ConnectGitHubOrganisationAsync();
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+        GitHubSays("cronus-dk/payment-import", HttpStatusCode.NotFound);
+
+        var act = () => Svc(_db.NewContext()).AddRepositoryAsync(id, Payments);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Url"].Should().Contain("can't see cronus-dk/payment-import");
+        (await RepositoryUrlsAsync(id)).Should().Equal(Core.Url);
+    }
+
+    [Theory]
+    [InlineData("https://github.com/cronus-dk/payment-import/tree/main")]
+    [InlineData("https://www.github.com/CRONUS-DK/payment-import.git")]
+    public async Task A_repository_address_written_another_way_is_checked_as_the_repository_it_reaches(string url)
+    {
+        await ConnectGitHubOrganisationAsync();
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+        GitHubSays("CRONUS-DK/payment-import", HttpStatusCode.NotFound);
+        GitHubSays("cronus-dk/payment-import", HttpStatusCode.NotFound);
+
+        var act = () => Svc(_db.NewContext()).AddRepositoryAsync(id, new ProjectRepositoryInput(RepositoryProvider.GitHub, url, ""));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Url");
+    }
+
+    [Fact]
+    public async Task Adding_a_repository_in_the_connected_organisation_without_a_GitHub_account_is_refused()
+    {
+        await ConnectGitHubOrganisationAsync();
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: false);
+
+        var act = () => Svc(_db.NewContext()).AddRepositoryAsync(id, Payments);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Url"].Should().StartWith("Connect your GitHub account");
+        _gitHub.Calls.Should().BeEmpty("there is no account to ask GitHub with");
+    }
+
+    [Fact]
+    public async Task Adding_a_repository_when_GitHub_cannot_be_reached_is_refused()
+    {
+        await ConnectGitHubOrganisationAsync();
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+        GitHubSays("cronus-dk/payment-import", FakeGitHubApi.Unreachable);
+
+        var act = () => Svc(_db.NewContext()).AddRepositoryAsync(id, Payments);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Url");
+    }
+
+    [Fact]
+    public async Task Adding_a_repository_in_the_connected_organisation_the_person_can_see_is_added()
+    {
+        await ConnectGitHubOrganisationAsync();
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+        GitHubSays("cronus-dk/payment-import", HttpStatusCode.OK);
+
+        await Svc(_db.NewContext()).AddRepositoryAsync(id, Payments);
+
+        (await RepositoryUrlsAsync(id)).Should().Equal(Core.Url, Payments.Url);
+    }
+
+    [Fact]
+    public async Task A_repository_outside_the_connected_organisation_is_not_asked_about()
+    {
+        await ConnectGitHubOrganisationAsync();
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: false);
+
+        await Svc(_db.NewContext()).AddRepositoryAsync(id,
+            new ProjectRepositoryInput(RepositoryProvider.GitHub, "https://github.com/fabrikam/shared", "Shared"));
+        await Svc(_db.NewContext()).AddRepositoryAsync(id, AzureExtensions);
+
+        (await RepositoryUrlsAsync(id)).Should().HaveCount(3);
+        _gitHub.Calls.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Saving_a_new_repository_the_person_cannot_see_is_refused_under_its_row()
+    {
+        await ConnectGitHubOrganisationAsync();
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+        GitHubSays("cronus-dk/payment-import", HttpStatusCode.NotFound);
+
+        var act = () => Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core, Payments));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Keys.Should().Equal("Repositories[1].Url");
+        (await RepositoryUrlsAsync(id)).Should().Equal(Core.Url);
+    }
+
+    [Fact]
+    public async Task Changing_a_repository_address_to_one_the_person_cannot_see_is_refused()
+    {
+        await ConnectGitHubOrganisationAsync();
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+        GitHubSays("cronus-dk/secret-app", HttpStatusCode.NotFound);
+
+        var act = () => Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null,
+            Core with { Url = "https://github.com/cronus-dk/secret-app" }));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("Repositories[0].Url");
+    }
+
+    [Fact]
+    public async Task A_repository_the_solution_already_has_is_not_asked_about_again()
+    {
+        await ConnectGitHubOrganisationAsync();
+        await LinkGitHubAsync(OwnerUserId);
+        GitHubSays("cronus-dk/payment-import", HttpStatusCode.OK);
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core, Payments));
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: false);
+
+        // A rename by someone who could not see the repository: nothing new is added.
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S Denmark", "dk", null, Core, Payments));
+
+        (await RepositoryUrlsAsync(id)).Should().Equal(Core.Url, Payments.Url);
+    }
+
+    [Fact]
+    public async Task Creating_a_solution_with_a_repository_the_person_cannot_see_is_refused()
+    {
+        await ConnectGitHubOrganisationAsync();
+        await LinkGitHubAsync(OwnerUserId);
+        GitHubSays("cronus-dk/payment-import", HttpStatusCode.NotFound);
+
+        var act = () => Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core, Payments));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Keys.Should().Equal("Repositories[1].Url");
+        (await _db.NewContext().OeProjects.AsNoTracking().AnyAsync()).Should().BeFalse();
     }
 
     [Fact]
