@@ -181,13 +181,28 @@ public sealed class ProjectService
     }
 
     /// <summary>Creates a project and its repositories. Returns the new id.</summary>
-    public async Task<int> CreateProjectAsync(
-        ProjectInput input, ProjectAccessSettings? access = null, CancellationToken ct = default)
+    public Task<int> CreateProjectAsync(
+        ProjectInput input, ProjectAccessSettings? access = null, CancellationToken ct = default) =>
+        CreateProjectAsync(input, access, checkReadAccess: true, ct);
+
+    /// <summary>
+    /// <see cref="CreateProjectAsync(ProjectInput, ProjectAccessSettings?, CancellationToken)"/>
+    /// for a repository the GitHub App has just created for the acting person from what they
+    /// generated, which skips the check that they can see it (<see cref="RepositoryAccessErrorsAsync"/>):
+    /// it holds only their own output, and in an organisation whose members get no access by
+    /// default they may not see it yet. Internal so only "Create repository" reaches it, never
+    /// a page or an agent with a URL of its choosing.
+    /// </summary>
+    internal Task<int> CreateProjectForCreatedRepositoryAsync(ProjectInput input, CancellationToken ct = default) =>
+        CreateProjectAsync(input, access: null, checkReadAccess: false, ct);
+
+    private async Task<int> CreateProjectAsync(
+        ProjectInput input, ProjectAccessSettings? access, bool checkReadAccess, CancellationToken ct)
     {
         var orgId = RequireOrganizationId();
         var (name, shortName, country, repos, slug) = await ValidateAsync(input, existingId: null, orgId, ct);
         await EnsureRepositoriesUnclaimedAsync(repos, projectId: null, existing: null, ct);
-        await EnsureRepositoriesReadableAsync(repos, existing: null, ct);
+        if (checkReadAccess) await EnsureRepositoriesReadableAsync(repos, existing: null, ct);
 
         // The level is chosen on the create form, and it is written in the same
         // SaveChanges as the solution itself. Not a create followed by SetAccessAsync:
@@ -372,8 +387,22 @@ public sealed class ProjectService
     /// </summary>
     /// <exception cref="PlanValidationException">The solution is gone, or the URL is not one that provider serves.</exception>
     /// <exception cref="ProjectAccessDeniedException">The caller may not manage this solution.</exception>
-    public async Task<string> AddRepositoryAsync(
-        int projectId, ProjectRepositoryInput repository, CancellationToken ct = default)
+    public Task<string> AddRepositoryAsync(
+        int projectId, ProjectRepositoryInput repository, CancellationToken ct = default) =>
+        AddRepositoryAsync(projectId, repository, checkReadAccess: true, ct);
+
+    /// <summary>
+    /// <see cref="AddRepositoryAsync(int, ProjectRepositoryInput, CancellationToken)"/> for a
+    /// repository the GitHub App has just created for the acting person, without the check
+    /// that they can see it. See <see cref="CreateProjectForCreatedRepositoryAsync"/> for why,
+    /// and why it is internal.
+    /// </summary>
+    internal Task<string> AddCreatedRepositoryAsync(
+        int projectId, ProjectRepositoryInput repository, CancellationToken ct = default) =>
+        AddRepositoryAsync(projectId, repository, checkReadAccess: false, ct);
+
+    private async Task<string> AddRepositoryAsync(
+        int projectId, ProjectRepositoryInput repository, bool checkReadAccess, CancellationToken ct)
     {
         var orgId = RequireOrganizationId();
         ArgumentNullException.ThrowIfNull(repository);
@@ -410,9 +439,12 @@ public sealed class ProjectService
         var claimed = await RepositoryClaimErrorsAsync(
             [new ProjectRepositoryInput(repository.Provider, url, display)], project.Id, existing: null, ct);
         if (claimed.TryGetValue(0, out var claimedBy)) throw Validation("Url", claimedBy);
-        var unreadable = await RepositoryAccessErrorsAsync(
-            [new ProjectRepositoryInput(repository.Provider, url, display)], existing: null, ct);
-        if (unreadable.TryGetValue(0, out var notReadable)) throw Validation("Url", notReadable);
+        if (checkReadAccess)
+        {
+            var unreadable = await RepositoryAccessErrorsAsync(
+                [new ProjectRepositoryInput(repository.Provider, url, display)], existing: null, ct);
+            if (unreadable.TryGetValue(0, out var notReadable)) throw Validation("Url", notReadable);
+        }
 
         project.Repositories.Add(new OeProjectRepository
         {

@@ -1193,8 +1193,11 @@ Business Central, the way Dependabot does it, instead of remembering to press th
   connected GitHub account (`GitHubAccessService.CanAccessRepoAsync`). Without a
   connected account, or when GitHub cannot be asked, the repository is refused under its
   row with what to do next. Repositories outside the connected organisation, Azure DevOps
-  ones and the ones a solution already has are not asked about. "Create repository"
-  passes because the person who made the repository can see it.
+  ones and the ones a solution already has are not asked about. "Create repository" puts
+  the repository it just made on the solution without asking: it holds only what that
+  person generated, and in an organisation whose members get no access by default they
+  may not see it yet. That path is internal to the service, so no page or agent can
+  name a URL to skip the check with.
 - **`DependencyDriftScheduler` runs once a night at 05:00 UTC**, after the environment
   refresh, for every organisation with an imported first-party release: it rescans (so a
   customer moved to a new version during the day is measured against it, and the

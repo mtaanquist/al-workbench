@@ -111,11 +111,9 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         // person, that the organisation ruleset lets bypass its rules.
         TokenFor(api, "PATCH", $"/repos/{Repo}/git/refs/heads/main").Should().Be(InstallationToken);
         // The person's own token is what answers "are they in this
-        // organisation" and "can they see the repository" before it goes on a
-        // solution, and it is used for nothing else here.
+        // organisation", and it is used for nothing else here.
         api.Credentials.Where(c => c.Token == UserToken)
-            .Should().OnlyContain(c => c.Call.Contains($"/orgs/{OrgLogin}/members/")
-                || c.Call == $"GET https://api.github.com/repos/{Repo}");
+            .Should().OnlyContain(c => c.Call.Contains($"/orgs/{OrgLogin}/members/"));
     }
 
     [Fact]
@@ -724,6 +722,29 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         repo.DisplayName.Should().Be(RepoName);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_new_repository_goes_on_the_solution_even_when_its_creator_cannot_see_it_yet(bool chosenSolution)
+    {
+        // An organisation whose members get no access by default: the App made the
+        // repository, and the person who asked for it cannot see it on GitHub yet.
+        await ReadyAsync();
+        int? solutionId = chosenSolution ? await SeedSolutionAsync("CRONUS Customer", ownedByCaller: true) : null;
+        var api = WritableApi().On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.NotFound);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(
+            WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
+
+        created.SolutionId.Should().NotBeNull();
+        created.SolutionWarning.Should().BeNull();
+        await using var read = _db.NewContext();
+        (await read.OeProjectRepositories.AsNoTracking().SingleAsync(r => r.ProjectId == created.SolutionId))
+            .Url.Should().Be($"https://github.com/{Repo}.git");
+    }
+
     [Fact]
     public async Task With_no_solution_chosen_the_customer_becomes_one()
     {
@@ -1232,9 +1253,6 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
             .On(HttpMethod.Get, $"/orgs/{OrgLogin}/members/", HttpStatusCode.NoContent)
             .On(HttpMethod.Post, $"/orgs/{OrgLogin}/repos", HttpStatusCode.Created,
                 FakeGitHubApi.RepositoryJson(Repo))
-            // The creator can see what they just made, which registering it on a
-            // solution asks with their own account.
-            .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.OK, FakeGitHubApi.RepositoryJson(Repo))
             .On(HttpMethod.Put, $"/repos/{Repo}/contents/", HttpStatusCode.Created, FakeGitHubApi.FileWriteJson())
             .On(HttpMethod.Post, $"/repos/{Repo}/git/blobs", HttpStatusCode.Created, FakeGitHubApi.ShaJson("blob-sha"))
             .On(HttpMethod.Post, $"/repos/{Repo}/git/trees", HttpStatusCode.Created, FakeGitHubApi.ShaJson("new-tree-sha"))
