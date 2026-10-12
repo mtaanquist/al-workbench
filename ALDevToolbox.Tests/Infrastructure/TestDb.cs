@@ -358,11 +358,6 @@ public sealed class TestDb : IDisposable
             NullLogger<ALDevToolbox.Services.GitHub.GitHubConnectionService>.Instance, TimeProvider.System);
 
     /// <summary>
-    /// The per-user GitHub account link. Takes the API client so a test can
-    /// decide what GitHub answers; <paramref name="clock"/> lets the token-expiry
-    /// tests move time without waiting eight hours.
-    /// </summary>
-    /// <summary>
     /// Gives <paramref name="userId"/> a GitHub link with a non-expiring
     /// <paramref name="accessToken"/>, written straight to the row so a test that
     /// only needs "this person is linked" does not replay the OAuth handshake.
@@ -385,6 +380,11 @@ public sealed class TestDb : IDisposable
         await ctx.SaveChangesAsync();
     }
 
+    /// <summary>
+    /// The per-user GitHub account link. Takes the API client so a test can
+    /// decide what GitHub answers; <paramref name="clock"/> lets the token-expiry
+    /// tests move time without waiting eight hours.
+    /// </summary>
     public ALDevToolbox.Services.GitHub.GitHubAccessService NewGitHubAccessService(
         AppDbContext ctx,
         ALDevToolbox.Services.GitHub.GitHubAppClient client,

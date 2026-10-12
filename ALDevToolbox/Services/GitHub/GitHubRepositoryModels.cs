@@ -31,6 +31,11 @@ public sealed record GitHubRepositorySummary(
     string HtmlUrl,
     string CloneUrl);
 
+/// <summary>What one person may do in one repository, as GitHub told them.</summary>
+/// <param name="CanSee">They can read it.</param>
+/// <param name="CanPush">They can write to it, which is what publishing a release needs.</param>
+public sealed record GitHubUserRepositoryAccess(bool CanSee, bool CanPush);
+
 /// <summary>
 /// One file read through the Contents API: its decoded text and the blob
 /// <c>sha</c> that a later write has to quote to prove it changed the version

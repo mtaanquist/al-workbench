@@ -317,34 +317,95 @@ public sealed partial class GitHubAppClient
     /// 404 here means "not visible to this person", never "gone", and the two
     /// are not distinguishable from outside. A 301 means the repository was
     /// renamed and is still visible.</para>
+    ///
+    /// <para>An answer that says nothing about the person - a rate limit, a
+    /// server error - throws <see cref="GitHubApiException"/> rather than coming
+    /// back as a no, so a caller can tell "try again" from "you may not".</para>
     /// </summary>
     public async Task<bool> UserCanSeeRepositoryAsync(
         string userToken, string owner, string repo, CancellationToken ct = default)
     {
-        var status = await ProbeAsync(
-            HttpMethod.Get,
-            $"repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repo)}",
-            userToken, ct);
-        return status is HttpStatusCode.OK or HttpStatusCode.MovedPermanently;
+        using var request = NewRequest(HttpMethod.Get, RepoPath(owner, repo), userToken);
+        using var response = await SendRawAsync(request, ct);
+        _logger.LogDebug("GitHub answered {Status} for {Method} {Path}.", (int)response.StatusCode, request.Method, request.RequestUri);
+        if (response.StatusCode is HttpStatusCode.OK or HttpStatusCode.MovedPermanently) return true;
+        await ThrowIfNoVerdictAsync(response, request, ct);
+        return false;
     }
 
     /// <summary>
-    /// Whether <paramref name="userToken"/>'s owner can write to
-    /// <paramref name="owner"/>/<paramref name="repo"/>: the <c>push</c> flag of
-    /// the <c>permissions</c> object GitHub adds to a repository read made with a
-    /// user's own token. A repository they cannot see answers 404, which is a no
-    /// like any other.
+    /// What <paramref name="userToken"/>'s owner may do in
+    /// <c>{owner}/{repo}</c>: whether they can see it, and whether they can write
+    /// to it - the <c>push</c> flag of the <c>permissions</c> object GitHub adds to
+    /// a repository read made with a user's own token.
+    ///
+    /// <para>A renamed repository answers 301 pointing at its new address. The
+    /// client does not follow redirects, so the hop is taken here, once, and only
+    /// to the API host: the permissions live at the other end, and a rename is
+    /// not a reason to say no. Same failure rule as
+    /// <see cref="UserCanSeeRepositoryAsync"/>.</para>
     /// </summary>
-    public async Task<bool> UserCanPushRepositoryAsync(
+    public async Task<GitHubUserRepositoryAccess> GetUserRepositoryAccessAsync(
         string userToken, string owner, string repo, CancellationToken ct = default)
     {
         using var request = NewRequest(HttpMethod.Get, RepoPath(owner, repo), userToken);
-        using var document = await SendOrNotFoundAsync(request, ct);
-        return document is not null
-            && document.RootElement.TryGetProperty("permissions", out var permissions)
-            && permissions.ValueKind == JsonValueKind.Object
-            && permissions.TryGetProperty("push", out var push)
-            && push.ValueKind == JsonValueKind.True;
+        using var response = await SendRawAsync(request, ct);
+        if (response.StatusCode == HttpStatusCode.MovedPermanently)
+        {
+            var location = response.Headers.Location;
+            if (location is null
+                || !location.IsAbsoluteUri
+                || !string.Equals(location.Host, new Uri(ApiBaseUrl).Host, StringComparison.OrdinalIgnoreCase)
+                || location.Scheme != Uri.UriSchemeHttps)
+            {
+                throw new GitHubApiException(HttpStatusCode.BadGateway,
+                    "GitHub said the repository moved but not to where it could be read.");
+            }
+            using var moved = NewRequest(HttpMethod.Get, location.ToString(), userToken);
+            using var movedResponse = await SendRawAsync(moved, ct);
+            return await ReadRepositoryAccessAsync(movedResponse, moved, ct);
+        }
+        return await ReadRepositoryAccessAsync(response, request, ct);
+    }
+
+    private async Task<GitHubUserRepositoryAccess> ReadRepositoryAccessAsync(
+        HttpResponseMessage response, HttpRequestMessage request, CancellationToken ct)
+    {
+        if (response.StatusCode == HttpStatusCode.OK)
+        {
+            using var document = ParseOrThrow(await response.Content.ReadAsStringAsync(ct), request.RequestUri?.ToString());
+            var canPush = document.RootElement.TryGetProperty("permissions", out var permissions)
+                && permissions.ValueKind == JsonValueKind.Object
+                && permissions.TryGetProperty("push", out var push)
+                && push.ValueKind == JsonValueKind.True;
+            return new GitHubUserRepositoryAccess(CanSee: true, CanPush: canPush);
+        }
+        await ThrowIfNoVerdictAsync(response, request, ct);
+        return new GitHubUserRepositoryAccess(CanSee: false, CanPush: false);
+    }
+
+    /// <summary>
+    /// Throws when a refused repository read says nothing about the person who
+    /// asked: a rate limit (429, or 403 with no requests left), a server error, or
+    /// any other status that is not one of GitHub's ways of saying no (401, 403,
+    /// 404). Returns for those, which are a definite no.
+    /// </summary>
+    private async Task ThrowIfNoVerdictAsync(HttpResponseMessage response, HttpRequestMessage request, CancellationToken ct)
+    {
+        var rateLimited = response.StatusCode == HttpStatusCode.TooManyRequests
+            || (response.StatusCode == HttpStatusCode.Forbidden
+                && response.Headers.TryGetValues("x-ratelimit-remaining", out var remaining)
+                && remaining.Any(r => r.Trim() == "0"));
+        if (!rateLimited && response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+        {
+            return;
+        }
+
+        var (message, documentationUrl) = ReadError(await response.Content.ReadAsStringAsync(ct));
+        _logger.LogWarning(
+            "GitHub gave no answer about access for {Method} {Path}: {Status} {Message}",
+            request.Method, request.RequestUri, (int)response.StatusCode, message);
+        throw new GitHubApiException(response.StatusCode, message, documentationUrl);
     }
 
     /// <summary>

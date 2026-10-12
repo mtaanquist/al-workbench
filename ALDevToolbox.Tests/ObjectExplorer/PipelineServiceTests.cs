@@ -1046,6 +1046,57 @@ public sealed class PipelineServiceTests : IDisposable
         (await read.OePipelines.SingleAsync(p => p.Id == pipeline.Id)).GithubReleaseRepositoryId.Should().Be(repositoryId);
     }
 
+    [Fact]
+    public async Task A_release_target_whose_link_names_no_github_repository_is_refused()
+    {
+        await using var ctx = _db.NewContext();
+        var (projectId, repositoryId) = await SeedPublishingAsync(ctx, linked: true);
+        await ctx.OeProjectRepositories.Where(r => r.Id == repositoryId)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.Url, "https://github.com/cronus-dk"));
+        var github = RepositoryWithPush(push: true);
+
+        var act = () => NewService(ctx, github)
+            .CreatePipelineAsync(new PipelineInput(projectId, null, null, GithubReleaseRepositoryId: repositoryId));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId")
+            .WhoseValue.Should().Contain("isn't a github.com repository address");
+        github.Calls.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_release_target_github_cannot_check_says_to_try_again()
+    {
+        await using var ctx = _db.NewContext();
+        var (projectId, repositoryId) = await SeedPublishingAsync(ctx, linked: true);
+        var github = new FakeGitHubApi().On(HttpMethod.Get, $"/repos/{ReleaseRepo}",
+            System.Net.HttpStatusCode.BadGateway, "{\"message\":\"bad gateway\"}");
+
+        var act = () => NewService(ctx, github)
+            .CreatePipelineAsync(new PipelineInput(projectId, null, null, GithubReleaseRepositoryId: repositoryId));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId")
+            .WhoseValue.Should().Contain("couldn't be reached");
+    }
+
+    [Fact]
+    public async Task A_renamed_release_target_is_followed_to_its_new_name()
+    {
+        await using var ctx = _db.NewContext();
+        var (projectId, repositoryId) = await SeedPublishingAsync(ctx, linked: true);
+        var github = RepositoryWithPush(push: true)
+            .OnMoved($"/repos/{ReleaseRepo}", "https://api.github.com/repositories/4242")
+            .On(HttpMethod.Get, "/repositories/4242", System.Net.HttpStatusCode.OK,
+                FakeGitHubApi.RepositoryJson(ReleaseRepo).TrimEnd().TrimEnd('}') + ",\"permissions\":{\"push\":true}}");
+
+        var id = await NewService(ctx, github)
+            .CreatePipelineAsync(new PipelineInput(projectId, null, null, GithubReleaseRepositoryId: repositoryId));
+
+        await using var read = _db.NewContext();
+        (await read.OePipelines.SingleAsync(p => p.Id == id)).GithubReleaseRepositoryId.Should().Be(repositoryId);
+    }
+
     /// <summary>A GitHub that answers the person's read of the repository with their write permission.</summary>
     private static FakeGitHubApi RepositoryWithPush(bool push) =>
         new FakeGitHubApi().On(HttpMethod.Get, $"/repos/{ReleaseRepo}", System.Net.HttpStatusCode.OK,

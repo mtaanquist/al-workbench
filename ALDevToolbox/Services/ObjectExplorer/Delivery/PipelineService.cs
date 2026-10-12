@@ -293,16 +293,25 @@ public sealed class PipelineService
     }
 
     /// <summary>
-    /// Whether the acting user may make <paramref name="repoFullName"/> a pipeline's
-    /// release target. The releases go up on the installation token from the build
-    /// worker, with no person behind them to ask, so whoever points a pipeline at a
-    /// repository has to be able to write to it on GitHub themselves. Asked only when
-    /// the target is new or changes: a colleague editing a pipeline somebody else
-    /// already pointed there is not re-asked.
+    /// Why the acting user may not make <paramref name="repoFullName"/> a pipeline's
+    /// release target, or null when they may: they have to be able to write to it on
+    /// GitHub themselves. Asked only when the target is new or changes, so the person
+    /// choosing it hears about a refusal at once; every publish asks the same of the
+    /// person the build ran as (<see cref="GitHubReleaseService.PublishBuildAsync"/>),
+    /// so editing a pipeline that already publishes needs no second gate here.
     /// </summary>
-    private async Task<bool> CanPublishToAsync(string repoFullName, CancellationToken ct) =>
-        _orgContext.CurrentUserId is { } userId
-        && await _githubAccess.CanPushRepoAsync(userId, repoFullName, ct);
+    private async Task<string?> PublishRefusalAsync(string repoFullName, CancellationToken ct)
+    {
+        var canPush = _orgContext.CurrentUserId is { } userId
+            ? await _githubAccess.TryCanPushRepoAsync(userId, repoFullName, ct)
+            : false;
+        return canPush switch
+        {
+            true => null,
+            null => $"GitHub couldn't be reached to check your access to {repoFullName}. Try again in a few minutes.",
+            false => $"Your GitHub account can't publish to {repoFullName}. Connect your GitHub account under Account → Repository access, or ask an owner of the repository for write access.",
+        };
+    }
 
     /// <summary>
     /// Validates the input against its project (which must exist and be manageable)
@@ -345,12 +354,15 @@ public sealed class PipelineService
             {
                 errors["GithubReleaseRepositoryId"] = "Choose one of this solution's GitHub repositories, or don't publish releases.";
             }
-            else if (repoId != existing?.GithubReleaseRepositoryId
-                     && GitHubReleaseService.TryParseRepository(repositoryUrl, out var repoOwner, out var repoName)
-                     && !await CanPublishToAsync($"{repoOwner}/{repoName}", ct))
+            else if (!GitHubReleaseService.TryParseRepository(repositoryUrl, out var repoOwner, out var repoName))
             {
                 errors["GithubReleaseRepositoryId"] =
-                    $"Your GitHub account can't publish to {repoOwner}/{repoName}. Connect your GitHub account under Account → Repository access, or ask an owner of the repository for write access.";
+                    "This repository's link isn't a github.com repository address, so releases can't be published there. Fix the link on the solution, or don't publish releases.";
+            }
+            else if (repoId != existing?.GithubReleaseRepositoryId
+                     && await PublishRefusalAsync($"{repoOwner}/{repoName}", ct) is { } refusal)
+            {
+                errors["GithubReleaseRepositoryId"] = refusal;
             }
             else
             {

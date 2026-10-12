@@ -85,6 +85,25 @@ public sealed class FakeGitHubApi : HttpMessageHandler
     }
 
     /// <summary>
+    /// Registers a <c>301</c> for a <c>GET</c> of <paramref name="path"/> pointing at
+    /// <paramref name="location"/>, which is how GitHub answers a read of a renamed
+    /// repository by its old name.
+    /// </summary>
+    public FakeGitHubApi OnMoved(string path, string location)
+    {
+        _routes.Add((HttpMethod.Get.Method, Normalise(path), _ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.MovedPermanently)
+            {
+                Content = new StringContent(string.Empty, Encoding.UTF8, "application/json"),
+            };
+            response.Headers.Location = new Uri(location);
+            return response;
+        }));
+        return this;
+    }
+
+    /// <summary>
     /// Registers a reply computed from the request that may also carry headers - a
     /// <c>Link</c> header, say, which is how GitHub's cursor-paged routes name the
     /// next page.
