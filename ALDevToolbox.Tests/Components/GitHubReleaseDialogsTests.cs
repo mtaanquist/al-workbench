@@ -196,8 +196,8 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         // The page can still re-render from its own loading after the first paint, which
         // retires the handler a found element points at. Let its reads finish first, then
         // pick the source again if a late render still lands in between.
-        // The retry runs on a deadline rather than a count: on a loaded CI runner the late
-        // renders can outlast twenty quick attempts.
+        // On a loaded CI runner the markup the test reads could stay on the retired handler
+        // for good, so a retry re-renders the page before looking again.
         _db.WaitForQueriesToSettle();
         var deadline = DateTime.UtcNow.AddSeconds(10);
         while (true)
@@ -210,6 +210,7 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
             catch (Bunit.Rendering.UnknownEventHandlerIdException) when (DateTime.UtcNow < deadline)
             {
                 await Task.Delay(100);
+                cut.Render();
             }
         }
 
