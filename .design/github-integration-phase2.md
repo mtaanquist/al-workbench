@@ -363,12 +363,15 @@ Releases page, and who sometimes has to redeploy a version the workbench did not
   webhook build).
 - **The person is checked where there is one.** The installation token can reach every
   repository in the organisation, so it never stands in for the acting user's own rights.
-  Choosing (or changing) a build pipeline's release repository needs the person saving it
-  to have write access to that repository on GitHub, asked with their own token; the
-  publish itself then runs without a user. Listing and staging a repository's Releases
-  need the acting person to be able to see it on GitHub (`CanAccessRepoAsync`) on every
-  call, in the UI and through `list_github_releases` / `stage_github_release` alike. No
-  connected GitHub account counts as no access.
+  Every publish needs the person the build ran as (its recorded starter; for a build on
+  push, the person those builds run as) to have write access to the repository on GitHub,
+  asked with their own token; a build with nobody recorded is not published. Choosing (or
+  changing) a build pipeline's release repository asks the same of the person saving it,
+  so they hear about it at once. Listing and staging a repository's Releases need the
+  acting person to be able to see it on GitHub on every call, in the UI and through
+  `list_github_releases` / `stage_github_release` alike. No connected GitHub account counts
+  as no access; a rate limit, server error or timeout is reported as "GitHub couldn't be
+  reached, try again", never as a refusal. A renamed repository's redirect is followed.
 - **Deliver from a Release is a release-pipeline source.** `oe_release_pipelines` gains
   `artifact_source` (`build` | `github_release`) and `github_release_repository_id`;
   `build_pipeline_id` becomes nullable and is required exactly when the source is
