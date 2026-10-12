@@ -637,7 +637,7 @@ public class ReleaseImportService
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["ParentReleaseId"] = "That parent release no longer exists. Reload the page and pick another one.",
+                ["ParentReleaseId"] = "The parent release is no longer available. Pick another one.",
             });
         }
     }
