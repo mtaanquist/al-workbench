@@ -158,6 +158,53 @@ public sealed class OAuthClaimsTransformerTests : IDisposable
         result.FindFirstValue(HttpOrganizationContext.UserIdClaim).Should().Be(user.Id.ToString());
     }
 
+    /// <summary>
+    /// The cut-off reads the creation date off the validated principal, so it
+    /// only works while the token format carries that date across. This sends
+    /// the principal through the same Data Protection formatters the server
+    /// writes access tokens with and the validation side reads them back with,
+    /// so a format change that drops the date fails here rather than silently
+    /// refusing (or admitting) every token.
+    /// </summary>
+    [Theory]
+    [InlineData(-600, false)]  // issued ten minutes before the change
+    [InlineData(0.1, true)]    // same second, after the change
+    [InlineData(60, true)]     // a minute after
+    public async Task Access_token_round_tripped_through_the_token_format_is_judged_by_its_creation_date(
+        double secondsFromChange, bool expectStamped)
+    {
+        var changedAt = new DateTime(2026, 6, 1, 9, 0, 0, 500, DateTimeKind.Utc);
+        var user = await SeedUserAsync(credentialsChangedAt: changedAt);
+
+        var issued = new ClaimsPrincipal(new ClaimsIdentity(
+            [
+                new Claim(OpenIddictConstants.Claims.Subject, user.Id.ToString()),
+                new Claim(OAuthClaimsTransformer.OrgClaim, TestDb.DefaultOrgId.ToString()),
+            ],
+            authenticationType: "OpenIddict.Server.AspNetCore"));
+        issued.SetTokenType(OpenIddictConstants.TokenTypeIdentifiers.AccessToken);
+        issued.SetCreationDate(new DateTimeOffset(changedAt).AddSeconds(secondsFromChange));
+        issued.SetExpirationDate(new DateTimeOffset(changedAt).AddHours(1));
+
+        using var buffer = new MemoryStream();
+        using (var writer = new BinaryWriter(buffer, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            new OpenIddict.Server.DataProtection.OpenIddictServerDataProtectionFormatter().WriteToken(writer, issued);
+        }
+        buffer.Position = 0;
+        ClaimsPrincipal validated;
+        using (var reader = new BinaryReader(buffer))
+        {
+            validated = new OpenIddict.Validation.DataProtection.OpenIddictValidationDataProtectionFormatter().ReadToken(reader)!;
+        }
+        validated.GetCreationDate().Should().NotBeNull("the token format must carry the creation date");
+
+        var result = await TransformAsync(validated);
+
+        result.FindFirstValue(HttpOrganizationContext.UserIdClaim)
+            .Should().Be(expectStamped ? user.Id.ToString() : null);
+    }
+
     [Fact]
     public async Task Unknown_subject_is_not_stamped()
     {
