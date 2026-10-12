@@ -122,7 +122,7 @@ public sealed class TestDb : IDisposable
 
     /// <summary>Org-admin actions on user accounts, wired to this fixture's clock and token manager.</summary>
     public ALDevToolbox.Services.Account.UserAdministrationService NewUserAdministrationService(AppDbContext ctx, TimeProvider clock) =>
-        new(ctx, clock, OpenIddictTokens);
+        new(ctx, clock, OpenIddictTokens, OrgContext);
 
     /// <summary>
     /// Builds the process-wide template database: migrate once, seed once. Every
