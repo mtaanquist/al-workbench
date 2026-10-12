@@ -117,7 +117,7 @@ public sealed class EntraLoginPolicyTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             // Issue while the org still allows local login...
-            var resets = new PasswordResetService(ctx, NewAuth(ctx), TimeProvider.System);
+            var resets = new PasswordResetService(ctx, NewAuth(ctx), TimeProvider.System, _db.OpenIddictTokens);
             preIssued = (await resets.CreateMagicLoginTokenAsync("mette@cronus.com", Ip))!;
             preIssued.Should().NotBeNull();
         }
@@ -126,7 +126,7 @@ public sealed class EntraLoginPolicyTests : IDisposable
 
         await using (var ctx = _db.NewContext())
         {
-            var resets = new PasswordResetService(ctx, NewAuth(ctx), TimeProvider.System);
+            var resets = new PasswordResetService(ctx, NewAuth(ctx), TimeProvider.System, _db.OpenIddictTokens);
             (await resets.CreateMagicLoginTokenAsync("mette@cronus.com", Ip))
                 .Should().BeNull("no new magic links for a Microsoft-only org");
             Func<Task> act = () => resets.ConsumeMagicLoginTokenAsync(preIssued);
@@ -142,7 +142,7 @@ public sealed class EntraLoginPolicyTests : IDisposable
         await SetPolicyAsync(TestDb.DefaultOrgId, LocalLoginPolicy.EntraOnly);
         await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
         await using var ctx = _db.NewContext();
-        var resets = new PasswordResetService(ctx, NewAuth(ctx), TimeProvider.System);
+        var resets = new PasswordResetService(ctx, NewAuth(ctx), TimeProvider.System, _db.OpenIddictTokens);
 
         (await resets.CreatePasswordResetTokenAsync("mette@cronus.com", "10.0.0.1")).Should().BeNull();
     }

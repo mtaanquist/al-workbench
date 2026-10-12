@@ -13,16 +13,18 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using OpenIddict.Abstractions;
 using ALDevToolbox.Services.Operations;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
 /// <summary>
 /// Issue #675: a password change or a completed reset has to end the sessions
-/// and tokens someone else may be holding. These pin the three halves of that:
-/// the <c>credentials_changed_at</c> stamp, the personal-access-token revoke,
-/// and <see cref="CookieSessionRevalidation"/> dropping a cookie that was
-/// issued before the stamp (while leaving a freshly-issued one alone).
+/// and tokens someone else may be holding. These pin the parts of that: the
+/// <c>credentials_changed_at</c> stamp, the personal-access-token and OAuth
+/// token revokes, and <see cref="CookieSessionRevalidation"/> dropping a cookie
+/// that was issued before the stamp (while leaving a freshly-issued one alone).
+/// The OAuth access-token cut-off is pinned in <c>OAuthClaimsTransformerTests</c>.
 /// </summary>
 public sealed class CredentialChangeRevocationTests : IDisposable
 {
@@ -43,9 +45,9 @@ public sealed class CredentialChangeRevocationTests : IDisposable
         new(ctx, NewAuth(ctx),
             new SystemSettingsService(ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, _clock),
             new ALDevToolbox.Services.SingleTenant.SingleTenantModeState(false),
-            NullLogger<AccountService>.Instance, _clock);
+            NullLogger<AccountService>.Instance, _clock, _db.OpenIddictTokens);
 
-    private PasswordResetService NewPasswordReset(AppDbContext ctx) => new(ctx, NewAuth(ctx), _clock);
+    private PasswordResetService NewPasswordReset(AppDbContext ctx) => new(ctx, NewAuth(ctx), _clock, _db.OpenIddictTokens);
 
     [Fact]
     public async Task Changing_the_password_stamps_the_user_and_revokes_live_tokens()
@@ -58,6 +60,27 @@ public sealed class CredentialChangeRevocationTests : IDisposable
         }
 
         await AssertRevokedAsync(userId);
+
+        // The assistants approved under the old password have to be approved again.
+        await using var check = _db.NewContext();
+        check.OAuthConsents.Where(c => c.UserId == userId).ToList()
+            .Should().ContainSingle().Which.RevokedAt.Should().Be(Now);
+    }
+
+    [Fact]
+    public async Task Changing_the_password_leaves_other_users_oauth_tokens_alone()
+    {
+        var userId = await SeedUserAsync();
+        var bystander = await CreateOAuthTokenAsync(subjectUserId: userId + 1000);
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewAccounts(ctx).ChangePasswordAsync(userId, OldPassword, NewPassword);
+        }
+
+        var tokens = _db.OpenIddictTokens;
+        (await tokens.GetStatusAsync((await tokens.FindByIdAsync(bystander))!))
+            .Should().Be(OpenIddictConstants.Statuses.Valid);
     }
 
     [Fact]
@@ -142,6 +165,15 @@ public sealed class CredentialChangeRevocationTests : IDisposable
         var tokens = check.PersonalAccessTokens.Where(p => p.UserId == userId).ToList();
         tokens.Should().HaveCount(2);
         tokens.Should().AllSatisfy(t => t.RevokedAt.Should().NotBeNull());
+
+        var oauthTokens = _db.OpenIddictTokens;
+        var statuses = new List<string?>();
+        await foreach (var token in oauthTokens.FindBySubjectAsync(userId.ToString(CultureInfo.InvariantCulture)))
+        {
+            statuses.Add(await oauthTokens.GetStatusAsync(token));
+        }
+        statuses.Should().HaveCount(2, "the refresh token and the access token issued to the assistant");
+        statuses.Should().AllBe(OpenIddictConstants.Statuses.Revoked);
     }
 
     /// <summary>Auth properties as a sign-in at <paramref name="issuedAt"/> would leave them.</summary>
@@ -211,8 +243,43 @@ public sealed class CredentialChangeRevocationTests : IDisposable
                 CreatedAt = Now,
             });
         }
+        if (withTokens > 0)
+        {
+            // An assistant the user approved, with a refresh token and an
+            // access token issued under it.
+            seed.OAuthConsents.Add(new OAuthConsent
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                UserId = user.Id,
+                ClientId = "claude-desktop",
+                ScopesGranted = "mcp offline_access",
+                GrantedAt = Now,
+            });
+        }
         await seed.SaveChangesAsync();
+
+        if (withTokens > 0)
+        {
+            await CreateOAuthTokenAsync(user.Id, OpenIddictConstants.TokenTypeHints.RefreshToken);
+            await CreateOAuthTokenAsync(user.Id, OpenIddictConstants.TokenTypeHints.AccessToken);
+        }
         return user.Id;
+    }
+
+    /// <summary>Stores an OpenIddict token for <paramref name="subjectUserId"/>; returns its id.</summary>
+    private async Task<string> CreateOAuthTokenAsync(
+        int subjectUserId, string type = OpenIddictConstants.TokenTypeHints.RefreshToken)
+    {
+        var tokens = _db.OpenIddictTokens;
+        var token = await tokens.CreateAsync(new OpenIddictTokenDescriptor
+        {
+            Subject = subjectUserId.ToString(CultureInfo.InvariantCulture),
+            Type = type,
+            Status = OpenIddictConstants.Statuses.Valid,
+            CreationDate = _clock.GetUtcNow(),
+            ExpirationDate = _clock.GetUtcNow().AddDays(30),
+        });
+        return (await tokens.GetIdAsync(token))!;
     }
 
     /// <summary>

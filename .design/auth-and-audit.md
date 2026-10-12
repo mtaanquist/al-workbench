@@ -49,7 +49,7 @@ services.AddAuthentication("Cookie")
     });
 ```
 
-A 30-day sliding cookie is long, so two things keep it honest. `CookieSessionRevalidation` re-reads the user every five minutes and drops the cookie when the account has been disabled, deleted or demoted. And every sign-in stamps the moment the session started into the auth properties: a password change or a completed reset writes `users.credentials_changed_at`, and any cookie issued before that stamp is rejected at its next re-validation. The same change revokes the user's live personal access tokens, so recovering an account really does evict whoever else was holding it (issue #675).
+A 30-day sliding cookie is long, so two things keep it honest. `CookieSessionRevalidation` re-reads the user every five minutes and drops the cookie when the account has been disabled, deleted or demoted. And every sign-in stamps the moment the session started into the auth properties: a password change or a completed reset writes `users.credentials_changed_at`, and any cookie issued before that stamp is rejected at its next re-validation. The same change revokes the user's live personal access tokens and the OAuth access and refresh tokens issued to their assistants, and an OAuth access token issued before the stamp is refused even before it expires, so recovering an account really does evict whoever else was holding it (issue #675). A password change also revokes the user's assistant consents, so each assistant has to be approved again.
 
 The cookie carries the user's id, organisation id, role, display name and email as claims. `HttpOrganizationContext` reads `org_id` and `user_id` to drive EF query filters; the rest are for the top-bar caption ("Bob (CRONUS) — Admin") and audit attribution.
 

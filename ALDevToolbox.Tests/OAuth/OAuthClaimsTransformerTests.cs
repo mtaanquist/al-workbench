@@ -27,7 +27,8 @@ public sealed class OAuthClaimsTransformerTests : IDisposable
         UserStatus status = UserStatus.Active,
         UserRole role = UserRole.User,
         bool isSiteAdmin = false,
-        string email = "alice@cronus.test")
+        string email = "alice@cronus.test",
+        DateTime? credentialsChangedAt = null)
     {
         await using var ctx = _db.NewContext();
         var user = new User
@@ -40,6 +41,7 @@ public sealed class OAuthClaimsTransformerTests : IDisposable
             Status = status,
             IsSiteAdmin = isSiteAdmin,
             CreatedAt = DateTime.UtcNow,
+            CredentialsChangedAt = credentialsChangedAt,
         };
         ctx.Users.Add(user);
         await ctx.SaveChangesAsync();
@@ -103,6 +105,57 @@ public sealed class OAuthClaimsTransformerTests : IDisposable
             (OAuthClaimsTransformer.OrgClaim, TestDb.DefaultOrgId.ToString())));
 
         result.FindFirstValue(HttpOrganizationContext.UserIdClaim).Should().BeNull();
+    }
+
+    /// <summary>
+    /// Access tokens are checked locally, not against the token table, so
+    /// revoking them on a password change would leave them usable until they
+    /// expire. The credential-change stamp is what cuts them off.
+    /// </summary>
+    [Fact]
+    public async Task Token_issued_before_the_password_changed_is_not_stamped()
+    {
+        var changedAt = new DateTime(2026, 6, 1, 9, 0, 0, 500, DateTimeKind.Utc);
+        var user = await SeedUserAsync(credentialsChangedAt: changedAt);
+
+        var principal = TokenPrincipal(
+            (OpenIddictConstants.Claims.Subject, user.Id.ToString()),
+            (OAuthClaimsTransformer.OrgClaim, TestDb.DefaultOrgId.ToString()));
+        principal.SetCreationDate(new DateTimeOffset(changedAt).AddMinutes(-10));
+
+        var result = await TransformAsync(principal);
+
+        result.FindFirstValue(HttpOrganizationContext.UserIdClaim).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Token_with_no_creation_date_is_not_stamped_once_the_password_has_changed()
+    {
+        var user = await SeedUserAsync(credentialsChangedAt: new DateTime(2026, 6, 1, 9, 0, 0, DateTimeKind.Utc));
+
+        var result = await TransformAsync(TokenPrincipal(
+            (OpenIddictConstants.Claims.Subject, user.Id.ToString()),
+            (OAuthClaimsTransformer.OrgClaim, TestDb.DefaultOrgId.ToString())));
+
+        result.FindFirstValue(HttpOrganizationContext.UserIdClaim).Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(0)]     // same second, stored without fractions
+    [InlineData(60)]
+    public async Task Token_issued_after_the_password_changed_is_stamped(int secondsAfter)
+    {
+        var changedAt = new DateTime(2026, 6, 1, 9, 0, 0, 500, DateTimeKind.Utc);
+        var user = await SeedUserAsync(credentialsChangedAt: changedAt);
+
+        var principal = TokenPrincipal(
+            (OpenIddictConstants.Claims.Subject, user.Id.ToString()),
+            (OAuthClaimsTransformer.OrgClaim, TestDb.DefaultOrgId.ToString()));
+        principal.SetCreationDate(new DateTimeOffset(2026, 6, 1, 9, 0, 0, TimeSpan.Zero).AddSeconds(secondsAfter));
+
+        var result = await TransformAsync(principal);
+
+        result.FindFirstValue(HttpOrganizationContext.UserIdClaim).Should().Be(user.Id.ToString());
     }
 
     [Fact]

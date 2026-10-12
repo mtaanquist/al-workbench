@@ -33,13 +33,13 @@ public sealed class AccountServiceTests : IDisposable
     private AccountService NewAccounts(Data.AppDbContext ctx, bool singleTenant = false) =>
         new(ctx, NewAuth(ctx), NewSettings(ctx),
             new ALDevToolbox.Services.SingleTenant.SingleTenantModeState(singleTenant),
-            NullLogger<AccountService>.Instance, _clock);
+            NullLogger<AccountService>.Instance, _clock, _db.OpenIddictTokens);
 
     private UserAdministrationService NewUserAdmin(Data.AppDbContext ctx) =>
         _db.NewUserAdministrationService(ctx, _clock);
 
     private PasswordResetService NewPasswordReset(Data.AppDbContext ctx) =>
-        new(ctx, NewAuth(ctx), _clock);
+        new(ctx, NewAuth(ctx), _clock, _db.OpenIddictTokens);
 
     [Fact]
     public void BCrypt_round_trip_verifies_only_the_original_password()
