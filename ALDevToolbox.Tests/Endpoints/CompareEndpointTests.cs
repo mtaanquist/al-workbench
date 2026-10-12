@@ -3,6 +3,8 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Diff;
+using Microsoft.Extensions.DependencyInjection;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 
@@ -199,43 +201,63 @@ public sealed class CompareEndpointTests : IDisposable
     }
 
     /// <summary>
-    /// A changed line is word-diffed against its counterpart, at a cost that
-    /// grows with the square of its length, so one very long line is refused
-    /// even when the text as a whole is well under the character cap.
+    /// Long lines are not refused: a layout's embedded image data or a minified
+    /// document is a realistic paste. Identical long lines cost the word diff
+    /// nothing, and a changed long line is still compared.
     /// </summary>
     [Fact]
-    public async Task A_line_over_the_length_cap_is_refused()
+    public async Task Long_lines_are_compared()
     {
-        var longLine = "short\n" + string.Join(' ', Enumerable.Repeat("w", CompareEndpoints.MaxLineLength / 2 + 1)) + "\nshort";
-        longLine.Length.Should().BeLessThan(CompareEndpoints.MaxInputLength);
-
+        var image = new string('Q', 50_000);
         using var client = _factory.CreateClient();
         using var response = await client.PostAsJsonAsync("/api/compare/diff",
-            new { left = "a", right = longLine });
+            new { left = $"{image}\nold {image}", right = $"{image}\nnew {image}" });
 
-        response.StatusCode.Should().Be(HttpStatusCode.RequestEntityTooLarge);
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        var error = doc.RootElement.GetProperty("error").GetString();
-        error.Should().Contain("line that is too long");
-        error.Should().Contain(CompareEndpoints.MaxLineLength.ToString("N0"));
+        doc.RootElement.GetProperty("summary").GetProperty("modified").GetInt32().Should().Be(1);
+    }
+
+    /// <summary>
+    /// Every changed pair of lines gets a word diff costing about the square
+    /// of its length, so many long changed lines are the expensive case. Past
+    /// the request's word-diff budget the remaining pairs are still reported
+    /// as changed - only the within-line highlighting is coarser - so the
+    /// counts the reader sees stay true.
+    /// </summary>
+    [Fact]
+    public async Task Many_long_changed_lines_are_all_still_reported_as_changed()
+    {
+        const int lines = 60;
+        var left = string.Join('\n', Enumerable.Repeat(string.Concat(Enumerable.Repeat("a.", 2000)), lines));
+        var right = string.Join('\n', Enumerable.Repeat(string.Concat(Enumerable.Repeat("b,", 2000)), lines));
+
+        using var client = _factory.CreateClient();
+        using var response = await client.PostAsJsonAsync("/api/compare/diff", new { left, right });
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        doc.RootElement.GetProperty("summary").GetProperty("modified").GetInt32().Should().Be(lines);
     }
 
     /// <summary>
     /// A diff cannot be stopped once it starts, so the number running at once
     /// is capped app-wide whoever is asking. With every slot taken, a request
     /// waits briefly and is then told the server is busy rather than queuing
-    /// behind work it cannot see.
+    /// behind work it cannot see. The gate is this factory's own singleton, so
+    /// holding it cannot starve another test class's requests.
     /// </summary>
     [Fact]
     public async Task With_every_diff_slot_taken_a_request_is_answered_busy()
     {
+        var gate = _factory.Services.GetRequiredService<CompareDiffGate>();
         using var client = _factory.CreateClient();
         var held = 0;
         try
         {
-            for (; held < CompareEndpoints.MaxConcurrentDiffs; held++)
+            for (; held < gate.Slots; held++)
             {
-                (await CompareEndpoints.DiffSlots.WaitAsync(TimeSpan.FromSeconds(10))).Should().BeTrue();
+                (await gate.Semaphore.WaitAsync(TimeSpan.FromSeconds(10))).Should().BeTrue();
             }
 
             using var response = await client.PostAsJsonAsync("/api/compare/diff",
@@ -247,12 +269,13 @@ public sealed class CompareEndpointTests : IDisposable
         }
         finally
         {
-            if (held > 0) CompareEndpoints.DiffSlots.Release(held);
+            if (held > 0) gate.Semaphore.Release(held);
         }
 
         using var after = await client.PostAsJsonAsync("/api/compare/diff",
             new { left = "a", right = "b" });
         after.StatusCode.Should().Be(HttpStatusCode.OK, "the slots are released once the work is done");
+        gate.Semaphore.CurrentCount.Should().Be(gate.Slots, "a finished request gives its slot back");
     }
 
     /// <summary>

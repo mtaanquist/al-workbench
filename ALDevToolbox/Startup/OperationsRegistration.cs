@@ -1,5 +1,6 @@
 using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Diff;
 using System.Threading.RateLimiting;
 using ALDevToolbox.Services.Operations;
 using ALDevToolbox.Services.Workers;
@@ -45,6 +46,9 @@ public static class OperationsRegistration
         // POST /api/compare/diff is anonymous for a different reason — the Diff
         // tool is deliberately account-free — and costs CPU rather than rows, so
         // it gets its own policy below. See issue #673.
+        // The per-IP limit below meters each caller of the Diff endpoint; this
+        // caps how many of its diffs run at once across all of them.
+        services.AddSingleton(_ => new CompareDiffGate(CompareDiffGate.DefaultSlots));
         services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;

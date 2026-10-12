@@ -1,7 +1,6 @@
 using System.Text.Json;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Diff;
-using DiffPlex.DiffBuilder;
 
 namespace ALDevToolbox.Endpoints;
 
@@ -26,80 +25,83 @@ namespace ALDevToolbox.Endpoints;
 ///
 /// <para>Anonymous is the design, so the limits below are the only things
 /// standing between a script and the container every signed-in user's circuit
-/// lives in: per-side caps on characters, lines and line length that bound how
-/// long one diff can run (DiffPlex takes no cancellation token, so the input
-/// is the only budget there is), an app-wide cap on diffs running at once, and
-/// the per-IP rate limit. See issue #673 for the rate limit and the first
-/// cap.</para>
+/// lives in: per-side caps on characters and lines plus a budget on the
+/// within-line word diffs, which together bound how long one diff can run
+/// (DiffPlex takes no cancellation token, so the work has to be bounded up
+/// front), an app-wide cap on diffs running at once
+/// (<see cref="CompareDiffGate"/>), and the per-IP rate limit. See issue #673
+/// for the rate limit and the first cap.</para>
 /// </summary>
 internal static class CompareEndpoints
 {
     /// <summary>
     /// Per-side input cap for this endpoint: a million characters, which is
-    /// several times the largest AL file in the base application and far
-    /// below what the diff below can take its time over. Deliberately NOT
-    /// Piper's cap (<see cref="PiperTransform.MaxInputLength"/>, 50 MB): that
-    /// one bounds a signed-in, circuit-bound transform, while this route is
-    /// anonymous and runs a full diff plus six serialisations and a unified
+    /// several times the largest AL file in the base application. Deliberately
+    /// NOT Piper's cap (<see cref="PiperTransform.MaxInputLength"/>, 50 MB):
+    /// that one bounds a signed-in, circuit-bound transform, while this route
+    /// is anonymous and runs a full diff plus six serialisations and a unified
     /// rebuild per request, so the two numbers answer different questions.
     /// See issue #673.
     ///
-    /// <para>The character cap alone does not bound the work. DiffPlex's line
-    /// diff is O(N*D) in lines, and every changed pair of lines gets a word
-    /// diff of its own that is O(N*D) in words, and none of it can be
-    /// cancelled once started. So <see cref="MaxLines"/> bounds the first and
-    /// <see cref="MaxLineLength"/> the second; with all three at their limits
-    /// and every line different, one request measures under two seconds of a
-    /// single core on DiffPlex 1.9.</para>
+    /// <para>The character cap alone does not bound the work, and DiffPlex
+    /// cannot be cancelled once started. Its line diff grows with the line
+    /// count times the number of changed lines, which <see cref="MaxLines"/>
+    /// bounds; then every pair of changed lines gets a word diff of its own
+    /// costing roughly the square of the pair's length, which
+    /// <see cref="WordDiffCostBudget"/> and <see cref="WordDiffWordBudget"/>
+    /// bound across the whole request. Measured for the whole request (diff
+    /// plus every serialisation) on DiffPlex 1.9, Release build, one core of a
+    /// 4-core cloud VM: two wholly different 15,000-line texts about 1.1 s; a
+    /// million characters per side of 15,000 changed lines about 1.1 s; a
+    /// million characters per side in a few hundred long changed lines, or in
+    /// one line, about 0.3 s. The slowest shapes are the line diff, which only
+    /// <see cref="MaxLines"/> bounds, so a request should not exceed roughly
+    /// 1.1 s on that machine, or about 1.5 s on one a third slower.</para>
     /// </summary>
     internal const int MaxInputLength = 1_000_000;
 
     /// <summary>
-    /// Per-side line cap. Twenty thousand lines is past the longest object a
+    /// Per-side line cap. Fifteen thousand lines is past the longest object a
     /// Business Central developer is likely to compare, and keeps the line
-    /// diff of two wholly different texts near a second and a half.
+    /// diff of two wholly different texts near a second.
     /// </summary>
-    internal const int MaxLines = 20_000;
+    internal const int MaxLines = 15_000;
 
     /// <summary>
-    /// Longest single line either side may carry. AL code does not get near
-    /// it; the cap is there because a changed line is word-diffed against its
-    /// counterpart, and two very long changed lines cost the square of their
-    /// length.
+    /// Time budget for the within-line word diffs of one request, in
+    /// <see cref="BudgetedWordDiffer"/>'s units (the squared word count of each
+    /// changed pair): about 0.2 s of one core. Past it, or past
+    /// <see cref="WordDiffWordBudget"/>, the remaining changed lines are still
+    /// shown as changed, only without the finer within-line highlighting.
+    /// Charged only for lines that differ, so long identical lines (embedded
+    /// images, minified data) cost nothing here.
     /// </summary>
-    internal const int MaxLineLength = 4_000;
+    internal const long WordDiffCostBudget = 200_000_000;
 
     /// <summary>
-    /// Kestrel's body cap for this route, sized at two full-length sides of
-    /// multi-byte text plus JSON overhead. It exists so an oversized body is
+    /// Size budget for the same word diffs: how many words, both sides
+    /// together, are word-diffed per request. Each changed word becomes one
+    /// highlighted range in the response, so this is what keeps a large text
+    /// of changed words from turning into a response many times its size. A
+    /// thousand rewritten lines of AL spend well under it.
+    /// </summary>
+    internal const long WordDiffWordBudget = 100_000;
+
+    /// <summary>
+    /// Kestrel's body cap for this route. It exists so an oversized body is
     /// refused before it is buffered and bound into two strings — the checks
-    /// below can only run once the whole payload has already been read. A body
-    /// past this never reaches the handler, so the reply is the framework's own
-    /// refusal rather than the friendly JSON below — which is why
-    /// <c>source-viewer.js</c> checks both sides against the cap before it
+    /// below can only run once the whole payload has already been read. It
+    /// covers two full-length sides of plain text with room for JSON escaping
+    /// and some non-ASCII, but not two full sides made wholly of 3-byte UTF-8
+    /// characters or escapes; such a body is refused here instead of by the
+    /// character check, which is the same outcome with a less specific message.
+    /// A body past this never reaches the handler, so the reply is the
+    /// framework's own refusal rather than the friendly JSON below — which is
+    /// why <c>source-viewer.js</c> checks both sides against the cap before it
     /// sends anything, and reports any refused response in words instead of
     /// trying to read a diff out of it.
     /// </summary>
     private const int MaxRequestBodyBytes = 6_000_000;
-
-    /// <summary>
-    /// How many diffs the whole app runs at once, whoever asks. The per-IP
-    /// rate limit meters each caller, but a diff cannot be cancelled once it
-    /// starts, so this is what keeps enough cores free for everyone's pages
-    /// and the background workers however many callers there are.
-    /// </summary>
-    internal static readonly int MaxConcurrentDiffs = Math.Max(1, Environment.ProcessorCount / 2);
-
-    /// <summary>
-    /// How long a request waits for one of the <see cref="MaxConcurrentDiffs"/>
-    /// slots before it is answered 503. Short, because the Diff tool sends a
-    /// fresh request on the next edit and a late diff has usually been
-    /// superseded by then.
-    /// </summary>
-    internal static readonly TimeSpan SlotWait = TimeSpan.FromSeconds(2);
-
-    /// <summary>The slots behind <see cref="MaxConcurrentDiffs"/>; internal so a test can hold them.</summary>
-    internal static readonly SemaphoreSlim DiffSlots = new(MaxConcurrentDiffs, MaxConcurrentDiffs);
 
     /// <summary>
     /// Per-IP rate-limit policy, registered in <c>OperationsRegistration</c>.
@@ -110,7 +112,7 @@ internal static class CompareEndpoints
 
     public static IEndpointRouteBuilder MapCompareEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/api/compare/diff", async (CompareDiffRequest request, CancellationToken cancellationToken) =>
+        app.MapPost("/api/compare/diff", async (CompareDiffRequest request, CompareDiffGate gate, CancellationToken cancellationToken) =>
         {
             var left = request.Left ?? string.Empty;
             var right = request.Right ?? string.Empty;
@@ -121,32 +123,38 @@ internal static class CompareEndpoints
                 return Results.Json(new { error = refusal }, statusCode: StatusCodes.Status413PayloadTooLarge);
             }
 
-            if (!await DiffSlots.WaitAsync(SlotWait, cancellationToken))
+            if (!await gate.Semaphore.WaitAsync(CompareDiffGate.SlotWait, cancellationToken))
             {
                 return Results.Json(
                     new { error = "The server is busy comparing other texts. Edit either side to retry in a moment." },
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
+            byte[] body;
             try
             {
                 // The caller may have gone (a newer keystroke superseded this
                 // request) while it waited for a slot; the diff itself cannot be
                 // stopped once started, so this is the last place to skip it.
                 cancellationToken.ThrowIfCancellationRequested();
-                return Results.Json(BuildResponse(left, right, request.IgnoreWhitespace ?? true, cancellationToken));
+                // Serialised inside the slot so the whole cost of the request,
+                // not just the diff, is counted against the concurrency cap.
+                body = JsonSerializer.SerializeToUtf8Bytes(
+                    BuildResponse(left, right, request.IgnoreWhitespace ?? true, cancellationToken),
+                    JsonSerializerOptions.Web);
             }
             finally
             {
-                DiffSlots.Release();
+                gate.Semaphore.Release();
             }
+            return Results.Bytes(body, "application/json; charset=utf-8");
         })
         .AllowAnonymous()
         .DisableAntiforgery()
         .RequireRateLimiting(DiffRateLimitPolicy)
-        // Two full-length sides plus JSON overhead. Bigger than the framework
-        // default, small enough that a hostile body is dropped at the socket
-        // instead of being materialised as two strings first.
+        // See MaxRequestBodyBytes: bigger than the framework default, small
+        // enough that an oversized body is dropped at the socket instead of
+        // being materialised as two strings first.
         .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxRequestBodyBytes));
 
         return app;
@@ -166,34 +174,23 @@ internal static class CompareEndpoints
         }
 
         var lines = 1;
-        var lineStart = 0;
-        var longest = 0;
         for (var i = 0; i < text.Length; i++)
         {
             var c = text[i];
             if (c != '\n' && c != '\r') continue;
 
-            longest = Math.Max(longest, i - lineStart);
             if (c == '\r' && i + 1 < text.Length && text[i + 1] == '\n') i++;
-            lineStart = i + 1;
             lines++;
         }
-        longest = Math.Max(longest, text.Length - lineStart);
 
-        if (lines > MaxLines)
-        {
-            return $"One of the texts has too many lines ({lines:N0}). Trim it under {MaxLines:N0} lines and try again.";
-        }
-        if (longest > MaxLineLength)
-        {
-            return $"One of the texts has a line that is too long ({longest:N0} characters). Break it into lines under {MaxLineLength:N0} characters and try again.";
-        }
-        return null;
+        return lines > MaxLines
+            ? $"One of the texts has too many lines ({lines:N0}). Trim it under {MaxLines:N0} lines and try again."
+            : null;
     }
 
     private static object BuildResponse(string left, string right, bool ignoreWhitespace, CancellationToken cancellationToken)
     {
-        var model = SideBySideDiffBuilder.Diff(left, right, ignoreWhitespace);
+        var model = new BudgetedWordDiffer(WordDiffCostBudget, WordDiffWordBudget).Diff(left, right, ignoreWhitespace);
         cancellationToken.ThrowIfCancellationRequested();
 
         var summary = SideBySideDiffSerializer.Summarize(model);
