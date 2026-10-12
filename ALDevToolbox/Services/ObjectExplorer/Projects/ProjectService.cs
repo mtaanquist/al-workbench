@@ -292,12 +292,19 @@ public sealed class ProjectService
         }
 
         var gitHubBefore = GitHubRepositoryKeys(project);
+        var allBefore = RepositoryKeys(project);
         ReconcileRepositories(project, repos, orgId);
         // Only a repository that was not there before - added, or its URL changed - is
         // somewhere the previous person never agreed to write. Removing one is not.
         if (!toggled && GitHubRepositoryKeys(project).Except(gitHubBefore).Any())
         {
             await FollowRepositoryChangeAsync(project, ct);
+        }
+        // The same holds for reading: any provider's new repository is one the people
+        // the automatic builds run as never agreed to clone.
+        if (RepositoryKeys(project).Except(allBefore).Any())
+        {
+            await FollowRepositoryChangeInPipelinesAsync(project.Id, ct);
         }
 
         await SaveTranslatingNameClashAsync(ct);
@@ -409,6 +416,7 @@ public sealed class ProjectService
         });
         project.UpdatedAt = DateTime.UtcNow;
         if (repository.Provider == RepositoryProvider.GitHub) await FollowRepositoryChangeAsync(project, ct);
+        await FollowRepositoryChangeInPipelinesAsync(project.Id, ct);
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Added {Url} to project {ProjectId} ({Name}).", url, project.Id, project.Name);
@@ -538,6 +546,54 @@ public sealed class ProjectService
         _logger.LogInformation(
             "User {UserId} changed the repositories of solution {ProjectId}, so its automatic update pull requests are now opened as them (GitHub account connected: {Linked}).",
             userId, project.Id, linked);
+    }
+
+    /// <summary>The solution's repositories of every provider, keyed the way <see cref="ReconcileRepositories"/> matches them.</summary>
+    private static HashSet<string> RepositoryKeys(OeProject project) =>
+        project.Repositories
+            .Select(r => RepositoryKey(r.Provider, r.Url))
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Makes the acting person the one the solution's automatic builds - the nightly
+    /// preview check and building on push - run as, on every pipeline where someone
+    /// else holds them, when a repository is added to the solution or one's address
+    /// changes. Those builds clone every repository on the solution with that person's
+    /// access, so without this, anyone who manages the solution could add a repository
+    /// only the other person can read and have it cloned and compiled with their access.
+    /// The same "whoever last saved" rule saving a pipeline follows
+    /// (<c>PipelineService.UpdatePipelineAsync</c>); a build already waiting as the
+    /// previous person is then refused when its turn comes (#1112). Any provider, since
+    /// the build clones them all. Nothing is saved here; the caller saves.
+    /// </summary>
+    private async Task FollowRepositoryChangeInPipelinesAsync(int projectId, CancellationToken ct)
+    {
+        var userId = _orgContext.CurrentUserId;
+        var pipelines = await _db.OePipelines
+            .Where(p => p.ProjectId == projectId && p.DeletedAt == null
+                && ((p.PreviewCheck && p.PreviewCheckByUserId != userId)
+                    || (p.BuildOnPush && p.BuildOnPushByUserId != userId)))
+            .ToListAsync(ct);
+        if (pipelines.Count == 0) return;
+
+        var now = DateTime.UtcNow;
+        foreach (var pipeline in pipelines)
+        {
+            if (pipeline.PreviewCheck && pipeline.PreviewCheckByUserId != userId)
+            {
+                pipeline.PreviewCheckByUserId = userId;
+                pipeline.PreviewCheckBlocked = null;
+            }
+            if (pipeline.BuildOnPush && pipeline.BuildOnPushByUserId != userId)
+            {
+                pipeline.BuildOnPushByUserId = userId;
+                pipeline.BuildOnPushBlocked = null;
+            }
+            pipeline.UpdatedAt = now;
+        }
+        _logger.LogInformation(
+            "User {UserId} changed the repositories of solution {ProjectId}, so the automatic builds of {PipelineCount} pipeline(s) now run as them.",
+            userId, projectId, pipelines.Count);
     }
 
     /// <summary>Whether <paramref name="userId"/> has connected a GitHub account - read from the database, without asking GitHub.</summary>

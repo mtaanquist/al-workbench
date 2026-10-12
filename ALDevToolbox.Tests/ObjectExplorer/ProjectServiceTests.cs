@@ -266,6 +266,142 @@ public sealed class ProjectServiceTests : IDisposable
         saved.AutoUpdatePullRequestsBlocked.Should().Be(ALDevToolbox.Services.GitHub.DependencyDriftService.AutomaticNotLinkedMessage);
     }
 
+    private static readonly ProjectRepositoryInput AzureExtensions =
+        new(RepositoryProvider.AzureDevOps, "https://dev.azure.com/cronus/bc/_git/extensions", "Extensions");
+
+    /// <summary>
+    /// A pipeline on <paramref name="projectId"/> with the nightly preview check and building
+    /// on push on, both running as the owner and both showing an earlier hold-up.
+    /// </summary>
+    private async Task<int> SeedAutomaticPipelineAsync(int projectId, bool on = true)
+    {
+        await using var ctx = _db.NewContext();
+        var pipeline = new OePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            Name = "main " + Guid.NewGuid().ToString("N")[..8],
+            PreviewCheck = on,
+            PreviewCheckByUserId = on ? OwnerUserId : null,
+            PreviewCheckBlocked = on ? "Earlier hold-up." : null,
+            BuildOnPush = on,
+            BuildOnPushByUserId = on ? OwnerUserId : null,
+            BuildOnPushBlocked = on ? "Earlier hold-up." : null,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        ctx.OePipelines.Add(pipeline);
+        await ctx.SaveChangesAsync();
+        return pipeline.Id;
+    }
+
+    private Task<OePipeline> PipelineAsync(int id) =>
+        _db.NewContext().OePipelines.AsNoTracking().SingleAsync(p => p.Id == id);
+
+    [Fact]
+    public async Task Someone_else_adding_one_repository_takes_over_the_automatic_builds()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var pipelineId = await SeedAutomaticPipelineAsync(id);
+        var colleagueId = await SeedColleagueAsync(gitHubLinked: false);
+        _db.OrgContext.CurrentUserId = colleagueId;
+
+        await Svc(_db.NewContext()).AddRepositoryAsync(id, Payments);
+
+        var saved = await PipelineAsync(pipelineId);
+        saved.PreviewCheck.Should().BeTrue();
+        saved.BuildOnPush.Should().BeTrue();
+        saved.PreviewCheckByUserId.Should().Be(colleagueId,
+            "the repository they added must not be cloned with the owner's access");
+        saved.BuildOnPushByUserId.Should().Be(colleagueId);
+        saved.PreviewCheckBlocked.Should().BeNull();
+        saved.BuildOnPushBlocked.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Someone_else_adding_an_Azure_DevOps_repository_takes_over_the_automatic_builds()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var pipelineId = await SeedAutomaticPipelineAsync(id);
+        var colleagueId = await SeedColleagueAsync(gitHubLinked: true);
+        _db.OrgContext.CurrentUserId = colleagueId;
+
+        await Svc(_db.NewContext()).AddRepositoryAsync(id, AzureExtensions);
+
+        var saved = await PipelineAsync(pipelineId);
+        saved.PreviewCheckByUserId.Should().Be(colleagueId);
+        saved.BuildOnPushByUserId.Should().Be(colleagueId);
+    }
+
+    [Theory]
+    [InlineData(RepositoryProvider.GitHub)]
+    [InlineData(RepositoryProvider.AzureDevOps)]
+    public async Task Someone_else_saving_a_new_repository_takes_over_the_automatic_builds(RepositoryProvider provider)
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var pipelineId = await SeedAutomaticPipelineAsync(id);
+        var colleagueId = await SeedColleagueAsync(gitHubLinked: true);
+        _db.OrgContext.CurrentUserId = colleagueId;
+
+        var added = provider == RepositoryProvider.GitHub ? Payments : AzureExtensions;
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core, added));
+
+        var saved = await PipelineAsync(pipelineId);
+        saved.PreviewCheckByUserId.Should().Be(colleagueId);
+        saved.BuildOnPushByUserId.Should().Be(colleagueId);
+        saved.PreviewCheckBlocked.Should().BeNull();
+        saved.BuildOnPushBlocked.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Someone_else_changing_a_repository_address_takes_over_the_automatic_builds()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var pipelineId = await SeedAutomaticPipelineAsync(id);
+        var colleagueId = await SeedColleagueAsync(gitHubLinked: true);
+        _db.OrgContext.CurrentUserId = colleagueId;
+
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null,
+            Core with { Url = "https://github.com/cronus-dk/secret-app" }));
+
+        var saved = await PipelineAsync(pipelineId);
+        saved.PreviewCheckByUserId.Should().Be(colleagueId);
+        saved.BuildOnPushByUserId.Should().Be(colleagueId);
+    }
+
+    [Fact]
+    public async Task Someone_else_saving_without_adding_a_repository_leaves_the_automatic_builds_alone()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core, Payments));
+        var pipelineId = await SeedAutomaticPipelineAsync(id);
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+
+        // A rename, one repository taken away and the other re-spelled with .git.
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S Denmark", "dk", null,
+            Core with { Url = "https://github.com/acme/core.git" }));
+
+        var saved = await PipelineAsync(pipelineId);
+        saved.PreviewCheckByUserId.Should().Be(OwnerUserId);
+        saved.BuildOnPushByUserId.Should().Be(OwnerUserId);
+        saved.PreviewCheckBlocked.Should().Be("Earlier hold-up.");
+    }
+
+    [Fact]
+    public async Task Adding_a_repository_leaves_automatic_builds_that_are_off_off()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var pipelineId = await SeedAutomaticPipelineAsync(id, on: false);
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+
+        await Svc(_db.NewContext()).AddRepositoryAsync(id, Payments);
+
+        var saved = await PipelineAsync(pipelineId);
+        saved.PreviewCheck.Should().BeFalse();
+        saved.BuildOnPush.Should().BeFalse();
+        saved.PreviewCheckByUserId.Should().BeNull();
+        saved.BuildOnPushByUserId.Should().BeNull();
+    }
+
     [Fact]
     public async Task Create_persists_project_and_repositories()
     {

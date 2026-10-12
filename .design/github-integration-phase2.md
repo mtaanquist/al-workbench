@@ -941,7 +941,11 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
 - **Whose identity.** The build runs as **the person who last saved the pipeline with
   building on push on** (`build_on_push_by_user_id`), the way a deployment pipeline's
   "deploy without approval" follows whoever saved it, so one manager cannot repoint a
-  pipeline and have it clone with someone else's access. As with the nightly preview check,
+  pipeline and have it clone with someone else's access. Adding a repository to the
+  solution, of either provider, or changing one's address, likewise makes whoever saves it
+  the person building on push and the nightly preview check run as, on every pipeline of
+  the solution (`ProjectService.FollowRepositoryChangeInPipelinesAsync`); a build already
+  waiting as the previous person is then refused when its turn comes. As with the nightly preview check,
   the access check, the clone credential (their connected GitHub account, then their build
   token), the name on the build and its notifications are theirs. It is not the GitHub
   App's installation token, which would let builds keep running with nobody's permission
