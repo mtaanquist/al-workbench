@@ -325,9 +325,19 @@ public sealed class GitHubAccessService
     /// (<c>owner/name</c>) on GitHub, asked with that person's own token.
     /// <see langword="false"/> when they have no usable link, when GitHub says
     /// no, and when GitHub could not be asked - "we could not confirm" is never
-    /// promoted to "yes".
+    /// promoted to "yes". A caller that has something better to say about the
+    /// last of those asks <see cref="TryCanAccessRepoAsync"/> instead.
     /// </summary>
-    public async Task<bool> CanAccessRepoAsync(int userId, string repoFullName, CancellationToken ct = default)
+    public async Task<bool> CanAccessRepoAsync(int userId, string repoFullName, CancellationToken ct = default) =>
+        await TryCanAccessRepoAsync(userId, repoFullName, ct) ?? false;
+
+    /// <summary>
+    /// The same question as <see cref="CanAccessRepoAsync"/>, with the third
+    /// answer kept: <see langword="null"/> means GitHub could not be asked (it
+    /// did not answer, rate-limited the call, or failed), which is not the same as
+    /// a no and is not remembered as one.
+    /// </summary>
+    public async Task<bool?> TryCanAccessRepoAsync(int userId, string repoFullName, CancellationToken ct = default)
     {
         var parts = (repoFullName ?? string.Empty).Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length != 2) return false;
@@ -345,9 +355,43 @@ public sealed class GitHubAccessService
         catch (Exception ex) when (IsGitHubUnreachable(ex, ct))
         {
             _logger.LogWarning(ex,
-                "Could not check whether user {UserId} can see {RepoFullName}; treating it as no access.",
+                "Could not check whether user {UserId} can see {RepoFullName}; GitHub gave no answer.",
                 userId, repoFullName);
-            return false;
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="userId"/> can write to <paramref name="repoFullName"/>
+    /// (<c>owner/name</c>) on GitHub, asked with that person's own token - the gate
+    /// on publishing releases there, which itself runs on the installation token.
+    /// <see langword="false"/> when they have no usable link or GitHub says no;
+    /// <see langword="null"/> when GitHub could not be asked, which is not
+    /// remembered. A renamed repository is followed to its new name.
+    /// </summary>
+    public async Task<bool?> TryCanPushRepoAsync(int userId, string repoFullName, CancellationToken ct = default)
+    {
+        var parts = (repoFullName ?? string.Empty).Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2) return false;
+
+        var key = $"push:{userId}:{repoFullName!.ToLowerInvariant()}";
+        if (TryRecall(key, out var remembered)) return remembered;
+
+        var token = await ResolveUserTokenAsync(userId, ct);
+        if (token is null) return Remember(key, false);
+
+        try
+        {
+            var access = await _github.GetUserRepositoryAccessAsync(token, parts[0], parts[1], ct);
+            Remember($"repo:{userId}:{repoFullName.ToLowerInvariant()}", access.CanSee);
+            return Remember(key, access.CanPush);
+        }
+        catch (Exception ex) when (IsGitHubUnreachable(ex, ct))
+        {
+            _logger.LogWarning(ex,
+                "Could not check whether user {UserId} can write to {RepoFullName}; GitHub gave no answer.",
+                userId, repoFullName);
+            return null;
         }
     }
 

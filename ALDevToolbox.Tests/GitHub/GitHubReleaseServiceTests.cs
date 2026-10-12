@@ -41,6 +41,7 @@ public sealed class GitHubReleaseServiceTests : IDisposable
     private const string Repo = $"{OrgLogin}/{RepoName}";
     private const string RepoUrl = $"https://github.com/{Repo}.git";
     private const string InstallationToken = "ghs_installation";
+    private const string UserToken = "ghu_dev";
     private const long ReleaseId = 900;
     private const long AssetId = 5501;
 
@@ -130,10 +131,96 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
 
-        // There may be no user at all behind a build, so nothing here may need one.
+        // The person the build ran as is asked about their own rights with their own
+        // token; everything that writes to GitHub goes on the installation token.
         api.Credentials
-            .Where(c => !c.Call.Contains("access_tokens"))
+            .Where(c => !c.Call.Contains("access_tokens") && c.Call != $"GET https://api.github.com/repos/{Repo}")
             .Should().OnlyContain(c => c.Token == InstallationToken);
+        api.Credentials.Should().Contain(c => c.Call == $"GET https://api.github.com/repos/{Repo}" && c.Token == UserToken);
+    }
+
+    [Fact]
+    public async Task A_build_is_not_published_when_the_person_it_ran_as_can_only_read_the_repository()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        var api = PublishableApi(existingRelease: false, userCanPush: false);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+            result.Published.Should().BeFalse();
+            result.Error.Should().Contain($"can't publish to {Repo}");
+        }
+
+        api.Calls.Should().NotContain(c => c.Contains("/releases"));
+        await AssertBuildStillReadyAsync(seed.BuildId, "can't publish to");
+    }
+
+    [Fact]
+    public async Task A_build_is_not_published_when_the_person_it_ran_as_has_no_github_account_connected()
+    {
+        await ConnectOrganisationAsync(linkUser: false);
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        var api = PublishableApi(existingRelease: false);
+
+        await using var ctx = _db.NewContext();
+        var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+
+        result.Published.Should().BeFalse();
+        api.Calls.Should().NotContain(c => c.Contains("/releases"));
+    }
+
+    [Fact]
+    public async Task A_build_with_nobody_recorded_as_starting_it_is_not_published()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        await using (var clear = _db.NewContext())
+        {
+            await clear.OeProjectBuilds.Where(b => b.Id == seed.BuildId)
+                .ExecuteUpdateAsync(u => u.SetProperty(b => b.StartedByUserId, (int?)null));
+        }
+        var api = PublishableApi(existingRelease: false);
+
+        await using var ctx = _db.NewContext();
+        var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+
+        result.Published.Should().BeFalse();
+        result.Error.Should().Contain("Nobody is recorded");
+        api.Calls.Should().NotContain(c => c.Contains("/releases"));
+    }
+
+    [Fact]
+    public async Task A_build_is_not_published_when_github_cannot_say_who_may_write_and_it_says_to_retry()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        var api = PublishableApi(existingRelease: false)
+            .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.ServiceUnavailable, "{\"message\":\"busy\"}");
+
+        await using var ctx = _db.NewContext();
+        var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+
+        result.Published.Should().BeFalse();
+        result.Error.Should().Contain("couldn't be reached").And.Contain("Build again");
+        api.Calls.Should().NotContain(c => c.Contains("/releases"));
+    }
+
+    [Fact]
+    public async Task A_renamed_repository_is_followed_to_its_new_name_for_the_write_check()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        var api = PublishableApi(existingRelease: false)
+            .OnMoved($"/repos/{Repo}", "https://api.github.com/repositories/4242")
+            .On(HttpMethod.Get, "/repositories/4242", HttpStatusCode.OK, RepositoryWithPushJson(push: true));
+
+        await using var ctx = _db.NewContext();
+        var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+
+        result.Published.Should().BeTrue();
+        api.Credentials.Should().Contain(c => c.Call == "GET https://api.github.com/repositories/4242" && c.Token == UserToken);
     }
 
     [Fact]
@@ -229,6 +316,7 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         var api = new FakeGitHubApi()
             .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
                 HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson(InstallationToken))
+            .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.OK, RepositoryWithPushJson(push: true))
             .On(HttpMethod.Post, $"/repos/{Repo}/releases/{ReleaseId}/assets", HttpStatusCode.Created,
                 "{\"id\":77,\"name\":\"uploaded.app\",\"size\":3}")
             .On(HttpMethod.Get, $"/repos/{Repo}/releases/tags/v1.0.0.0", HttpStatusCode.OK,
@@ -268,6 +356,7 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         var api = new FakeGitHubApi()
             .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
                 HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson(InstallationToken))
+            .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.OK, RepositoryWithPushJson(push: true))
             .On(HttpMethod.Get, $"/repos/{Repo}/releases/tags/", HttpStatusCode.NotFound)
             // What a "restrict tag creation" rule looks like from outside.
             .On(HttpMethod.Post, $"/repos/{Repo}/releases", HttpStatusCode.Forbidden,
@@ -443,6 +532,81 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         storageCall.Token.Should().BeNull();
         // ... and the API call that produced the redirect did carry it.
         api.Credentials.Single(c => c.Call.Contains($"/releases/assets/{AssetId}")).Token.Should().Be(InstallationToken);
+    }
+
+    [Fact]
+    public async Task Listing_releases_asks_github_whether_the_person_can_see_the_repository()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi();
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx, api).ListReleasesAsync(seed.ReleasePipelineId);
+        }
+
+        // Asked with their own token, not the installation's, which sees everything.
+        api.Credentials.Should().Contain(c => c.Call == $"GET https://api.github.com/repos/{Repo}" && c.Token == UserToken);
+    }
+
+    [Fact]
+    public async Task Listing_and_staging_are_refused_when_the_persons_github_account_cannot_see_the_repository()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi(userCanSee: false);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var list = () => NewService(ctx, api).ListReleasesAsync(seed.ReleasePipelineId);
+            (await list.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId")
+                .WhoseValue.Should().Contain(Repo);
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            var stage = () => NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+            (await stage.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId");
+        }
+
+        // Nothing was read from the repository with the installation token.
+        api.Calls.Should().NotContain(c => c.Contains("/releases"));
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectBuilds.AsNoTracking().AnyAsync(b => b.PipelineId == null)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Staging_says_to_retry_when_github_cannot_say_whether_the_person_can_see_the_repository()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.TooManyRequests, "{\"message\":\"slow down\"}");
+
+        await using var ctx = _db.NewContext();
+        var stage = () => NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+
+        (await stage.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId")
+            .WhoseValue.Should().Contain("couldn't be reached");
+        api.Calls.Should().NotContain(c => c.Contains("/releases"));
+    }
+
+    [Fact]
+    public async Task Staging_is_refused_when_the_person_has_no_github_account_connected()
+    {
+        await ConnectOrganisationAsync(linkUser: false);
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi();
+
+        await using var ctx = _db.NewContext();
+        var stage = () => NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+
+        (await stage.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId");
+        api.Calls.Should().NotContain(c => c.Contains("/releases"));
     }
 
     [Fact]
@@ -698,11 +862,13 @@ public sealed class GitHubReleaseServiceTests : IDisposable
             ?? throw new InvalidOperationException("No release was created.");
 
     /// <summary>A GitHub that answers everything publishing needs.</summary>
-    private static FakeGitHubApi PublishableApi(bool existingRelease, string tag = "v1.0.0.0")
+    private static FakeGitHubApi PublishableApi(bool existingRelease, string tag = "v1.0.0.0", bool userCanPush = true)
     {
         var api = new FakeGitHubApi()
             .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
                 HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson(InstallationToken))
+            // The person the build ran as, reading the repository with their own token.
+            .On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.OK, RepositoryWithPushJson(userCanPush))
             // The upload host: a longer path than the create-release route, so the two
             // stay apart even though one is a prefix of the other.
             .On(HttpMethod.Post, $"/repos/{Repo}/releases/{ReleaseId}/assets", HttpStatusCode.Created,
@@ -725,11 +891,20 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         return api;
     }
 
+    /// <summary>The repository as its reader sees it, with whether they may write to it.</summary>
+    private static string RepositoryWithPushJson(bool push) =>
+        FakeGitHubApi.RepositoryJson(Repo).TrimEnd().TrimEnd('}')
+        + $",\"permissions\":{{\"admin\":false,\"push\":{(push ? "true" : "false")},\"pull\":true}}}}";
+
     /// <summary>A GitHub with two releases on the repository, one of them installable.</summary>
-    private static FakeGitHubApi StageableApi() =>
+    private static FakeGitHubApi StageableApi(bool userCanSee = true) =>
         new FakeGitHubApi()
             .On(HttpMethod.Post, $"/app/installations/{InstallationId}/access_tokens",
                 HttpStatusCode.Created, FakeGitHubApi.InstallationTokenJson(InstallationToken))
+            // What the acting person's own account can see of the repository.
+            .On(HttpMethod.Get, $"/repos/{Repo}",
+                userCanSee ? HttpStatusCode.OK : HttpStatusCode.NotFound,
+                userCanSee ? FakeGitHubApi.RepositoryJson(Repo) : null)
             .On(HttpMethod.Get, $"/repos/{Repo}/releases", HttpStatusCode.OK, FakeGitHubApi.ReleasesJson(
                 FakeGitHubApi.ReleaseJson(Repo, "v1.0.0.0", ReleaseId, assets: (AssetId, "CRONUS Core_1.0.0.0.app")),
                 FakeGitHubApi.ReleaseJson(Repo, "v0.9.0.0", 899, assets: (5599, "source.zip"))))
@@ -824,7 +999,7 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         var build = new OeProjectBuild
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, PipelineId = pipeline.Id,
-            Status = ProjectBuildStatus.Ready, StartedAt = now, FinishedAt = now,
+            Status = ProjectBuildStatus.Ready, StartedAt = now, FinishedAt = now, StartedByUserId = UserId,
         };
         ctx.OeProjectBuilds.Add(build);
         await ctx.SaveChangesAsync();
@@ -849,7 +1024,7 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         return new Seed(project.Id, pipeline.Id, releasePipeline.Id, build.Id);
     }
 
-    private async Task ConnectOrganisationAsync()
+    private async Task ConnectOrganisationAsync(bool linkUser = true)
     {
         using var rsa = RSA.Create(2048);
         await _db.NewSystemSettingsService(_db.NewContext()).SaveGitHubAppAsync(new GitHubAppInput(
@@ -867,5 +1042,7 @@ public sealed class GitHubReleaseServiceTests : IDisposable
             UpdatedAt = DateTime.UtcNow,
         });
         await ctx.SaveChangesAsync();
+
+        if (linkUser) await _db.LinkGitHubAccountAsync(UserId, UserToken);
     }
 }
