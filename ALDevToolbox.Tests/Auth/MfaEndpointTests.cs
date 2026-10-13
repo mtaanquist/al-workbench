@@ -84,6 +84,26 @@ public sealed class MfaEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task Coming_back_from_the_confirm_step_says_it_worked()
+    {
+        // "Confirm with Microsoft" goes through the step-up and back to the
+        // security tab; the user should not land there with nothing to say
+        // the confirmation took.
+        var (_, _, recoveryCodes) = await SeedTotpUserAsync("confirmed@cronus.example", linkMicrosoft: true);
+        using var client = await SignInWithRecoveryCodeAsync("confirmed@cronus.example", recoveryCodes[0]);
+
+        // Already fresh from the recovery code, so the step-up hands straight back.
+        using var stepUp = await client.GetAsync("/auth/step-up?return=" + Uri.EscapeDataString("/account/security?ok=confirmed"));
+        stepUp.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        var back = stepUp.Headers.Location!.OriginalString;
+        back.Should().Be("/account/security?ok=confirmed");
+
+        using var page = await client.GetAsync(back);
+        var html = await page.Content.ReadAsStringAsync();
+        html.Should().Contain("confirmed for the next few minutes. You can now get new recovery codes");
+    }
+
+    [Fact]
     public async Task An_account_without_a_microsoft_link_still_needs_its_password_to_turn_off_totp()
     {
         var (userId, _, recoveryCodes) = await SeedTotpUserAsync("password-only@cronus.example");

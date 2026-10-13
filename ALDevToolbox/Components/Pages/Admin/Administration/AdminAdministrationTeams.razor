@@ -241,8 +241,8 @@
         var message = team.MemberCount switch
         {
             0 => $"{team.Name} will be deleted.",
-            1 => $"{team.Name} will be deleted, along with its 1 member. Nobody's account is affected.",
-            _ => $"{team.Name} will be deleted, along with its {team.MemberCount} members. Nobody's account is affected.",
+            1 => $"{team.Name} will be deleted and its 1 member removed from it. Their account isn't affected.",
+            _ => $"{team.Name} will be deleted and its {team.MemberCount} members removed from it. Their accounts aren't affected.",
         };
         var confirmed = await _confirm.OpenAsync(
             title: $"Delete {team.Name}?",
@@ -269,7 +269,7 @@
         {
             // A worded refusal, such as the last team on a private solution,
             // is not an unexpected error (#1260).
-            _error = ex.Errors.Values.FirstOrDefault() ?? "The team was not deleted.";
+            _error = ex.Errors.Values.FirstOrDefault() ?? "The team was not deleted. Check which solutions use it on their Access tab, then try again.";
         }
         catch (Exception ex)
         {
