@@ -167,6 +167,33 @@ public sealed class RecipeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_deleted_recipe_is_not_served_but_the_admin_editor_still_opens_it()
+    {
+        // A withdrawn recipe must not reach the recipe page, the download,
+        // apply-to-repository or an agent (#1251); the editor is where it is
+        // looked at and restored, so it still loads there.
+        int recipeId;
+        await using (var ctx = _db.NewContext())
+        {
+            var s = RecipeBuilder.Default("Withdrawn").WithFile("A.al", "// a");
+            ctx.Recipes.Add(s);
+            await ctx.SaveChangesAsync();
+            recipeId = s.Id;
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).SoftDeleteAsync(recipeId);
+        }
+
+        await using var read = _db.NewContext();
+        var svc = NewService(read);
+        (await svc.GetAsync(recipeId)).Should().BeNull();
+        var forAdmin = await svc.GetForAdminAsync(recipeId);
+        forAdmin.Should().NotBeNull();
+        forAdmin!.Files.Should().ContainSingle();
+    }
+
+    [Fact]
     public async Task Restore_refuses_when_a_live_recipe_took_the_title()
     {
         int deletedId;

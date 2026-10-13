@@ -227,6 +227,7 @@ public class GenerationService
             orgConfig.Settings.DefaultPublisher, template.Defaults.Publisher);
 
         var extensions = BuildExtensionList(template, plan, modules, publisher, orgConfig.Settings.NamingFolderStyle);
+        ValidateExtensionFolders(extensions);
         ValidateIdRanges(extensions);
         ValidateExtensionNames(extensions);
 
@@ -429,9 +430,25 @@ public class GenerationService
         // order the IN-clause matched.
         var byKey = modules.ToDictionary(m => m.Key);
         var ordered = new List<Module>(moduleKeys.Count);
+        var missing = new List<string>();
         foreach (var key in moduleKeys)
         {
             if (byKey.TryGetValue(key, out var module)) ordered.Add(module);
+            else missing.Add(key);
+        }
+
+        // A key that names no live module used to be skipped, yet the saved
+        // settings still listed it - and reading those settings back refuses
+        // unknown keys, so every extension added to the workspace later lost
+        // its naming and prefix (#1242). Refuse the plan instead.
+        if (missing.Count > 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["SelectedModuleKeys"] =
+                    $"No module with the key {string.Join(", ", missing.Select(k => $"'{k}'"))} exists. "
+                    + "It may have been deleted since the list was loaded. Pick again from the modules available now.",
+            });
         }
         return ordered;
     }
@@ -494,7 +511,8 @@ public class GenerationService
             Dependencies: ext.Dependencies
                 .OrderBy(d => d.Ordering)
                 .Select(d => new EmittableDependency(d.RefExtensionPath, d.RefModuleKey, d.LitId, d.LitName, d.LitPublisher, d.LitVersion))
-                .ToList());
+                .ToList(),
+            Required: ext.Required);
     }
 
     private EmittableExtension BuildFromModule(Module module, RuntimeTemplate template, ProjectPlan plan, int from, int to, string publisher, NamingStyle folderStyle)
@@ -529,7 +547,8 @@ public class GenerationService
             ModuleKey: module.Key,
             ModuleName: module.ExtensionName,
             FolderRoots: BuildModuleFolderTree(module.ExtensionFolders),
-            Dependencies: deps);
+            Dependencies: deps,
+            Required: false);
     }
 
     private static List<FolderNode> BuildFolderTree(IEnumerable<WorkspaceExtensionFolder> roots) =>
@@ -653,6 +672,34 @@ public class GenerationService
     }
 
     /// <summary>
+    /// Every extension is written to the folder named by its path, and a
+    /// module clone's path is the module's extension name - which nothing
+    /// keeps apart from another module's or from a template extension's
+    /// ("Core"). Two extensions in one folder would put two <c>app.json</c>
+    /// entries in the ZIP, only one of which survives extraction, so the plan
+    /// is refused instead (#1240). Case-insensitive because Windows, where
+    /// most of these workspaces are unzipped, folds the two together.
+    /// </summary>
+    private static void ValidateExtensionFolders(IReadOnlyList<EmittableExtension> extensions)
+    {
+        var clashes = extensions
+            .GroupBy(e => e.Path, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => $"{string.Join(" and ", group.Select(Describe))} would share the folder {group.Key}")
+            .ToList();
+        if (clashes.Count == 0) return;
+
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["SelectedModuleKeys"] =
+                $"{string.Join("; ", clashes)}. Pick only one of them, or ask an editor to give one a different extension name.",
+        });
+
+        static string Describe(EmittableExtension e) =>
+            e.IsModuleClone ? $"the {e.ModuleName} module ({e.ModuleKey})" : $"the template's {e.Path} extension";
+    }
+
+    /// <summary>
     /// Walks the final extension list and rejects the plan when any two
     /// resolved id ranges overlap. Per <c>unified-extensions.md</c> a
     /// workspace's allocated ranges have to be disjoint or AL refuses to
@@ -757,6 +804,25 @@ public record SiblingWorkspaceContext(
     /// </summary>
     string? CodeWorkspaceJson = null)
 {
+    /// <summary>
+    /// The context for a workspace read back from its saved settings, carrying
+    /// <see cref="SavedPlan"/> and <see cref="SavedExtensions"/> so the
+    /// generator checks the new extension's IDs against the saved ones, takes
+    /// the saved publisher, and writes the settings back with the new extension
+    /// listed. Shared by the GitHub delivery and the ZIP download so both build
+    /// the same context from the same file (#1239).
+    /// </summary>
+    public static SiblingWorkspaceContext FromSavedWorkspace(
+        ProjectPlan workspace, IReadOnlyList<WorkspaceExtensionIdentity> extensions) =>
+        new(
+            workspace.WorkspaceName,
+            workspace.SelectedModuleKeys,
+            extensions.Select(e => e.Folder).ToList(),
+            workspace.ShortName,
+            workspace.ExtensionPrefix,
+            SavedPlan: workspace,
+            SavedExtensions: extensions);
+
     /// <summary>The tenant with its fallback applied: this context's own, else the saved plan's, else blank.</summary>
     public string EffectiveTenantId => TenantId ?? SavedPlan?.TenantId ?? string.Empty;
 

@@ -234,4 +234,47 @@ public sealed class PendingSignupServiceTests : IDisposable
         (await read.PendingSignups.IgnoreQueryFilters().CountAsync(p => p.Email == "again@example.com"))
             .Should().Be(1, "each start supersedes the prior in-flight row");
     }
+
+    [Fact]
+    public async Task Parallel_wrong_codes_cannot_overrun_the_cap()
+    {
+        // Every guess a request of its own, all in flight at once (#1208).
+        PendingSignupStart start;
+        await using (var ctx = _db.NewContext())
+        {
+            start = (await NewService(ctx).StartAsync("swarm@example.com", "1.2.3.4"))!;
+        }
+        var wrong = start.Code == "000000" ? "111111" : "000000";
+
+        await Task.WhenAll(Enumerable.Range(0, 25).Select(async _ =>
+        {
+            await using var ctx = _db.NewContext();
+            await NewService(ctx).VerifyByCodeAsync("swarm@example.com", wrong);
+        }));
+
+        await using (var read = _db.NewContext())
+        {
+            (await read.PendingSignups.SingleAsync(p => p.Email == "swarm@example.com")).FailedCodeAttempts
+                .Should().Be(PendingSignupService.MaxCodeAttempts);
+        }
+        await using var ctx2 = _db.NewContext();
+        (await NewService(ctx2).VerifyByCodeAsync("swarm@example.com", start.Code))
+            .Should().BeNull("the cap was reached, so even the right code is refused");
+    }
+
+    [Fact]
+    public async Task A_right_code_does_not_use_up_an_attempt()
+    {
+        PendingSignupStart start;
+        await using (var ctx = _db.NewContext())
+        {
+            start = (await NewService(ctx).StartAsync("right@example.com", "1.2.3.4"))!;
+        }
+
+        await using var ctx2 = _db.NewContext();
+        (await NewService(ctx2).VerifyByCodeAsync("right@example.com", start.Code)).Should().NotBeNull();
+
+        await using var read = _db.NewContext();
+        (await read.PendingSignups.SingleAsync(p => p.Email == "right@example.com")).FailedCodeAttempts.Should().Be(0);
+    }
 }

@@ -49,8 +49,8 @@ public enum EntraCompletionOutcome
     EmailTakenElsewhere,
     /// <summary>
     /// A local account with this email exists in the resolved organisation, but
-    /// nothing proves the Entra tenant owns the address (no <c>xms_edov</c>, and
-    /// the domain isn't one the organisation has verified). Binding on an
+    /// nothing proves the Entra tenant owns the address (no <c>xms_edov</c>).
+    /// A domain the organisation has claimed is not proof. Binding on an
     /// unverified claim would be account takeover, so the sign-in is refused.
     /// </summary>
     EmailNotVerified,
@@ -359,14 +359,14 @@ public sealed class EntraSignInService
             // partner or customer tenant an admin controls what lands in
             // preferred_username/mail, and a B2B guest's UPN is their own
             // external address. Bind only on positive evidence that the
-            // tenant owns the address — Microsoft's own xms_edov claim, or a
-            // domain this organisation has verified.
-            var domainVerifiedByOrg = domainOrgId is not null && domainOrgId == resolved.OrganizationId;
-            if (!token.EmailVerified && !domainVerifiedByOrg)
+            // tenant owns the address — Microsoft's own xms_edov claim. A
+            // domain the organisation has claimed does not count: a claim is
+            // not proof of ownership (#1211).
+            if (!token.EmailVerified)
             {
                 _logger.LogWarning(
-                    "Refused to link Entra tenant {Tid} to an existing account: the email domain {Domain} is unverified for that tenant (no xms_edov, domain not claimed by org {OrgId}).",
-                    tid, domain ?? "(none)", resolved.OrganizationId);
+                    "Refused to link Entra tenant {Tid} to an existing account in org {OrgId}: the email domain {Domain} is unverified for that tenant (no xms_edov).",
+                    tid, resolved.OrganizationId, domain ?? "(none)");
                 return await RefuseAsync(EntraCompletionOutcome.EmailNotVerified, email, ip, now,
                     $"tenant {tid} did not prove ownership of domain {domain ?? "(none)"}", ct);
             }

@@ -377,7 +377,7 @@ public sealed class TranslationMemoryIngestService
     /// free-text entry is allowed on a solution's repositories, so this is an
     /// ordinary case rather than bad data.
     /// </summary>
-    private static (string? Owner, string? Name) ParseOwnerAndName(string url)
+    internal static (string? Owner, string? Name) ParseOwnerAndName(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return (null, null);
         if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri)) return (null, null);

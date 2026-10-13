@@ -27,7 +27,9 @@ namespace ALDevToolbox.Services.ObjectExplorer.Explore;
 /// paths keeps its lowest rank (<c>chain</c> has one row per release). Links
 /// are followed one level only: the recursive step walks parent pointers,
 /// never a dependency release's own links. A rank tie between two releases
-/// carrying the same app id goes to the newer release id. See
+/// carrying the same app id goes to the newer release id, and two versions of
+/// one app in the same release (an amend can add a newer one) go to the higher
+/// version, then the newer module, so the pick is the same on every run (#1224). See
 /// <c>.design/object-explorer.md</c> ("Dependency links").</para>
 ///
 /// <para><b>Tenant fence.</b> The dependency seed joins both ends of each link
@@ -71,7 +73,10 @@ internal static class ReleaseAncestrySql
             SELECT DISTINCT ON (m.app_id) m.id, m.app_id
             FROM oe_modules m
             JOIN chain c ON c.id = m.release_id
-            ORDER BY m.app_id, c.depth ASC, c.id DESC
+            ORDER BY m.app_id, c.depth ASC, c.id DESC,
+                     CASE WHEN m.version ~ '^[0-9]+(\.[0-9]+)*$'
+                          THEN string_to_array(m.version, '.')::numeric[] END DESC NULLS LAST,
+                     m.id DESC
         )
         """;
 
@@ -81,7 +86,10 @@ internal static class ReleaseAncestrySql
             SELECT DISTINCT ON (m.app_id) m.id, m.app_id, m.name
             FROM oe_modules m
             JOIN chain c ON c.id = m.release_id
-            ORDER BY m.app_id, c.depth ASC, c.id DESC
+            ORDER BY m.app_id, c.depth ASC, c.id DESC,
+                     CASE WHEN m.version ~ '^[0-9]+(\.[0-9]+)*$'
+                          THEN string_to_array(m.version, '.')::numeric[] END DESC NULLS LAST,
+                     m.id DESC
         )
         """;
 }

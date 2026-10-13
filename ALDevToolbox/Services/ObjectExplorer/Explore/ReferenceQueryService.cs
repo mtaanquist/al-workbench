@@ -32,6 +32,14 @@ public sealed class ReferenceQueryService
     /// </summary>
     public const int MaxReferenceMatches = 5000;
 
+    /// <summary>
+    /// The SQL row limit for a caller's <paramref name="take"/>: one row past it,
+    /// so the caller can tell the result was cut, and never past the global cap.
+    /// A caller that shows fewer rows than the cap passes its own <c>take</c>, so
+    /// only the rows it returns are fetched and snippet-enriched (#1247).
+    /// </summary>
+    private static int RowLimit(int take) => Math.Clamp(take, 1, MaxReferenceMatches) + 1;
+
     public ReferenceQueryService(
         AppDbContext db,
         ProjectAccess access,
@@ -337,8 +345,9 @@ public sealed class ReferenceQueryService
     /// then source object name so the UI can render it without further sort.
     /// </summary>
     public async Task<List<ReferenceMatch>> FindReferencesAsync(
-        int releaseId, FindReferencesQuery query, CancellationToken ct = default)
+        int releaseId, FindReferencesQuery query, int take = MaxReferenceMatches, CancellationToken ct = default)
     {
+        var limit = RowLimit(take);
         // Tenant fence: the recursive CTE below runs as raw SQL and so bypasses
         // the EF query filter. Confirm the seed release is visible in the
         // caller's org first, otherwise return empty rather than leaking
@@ -430,7 +439,7 @@ public sealed class ReferenceQueryService
             JOIN oe_modules        m  ON m.id  = mr.module_id
             LEFT JOIN oe_module_symbols ss ON ss.id = mr.source_symbol_id
             ORDER BY m.name, so.name, mr.id
-            LIMIT {{MaxReferenceMatches + 1}}
+            LIMIT {{limit}}
             """;
 
         var matches = await _db.Database
@@ -469,8 +478,9 @@ public sealed class ReferenceQueryService
     /// them, with the system method name in <see cref="ReferenceMatch.MemberName"/>.
     /// </summary>
     public async Task<List<ReferenceMatch>> FindSystemReferencesAsync(
-        int releaseId, FindSystemReferencesQuery query, CancellationToken ct = default)
+        int releaseId, FindSystemReferencesQuery query, int take = MaxReferenceMatches, CancellationToken ct = default)
     {
+        var limit = RowLimit(take);
         if (!await ReleaseVisibleAsync(releaseId, ct)) return new();
 
         // Module-scoping + UNION-ALL split, exactly as FindReferencesAsync /
@@ -527,7 +537,7 @@ public sealed class ReferenceQueryService
             JOIN oe_modules        m  ON m.id  = sr.module_id
             LEFT JOIN oe_module_symbols ss ON ss.id = sr.source_symbol_id
             ORDER BY m.name, so.name, sr.id
-            LIMIT {{MaxReferenceMatches + 1}}
+            LIMIT {{limit}}
             """;
 
         var matches = await _db.Database
@@ -580,8 +590,10 @@ public sealed class ReferenceQueryService
     public async Task<List<ReferenceMatch>> FindReferencesForSymbolAsync(
         int releaseId,
         FindReferencesQuery query,
+        int take = MaxReferenceMatches,
         CancellationToken ct = default)
     {
+        var limit = RowLimit(take);
         if (string.IsNullOrEmpty(query.TargetMemberName))
         {
             throw new ArgumentException(
@@ -632,7 +644,7 @@ public sealed class ReferenceQueryService
               AND s.name                = {5}::text
               AND {{MemberKindMatch("s.kind")}}
             ORDER BY m.name, o.name, s.line_number
-            LIMIT {{MaxReferenceMatches + 1}}
+            LIMIT {{limit}}
             """;
 
         var declarations = await _db.Database
@@ -650,7 +662,7 @@ public sealed class ReferenceQueryService
         // (2) Call sites: rows already tagged with the matching member by
         // call-site / field-access extraction. Reusing FindReferencesAsync
         // keeps the call/object branch logic in one place.
-        var memberRefs = await FindReferencesAsync(releaseId, query, ct);
+        var memberRefs = await FindReferencesAsync(releaseId, query, take, ct);
 
         // (3) Owner-type references at the object level are deliberately
         // not collected: on large releases that bucket runs into thousands
@@ -666,7 +678,7 @@ public sealed class ReferenceQueryService
         List<ReferenceMatch> implementations = new();
         if (string.Equals(query.TargetObjectKind, "interface", StringComparison.OrdinalIgnoreCase))
         {
-            implementations = await FindInterfaceMethodImplementationsAsync(releaseId, query, ct);
+            implementations = await FindInterfaceMethodImplementationsAsync(releaseId, query, limit, ct);
         }
 
         // Concatenate. Declarations first (most direct), then concrete
@@ -703,7 +715,7 @@ public sealed class ReferenceQueryService
     /// module chain.
     /// </summary>
     private async Task<List<ReferenceMatch>> FindInterfaceMethodImplementationsAsync(
-        int releaseId, FindReferencesQuery query, CancellationToken ct)
+        int releaseId, FindReferencesQuery query, int limit, CancellationToken ct)
     {
         string sql = ReleaseAncestrySql.WinningModules + "\n" + $$"""
             SELECT
@@ -738,7 +750,7 @@ public sealed class ReferenceQueryService
               AND s.name                = {3}::text
               AND ({4}::text IS NULL OR s.kind = {4}::text)
             ORDER BY sm.name, so.name, s.line_number
-            LIMIT {{MaxReferenceMatches + 1}}
+            LIMIT {{limit}}
             """;
 
         return await _db.Database

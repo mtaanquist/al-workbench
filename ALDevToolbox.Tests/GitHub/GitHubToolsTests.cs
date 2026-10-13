@@ -430,6 +430,75 @@ public sealed class GitHubToolsTests : IDisposable
         WrittenXml(api).Should().Contain("target-language=\"da-DK\"");
     }
 
+    [Fact]
+    public async Task A_second_round_while_the_pull_request_is_open_builds_on_the_branch()
+    {
+        // The first round's commit moved the file on the branch, so the
+        // default branch's copy is behind. Reading that one and quoting its sha
+        // made every later round a conflict until the pull request was merged.
+        await ReadyAsync();
+        var onBranch = Xliff.Replace(
+            "<target state=\"needs-translation\"></target>",
+            "<target state=\"translated\">Beloeb</target>",
+            StringComparison.Ordinal);
+        var api = WritableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/aldt/translate-da-DK", HttpStatusCode.OK,
+                $"{{\"ref\":\"refs/heads/aldt/translate-da-DK\",\"object\":{{\"sha\":\"branch-head\"}}}}")
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{FilePath}", request =>
+                request.RequestUri!.Query.Contains("ref=aldt", StringComparison.Ordinal)
+                    ? (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, onBranch, "branch-blob-sha"))
+                    : (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, Xliff, LoadedSha)))
+            .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK,
+                $"[{{\"number\":12,\"html_url\":\"https://github.com/{Repo}/pull/12\"}}]");
+        var (tools, ctx) = NewTools(api);
+        await using var _ = ctx;
+
+        var result = await tools.OpenTranslationPullRequestAsync(
+            Repo, FilePath, "da-DK", [new TranslationUnitEditInput(PostedId, "Bogfort", "translated")]);
+
+        result.IsNewPullRequest.Should().BeFalse();
+        BodyOf(api, "PUT", "/contents/").Should().Contain("\"sha\":\"branch-blob-sha\"");
+        var written = WrittenXml(api);
+        written.Should().Contain("<target state=\"translated\">Beloeb</target>",
+            "the first round's translation is on the branch and has to survive the second");
+        written.Should().Contain("<target state=\"translated\">Bogfort</target>");
+    }
+
+    [Fact]
+    public async Task A_second_round_from_the_generated_file_adds_to_the_language_file_on_the_branch()
+    {
+        // The language file the first round created exists only on the branch,
+        // so the default branch has nothing at that path.
+        await ReadyAsync();
+        var languageFile = Xliff.Replace(
+            "<target state=\"needs-translation\"></target>",
+            "<target state=\"translated\">Beloeb</target>",
+            StringComparison.Ordinal);
+        var api = WritableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/aldt/translate-da-DK", HttpStatusCode.OK,
+                $"{{\"ref\":\"refs/heads/aldt/translate-da-DK\",\"object\":{{\"sha\":\"branch-head\"}}}}")
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{SourcePath}", HttpStatusCode.OK,
+                FakeGitHubApi.FileContentsJson(SourcePath, GeneratedXliff, "generated-sha"))
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{FilePath}", request =>
+                request.RequestUri!.Query.Contains("ref=aldt", StringComparison.Ordinal)
+                    ? (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, languageFile, "branch-blob-sha"))
+                    : (HttpStatusCode.NotFound, null))
+            .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK,
+                $"[{{\"number\":12,\"html_url\":\"https://github.com/{Repo}/pull/12\"}}]");
+        var (tools, ctx) = NewTools(api);
+        await using var _ = ctx;
+
+        var result = await tools.OpenTranslationPullRequestAsync(
+            Repo, SourcePath, "da-DK", [new TranslationUnitEditInput(PostedId, "Bogfort", "translated")]);
+
+        result.SavedPath.Should().Be(FilePath);
+        result.IsNewPullRequest.Should().BeFalse();
+        BodyOf(api, "PUT", "/contents/").Should().Contain("\"sha\":\"branch-blob-sha\"");
+        var written = WrittenXml(api);
+        written.Should().Contain("<target state=\"translated\">Beloeb</target>");
+        written.Should().Contain("<target state=\"translated\">Bogfort</target>");
+    }
+
     // --- helpers ------------------------------------------------------------
 
     private (GitHubTools Tools, ALDevToolbox.Data.AppDbContext Context) NewTools(FakeGitHubApi api)
@@ -442,6 +511,9 @@ public sealed class GitHubToolsTests : IDisposable
             _db.NewGitHubWorkspaceRepositoryService(ctx, client, access),
             _db.NewGitHubExtensionDeliveryService(ctx, client, access),
             _db.NewGitHubTranslationService(ctx, client, access),
+            new ALDevToolbox.Services.Templates.TemplateService(
+                ctx, NullLogger<ALDevToolbox.Services.Templates.TemplateService>.Instance, _db.OrgContext,
+                new ALDevToolbox.Services.Templates.FolderTreeHydrator(ctx)),
             NullLogger<GitHubTools>.Instance);
         return (tools, ctx);
     }

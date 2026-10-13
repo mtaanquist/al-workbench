@@ -63,12 +63,24 @@ public interface IOffsiteStorageProvider
     Task<OffsiteDownload> OpenReadAsync(string key, CancellationToken ct);
 
     /// <summary>
+    /// Reads the user metadata of the object at <paramref name="key"/> without
+    /// its body, keys mapped back to the canonical form as for
+    /// <see cref="OpenReadAsync"/>. The listing and the retention prune use it
+    /// to read the deployment stamp, which no backend returns in a listing.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, string>> GetMetadataAsync(string key, CancellationToken ct);
+
+    /// <summary>
     /// Lists objects whose key starts with <paramref name="prefix"/>, newest
     /// first not required (the service sorts), capped at
     /// <paramref name="maxObjects"/>. Implementations page internally and stop
-    /// at the cap so neither walks an unbounded bucket.
+    /// at the cap so neither walks an unbounded bucket. With
+    /// <paramref name="topLevelOnly"/> only the objects directly under
+    /// <paramref name="prefix"/> are returned, not those under a further
+    /// <c>/</c>; the whole-database listing uses that to step over the
+    /// per-tenant subtree instead of paging through it.
     /// </summary>
-    Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, int maxObjects, CancellationToken ct);
+    Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, int maxObjects, bool topLevelOnly, CancellationToken ct);
 
     /// <summary>Deletes the given keys. The provider chooses batch vs per-object.</summary>
     Task DeleteAsync(IReadOnlyCollection<string> keys, CancellationToken ct);

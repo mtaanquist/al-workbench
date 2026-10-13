@@ -992,6 +992,12 @@ suggestions without anyone uploading anything.
   `source_repository` and `source_path`, plus `Origin` set to "{repository} / {folder}".
   The unique pair index is unchanged, so a pair seen in two files keeps the most recent
   file's attribution - "where did this come from" has one answer, and it is a real one.
+- **A Private solution's pairs stay with the people who can see it** (#1252). The ingest
+  still reads every tracked repository, so the solution's own team is offered its
+  translations; suggestions, pre-translate and the memory search leave out any pair
+  attributed to a repository that only solutions the reader cannot see track (deleted
+  ones included). A repository a visible solution also tracks is not hidden - the reader
+  can already see it, and the pair is the same whichever file taught it last.
 - **The ingest runs daily** (`TranslationMemoryIngestScheduler : PolledScheduler`,
   `DISABLE_TRANSLATION_MEMORY_INGEST_SCHEDULER=1`), per org through the ambient loop,
   and **on demand** from the admin Translation memory page ("Refresh from

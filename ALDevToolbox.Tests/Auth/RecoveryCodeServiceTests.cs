@@ -80,4 +80,25 @@ public sealed class RecoveryCodeServiceTests : IDisposable
         await using var read = _db.NewContext();
         (await read.UserRecoveryCodes.IgnoreQueryFilters().CountAsync(c => c.UserId == userId)).Should().Be(10);
     }
+
+    [Fact]
+    public async Task A_code_posted_twice_at_once_is_accepted_once()
+    {
+        // Two requests carrying the same code, both past the BCrypt check
+        // before either wrote (#1208).
+        var userId = await SeedUserAsync(8110);
+        IReadOnlyList<string> codes;
+        await using (var ctx = _db.NewContext())
+        {
+            codes = await new RecoveryCodeService(ctx, _clock).RegenerateAsync(userId);
+        }
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 2).Select(async _ =>
+        {
+            await using var ctx = _db.NewContext();
+            return await new RecoveryCodeService(ctx, _clock).ConsumeAsync(userId, codes[0]);
+        }));
+
+        results.Count(r => r).Should().Be(1);
+    }
 }

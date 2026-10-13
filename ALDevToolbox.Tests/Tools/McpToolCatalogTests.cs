@@ -63,24 +63,33 @@ public sealed class McpToolCatalogTests
     }
 
     [Fact]
-    public void Every_writing_tool_names_the_tool_whose_step_up_rule_covers_it()
+    public void Every_writing_tool_names_the_tool_whose_switch_and_step_up_rule_cover_it()
     {
-        // The step-up rule an admin sets per tool reaches the MCP surface
-        // through this field; a writing tool without one would be ungated.
-        foreach (var tool in McpToolCatalog.All)
+        // The step-up rule an admin sets per tool, and switching the tool off,
+        // reach the MCP surface through this field; a writing tool without one
+        // would be ungated by both.
+        foreach (var tool in McpToolCatalog.All.Where(t => t.Writes))
         {
-            if (tool.Writes)
-            {
-                tool.Tool.Should().NotBeNull("{0} changes something, so it needs a tool to follow", tool.Name);
-            }
-            else
-            {
-                tool.Tool.Should().BeNull("{0} is read-only and is never gated by step-up", tool.Name);
-            }
+            tool.Tool.Should().NotBeNull("{0} changes something, so it needs a tool to follow", tool.Name);
         }
         McpToolCatalog.ToolFor("deploy_build").Should().Be(ToolKey.Releases);
-        McpToolCatalog.ToolFor("list_environments").Should().BeNull();
         McpToolCatalog.ToolFor("no_such_tool").Should().BeNull();
+    }
+
+    [Fact]
+    public void Read_only_tools_follow_their_tools_switch_too()
+    {
+        // Switching Solutions off has to stop an assistant reading environments
+        // and customer contacts as well, not only the tools that write (#1245).
+        McpToolCatalog.ToolFor("list_environments").Should().Be(ToolKey.Projects);
+        McpToolCatalog.ToolFor("search_objects").Should().Be(ToolKey.ObjectExplorer);
+        McpToolCatalog.ToolFor("get_recipe").Should().Be(ToolKey.Cookbook);
+        McpToolCatalog.ToolFor("list_deployments").Should().Be(ToolKey.Releases);
+
+        // The only tools left to the MCP switch alone are the ones no single
+        // tool owns. A new one has to be added here on purpose.
+        McpToolCatalog.All.Where(t => t.Tool is null).Select(t => t.Name).Should().BeEquivalentTo(
+            "list_repositories", "search_bcquality", "get_bcquality_article");
     }
 
     [Fact]

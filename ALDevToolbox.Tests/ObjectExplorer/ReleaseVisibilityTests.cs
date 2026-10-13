@@ -391,8 +391,8 @@ public sealed class ReleaseVisibilityTests : IDisposable
 
             // Both sides of a comparison, in both directions: knowing one side
             // must not buy you the other's contents.
-            (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Should().BeEmpty();
-            (await Comparison(ctx).CompareReleaseObjectsAsync(seeded.ReleaseId, open.ReleaseId)).Should().BeEmpty();
+            (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Rows.Should().BeEmpty();
+            (await Comparison(ctx).CompareReleaseObjectsAsync(seeded.ReleaseId, open.ReleaseId)).Rows.Should().BeEmpty();
             (await Comparison(ctx).CompareReleasesAsync(open.ReleaseId, seeded.ReleaseId)).Should().BeNull();
             (await Comparison(ctx).FindObjectFileInReleaseAsync(seeded.ReleaseId, "table", 50100, "Loyalty Card"))
                 .Should().BeNull();
@@ -419,7 +419,7 @@ public sealed class ReleaseVisibilityTests : IDisposable
             (await Search(ctx).SearchObjectsInReleaseAsync(
                 seeded.ReleaseId, new ObjectListFilter(Search: "Loyalty"))).Should().ContainSingle();
             (await Viewer(ctx).GetFileAsync(seeded.FileId)).Should().NotBeNull();
-            (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Should().NotBeEmpty();
+            (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Rows.Should().NotBeEmpty();
             (await Explorer(ctx).ListLatestPipelineBuildReleasesAsync())
                 .Should().ContainSingle(r => r.Id == seeded.ReleaseId);
         }
@@ -505,6 +505,54 @@ public sealed class ReleaseVisibilityTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             (await Sessions(ctx).CreateFromSymbolAsync(seeded.ObjectId, "member")).Should().NotBeNull();
+        }
+    }
+
+    /// <summary>
+    /// Seeding the session at a visible release (<c>?from=</c>) must not unlock a
+    /// target that lives in a hidden one: the label names the target's kind,
+    /// number, name and member signature (#1227). All three lookups by target id
+    /// are covered.
+    /// </summary>
+    [Fact]
+    public async Task No_reference_session_is_minted_for_a_hidden_target_seeded_from_a_visible_release()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, hidden.ReleaseId);
+        var visible = await SeedReleaseAsync("BC 26.0 (DK)", kind: "first_party");
+        long symbolId;
+        await using (var ctx = _db.NewContext())
+        {
+            var symbol = new OeModuleSymbol
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ModuleId = hidden.ModuleId,
+                ObjectId = hidden.ObjectId,
+                Kind = "procedure",
+                Name = "GrantPoints",
+                Signature = "(Points: Integer)",
+            };
+            ctx.OeModuleSymbols.Add(symbol);
+            await ctx.SaveChangesAsync();
+            symbolId = symbol.Id;
+        }
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var sessions = Sessions(ctx);
+            (await sessions.CreateFromSymbolAsync(hidden.ObjectId, "outsider", visible.ReleaseId)).Should().BeNull();
+            (await sessions.CreateSystemReferencesFromObjectAsync(hidden.ObjectId, "outsider", visible.ReleaseId)).Should().BeNull();
+            (await sessions.CreateFromMemberSymbolAsync(symbolId, "outsider", visible.ReleaseId)).Should().BeNull();
+            // The visible release's own objects still work from there.
+            (await sessions.CreateFromSymbolAsync(visible.ObjectId, "outsider", visible.ReleaseId)).Should().NotBeNull();
+        }
+
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Sessions(ctx).CreateFromMemberSymbolAsync(symbolId, "member", visible.ReleaseId)).Should().NotBeNull();
         }
     }
 

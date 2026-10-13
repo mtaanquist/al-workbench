@@ -396,7 +396,7 @@
     {
         _applicationVersions = await ApplicationVersions.GetActiveAsync();
         if (Id is null) return;
-        var existing = await Recipes.GetAsync(Id.Value);
+        var existing = await Recipes.GetForAdminAsync(Id.Value);
         if (existing is null)
         {
             _loadFailed = true;

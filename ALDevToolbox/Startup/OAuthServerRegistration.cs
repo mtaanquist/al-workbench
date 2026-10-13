@@ -224,6 +224,13 @@ public static class OAuthServerRegistration
                 o.UseLocalServer();
                 o.UseAspNetCore();
                 o.UseDataProtection();
+                // An access token is self-contained, so on its own it stays
+                // valid for its whole lifetime after the user disconnects the
+                // assistant or a SiteAdmin deletes the client. Checking its
+                // stored entry on every request makes a revoked (or, with its
+                // client, deleted) token fail at once. One indexed lookup per
+                // bearer request. See issue #1246.
+                o.EnableTokenEntryValidation();
             });
         // Stamps the ALDevToolbox claim names (user_id, org_id, role, site_admin)
         // on principals authenticated by OpenIddict's validation scheme. PAT and

@@ -209,10 +209,12 @@ public sealed class PasswordResetService
         var hash = TokenIssuer.Sha256Hex(token);
         var now = _clock.GetUtcNow().UtcDateTime;
         // Fence category 1 (pre-auth routing): pinned to the magic-link token's hash.
-        var row = await _db.PasswordResetTokens.IgnoreQueryFilters()
+        var tokenRows = _db.PasswordResetTokens.IgnoreQueryFilters()
+            .Where(t => t.TokenHash == hash && t.Purpose == TokenPurpose.MagicLogin);
+        var row = await tokenRows
             .Include(t => t.User)
                 .ThenInclude(u => u!.Organization)
-            .FirstOrDefaultAsync(t => t.TokenHash == hash && t.Purpose == TokenPurpose.MagicLogin, ct);
+            .FirstOrDefaultAsync(ct);
         if (row is null || row.ConsumedAt is not null || row.ExpiresAt <= now || row.User is null)
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This sign-in link is no longer valid. Request a new one." });
@@ -226,6 +228,15 @@ public sealed class PasswordResetService
         if (await _auth.IsLocalLoginDisabledAsync(row.User, ct))
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "Your organisation signs in with Microsoft. Use \"Sign in with Microsoft\" on the login page." });
+        }
+        // Single use, claimed with a conditional update: of two requests
+        // carrying the same link, one signs in. #1208
+        var claimed = await tokenRows
+            .Where(t => t.Id == row.Id && t.ConsumedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);
+        if (claimed == 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "This sign-in link is no longer valid. Request a new one." });
         }
         row.ConsumedAt = now;
         row.User.LastLoginAt = now;

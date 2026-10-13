@@ -21,6 +21,7 @@ public static class McpRegistration
         services.AddSingleton<ALDevToolbox.Services.Mcp.McpAvailabilityState>();
         services.AddSingleton<ALDevToolbox.Services.Mcp.IMcpAvailability>(
             sp => sp.GetRequiredService<ALDevToolbox.Services.Mcp.McpAvailabilityState>());
+        services.AddScoped<ALDevToolbox.Services.Mcp.McpToolGate>();
         services.AddScoped<ALDevToolbox.Services.Mcp.Tools.WorkspaceTools>();
         services.AddScoped<ALDevToolbox.Services.Mcp.Tools.CookbookTools>();
         services.AddScoped<ALDevToolbox.Services.Mcp.Tools.ObjectExplorerTools>();
@@ -60,14 +61,31 @@ public static class McpRegistration
             // recent second factor (OAuthEndpoints.MapAuthorizeComplete stamps
             // that), which is what makes an assistant approved before the org
             // marked the tool approve again. Read-only tools are never gated.
-            .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (request, ct) =>
+            //
+            // Before that, a tool switched off under Administration -> Tools (or
+            // site-wide) is refused here and left out of tools/list, the same
+            // as its pages 404 - see McpToolGate.
+            .WithRequestFilters(filters => filters.AddListToolsFilter(next => async (request, ct) =>
+            {
+                var result = await next(request, ct);
+                var services = request.Services ?? throw new InvalidOperationException("MCP call without request services.");
+                var gate = services.GetRequiredService<ALDevToolbox.Services.Mcp.McpToolGate>();
+                for (var i = result.Tools.Count - 1; i >= 0; i--)
+                {
+                    if (!await gate.IsAvailableAsync(result.Tools[i].Name, ct)) result.Tools.RemoveAt(i);
+                }
+                return result;
+            }).AddCallToolFilter(next => async (request, ct) =>
             {
                 var name = request.Params?.Name ?? string.Empty;
-                if (ALDevToolbox.Domain.Tools.McpToolCatalog.ToolFor(name) is not { } key)
+                var services = request.Services ?? throw new InvalidOperationException("MCP call without request services.");
+                await services.GetRequiredService<ALDevToolbox.Services.Mcp.McpToolGate>().EnsureAvailableAsync(name, ct);
+
+                // Step-up governs only the tools that change something.
+                if (ALDevToolbox.Domain.Tools.McpToolCatalog.Find(name) is not { Writes: true, Tool: { } key })
                 {
                     return await next(request, ct);
                 }
-                var services = request.Services ?? throw new InvalidOperationException("MCP call without request services.");
                 var tools = services.GetRequiredService<ALDevToolbox.Services.Tools.ToolEnablement>();
                 if (!await tools.RequiresStepUpAsync(key, ct))
                 {

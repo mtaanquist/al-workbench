@@ -81,7 +81,8 @@ public sealed class UpgradeActionService
     /// <param name="targetVersion">
     /// The version a <see cref="UpgradeActionKind.SelectVersion"/> sets as the next update
     /// (e.g. <c>29.2</c>). Required for that kind and refused for every other, which act
-    /// on the update already chosen.
+    /// on the update already chosen. A booked <see cref="UpgradeActionKind.RunNow"/> stores
+    /// the environment's next update itself, as the one it may start.
     /// </param>
     /// <param name="upgradeId">
     /// The planned upgrade the action is run from (issue #984), or null for an ad hoc
@@ -130,6 +131,16 @@ public sealed class UpgradeActionService
                     ["Upgrade"] = "This environment isn't on that upgrade any more, or the upgrade has been marked done. Reload the upgrade and try again.",
                 });
             }
+        }
+
+        // A booked start remembers the update it was booked for - the one the person was
+        // shown - so the slot starts that one or nothing, never whatever is next by then (#1234).
+        if (kind == UpgradeActionKind.RunNow && executeAt is not null)
+        {
+            targetVersion = await _db.OeProjectEnvironments.AsNoTracking()
+                .Where(e => e.Id == environmentId)
+                .Select(e => e.BcNextUpdateVersion)
+                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         }
 
         var now = _clock.GetUtcNow().UtcDateTime;
@@ -408,7 +419,8 @@ public sealed class UpgradeActionService
         kind switch
         {
             UpgradeActionKind.PushDateToLatest => _connections.PushUpdateDateToLatestAsync(projectId, environmentId, ct),
-            UpgradeActionKind.RunNow => _connections.RunUpdateNowAsync(projectId, environmentId, ct),
+            // A booked start carries the version it was booked for, and refuses another (#1234).
+            UpgradeActionKind.RunNow => _connections.RunUpdateNowAsync(projectId, environmentId, ct, targetVersion),
             // SelectTargetVersionAsync re-reads the offer list live and refuses a version
             // no longer offered, so a mirror a sweep old can't send a stale pick.
             UpgradeActionKind.SelectVersion => _connections.SelectTargetVersionAsync(

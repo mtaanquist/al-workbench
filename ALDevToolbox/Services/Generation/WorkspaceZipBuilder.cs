@@ -191,7 +191,8 @@ public sealed class WorkspaceZipBuilder
                 ModuleKey: null,
                 ModuleName: plan.ExtensionName,
                 FolderRoots: scaffoldFolderRoots,
-                Dependencies: standaloneDeps);
+                Dependencies: standaloneDeps,
+                Required: true);
             var standaloneAsWorkspacePlan = new ProjectPlan(
                 TemplateKey: plan.TemplateKey,
                 // A standalone extension has no customer behind it, so there is
@@ -570,12 +571,15 @@ public sealed class WorkspaceZipBuilder
 
         // Module clones get implicit dependencies on required template
         // extensions (typically just Core). Emitted before the module's own
-        // deps so Core is listed first in the resulting app.json.
+        // deps so Core is listed first in the resulting app.json. A ticked
+        // optional extension (a Test app, say) is left out: depending on it
+        // would drag it into every module, and one that itself depends on a
+        // module would close a cycle AL refuses (#1237).
         if (ext.IsModuleClone)
         {
             foreach (var other in allExtensions)
             {
-                if (other.IsModuleClone) continue;
+                if (other.IsModuleClone || !other.Required) continue;
                 if (other.Id == ext.Id) continue;
                 if (!emitted.Add(other.Id)) continue;
                 array.Add(BuildDepNode(other.Id.ToString(), other.Name, other.Publisher, "0.0.0.1"));
@@ -743,7 +747,7 @@ public sealed class WorkspaceZipBuilder
             ct.ThrowIfCancellationRequested();
             if (file.Scope != Domain.ValueObjects.OrganizationFileScope.WorkspaceRoot) continue;
             var content = file.MustacheEnabled
-                ? _mustache.Render(file.Content, ctx with { FolderPath = file.Path })
+                ? _mustache.Render(file.Content, ctx with { FolderPath = file.Path }, jsonStrings: IsJsonFile(file.Path))
                 : file.Content;
             WriteString(archive, $"{rootFolder}/{file.Path}", content);
             written++;
@@ -787,7 +791,7 @@ public sealed class WorkspaceZipBuilder
             ct.ThrowIfCancellationRequested();
             if (file.Scope != Domain.ValueObjects.OrganizationFileScope.EveryExtension) continue;
             var content = file.MustacheEnabled
-                ? _mustache.Render(file.Content, ctx with { FolderPath = file.Path })
+                ? _mustache.Render(file.Content, ctx with { FolderPath = file.Path }, jsonStrings: IsJsonFile(file.Path))
                 : file.Content;
             // Re-serialise app.json into Microsoft's 2-space, pretty-printed-array
             // style so the inline {{dependencies_array}}/{{id_ranges_array}}
@@ -948,7 +952,7 @@ public sealed class WorkspaceZipBuilder
     /// </summary>
     private JsonObject ParseSubstitutedJsonObject(string source, MustacheContext ctx, string fieldKey)
     {
-        var substituted = _mustache.Render(source, ctx);
+        var substituted = _mustache.Render(source, ctx, jsonStrings: true);
         JsonNode? parsed;
         try
         {
@@ -1044,6 +1048,14 @@ public sealed class WorkspaceZipBuilder
     /// generation still emits a file — the AL compiler then surfaces the JSON
     /// error to the user — rather than aborting the whole ZIP.
     /// </summary>
+    /// <summary>
+    /// Whether an organisation file is JSON, so its placeholders render
+    /// JSON-escaped: a brief with a quote in it must not end the string it
+    /// sits in (#1241).
+    /// </summary>
+    private static bool IsJsonFile(string path) =>
+        path.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+
     private static string FormatAppJson(string substituted)
     {
         try

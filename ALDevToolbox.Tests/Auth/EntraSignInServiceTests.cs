@@ -96,13 +96,13 @@ public sealed class EntraSignInServiceTests : IDisposable
     [Fact]
     public async Task Complete_matches_an_existing_user_by_email_and_creates_the_link()
     {
-        // The org has verified cronus.com, which is what licenses the bind.
+        // Microsoft confirms the email (xms_edov), which is what licenses the bind.
         await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA, domain: "cronus.com");
         var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
         await using var ctx = _db.NewContext();
 
         var result = await NewService(ctx).CompleteAsync(
-            new EntraTokenIdentity(TenantA, Oid, "Mette@CRONUS.com", "Mette"), Ip);
+            new EntraTokenIdentity(TenantA, Oid, "Mette@CRONUS.com", "Mette", EmailVerified: true), Ip);
 
         result.Outcome.Should().Be(EntraCompletionOutcome.Success);
         result.User!.Id.Should().Be(userId);
@@ -248,9 +248,9 @@ public sealed class EntraSignInServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var svc = NewService(ctx);
 
-        (await svc.CompleteAsync(new EntraTokenIdentity(TenantA, Oid, "disabled@cronus.com", null), Ip))
+        (await svc.CompleteAsync(new EntraTokenIdentity(TenantA, Oid, "disabled@cronus.com", null, EmailVerified: true), Ip))
             .Outcome.Should().Be(EntraCompletionOutcome.AccountDisabled);
-        (await svc.CompleteAsync(new EntraTokenIdentity(TenantA, "aaaaaaaa-0000-0000-0000-000000000002", "pending@cronus.com", null), Ip))
+        (await svc.CompleteAsync(new EntraTokenIdentity(TenantA, "aaaaaaaa-0000-0000-0000-000000000002", "pending@cronus.com", null, EmailVerified: true), Ip))
             .Outcome.Should().Be(EntraCompletionOutcome.AccountPending);
     }
 
@@ -337,8 +337,9 @@ public sealed class EntraSignInServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Complete_binds_an_existing_account_when_the_org_verified_the_domain()
+    public async Task Complete_refuses_to_bind_an_existing_account_when_only_the_org_claimed_the_domain()
     {
+        // A claimed domain is not proof the tenant owns the address (#1211).
         await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA, domain: "cronus.com");
         var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
         await using var ctx = _db.NewContext();
@@ -346,8 +347,9 @@ public sealed class EntraSignInServiceTests : IDisposable
         var result = await NewService(ctx).CompleteAsync(
             new EntraTokenIdentity(TenantA, Oid, "mette@cronus.com", "Mette"), Ip);
 
-        result.Outcome.Should().Be(EntraCompletionOutcome.Success);
-        result.User!.Id.Should().Be(userId);
+        result.Outcome.Should().Be(EntraCompletionOutcome.EmailNotVerified);
+        (await ctx.UserExternalLogins.IgnoreQueryFilters().AnyAsync(l => l.UserId == userId))
+            .Should().BeFalse();
     }
 
     [Fact]
@@ -550,7 +552,7 @@ public sealed class EntraSignInServiceTests : IDisposable
 
         await using var ctx = _db.NewContext(new ClaimIdentityDuringSaveInterceptor(_db, strangerId));
         var result = await NewService(ctx).CompleteAsync(
-            new EntraTokenIdentity(TenantA, Oid, "Mette@CRONUS.com", "Mette"), Ip);
+            new EntraTokenIdentity(TenantA, Oid, "Mette@CRONUS.com", "Mette", EmailVerified: true), Ip);
 
         result.Outcome.Should().Be(EntraCompletionOutcome.IdentityTakenElsewhere,
             "the identity belongs to the account that won the race, and this sign-in must refuse rather than throw");
@@ -569,7 +571,7 @@ public sealed class EntraSignInServiceTests : IDisposable
         // in substance, the one the visitor asked for.
         await using var ctx = _db.NewContext(new ClaimIdentityDuringSaveInterceptor(_db, userId));
         var result = await NewService(ctx).CompleteAsync(
-            new EntraTokenIdentity(TenantA, Oid, "Mette@CRONUS.com", "Mette"), Ip);
+            new EntraTokenIdentity(TenantA, Oid, "Mette@CRONUS.com", "Mette", EmailVerified: true), Ip);
 
         result.Outcome.Should().Be(EntraCompletionOutcome.Success);
         result.User!.Id.Should().Be(userId);

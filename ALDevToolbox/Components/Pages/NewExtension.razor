@@ -68,27 +68,16 @@
         }
     </Notices>
     <Form>
-        @* Sibling-extension flow: when a workspace config is loaded, ship
-           the workspace's identity through to the generation endpoint so
-           the ZIP can include an updated <Workspace>.code-workspace file
-           listing Core + every imported module + the new extension. The
-           folder names come from the persisted identities so renames in
-           the DB since the workspace was generated don't bleed into the
-           regenerated workspace file. *@
+        @* Sibling-extension flow: when a workspace config is loaded, post
+           the saved settings themselves through to the generation endpoint,
+           which reads them back exactly as the "Add to repository" path
+           does. The ZIP then carries the rewritten settings file and an
+           updated <Workspace>.code-workspace listing every extension the
+           settings know about plus the new one, and the ID-range check runs
+           against the saved extensions (#1239). *@
         @if (_workspaceContext is not null)
         {
-            <input type="hidden" name="WorkspaceName" value="@_workspaceContext.WorkspaceName" />
-            <input type="hidden" name="WorkspaceShortName" value="@_workspaceContext.ShortName" />
-            <input type="hidden" name="WorkspaceExtensionPrefix" value="@_workspaceContext.ExtensionPrefix" />
-            <input type="hidden" name="WorkspaceTenantId" value="@_workspaceContext.TenantId" />
-            @foreach (var key in _workspaceContext.ModuleKeys)
-            {
-                <input type="hidden" name="WorkspaceModuleKeys" value="@key" />
-            }
-            @foreach (var ext in _workspaceContext.Extensions)
-            {
-                <input type="hidden" name="WorkspaceFolders" value="@ext.Folder" />
-            }
+            <input type="hidden" name="WorkspaceConfig" value="@_workspaceContext.ConfigToml" />
         }
 
         <section class="form-sec">
@@ -560,7 +549,11 @@
         bool IncludeExamples,
         IReadOnlyList<string> ModuleKeys,
         IReadOnlyList<WorkspaceExtensionIdentity> Extensions,
-        string TenantId);
+        string TenantId,
+        // The saved settings file as it was read, posted with the form so the
+        // download endpoint builds its context from the same file.
+        ProjectPlan SavedPlan,
+        string ConfigToml);
 
     // Import-config feedback. _importFileName labels the picked file next to
     // the button; _importMessage is the success/seed line shown underneath;
@@ -800,6 +793,7 @@
                 ExtensionPrefixPolicy.ForExistingWorkspace(
                     _orgConfig.Settings, _workspaceContext.ExtensionPrefix,
                     _workspaceContext.ShortName, _workspaceContext.WorkspaceName),
+                SavedPlan: _workspaceContext.SavedPlan,
                 SavedExtensions: _workspaceContext.Extensions,
                 TenantId: _workspaceContext.TenantId);
 
@@ -1282,7 +1276,7 @@
                     + "including its ID range and dependencies.", new());
 
             case WorkspaceConfigService.WorkspaceKind when import.Workspace is not null:
-                ApplyImportedWorkspace(import.Workspace, import.Extensions);
+                ApplyImportedWorkspace(import.Workspace, import.Extensions, toml);
                 // Extensions include the workspace's own Core, so the others
                 // (modules, and extensions added since) are what is left after it.
                 var others = Math.Max(0, import.Extensions.Count - 1);
@@ -1342,7 +1336,7 @@
     /// empty identities list (older configs), we fall back to estimating the
     /// next slot from the template's defaults.
     /// </summary>
-    private void ApplyImportedWorkspace(ProjectPlan plan, IReadOnlyList<WorkspaceExtensionIdentity> extensions)
+    private void ApplyImportedWorkspace(ProjectPlan plan, IReadOnlyList<WorkspaceExtensionIdentity> extensions, string toml)
     {
         var template = _templates?.FirstOrDefault(t => t.Key == plan.TemplateKey);
         _selected = template ?? _selected;
@@ -1392,7 +1386,9 @@
             plan.IncludeExamples,
             plan.SelectedModuleKeys.ToList(),
             extensions,
-            plan.TenantId);
+            plan.TenantId,
+            plan,
+            toml);
     }
 
     /// <summary>

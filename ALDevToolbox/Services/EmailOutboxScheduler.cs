@@ -55,11 +55,8 @@ public sealed class EmailOutboxScheduler : PolledScheduler
         WorkerHeartbeatRegistry heartbeats)
         : base(logger, heartbeats, nameof(EmailOutboxScheduler),
             pollInterval: PollInterval,
-            // Idle silence must sit ABOVE the longest legitimate tick: the base
-            // class ticks the heartbeat once per loop and does not exempt an
-            // active tick, so a shorter idle bound is the one that fires, and it
-            // reports "gone quiet" when the worker is in fact busy. Both bounds
-            // clear SweepDeadline plus a poll.
+            // The active bound clears SweepDeadline plus a poll, so a sweep cut
+            // off at its deadline is never reported as wedged.
             maxActiveDuration: TimeSpan.FromMinutes(6),
             maxIdleSilence: TimeSpan.FromMinutes(10),
             disableEnvVar: "DISABLE_EMAIL_OUTBOX_SCHEDULER")

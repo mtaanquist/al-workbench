@@ -84,11 +84,15 @@ public sealed partial class GitHubAppClient
     /// build produced and links back to the build, which is the thing a
     /// consultant opening the Releases page wants. GitHub's generated notes
     /// would describe commits nobody here chose.</para>
+    ///
+    /// <para>With <paramref name="draft"/> the Release is created unpublished, so nobody
+    /// can see or deploy it until its files are on it (#1230); <see cref="PublishReleaseAsync"/>
+    /// makes it public.</para>
     /// </summary>
     /// <exception cref="GitHubApiException">GitHub refused - typically a rule that restricts tag creation.</exception>
     public async Task<GitHubRelease> CreateReleaseAsync(
         string credential, string owner, string repo, string tag, string name, string body,
-        string? targetCommit = null, CancellationToken ct = default)
+        string? targetCommit = null, bool draft = false, CancellationToken ct = default)
     {
         using var request = NewJsonRequest(
             HttpMethod.Post, $"{RepoPath(owner, repo)}/releases", credential,
@@ -99,7 +103,7 @@ public sealed partial class GitHubAppClient
                 target_commitish = string.IsNullOrWhiteSpace(targetCommit) ? null : targetCommit,
                 name,
                 body,
-                draft = false,
+                draft,
                 prerelease = false,
                 generate_release_notes = false,
             });
@@ -112,20 +116,60 @@ public sealed partial class GitHubAppClient
 
     /// <summary>
     /// Rewrites an existing Release's title and body. The tag is never sent, so
-    /// re-publishing a version can never move it onto a different commit.
+    /// re-publishing a version can never move it onto a different commit. With
+    /// <paramref name="draft"/> it is also taken back to a draft while its files are
+    /// replaced, so nobody deploys it half-uploaded (#1230).
     /// </summary>
     public async Task<GitHubRelease> UpdateReleaseAsync(
         string credential, string owner, string repo, long releaseId, string name, string body,
-        CancellationToken ct = default)
+        bool draft = false, CancellationToken ct = default)
     {
+        // A null draft is left out of the request, so the Release keeps the state it has.
         using var request = NewJsonRequest(
             HttpMethod.Patch, $"{RepoPath(owner, repo)}/releases/{releaseId}", credential,
-            new { name, body });
+            new { name, body, draft = draft ? true : (bool?)null });
         using var document = await SendAsync(request, ct);
         var release = ReadRelease(document.RootElement)
             ?? throw new GitHubApiException(HttpStatusCode.BadGateway, "GitHub did not say which release it updated.");
         _logger.LogInformation("Updated the GitHub release {ReleaseId} on {Owner}/{Repo}.", releaseId, owner, repo);
         return release;
+    }
+
+    /// <summary>
+    /// Publishes a draft Release, once every file is on it (#1230).
+    /// </summary>
+    public async Task<GitHubRelease> PublishReleaseAsync(
+        string credential, string owner, string repo, long releaseId, CancellationToken ct = default)
+    {
+        using var request = NewJsonRequest(
+            HttpMethod.Patch, $"{RepoPath(owner, repo)}/releases/{releaseId}", credential,
+            new { draft = false });
+        using var document = await SendAsync(request, ct);
+        var release = ReadRelease(document.RootElement)
+            ?? throw new GitHubApiException(HttpStatusCode.BadGateway, "GitHub did not say which release it published.");
+        _logger.LogInformation("Published the GitHub release {ReleaseId} on {Owner}/{Repo}.", releaseId, owner, repo);
+        return release;
+    }
+
+    /// <summary>
+    /// Deletes a Release (not its tag). Used to clear away a draft whose files did not
+    /// all go up (#1230). One that is already gone is not an error.
+    /// </summary>
+    public async Task DeleteReleaseAsync(
+        string credential, string owner, string repo, long releaseId, CancellationToken ct = default)
+    {
+        using var request = NewRequest(
+            HttpMethod.Delete, $"{RepoPath(owner, repo)}/releases/{releaseId}", credential);
+        using var response = await SendRawAsync(request, ct);
+        if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NotFound)
+        {
+            _logger.LogInformation("Deleted the GitHub release {ReleaseId} on {Owner}/{Repo}.", releaseId, owner, repo);
+            return;
+        }
+
+        var body = await response.Content.ReadAsStringAsync(ct);
+        var (message, url) = ReadError(body);
+        throw new GitHubApiException(response.StatusCode, message, url);
     }
 
     /// <summary>

@@ -22,7 +22,7 @@ internal static class StartupTasks
     /// startup stays /readyz-red until it finishes and ApplicationStopping aborts
     /// it on shutdown — so a generous bound has no steady-state cost.
     /// </summary>
-    private static readonly TimeSpan MigrationCommandTimeout = TimeSpan.FromMinutes(30);
+    internal static readonly TimeSpan MigrationCommandTimeout = TimeSpan.FromMinutes(30);
 
     public static async Task RunAsync(WebApplication app)
     {
@@ -211,34 +211,15 @@ internal static class StartupTasks
         if (interruptedBuilds > 0)
             logger.LogWarning("Marked {Count} interrupted build(s) as failed on startup.", interruptedBuilds);
 
-        // Prime the in-memory MCP toggle from the singleton system_settings
-        // row before any request can read it. Resolved from the root provider
-        // because McpAvailabilityState is a singleton — see
-        // Services/Mcp/IMcpAvailability.cs for why the cache exists.
-        var mcpEnabled = await db.SystemSettings.AsNoTracking()
-            .Where(s => s.Id == 1)
-            .Select(s => s.McpEnabled)
-            .FirstOrDefaultAsync(stopping);
-        app.Services.GetRequiredService<ALDevToolbox.Services.Mcp.McpAvailabilityState>().Set(mcpEnabled);
-
-        // Prime the in-memory per-tool site toggles the same way, so the sidebar
-        // and the route-access gate see the disabled set before the first
-        // request. See Services/Tools/IToolAvailability.cs.
-        var disabledTools = await db.SystemSettings.AsNoTracking()
-            .Where(s => s.Id == 1)
-            .Select(s => s.DisabledTools)
-            .FirstOrDefaultAsync(stopping);
-        app.Services.GetRequiredService<ALDevToolbox.Services.Tools.ToolAvailabilityState>()
-            .Set(ALDevToolbox.Domain.Tools.ToolCatalog.ParseDisabled(disabledTools));
-
-        // Apply the SiteAdmin's build limit before the workers start taking builds
-        // (they start with app.Run(), after this). Empty keeps OE_BUILD_CONCURRENCY's
-        // default, which the queue already holds (#1164).
-        var buildConcurrency = await db.SystemSettings.AsNoTracking()
-            .Where(s => s.Id == 1)
-            .Select(s => s.BuildConcurrency)
-            .FirstOrDefaultAsync(stopping);
-        buildQueue.ApplySetting(buildConcurrency);
+        // Prime the in-memory copies of the system settings row before any
+        // request can read them: the MCP toggle (Services/Mcp/IMcpAvailability.cs),
+        // the per-tool site toggles (Services/Tools/IToolAvailability.cs) and the
+        // SiteAdmin's build limit, applied before the workers start taking builds
+        // (they start with app.Run(), after this). An empty limit keeps
+        // OE_BUILD_CONCURRENCY's default, which the queue already holds (#1164).
+        // A full restore re-applies the same row through the same method (#1255).
+        await scope.ServiceProvider.GetRequiredService<ALDevToolbox.Services.Operations.SystemSettingsService>()
+            .ApplyInMemoryStateAsync(stopping);
         ALDevToolbox.Services.ObjectExplorer.Import.BuildConcurrencyAdvice.WarnIfAboveRecommendation(buildQueue.Limit, logger);
 
         // Flip /readyz to green now that migrations, seed and bootstrap have

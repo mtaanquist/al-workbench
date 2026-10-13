@@ -14,7 +14,8 @@ namespace ALDevToolbox.Services.ObjectExplorer.Import;
 /// <para>
 /// Dedup keys on the explicit <c>bc-onprem:{Major}.{Minor}:{cc}</c> key
 /// (<see cref="BcArtifactIndex.FormatDedupKey"/>), not the display label. A
-/// version whose key already exists (non-deleted) is skipped, which is what
+/// version whose key already exists (non-deleted) is skipped unless its import
+/// failed, in which case it is re-run in place (#1222); skipping is what
 /// makes the daily sweep idempotent and stops the Artifacts tab re-downloading a
 /// version already in the catalogue. Always <c>first_party</c> — these are
 /// Microsoft releases.
@@ -87,17 +88,44 @@ public sealed class ArtifactReleaseImporter
         }
 
         // Dedup by the explicit key — query-filtered to the current org.
-        var existingId = await _db.OeReleases.AsNoTracking()
+        var existing = await _db.OeReleases.AsNoTracking()
             .Where(r => r.DedupKey == resolved.DedupKey && r.DeletedAt == null)
-            .Select(r => (int?)r.Id)
+            .Select(r => new { r.Id, r.Status })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        if (existingId is not null)
+        if (existing is { Status: "failed" })
         {
-            return new ArtifactImportOutcome(ArtifactImportStatus.AlreadyImported, existingId, resolved.Label);
+            // A failed import is not "in the catalogue": without this, one network
+            // error left the version stuck for the sweep and the Artifacts tab alike
+            // (#1222). Re-run it in place, so the release keeps its id and label.
+            await RequeueFailedAsync(existing.Id, resolved, ct).ConfigureAwait(false);
+            return new ArtifactImportOutcome(ArtifactImportStatus.Queued, existing.Id, resolved.Label);
+        }
+        if (existing is not null)
+        {
+            return new ArtifactImportOutcome(ArtifactImportStatus.AlreadyImported, existing.Id, resolved.Label);
         }
 
         var releaseId = await QueueAsync(resolved, ct).ConfigureAwait(false);
         return new ArtifactImportOutcome(ArtifactImportStatus.Queued, releaseId, resolved.Label);
+    }
+
+    /// <summary>
+    /// Re-runs a failed artifact import into its own release row: back to
+    /// <c>ingesting</c>, the previous attempt's partial data wiped, and a fresh job
+    /// queued from <paramref name="resolved"/>'s download URL. The same steps the
+    /// manage page's Retry takes.
+    /// </summary>
+    private async Task RequeueFailedAsync(int releaseId, ResolvedArtifact resolved, CancellationToken ct)
+    {
+        // Reads as importing from the reopen on, so a build polling it does not
+        // take it for abandoned while the wipe runs (#1180).
+        using var reopened = _importer.Ingests.Track(releaseId);
+        await _importer.ReopenForRetryAsync(releaseId, ct).ConfigureAwait(false);
+        await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
+        var identity = AmbientOrganizationScope.OrganizationIdentity.FromContext(_orgContext, "retrying an artifact import");
+        var jobRowId = await _persistedJobs.CreateAsync(
+            releaseId, identity, new ReleaseImportSource.BcArtifact(resolved.ApplicationUrl), storeSymbolReference: false, ct).ConfigureAwait(false);
+        await EnqueueAsync(releaseId, jobRowId, resolved, ct).ConfigureAwait(false);
     }
 
     /// <summary>

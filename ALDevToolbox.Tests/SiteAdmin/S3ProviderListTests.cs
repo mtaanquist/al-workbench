@@ -26,6 +26,7 @@ public sealed class S3ProviderListTests : IDisposable
     private readonly HttpListener _listener = new();
     private readonly string _endpoint;
     private string _responseXml = string.Empty;
+    private volatile string? _lastQuery;
 
     public S3ProviderListTests()
     {
@@ -65,6 +66,7 @@ public sealed class S3ProviderListTests : IDisposable
                 return;
             }
 
+            _lastQuery = ctx.Request.Url?.Query;
             var bytes = Encoding.UTF8.GetBytes(_responseXml);
             ctx.Response.StatusCode = 200;
             ctx.Response.ContentType = "application/xml";
@@ -111,7 +113,7 @@ public sealed class S3ProviderListTests : IDisposable
         """;
 
         using var provider = NewProvider();
-        var objects = await provider.ListAsync("aldevtoolbox/", maxObjects: 100, CancellationToken.None);
+        var objects = await provider.ListAsync("aldevtoolbox/", maxObjects: 100, topLevelOnly: false, CancellationToken.None);
 
         objects.Should().HaveCount(2);
         objects[0].Key.Should().Be("aldevtoolbox/2026-08-01.dump");
@@ -138,9 +140,32 @@ public sealed class S3ProviderListTests : IDisposable
         """;
 
         using var provider = NewProvider();
-        var objects = await provider.ListAsync("aldevtoolbox/", maxObjects: 100, CancellationToken.None);
+        var objects = await provider.ListAsync("aldevtoolbox/", maxObjects: 100, topLevelOnly: false, CancellationToken.None);
 
         objects.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// The off-site prune lists the whole-database dumps with a delimiter so S3
+    /// does not page through the per-tenant subtree underneath them (#1258).
+    /// </summary>
+    [Fact]
+    public async Task A_top_level_listing_asks_for_a_delimiter_and_a_full_one_does_not()
+    {
+        _responseXml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+          <Name>backups</Name>
+          <IsTruncated>false</IsTruncated>
+        </ListBucketResult>
+        """;
+
+        using var provider = NewProvider();
+        await provider.ListAsync("aldevtoolbox/", maxObjects: 100, topLevelOnly: true, CancellationToken.None);
+        _lastQuery.Should().Contain("delimiter=%2F");
+
+        await provider.ListAsync("aldevtoolbox/", maxObjects: 100, topLevelOnly: false, CancellationToken.None);
+        _lastQuery.Should().NotContain("delimiter");
     }
 
     public void Dispose()

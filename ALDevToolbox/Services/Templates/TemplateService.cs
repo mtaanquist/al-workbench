@@ -129,6 +129,22 @@ public class TemplateService
             .FirstOrDefaultAsync(ct);
 
     /// <summary>
+    /// The keys of the modules a template pre-selects, in its order, leaving
+    /// out soft-deleted modules - the same list <c>get_template</c> shows an
+    /// agent. An agent that leaves <c>selectedModuleKeys</c> out gets these, as
+    /// that parameter promises (#1243). Empty for a template that does not
+    /// exist; generation refuses that key on its own.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetDefaultModuleKeysAsync(string templateKey, CancellationToken ct = default) =>
+        await _db.RuntimeTemplateDefaultModules
+            .AsNoTracking()
+            .Where(d => d.Template!.Key == templateKey && d.Template.DeletedAt == null
+                        && d.Module!.DeletedAt == null)
+            .OrderBy(d => d.Ordering)
+            .Select(d => d.Module!.Key)
+            .ToListAsync(ct);
+
+    /// <summary>
     /// Loads an existing template into its <see cref="TemplateAuthoring"/>
     /// representation — the same shape the TOML mapper produces — so the
     /// structured admin form binds to a single canonical model regardless of

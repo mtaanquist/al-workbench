@@ -128,6 +128,71 @@ public sealed class ExportServiceTests : IDisposable
         parsed.Key.Should().Be("runtime-rt");
     }
 
+    [Fact]
+    public async Task ExportAllAsync_template_toml_carries_dependencies_folders_included_files_and_root_folders()
+    {
+        // #1220: the export loaded only the extensions themselves, so the
+        // template.toml it wrote had none of the layout below.
+        await using (var seed = _db.NewContext())
+        {
+            var file = new OrganizationFile
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Path = "export-included.txt",
+                Content = "x",
+                UpdatedAt = DateTime.UtcNow,
+            };
+            seed.OrganizationFiles.Add(file);
+            await seed.SaveChangesAsync();
+
+            var template = TemplateBuilder.Default("runtime-layout")
+                .WithCoreFolder("src/Codeunits", ("Hello.Codeunit.al", "codeunit 50100 Hello {}"));
+            var core = template.WorkspaceExtensions.Single();
+            core.Dependencies.Add(new WorkspaceExtensionDependency
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Ordering = 0,
+                LitId = "11111111-2222-3333-4444-555555555555",
+                LitName = "Base",
+                LitPublisher = "CRONUS",
+                LitVersion = "1.0.0.0",
+            });
+            template.IncludedFiles.Add(new RuntimeTemplateIncludedFile
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                OrganizationFileId = file.Id,
+                Ordering = 0,
+            });
+            template.RootFolders.Add(new RuntimeTemplateRootFolder
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Path = ".alpackages",
+                Ordering = 0,
+            });
+            seed.RuntimeTemplates.Add(template);
+            await seed.SaveChangesAsync();
+        }
+
+        string templateToml;
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = new ExportService(ctx, _db.OrgContext, new FolderTreeHydrator(ctx), NullLogger<ExportService>.Instance);
+            var archive = await svc.ExportAllAsync();
+            using var zip = new ZipArchive(archive.Stream, ZipArchiveMode.Read);
+            using var reader = new StreamReader(zip.GetEntry("runtime-layout/template.toml")!.Open());
+            templateToml = await reader.ReadToEndAsync();
+        }
+
+        var parsed = TemplateTomlMapper.FromToml(templateToml, deprecated: false);
+        var ext = parsed.Extensions.Should().ContainSingle().Subject;
+        ext.Dependencies.Should().ContainSingle(d => d.LitName == "Base" && d.LitPublisher == "CRONUS");
+        var src = ext.Folders.Should().ContainSingle(f => f.Path == "src").Subject;
+        var codeunits = src.Folders.Should().ContainSingle(f => f.Path == "Codeunits").Subject;
+        codeunits.Files.Should().ContainSingle(f => f.Path == "Hello.Codeunit.al" && f.Content == "codeunit 50100 Hello {}");
+        parsed.IncludedFilePaths.Should().Equal("export-included.txt");
+        parsed.RootFolderPaths.Should().Equal(".alpackages");
+    }
+
     private async Task<List<string>> ExportAndListEntriesAsync()
     {
         await using var ctx = _db.NewContext();

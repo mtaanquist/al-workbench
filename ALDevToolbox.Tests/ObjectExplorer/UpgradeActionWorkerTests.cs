@@ -84,6 +84,70 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_booked_start_starts_the_update_it_was_booked_for()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await SetNextUpdateAsync(envId, "27.6");
+        var actionId = await BookAsync(projectId, envId, hoursAhead: 12);
+        (await _f.ReadActionAsync(actionId)).TargetVersion.Should().Be("27.6", "the booking remembers what it was shown");
+
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Admin.Writes.Should().Be(1);
+        (await _f.ReadActionAsync(actionId)).Status.Should().Be(UpgradeActionStatus.Sent);
+    }
+
+    [Fact]
+    public async Task A_booked_start_does_not_start_another_update_that_became_next_in_the_meantime()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        await SetNextUpdateAsync(envId, "27.6");
+        var actionId = await BookAsync(projectId, envId, hoursAhead: 12);
+
+        // In the afternoon Microsoft makes 28.0 the next update (#1234).
+        _f.Admin.OnUpdates = () => new[]
+        {
+            UpgradeActionTestFixture.Update(UpgradeActionTestFixture.ScheduledDate, UpgradeActionTestFixture.LatestDate) with { TargetVersion = "28.0" },
+        };
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Admin.Writes.Should().Be(0, "the customer agreed to 27.6, not to whatever is next at the slot");
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("28.0").And.Contain("27.6");
+    }
+
+    private async Task SetNextUpdateAsync(int envId, string version)
+    {
+        await using var ctx = _f.Db.NewContext();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == envId)
+            .ExecuteUpdateAsync(u => u.SetProperty(e => e.BcNextUpdateVersion, version));
+    }
+
+    [Fact]
+    public async Task A_booking_made_by_someone_disabled_since_does_not_run()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookAsync(projectId, envId, hoursAhead: 12);
+
+        // The person who booked it leaves and their account is disabled (#1235).
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.Users.Where(u => u.Id == UpgradeActionTestFixture.FlagUserId)
+                .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, ALDevToolbox.Domain.Entities.UserStatus.Disabled));
+        }
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Admin.Writes.Should().Be(0, "a disabled account runs nothing");
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("no longer had permission");
+    }
+
+    [Fact]
     public async Task One_customers_failure_does_not_stop_the_others()
     {
         var (projectA, envA) = await _f.SeedCustomerAsync("CRONUS Denmark");

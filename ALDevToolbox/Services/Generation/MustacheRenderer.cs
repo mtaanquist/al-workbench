@@ -1,3 +1,5 @@
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using ALDevToolbox.Domain.ValueObjects;
 
@@ -50,8 +52,14 @@ public sealed class MustacheRenderer
     /// Unknown variables are left as-is and logged at Warning. Deprecated
     /// camelCase names are resolved silently but accumulated; a single
     /// warning is logged per <see cref="Render"/> call listing them all.
+    /// <para>Pass <paramref name="jsonStrings"/> when <paramref name="source"/>
+    /// is a JSON document whose placeholders sit inside string literals
+    /// (<c>"brief": "{{brief}}"</c> in <c>app.json</c>): every value is then
+    /// JSON-escaped, so a quote or backslash someone typed stays text instead
+    /// of breaking the file (#1241). The two raw JSON fragments are left as
+    /// they are - they are meant to land outside a string.</para>
     /// </summary>
-    public string Render(string source, MustacheContext ctx)
+    public string Render(string source, MustacheContext ctx, bool jsonStrings = false)
     {
         HashSet<string>? deprecated = null;
         var result = MustacheRegex.Replace(source, match =>
@@ -62,7 +70,7 @@ public sealed class MustacheRenderer
                 (deprecated ??= new(StringComparer.Ordinal)).Add(key);
                 key = canonical;
             }
-            return key switch
+            string? value = key switch
             {
                 "name" => ctx.Name,
                 "workspace_name" => ctx.WorkspaceName,
@@ -96,8 +104,12 @@ public sealed class MustacheRenderer
                 "runtime" => ctx.Runtime,
                 "dependencies_array" => ctx.DependenciesArrayJson,
                 "id_ranges_array" => ctx.IdRangesArrayJson,
-                _ => UnknownVariable(match.Value, key),
+                _ => null,
             };
+            if (value is null) return UnknownVariable(match.Value, key);
+            return jsonStrings && key is not ("dependencies_array" or "id_ranges_array")
+                ? JsonStringContent(value)
+                : value;
         });
         if (deprecated is { Count: > 0 })
         {
@@ -108,6 +120,23 @@ public sealed class MustacheRenderer
         }
         return result;
     }
+
+    /// <summary>
+    /// <paramref name="value"/> escaped for the inside of a JSON string literal,
+    /// without the surrounding quotes. The relaxed encoder escapes only what
+    /// JSON requires (quotes, backslashes, control characters), so a Danish
+    /// customer name is still readable in the file.
+    /// </summary>
+    private static string JsonStringContent(string value)
+    {
+        var quoted = JsonSerializer.Serialize(value, JsonStringOptions);
+        return quoted[1..^1];
+    }
+
+    private static readonly JsonSerializerOptions JsonStringOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
 
     private string UnknownVariable(string original, string key)
     {

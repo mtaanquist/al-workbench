@@ -60,7 +60,8 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
         _ctx.Services.AddScoped<BackupService>();
         _ctx.Services.AddScoped(sp => new PerTenantBackupService(
             sp.GetRequiredService<AppDbContext>(), _db.OrgContext,
-            _db.NewQuotaGuard(sp.GetRequiredService<AppDbContext>()), config,
+            _db.NewQuotaGuard(sp.GetRequiredService<AppDbContext>()),
+            _db.NewOrganizationConfigService(sp.GetRequiredService<AppDbContext>()), config,
             NullLogger<PerTenantBackupService>.Instance, TimeProvider.System));
         _ctx.Services.AddSingleton<IOffsiteStorageProviderFactory>(new OffsiteStorageProviderFactory(NullLoggerFactory.Instance));
         _ctx.Services.AddSingleton(DeploymentIdentity.LoadOrCreate(_deploymentDir, NullLogger.Instance));

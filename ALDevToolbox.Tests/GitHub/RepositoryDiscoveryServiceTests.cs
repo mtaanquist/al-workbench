@@ -202,6 +202,47 @@ public sealed class RepositoryDiscoveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_repository_github_would_not_let_the_sweep_read_keeps_its_row_and_its_ignore()
+    {
+        await ReadyAsync();
+        var (first, ctx1) = NewService(SingleAlRepositoryApi());
+        await using (ctx1) await first.SweepCurrentOrganisationAsync();
+        var ignoredId = await CandidateIdAsync(RepoA);
+        var (ignoring, ctx2) = NewService(SweepableApi());
+        await using (ctx2) await ignoring.IgnoreAsync(ignoredId);
+
+        // The nightly sweep is rate-limited part-way: the hidden repository cannot be read.
+        var (second, ctx3) = NewService(SweepableApi()
+            .On(HttpMethod.Get, $"/repos/{RepoA}/git/trees/main", HttpStatusCode.Forbidden,
+                "{\"message\":\"API rate limit exceeded for installation.\"}")
+            .On(HttpMethod.Get, $"/repos/{RepoB}/git/trees/main", HttpStatusCode.OK, TreeJson()));
+        await using (ctx3) await second.SweepCurrentOrganisationAsync();
+
+        await using var read = _db.NewContext();
+        var row = await read.GitHubRepositoryCandidates.SingleAsync();
+        row.FullName.Should().Be(RepoA);
+        row.IgnoredAt.Should().NotBeNull("a sweep that could not read the repository has learned nothing about it (#1231)");
+    }
+
+    [Fact]
+    public async Task A_repository_no_longer_shared_with_the_app_is_dropped()
+    {
+        await ReadyAsync();
+        var (first, ctx1) = NewService(SingleAlRepositoryApi());
+        await using (ctx1) await first.SweepCurrentOrganisationAsync();
+
+        // The full listing no longer names it.
+        var (second, ctx2) = NewService(SweepableApi()
+            .On(HttpMethod.Get, "/installation/repositories", HttpStatusCode.OK,
+                FakeGitHubApi.InstallationRepositoriesJson(RepoB))
+            .On(HttpMethod.Get, $"/repos/{RepoB}/git/trees/main", HttpStatusCode.OK, TreeJson()));
+        await using (ctx2) await second.SweepCurrentOrganisationAsync();
+
+        await using var read = _db.NewContext();
+        (await read.GitHubRepositoryCandidates.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task An_organisation_with_no_github_connection_sweeps_nothing()
     {
         await ConfigureDeploymentAsync();

@@ -1,3 +1,4 @@
+using System.Data;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Text;
@@ -10,6 +11,7 @@ using Npgsql;
 
 using ALDevToolbox.Services.Configuration;
 using ALDevToolbox.Services.Organizations;
+using ALDevToolbox.Services.Operations;
 
 namespace ALDevToolbox.Services.Backups;
 
@@ -78,31 +80,39 @@ public sealed class PerTenantBackupService
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly StorageQuotaGuard _quotaGuard;
+    private readonly OrganizationConfigService _orgConfig;
     private readonly ILogger<PerTenantBackupService> _logger;
     private readonly TimeProvider _clock;
     private readonly string _connectionString;
     private readonly string _backupsRoot;
+    private readonly DeploymentIdentity? _deployment;
 
     public PerTenantBackupService(
         AppDbContext db,
         IOrganizationContext orgContext,
         StorageQuotaGuard quotaGuard,
+        OrganizationConfigService orgConfig,
         IConfiguration configuration,
         ILogger<PerTenantBackupService> logger,
         TimeProvider clock,
         // Optional so the tests that build this service by hand keep compiling.
         // In production DI it is always the instance registered from configuration.
-        BackupOptions? options = null)
+        BackupOptions? options = null,
+        // Optional for the same reason. Stamped into every manifest and checked
+        // on restore, so a snapshot another deployment took is refused (#1257).
+        DeploymentIdentity? deployment = null)
     {
         _db = db;
         _orgContext = orgContext;
         _quotaGuard = quotaGuard;
+        _orgConfig = orgConfig;
         _logger = logger;
         _clock = clock;
         _connectionString = configuration.GetConnectionString("DefaultConnection")
             ?? throw new InvalidOperationException(
                 "ConnectionStrings:DefaultConnection is required for PerTenantBackupService.");
         _backupsRoot = (options ?? new BackupOptions()).Directory;
+        _deployment = deployment;
     }
 
     /// <summary>Absolute path to the per-tenant subdirectory for the given org slug.</summary>
@@ -206,6 +216,20 @@ public sealed class PerTenantBackupService
         await using (var connection = new NpgsqlConnection(_connectionString))
         {
             await connection.OpenAsync(ct);
+            // Every table is read from one snapshot (#1217). On autocommit
+            // reads each SELECT sees the database as of its own moment, so a
+            // parent and child committed between two reads land in the ZIP as
+            // an orphan child, and the restore - which inserts in FK order
+            // with immediate constraints - rolls back on it. REPEATABLE READ
+            // fixes the snapshot at the first query; READ ONLY because this
+            // transaction must never write.
+            await using var readTx = await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
+            await using (var readOnly = connection.CreateCommand())
+            {
+                readOnly.Transaction = readTx;
+                readOnly.CommandText = "SET TRANSACTION READ ONLY";
+                await readOnly.ExecuteNonQueryAsync(ct);
+            }
             using var zip = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true);
 
             var includedTables = new List<string>();
@@ -236,10 +260,12 @@ public sealed class PerTenantBackupService
                 organization_name = org.Name,
                 created_at = timestamp,
                 tables = includedTables,
+                deployment_id = _deployment?.Id,
             };
             var manifestEntry = zip.CreateEntry(ManifestEntryName, CompressionLevel.Optimal);
             await using var manifestStream = manifestEntry.Open();
             await JsonSerializer.SerializeAsync(manifestStream, manifest, ManifestJson, ct);
+            await readTx.CommitAsync(ct);
         }
         size = new FileInfo(targetPath).Length;
         sw.Stop();
@@ -327,6 +353,18 @@ public sealed class PerTenantBackupService
         {
             throw new InvalidOperationException(
                 $"Snapshot manifest organisation id {manifest.organization_id} does not match per_tenant_backups row {row.OrganizationId}.");
+        }
+        // Slugs and organisation ids repeat across deployments ("default", 1),
+        // so the org check above passes for a neighbour's snapshot pulled from a
+        // shared off-site bucket. Its rows would then point at another
+        // deployment's users. A manifest without a stamp predates it and is let
+        // through, as unstamped off-site dumps are.
+        if (_deployment?.IsForeign(manifest.deployment_id) == true)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["BackupId"] = "This snapshot was taken by another AL Workbench installation that shares the off-site storage. Restoring it would bring in that installation's users and settings, so it has been refused.",
+            });
         }
 
         await using var connection = new NpgsqlConnection(_connectionString);
@@ -418,6 +456,10 @@ public sealed class PerTenantBackupService
             "Restored per-tenant snapshot {FileName} for org {OrgSlug} in {ElapsedMs} ms.",
             row.FileName, row.Organization.Slug, sw.ElapsedMilliseconds);
         _quotaGuard.Invalidate(row.OrganizationId);
+        // The restore rewrote organization_settings, organization_assets and
+        // organization_files underneath the cached config, which has no expiry
+        // (#1218). Every other writer of those tables drops it the same way.
+        _orgConfig.InvalidateCache(row.OrganizationId);
     }
 
     /// <summary>Pins or unpins a snapshot (exempts it from retention pruning).</summary>
@@ -606,4 +648,6 @@ public sealed record PerTenantBackupManifest(
     string organization_slug,
     string organization_name,
     DateTime created_at,
-    IReadOnlyList<string> tables);
+    IReadOnlyList<string> tables,
+    // Absent from snapshots taken before #1257.
+    string? deployment_id = null);

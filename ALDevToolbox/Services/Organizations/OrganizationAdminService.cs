@@ -114,6 +114,12 @@ public sealed class OrganizationAdminService
         _logger = logger;
     }
 
+    private static string? EmailDomainOf(string email)
+    {
+        var at = email.LastIndexOf('@');
+        return at < 0 ? null : email[(at + 1)..].Trim().ToLowerInvariant();
+    }
+
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
         ?? throw new InvalidOperationException("No organization in scope; service mutation called outside an authenticated request.");
 
@@ -146,6 +152,27 @@ public sealed class OrganizationAdminService
         }
 
         var orgId = RequireOrganizationId();
+
+        // A claim routes everyone who later signs up from the domain into this
+        // organisation, so it needs some evidence the organisation is connected
+        // to the domain: the claiming Admin's own (verified) sign-in email must
+        // be on it. SiteAdmins may claim any domain on an organisation's behalf.
+        // Not proof of ownership, which would take DNS verification (#1211).
+        var actingUserId = _orgContext.CurrentUserId
+            ?? throw new InvalidOperationException("No user in scope; service mutation called outside an authenticated request.");
+        var actor = await _db.Users.AsNoTracking()
+            .Where(u => u.Id == actingUserId)
+            .Select(u => new { u.Email, u.IsSiteAdmin })
+            .FirstOrDefaultAsync(ct)
+            ?? throw new InvalidOperationException("The signed-in user was not found in this organisation.");
+        if (!actor.IsSiteAdmin && !string.Equals(EmailDomainOf(actor.Email), normalised, StringComparison.Ordinal))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Domain"] = "You can only add the domain of your own email address. Ask a site administrator to add other domains.",
+            });
+        }
+
         var existing = await _db.OrganizationEmailDomains
             // Fence category 6 (uniqueness probe): email domains are unique deployment-wide, so
             // the claim check has to see past the filter; only the owning org id is read, to

@@ -132,15 +132,29 @@ public sealed class RecipeService
             .ToListAsync(ct);
     }
 
-    /// <summary>Returns a single recipe with its files. <c>null</c> when not found in this org.</summary>
-    public Task<Recipe?> GetAsync(int id, CancellationToken ct = default)
-    {
-        return _db.Recipes
+    /// <summary>
+    /// Returns a single recipe with its files, for everything that reads or
+    /// delivers one: the recipe page, the download, apply-to-repository and the
+    /// MCP tools. <c>null</c> when it is not in this org or has been deleted -
+    /// a recipe an Editor withdrew must not still be served to a stale tab or
+    /// an agent holding its id (issue #1251).
+    /// </summary>
+    public Task<Recipe?> GetAsync(int id, CancellationToken ct = default) =>
+        WithFiles().FirstOrDefaultAsync(s => s.Id == id && s.DeletedAt == null, ct);
+
+    /// <summary>
+    /// Returns a single recipe with its files whether or not it has been
+    /// deleted, for the admin editor, which is where a deleted recipe is
+    /// looked at and restored. <c>null</c> when not found in this org.
+    /// </summary>
+    public Task<Recipe?> GetForAdminAsync(int id, CancellationToken ct = default) =>
+        WithFiles().FirstOrDefaultAsync(s => s.Id == id, ct);
+
+    private IQueryable<Recipe> WithFiles() =>
+        _db.Recipes
             .AsNoTracking()
             .Include(s => s.Files.OrderBy(f => f.Ordering))
-            .Include(s => s.MinimumApplicationVersion)
-            .FirstOrDefaultAsync(s => s.Id == id, ct);
-    }
+            .Include(s => s.MinimumApplicationVersion);
 
     /// <summary>Creates a recipe plus its files. Throws <see cref="PlanValidationException"/> on validation failure.</summary>
     public async Task<Recipe> CreateAsync(RecipeInput input, CancellationToken ct = default)

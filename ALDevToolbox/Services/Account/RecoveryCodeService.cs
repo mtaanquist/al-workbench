@@ -68,16 +68,20 @@ public sealed class RecoveryCodeService
 
         // Fence category 4 (explicitly scoped user-id lookup): pinned to c.UserId == userId
         // (the half-authenticated MFA state).
-        var candidates = await _db.UserRecoveryCodes.IgnoreQueryFilters()
-            .Where(c => c.UserId == userId && c.ConsumedAt == null)
-            .ToListAsync(ct);
+        var unused = _db.UserRecoveryCodes.IgnoreQueryFilters()
+            .Where(c => c.UserId == userId && c.ConsumedAt == null);
+        var candidates = await unused.AsNoTracking().ToListAsync(ct);
         foreach (var row in candidates)
         {
             if (BCrypt.Net.BCrypt.Verify(normalised, row.CodeHash))
             {
-                row.ConsumedAt = _clock.GetUtcNow().UtcDateTime;
-                await _db.SaveChangesAsync(ct);
-                return true;
+                // Single use, claimed with a conditional update so two posts
+                // of the same code can't both sign in. #1208
+                var now = _clock.GetUtcNow().UtcDateTime;
+                var claimed = await unused
+                    .Where(c => c.Id == row.Id)
+                    .ExecuteUpdateAsync(s => s.SetProperty(c => c.ConsumedAt, now), ct);
+                return claimed == 1;
             }
         }
         return false;

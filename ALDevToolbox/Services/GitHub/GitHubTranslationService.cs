@@ -161,6 +161,28 @@ public sealed class GitHubTranslationService
     }
 
     /// <summary>
+    /// Reads a file from the language's translation branch, or
+    /// <see langword="null"/> when that branch does not exist yet or does not
+    /// carry the file.
+    ///
+    /// <para>While a translation's pull request is open, its branch is ahead of
+    /// the default branch: the file there carries the earlier translations and
+    /// the sha the next save is compared against, and a language file started
+    /// from the generated source file exists only there. A second round of
+    /// translations has to start from that version, not the default branch's,
+    /// or <see cref="SaveAsync"/> refuses it as a conflict every time.</para>
+    /// </summary>
+    /// <exception cref="PlanValidationException">The repository cannot be reached or is not one this user may open.</exception>
+    public async Task<GitHubFileContent?> OpenOnTranslationBranchAsync(
+        string repoFullName, string path, string targetLanguage, CancellationToken ct = default)
+    {
+        var (repo, token) = await ResolveAsync(repoFullName, ct);
+        var branch = BranchPrefix + Slug(targetLanguage);
+        if (await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct) is null) return null;
+        return await _github.GetFileAsync(token, repo.Owner, repo.Name, path, branch, ct);
+    }
+
+    /// <summary>
     /// Commits the edited file onto the translation branch and makes sure a
     /// pull request is open for it.
     ///

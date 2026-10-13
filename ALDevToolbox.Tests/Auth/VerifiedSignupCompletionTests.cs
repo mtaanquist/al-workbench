@@ -184,6 +184,40 @@ public sealed class VerifiedSignupCompletionTests : IDisposable
     }
 
     [Fact]
+    public async Task A_double_submit_creates_one_account_and_one_organisation()
+    {
+        // Both posts passed the endpoint's FindVerifiedAsync before either
+        // completed, as a double-clicked Create does (#1215).
+        var id = await SeedVerifiedPendingAsync("double@fresh.example");
+
+        var results = await Task.WhenAll(
+            CompleteAsync(id, "Double", "verylongpassword12345", orgName: "Double Co"),
+            CompleteAsync(id, "Double", "verylongpassword12345", orgName: "Double Co"));
+
+        results.Select(r => r.Outcome).Should().BeEquivalentTo(
+            [SignupOutcome.OrganizationProvisioned, SignupOutcome.EmailAlreadyTaken]);
+        await using var read = _db.NewContext();
+        (await read.Organizations.CountAsync(o => o.Name == "Double Co"))
+            .Should().Be(1, "the losing submit must not leave a second organisation behind");
+        (await read.Users.IgnoreQueryFilters().CountAsync(u => u.Email == "double@fresh.example"))
+            .Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_refused_completion_leaves_the_verification_usable()
+    {
+        // The row is claimed before the organisation name is checked; the
+        // refusal must roll that claim back so the visitor can fix the field.
+        var id = await SeedVerifiedPendingAsync("retry@fresh.example");
+
+        await ((Func<Task>)(() => CompleteAsync(id, "Retry", "verylongpassword12345", orgName: "")))
+            .Should().ThrowAsync<PlanValidationException>();
+        var (outcome, _, _) = await CompleteAsync(id, "Retry", "verylongpassword12345", orgName: "Retry Co");
+
+        outcome.Should().Be(SignupOutcome.OrganizationProvisioned);
+    }
+
+    [Fact]
     public async Task Refuses_when_a_user_for_the_email_already_exists()
     {
         await using (var seed = _db.NewContext())

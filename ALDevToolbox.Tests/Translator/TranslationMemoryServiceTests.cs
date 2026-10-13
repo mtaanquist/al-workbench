@@ -563,6 +563,165 @@ public sealed class TranslationMemoryServiceTests : IDisposable
         }
     }
 
+    // ── Private solutions (#1252) ──────────────────────────────────────────
+
+    private const int OwnerId = 4101;
+    private const int OutsiderId = 4102;
+    private const int AdminId = 4103;
+
+    [Fact]
+    public async Task Pairs_from_a_private_solutions_repository_are_hidden_from_people_outside_it()
+    {
+        await SeedPrivateAndPublicSolutionsAsync();
+
+        _db.OrgContext.CurrentUserId = OutsiderId;
+        await using (var ctx = _db.NewContext())
+        {
+            var memory = NewMemory(ctx);
+            // An empty search is the "show me everything" the issue was found with.
+            var all = await memory.SearchAsync(new MemorySearchQuery());
+            all.Items.Select(i => i.SourceRepository).Should().BeEquivalentTo(new[] { "cronus-dk/shared-app", null });
+            all.Total.Should().Be(2);
+
+            (await memory.SuggestAsync("Rebate scheme", "en-US", "da-DK")).Should().BeEmpty();
+            (await memory.GetExactMatchesAsync(new[] { "Rebate scheme" }, "en-US", "da-DK")).Should().BeEmpty();
+            (await memory.SuggestAsync("Bin code", "en-US", "da-DK")).Should().ContainSingle();
+        }
+    }
+
+    [Fact]
+    public async Task The_private_solutions_owner_and_an_admin_still_get_its_pairs()
+    {
+        await SeedPrivateAndPublicSolutionsAsync();
+
+        foreach (var userId in new[] { OwnerId, AdminId })
+        {
+            _db.OrgContext.CurrentUserId = userId;
+            await using var ctx = _db.NewContext();
+            var hit = (await NewMemory(ctx).SuggestAsync("Rebate scheme", "en-US", "da-DK")).Single();
+            hit.SourceRepository.Should().Be("cronus-dk/Secret-App");
+            (await NewMemory(ctx).SearchAsync(new MemorySearchQuery())).Total.Should().Be(3);
+        }
+    }
+
+    [Fact]
+    public async Task A_member_of_a_team_assigned_to_the_private_solution_gets_its_pairs()
+    {
+        await SeedPrivateAndPublicSolutionsAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var secret = await ctx.OeProjects.SingleAsync(p => p.Name == "CRONUS Secret");
+            var team = new Team
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Name = "Nordics",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            };
+            ctx.Teams.Add(team);
+            await ctx.SaveChangesAsync();
+            ctx.TeamMembers.Add(new TeamMember
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                TeamId = team.Id,
+                UserId = OutsiderId,
+            });
+            ctx.OeProjectTeams.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectTeam
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = secret.Id,
+                TeamId = team.Id,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        _db.OrgContext.CurrentUserId = OutsiderId;
+        await using var read = _db.NewContext();
+        (await NewMemory(read).SuggestAsync("Rebate scheme", "en-US", "da-DK")).Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_repository_a_visible_solution_also_tracks_is_not_hidden()
+    {
+        await SeedPrivateAndPublicSolutionsAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var shared = await ctx.OeProjects.SingleAsync(p => p.Name == "CRONUS Shared");
+            ctx.OeProjectRepositories.Add(Repository(shared.Id, "https://github.com/cronus-dk/secret-app.git"));
+            await ctx.SaveChangesAsync();
+        }
+
+        _db.OrgContext.CurrentUserId = OutsiderId;
+        await using var read = _db.NewContext();
+        (await NewMemory(read).SuggestAsync("Rebate scheme", "en-US", "da-DK")).Should().ContainSingle(
+            "a solution the reader can see already shows them that repository");
+    }
+
+    private async Task SeedPrivateAndPublicSolutionsAsync()
+    {
+        await using var ctx = _db.NewContext();
+        ctx.Users.AddRange(
+            User(OwnerId, "owner@cronus.example", UserRole.User),
+            User(OutsiderId, "outsider@cronus.example", UserRole.User),
+            User(AdminId, "admin@cronus.example", UserRole.Admin));
+        await ctx.SaveChangesAsync();
+
+        var secret = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Name = "CRONUS Secret",
+            CreatedByUserId = OwnerId,
+            Visibility = ALDevToolbox.Domain.Entities.ObjectExplorer.ProjectVisibility.Private,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        var shared = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Name = "CRONUS Shared",
+            CreatedByUserId = OwnerId,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        ctx.OeProjects.AddRange(secret, shared);
+        await ctx.SaveChangesAsync();
+        ctx.OeProjectRepositories.AddRange(
+            Repository(secret.Id, "https://github.com/cronus-dk/Secret-App"),
+            Repository(shared.Id, "https://github.com/cronus-dk/shared-app"));
+        await ctx.SaveChangesAsync();
+
+        await NewMemory(ctx).UpsertAsync(new[]
+        {
+            new TranslationMemoryUpsert("en-US", "da-DK", "Rebate scheme", "Hemmelig", "caption", "Secret-App",
+                "cronus-dk/Secret-App", "App/Translations/App.da-DK.xlf"),
+            new TranslationMemoryUpsert("en-US", "da-DK", "Bin code", "Delt", "caption", "shared-app",
+                "cronus-dk/shared-app", "App/Translations/App.da-DK.xlf"),
+            Pair("Amount", "Beloeb"),
+        });
+    }
+
+    private static ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectRepository Repository(int projectId, string url) => new()
+    {
+        OrganizationId = TestDb.DefaultOrgId,
+        ProjectId = projectId,
+        Provider = ALDevToolbox.Domain.ValueObjects.RepositoryProvider.GitHub,
+        Url = url,
+        DisplayName = url[(url.LastIndexOf('/') + 1)..],
+    };
+
+    private static User User(int id, string email, UserRole role) => new()
+    {
+        Id = id,
+        OrganizationId = TestDb.DefaultOrgId,
+        Email = email,
+        DisplayName = email,
+        PasswordHash = "x",
+        Role = role,
+        Status = UserStatus.Active,
+        CreatedAt = DateTime.UtcNow,
+    };
+
     private static string Xliff(string source, string target) => $"""
         <?xml version="1.0" encoding="utf-8"?>
         <xliff version="1.2" xmlns="urn:oasis:names:tc:xliff:document:1.2">

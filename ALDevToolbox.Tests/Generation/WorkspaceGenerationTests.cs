@@ -187,6 +187,94 @@ public sealed class WorkspaceGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task Module_clone_does_not_depend_on_a_ticked_optional_extension()
+    {
+        // #1237: the implicit dependency is on required template extensions
+        // only. A ticked optional "Test" extension must not become a
+        // dependency of every module.
+        var template = TemplateBuilder.Default();
+        template.WorkspaceExtensions.Add(new WorkspaceExtension
+        {
+            OrganizationId = template.OrganizationId,
+            Path = "Test",
+            NameTemplate = "{{extension_prefix}} Test",
+            Required = false,
+            Ordering = 1,
+        });
+        var module = ModuleBuilder.Default("document-capture", "Document Capture");
+        await SeedTemplateAsync(template, module);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan(
+            selectedExtensions: new[] { "Test" },
+            selectedModules: new[] { "document-capture" }));
+
+        zip.GetEntry("AcmeCustomer/Test/app.json").Should().NotBeNull();
+        var moduleAppJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("AcmeCustomer/DocumentCapture/app.json")!));
+        moduleAppJson.RootElement.GetProperty("dependencies").EnumerateArray()
+            .Select(d => d.GetProperty("name").GetString())
+            .Should().Equal("ACME Core");
+    }
+
+    [Fact]
+    public async Task Two_modules_with_the_same_extension_name_are_refused()
+    {
+        // #1240: both would be written to Banking/, and only one app.json
+        // would survive extraction.
+        var template = TemplateBuilder.Default();
+        await SeedTemplateAsync(template,
+            ModuleBuilder.Default("banking-dk", "Banking DK", extensionName: "Banking"),
+            ModuleBuilder.Default("banking-no", "Banking NO", extensionName: "Banking"));
+
+        var act = () => NewService().GenerateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(selectedModules: new[] { "banking-dk", "banking-no" }));
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("SelectedModuleKeys")
+            .WhoseValue.Should().Contain("banking-dk").And.Contain("banking-no").And.Contain("Banking");
+    }
+
+    [Fact]
+    public async Task An_unknown_module_key_is_refused_rather_than_dropped()
+    {
+        // #1242: the key used to be skipped while the saved settings still
+        // listed it, and those settings then could not be read back.
+        await SeedTemplateAsync(TemplateBuilder.Default(), ModuleBuilder.Default("banking", "Banking"));
+
+        var act = () => NewService().GenerateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(selectedModules: new[] { "banking", "bankng" }));
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("SelectedModuleKeys")
+            .WhoseValue.Should().Contain("'bankng'").And.NotContain("'banking'");
+    }
+
+    [Fact]
+    public async Task A_deleted_module_key_is_refused()
+    {
+        var deleted = ModuleBuilder.Default("payroll", "Payroll");
+        deleted.DeletedAt = DateTime.UtcNow;
+        await SeedTemplateAsync(TemplateBuilder.Default(), deleted);
+
+        var errors = await NewService().ValidateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(selectedModules: new[] { "payroll" }));
+
+        errors.Should().ContainKey("SelectedModuleKeys")
+            .WhoseValue.Should().Contain("'payroll'");
+    }
+
+    [Fact]
+    public async Task A_module_named_like_a_template_extension_is_refused_whatever_the_case()
+    {
+        var template = TemplateBuilder.Default();
+        await SeedTemplateAsync(template, ModuleBuilder.Default("core-addon", "Core Addon", extensionName: "CORE"));
+
+        var errors = await NewService().ValidateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(selectedModules: new[] { "core-addon" }));
+
+        errors.Should().ContainKey("SelectedModuleKeys");
+    }
+
+    [Fact]
     public async Task Recursive_folder_tree_emits_files_at_correct_depth()
     {
         var template = TemplateBuilder.Default()
@@ -361,6 +449,26 @@ public sealed class WorkspaceGenerationTests : IDisposable
 
         content.Should().Contain("\"brief\": \"Acme & Co <reporting>\"");
         content.Should().NotContain("\\u0026");
+    }
+
+    [Fact]
+    public async Task App_json_stays_valid_when_the_brief_and_description_hold_quotes_and_backslashes()
+    {
+        // #1241: the canonical body is "brief": "{{brief}}", so an unescaped
+        // quote or backslash ended the string and the file was no longer JSON.
+        var template = TemplateBuilder.Default();
+        await SeedTemplateAsync(template);
+        const string brief = "Sync orders with \"Shopify\"";
+        const string description = @"Exports land in C:\exports";
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan(brief: brief) with { Description = description });
+        var content = ReadEntry(zip.GetEntry("AcmeCustomer/Core/app.json")!);
+
+        using var appJson = JsonDocument.Parse(content);
+        appJson.RootElement.GetProperty("brief").GetString().Should().Be(brief);
+        appJson.RootElement.GetProperty("description").GetString().Should().Be(description);
+        appJson.RootElement.GetProperty("dependencies").ValueKind.Should().Be(JsonValueKind.Array,
+            "the raw JSON fragments are still spliced in unescaped");
     }
 
     [Fact]

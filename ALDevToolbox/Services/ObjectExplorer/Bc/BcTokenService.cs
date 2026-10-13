@@ -77,7 +77,9 @@ public sealed class BcTokenService
         {
             response = await client.SendAsync(request, ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // HttpClient's own timeout surfaces as a cancellation too; only the caller's
+        // token stopping is a real cancel, anything else is BC not answering (#1233).
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             throw new BcApiException(null, "Couldn't reach the Microsoft sign-in endpoint.", ex);
         }

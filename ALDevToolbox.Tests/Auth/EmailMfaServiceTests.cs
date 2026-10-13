@@ -103,4 +103,66 @@ public sealed class EmailMfaServiceTests : IDisposable
         (await svc.IssueChallengeAsync(userId)).Should().NotBeNull();
         (await svc.IssueChallengeAsync(userId)).Should().BeNull("three per ten minutes is the limit");
     }
+
+    [Fact]
+    public async Task Parallel_wrong_codes_cannot_overrun_the_cap()
+    {
+        // Every guess a request of its own, all in flight at once (#1208).
+        var userId = await SeedUserAsync(9110);
+        string code;
+        await using (var ctx = _db.NewContext())
+        {
+            code = (await new EmailMfaService(ctx, _clock).IssueChallengeAsync(userId))!;
+        }
+        var wrong = code == "000000" ? "111111" : "000000";
+
+        await Task.WhenAll(Enumerable.Range(0, 25).Select(async _ =>
+        {
+            await using var ctx = _db.NewContext();
+            await new EmailMfaService(ctx, _clock).VerifyAsync(userId, wrong);
+        }));
+
+        await using (var read = _db.NewContext())
+        {
+            (await read.PasswordResetTokens.IgnoreQueryFilters().Where(t => t.UserId == userId).SumAsync(t => t.FailedAttempts))
+                .Should().Be(EmailMfaService.MaxVerifyAttempts, "every guess that was compared is counted, and no more than the cap were");
+        }
+        await using var ctx2 = _db.NewContext();
+        (await new EmailMfaService(ctx2, _clock).VerifyAsync(userId, code))
+            .Should().BeFalse("the cap was reached, so even the right code is refused until a fresh one is sent");
+    }
+
+    [Fact]
+    public async Task A_right_code_posted_twice_at_once_signs_in_once()
+    {
+        var userId = await SeedUserAsync(9111);
+        string code;
+        await using (var ctx = _db.NewContext())
+        {
+            code = (await new EmailMfaService(ctx, _clock).IssueChallengeAsync(userId))!;
+        }
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 2).Select(async _ =>
+        {
+            await using var ctx = _db.NewContext();
+            return await new EmailMfaService(ctx, _clock).VerifyAsync(userId, code);
+        }));
+
+        results.Count(r => r).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_right_code_does_not_use_up_an_attempt()
+    {
+        var userId = await SeedUserAsync(9112);
+        await using var ctx = _db.NewContext();
+        var svc = new EmailMfaService(ctx, _clock);
+        var code = (await svc.IssueChallengeAsync(userId))!;
+
+        (await svc.VerifyAsync(userId, code)).Should().BeTrue();
+
+        await using var read = _db.NewContext();
+        (await read.PasswordResetTokens.IgnoreQueryFilters().Where(t => t.UserId == userId).SumAsync(t => t.FailedAttempts))
+            .Should().Be(0);
+    }
 }

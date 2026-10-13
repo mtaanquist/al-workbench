@@ -2,6 +2,9 @@ using System.Security.Cryptography;
 using System.Text;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.Entities.ObjectExplorer;
+using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Explore;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using Microsoft.EntityFrameworkCore;
@@ -25,6 +28,12 @@ public sealed class TranslationMemoryService
     private readonly IOrganizationContext _orgContext;
     private readonly ILogger<TranslationMemoryService> _logger;
 
+    // Built from the same two dependencies rather than injected, so the many
+    // places that construct this service (importers, tests) are unchanged. It
+    // caches the caller's snapshot for this service's own lifetime, exactly as
+    // the scoped one does for its scope.
+    private readonly ProjectAccess _projectAccess;
+
     public TranslationMemoryService(
         AppDbContext db,
         IOrganizationContext orgContext,
@@ -33,6 +42,7 @@ public sealed class TranslationMemoryService
         _db = db;
         _orgContext = orgContext;
         _logger = logger;
+        _projectAccess = new ProjectAccess(db, orgContext);
     }
 
     private int RequireOrganizationId() => _orgContext.CurrentOrganizationId
@@ -243,8 +253,9 @@ public sealed class TranslationMemoryService
         if (string.IsNullOrEmpty(tgt)) return new List<TranslationSuggestion>();
         var src = string.IsNullOrWhiteSpace(sourceLanguage) ? null : NormaliseLanguage(sourceLanguage);
         var srcHash = Hash(sourceText);
+        var memory = VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false));
 
-        var exact = await _db.TranslationMemory.AsNoTracking()
+        var exact = await memory
             .Where(e => e.DeletedAt == null && e.TargetLanguage == tgt
                 && (src == null || e.SourceLanguage == src)
                 && e.SourceHash == srcHash && e.SourceText == sourceText)
@@ -263,7 +274,7 @@ public sealed class TranslationMemoryService
             // Trigram fuzzy. TrigramsAreSimilar maps to the `%` operator, which
             // the GIN index accelerates (default threshold 0.3); we rank by
             // closeness first, then vote score.
-            var fuzzy = await _db.TranslationMemory.AsNoTracking()
+            var fuzzy = await memory
                 .Where(e => e.DeletedAt == null && e.TargetLanguage == tgt
                     && (src == null || e.SourceLanguage == src)
                     && e.SourceText != sourceText
@@ -350,11 +361,12 @@ public sealed class TranslationMemoryService
         if (byHash.Count == 0) return result;
 
         var hashes = byHash.Keys.ToList();
+        var memory = VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false));
         foreach (var hashChunk in hashes.Chunk(500))
         {
             ct.ThrowIfCancellationRequested();
             var set = hashChunk.ToList();
-            var rows = await _db.TranslationMemory.AsNoTracking()
+            var rows = await memory
                 .Where(e => e.DeletedAt == null && e.TargetLanguage == tgt
                     && (src == null || e.SourceLanguage == src)
                     && set.Contains(e.SourceHash))
@@ -525,7 +537,7 @@ public sealed class TranslationMemoryService
         RequireOrganizationId();
         var userId = _orgContext.CurrentUserId;
 
-        var query = _db.TranslationMemory.AsNoTracking().AsQueryable();
+        var query = VisibleTo(await HiddenRepositoriesAsync(ct).ConfigureAwait(false));
         if (!q.IncludeDeleted) query = query.Where(e => e.DeletedAt == null);
         if (!string.IsNullOrWhiteSpace(q.TargetLanguage))
         {
@@ -586,6 +598,68 @@ public sealed class TranslationMemoryService
             r.HitCount, r.Score, myVotes.GetValueOrDefault(r.Id), r.CreatedAt, r.LastSeenAt, r.DeletedAt != null,
             r.SourceRepository, r.SourcePath)).ToList();
         return new MemorySearchResult(items, total);
+    }
+
+    // ── Solution visibility ────────────────────────────────────────────────
+
+    /// <summary>
+    /// The memory as this caller may read it: every pair, less the ones learned
+    /// from a repository that only solutions hidden from them track.
+    /// </summary>
+    private IQueryable<TranslationMemoryEntry> VisibleTo(List<string> hiddenRepositories)
+    {
+        var query = _db.TranslationMemory.AsNoTracking();
+        if (hiddenRepositories.Count == 0) return query;
+        return query.Where(e => e.SourceRepository == null
+            || !hiddenRepositories.Contains(e.SourceRepository.ToLower()));
+    }
+
+    /// <summary>
+    /// The repositories (<c>owner/name</c>, lower-cased) whose pairs the caller
+    /// may not see (issue #1252). The ingest reads every tracked repository so
+    /// a Private solution's own team gets its translations suggested; a pair
+    /// carries the repository and file it came from, so showing it to anyone
+    /// else would show them the solution's code and customer-specific strings.
+    ///
+    /// <para>A repository is hidden when a solution the caller cannot see
+    /// tracks it - deleted ones included, since deleting a Private solution
+    /// does not make its strings public - and no solution they can see
+    /// tracks it too. One they can see already shows them the repository, and
+    /// the pair is the same pair whichever repository taught it last. Admins
+    /// see every solution, so nothing is hidden from them.</para>
+    /// </summary>
+    private async Task<List<string>> HiddenRepositoriesAsync(CancellationToken ct)
+    {
+        var snapshot = await _projectAccess.GetSnapshotAsync(ct).ConfigureAwait(false);
+        if (snapshot.BypassesVisibility) return [];
+
+        var hidden = await RepositoryNamesAsync(
+            _db.OeProjects.Where(ProjectAccess.LockedProjectPredicate(snapshot)), ct).ConfigureAwait(false);
+        if (hidden.Count == 0) return [];
+
+        var visible = await RepositoryNamesAsync(
+            _db.OeProjects.Where(p => p.DeletedAt == null).Where(ProjectAccess.VisibleProjectPredicate(snapshot)),
+            ct).ConfigureAwait(false);
+        hidden.ExceptWith(visible);
+        return hidden.ToList();
+    }
+
+    /// <summary>The GitHub repositories the given solutions track, named the way the ingest records them.</summary>
+    private async Task<HashSet<string>> RepositoryNamesAsync(IQueryable<OeProject> projects, CancellationToken ct)
+    {
+        var projectIds = projects.Select(p => p.Id);
+        var urls = await _db.OeProjectRepositories.AsNoTracking()
+            .Where(r => r.Provider == RepositoryProvider.GitHub && projectIds.Contains(r.ProjectId))
+            .Select(r => r.Url)
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var url in urls)
+        {
+            var (owner, name) = TranslationMemoryIngestService.ParseOwnerAndName(url);
+            if (owner is not null && name is not null) names.Add($"{owner}/{name}".ToLowerInvariant());
+        }
+        return names;
     }
 
     private sealed class PreparedEntry

@@ -1,6 +1,7 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
+using Microsoft.AspNetCore.StaticAssets;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Endpoints;
@@ -28,6 +29,18 @@ internal static class StrongAuthGate
         app.Use(async (ctx, next) =>
         {
             if (ctx.User?.Identity?.IsAuthenticated != true)
+            {
+                await next();
+                return;
+            }
+
+            // Stylesheets, scripts, fonts and images: the enrolment page the
+            // gate sends people to needs them to render, and gating them cost
+            // a few database reads on every one of the ~30 a page loads. Told
+            // apart by the endpoint MapStaticAssets matched, not by path, so
+            // every wwwroot file, fingerprinted name and component script is
+            // covered and no app route can pass for one. See issue #1214.
+            if (ctx.GetEndpoint()?.Metadata.GetMetadata<StaticAssetDescriptor>() is not null)
             {
                 await next();
                 return;
@@ -142,17 +155,39 @@ internal static class StrongAuthGate
     /// requirement (or sign out). Anything under <c>/auth/</c> is allowed
     /// so passkey/TOTP/email-MFA enrolment flows keep working; the
     /// <c>/account</c> tree carries the UI for it. Framework / health
-    /// paths are allowed so Blazor circuits and probes don't break.
+    /// paths are allowed so Blazor circuits and probes don't break. Static
+    /// files pass by their endpoint before this list is consulted.
     /// </summary>
     internal static bool IsAllowed(PathString path)
     {
         if (!path.HasValue) return true;
+        foreach (var prefix in GatedPathPrefixes)
+        {
+            if (path.StartsWithSegments(prefix)) return false;
+        }
         foreach (var prefix in AllowedPathPrefixes)
         {
             if (path.StartsWithSegments(prefix)) return true;
         }
         return false;
     }
+
+    /// <summary>
+    /// Paths inside an allow-listed prefix that are gated all the same: the
+    /// ones that hand out a long-lived credential. A personal access token or
+    /// an assistant's OAuth grant keeps working without a second factor
+    /// (PAT and bearer requests pass the gate, see #372), so letting a
+    /// password-only session mint one would turn the requirement into a
+    /// formality. The consent page and its form post are gated, while the
+    /// token, registration and discovery endpoints the assistant itself calls
+    /// stay open. Revoking a token stays reachable. See issue #1206.
+    /// </summary>
+    internal static readonly string[] GatedPathPrefixes =
+    [
+        "/auth/account/access-tokens/create",
+        "/oauth/consent",
+        "/oauth/authorize",
+    ];
 
     /// <summary>
     /// The allow-list itself, as data so a test can assert the exact set
@@ -179,8 +214,6 @@ internal static class StrongAuthGate
         "/readyz",
         "/not-found",
         "/Error",
-        "/css",
-        "/js",
         "/favicon.ico",
     ];
 }

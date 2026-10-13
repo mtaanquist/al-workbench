@@ -319,6 +319,38 @@ public sealed class SystemSettingsService
     }
 
     /// <summary>
+    /// Pushes the settings row into the in-memory copies that are read on every
+    /// request without a query: the MCP toggle, the per-tool site toggles and
+    /// the build limit. Startup calls it once migrations have run, and a full
+    /// restore calls it through <see cref="ReloadAfterRestoreAsync"/>, because
+    /// both replace the row underneath those copies.
+    /// </summary>
+    public async Task ApplyInMemoryStateAsync(CancellationToken ct)
+    {
+        var row = await _db.SystemSettings.AsNoTracking()
+            .Where(s => s.Id == 1)
+            .Select(s => new { s.McpEnabled, s.DisabledTools, s.BuildConcurrency })
+            .FirstOrDefaultAsync(ct);
+        _mcpAvailability?.Set(row?.McpEnabled ?? false);
+        _toolAvailability?.Set(ALDevToolbox.Domain.Tools.ToolCatalog.ParseDisabled(row?.DisabledTools));
+        _buildQueue?.ApplySetting(row?.BuildConcurrency);
+        _cache?.Remove(BannerCacheKey);
+    }
+
+    /// <summary>
+    /// After a full-database restore every cached read describes the database
+    /// that was replaced: organisation config and names, the banner, and the
+    /// in-memory toggles. Empties the memory cache and re-applies the settings
+    /// row, so the application comes back on what was restored rather than on
+    /// what it held before (#1255).
+    /// </summary>
+    public async Task ReloadAfterRestoreAsync(CancellationToken ct)
+    {
+        if (_cache is MemoryCache memoryCache) memoryCache.Clear();
+        await ApplyInMemoryStateAsync(ct);
+    }
+
+    /// <summary>
     /// True when the deployment has more than one organisation. The settings on this
     /// row are site-wide but times are shown in each organisation's own zone, so the
     /// backup schedule page says whose zone it is showing only when there is a choice

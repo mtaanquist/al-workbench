@@ -274,7 +274,7 @@ public sealed class ProjectBuildImporter
         int pipelineId, string bcTarget, string trigger, CancellationToken ct, (int RepositoryId, string Sha)? head = null)
     {
         var pipeline = await _db.OePipelines.AsNoTracking()
-            .Where(p => p.Id == pipelineId && p.DeletedAt == null)
+            .Where(p => p.Id == pipelineId && p.DeletedAt == null && p.Project!.DeletedAt == null)
             .Select(p => new
             {
                 p.ProjectId,

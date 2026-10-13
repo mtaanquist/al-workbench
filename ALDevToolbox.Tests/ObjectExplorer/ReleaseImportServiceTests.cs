@@ -674,7 +674,7 @@ public sealed class ReleaseImportServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_cancelled_amend_is_failed_rather_than_left_importing()
+    public async Task A_cancelled_amend_hands_the_release_back_ready()
     {
         var releaseId = await SeedReadyReleaseAsync("Amend cancelled", "Microsoft_DK_Core.app");
         await using var ctx = _db.NewContext();
@@ -691,7 +691,8 @@ public sealed class ReleaseImportServiceTests : IDisposable
         await act.Should().ThrowAsync<OperationCanceledException>();
         svc.Ingests.IsRunning(releaseId).Should().BeFalse();
         await using var read = _db.NewContext();
-        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId)).Status.Should().Be("failed");
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId)).Status.Should().Be("ready",
+            "the release held good data before the amend, and a cancelled request must not take it out of use (#1221)");
     }
 
     /// <summary>An upload whose first read runs <c>onRead</c> and throws what it returns.</summary>
@@ -1303,26 +1304,98 @@ public sealed class ReleaseImportServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Amend_flips_release_to_failed_and_preserves_existing_modules_on_exception()
+    public async Task Amend_failure_rolls_back_every_upload_and_leaves_the_release_ready()
     {
+        // #1221: the first upload lands, the second is not an app at all. The
+        // amend must not leave half its work behind, nor fail a release that
+        // held good data before it started.
         var releaseId = await SeedReadyReleaseAsync("Amend failure", "Microsoft_DK_Core.app");
 
         await using var ctx = _db.NewContext();
         var svc = NewService(ctx);
+        await using var good = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_OIOUBL.app"));
         await using var notAnApp = new MemoryStream(new byte[] { 0x50, 0x4B, 0x03, 0x04, 0x00 });
         var act = async () => await svc.AmendReleaseAsync(
             releaseId,
-            new[] { new AppFileUpload("not-an-app.zip", notAnApp, SourceZipStream: null) });
+            new[]
+            {
+                new AppFileUpload("Microsoft_OIOUBL.app", good, SourceZipStream: null),
+                new AppFileUpload("not-an-app.zip", notAnApp, SourceZipStream: null),
+            });
         await act.Should().ThrowAsync<InvalidDataException>();
+        svc.Ingests.IsRunning(releaseId).Should().BeFalse();
 
         await using var read = _db.NewContext();
         var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
-        release.Status.Should().Be("failed");
-        release.StatusMessage.Should().NotBeNullOrEmpty();
+        release.Status.Should().Be("ready");
+        release.StatusMessage.Should().BeNull();
 
         var modules = await read.OeModules.AsNoTracking()
-            .CountAsync(m => m.ReleaseId == releaseId);
-        modules.Should().Be(1, because: "the pre-existing module must survive an amend failure");
+            .Where(m => m.ReleaseId == releaseId)
+            .Select(m => m.AppId)
+            .ToListAsync();
+        modules.Should().Equal(Guid.Parse(DkCoreAppId));
+    }
+
+    [Fact]
+    public async Task Amend_refusal_leaves_the_release_ready_for_the_corrected_upload()
+    {
+        // #1221: a refusal the admin can fix (here a clashing version of an app
+        // already in the release) comes back field-keyed, and the release stays
+        // ready so the corrected amend can run straight away.
+        var releaseId = await SeedReadyReleaseAsync("Amend refused", "Microsoft_DK_Core.app");
+        await using (var tamper = _db.NewContext())
+        {
+            var module = await tamper.OeModules.SingleAsync(m => m.ReleaseId == releaseId);
+            module.AppFileHash = "not-the-same-bytes";
+            await tamper.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        await using var oioubl = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_OIOUBL.app"));
+        await using var clash = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
+        var act = async () => await svc.AmendReleaseAsync(
+            releaseId,
+            new[]
+            {
+                new AppFileUpload("Microsoft_OIOUBL.app", oioubl, SourceZipStream: null),
+                new AppFileUpload("Microsoft_DK_Core.app", clash, SourceZipStream: null),
+            });
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("Uploads.Microsoft_DK_Core.app");
+
+        await using var read = _db.NewContext();
+        (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId)).Status.Should().Be("ready");
+        (await read.OeModules.AsNoTracking().CountAsync(m => m.ReleaseId == releaseId)).Should().Be(1,
+            "the upload that went in before the refusal is rolled back with it");
+    }
+
+    [Fact]
+    public async Task Amend_does_not_duplicate_system_references()
+    {
+        // #1223: the reindex re-emits system references for every module in the
+        // release, so it has to clear the old ones first.
+        var releaseId = await SeedReadyReleaseAsync("Amend system refs", "Microsoft_DK_Core.app");
+        int before;
+        await using (var read = _db.NewContext())
+        {
+            before = await read.OeModuleSystemReferences.AsNoTracking()
+                .CountAsync(r => r.Module!.ReleaseId == releaseId);
+        }
+        before.Should().BeGreaterThan(0);
+
+        await using (var ctx = _db.NewContext())
+        {
+            await using var same = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
+            var amend = await NewService(ctx).AmendReleaseAsync(
+                releaseId, new[] { new AppFileUpload("Microsoft_DK_Core.app", same, SourceZipStream: null) });
+            amend.ModulesSkipped.Should().Be(1);
+        }
+
+        await using var after = _db.NewContext();
+        (await after.OeModuleSystemReferences.AsNoTracking()
+            .CountAsync(r => r.Module!.ReleaseId == releaseId)).Should().Be(before);
     }
 
     [Fact]

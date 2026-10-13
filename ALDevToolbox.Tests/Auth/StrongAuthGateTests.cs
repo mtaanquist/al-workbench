@@ -169,7 +169,7 @@ public sealed class StrongAuthGateTests : IDisposable
         StrongAuthGate.AllowedPathPrefixes.Should().Equal(
             "/account", "/auth", "/mcp", "/oauth", "/.well-known", "/login", "/signup",
             "/_blazor", "/_framework", "/_content", "/healthz", "/readyz", "/not-found",
-            "/Error", "/css", "/js", "/favicon.ico");
+            "/Error", "/favicon.ico");
     }
 
     [Theory]
@@ -180,6 +180,35 @@ public sealed class StrongAuthGateTests : IDisposable
     [InlineData("/admin", false)]
     [InlineData("/", false)]
     public void Allow_list_matching_is_by_segment_not_by_string_prefix(string path, bool allowed) =>
+        StrongAuthGate.IsAllowed(path).Should().Be(allowed);
+
+    [Theory]
+    [InlineData("/auth/account/access-tokens/create", "POST")]
+    [InlineData("/oauth/authorize", "POST")]
+    [InlineData("/oauth/consent", "GET")]
+    [InlineData("/oauth/authorize", "GET")]
+    public async Task Minting_a_token_or_an_assistant_grant_is_gated(string path, string method)
+    {
+        // A token or an OAuth grant outlives the session and is never gated
+        // itself, so minting one would sidestep the requirement (#1206).
+        var user = await SeedUserAsync();
+        await SetRequireStrongAuthAsync(TestDb.DefaultOrgId, true);
+
+        var (ctx, reached) = await RunAsync(user, path, method);
+
+        reached.Should().BeFalse($"{method} {path} hands out a credential that outlives the session");
+        ctx.Response.StatusCode.Should().Be(method == "GET" ? StatusCodes.Status302Found : StatusCodes.Status403Forbidden);
+    }
+
+    [Theory]
+    [InlineData("/auth/account/access-tokens/create", false)]
+    [InlineData("/auth/account/access-tokens/12/revoke", true)]
+    [InlineData("/auth/account/2fa/totp/confirm", true)]
+    [InlineData("/oauth/consent", false)]
+    [InlineData("/oauth/authorize", false)]
+    [InlineData("/oauth/token", true)]
+    [InlineData("/oauth/register", true)]
+    public void Credential_minting_paths_are_carved_out_of_the_allow_list(string path, bool allowed) =>
         StrongAuthGate.IsAllowed(path).Should().Be(allowed);
 
     [Fact]

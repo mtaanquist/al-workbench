@@ -243,6 +243,62 @@ public sealed class GitHubReleaseServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_new_release_stays_a_draft_until_every_app_file_is_on_it()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0"), ("CRONUS Sales", "1.0.0.0")]);
+        var api = PublishableApi(existingRelease: false);
+
+        await using var ctx = _db.NewContext();
+        (await NewService(ctx, api).PublishBuildAsync(seed.BuildId)).Published.Should().BeTrue();
+
+        CreateReleaseBody(api).Should().Contain("\"draft\":true");
+        var lastUpload = api.Calls.FindLastIndex(c => c.Contains("uploads.github.com"));
+        var publish = api.Bodies.Single(b => b.Call.StartsWith("PATCH", StringComparison.Ordinal));
+        publish.Body.Should().Contain("\"draft\":false");
+        api.Calls.IndexOf(publish.Call).Should().BeGreaterThan(lastUpload, "it is published only after its files are on it");
+    }
+
+    [Fact]
+    public async Task A_release_that_loses_a_file_on_the_way_up_is_deleted_rather_than_published()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0"), ("CRONUS Sales", "1.0.0.0"), ("CRONUS Service", "1.0.0.0")]);
+        var api = PublishableApi(existingRelease: false)
+            .OnSequence(HttpMethod.Post, $"/repos/{Repo}/releases/{ReleaseId}/assets",
+                (HttpStatusCode.Created, "{\"id\":77,\"name\":\"uploaded.app\",\"size\":3}"),
+                (HttpStatusCode.UnprocessableEntity, "{\"message\":\"Upload timed out.\"}"));
+
+        await using (var ctx = _db.NewContext())
+        {
+            var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+            result.Published.Should().BeFalse();
+        }
+
+        api.Calls.Should().NotContain(c => c.StartsWith("PATCH", StringComparison.Ordinal), "a release missing a file is never published");
+        api.Calls.Should().Contain($"DELETE https://api.github.com/repos/{Repo}/releases/{ReleaseId}");
+        await AssertBuildStillReadyAsync(seed.BuildId, expectError: "Upload timed out");
+    }
+
+    [Fact]
+    public async Task Publishing_the_same_version_again_takes_the_release_back_to_a_draft_before_its_files_come_off()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        var api = PublishableApi(existingRelease: true);
+
+        await using var ctx = _db.NewContext();
+        (await NewService(ctx, api).PublishBuildAsync(seed.BuildId)).Published.Should().BeTrue();
+
+        var patches = api.Bodies.Where(b => b.Call.StartsWith("PATCH", StringComparison.Ordinal)).ToList();
+        patches.Should().HaveCount(2);
+        patches[0].Body.Should().Contain("\"draft\":true");
+        patches[1].Body.Should().Contain("\"draft\":false");
+        api.Calls.IndexOf(patches[0].Call).Should().BeLessThan(
+            api.Calls.FindIndex(c => c.StartsWith("DELETE", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public async Task Apps_at_different_versions_are_published_under_the_build_number()
     {
         // Apps that each keep their own Major.Minor share only the build number, so the
@@ -323,6 +379,8 @@ public sealed class GitHubReleaseServiceTests : IDisposable
                 FakeGitHubApi.ReleaseJson(Repo, "v1.0.0.0", ReleaseId, assets: (AssetId, "CRONUS Core_1.0.0.0.app")))
             .On(HttpMethod.Get, $"/repos/{Repo}/releases/tags/{tag}", HttpStatusCode.NotFound)
             .On(HttpMethod.Post, $"/repos/{Repo}/releases", HttpStatusCode.Created,
+                FakeGitHubApi.ReleaseJson(Repo, tag, ReleaseId))
+            .On(HttpMethod.Patch, $"/repos/{Repo}/releases/{ReleaseId}", HttpStatusCode.OK,
                 FakeGitHubApi.ReleaseJson(Repo, tag, ReleaseId));
 
         await using var ctx = _db.NewContext();
@@ -632,6 +690,34 @@ public sealed class GitHubReleaseServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Staging_a_release_whose_files_changed_since_stages_it_again()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+
+        int first;
+        await using (var ctx = _db.NewContext())
+        {
+            first = await NewService(ctx, StageableApi()).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+        }
+        // The release lost a file on the way up, and someone has since put it back.
+        var fixedApi = StageableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/releases/tags/v1.0.0.0", HttpStatusCode.OK,
+                StagedReleaseJson((AssetId, "CRONUS Core_1.0.0.0.app"), (AssetId + 1, "CRONUS Sales_1.0.0.0.app")))
+            .OnRedirect(HttpMethod.Get, $"/repos/{Repo}/releases/assets/{AssetId + 1}",
+                "https://objects.githubusercontent.com/app-bytes");
+        int second;
+        await using (var ctx = _db.NewContext())
+        {
+            second = await NewService(ctx, fixedApi).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+        }
+
+        second.Should().NotBe(first);
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectBuildArtifacts.AsNoTracking().CountAsync(a => a.ProjectBuildId == second)).Should().Be(2);
+    }
+
+    [Fact]
     public async Task Staging_again_records_the_repository_on_a_release_staged_before_it_was_recorded()
     {
         await ConnectOrganisationAsync();
@@ -872,15 +958,18 @@ public sealed class GitHubReleaseServiceTests : IDisposable
             // The upload host: a longer path than the create-release route, so the two
             // stay apart even though one is a prefix of the other.
             .On(HttpMethod.Post, $"/repos/{Repo}/releases/{ReleaseId}/assets", HttpStatusCode.Created,
-                "{\"id\":77,\"name\":\"uploaded.app\",\"size\":3}");
+                "{\"id\":77,\"name\":\"uploaded.app\",\"size\":3}")
+            // Taking it back to a draft, and publishing it once its files are on (#1230).
+            .On(HttpMethod.Patch, $"/repos/{Repo}/releases/{ReleaseId}", HttpStatusCode.OK,
+                FakeGitHubApi.ReleaseJson(Repo, tag, ReleaseId))
+            // Clearing away a draft that lost a file.
+            .On(HttpMethod.Delete, $"/repos/{Repo}/releases/{ReleaseId}", HttpStatusCode.NoContent);
 
         if (existingRelease)
         {
             api.On(HttpMethod.Get, $"/repos/{Repo}/releases/tags/", HttpStatusCode.OK,
                     FakeGitHubApi.ReleaseJson(Repo, tag, ReleaseId, assets: (AssetId, "old.app")))
-                .On(HttpMethod.Delete, $"/repos/{Repo}/releases/assets/", HttpStatusCode.NoContent)
-                .On(HttpMethod.Patch, $"/repos/{Repo}/releases/{ReleaseId}", HttpStatusCode.OK,
-                    FakeGitHubApi.ReleaseJson(Repo, tag, ReleaseId));
+                .On(HttpMethod.Delete, $"/repos/{Repo}/releases/assets/", HttpStatusCode.NoContent);
         }
         else
         {
@@ -909,7 +998,7 @@ public sealed class GitHubReleaseServiceTests : IDisposable
                 FakeGitHubApi.ReleaseJson(Repo, "v1.0.0.0", ReleaseId, assets: (AssetId, "CRONUS Core_1.0.0.0.app")),
                 FakeGitHubApi.ReleaseJson(Repo, "v0.9.0.0", 899, assets: (5599, "source.zip"))))
             .On(HttpMethod.Get, $"/repos/{Repo}/releases/tags/v1.0.0.0", HttpStatusCode.OK,
-                FakeGitHubApi.ReleaseJson(Repo, "v1.0.0.0", ReleaseId, assets: (AssetId, "CRONUS Core_1.0.0.0.app")))
+                StagedReleaseJson((AssetId, "CRONUS Core_1.0.0.0.app")))
             .On(HttpMethod.Get, $"/repos/{Repo}/releases/tags/v0.9.0.0", HttpStatusCode.OK,
                 FakeGitHubApi.ReleaseJson(Repo, "v0.9.0.0", 899, assets: (5599, "source.zip")))
             .On(HttpMethod.Get, $"/repos/{Repo}/releases/tags/", HttpStatusCode.NotFound)
@@ -917,6 +1006,14 @@ public sealed class GitHubReleaseServiceTests : IDisposable
             .OnRedirect(HttpMethod.Get, $"/repos/{Repo}/releases/assets/{AssetId}",
                 "https://objects.githubusercontent.com/app-bytes")
             .OnBytes(HttpMethod.Get, "/app-bytes", AppFile("CRONUS Core", "1.0.0.0"));
+
+    /// <summary>
+    /// The v1.0.0.0 Release with <paramref name="assets"/>, each the size of the file the
+    /// fake hands out for it, as GitHub reports it - staging compares sizes (#1230).
+    /// </summary>
+    private static string StagedReleaseJson(params (long Id, string Name)[] assets) =>
+        FakeGitHubApi.ReleaseJson(Repo, "v1.0.0.0", ReleaseId, assets: assets)
+            .Replace("\"size\":3", $"\"size\":{AppFile("CRONUS Core", "1.0.0.0").Length}");
 
     private const string StagedAppId = "c0ffee00-0000-0000-0000-000000000001";
 

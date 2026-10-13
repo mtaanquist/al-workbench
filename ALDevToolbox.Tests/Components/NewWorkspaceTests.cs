@@ -730,4 +730,37 @@ public sealed class NewWorkspaceTests : IDisposable
         cut.WaitForAssertion(() =>
             cut.Find("input[name='ShortName']").GetAttribute("value").Should().Be("MINE"));
     }
+
+    /// <summary>
+    /// #1238: Generate posts the ticked modules in the order they are listed,
+    /// so the preview has to allocate ID ranges in that order too - not the
+    /// order they were ticked - or the ZIP and the preview disagree.
+    /// </summary>
+    [Fact]
+    public async Task Module_id_ranges_in_the_preview_follow_list_order_not_tick_order()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            seed.RuntimeTemplates.Add(TemplateBuilder.Default());
+            seed.Modules.Add(ModuleBuilder.Default("banking", "Banking"));
+            seed.Modules.Add(ModuleBuilder.Default("document-capture", "Document Capture"));
+            await seed.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<NewWorkspace>();
+        cut.WaitForElement("input[name='SelectedModuleKeys'][value='banking']");
+        cut.Find("input[name='SelectedModuleKeys'][value='document-capture']").Change(true);
+        cut.Find("input[name='SelectedModuleKeys'][value='banking']").Change(true);
+
+        cut.FindAll("input[name='SelectedModuleKeys']").Select(i => i.GetAttribute("value"))
+            .Should().Equal(new[] { "banking", "document-capture" }, "the form posts in list order");
+        cut.WaitForAssertion(() =>
+        {
+            string? MetaOf(string folder) => cut.FindAll(".tree__row")
+                .First(r => r.QuerySelector(".tree__name")?.TextContent.Trim() == folder + "/")
+                .QuerySelector(".tree__meta")?.TextContent.Trim();
+            MetaOf("Banking").Should().Be("ID 91000-91199");
+            MetaOf("DocumentCapture").Should().Be("ID 91200-91399");
+        });
+    }
 }

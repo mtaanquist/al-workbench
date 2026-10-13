@@ -259,43 +259,59 @@ public sealed class AuthService
     }
 
     /// <summary>
-    /// True when the account has already had <see cref="MaxMfaAttempts"/>
-    /// consecutive failed auth attempts for this email within the lockout
-    /// window (no intervening success). Gates the second-factor challenge
-    /// endpoints so the short TOTP / recovery-code space can't be brute-forced
-    /// inside the renewable MfaPending window. Failures are counted from
-    /// <c>login_attempts</c>, which the challenge handlers now write on a wrong
-    /// code via <see cref="RecordMfaFailureAsync"/>. See #477.
+    /// Takes one second-factor attempt for the user before the code is
+    /// checked. Gates the TOTP and recovery-code challenges so their short
+    /// code space can't be brute-forced inside the renewable MfaPending
+    /// window: after <see cref="MaxMfaAttempts"/> consecutive failed attempts
+    /// for the user's email within the lockout window (no success between),
+    /// further attempts are refused. See #477.
+    ///
+    /// <para>The attempt is written to <c>login_attempts</c> as a failure
+    /// first and the throttle is then checked against every other attempt,
+    /// which is what makes the cap hold under parallel guesses: each request
+    /// sees the ones already in flight, where check-then-write let them all
+    /// read the same count (#1208). Returns the attempt's id, or
+    /// <see langword="null"/> when throttled (the attempt is then removed
+    /// again, so a refused request doesn't extend the lockout). On a right
+    /// code the caller hands the id to <see cref="ReleaseMfaAttemptAsync"/>;
+    /// on a wrong one the recorded failure stands, and also feeds the
+    /// per-email and per-IP login limits.</para>
     /// </summary>
-    public async Task<bool> IsMfaThrottledAsync(int userId, DateTime now, CancellationToken ct)
+    public async Task<int?> TryReserveMfaAttemptAsync(int userId, string ip, CancellationToken ct)
     {
         // Fence category 1 (pre-auth routing): MFA throttle between the two login legs;
         // pinned to u.Id == userId and then to that user's email.
         var email = await _db.Users.IgnoreQueryFilters()
             .Where(u => u.Id == userId).Select(u => u.Email).FirstOrDefaultAsync(ct);
-        if (email is null) return false;
+        if (email is null) return null;
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var attempt = new LoginAttempt { Email = email, Ip = ip ?? string.Empty, Succeeded = false, Timestamp = now };
+        _db.LoginAttempts.Add(attempt);
+        await _db.SaveChangesAsync(ct);
+
         var window = now - LockoutWindow;
-        var recent = await _db.LoginAttempts
-            .Where(a => a.Email == email && a.Timestamp >= window)
+        var others = await _db.LoginAttempts
+            .Where(a => a.Email == email && a.Timestamp >= window && a.Id != attempt.Id)
             .OrderByDescending(a => a.Timestamp)
+            .ThenByDescending(a => a.Id)
             .Take(MaxMfaAttempts)
+            .AsNoTracking()
             .ToListAsync(ct);
-        return recent.Count >= MaxMfaAttempts && recent.All(a => !a.Succeeded);
+        if (others.Count >= MaxMfaAttempts && others.All(a => !a.Succeeded))
+        {
+            await ReleaseMfaAttemptAsync(attempt.Id, ct);
+            return null;
+        }
+        return attempt.Id;
     }
 
     /// <summary>
-    /// Records a failed second-factor attempt for the user in
-    /// <c>login_attempts</c> (resolving the email from the id, since the MFA
-    /// challenge only carries the user id). Feeds both the MFA throttle
-    /// (<see cref="IsMfaThrottledAsync"/>) and the existing per-email/per-IP
-    /// login rate limits. See #477.
+    /// Withdraws an attempt <see cref="TryReserveMfaAttemptAsync"/> took, once
+    /// the code proved right: a correct second factor is not a failure.
     /// </summary>
-    public async Task RecordMfaFailureAsync(int userId, string ip, CancellationToken ct)
+    public async Task ReleaseMfaAttemptAsync(int attemptId, CancellationToken ct)
     {
-        var email = await _db.Users.IgnoreQueryFilters()
-            .Where(u => u.Id == userId).Select(u => u.Email).FirstOrDefaultAsync(ct);
-        if (email is null) return;
-        await RecordAttemptAsync(email, ip, succeeded: false, _clock.GetUtcNow().UtcDateTime, ct);
+        await _db.LoginAttempts.Where(a => a.Id == attemptId).ExecuteDeleteAsync(ct);
     }
 
     public async Task RecordAttemptAsync(string email, string ip, bool succeeded, DateTime timestamp, CancellationToken ct)

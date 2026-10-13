@@ -195,6 +195,12 @@ The MCP server (`Services/Mcp/Tools/*Tools.cs`) is a parallel front-end on the s
   tool's existing "not found" message, never a distinct refusal — see the
   project-visibility fence in `.design/teams-and-visibility.md` for the worked example.
 
+- **A new tool names the tool it belongs to.** Every entry in `McpToolCatalog` carries
+  the `ToolKey` whose switch (Administration -> Tools) turns it off, read-only tools
+  included; `McpToolGate` refuses the call and drops it from `tools/list` when that tool
+  is off. Leave it null only for a tool no single switch owns, and add it to the list in
+  `McpToolCatalogTests` when you do.
+
 - **A read-only area gets a read-only class, and a test that says so.** The Deliver
   area's reads (#912) live in `DeliverTools`, apart from `DeliveryTools` where the one
   write (`deploy_build`) sits behind its own gate. `DeliverToolsTests` walks the class

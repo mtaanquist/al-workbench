@@ -466,9 +466,16 @@ public sealed class GitHubAccessService
     /// <summary>
     /// Narrows <paramref name="repoFullNames"/> - typically everything the
     /// installation can see - to the ones <paramref name="userId"/> can see
-    /// themselves, preserving the caller's order. One call to GitHub per
-    /// repository, sequential: the picker's list is short and a burst of
-    /// parallel calls is how you meet a secondary rate limit.
+    /// themselves, preserving the caller's order.
+    ///
+    /// <para>When the organisation has connected an installation, that is one paged
+    /// read with the person's own token of the installation's repositories they can
+    /// reach, intersected with the names (#1232): asking per repository spent one of
+    /// the person's hourly GitHub calls on every row and took a minute on a large
+    /// organisation. A name the read did not reach (past its thousand) falls back to
+    /// the per-repository question, and so does every name when the read fails. Without an
+    /// installation, every name is asked about on its own, sequentially - a burst of
+    /// parallel calls is how you meet a secondary rate limit.</para>
     /// </summary>
     public async Task<IReadOnlyList<string>> FilterAccessibleAsync(
         int userId, IEnumerable<string> repoFullNames, CancellationToken ct = default)
@@ -486,16 +493,55 @@ public sealed class GitHubAccessService
             return [];
         }
 
+        var reachable = await ReachableInstallationRepositoriesAsync(userId, ct);
         var visible = new List<string>(candidates.Count);
         foreach (var name in candidates)
         {
-            if (await CanAccessRepoAsync(userId, name, ct)) visible.Add(name);
+            if (reachable is { } set && set.Names.Contains(name))
+            {
+                // Remembered, so choosing one of them does not ask GitHub again.
+                Remember($"repo:{userId}:{name.ToLowerInvariant()}", true);
+                visible.Add(name);
+            }
+            else if (reachable is null || reachable.Value.Truncated)
+            {
+                if (await CanAccessRepoAsync(userId, name, ct)) visible.Add(name);
+            }
         }
 
         _logger.LogInformation(
             "User {UserId} can see {VisibleCount} of {RepositoryCount} repositories in the connected organisation.",
             userId, visible.Count, candidates.Count);
         return visible;
+    }
+
+    /// <summary>
+    /// The connected installation's repositories <paramref name="userId"/> can reach
+    /// with their own token, read once, or null when the organisation has connected no
+    /// installation or GitHub did not answer the read - the caller then asks per
+    /// repository, as it always did, so a failed read costs speed and never a
+    /// repository the person can open.
+    /// </summary>
+    private async Task<(HashSet<string> Names, bool Truncated)?> ReachableInstallationRepositoriesAsync(
+        int userId, CancellationToken ct)
+    {
+        var installationId = (await _orgConfig.GetCurrentAsync(ct)).Settings.GitHubInstallationId;
+        if (installationId is null) return null;
+        var token = await ResolveUserTokenAsync(userId, ct);
+        if (token is null) return null;
+
+        try
+        {
+            var listing = await _github.ListUserInstallationRepositoriesAsync(token, installationId.Value, ct);
+            var names = listing.Repositories.Select(r => r.FullName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return (names, listing.Truncated);
+        }
+        catch (Exception ex) when (IsGitHubUnreachable(ex, ct))
+        {
+            _logger.LogWarning(ex,
+                "Could not read which repositories user {UserId} can reach in one go; asking about each one instead.", userId);
+            return null;
+        }
     }
 
     /// <summary>

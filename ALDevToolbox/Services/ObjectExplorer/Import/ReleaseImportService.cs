@@ -310,8 +310,12 @@ public class ReleaseImportService
     /// pattern. See GitHub issue #216.
     ///
     /// Flips <c>ready → ingesting</c> for the duration of the amend so
-    /// concurrent submits can be refused by the UI; back to <c>ready</c>
-    /// on success or <c>failed</c> on any exception. Re-runs the same
+    /// concurrent submits can be refused by the UI, and back to <c>ready</c>
+    /// whatever happens. The amend's writes run in one transaction, so a refused
+    /// upload (an NEA-encrypted .app, a clashing version), any other failure or
+    /// a cancelled request rolls them back and leaves the release as it was: it
+    /// held good data, and failing it would take it out of the pickers and let
+    /// the next build replace it (#1221). Re-runs the same
     /// release-scoped post-passes <see cref="ImportReleaseAsync"/> uses,
     /// and reindexes extracted call-site references (option 1 from #216)
     /// so a late-landing module retroactively resolves earlier modules'
@@ -381,8 +385,10 @@ public class ReleaseImportService
             release.Id, release.Label, uploads.Count);
 
         var totals = new ImportTotals();
+        OeRelease ready;
         try
         {
+            await using var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
             foreach (var upload in uploads)
             {
                 ct.ThrowIfCancellationRequested();
@@ -398,10 +404,13 @@ public class ReleaseImportService
             await ResolveNumericSourceTableNamesAsync(release.Id, ct).ConfigureAwait(false);
             await ResolveVariableTargetsAsync(release.Id, ct).ConfigureAwait(false);
             await DeleteExtractedCallSiteReferencesAsync(release.Id, ct).ConfigureAwait(false);
+            // The emit also writes a system reference per built-in call site,
+            // for every module in the release, so those go too (#1223).
+            await DeleteSystemReferencesAsync(release.Id, ct).ConfigureAwait(false);
             totals.ReferencesImported += await _callSites.EmitAsync(orgId, release.Id, ct).ConfigureAwait(false);
 
             _db.ChangeTracker.Clear();
-            var ready = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct).ConfigureAwait(false)
+            ready = await _db.OeReleases.FindAsync(new object?[] { release.Id }, ct).ConfigureAwait(false)
                 ?? throw new InvalidOperationException($"Release {release.Id} disappeared mid-amend.");
 
             // Re-infer BcVersion so amending the Base App into a previously
@@ -430,38 +439,65 @@ public class ReleaseImportService
             ready.SourceContentLength = totalsRow?.Length ?? 0;
 
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-
-
-            // A new Business Central release is exactly when the customer
-            // repositories that target the old one become worth knowing about,
-            // so the drift scan runs here (issue #630). Best-effort: a GitHub
-            // that will not answer must not fail an import that has already
-            // landed every module it was given.
-            await ScanForDependencyDriftAsync(ready, ct).ConfigureAwait(false);
-
-            _logger.LogInformation(
-                "Completed Release amend: ReleaseId={ReleaseId} ModulesImported={ModulesImported} ModulesSkipped={ModulesSkipped} ObjectsImported={ObjectsImported} ReferencesImported={ReferencesImported} TranslationsImported={TranslationsImported}",
-                release.Id, totals.ModulesImported, totals.ModulesSkipped, totals.ObjectsImported, totals.ReferencesImported, totals.TranslationsImported);
-
-            return new ReleaseImportSummary(
-                ReleaseId: release.Id,
-                ModulesImported: totals.ModulesImported,
-                ModulesSkipped: totals.ModulesSkipped,
-                ObjectsImported: totals.ObjectsImported,
-                ReferencesImported: totals.ReferencesImported,
-                SourceFilesImported: totals.SourceFilesImported,
-                TranslationsImported: totals.TranslationsImported);
+            // Not cancellable: once every row is written, a request cancelled at
+            // the last step should not throw the work away.
+            await tx.CommitAsync(CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex,
-                "Release amend failed: ReleaseId={ReleaseId} ModulesImportedBeforeFailure={ModulesImported}",
-                release.Id, totals.ModulesImported);
-            // Cancelled or not: an amend has no job to resume it, so leaving it
-            // importing would only strand it until the next restart (#1180).
-            await StampFailedAsync(release.Id, ex.Message).ConfigureAwait(false);
+            if (ex is PlanValidationException or OperationCanceledException)
+            {
+                _logger.LogInformation(
+                    "Release amend refused or cancelled and rolled back: ReleaseId={ReleaseId} Reason={Reason}",
+                    release.Id, ex.Message);
+            }
+            else
+            {
+                _logger.LogError(ex,
+                    "Release amend failed and rolled back: ReleaseId={ReleaseId} ModulesImportedBeforeFailure={ModulesImported}",
+                    release.Id, totals.ModulesImported);
+            }
+            // Disposing the transaction rolled back every row the amend wrote, so
+            // the release holds what it held before: hand it back ready. An amend
+            // has no job to resume it, so leaving it importing would strand it (#1180).
+            await RestoreReadyAsync(release.Id).ConfigureAwait(false);
             throw;
         }
+
+        // A new Business Central release is exactly when the customer
+        // repositories that target the old one become worth knowing about,
+        // so the drift scan runs here (issue #630). Best-effort: a GitHub
+        // that will not answer must not fail an import that has already
+        // landed every module it was given.
+        await ScanForDependencyDriftAsync(ready, ct).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Completed Release amend: ReleaseId={ReleaseId} ModulesImported={ModulesImported} ModulesSkipped={ModulesSkipped} ObjectsImported={ObjectsImported} ReferencesImported={ReferencesImported} TranslationsImported={TranslationsImported}",
+            release.Id, totals.ModulesImported, totals.ModulesSkipped, totals.ObjectsImported, totals.ReferencesImported, totals.TranslationsImported);
+
+        return new ReleaseImportSummary(
+            ReleaseId: release.Id,
+            ModulesImported: totals.ModulesImported,
+            ModulesSkipped: totals.ModulesSkipped,
+            ObjectsImported: totals.ObjectsImported,
+            ReferencesImported: totals.ReferencesImported,
+            SourceFilesImported: totals.SourceFilesImported,
+            TranslationsImported: totals.TranslationsImported);
+    }
+
+    /// <summary>
+    /// Puts an amended release back to <c>ready</c> after its amend rolled back. Never
+    /// cancelled, for the reason <see cref="StampFailedAsync"/> gives.
+    /// </summary>
+    private async Task RestoreReadyAsync(int releaseId)
+    {
+        _db.ChangeTracker.Clear();
+        var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, CancellationToken.None).ConfigureAwait(false);
+        if (release is null) return;
+        release.Status = "ready";
+        release.StatusMessage = null;
+        release.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>
