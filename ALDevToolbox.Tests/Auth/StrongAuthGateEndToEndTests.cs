@@ -56,6 +56,40 @@ public sealed class StrongAuthGateEndToEndTests : IDisposable
         (await read.PersonalAccessTokens.IgnoreQueryFilters().AnyAsync()).Should().BeFalse();
     }
 
+    [Fact]
+    public async Task Every_static_file_reaches_an_unenrolled_member()
+    {
+        // The enrolment page has to render with its stylesheets, fonts and
+        // scripts, and those live at the site root, not under a folder an
+        // allow-list could name (#1214). Pinned against the real wwwroot.
+        using var client = await SignedInUnenrolledAsync();
+        var webRoot = Path.Combine(ProjectFolder(), "wwwroot");
+        var paths = Directory.EnumerateFiles(webRoot, "*", SearchOption.AllDirectories)
+            .Select(f => "/" + Path.GetRelativePath(webRoot, f).Replace(Path.DirectorySeparatorChar, '/'))
+            .ToList();
+        paths.Should().Contain(["/tokens.css", "/app.css", "/theme.js", "/favicon.svg"]);
+
+        foreach (var path in paths)
+        {
+            using var response = await client.GetAsync(path);
+            response.StatusCode.Should().Be(HttpStatusCode.OK, $"{path} must not be held back by the gate");
+        }
+
+        using var page = await client.GetAsync("/");
+        page.StatusCode.Should().Be(HttpStatusCode.Redirect, "pages themselves are still gated");
+        page.Headers.Location!.OriginalString.Should().EndWith("/account/security?required=1");
+    }
+
+    private static string ProjectFolder()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "ALDevToolbox", "ALDevToolbox.csproj")))
+        {
+            dir = dir.Parent;
+        }
+        return Path.Combine(dir!.FullName, "ALDevToolbox");
+    }
+
     private async Task<HttpClient> SignedInUnenrolledAsync()
     {
         await using (var seed = _db.NewContext())

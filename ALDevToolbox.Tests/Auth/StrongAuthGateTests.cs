@@ -169,7 +169,7 @@ public sealed class StrongAuthGateTests : IDisposable
         StrongAuthGate.AllowedPathPrefixes.Should().Equal(
             "/account", "/auth", "/mcp", "/oauth", "/.well-known", "/login", "/signup",
             "/_blazor", "/_framework", "/_content", "/healthz", "/readyz", "/not-found",
-            "/Error", "/css", "/js", "/favicon.ico");
+            "/Error", "/favicon.ico");
     }
 
     [Theory]
