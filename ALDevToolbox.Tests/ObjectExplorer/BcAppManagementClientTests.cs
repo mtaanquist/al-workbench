@@ -451,6 +451,47 @@ public sealed class BcAppManagementClientTests
         thrown.Message.Should().Contain("Forbidden");
     }
 
+    // ── Timeouts (#1233) ──────────────────────────────────────────────────
+
+    /// <summary>Throws what HttpClient throws when its own timeout runs out.</summary>
+    private sealed class TimingOutHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout.",
+                new TimeoutException());
+    }
+
+    [Fact]
+    public async Task A_call_that_times_out_is_business_central_not_answering_rather_than_a_cancel()
+    {
+        var client = new BcAppManagementClient(new StubFactory(new TimingOutHandler()), NullLogger<BcAppManagementClient>.Instance);
+
+        var poll = () => client.GetAppOperationAsync(Token, Family, Environment, Guid.NewGuid(), Guid.NewGuid());
+
+        (await poll.Should().ThrowAsync<BcApiException>()).Which.StatusCode.Should().BeNull();
+    }
+
+    /// <summary>Waits until the call is cancelled, as a slow Business Central would.</summary>
+    private sealed class HangingHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            throw new InvalidOperationException("Unreachable.");
+        }
+    }
+
+    [Fact]
+    public async Task A_call_the_caller_cancels_stays_a_cancel()
+    {
+        var client = new BcAppManagementClient(new StubFactory(new HangingHandler()), NullLogger<BcAppManagementClient>.Instance);
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+
+        var poll = () => client.GetAppOperationAsync(Token, Family, Environment, Guid.NewGuid(), Guid.NewGuid(), cts.Token);
+
+        await poll.Should().ThrowAsync<OperationCanceledException>();
+    }
+
     // ── Wire-value constants ──────────────────────────────────────────────
 
     [Fact]
