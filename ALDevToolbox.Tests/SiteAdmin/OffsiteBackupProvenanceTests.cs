@@ -236,6 +236,53 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
             });
     }
 
+    // ---- #1279: whole-database dump provenance and the manifest slug ----------
+
+    [Fact]
+    public async Task Dump_download_refuses_a_dump_stamped_by_another_deployment()
+    {
+        await ConfigureOffsiteAsync();
+        PutDump("theirs", _neighbour, Now.AddDays(-1));
+
+        var act = () => NewOffsite(_us).DownloadAsync(DumpKey("theirs"), progress: null, default);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*different deployment*");
+        Directory.GetFiles(_options.Directory).Should().BeEmpty("nothing of another deployment's may land here");
+        await using var ctx = _db.NewContext();
+        (await ctx.Backups.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Dump_download_accepts_an_unstamped_legacy_dump()
+    {
+        await ConfigureOffsiteAsync();
+        PutDump("legacy", null, Now.AddDays(-1));
+
+        var id = await NewOffsite(_us).DownloadAsync(DumpKey("legacy"), progress: null, default);
+
+        await using var ctx = _db.NewContext();
+        var row = await ctx.Backups.AsNoTracking().SingleAsync(b => b.Id == id);
+        row.OffsiteObjectKey.Should().Be(DumpKey("legacy"));
+        File.Exists(Path.Combine(_options.Directory, row.FileName)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Per_tenant_download_refuses_a_snapshot_whose_manifest_names_another_organisation()
+    {
+        await ConfigureOffsiteAsync();
+        var ours = await CreateSnapshotAsync(_us);
+        var key = SnapshotKey("other", "moved");
+        _store.Put(key, await File.ReadAllBytesAsync(SnapshotPath(ours)), Stamp(_us), Now);
+
+        var act = () => NewOffsite(_us).DownloadPerTenantAsync(key, progress: null, default);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*manifest names org 'default'*");
+        Directory.GetFiles(Path.Combine(_options.Directory, "tenants", "other"))
+            .Should().BeEmpty("the staging copy is deleted along with the refusal");
+        await using var ctx = _db.NewContext();
+        (await ctx.PerTenantBackups.CountAsync(b => b.OrganizationId == TestDb.OtherOrgId)).Should().Be(0);
+    }
+
     // ---- #1269: a downloaded dump keeps the date in its name -----------------
 
     [Theory]

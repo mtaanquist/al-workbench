@@ -286,6 +286,54 @@ public sealed class PerTenantBackupServiceTests : IDisposable
         Directory.GetFiles(dir).Should().BeEmpty("neither the finished file nor its staging copy may outlive the failure");
     }
 
+    /// <summary>
+    /// Snapshots carry no tenant query filter, so the prune's own organisation
+    /// predicate is the only thing between one tenant's retention and another
+    /// tenant's snapshots (#1279).
+    /// </summary>
+    [Fact]
+    public async Task Prune_removes_only_that_organisations_oldest_unpinned_snapshots()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            var settings = await ctx.SystemSettings.SingleAsync(s => s.Id == 1);
+            settings.PerTenantBackupRetentionCount = 1;
+            await ctx.SaveChangesAsync();
+        }
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var aNewest = await SeedSnapshotRowAsync(OrgA, "a-newest", now.AddDays(-1));
+        await SeedSnapshotRowAsync(OrgA, "a-old", now.AddDays(-2));
+        await SeedSnapshotRowAsync(OrgA, "a-oldest", now.AddDays(-3));
+        var aPinned = await SeedSnapshotRowAsync(OrgA, "a-pinned", now.AddDays(-9), pinned: true);
+        var bOld = await SeedSnapshotRowAsync(OrgB, "b-old", now.AddDays(-5));
+        var bOldest = await SeedSnapshotRowAsync(OrgB, "b-oldest", now.AddDays(-6));
+
+        await using (var ctx = _db.NewContext())
+            await NewService(ctx).PruneRetentionAsync(OrgA);
+
+        await using var read = _db.NewContext();
+        (await read.PerTenantBackups.AsNoTracking().Select(b => b.Id).ToListAsync())
+            .Should().BeEquivalentTo([aNewest, aPinned, bOld, bOldest]);
+    }
+
+    private async Task<int> SeedSnapshotRowAsync(int organizationId, string name, DateTime createdAt, bool pinned = false)
+    {
+        await using var ctx = _db.NewContext();
+        var row = new PerTenantBackup
+        {
+            OrganizationId = organizationId,
+            FileName = name + PerTenantBackupService.FileSuffix,
+            FileSizeBytes = 1,
+            CreatedAt = createdAt,
+            Kind = BackupKind.Scheduled,
+            SchemaVersion = PerTenantBackupService.CurrentSchemaVersion,
+            IsPinned = pinned,
+        };
+        ctx.PerTenantBackups.Add(row);
+        await ctx.SaveChangesAsync();
+        return row.Id;
+    }
+
     /// <summary>Fails the save that registers a snapshot, after its file has been written.</summary>
     private sealed class FailingSnapshotSave : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
     {

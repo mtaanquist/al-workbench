@@ -157,6 +157,81 @@ public sealed class BackupSchedulerTests : IDisposable
         Runs(runs).Should().Be(2, "it does try again once the pause is over");
     }
 
+    // ===== The scheduled per-tenant snapshots (#1279) =====
+
+    [Fact]
+    public async Task Each_organisation_gets_one_snapshot_per_window_and_system_and_pending_ones_none()
+    {
+        await SeedSettingsAsync(enabled: true, scheduledTimeUtc: new TimeOnly(2, 0));
+        _clock.Advance(TimeSpan.FromHours(2) + TimeSpan.FromSeconds(5));
+        var pending = await SeedOrganizationAsync("pending", isPending: true);
+        var served = await SeedOrganizationAsync("served", isPending: false);
+        await using (var seed = _db.NewContext())
+        {
+            // Today's slot for this one is already taken.
+            seed.PerTenantBackups.Add(new PerTenantBackup
+            {
+                OrganizationId = served, FileName = "served-today" + PerTenantBackupService.FileSuffix, FileSizeBytes = 1,
+                CreatedAt = _clock.GetUtcNow().UtcDateTime.AddSeconds(-1), Kind = BackupKind.Scheduled,
+                SchemaVersion = PerTenantBackupService.CurrentSchemaVersion,
+            });
+            await seed.SaveChangesAsync();
+        }
+        var options = _options with { PgDumpPath = StubPgDump(exitCode: 0, out _) };
+
+        await TickOnceAsync(options: options);
+
+        await using var read = _db.NewContext();
+        var perOrg = await read.PerTenantBackups.AsNoTracking()
+            .GroupBy(b => b.OrganizationId)
+            .ToDictionaryAsync(g => g.Key, g => g.Count());
+        perOrg.Should().BeEquivalentTo(new Dictionary<int, int>
+        {
+            [TestDb.OtherOrgId] = 1,
+            [served] = 1,
+        }, "the system organisation and a pending one get none, and a served slot is not taken twice");
+        perOrg.Should().NotContainKey(pending);
+    }
+
+    [Fact]
+    public async Task Single_tenant_mode_takes_the_backup_but_no_per_tenant_snapshots()
+    {
+        await SeedSettingsAsync(enabled: true, scheduledTimeUtc: new TimeOnly(2, 0));
+        _clock.Advance(TimeSpan.FromHours(2) + TimeSpan.FromSeconds(5));
+        var options = _options with { PgDumpPath = StubPgDump(exitCode: 0, out _) };
+
+        await TickOnceAsync(NewScheduler(singleTenant: true), options);
+
+        await using var read = _db.NewContext();
+        (await read.Backups.CountAsync()).Should().Be(1);
+        (await read.PerTenantBackups.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_tick_during_a_restore_takes_nothing()
+    {
+        await SeedSettingsAsync(enabled: true, scheduledTimeUtc: new TimeOnly(2, 0));
+        _clock.Advance(TimeSpan.FromHours(2) + TimeSpan.FromSeconds(5));
+        var options = _options with { PgDumpPath = StubPgDump(exitCode: 0, out var runs) };
+        _maintenance.Enter("Restoring from a backup.");
+
+        await TickOnceAsync(options: options);
+
+        Runs(runs).Should().Be(0);
+        await using var read = _db.NewContext();
+        (await read.Backups.CountAsync()).Should().Be(0);
+        (await read.PerTenantBackups.CountAsync()).Should().Be(0);
+    }
+
+    private async Task<int> SeedOrganizationAsync(string slug, bool isPending)
+    {
+        await using var ctx = _db.NewContext();
+        var org = new Organization { Name = slug, Slug = slug, IsPending = isPending, CreatedAt = DateTime.UtcNow };
+        ctx.Organizations.Add(org);
+        await ctx.SaveChangesAsync();
+        return org.Id;
+    }
+
     // ===== Fixture helpers =====
 
     private async Task SeedSettingsAsync(bool enabled, TimeOnly scheduledTimeUtc)
