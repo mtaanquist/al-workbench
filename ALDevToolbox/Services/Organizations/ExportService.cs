@@ -60,11 +60,21 @@ public class ExportService
         var templateRows = await _db.RuntimeTemplates
             .AsNoTracking()
             .Where(t => t.DeletedAt == null)
+            // Same graph the admin TOML editor loads (TemplateService.GetAuthoringByKeyAsync)
+            // so the exported template.toml matches "open in TOML mode" instead of
+            // silently dropping dependencies, included files and root folders (#1220).
             .Include(t => t.WorkspaceExtensions.OrderBy(e => e.Ordering))
+                .ThenInclude(e => e.Dependencies.OrderBy(d => d.Ordering))
             .Include(t => t.DefaultModules.OrderBy(d => d.Ordering))
                 .ThenInclude(d => d.Module!)
+            .Include(t => t.IncludedFiles.OrderBy(j => j.Ordering))
+                .ThenInclude(j => j.OrganizationFile!)
+            .Include(t => t.RootFolders.OrderBy(f => f.Ordering))
             .Include(t => t.DefaultApplicationVersion)
             .ToListAsync(ct);
+        // The extension folder/file tree needs the flat-query hydrator, the same
+        // as the module export below.
+        await _folderTree.HydrateExtensionFolderTreeAsync(templateRows, ct);
 
         // Sort client-side because Runtime is a text column and lexicographic
         // order would put "10" before "9". TemplateService exposes the
