@@ -147,12 +147,33 @@ internal static class StrongAuthGate
     internal static bool IsAllowed(PathString path)
     {
         if (!path.HasValue) return true;
+        foreach (var prefix in GatedPathPrefixes)
+        {
+            if (path.StartsWithSegments(prefix)) return false;
+        }
         foreach (var prefix in AllowedPathPrefixes)
         {
             if (path.StartsWithSegments(prefix)) return true;
         }
         return false;
     }
+
+    /// <summary>
+    /// Paths inside an allow-listed prefix that are gated all the same: the
+    /// ones that hand out a long-lived credential. A personal access token or
+    /// an assistant's OAuth grant keeps working without a second factor
+    /// (PAT and bearer requests pass the gate, see #372), so letting a
+    /// password-only session mint one would turn the requirement into a
+    /// formality. The consent page and its form post are gated, while the
+    /// token, registration and discovery endpoints the assistant itself calls
+    /// stay open. Revoking a token stays reachable. See issue #1206.
+    /// </summary>
+    internal static readonly string[] GatedPathPrefixes =
+    [
+        "/auth/account/access-tokens/create",
+        "/oauth/consent",
+        "/oauth/authorize",
+    ];
 
     /// <summary>
     /// The allow-list itself, as data so a test can assert the exact set
