@@ -79,6 +79,7 @@ public sealed class PerTenantBackupService
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly StorageQuotaGuard _quotaGuard;
+    private readonly OrganizationConfigService _orgConfig;
     private readonly ILogger<PerTenantBackupService> _logger;
     private readonly TimeProvider _clock;
     private readonly string _connectionString;
@@ -88,6 +89,7 @@ public sealed class PerTenantBackupService
         AppDbContext db,
         IOrganizationContext orgContext,
         StorageQuotaGuard quotaGuard,
+        OrganizationConfigService orgConfig,
         IConfiguration configuration,
         ILogger<PerTenantBackupService> logger,
         TimeProvider clock,
@@ -98,6 +100,7 @@ public sealed class PerTenantBackupService
         _db = db;
         _orgContext = orgContext;
         _quotaGuard = quotaGuard;
+        _orgConfig = orgConfig;
         _logger = logger;
         _clock = clock;
         _connectionString = configuration.GetConnectionString("DefaultConnection")
@@ -434,6 +437,10 @@ public sealed class PerTenantBackupService
             "Restored per-tenant snapshot {FileName} for org {OrgSlug} in {ElapsedMs} ms.",
             row.FileName, row.Organization.Slug, sw.ElapsedMilliseconds);
         _quotaGuard.Invalidate(row.OrganizationId);
+        // The restore rewrote organization_settings, organization_assets and
+        // organization_files underneath the cached config, which has no expiry
+        // (#1218). Every other writer of those tables drops it the same way.
+        _orgConfig.InvalidateCache(row.OrganizationId);
     }
 
     /// <summary>Pins or unpins a snapshot (exempts it from retention pruning).</summary>

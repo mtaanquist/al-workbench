@@ -185,6 +185,42 @@ public sealed class PerTenantBackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Restore_drops_the_cached_organisation_config()
+    {
+        // #1218: the restore rewrites organization_files underneath the cached
+        // config, which never expires on its own.
+        await SeedOrgAsync(OrgA, "a");
+        var backup = await CreateAsync(OrgA);
+        await using (var ctx = _db.NewContext())
+        {
+            // Written past the config service, so its cache is not dropped here.
+            ctx.OrganizationFiles.Add(new OrganizationFile
+            {
+                OrganizationId = OrgA, Path = "after-snapshot.txt", Content = "x", Ordering = 1,
+                UpdatedAt = _clock.GetUtcNow().UtcDateTime,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var warm = await _db.NewOrganizationConfigService(ctx).GetForAsync(OrgA);
+            warm.Files.Select(f => f.Path).Should().Contain("after-snapshot.txt",
+                "the cache must hold the post-snapshot state before the restore");
+        }
+
+        await RestoreAsync(backup.Id);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var after = await _db.NewOrganizationConfigService(ctx).GetForAsync(OrgA);
+            after.Files.Select(f => f.Path).Should().Contain("a/.gitattributes")
+                .And.NotContain("after-snapshot.txt",
+                    "the config served after a restore must be the restored one, not the cached pre-restore copy");
+        }
+    }
+
+    [Fact]
     public async Task Snapshot_reads_every_table_as_of_one_moment()
     {
         // #1217: a row committed while the snapshot is part-way through must not
@@ -243,7 +279,7 @@ public sealed class PerTenantBackupServiceTests : IDisposable
             ["ConnectionStrings:DefaultConnection"] = _db.ConnectionString,
         }).Build();
         return new PerTenantBackupService(
-            ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), config,
+            ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), config,
             NullLogger<PerTenantBackupService>.Instance, _clock, _options);
     }
 
