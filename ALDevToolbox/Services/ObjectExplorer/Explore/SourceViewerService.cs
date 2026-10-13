@@ -557,7 +557,8 @@ public sealed class SourceViewerService
 
     /// <summary>
     /// "Find in this file" — extracts the word at the supplied click position
-    /// and returns every line of the same file that contains it.
+    /// and returns every line of the same file that contains it as a whole
+    /// word, ignoring case.
     /// </summary>
     public async Task<FileWordSearch?> FindInFileAsync(
         long fileId, int line, int column, CancellationToken ct = default)
@@ -574,7 +575,9 @@ public sealed class SourceViewerService
         var lines = OeSourceText.SplitLines(content);
         for (var i = 0; i < lines.Length; i++)
         {
-            if (lines[i].Contains(word, StringComparison.Ordinal))
+            // AL identifiers are case-insensitive, and a match inside a longer
+            // identifier (Insert in InsertRecord) is not the same name (#1262).
+            if (ReferenceSessionService.IndexOfWord(lines[i], word, 0) >= 0)
             {
                 var trimmed = lines[i].TrimEnd();
                 if (trimmed.Length > 200) trimmed = trimmed[..200] + "...";

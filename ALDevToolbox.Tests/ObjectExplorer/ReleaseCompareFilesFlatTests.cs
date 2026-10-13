@@ -153,6 +153,103 @@ public sealed class ReleaseCompareFilesFlatTests : IDisposable
         winning.Should().Equal(newer.Id);
     }
 
+    /// <summary>
+    /// The database cut and the in-memory sort used different orders (the
+    /// column's en_US collation against OrdinalIgnoreCase), so past the cap the
+    /// "first N" could skip rows in the middle. en_US ranks "A1" before "a b";
+    /// a case-insensitive ordinal sort puts it after "a-b" (#1262).
+    /// </summary>
+    [Fact]
+    public async Task Flat_compare_cut_is_a_clean_prefix_with_mixed_case_and_punctuation()
+    {
+        int leftId, rightId;
+        await using (var ctx = _db.NewContext())
+        {
+            var left = NewRelease("Sort left");
+            var right = NewRelease("Sort right");
+            ctx.OeReleases.AddRange(left, right);
+            await ctx.SaveChangesAsync();
+            await EnsureContentAsync(ctx, HashA);
+            var fresh = NewModule(right.Id, Guid.NewGuid(), "Right Only App", "1.0.0.0");
+            ctx.OeModules.Add(fresh);
+            await ctx.SaveChangesAsync();
+            foreach (var path in new[] { "src/A1.al", "src/a b.al", "src/a-b.al", "src/a.b.al", "src/Ab.al" })
+            {
+                ctx.OeModuleFiles.Add(NewFile(fresh.Id, path, HashA));
+            }
+            await ctx.SaveChangesAsync();
+            (leftId, rightId) = (left.Id, right.Id);
+        }
+
+        await using var read = _db.NewContext();
+        var comparison = NewComparison(read);
+        var all = await comparison.CompareReleaseFilesFlatAsync(leftId, rightId, take: null);
+
+        for (var take = 1; take < all.Count; take++)
+        {
+            var capped = await comparison.CompareReleaseFilesFlatAsync(leftId, rightId, take: take);
+            capped.Select(r => r.Path).Should().Equal(all.Take(take + 1).Select(r => r.Path),
+                because: $"a cut at {take} must keep the first rows of the full order, with no gaps");
+        }
+    }
+
+    /// <summary>
+    /// Objects from a symbols-only app have no source file, so there is no hash
+    /// to compare, and every one of them used to read "modified" (#1262). Two
+    /// releases holding the same app package compare as unchanged; a newer
+    /// version of the app still reads as modified.
+    /// </summary>
+    [Fact]
+    public async Task Object_compare_of_identical_symbols_only_apps_reports_unchanged()
+    {
+        await using var ctx = _db.NewContext();
+        var left = NewRelease("Symbols left");
+        var same = NewRelease("Symbols same");
+        var newer = NewRelease("Symbols newer");
+        ctx.OeReleases.AddRange(left, same, newer);
+        await ctx.SaveChangesAsync();
+        var appId = Guid.NewGuid();
+        var modules = new[]
+        {
+            NewModule(left.Id, appId, "Symbols App", "1.0.0.0"),
+            NewModule(same.Id, appId, "Symbols App", "1.0.0.0"),
+            NewModule(newer.Id, appId, "Symbols App", "2.0.0.0"),
+        };
+        modules[0].AppFileHash = modules[1].AppFileHash = "app-v1";
+        modules[2].AppFileHash = "app-v2";
+        ctx.OeModules.AddRange(modules);
+        await ctx.SaveChangesAsync();
+        foreach (var m in modules)
+        {
+            ctx.OeModuleObjects.Add(new OeModuleObject
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ModuleId = m.Id,
+                Kind = "table",
+                ObjectId = 50100,
+                Name = "Symbols Table",
+            });
+        }
+        await ctx.SaveChangesAsync();
+
+        await using var read = _db.NewContext();
+        var comparison = NewComparison(read);
+
+        var unchanged = await comparison.CompareReleaseObjectsAsync(left.Id, same.Id, includeUnchanged: true);
+        unchanged.Rows.Should().ContainSingle().Which.Status.Should().Be("unchanged");
+
+        var changed = await comparison.CompareReleaseObjectsAsync(left.Id, newer.Id, includeUnchanged: true);
+        changed.Rows.Should().ContainSingle().Which.Status.Should().Be("modified");
+    }
+
+    private static async Task EnsureContentAsync(AppDbContext ctx, string hash)
+    {
+        if (!await ctx.OeFileContents.AnyAsync(c => c.ContentHash == hash))
+        {
+            ctx.OeFileContents.Add(new OeFileContent { ContentHash = hash, Content = "// " + hash, ContentLength = 10, LineCount = 1 });
+        }
+    }
+
     private ReleaseComparisonService NewComparison(AppDbContext ctx) =>
         new(ctx, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseComparisonService>.Instance);
 

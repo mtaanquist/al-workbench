@@ -95,9 +95,10 @@ public sealed record CompareTargetOption(
 /// independent releases up by object identity — the shape a legacy C/AL
 /// Base-vs-Customer diff needs, since each C/AL release is its own synthetic
 /// module with a distinct AppId. <see cref="Status"/> is decided by the
-/// objects' source-slice <c>content_hash</c>. For <c>modified</c> rows both
-/// file ids are set, so the row links straight into the side-by-side source
-/// diff at <c>/object-explorer/compare/file</c>.
+/// <c>content_hash</c> of the source file holding each object, or by the owning
+/// app package when neither side has source (symbols-only apps). A
+/// <c>modified</c> row with both file ids set links straight into the
+/// side-by-side source diff at <c>/object-explorer/compare/file</c>.
 /// </summary>
 public sealed record ObjectCompareRow(
     string Kind,

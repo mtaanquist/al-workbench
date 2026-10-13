@@ -763,6 +763,31 @@ public sealed class ExplorerTreeTests : IDisposable
     }
 
     /// <summary>
+    /// "_" and "%" are LIKE wildcards; unescaped, a search for "__" or "%%"
+    /// matched every file in the release (#1262).
+    /// </summary>
+    [Theory]
+    [InlineData("__", "src/Odd/My__Helper.Codeunit.al")]
+    [InlineData("%%", "src/Odd/Rate%%Calc.Codeunit.al")]
+    public async Task Search_treats_wildcard_characters_literally(string query, string expectedPath)
+    {
+        var releaseId = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var (_, _, moduleId) = await AFileAsync(ctx);
+            await AddFileAsync(ctx, moduleId, "src/Odd/My__Helper.Codeunit.al");
+            await AddFileAsync(ctx, moduleId, "src/Odd/Rate%%Calc.Codeunit.al");
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var hits = await NewTree(read).SearchTreeAsync(releaseId, query);
+
+        hits.Should().ContainSingle(h => h.Kind == "file")
+            .Which.Path.Should().Be(expectedPath);
+    }
+
+    /// <summary>
     /// A search box is reachable by anyone signed in, and the release id comes
     /// off the URL. The query filter is the only thing scoping it.
     /// </summary>
