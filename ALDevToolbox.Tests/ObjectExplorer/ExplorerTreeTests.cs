@@ -762,6 +762,81 @@ public sealed class ExplorerTreeTests : IDisposable
         upper.Select(h => h.FileId).Should().BeEquivalentTo(lower.Select(h => h.FileId));
     }
 
+    // ── ListModuleTreeAsync (#1273) ────────────────────────────────────
+
+    [Fact]
+    public async Task Module_tree_by_folder_lists_the_apps_files_and_marks_the_active_one()
+    {
+        await SeedAsync();
+        await using var ctx = _db.NewContext();
+        var (fileId, _, moduleId) = await AFileAsync(ctx);
+        var fileCount = await ctx.OeModuleFiles.CountAsync(f => f.ModuleId == moduleId);
+
+        var nodes = await NewTree(ctx).ListModuleTreeAsync(moduleId, ExplorerTreeService.TreeGrouping.Folder, fileId);
+
+        nodes.Where(n => n.Kind == "file").Should().HaveCount(fileCount);
+        nodes.Should().ContainSingle(n => n.IsActive).Which.FileId.Should().Be(fileId);
+    }
+
+    [Fact]
+    public async Task Module_tree_by_kind_puts_each_file_under_its_kinds_section_in_reading_order()
+    {
+        await SeedAsync();
+        await using var ctx = _db.NewContext();
+        var (fileId, _, moduleId) = await AFileAsync(ctx);
+        var fileCount = await ctx.OeModuleFiles.CountAsync(f => f.ModuleId == moduleId);
+
+        var nodes = await NewTree(ctx).ListModuleTreeAsync(moduleId, ExplorerTreeService.TreeGrouping.Kind, fileId);
+
+        var sections = nodes.Where(n => n.Kind == "section").ToList();
+        sections.Should().NotBeEmpty();
+        sections.Should().OnlyContain(s => s.Depth == 0);
+        nodes.Where(n => n.Kind == "file").Should().HaveCount(fileCount)
+            .And.OnlyContain(n => n.Depth == 1);
+        nodes.First().Kind.Should().Be("section", because: "every file sits under a heading");
+
+        // Each section's badge counts the files listed under it.
+        for (var i = 0; i < nodes.Count; i++)
+        {
+            if (nodes[i].Kind != "section") continue;
+            var under = nodes.Skip(i + 1).TakeWhile(n => n.Kind == "file").Count();
+            nodes[i].Badge.Should().Be(under.ToString("N0"));
+        }
+
+        // Codeunits come before "Other files", whatever the alphabet says.
+        var titles = sections.Select(s => s.Name).ToList();
+        if (titles.Contains("Codeunits") && titles.Contains("Other files"))
+        {
+            titles.IndexOf("Codeunits").Should().BeLessThan(titles.IndexOf("Other files"));
+        }
+        nodes.Should().ContainSingle(n => n.IsActive).Which.FileId.Should().Be(fileId);
+    }
+
+    [Fact]
+    public async Task Module_tree_with_an_unknown_grouping_falls_back_to_folders()
+    {
+        await SeedAsync();
+        await using var ctx = _db.NewContext();
+        var (_, _, moduleId) = await AFileAsync(ctx);
+        var tree = NewTree(ctx);
+
+        var unknown = await tree.ListModuleTreeAsync(moduleId, "made-up");
+        var folder = await tree.ListModuleTreeAsync(moduleId, ExplorerTreeService.TreeGrouping.Folder);
+
+        unknown.Select(n => n.FileId).Should().Equal(folder.Select(n => n.FileId));
+        unknown.Should().NotContain(n => n.Kind == "section");
+    }
+
+    [Fact]
+    public async Task Module_tree_of_an_unknown_module_is_empty()
+    {
+        await SeedAsync();
+        await using var ctx = _db.NewContext();
+
+        (await NewTree(ctx).ListModuleTreeAsync(long.MaxValue, ExplorerTreeService.TreeGrouping.Kind))
+            .Should().BeEmpty();
+    }
+
     /// <summary>
     /// "_" and "%" are LIKE wildcards; unescaped, a search for "__" or "%%"
     /// matched every file in the release (#1262).
