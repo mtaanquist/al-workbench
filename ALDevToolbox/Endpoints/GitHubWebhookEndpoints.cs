@@ -249,20 +249,16 @@ public static class GitHubWebhookEndpoints
             // Waiting here would hold GitHub's request open behind that backlog.
             // GitHub does not resend a 5xx by itself: the refusal stays in the
             // App's delivery log, and GitHubWebhookRecoveryScheduler asks GitHub
-            // to send it again once the queue has room (#1121).
-            if (!queue.TryEnqueue(job))
+            // to send it again once the queue has room (#1121). The queue announces
+            // the new head as part of queuing it, and only cancels the build for the
+            // previous head once the job is really queued (#1264).
+            if (!queue.TryEnqueuePullRequest(job))
             {
                 log.LogWarning(
                     "Refused a pull-request delivery for {Repository}#{Number}: the build queue is full.",
                     job.RepositoryFullName, job.PullRequestNumber);
                 return Results.Text("Busy; the delivery will be requested again.", "text/plain", statusCode: 503);
             }
-
-            // Announced only once the job is really queued. Announcing first would
-            // cancel the build running for the previous head on the strength of a
-            // job that then never arrived, leaving the pull request with no answer
-            // at all.
-            queue.Announce(job.Key, job.HeadSha, job.UpdatedAt);
 
             log.LogInformation(
                 "Queued a pull-request build for {Repository}#{Number} at {HeadSha} (installation {InstallationId}, delivery {DeliveryId}).",

@@ -151,7 +151,10 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     private sealed record HeadMark(string Sha, DateTimeOffset? UpdatedAt);
 
     private readonly ConcurrentDictionary<string, HeadMark> _latestSha = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, CancellationTokenSource> _running = new(StringComparer.Ordinal);
+    // Every build in flight per pull request: several solutions can build the same
+    // pull request side by side, and a newer head supersedes all of them (#1264).
+    private readonly Lock _runningGate = new();
+    private readonly Dictionary<string, HashSet<CancellationTokenSource>> _running = new(StringComparer.Ordinal);
     private readonly TimeProvider _clock;
 
     /// <summary>How many deliveries the queue holds before the endpoint refuses more.</summary>
@@ -200,35 +203,97 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     /// </summary>
     public bool Announce(string key, string headSha, DateTimeOffset? updatedAt = null)
     {
+        var record = Record(key, headSha, updatedAt);
+        if (record.Moved) CancelRunning(key);
+        return record.IsNewest;
+    }
+
+    /// <summary>
+    /// Queues a pull-request <paramref name="job"/> and announces its head, as one step.
+    /// False, with nothing changed, when the queue is full.
+    ///
+    /// <para>The head is recorded <em>before</em> the job is written (#1264): written
+    /// first, the worker could dequeue it, still see the previous head as the newest
+    /// and skip it as superseded, leaving the pull request with no check for its newest
+    /// commit. A write that fails puts the previous head back. The build running for
+    /// the previous head is cancelled only once the job is really queued, so a refused
+    /// delivery never stops a build on the strength of a job that never arrived.</para>
+    /// </summary>
+    public bool TryEnqueuePullRequest(GitHubPullRequestJob job)
+    {
+        ArgumentNullException.ThrowIfNull(job);
+        var record = Record(job.Key, job.HeadSha, job.UpdatedAt);
+        if (!Writer.TryWrite(job))
+        {
+            Restore(job.Key, record);
+            return false;
+        }
+        if (record.Moved) CancelRunning(job.Key);
+        return true;
+    }
+
+    /// <summary>
+    /// What <see cref="Record"/> did: whether the head is the newest once it returns,
+    /// whether it replaced a different head (so builds for that one are superseded),
+    /// and the before and after marks a rollback needs.
+    /// </summary>
+    private readonly record struct HeadRecord(bool IsNewest, bool Moved, HeadMark? Previous, HeadMark? Written);
+
+    private HeadRecord Record(string key, string headSha, DateTimeOffset? updatedAt)
+    {
         var mark = new HeadMark(headSha, updatedAt);
         HeadMark? previous;
+        HeadMark written;
         while (true)
         {
             if (!_latestSha.TryGetValue(key, out previous))
             {
-                if (_latestSha.TryAdd(key, mark)) break;
+                if (_latestSha.TryAdd(key, mark)) { written = mark; break; }
                 continue;
             }
             if (previous.UpdatedAt is { } recorded && updatedAt is { } offered && offered < recorded)
             {
-                return string.Equals(previous.Sha, headSha, StringComparison.OrdinalIgnoreCase);
+                return new HeadRecord(string.Equals(previous.Sha, headSha, StringComparison.OrdinalIgnoreCase), false, null, null);
             }
             // A delivery without a time cannot be ordered, but it must not wipe the
             // time already known, or every older delivery after it would get through.
             var next = updatedAt is null && previous.UpdatedAt is not null ? mark with { UpdatedAt = previous.UpdatedAt } : mark;
-            if (_latestSha.TryUpdate(key, next, previous)) break;
+            if (_latestSha.TryUpdate(key, next, previous)) { written = next; break; }
         }
 
-        if (previous is not null && string.Equals(previous.Sha, headSha, StringComparison.OrdinalIgnoreCase)) return true;
+        var moved = previous is null || !string.Equals(previous.Sha, headSha, StringComparison.OrdinalIgnoreCase);
+        return new HeadRecord(true, moved, previous, written);
+    }
 
-        if (_running.TryGetValue(key, out var cts))
+    /// <summary>
+    /// Puts back the head <paramref name="record"/> replaced, unless another delivery
+    /// has moved it on since - then that one is the newest and stays.
+    /// </summary>
+    private void Restore(string key, HeadRecord record)
+    {
+        if (record.Written is null) return;
+        if (record.Previous is null)
+            ((ICollection<KeyValuePair<string, HeadMark>>)_latestSha)
+                .Remove(new KeyValuePair<string, HeadMark>(key, record.Written));
+        else
+            _latestSha.TryUpdate(key, record.Previous, record.Written);
+    }
+
+    private void CancelRunning(string key)
+    {
+        CancellationTokenSource[] builds;
+        lock (_runningGate)
+        {
+            if (!_running.TryGetValue(key, out var set)) return;
+            builds = [.. set];
+        }
+        foreach (var cts in builds)
         {
             // Cancel, don't remove: the worker owns the registration and clears it
             // in its own finally, so removing here would strand a live token.
             try { cts.Cancel(); }
             catch (ObjectDisposedException) { /* the build finished as we asked. */ }
         }
-        return true;
     }
 
     /// <summary>
@@ -242,15 +307,29 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
         || string.Equals(latest.Sha, headSha, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Registers <paramref name="cts"/> as the build in flight for
-    /// <paramref name="key"/>, so a newer head can cancel it. The caller disposes
-    /// the source and calls <see cref="EndBuild"/> when the build ends.
+    /// Registers <paramref name="cts"/> as a build in flight for
+    /// <paramref name="key"/>, so a newer head can cancel it. Several builds may be
+    /// registered for one key at once (one per solution building the pull request).
+    /// The caller disposes the source and calls <see cref="EndBuild"/> when the
+    /// build ends.
     /// </summary>
-    public void BeginBuild(string key, CancellationTokenSource cts) => _running[key] = cts;
+    public void BeginBuild(string key, CancellationTokenSource cts)
+    {
+        lock (_runningGate)
+        {
+            if (!_running.TryGetValue(key, out var set)) _running[key] = set = [];
+            set.Add(cts);
+        }
+    }
+
+    private bool IsRunning(string key)
+    {
+        lock (_runningGate) return _running.ContainsKey(key);
+    }
 
     /// <summary>
-    /// Clears the in-flight registration for <paramref name="key"/> if
-    /// <paramref name="cts"/> is still the one held, and forgets the newest-head
+    /// Clears <paramref name="cts"/>'s in-flight registration for
+    /// <paramref name="key"/>, leaving any other build for it registered, and forgets the newest-head
     /// record when <paramref name="headSha"/> is still that head.
     ///
     /// <para>The second half is what keeps the map from growing for the life of
@@ -264,8 +343,10 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     /// </summary>
     public void EndBuild(string key, CancellationTokenSource cts, string? headSha = null)
     {
-        ((ICollection<KeyValuePair<string, CancellationTokenSource>>)_running)
-            .Remove(new KeyValuePair<string, CancellationTokenSource>(key, cts));
+        lock (_runningGate)
+        {
+            if (_running.TryGetValue(key, out var set) && set.Remove(cts) && set.Count == 0) _running.Remove(key);
+        }
         if (headSha is null) return;
         if (_latestSha.TryGetValue(key, out var latest)
             && latest.UpdatedAt is null
@@ -278,7 +359,7 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
         var cutoff = _clock.GetUtcNow() - KeepDatedHeadsFor;
         foreach (var entry in _latestSha)
         {
-            if (entry.Value.UpdatedAt < cutoff && !_running.ContainsKey(entry.Key))
+            if (entry.Value.UpdatedAt < cutoff && !IsRunning(entry.Key))
                 ((ICollection<KeyValuePair<string, HeadMark>>)_latestSha).Remove(entry);
         }
     }
@@ -297,6 +378,6 @@ public sealed class GitHubWebhookQueue : JobQueue<GitHubWebhookJob>
     internal void Forget(string key)
     {
         _latestSha.TryRemove(key, out _);
-        _running.TryRemove(key, out _);
+        lock (_runningGate) _running.Remove(key);
     }
 }

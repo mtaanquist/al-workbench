@@ -356,7 +356,7 @@ public sealed class ArtifactServiceTests : IDisposable
         var svc = Svc(read);
 
         (await svc.GetArtifactBytesAsync(buildId, artifactId))!.Content.Should().Equal(1, 2, 3);
-        (await svc.GetAllArtifactBytesAsync(buildId)).Should().ContainSingle();
+        (await svc.ListArtifactRowsAsync(buildId)).Should().ContainSingle();
         var raw = await svc.GetRawLogAsync(buildId);
         raw.Should().NotBeNull();
         raw!.Content.Should().Contain("alc ok");

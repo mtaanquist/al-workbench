@@ -20,6 +20,11 @@ public sealed class WorkerBaseTests
         public TestQueue() : base(capacity: 8, keySelector: job => job.Id) { }
     }
 
+    private sealed class RerunningTestQueue : JobQueue<TestJob, int>
+    {
+        public RerunningTestQueue() : base(capacity: 8, keySelector: job => job.Id, rerunIfRequestedWhileRunning: true) { }
+    }
+
     private sealed class TestDrainWorker : QueueDrainWorker<TestJob>
     {
         private readonly TestQueue _queue;
@@ -78,6 +83,65 @@ public sealed class WorkerBaseTests
         queue.Complete(7);
         queue.IsInFlight(7).Should().BeFalse();
         (await queue.EnqueueAsync(new TestJob(7))).Should().BeTrue("the gate reopened on Complete");
+    }
+
+    /// <summary>
+    /// A request that arrives while its key's job is running may be about inputs the
+    /// running job has already read - a repository added to a solution mid-discovery
+    /// (#1263) - so a re-running queue holds it and queues it once the run completes.
+    /// </summary>
+    [Fact]
+    public async Task A_rerunning_JobQueue_queues_a_request_made_while_the_key_runs_once_it_completes()
+    {
+        var queue = new RerunningTestQueue();
+
+        (await queue.EnqueueAsync(new TestJob(7))).Should().BeTrue();
+        queue.Reader.TryRead(out _).Should().BeTrue();
+        queue.Start(7);
+
+        (await queue.EnqueueAsync(new TestJob(7))).Should().BeFalse("the key is running, so the request is held");
+        queue.TryEnqueue(new TestJob(7)).Should().BeFalse("several held requests collapse into one re-run");
+        queue.Reader.TryRead(out _).Should().BeFalse("nothing is queued while the first run is going");
+
+        queue.Complete(7);
+        queue.IsInFlight(7).Should().BeTrue("the held request took the slot");
+        queue.Reader.TryRead(out var rerun).Should().BeTrue();
+        rerun!.Id.Should().Be(7);
+        queue.Reader.TryRead(out _).Should().BeFalse("the held requests ran once, not twice");
+
+        queue.Start(7);
+        queue.Complete(7);
+        queue.IsInFlight(7).Should().BeFalse("nothing arrived during the re-run");
+    }
+
+    [Fact]
+    public async Task A_rerunning_JobQueue_still_coalesces_a_request_for_a_key_that_is_only_queued()
+    {
+        var queue = new RerunningTestQueue();
+
+        (await queue.EnqueueAsync(new TestJob(7))).Should().BeTrue();
+        (await queue.EnqueueAsync(new TestJob(7))).Should().BeFalse();
+        queue.Reader.TryRead(out _).Should().BeTrue();
+        queue.Start(7);
+        queue.Complete(7);
+
+        queue.IsInFlight(7).Should().BeFalse("the queued job had not started, so it covered the request");
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_plain_JobQueue_drops_a_request_made_while_the_key_runs()
+    {
+        var queue = new TestQueue();
+
+        (await queue.EnqueueAsync(new TestJob(7))).Should().BeTrue();
+        queue.Reader.TryRead(out _).Should().BeTrue();
+        queue.Start(7);
+        (await queue.EnqueueAsync(new TestJob(7))).Should().BeFalse();
+        queue.Complete(7);
+
+        queue.IsInFlight(7).Should().BeFalse();
+        queue.Reader.TryRead(out _).Should().BeFalse("deliveries and refreshes must never run twice");
     }
 
     [Fact]

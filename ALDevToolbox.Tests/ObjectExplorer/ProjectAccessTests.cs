@@ -569,6 +569,194 @@ public sealed class ProjectAccessTests : IDisposable
         }
     }
 
+    private sealed record SeededBuild(int PipelineId, int BuildId, int ArtifactId);
+
+    /// <summary>A pipeline on <paramref name="projectId"/> with one successful build and its one app.</summary>
+    private async Task<SeededBuild> SeedPipelineBuildAsync(int projectId, string appName = "CRONUS Sales")
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var release = new OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = appName, BcVersion = "",
+            DedupKey = Guid.NewGuid().ToString(), Kind = OeRelease.ProjectBuildKind, Status = "ready",
+            ImportedAt = now, CreatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        var pipeline = new OePipeline
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = appName, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OePipelines.Add(pipeline);
+        await ctx.SaveChangesAsync();
+        var build = new OeProjectBuild
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, PipelineId = pipeline.Id, ReleaseId = release.Id,
+            Status = ProjectBuildStatus.Ready, StartedAt = now, FinishedAt = now,
+        };
+        ctx.OeProjectBuilds.Add(build);
+        await ctx.SaveChangesAsync();
+        var artifact = new OeProjectBuildArtifact
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = build.Id, FileName = $"{appName}_1.0.0.0.app",
+            AppName = appName, AppVersion = "1.0.0.0", SizeBytes = 3, Content = new byte[] { 1, 2, 3 }, CreatedAt = now,
+        };
+        ctx.OeProjectBuildArtifacts.Add(artifact);
+        await ctx.SaveChangesAsync();
+        return new SeededBuild(pipeline.Id, build.Id, artifact.Id);
+    }
+
+    /// <summary>Every <see cref="ArtifactService"/> read keyed by a pipeline id, run once each.</summary>
+    private static IEnumerable<(string Name, Func<Task> Read)> PipelineKeyedReads(ArtifactService artifacts, SeededBuild seed) =>
+    [
+        ("GetPipelineHeaderAsync", () => artifacts.GetPipelineHeaderAsync(seed.PipelineId)),
+        ("ListBuildsAsync", () => artifacts.ListBuildsAsync(seed.PipelineId)),
+        ("GetPipelineBuildRowAsync", () => artifacts.GetPipelineBuildRowAsync(seed.PipelineId, seed.BuildId)),
+        ("CountBuildsAsync", () => artifacts.CountBuildsAsync(seed.PipelineId)),
+        ("ListDeployableBuildsAsync", () => artifacts.ListDeployableBuildsAsync(seed.PipelineId)),
+        ("ListBuildAppsAsync", () => artifacts.ListBuildAppsAsync(seed.PipelineId, [seed.BuildId])),
+        ("HasBuildInFlightAsync", () => artifacts.HasBuildInFlightAsync(seed.PipelineId)),
+        ("IsBuildRunningAsync", () => artifacts.IsBuildRunningAsync(seed.PipelineId)),
+        ("ListComparableBuildsAsync", () => artifacts.ListComparableBuildsAsync(seed.PipelineId)),
+    ];
+
+    /// <summary>
+    /// A pipeline inherits its solution's visibility (#1274): every read that takes a
+    /// pipeline id refuses someone with no grant on a Private solution, answers a
+    /// member of its team, and the pipelines list leaves it out for the first.
+    /// </summary>
+    [Fact]
+    public async Task A_private_projects_pipelines_are_hidden_from_every_pipeline_keyed_read()
+    {
+        var projectId = await SeedProjectAsync("CRONUS Denmark");
+        var openId = await SeedProjectAsync("CRONUS Norway");
+        var seed = await SeedPipelineBuildAsync(projectId, "CRONUS Sales");
+        await SeedPipelineBuildAsync(openId, "CRONUS Service");
+        var teamId = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        await SetAccessAsOwnerAsync(projectId, ProjectVisibility.Private, teamId);
+
+        ActAs(PlainUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var artifacts = Artifacts(ctx);
+            foreach (var (name, read) in PipelineKeyedReads(artifacts, seed))
+            {
+                await read.Should().ThrowAsync<ProjectAccessDeniedException>(name);
+            }
+            (await artifacts.ListPipelinesAsync()).Select(p => p.Name).Should().Equal("CRONUS Service");
+        }
+
+        ActAs(TeamMemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var artifacts = Artifacts(ctx);
+            foreach (var (name, read) in PipelineKeyedReads(artifacts, seed))
+            {
+                await read.Should().NotThrowAsync(name);
+            }
+            (await artifacts.GetPipelineHeaderAsync(seed.PipelineId)).Should().NotBeNull();
+            (await artifacts.ListBuildsAsync(seed.PipelineId)).Should().ContainSingle();
+            (await artifacts.ListPipelinesAsync()).Select(p => p.Name).Should().Equal("CRONUS Sales", "CRONUS Service");
+        }
+    }
+
+    /// <summary>
+    /// The download checks visibility on the build id it is given, so the artifact has to
+    /// belong to that build (#1274): a build the caller may see, paired with the id of a
+    /// Private solution's app, must not hand that app over.
+    /// </summary>
+    [Fact]
+    public async Task A_visible_build_id_does_not_unlock_a_private_builds_artifact()
+    {
+        var privateId = await SeedProjectAsync("CRONUS Denmark");
+        var openId = await SeedProjectAsync("CRONUS Norway");
+        var hidden = await SeedPipelineBuildAsync(privateId, "CRONUS Sales");
+        var visible = await SeedPipelineBuildAsync(openId, "CRONUS Service");
+        var teamId = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        await SetAccessAsOwnerAsync(privateId, ProjectVisibility.Private, teamId);
+
+        ActAs(PlainUserId);
+        await using var ctx = _db.NewContext();
+        var artifacts = Artifacts(ctx);
+
+        (await artifacts.GetArtifactBytesAsync(visible.BuildId, hidden.ArtifactId)).Should().BeNull();
+        (await artifacts.ListBuildAppsAsync(visible.PipelineId, [hidden.BuildId])).Should().BeEmpty(
+            "the apps are pinned to the pipeline asked about");
+        (await artifacts.GetArtifactBytesAsync(visible.BuildId, visible.ArtifactId)).Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// Adding and removing a solution's dependency symbols is managing it (#1274):
+    /// a colleague may read a Read-only solution but neither add nor delete them.
+    /// </summary>
+    [Fact]
+    public async Task A_colleague_cannot_add_or_delete_supplemental_symbols_on_a_read_only_project()
+    {
+        var projectId = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx).AddSupplementalSymbolsAsync(projectId, [new SupplementalSymbolUpload("Dep.app", [1])]);
+        }
+        var teamId = await SeedTeamAsync("Nordics", TeamMemberUserId);
+        await SetAccessAsOwnerAsync(projectId, ProjectVisibility.ReadOnly, teamId);
+
+        ActAs(PlainUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var projects = Svc(ctx);
+            var symbolId = (await projects.ListSupplementalSymbolsAsync(projectId)).Single().Id;
+
+            await ((Func<Task>)(() => projects.AddSupplementalSymbolsAsync(projectId, [new SupplementalSymbolUpload("Other.app", [2])])))
+                .Should().ThrowAsync<ProjectAccessDeniedException>();
+            await ((Func<Task>)(() => projects.DeleteSupplementalSymbolAsync(projectId, symbolId)))
+                .Should().ThrowAsync<ProjectAccessDeniedException>();
+        }
+
+        await using (var verify = _db.NewContext())
+        {
+            (await verify.OeProjectSymbols.AsNoTracking().Where(s => s.ProjectId == projectId).Select(s => s.FileName).ToListAsync())
+                .Should().Equal("Dep.app");
+        }
+    }
+
+    /// <summary>
+    /// The delete is pinned to the solution it names (#1274): managing one solution does not
+    /// reach a symbol stored on another by passing its id.
+    /// </summary>
+    [Fact]
+    public async Task Deleting_another_projects_symbol_through_a_managed_project_leaves_it_in_place()
+    {
+        var mineId = await SeedProjectAsync("CRONUS Denmark");
+        var theirsId = await SeedProjectAsync("CRONUS Norway", ownerId: OtherTeamUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            ActAs(OtherTeamUserId);
+            await Svc(ctx).AddSupplementalSymbolsAsync(theirsId, [new SupplementalSymbolUpload("Dep.app", [1])]);
+        }
+        var teamId = await SeedTeamAsync("Norway", OtherTeamUserId);
+        ActAs(OtherTeamUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx).SetAccessAsync(theirsId, ProjectVisibility.ReadOnly, [teamId]);
+        }
+        int theirSymbolId;
+        await using (var ctx = _db.NewContext())
+        {
+            theirSymbolId = (await ctx.OeProjectSymbols.AsNoTracking().SingleAsync(s => s.ProjectId == theirsId)).Id;
+        }
+
+        ActAs(OwnerUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx).DeleteSupplementalSymbolAsync(mineId, theirSymbolId);
+        }
+
+        await using (var verify = _db.NewContext())
+        {
+            (await verify.OeProjectSymbols.AsNoTracking().AnyAsync(s => s.Id == theirSymbolId)).Should().BeTrue();
+        }
+    }
+
     /// <summary>
     /// The generator's Solution picker reads through the same gate: a customer
     /// this person cannot see is not offered as one to start a workspace for.

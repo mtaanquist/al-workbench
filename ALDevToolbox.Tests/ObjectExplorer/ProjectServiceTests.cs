@@ -1262,6 +1262,26 @@ public sealed class ProjectServiceTests : IDisposable
         rows[0].ContentLength.Should().Be(3, "the latest upload wins");
     }
 
+    /// <summary>
+    /// The same package re-uploaded with its name in another case replaces the first
+    /// (#1263): two rows would hand every build the same app id and version twice.
+    /// </summary>
+    [Fact]
+    public async Task AddSupplementalSymbols_replaces_a_package_whose_name_differs_only_in_case()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = Svc(ctx);
+        var id = await svc.CreateProjectAsync(NewInput("CRONUS"));
+
+        await svc.AddSupplementalSymbolsAsync(id, new[] { new SupplementalSymbolUpload("Dep.app", new byte[] { 1 }) });
+        await svc.AddSupplementalSymbolsAsync(id, new[] { new SupplementalSymbolUpload("dep.APP", new byte[] { 9, 9, 9 }) });
+
+        var rows = await svc.ListSupplementalSymbolsAsync(id);
+        var row = rows.Should().ContainSingle("a re-upload in another case replaces, not duplicates").Subject;
+        row.FileName.Should().Be("dep.APP", "the latest upload's name is kept");
+        row.ContentLength.Should().Be(3);
+    }
+
     [Theory]
     [InlineData("notes.txt")]
     [InlineData("")]
