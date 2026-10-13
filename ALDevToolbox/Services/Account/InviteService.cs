@@ -154,10 +154,13 @@ public sealed class InviteService
     /// Consumes an invite token: creates an Active user inside the inviting
     /// organisation, marks the invite accepted. Returns the new user. Throws
     /// <see cref="PlanValidationException"/> for invalid tokens or when the
-    /// supplied display name / password fail validation. If a user already
-    /// exists in the org with the invited email (e.g. a separate self-signup
-    /// raced the invite), the invite is marked accepted but no new user is
-    /// created and the existing user is returned.
+    /// supplied display name / password fail validation, and when any account
+    /// in any organisation already uses the invited email: emails are unique
+    /// deployment-wide (issue #1207). That check runs here rather than in
+    /// <see cref="CreateAsync"/> so that only the invitee, who owns the
+    /// address, learns it is taken; an admin inviting addresses learns nothing
+    /// about other organisations. The invite stays valid, so it works once the
+    /// clash is settled.
     /// </summary>
     public async Task<User> AcceptAsync(
         string token,
@@ -178,17 +181,11 @@ public sealed class InviteService
             });
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        // Race window: another self-signup could land between invite issue and
-        // acceptance. Honour that user's existence; the admin can fix roles
-        // afterwards. Invite still flips to accepted so it can't be reused.
-        var existing = await _db.Users.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(u => u.OrganizationId == invite.OrganizationId && u.Email == invite.Email, ct);
-        if (existing is not null)
+        // Fence category 6 (existence-only uniqueness probe): emails are unique
+        // deployment-wide; projects a bool, never a row.
+        if (await _db.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == invite.Email, ct))
         {
-            existing.Organization ??= invite.Organization;
-            invite.AcceptedAt = now;
-            await _db.SaveChangesAsync(ct);
-            return existing;
+            throw EmailTaken();
         }
 
         var passwordHash = BCrypt.Net.BCrypt.HashPassword(password, ALDevToolbox.Services.Account.AuthService.BcryptWorkFactor);
@@ -206,10 +203,22 @@ public sealed class InviteService
         };
         _db.Users.Add(user);
         invite.AcceptedAt = now;
-        await _db.SaveChangesAsync(ct);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex, "IX_users_email"))
+        {
+            // Lost a race to a signup or another invite for the same address.
+            throw EmailTaken();
+        }
         _logger.LogInformation("Invite {InviteId} accepted; user {UserId} ({Email}) activated in org {OrgId}.",
             invite.Id, user.Id, user.Email, invite.OrganizationId);
         return user;
     }
 
+    private static PlanValidationException EmailTaken() => new(new Dictionary<string, string>
+    {
+        ["Email"] = "You already have an account with this email. Sign in instead.",
+    });
 }

@@ -25,8 +25,10 @@ internal sealed class UserConfiguration : IEntityTypeConfiguration<User>
         entity.Property(e => e.PendingEmail).HasColumnName("pending_email");
         entity.Property(e => e.PendingEmailAt).HasColumnName("pending_email_at");
         entity.Property(e => e.CredentialsChangedAt).HasColumnName("credentials_changed_at");
-        entity.HasIndex(e => new { e.OrganizationId, e.Email }).IsUnique();
-        entity.HasIndex(e => e.Email);
+        // Unique deployment-wide, not per organisation: sign-in routes an email to
+        // exactly one account, so two orgs holding the same address is a broken
+        // state rather than a supported one (issue #1207).
+        entity.HasIndex(e => e.Email).IsUnique();
         entity.HasOne(e => e.Organization)
             .WithMany()
             .HasForeignKey(e => e.OrganizationId)
