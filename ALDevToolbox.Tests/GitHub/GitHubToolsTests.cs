@@ -511,6 +511,9 @@ public sealed class GitHubToolsTests : IDisposable
             _db.NewGitHubWorkspaceRepositoryService(ctx, client, access),
             _db.NewGitHubExtensionDeliveryService(ctx, client, access),
             _db.NewGitHubTranslationService(ctx, client, access),
+            new ALDevToolbox.Services.Templates.TemplateService(
+                ctx, NullLogger<ALDevToolbox.Services.Templates.TemplateService>.Instance, _db.OrgContext,
+                new ALDevToolbox.Services.Templates.FolderTreeHydrator(ctx)),
             NullLogger<GitHubTools>.Instance);
         return (tools, ctx);
     }

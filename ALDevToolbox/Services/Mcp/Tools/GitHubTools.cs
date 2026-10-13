@@ -4,6 +4,7 @@ using System.Xml;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.Mcp.Dtos;
+using ALDevToolbox.Services.Templates;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Services.Translation;
 using ModelContextProtocol;
@@ -35,6 +36,7 @@ public sealed class GitHubTools
     private readonly GitHubWorkspaceRepositoryService _workspaces;
     private readonly GitHubExtensionDeliveryService _delivery;
     private readonly GitHubTranslationService _translations;
+    private readonly TemplateService _templates;
     private readonly ILogger<GitHubTools> _logger;
 
     public GitHubTools(
@@ -42,12 +44,14 @@ public sealed class GitHubTools
         GitHubWorkspaceRepositoryService workspaces,
         GitHubExtensionDeliveryService delivery,
         GitHubTranslationService translations,
+        TemplateService templates,
         ILogger<GitHubTools> logger)
     {
         _repositories = repositories;
         _workspaces = workspaces;
         _delivery = delivery;
         _translations = translations;
+        _templates = templates;
         _logger = logger;
     }
 
@@ -116,7 +120,7 @@ public sealed class GitHubTools
             // the membership check and the credential split are inherited rather
             // than restated - see "Keeping MCP parity with the web UI" in PROJECT.md.
             var created = await _workspaces.CreateAsync(
-                plan.ToDomain(), (name ?? string.Empty).Trim(), isPrivate, solutionId, ct);
+                await plan.ToDomainAsync(_templates, ct), (name ?? string.Empty).Trim(), isPrivate, solutionId, ct);
             return RepositoryCreationResult.From(created);
         }
         catch (Exception ex) when (IsGitHubRefusal(ex))

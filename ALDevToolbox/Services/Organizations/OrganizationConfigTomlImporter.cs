@@ -10,7 +10,8 @@ namespace ALDevToolbox.Services.Organizations;
 
 /// <summary>
 /// Restores an organisation's configuration from the TOML snapshot
-/// <see cref="ExportService"/> writes. Wipe-and-replace, and the only writer
+/// <see cref="ExportService"/> writes. Replaces the settings and file set with the
+/// TOML's (files reconciled by path so template opt-ins survive), and the only writer
 /// that touches settings, always-included files and the logo in one go — which
 /// is why it lives beside <see cref="OrganizationConfigService"/> rather than
 /// inside it, reusing that service's validation and row-building helpers so the
@@ -154,16 +155,37 @@ public class OrganizationConfigTomlImporter
         OrganizationConfigService.ApplySettingsFields(settings, settingsInput, now);
         settings.CodeWorkspaceJson = codeWorkspaceJson;
 
-        // Files: drop everything and re-insert. Wipe-and-replace import means
-        // callers have already confirmed the destructive operation.
+        // Files: reconcile by path rather than drop-and-reinsert. Templates opt
+        // in to these rows by id (runtime_template_included_files cascades on
+        // delete), so re-creating a file under a new id would silently strip
+        // it from every template that included it (#1216). Rows whose path is
+        // still in the TOML are updated in place; only paths the TOML no
+        // longer carries are deleted.
         var existingFiles = await _db.OrganizationFiles
             .Where(f => f.OrganizationId == orgId)
             .ToListAsync(ct);
-        _db.OrganizationFiles.RemoveRange(existingFiles);
+        var existingByPath = new Dictionary<string, OrganizationFile>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in existingFiles) existingByPath.TryAdd(row.Path, row);
+        var kept = new HashSet<OrganizationFile>();
         for (var i = 0; i < fileInputs.Count; i++)
         {
-            _db.OrganizationFiles.Add(OrganizationConfigService.NewOrganizationFile(orgId, fileInputs[i], i, now));
+            var input = fileInputs[i];
+            if (existingByPath.TryGetValue(input.Path.Trim(), out var row))
+            {
+                row.Path = input.Path.Trim();
+                row.Content = input.Content ?? string.Empty;
+                row.MustacheEnabled = input.MustacheEnabled;
+                row.Scope = input.Scope;
+                row.Ordering = i;
+                row.UpdatedAt = now;
+                kept.Add(row);
+            }
+            else
+            {
+                _db.OrganizationFiles.Add(OrganizationConfigService.NewOrganizationFile(orgId, input, i, now));
+            }
         }
+        _db.OrganizationFiles.RemoveRange(existingFiles.Where(f => !kept.Contains(f)));
 
         // Logo: upsert if the TOML carries one; otherwise leave the existing
         // row alone (an admin who imports a logo-less TOML probably didn't

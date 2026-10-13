@@ -1,5 +1,7 @@
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
+using ALDevToolbox.Tests.Builders;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using ALDevToolbox.Services.Organizations;
@@ -143,5 +145,77 @@ public sealed class OrganizationConfigTomlImportTests : IDisposable
             """);
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey(nameof(OrganizationSettingsInput.DefaultLogo));
+    }
+
+    [Fact]
+    public async Task ImportFromToml_keeps_template_opt_ins_for_files_it_still_carries()
+    {
+        // #1216: re-importing a file the TOML still carries must update the
+        // row in place. Re-creating it under a new id cascades away every
+        // template's opt-in link to it.
+        int keptFileId;
+        int templateId;
+        await using (var ctx = _db.NewContext())
+        {
+            await _db.NewOrganizationConfigService(ctx).SaveFilesAsync(new[]
+            {
+                new OrganizationFileInput(null, "kept.txt", "before", false),
+                new OrganizationFileInput(null, "dropped.txt", "gone", false),
+            });
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            var files = ctx.OrganizationFiles.Where(f => f.Path == "kept.txt" || f.Path == "dropped.txt").ToList();
+            keptFileId = files.Single(f => f.Path == "kept.txt").Id;
+            var template = TemplateBuilder.Default("import-keeps-links", organizationId: TestDb.DefaultOrgId);
+            for (var i = 0; i < files.Count; i++)
+            {
+                template.IncludedFiles.Add(new RuntimeTemplateIncludedFile
+                {
+                    OrganizationId = TestDb.DefaultOrgId,
+                    OrganizationFileId = files[i].Id,
+                    Ordering = i,
+                });
+            }
+            ctx.RuntimeTemplates.Add(template);
+            await ctx.SaveChangesAsync();
+            templateId = template.Id;
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            await _db.NewOrganizationConfigTomlImporter(ctx).ImportFromTomlAsync("""
+                [settings]
+                default_publisher = "CRONUS"
+                default_id_range_from = 50000
+                default_id_range_to = 50999
+
+                [[file]]
+                path = "kept.txt"
+                content = "after"
+                mustache_enabled = true
+
+                [[file]]
+                path = "added.txt"
+                content = "new"
+                mustache_enabled = false
+                """);
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var kept = ctx.OrganizationFiles.Single(f => f.Path == "kept.txt");
+            kept.Id.Should().Be(keptFileId);
+            kept.Content.Should().Be("after");
+            kept.MustacheEnabled.Should().BeTrue();
+            ctx.OrganizationFiles.Should().Contain(f => f.Path == "added.txt");
+            ctx.OrganizationFiles.Should().NotContain(f => f.Path == "dropped.txt");
+
+            var links = ctx.Set<RuntimeTemplateIncludedFile>()
+                .Where(j => j.RuntimeTemplateId == templateId)
+                .Select(j => j.OrganizationFileId)
+                .ToList();
+            links.Should().Equal(keptFileId);
+        }
     }
 }

@@ -845,6 +845,62 @@ public sealed class McpToolTests : IDisposable
     }
 
     [Fact]
+    public async Task GenerateWorkspace_uses_the_templates_default_modules_when_selectedModuleKeys_is_left_out()
+    {
+        // #1243: the parameter's description promises the template's default
+        // modules; leaving it out used to generate none. A soft-deleted
+        // default drops out, as it does from get_template.
+        await using (var seed = _db.NewContext())
+        {
+            var banking = ModuleBuilder.Default("banking", "Banking")
+                .WithExtensionFolder("src", ("Bank.Codeunit.al", "codeunit 91000 Bank { }"));
+            var retired = ModuleBuilder.Default("retired", "Retired")
+                .WithExtensionFolder("src", ("Old.Codeunit.al", "codeunit 91200 Old { }"));
+            retired.DeletedAt = DateTime.UtcNow;
+            var template = TemplateBuilder.Default("runtime-test");
+            template.DefaultModules.Add(new RuntimeTemplateDefaultModule
+            {
+                OrganizationId = TestDb.DefaultOrgId, Module = banking, Ordering = 0,
+            });
+            template.DefaultModules.Add(new RuntimeTemplateDefaultModule
+            {
+                OrganizationId = TestDb.DefaultOrgId, Module = retired, Ordering = 1,
+            });
+            seed.RuntimeTemplates.Add(template);
+            await seed.SaveChangesAsync();
+        }
+
+        ProjectPlanInput Input(IReadOnlyList<string>? modules) => new(
+            TemplateKey: "runtime-test",
+            WorkspaceName: "CRONUS A/S",
+            ExtensionPrefix: "CRO",
+            Brief: "Brief",
+            Description: "Description",
+            ApplicationVersion: "24.0.0.0",
+            RuntimeVersion: "15",
+            CoreIdRangeFrom: 90000,
+            CoreIdRangeTo: 90999,
+            SelectedModuleKeys: modules);
+
+        var ctx = _db.NewContext();
+        var tools = NewWorkspaceTools(ctx);
+
+        var leftOut = await tools.GenerateWorkspaceAsync(Input(null));
+        using (var zip = new ZipArchive(new MemoryStream(Convert.FromBase64String(leftOut.ContentBase64)), ZipArchiveMode.Read))
+        {
+            zip.Entries.Should().Contain(e => e.FullName == "CRONUSAS/Banking/src/Bank.Codeunit.al");
+            zip.Entries.Should().NotContain(e => e.FullName.Contains("/Retired/"));
+        }
+
+        var none = await tools.GenerateWorkspaceAsync(Input(Array.Empty<string>()));
+        using (var zip = new ZipArchive(new MemoryStream(Convert.FromBase64String(none.ContentBase64)), ZipArchiveMode.Read))
+        {
+            zip.Entries.Should().NotContain(e => e.FullName.Contains("/Banking/"),
+                "an empty list is an agent asking for no modules");
+        }
+    }
+
+    [Fact]
     public async Task GenerateWorkspace_carries_the_short_name_into_the_plan()
     {
         // MCP parity (PROJECT.md): what the New Workspace form can say, the
