@@ -667,6 +667,99 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         api.Calls.Should().NotContain(c => c.Contains("/releases"));
     }
 
+    // ── Staging gates (#1275) ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Staging fetches the files that will be deployed, so it takes the recent-second-factor
+    /// rule deploying takes when the organisation asks for one.
+    /// </summary>
+    [Fact]
+    public async Task Staging_is_refused_without_a_recent_step_up_when_the_organisation_asks_for_one()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi();
+        await using var ctx = _db.NewContext();
+        await ctx.Organizations.Where(o => o.Id == TestDb.DefaultOrgId)
+            .ExecuteUpdateAsync(o => o.SetProperty(x => x.StepUpTools,
+                ALDevToolbox.Domain.Tools.ToolCatalog.Format([ALDevToolbox.Domain.Tools.ToolKey.Releases])));
+        var signedInLongAgo = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+        [
+            new System.Security.Claims.Claim(HttpOrganizationContext.UserIdClaim, UserId.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            new System.Security.Claims.Claim(HttpOrganizationContext.OrganizationIdClaim, TestDb.DefaultOrgId.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            // A cookie session carries these; a token does not.
+            new System.Security.Claims.Claim(ALDevToolbox.Endpoints.EndpointHelpers.DisabledToolsClaim, string.Empty),
+            new System.Security.Claims.Claim(ALDevToolbox.Endpoints.EndpointHelpers.StepUpToolsClaim, string.Empty),
+        ], "test"));
+        var tools = new ALDevToolbox.Services.Tools.ToolEnablement(TestDb.EverythingEnabled(),
+            new TestDb.FixedHttpContextAccessor(new Microsoft.AspNetCore.Http.DefaultHttpContext { User = signedInLongAgo }),
+            ctx, _db.OrgContext, TimeProvider.System);
+        var client = _db.NewGitHubAppClient(ctx, api);
+        var access = _db.NewGitHubAccessService(ctx, client);
+        var service = new GitHubReleaseService(ctx, client, _db.NewGitHubConnectionService(ctx, access),
+            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, _db.OrgContext), access, _db.OrgContext,
+            new ALDevToolbox.Endpoints.PublicOrigin(null), TimeProvider.System, tools,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<GitHubReleaseService>.Instance);
+
+        var stage = () => service.StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+
+        await stage.Should().ThrowAsync<ALDevToolbox.Services.Tools.StepUpRequiredException>();
+        await AssertNothingStagedAsync(api);
+    }
+
+    /// <summary>Staging is the first half of a deployment, and a disabled pipeline refuses the second.</summary>
+    [Fact]
+    public async Task Staging_is_refused_for_a_disabled_deployment_pipeline()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi();
+        await using (var write = _db.NewContext())
+        {
+            await write.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(r => r.SetProperty(x => x.DisabledAt, DateTime.UtcNow));
+        }
+
+        await using var ctx = _db.NewContext();
+        var stage = () => NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+
+        (await stage.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("ReleasePipeline");
+        await AssertNothingStagedAsync(api);
+    }
+
+    /// <summary>
+    /// Someone who may read a solution but not manage it stages nothing into it, and
+    /// GitHub is not asked anything on their behalf.
+    /// </summary>
+    [Fact]
+    public async Task Staging_is_refused_to_someone_who_cannot_manage_the_solution()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi();
+        await using (var write = _db.NewContext())
+        {
+            await write.OeProjects.Where(p => p.Id == seed.ProjectId)
+                .ExecuteUpdateAsync(p => p.SetProperty(x => x.Visibility, ProjectVisibility.ReadOnly));
+        }
+        _db.OrgContext.IsSiteAdmin = false;
+
+        await using var ctx = _db.NewContext();
+        var stage = () => NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+
+        await stage.Should().ThrowAsync<ProjectAccessDeniedException>();
+        api.Calls.Should().BeEmpty("the refusal comes before anything is asked of GitHub");
+        await AssertNothingStagedAsync(api);
+    }
+
+    private async Task AssertNothingStagedAsync(FakeGitHubApi api)
+    {
+        api.Calls.Should().NotContain(c => c.Contains("/releases"));
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectBuilds.AsNoTracking().AnyAsync(b => b.PipelineId == null)).Should().BeFalse();
+    }
+
     [Fact]
     public async Task Staging_the_same_release_twice_returns_the_build_already_staged()
     {
