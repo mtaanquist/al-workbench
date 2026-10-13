@@ -44,7 +44,7 @@ public sealed class IgnoreQueryFiltersBaselineTests
         ["ALDevToolbox/Endpoints/StartupTasks.cs"] = 4,
         ["ALDevToolbox/Endpoints/StrongAuthGate.cs"] = 3,
         ["ALDevToolbox/Services/Account/AccountService.cs"] = 7,
-        ["ALDevToolbox/Services/Account/AuthService.cs"] = 5,
+        ["ALDevToolbox/Services/Account/AuthService.cs"] = 4,
         ["ALDevToolbox/Services/Account/EmailMfaService.cs"] = 4,
         ["ALDevToolbox/Services/Account/EntraSignInService.cs"] = 12,
         ["ALDevToolbox/Services/Account/InviteService.cs"] = 5,

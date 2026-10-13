@@ -118,6 +118,26 @@ public sealed class AccountServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_double_submitted_signup_creates_one_account_and_one_organisation()
+    {
+        // Two posts for one address in flight at once, as a double-clicked
+        // Sign up sends them. Each gets its own context, like two requests.
+        Task<(SignupOutcome Outcome, User? User, Organization? Organization)> Submit() =>
+            NewAccounts(_db.NewContext()).SignupAsync(
+                "double@cronus.example", "Double", "verylongpassword12345", null, "CRONUS Double");
+
+        var results = await Task.WhenAll(Submit(), Submit());
+
+        results.Select(r => r.Outcome).Should().BeEquivalentTo(
+            [SignupOutcome.OrganizationProvisioned, SignupOutcome.EmailAlreadyTaken]);
+        await using var read = _db.NewContext();
+        (await read.Organizations.CountAsync(o => o.Name == "CRONUS Double"))
+            .Should().Be(1, "the losing submit must not leave a second organisation behind");
+        (await read.Users.IgnoreQueryFilters().CountAsync(u => u.Email == "double@cronus.example"))
+            .Should().Be(1);
+    }
+
+    [Fact]
     public async Task Signup_with_blank_slug_auto_approves_as_new_org_admin()
     {
         var ctx = _db.NewContext();

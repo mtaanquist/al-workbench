@@ -159,6 +159,20 @@ public sealed class AccountService
             }
         }
 
+        var now = _clock.GetUtcNow().UtcDateTime;
+        // Hashed before the lock below so it is not held across BCrypt.
+        var passwordHash = _auth.HashPassword(password);
+
+        // A double-clicked Sign up sends two posts for one address. Without
+        // a lock both pass the probe below and each creates an organisation
+        // before one loses on the email index. The transaction-scoped lock on
+        // the address makes the second wait, then find the first's account.
+        // The organisation and the user commit together, so a refusal or a
+        // fault never leaves an empty organisation behind. See issue #1215.
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        await _db.Database.ExecuteSqlAsync(
+            $"SELECT pg_advisory_xact_lock({SignupLockClass}, hashtext({normalised}))", ct);
+
         var existingUser = await _db.Users
             // Fence category 1 (pre-auth routing): signup runs before any cookie exists, so
             // there is no org to filter by; the probe is pinned to the typed email.
@@ -169,7 +183,6 @@ public sealed class AccountService
             return (SignupOutcome.EmailAlreadyTaken, null, null);
         }
 
-        var now = _clock.GetUtcNow().UtcDateTime;
         Organization org;
         bool createdNewOrg = false;
 
@@ -212,7 +225,7 @@ public sealed class AccountService
         {
             OrganizationId = org.Id,
             Email = normalised,
-            PasswordHash = _auth.HashPassword(password),
+            PasswordHash = passwordHash,
             DisplayName = displayName.Trim(),
             // New orgs auto-approve their first signup: there's no admin
             // in-org to do the approving and we deliberately have no superuser
@@ -223,7 +236,10 @@ public sealed class AccountService
             CreatedAt = now,
         };
         _db.Users.Add(user);
-        await _db.SaveChangesAsync(ct);
+        if (!await TrySaveNewUserAsync(ct))
+        {
+            return (SignupOutcome.EmailAlreadyTaken, null, null);
+        }
 
         var request = new SignupRequest
         {
@@ -244,6 +260,7 @@ public sealed class AccountService
             org.IsPending = false;
         }
         await _db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
 
         _logger.LogInformation("Signup recorded for {Email} into {OrgSlug} (new={New}).",
             normalised, org.Slug, createdNewOrg);
@@ -287,6 +304,23 @@ public sealed class AccountService
 
         var normalised = pending.Email;
         var now = _clock.GetUtcNow().UtcDateTime;
+        // Hashed before the claim below so the row lock is not held across BCrypt.
+        var passwordHash = _auth.HashPassword(password);
+
+        // Single-use, claimed first: a double-clicked Create sends two posts
+        // that both passed FindVerifiedAsync. The conditional update lets one
+        // of them through; the other waits on the row lock, then matches no
+        // row and reports the account as taken. Everything below runs in the
+        // same transaction, so a refusal or a fault leaves no stray
+        // organisation behind and the row claimable again. See issue #1215.
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        var claimed = await _db.PendingSignups
+            .Where(p => p.Id == pending.Id && p.CompletedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.CompletedAt, now), ct);
+        if (claimed == 0)
+        {
+            return (SignupOutcome.EmailAlreadyTaken, null, null);
+        }
 
         // Race: a user for this email could have appeared between verification
         // and completion (e.g. an admin invite was accepted in the meantime).
@@ -330,14 +364,17 @@ public sealed class AccountService
         {
             OrganizationId = org.Id,
             Email = normalised,
-            PasswordHash = _auth.HashPassword(password),
+            PasswordHash = passwordHash,
             DisplayName = displayName.Trim(),
             Role = createdNewOrg ? UserRole.Admin : UserRole.User,
             Status = autoActive ? UserStatus.Active : UserStatus.Pending,
             CreatedAt = now,
         };
         _db.Users.Add(user);
-        await _db.SaveChangesAsync(ct);
+        if (!await TrySaveNewUserAsync(ct))
+        {
+            return (SignupOutcome.EmailAlreadyTaken, null, null);
+        }
 
         var request = new SignupRequest
         {
@@ -352,9 +389,11 @@ public sealed class AccountService
         _db.SignupRequests.Add(request);
         if (createdNewOrg) org.IsPending = false;
 
-        // Single-use: burn the verification row alongside the new account.
-        pending.CompletedAt = now;
         await _db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        // The claim above went straight to the database; mirror it on the
+        // caller's copy so it reads as burned too.
+        pending.CompletedAt = now;
 
         _logger.LogInformation("Verified signup completed for {Email} into {OrgSlug} (new={New}, active={Active}).",
             normalised, org.Slug, createdNewOrg, autoActive);
@@ -492,6 +531,34 @@ public sealed class AccountService
         if (trimmed.Length is < 2 or > 80)
         {
             errors["OrganizationName"] = "Organisation name must be 2-80 characters.";
+        }
+    }
+
+    /// <summary>
+    /// First key of the advisory lock <see cref="SignupAsync"/> takes on the
+    /// address being signed up; the second is the address's hash. Distinct
+    /// from the build importer's lock classes.
+    /// </summary>
+    private const int SignupLockClass = 0x53_49_47_4E;
+
+    /// <summary>
+    /// Saves the pending new user, or returns false when another signup for
+    /// the same address committed first (an invite accepted, say). The email
+    /// probe can't see a request still in flight; the unique email index can.
+    /// The caller returns without committing, so its transaction rolls back
+    /// whatever organisation it created on the way.
+    /// </summary>
+    private async Task<bool> TrySaveNewUserAsync(CancellationToken ct)
+    {
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+            return true;
+        }
+        catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex, "IX_users_email"))
+        {
+            _db.ChangeTracker.Clear();
+            return false;
         }
     }
 
