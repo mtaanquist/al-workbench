@@ -1360,7 +1360,14 @@ else
         _parseError = null;
         try
         {
-            var content = await RepoFiles.OpenAsync(repo.FullName, file.Path);
+            // While the language's pull request is open its branch is ahead of
+            // the default branch, and a save is compared against the file there;
+            // opening the default branch's copy would make every save a conflict
+            // until the pull request is merged (#1244).
+            var content = (!file.IsSource && !string.IsNullOrEmpty(file.Language)
+                    ? await RepoFiles.OpenOnTranslationBranchAsync(repo.FullName, file.Path, file.Language)
+                    : null)
+                ?? await RepoFiles.OpenAsync(repo.FullName, file.Path);
             if (content is null)
             {
                 _parseError = $"\"{file.FileName}\" is not in {repo.FullName} any more. "
@@ -1556,8 +1563,10 @@ else
         if (!take) return;
 
         _repo = source.Repository;
+        // Named with the language so the reopen reads the translation branch,
+        // which is the version the save was compared against.
         await OpenFromRepositoryAsync(new RepositoryTranslationFile(
-            source.Path, source.FileName, string.Empty, null, IsSource: false));
+            source.Path, source.FileName, string.Empty, _targetLang, IsSource: false));
     }
 
     /// <summary>The line the pull request body carries about how far the translation has got.</summary>
