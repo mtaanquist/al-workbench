@@ -150,10 +150,20 @@ public sealed class BackupService
         var targetPath = ResolveFilePath(fileName);
 
         var sw = Stopwatch.StartNew();
-        await RunPgToolAsync(
-            _pgDumpPath,
-            new[] { "-Fc", "--no-owner", "--no-privileges", "-f", targetPath },
-            ct);
+        try
+        {
+            await RunPgToolAsync(
+                _pgDumpPath,
+                new[] { "-Fc", "--no-owner", "--no-privileges", "-f", targetPath },
+                ct);
+        }
+        catch
+        {
+            // A cancelled or failed pg_dump leaves a partial file with no row
+            // behind it, which retention would never prune. See issue #1213.
+            TryDeleteFile(fileName);
+            throw;
+        }
         sw.Stop();
 
         var size = new FileInfo(targetPath).Length;
@@ -223,6 +233,16 @@ public sealed class BackupService
     /// the <c>public</c> schema, runs <c>pg_restore</c>, lifts maintenance
     /// mode. The <c>backups</c> row stays in place after restore so the
     /// audit log retains the link to the file that was restored.
+    ///
+    /// <para>
+    /// <paramref name="ct"/> only covers the checks and the wait for the
+    /// backup lock. Once maintenance mode is on, the drop and the
+    /// <c>pg_restore</c> run to completion even if the caller goes away (the
+    /// SiteAdmin closes the tab, a proxy drops the long POST): stopping halfway
+    /// would leave a half-loaded schema, and lifting maintenance mode while an
+    /// orphaned <c>pg_restore</c> is still writing would let every user, and
+    /// the backup scheduler, in on it. See issue #1213.
+    /// </para>
     /// </summary>
     public async Task RestoreAsync(int id, CancellationToken ct = default)
     {
@@ -248,6 +268,8 @@ public sealed class BackupService
 
         _maintenance.Enter($"Restoring backup {row.FileName}");
         var sw = Stopwatch.StartNew();
+        // Deliberately not the caller's token from here on; see the remarks above.
+        var destructive = CancellationToken.None;
         try
         {
             // Drop everything in `public` so pg_restore lays the schema down on
@@ -256,7 +278,7 @@ public sealed class BackupService
             // mid-flight without nuking unrelated state.
             await ExecuteSqlAsync(
                 "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;",
-                ct);
+                destructive);
 
             var builder = new NpgsqlConnectionStringBuilder(_connectionString);
             await RunPgToolAsync(
@@ -270,7 +292,7 @@ public sealed class BackupService
                     "-d", builder.Database ?? string.Empty,
                     path,
                 },
-                ct);
+                destructive);
             sw.Stop();
             _logger.LogInformation(
                 "Restored backup {FileName} in {ElapsedMs} ms.", row.FileName, sw.ElapsedMilliseconds);
@@ -369,9 +391,30 @@ public sealed class BackupService
         using var process = Process.Start(psi)
             ?? throw new InvalidOperationException($"Failed to start {fileName}.");
 
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-        var stderrTask = process.StandardError.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
+        var stderrTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
+        try
+        {
+            await process.WaitForExitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // Disposing the Process only closes our handle: the tool itself would
+            // keep running, still writing, after the caller has moved on and
+            // released the backup lock. Stop it and wait until it is really gone
+            // before letting the cancellation through. See issue #1213.
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // It exited between the cancellation and the kill.
+            }
+            await process.WaitForExitAsync(CancellationToken.None);
+            _logger.LogWarning("{Tool} was cancelled and has been stopped.", fileName);
+            throw;
+        }
         var stderr = await stderrTask;
         _ = await stdoutTask;
 
