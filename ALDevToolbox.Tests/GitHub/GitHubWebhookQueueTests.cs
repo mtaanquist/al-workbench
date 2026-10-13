@@ -90,6 +90,110 @@ public sealed class GitHubWebhookQueueTests
         queue.TryEnqueue(Job("zzz")).Should().BeFalse();
     }
 
+    /// <summary>
+    /// The head is recorded before the job is written (#1264), so the worker can never
+    /// dequeue the newest head while the queue still holds the previous one as newest.
+    /// </summary>
+    [Fact]
+    public void A_queued_pull_request_is_already_the_newest_head_when_the_worker_reads_it()
+    {
+        var queue = new GitHubWebhookQueue();
+        queue.Announce(Job("aaa").Key, "aaa");
+
+        queue.TryEnqueuePullRequest(Job("bbb")).Should().BeTrue();
+
+        queue.Reader.TryRead(out var read).Should().BeTrue();
+        var job = read.Should().BeOfType<GitHubPullRequestJob>().Subject;
+        queue.IsLatest(job.Key, job.HeadSha).Should().BeTrue();
+        queue.IsLatest(job.Key, "aaa").Should().BeFalse();
+    }
+
+    [Fact]
+    public void Queuing_a_newer_head_cancels_the_build_running_for_the_older_one()
+    {
+        var queue = new GitHubWebhookQueue();
+        queue.TryEnqueuePullRequest(Job("aaa")).Should().BeTrue();
+        using var running = new CancellationTokenSource();
+        queue.BeginBuild(Job("aaa").Key, running);
+
+        queue.TryEnqueuePullRequest(Job("bbb")).Should().BeTrue();
+
+        running.IsCancellationRequested.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A delivery the full queue refuses changes nothing (#1264): the previous head stays
+    /// the newest, and its running build is not cancelled for a job that never arrived.
+    /// </summary>
+    [Fact]
+    public void A_refused_pull_request_leaves_the_previous_head_current_and_its_build_running()
+    {
+        var queue = new GitHubWebhookQueue();
+        var key = Job("aaa").Key;
+        queue.Announce(key, "aaa");
+        using var running = new CancellationTokenSource();
+        queue.BeginBuild(key, running);
+        var filler = 0;
+        while (queue.TryEnqueue(Job("fill", number: 1000 + filler))) filler++;
+
+        queue.TryEnqueuePullRequest(Job("bbb")).Should().BeFalse();
+
+        queue.IsLatest(key, "aaa").Should().BeTrue("the refused head was put back");
+        queue.IsLatest(key, "bbb").Should().BeFalse();
+        running.IsCancellationRequested.Should().BeFalse("nothing newer is coming to replace it");
+    }
+
+    [Fact]
+    public void A_refused_first_head_leaves_no_record_behind()
+    {
+        var queue = new GitHubWebhookQueue();
+        var filler = 0;
+        while (queue.TryEnqueue(Job("fill", number: 1000 + filler))) filler++;
+
+        queue.TryEnqueuePullRequest(Job("aaa")).Should().BeFalse();
+
+        queue.TrackedHeadCount.Should().Be(0);
+    }
+
+    /// <summary>
+    /// Several solutions can build one pull request side by side, and a newer head
+    /// supersedes every one of those builds, not only the last registered (#1264).
+    /// </summary>
+    [Fact]
+    public void A_newer_head_cancels_every_build_running_for_the_pull_request()
+    {
+        var queue = new GitHubWebhookQueue();
+        var key = Job("aaa").Key;
+        queue.Announce(key, "aaa");
+        using var first = new CancellationTokenSource();
+        using var second = new CancellationTokenSource();
+        queue.BeginBuild(key, first);
+        queue.BeginBuild(key, second);
+
+        queue.Announce(key, "bbb");
+
+        first.IsCancellationRequested.Should().BeTrue();
+        second.IsCancellationRequested.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Ending_one_build_leaves_the_other_build_for_the_pull_request_registered()
+    {
+        var queue = new GitHubWebhookQueue();
+        var key = Job("aaa").Key;
+        queue.Announce(key, "aaa");
+        using var first = new CancellationTokenSource();
+        using var second = new CancellationTokenSource();
+        queue.BeginBuild(key, first);
+        queue.BeginBuild(key, second);
+
+        queue.EndBuild(key, first);
+        queue.Announce(key, "bbb");
+
+        first.IsCancellationRequested.Should().BeFalse("it had already finished");
+        second.IsCancellationRequested.Should().BeTrue("it was still building the older head");
+    }
+
     [Fact]
     public void An_unknown_key_is_treated_as_current()
     {
