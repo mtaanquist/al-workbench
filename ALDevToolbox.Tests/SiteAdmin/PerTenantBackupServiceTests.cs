@@ -270,6 +270,34 @@ public sealed class PerTenantBackupServiceTests : IDisposable
             .Should().Equal(["Customer"], "a row committed after the snapshot began must not be in it");
     }
 
+    /// <summary>
+    /// A snapshot whose row cannot be written must not leave its file behind:
+    /// retention only ever sees files through their rows (#1269).
+    /// </summary>
+    [Fact]
+    public async Task A_snapshot_that_fails_leaves_no_file_behind()
+    {
+        await using var ctx = _db.NewContext(new FailingSnapshotSave());
+        var act = () => NewService(ctx).CreateAsync(OrgA, BackupKind.AdHoc, CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*row write failed*");
+
+        var dir = Path.Combine(_backupsDir, "tenants", "default");
+        Directory.GetFiles(dir).Should().BeEmpty("neither the finished file nor its staging copy may outlive the failure");
+    }
+
+    /// <summary>Fails the save that registers a snapshot, after its file has been written.</summary>
+    private sealed class FailingSnapshotSave : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
+    {
+        public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> SavingChangesAsync(
+            Microsoft.EntityFrameworkCore.Diagnostics.DbContextEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+            CancellationToken ct = default) =>
+            eventData.Context!.ChangeTracker.Entries<PerTenantBackup>().Any(e => e.State == EntityState.Added)
+                ? throw new InvalidOperationException("The row write failed.")
+                : ValueTask.FromResult(result);
+    }
+
     // ===== Fixture helpers =====
 
     private PerTenantBackupService NewService(AppDbContext ctx)

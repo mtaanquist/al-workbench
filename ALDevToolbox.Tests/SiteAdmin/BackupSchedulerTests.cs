@@ -129,6 +129,34 @@ public sealed class BackupSchedulerTests : IDisposable
             .Should().Be(2, "the next-day window opens a fresh slot");
     }
 
+    /// <summary>
+    /// A failed scheduled dump leaves no file behind and is not tried again on every
+    /// one-minute poll for the rest of the day, only after a pause (#1269).
+    /// </summary>
+    [Fact]
+    public async Task A_failed_scheduled_backup_leaves_no_file_and_waits_before_trying_again()
+    {
+        await SeedSettingsAsync(enabled: true, scheduledTimeUtc: new TimeOnly(2, 0));
+        _clock.Advance(TimeSpan.FromHours(2) + TimeSpan.FromSeconds(5));
+        var options = _options with { PgDumpPath = StubPgDump(exitCode: 1, out var runs) };
+        var scheduler = NewScheduler();
+
+        await TickOnceAsync(scheduler, options);
+
+        Runs(runs).Should().Be(1);
+        Directory.GetFiles(_backupsDir).Should().BeEmpty("a failed dump must not leave a file retention cannot see");
+        await using (var read = _db.NewContext())
+            (await read.Backups.CountAsync()).Should().Be(0);
+
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await TickOnceAsync(scheduler, options);
+        Runs(runs).Should().Be(1, "the next poll does not try again straight away");
+
+        _clock.Advance(BackupScheduler.FailedRunBackoff);
+        await TickOnceAsync(scheduler, options);
+        Runs(runs).Should().Be(2, "it does try again once the pause is over");
+    }
+
     // ===== Fixture helpers =====
 
     private async Task SeedSettingsAsync(bool enabled, TimeOnly scheduledTimeUtc)
@@ -148,14 +176,44 @@ public sealed class BackupSchedulerTests : IDisposable
         await ctx.SaveChangesAsync();
     }
 
-    private async Task TickOnceAsync()
+    private BackupScheduler NewScheduler(bool singleTenant = false) => new(
+        new ServiceCollection().BuildServiceProvider(), _clock,
+        new ALDevToolbox.Services.SingleTenant.SingleTenantModeState(singleTenant),
+        _maintenance,
+        NullLogger<BackupScheduler>.Instance, new WorkerHeartbeatRegistry());
+
+    /// <summary>
+    /// A stand-in <c>pg_dump</c>: records each run in <paramref name="counterPath"/>,
+    /// writes a few bytes to the <c>-f</c> target the way a real dump starts, and
+    /// exits with <paramref name="exitCode"/>. Lets the schedule's failure rules run
+    /// without the real tool.
+    /// </summary>
+    private string StubPgDump(int exitCode, out string counterPath)
     {
-        var sp = new ServiceCollection().BuildServiceProvider();
-        var scheduler = new BackupScheduler(
-            sp, _clock,
-            new ALDevToolbox.Services.SingleTenant.SingleTenantModeState(false),
-            _maintenance,
-            NullLogger<BackupScheduler>.Instance, new WorkerHeartbeatRegistry());
+        if (OperatingSystem.IsWindows()) Assert.Skip("The stand-in pg_dump is a shell script.");
+        var dir = Path.Combine(_backupsDir, "bin");
+        Directory.CreateDirectory(dir);
+        counterPath = Path.Combine(dir, "runs.txt");
+        var script = Path.Combine(dir, "pg_dump");
+        File.WriteAllText(script,
+            "#!/bin/sh\n"
+            + $"echo run >> '{counterPath}'\n"
+            + "while [ $# -gt 0 ]; do\n"
+            + "  if [ \"$1\" = \"-f\" ]; then shift; printf 'PGDMP' > \"$1\"; fi\n"
+            + "  shift\n"
+            + "done\n"
+            + $"exit {exitCode}\n");
+        File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        return script;
+    }
+
+    private static int Runs(string counterPath) =>
+        File.Exists(counterPath) ? File.ReadAllLines(counterPath).Length : 0;
+
+    private async Task TickOnceAsync(BackupScheduler? scheduler = null, BackupOptions? options = null)
+    {
+        scheduler ??= NewScheduler();
+        options ??= _options;
         await using var ctx = _db.NewContext();
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
@@ -163,10 +221,10 @@ public sealed class BackupSchedulerTests : IDisposable
         }).Build();
         var backups = new BackupService(
             ctx, _db.OrgContext, _maintenance, config,
-            NullLogger<BackupService>.Instance, _clock, _options);
+            NullLogger<BackupService>.Instance, _clock, options);
         var perTenant = new PerTenantBackupService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), config,
-            NullLogger<PerTenantBackupService>.Instance, _clock, _options);
+            NullLogger<PerTenantBackupService>.Instance, _clock, options);
         var systemSettings = new SystemSettingsService(
             ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, _clock);
         var providerFactory = new OffsiteStorageProviderFactory(NullLoggerFactory.Instance);

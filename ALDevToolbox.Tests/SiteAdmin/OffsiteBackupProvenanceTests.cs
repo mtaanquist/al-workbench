@@ -236,6 +236,23 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
             });
     }
 
+    // ---- #1269: a downloaded dump keeps the date in its name -----------------
+
+    [Theory]
+    [InlineData("aldevtoolbox-20260830T020000123Z-scheduled.dump", 123)]
+    [InlineData("aldevtoolbox-20260830T020000Z-scheduled.dump", 0)]
+    public async Task A_downloaded_dump_is_dated_from_its_name_in_either_stamp_shape(string key, int milliseconds)
+    {
+        await ConfigureOffsiteAsync();
+        _store.Put(key, [1], Stamp(_us), Now.AddDays(-2));
+
+        var id = await NewOffsite(_us).DownloadAsync(key, progress: null, default);
+
+        await using var ctx = _db.NewContext();
+        (await ctx.Backups.AsNoTracking().SingleAsync(b => b.Id == id)).CreatedAt
+            .Should().Be(new DateTime(2026, 8, 30, 2, 0, 0, milliseconds, DateTimeKind.Utc), "not the moment it was downloaded");
+    }
+
     // ---- plumbing -----------------------------------------------------------
 
     private static string DumpKey(string name) => $"aldevtoolbox-{name}{BackupService.BackupFileSuffix}";

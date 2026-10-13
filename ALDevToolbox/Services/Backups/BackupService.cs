@@ -155,34 +155,37 @@ public sealed class BackupService
         var targetPath = ResolveFilePath(fileName);
 
         var sw = Stopwatch.StartNew();
+        Backup row;
+        long size;
         try
         {
             await RunPgToolAsync(
                 _pgDumpPath,
                 new[] { "-Fc", "--no-owner", "--no-privileges", "-f", targetPath },
                 ct);
+            sw.Stop();
+
+            size = new FileInfo(targetPath).Length;
+            row = new Backup
+            {
+                FileName = fileName,
+                FileSizeBytes = size,
+                CreatedAt = timestamp,
+                CreatedByUserId = kind == BackupKind.AdHoc ? _orgContext.CurrentUserId : null,
+                Kind = kind,
+                IsPinned = false,
+            };
+            _db.Backups.Add(row);
+            await _db.SaveChangesAsync(ct);
         }
         catch
         {
             // A cancelled or failed pg_dump leaves a partial file with no row
-            // behind it, which retention would never prune. See issue #1213.
+            // behind it, which retention would never prune (#1213); so does a
+            // dump whose row could not be written (#1269).
             TryDeleteFile(fileName);
             throw;
         }
-        sw.Stop();
-
-        var size = new FileInfo(targetPath).Length;
-        var row = new Backup
-        {
-            FileName = fileName,
-            FileSizeBytes = size,
-            CreatedAt = timestamp,
-            CreatedByUserId = kind == BackupKind.AdHoc ? _orgContext.CurrentUserId : null,
-            Kind = kind,
-            IsPinned = false,
-        };
-        _db.Backups.Add(row);
-        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
             "Backup {FileName} written in {ElapsedMs} ms ({SizeBytes} bytes, kind={Kind}).",

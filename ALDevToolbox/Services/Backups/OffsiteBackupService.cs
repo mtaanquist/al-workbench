@@ -422,7 +422,7 @@ public sealed class OffsiteBackupService
         var size = new FileInfo(finalPath).Length;
 
         // Best-effort timestamp parse from our own filename shape:
-        // aldevtoolbox-yyyyMMddTHHmmssZ-(scheduled|adhoc).dump
+        // aldevtoolbox-yyyyMMddTHHmmss[fff]Z-(scheduled|adhoc).dump
         var createdAt = TryParseTimestamp(fileName) ?? _clock.GetUtcNow().UtcDateTime;
         var row = new Backup
         {
@@ -929,8 +929,15 @@ public sealed class OffsiteBackupService
     }
 
     /// <summary>
+    /// The two stamps a dump's name has carried: milliseconds since #371
+    /// (see <see cref="BackupService"/>), and whole seconds before it, which
+    /// off-site copies from older deployments still use.
+    /// </summary>
+    private static readonly string[] TimestampFormats = ["yyyyMMddTHHmmssfffZ", "yyyyMMddTHHmmssZ"];
+
+    /// <summary>
     /// Best-effort recovery of the original UTC timestamp from a filename
-    /// shaped like <c>aldevtoolbox-yyyyMMddTHHmmssZ-(scheduled|adhoc).dump</c>.
+    /// shaped like <c>aldevtoolbox-yyyyMMddTHHmmss[fff]Z-(scheduled|adhoc).dump</c>.
     /// Returns <see langword="null"/> if the shape doesn't match — the
     /// caller falls back to "now" so the row still saves.
     /// </summary>
@@ -944,7 +951,7 @@ public sealed class OffsiteBackupService
         var stamp = rest[..dash];
         return DateTime.TryParseExact(
             stamp,
-            "yyyyMMddTHHmmssZ",
+            TimestampFormats,
             System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
             out var parsed)
