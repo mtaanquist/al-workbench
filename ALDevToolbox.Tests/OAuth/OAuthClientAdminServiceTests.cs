@@ -243,4 +243,89 @@ public sealed class OAuthClientAdminServiceTests : IDisposable
 
         rows.Select(r => r.OrganizationId).Should().BeEquivalentTo(new[] { TestDb.DefaultOrgId, TestDb.OtherOrgId });
     }
+
+    [Fact]
+    public async Task Revoking_a_consent_revokes_every_token_the_user_holds_for_that_client_and_no_other()
+    {
+        // One set-based revoke over (subject, client) replaced a walk over
+        // every token the user holds (#1259); it must still reach them all.
+        var user = await SeedUserAsync(TestDb.DefaultOrgId, "alice@cronus.test");
+        var other = await SeedUserAsync(TestDb.DefaultOrgId, "bob@cronus.test");
+        var consent = await SeedConsentAsync(user);
+        var claudeApp = await CreateClientAsync("claude-desktop");
+        var cursorApp = await CreateClientAsync("cursor");
+        var mine = new List<string>();
+        for (var i = 0; i < 3; i++) mine.Add(await CreateTokenAsync(user.Id, claudeApp, _clock.GetUtcNow()));
+        var otherClient = await CreateTokenAsync(user.Id, cursorApp, _clock.GetUtcNow());
+        var otherUser = await CreateTokenAsync(other.Id, claudeApp, _clock.GetUtcNow());
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).RevokeConsentAsync(consent.Id, actorUserId: user.Id);
+        }
+
+        var statuses = await TokenStatusesAsync();
+        mine.Should().AllSatisfy(id => statuses[id].Should().Be(OpenIddictConstants.Statuses.Revoked));
+        statuses[otherClient].Should().Be(OpenIddictConstants.Statuses.Valid);
+        statuses[otherUser].Should().Be(OpenIddictConstants.Statuses.Valid);
+    }
+
+    [Fact]
+    public async Task The_prune_removes_dead_tokens_past_the_retention_window_and_keeps_the_rest()
+    {
+        var user = await SeedUserAsync(TestDb.DefaultOrgId, "alice@cronus.test");
+        var app = await CreateClientAsync("claude-desktop");
+        var now = DateTimeOffset.UtcNow;
+        var old = now - OAuthTokenPruneScheduler.RetentionWindow - TimeSpan.FromDays(1);
+        var expired = await CreateTokenAsync(user.Id, app, old, expiresAt: old + TimeSpan.FromHours(1));
+        var revoked = await CreateTokenAsync(user.Id, app, old, status: OpenIddictConstants.Statuses.Revoked);
+        var recentRevoked = await CreateTokenAsync(user.Id, app, now - TimeSpan.FromDays(1), status: OpenIddictConstants.Statuses.Revoked);
+        var live = await CreateTokenAsync(user.Id, app, old, expiresAt: now + TimeSpan.FromDays(30));
+
+        var (tokens, _) = await OAuthTokenPruneScheduler.PruneAsync(
+            _openIddict.GetRequiredService<IOpenIddictTokenManager>(),
+            _openIddict.GetRequiredService<IOpenIddictAuthorizationManager>(),
+            now - OAuthTokenPruneScheduler.RetentionWindow, default);
+
+        tokens.Should().Be(2);
+        var left = (await TokenStatusesAsync()).Keys;
+        left.Should().BeEquivalentTo(new[] { recentRevoked, live });
+        left.Should().NotContain(new[] { expired, revoked });
+    }
+
+    private async Task<string> CreateClientAsync(string clientId)
+    {
+        var apps = _openIddict.GetRequiredService<IOpenIddictApplicationManager>();
+        var app = await apps.CreateAsync(new OpenIddictApplicationDescriptor
+        {
+            ClientId = clientId,
+            ClientType = OpenIddictConstants.ClientTypes.Public,
+        });
+        return (await apps.GetIdAsync(app))!;
+    }
+
+    private async Task<string> CreateTokenAsync(
+        int userId, string applicationId, DateTimeOffset createdAt,
+        string status = OpenIddictConstants.Statuses.Valid, DateTimeOffset? expiresAt = null)
+    {
+        var tokens = _openIddict.GetRequiredService<IOpenIddictTokenManager>();
+        var token = await tokens.CreateAsync(new OpenIddictTokenDescriptor
+        {
+            Subject = userId.ToString(),
+            ApplicationId = applicationId,
+            Type = OpenIddictConstants.TokenTypeHints.RefreshToken,
+            Status = status,
+            CreationDate = createdAt,
+            ExpirationDate = expiresAt ?? createdAt + TimeSpan.FromDays(60),
+        });
+        return (await tokens.GetIdAsync(token))!;
+    }
+
+    private async Task<Dictionary<string, string?>> TokenStatusesAsync()
+    {
+        await using var ctx = _db.NewContext();
+        return await ctx.Set<OpenIddict.EntityFrameworkCore.Models.OpenIddictEntityFrameworkCoreToken>()
+            .AsNoTracking()
+            .ToDictionaryAsync(t => t.Id!, t => t.Status);
+    }
 }

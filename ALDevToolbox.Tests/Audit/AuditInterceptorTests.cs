@@ -747,6 +747,127 @@ public sealed class AuditInterceptorTests : IDisposable
         row.EntityName.Should().BeNull("a join row of two foreign keys has no name of its own");
     }
 
+    [Fact]
+    public async Task Saving_system_settings_files_the_audit_row_under_no_organisation()
+    {
+        // The settings belong to the whole deployment. Filed under the acting
+        // SiteAdmin's home org, they were readable by that org's Admins on
+        // their own audit page (#1260).
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor("root", TestDb.DefaultOrgId)))
+        {
+            var settings = await ctx.SystemSettings.FirstOrDefaultAsync();
+            if (settings is null)
+            {
+                settings = new SystemSettings { Id = 1 };
+                ctx.SystemSettings.Add(settings);
+                await ctx.SaveChangesAsync();
+            }
+            settings.SmtpHost = "smtp.cronus.example";
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var rows = await read.AuditLog.IgnoreQueryFilters()
+            .Where(r => r.EntityType == AuditEntityType.SystemSettings).ToListAsync();
+        rows.Should().NotBeEmpty();
+        rows.Should().AllSatisfy(r => r.OrganizationId.Should().BeNull());
+    }
+
+    [Fact]
+    public async Task An_org_owned_row_is_still_filed_under_its_own_organisation()
+    {
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor("root", TestDb.OtherOrgId)))
+        {
+            ctx.RuntimeTemplates.Add(TemplateBuilder.Default("runtime-org"));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        (await read.AuditLog.IgnoreQueryFilters()
+                .SingleAsync(r => r.EntityType == AuditEntityType.RuntimeTemplate)).OrganizationId
+            .Should().Be(TestDb.DefaultOrgId, "the row's own organisation wins over the request's");
+    }
+
+    [Theory]
+    [InlineData(nameof(OrganizationSettings.MachineTranslationApiKeyEncrypted))]
+    [InlineData(nameof(OrganizationSettings.EntraClientSecretEncrypted))]
+    [InlineData(nameof(OrganizationSettings.BcClientSecretEncrypted))]
+    public async Task An_organisation_secret_is_redacted_in_the_audit_snapshot(string property)
+    {
+        int settingsId;
+        await using (var seed = _db.NewContext())
+        {
+            var settings = await seed.OrganizationSettings.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(s => s.OrganizationId == TestDb.DefaultOrgId);
+            if (settings is null)
+            {
+                settings = new OrganizationSettings { OrganizationId = TestDb.DefaultOrgId };
+                seed.OrganizationSettings.Add(settings);
+            }
+            typeof(OrganizationSettings).GetProperty(property)!.SetValue(settings, "CfDJ8-ciphertext");
+            await seed.SaveChangesAsync();
+            settingsId = settings.Id;
+        }
+        await ClearAuditAsync();
+
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor("alice")))
+        {
+            var settings = await ctx.OrganizationSettings.IgnoreQueryFilters().SingleAsync(s => s.Id == settingsId);
+            typeof(OrganizationSettings).GetProperty(property)!.SetValue(settings, "CfDJ8-rotated");
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var row = await read.AuditLog.IgnoreQueryFilters()
+            .SingleAsync(r => r.EntityType == AuditEntityType.OrganizationSettings);
+        row.SnapshotJson.Should().NotContain("CfDJ8");
+        using var snapshot = JsonDocument.Parse(row.SnapshotJson!);
+        snapshot.RootElement.GetProperty(property).GetString().Should().Be("[redacted]");
+    }
+
+    [Fact]
+    public void Every_encrypted_column_on_an_audited_type_is_redacted()
+    {
+        // A new *Encrypted column on an audited entity, without a matching line
+        // in the redaction list, would copy its ciphertext into history.
+        using var ctx = _db.NewContext();
+        var checkedAny = false;
+        foreach (var type in AuditInterceptor.AuditedTypeMap.Keys)
+        {
+            var secrets = type.GetProperties()
+                .Where(p => p.Name.EndsWith("Encrypted", StringComparison.Ordinal) && p.PropertyType == typeof(string))
+                .ToList();
+            if (secrets.Count == 0) continue;
+
+            var entity = Activator.CreateInstance(type)!;
+            foreach (var secret in secrets) secret.SetValue(entity, "CfDJ8-ciphertext");
+            type.GetProperty("Id")?.SetValue(entity, 1);
+            var entry = ctx.Attach(entity); // tracked, never saved: the snapshot reads its original values
+            var snapshot = AuditInterceptor.OriginalValuesToDict(entry);
+
+            foreach (var secret in secrets)
+            {
+                snapshot.Should().ContainKey(secret.Name);
+                snapshot[secret.Name].Should().Be("[redacted]", $"{type.Name}.{secret.Name} must not reach the audit log");
+            }
+            checkedAny = true;
+        }
+        checkedAny.Should().BeTrue("at least the settings types carry secrets today");
+    }
+
+    private static AuditInterceptor NewInterceptor(string name, int organizationId)
+    {
+        var http = new HttpContextAccessor();
+        var ctx = new DefaultHttpContext();
+        ctx.User = new ClaimsPrincipal(new ClaimsIdentity(new[]
+        {
+            new Claim(ClaimTypes.Name, name),
+            new Claim(ALDevToolbox.Services.HttpOrganizationContext.OrganizationIdClaim, organizationId.ToString()),
+        }, "test"));
+        http.HttpContext = ctx;
+        return new AuditInterceptor(http);
+    }
+
     private static AuditInterceptor NewInterceptor(string? name)
     {
         var http = new HttpContextAccessor();

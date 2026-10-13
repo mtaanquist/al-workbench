@@ -331,6 +331,36 @@ public sealed class TeamServiceTests : IDisposable
         (await svc.GetTeamAsync(teamId))!.Members[0].IsManager.Should().BeFalse();
     }
 
+    [Fact]
+    public async Task A_manager_cannot_reach_another_teams_member_through_their_own_team()
+    {
+        // The manager check runs against the team id passed in, so the member
+        // lookup must be pinned to that team too. Without the pin, a manager
+        // of Nordics could remove or promote anyone on Benelux by naming
+        // their own team (#1272).
+        var nordics = await SeedTeamAsync("Nordics", (ManagerUserId, true));
+        var benelux = await SeedTeamAsync("Benelux", (MemberUserId, false));
+        int beneluxMemberId;
+        await using (var read = _db.NewContext())
+        {
+            beneluxMemberId = (await Svc(read).GetTeamAsync(benelux))!.Members[0].MemberId;
+        }
+        ActAs(ManagerUserId);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var svc = Svc(ctx);
+            await svc.SetManagerAsync(nordics, beneluxMemberId, true);
+            await svc.RemoveMemberAsync(nordics, beneluxMemberId);
+        }
+
+        ActAs(AdminUserId);
+        await using var check = _db.NewContext();
+        var members = (await Svc(check).GetTeamAsync(benelux))!.Members;
+        members.Should().ContainSingle(m => m.MemberId == beneluxMemberId);
+        members[0].IsManager.Should().BeFalse();
+    }
+
     // ------------------------------------------- update-ops flag (issue #657)
 
     [Fact]

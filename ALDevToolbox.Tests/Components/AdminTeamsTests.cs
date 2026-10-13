@@ -55,6 +55,7 @@ public sealed class AdminTeamsTests : IDisposable
         _ctx.Services.AddScoped<TeamService>();
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);
+        _ctx.JSInterop.Mode = JSRuntimeMode.Loose;
         _ctx.Services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>),
             typeof(Microsoft.Extensions.Logging.Abstractions.NullLogger<>));
     }
@@ -76,10 +77,11 @@ public sealed class AdminTeamsTests : IDisposable
             cut.FindAll(".empty-state").Should().ContainSingle(
                 "a first-time admin should meet an explanation, not a bare table");
             // The one piece of copy worth pinning: it says what a team is *for*
-            // today, and marks the visibility grant as still to come. Present
-            // tense here would tell an admin a project is protected when it is not.
+            // and where it takes effect. Team-based visibility ships, so this
+            // is present tense and names the solution's Access tab (#1260).
             cut.Markup.Should().Contain("Teams group the colleagues who work on the same customer");
-            cut.Markup.Should().Contain("Soon you'll be able to");
+            cut.Markup.Should().Contain("Access tab");
+            cut.Markup.Should().NotContain("Soon");
             cut.FindAll("button.btn--primary").Should().NotBeEmpty(
                 "the empty state has to offer the next step, not just describe it");
         });
@@ -133,5 +135,56 @@ public sealed class AdminTeamsTests : IDisposable
             cut.Markup.Should().Contain("No manager yet");
             cut.Markup.Should().Contain("Admin");
         });
+    }
+
+    [Fact]
+    public async Task Refusing_to_delete_the_last_team_on_a_private_solution_shows_the_reason()
+    {
+        // The refusal is worded for the admin; it used to fall through to the
+        // catch-all and read as an unexpected error (#1260).
+        await using (var seed = _db.NewContext())
+        {
+            var team = new Team
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Name = "Nordics",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            };
+            var project = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Name = "CRONUS Denmark",
+                Visibility = ALDevToolbox.Domain.Entities.ObjectExplorer.ProjectVisibility.Private,
+                CreatedByUserId = AdminUserId,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            };
+            seed.Teams.Add(team);
+            seed.OeProjects.Add(project);
+            await seed.SaveChangesAsync();
+            seed.OeProjectTeams.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectTeam
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = project.Id,
+                TeamId = team.Id,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<AdminAdministrationTeams>();
+        cut.WaitForAssertion(() => cut.FindAll("tbody tr").Should().ContainSingle());
+        cut.FindAll("tbody button").First(b => b.TextContent.Contains("Delete")).Click();
+        cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions button").Last().Click());
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("is the only team on");
+            cut.Markup.Should().Contain("CRONUS Denmark");
+            cut.Markup.Should().NotContain("An unexpected error occurred");
+        });
+        await using var read = _db.NewContext();
+        (await read.Teams.IgnoreQueryFilters().CountAsync()).Should().Be(1);
     }
 }

@@ -57,7 +57,7 @@ public sealed class AuthService
         var normalised = NormaliseEmail(email);
         var now = _clock.GetUtcNow().UtcDateTime;
 
-        if (await IsRateLimitedAsync(normalised, ip, now, ct))
+        if (await IsRateLimitedAsync(normalised, ip, now, ct, failuresOnlyPerIp: true))
         {
             await RecordAttemptAsync(normalised, ip, succeeded: false, now, ct);
             _logger.LogInformation("Login throttled for {Email} from {Ip}.", normalised, ip);
@@ -229,7 +229,17 @@ public sealed class AuthService
 
     public static string NormaliseEmail(string email) => email.Trim().ToLowerInvariant();
 
-    public async Task<bool> IsRateLimitedAsync(string email, string ip, DateTime now, CancellationToken ct)
+    /// <summary>
+    /// True when the email or the source IP has used up its attempts in the
+    /// rate window. <paramref name="failuresOnlyPerIp"/> is what password
+    /// sign-in passes: there the IP cap counts only refusals, because a whole
+    /// office signs in from one address and thirty good sign-ins on a Monday
+    /// morning must not lock the thirty-first person out (#1259). The flows
+    /// that send mail (reset links, magic links, signups) leave it off, so
+    /// the IP cap still bounds how much mail one address can make the site
+    /// send to valid accounts, whose rows are recorded as successes.
+    /// </summary>
+    public async Task<bool> IsRateLimitedAsync(string email, string ip, DateTime now, CancellationToken ct, bool failuresOnlyPerIp = false)
     {
         var window = now - RateWindow;
         // login_attempts is org-less rate-limit data with no tenant query filter,
@@ -239,7 +249,7 @@ public sealed class AuthService
         if (perEmail >= MaxAttemptsPerEmail) return true;
         if (string.IsNullOrEmpty(ip)) return false;
         var perIp = await _db.LoginAttempts
-            .CountAsync(a => a.Ip == ip && a.Timestamp >= window, ct);
+            .CountAsync(a => a.Ip == ip && a.Timestamp >= window && (!failuresOnlyPerIp || !a.Succeeded), ct);
         return perIp >= MaxAttemptsPerIp;
     }
 
@@ -262,9 +272,9 @@ public sealed class AuthService
     /// Takes one second-factor attempt for the user before the code is
     /// checked. Gates the TOTP and recovery-code challenges so their short
     /// code space can't be brute-forced inside the renewable MfaPending
-    /// window: after <see cref="MaxMfaAttempts"/> consecutive failed attempts
-    /// for the user's email within the lockout window (no success between),
-    /// further attempts are refused. See #477.
+    /// window: after <see cref="MaxMfaAttempts"/> failed attempts for the
+    /// user's email within the lockout window and since their last completed
+    /// sign-in, further attempts are refused. See #477.
     ///
     /// <para>The attempt is written to <c>login_attempts</c> as a failure
     /// first and the throttle is then checked against every other attempt,
@@ -281,23 +291,24 @@ public sealed class AuthService
     {
         // Fence category 1 (pre-auth routing): MFA throttle between the two login legs;
         // pinned to u.Id == userId and then to that user's email.
-        var email = await _db.Users.IgnoreQueryFilters()
-            .Where(u => u.Id == userId).Select(u => u.Email).FirstOrDefaultAsync(ct);
-        if (email is null) return null;
+        var user = await _db.Users.IgnoreQueryFilters()
+            .Where(u => u.Id == userId).Select(u => new { u.Email, u.LastLoginAt }).FirstOrDefaultAsync(ct);
+        if (user is null) return null;
+        var email = user.Email;
         var now = _clock.GetUtcNow().UtcDateTime;
         var attempt = new LoginAttempt { Email = email, Ip = ip ?? string.Empty, Succeeded = false, Timestamp = now };
         _db.LoginAttempts.Add(attempt);
         await _db.SaveChangesAsync(ct);
 
-        var window = now - LockoutWindow;
-        var others = await _db.LoginAttempts
-            .Where(a => a.Email == email && a.Timestamp >= window && a.Id != attempt.Id)
-            .OrderByDescending(a => a.Timestamp)
-            .ThenByDescending(a => a.Id)
-            .Take(MaxMfaAttempts)
-            .AsNoTracking()
-            .ToListAsync(ct);
-        if (others.Count >= MaxMfaAttempts && others.All(a => !a.Succeeded))
+        // The run of failures ends at a completed sign-in, read from the
+        // user's LastLoginAt, and not at any success row: issuing a reset or
+        // magic link writes a success row too, and letting that end the run
+        // let someone holding the password lift the cap at will (#1259).
+        var since = now - LockoutWindow;
+        if (user.LastLoginAt is { } lastLogin && lastLogin >= since) since = lastLogin.AddTicks(1);
+        var failures = await _db.LoginAttempts
+            .CountAsync(a => a.Email == email && a.Timestamp >= since && !a.Succeeded && a.Id != attempt.Id, ct);
+        if (failures >= MaxMfaAttempts)
         {
             await ReleaseMfaAttemptAsync(attempt.Id, ct);
             return null;
