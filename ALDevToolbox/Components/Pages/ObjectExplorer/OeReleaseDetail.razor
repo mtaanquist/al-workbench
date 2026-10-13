@@ -647,6 +647,17 @@
     /// Pipeline builds are not in this list; they use
     /// <c>ObjectExplorerService.ListBuildCompareCandidatesAsync</c> instead.
     /// </summary>
+    /// <summary>Reads the "include inherited" toggle from the URL: off unless it says inherited=1.</summary>
+    internal static bool InheritedFromQuery(string? value) => value == "1";
+
+    /// <summary>
+    /// Writes the toggle back to the URL. Off is the default on every release, the
+    /// one <see cref="InheritedFromQuery"/> reads, so only the opt-in is written. The
+    /// writer used to assume a parented release defaulted on and wrote nothing when
+    /// the toggle was on, so Back and shared links lost it (#1226).
+    /// </summary>
+    internal static string? InheritedQueryPart(bool includeInherited) => includeInherited ? "inherited=1" : null;
+
     internal static List<ReleaseListItem> CompareCandidates(
         IEnumerable<ReleaseListItem> releases, int releaseId, string releaseKind) =>
         releases
@@ -681,7 +692,7 @@
         // Default to this release's own objects; widening into the parent chain
         // (a third-party / solution release's Microsoft base) is an explicit
         // opt-in via inherited=1. The toggle is only shown for parented releases.
-        _includeInherited = query["inherited"] == "1";
+        _includeInherited = InheritedFromQuery(query["inherited"]);
         // Validated against the releases the picker actually offers. An id that
         // is not one of them - or this release itself - makes ReloadCompareAsync
         // null both result lists, which the child reads as "still loading" and
@@ -747,11 +758,7 @@
         if (_selectedKinds.Count > 0) parts.Add("kind=" + Uri.EscapeDataString(string.Join(",", _selectedKinds)));
         if (!string.IsNullOrWhiteSpace(_moduleFilter)) parts.Add("module=" + Uri.EscapeDataString(_moduleFilter));
         if (!string.IsNullOrWhiteSpace(_namespace)) parts.Add("namespace=" + Uri.EscapeDataString(_namespace));
-        // Persist only the non-default state: a parented release defaults to
-        // showing inherited objects, so record inherited=0 when toggled off;
-        // a parentless release defaults off, so record inherited=1 if ever on.
-        var inheritedDefault = _release?.ParentReleaseId is not null;
-        if (_includeInherited != inheritedDefault) parts.Add(_includeInherited ? "inherited=1" : "inherited=0");
+        if (InheritedQueryPart(_includeInherited) is { } inherited) parts.Add(inherited);
         if (_scope == SearchScope.Compare && !string.IsNullOrWhiteSpace(_compareRight)) parts.Add("right=" + Uri.EscapeDataString(_compareRight));
         if (_scope == SearchScope.Compare && _compareDirection == "ba") parts.Add("dir=ba");
         if (_scope == SearchScope.Compare && _compareBy == "objects") parts.Add("by=objects");
