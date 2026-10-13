@@ -391,8 +391,8 @@ public sealed class ReleaseVisibilityTests : IDisposable
 
             // Both sides of a comparison, in both directions: knowing one side
             // must not buy you the other's contents.
-            (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Should().BeEmpty();
-            (await Comparison(ctx).CompareReleaseObjectsAsync(seeded.ReleaseId, open.ReleaseId)).Should().BeEmpty();
+            (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Rows.Should().BeEmpty();
+            (await Comparison(ctx).CompareReleaseObjectsAsync(seeded.ReleaseId, open.ReleaseId)).Rows.Should().BeEmpty();
             (await Comparison(ctx).CompareReleasesAsync(open.ReleaseId, seeded.ReleaseId)).Should().BeNull();
             (await Comparison(ctx).FindObjectFileInReleaseAsync(seeded.ReleaseId, "table", 50100, "Loyalty Card"))
                 .Should().BeNull();
@@ -419,7 +419,7 @@ public sealed class ReleaseVisibilityTests : IDisposable
             (await Search(ctx).SearchObjectsInReleaseAsync(
                 seeded.ReleaseId, new ObjectListFilter(Search: "Loyalty"))).Should().ContainSingle();
             (await Viewer(ctx).GetFileAsync(seeded.FileId)).Should().NotBeNull();
-            (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Should().NotBeEmpty();
+            (await Comparison(ctx).CompareReleaseObjectsAsync(open.ReleaseId, seeded.ReleaseId)).Rows.Should().NotBeEmpty();
             (await Explorer(ctx).ListLatestPipelineBuildReleasesAsync())
                 .Should().ContainSingle(r => r.Id == seeded.ReleaseId);
         }

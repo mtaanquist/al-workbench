@@ -448,6 +448,8 @@
                                   FileResults="_compareResults"
                                   FileResultsTruncated="_compareTruncated"
                                   ObjectResults="_objectCompareResults"
+                                  ObjectCount="_objectCompareCount"
+                                  ObjectResultsTruncated="_objectCompareTruncated"
                                   NothingToCompare="@(_otherReleases is { Count: 0 })"
                                   IsBuild="@(_release?.Kind == OeRelease.ProjectBuildKind)" />
                 break;
@@ -506,6 +508,8 @@
     /// <summary>True when the file diff hit its cap and more files changed than are listed.</summary>
     private bool _compareTruncated;
     private List<ObjectCompareRow>? _objectCompareResults;
+    private int _objectCompareCount;
+    private bool _objectCompareTruncated;
 
     // Refs to the search-style text inputs whose `value` attribute is
     // intentionally NOT bound from the server side. See the comment on
@@ -1101,7 +1105,11 @@
                 : (ReleaseId, otherId);
             if (_compareBy == "objects")
             {
-                _objectCompareResults = await Comparison.CompareReleaseObjectsAsync(leftId, rightId);
+                // Changed objects only, capped like the file diff (#1228).
+                var set = await Comparison.CompareReleaseObjectsAsync(leftId, rightId);
+                _objectCompareResults = set.Rows.ToList();
+                _objectCompareCount = set.ObjectCount;
+                _objectCompareTruncated = set.Truncated;
                 _compareResults = null;
             }
             else
