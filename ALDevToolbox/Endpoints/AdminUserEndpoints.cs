@@ -31,7 +31,14 @@ internal static class AdminUserEndpoints
         {
             var logger = loggerFactory.CreateLogger("AdminUsers");
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            await users.ApproveSignupAsync(id, org.CurrentUserId!.Value, org.CurrentOrganizationId!.Value, ct);
+            // A double click, or a second admin on a stale page, finds the request
+            // already decided: show that as a message, not an error page (#1260).
+            try { await users.ApproveSignupAsync(id, org.CurrentUserId!.Value, org.CurrentOrganizationId!.Value, ct); }
+            catch (PlanValidationException ex)
+            {
+                RedirectWithError(ctx, ex);
+                return;
+            }
             if (await email.IsConfiguredAsync(ct))
             {
                 try
@@ -73,7 +80,12 @@ internal static class AdminUserEndpoints
             var requesterDisplay = req?.User?.DisplayName ?? "User";
             var orgName = req?.Organization?.Name ?? "Unknown organisation";
 
-            await users.RejectSignupAsync(id, org.CurrentUserId!.Value, org.CurrentOrganizationId!.Value, ct);
+            try { await users.RejectSignupAsync(id, org.CurrentUserId!.Value, org.CurrentOrganizationId!.Value, ct); }
+            catch (PlanValidationException ex)
+            {
+                RedirectWithError(ctx, ex);
+                return;
+            }
 
             if (await email.IsConfiguredAsync(ct) && !string.IsNullOrEmpty(requesterEmail))
             {
@@ -319,6 +331,13 @@ internal static class AdminUserEndpoints
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.AdminRole));
 
         return app;
+    }
+
+    /// <summary>Back to the users page with the refusal's first message as the error banner.</summary>
+    private static void RedirectWithError(HttpContext ctx, PlanValidationException ex)
+    {
+        var first = ex.Errors.FirstOrDefault();
+        ctx.Response.Redirect($"{RouteConstants.AdminUsers}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Value)}");
     }
 
     private static UserRole ParseInviteRole(string raw) =>

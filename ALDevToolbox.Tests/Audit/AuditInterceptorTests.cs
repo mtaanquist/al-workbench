@@ -747,6 +747,60 @@ public sealed class AuditInterceptorTests : IDisposable
         row.EntityName.Should().BeNull("a join row of two foreign keys has no name of its own");
     }
 
+    [Fact]
+    public async Task Saving_system_settings_files_the_audit_row_under_no_organisation()
+    {
+        // The settings belong to the whole deployment. Filed under the acting
+        // SiteAdmin's home org, they were readable by that org's Admins on
+        // their own audit page (#1260).
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor("root", TestDb.DefaultOrgId)))
+        {
+            var settings = await ctx.SystemSettings.FirstOrDefaultAsync();
+            if (settings is null)
+            {
+                settings = new SystemSettings { Id = 1 };
+                ctx.SystemSettings.Add(settings);
+                await ctx.SaveChangesAsync();
+            }
+            settings.SmtpHost = "smtp.cronus.example";
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var rows = await read.AuditLog.IgnoreQueryFilters()
+            .Where(r => r.EntityType == AuditEntityType.SystemSettings).ToListAsync();
+        rows.Should().NotBeEmpty();
+        rows.Should().AllSatisfy(r => r.OrganizationId.Should().BeNull());
+    }
+
+    [Fact]
+    public async Task An_org_owned_row_is_still_filed_under_its_own_organisation()
+    {
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor("root", TestDb.OtherOrgId)))
+        {
+            ctx.RuntimeTemplates.Add(TemplateBuilder.Default("runtime-org"));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        (await read.AuditLog.IgnoreQueryFilters()
+                .SingleAsync(r => r.EntityType == AuditEntityType.RuntimeTemplate)).OrganizationId
+            .Should().Be(TestDb.DefaultOrgId, "the row's own organisation wins over the request's");
+    }
+
+    private static AuditInterceptor NewInterceptor(string name, int organizationId)
+    {
+        var http = new HttpContextAccessor();
+        var ctx = new DefaultHttpContext();
+        ctx.User = new ClaimsPrincipal(new ClaimsIdentity(new[]
+        {
+            new Claim(ClaimTypes.Name, name),
+            new Claim(ALDevToolbox.Services.HttpOrganizationContext.OrganizationIdClaim, organizationId.ToString()),
+        }, "test"));
+        http.HttpContext = ctx;
+        return new AuditInterceptor(http);
+    }
+
     private static AuditInterceptor NewInterceptor(string? name)
     {
         var http = new HttpContextAccessor();

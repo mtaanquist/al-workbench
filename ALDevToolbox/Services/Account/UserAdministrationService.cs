@@ -110,6 +110,12 @@ public sealed class UserAdministrationService
     /// </summary>
     public async Task DisableUserAsync(int userId, int actingOrgId, CancellationToken ct = default)
     {
+        // One transaction from the guard to the commit, with the org locked, so
+        // two admins disabling each other at once can't both pass the guard
+        // (#1260). The bulk revocations below commit inside it too, so a failed
+        // save never leaves tokens revoked on an account still active.
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        await LockAdminGuardAsync(actingOrgId, ct);
         var user = await LoadUserAsync(userId, actingOrgId, ct);
         RequireMayManage(user);
         if (user.Role == UserRole.Admin && user.Status == UserStatus.Active
@@ -133,14 +139,11 @@ public sealed class UserAdministrationService
         var now = _clock.GetUtcNow().UtcDateTime;
         user.Status = UserStatus.Disabled;
         user.CredentialsChangedAt = now;
-        // One transaction: the bulk revocations commit on their own otherwise,
-        // and a failed save would leave tokens revoked on an account still
-        // active. Both filtered writes: LoadUserAsync pinned the user to the
+        // Both filtered writes: LoadUserAsync pinned the user to the
         // acting org, and the admin endpoint passes the request's own org as
         // actingOrgId, so the query filter and the pin agree. Not crossing the
         // fence here is deliberate (CLAUDE.md); a caller acting for another org
         // would find these no-op, which the filter would then be right about.
-        await using var tx = await _db.Database.BeginTransactionAsync(ct);
         await _db.PersonalAccessTokens
             .Where(p => p.UserId == userId && p.RevokedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(p => p.RevokedAt, now), ct);
@@ -187,6 +190,9 @@ public sealed class UserAdministrationService
     /// <summary>Promotes / demotes a user. Last-admin protection on any demotion away from Admin (User or Editor).</summary>
     public async Task ChangeRoleAsync(int userId, UserRole newRole, int actingOrgId, CancellationToken ct = default)
     {
+        // Guard and save under the org lock, as in DisableUserAsync (#1260).
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        await LockAdminGuardAsync(actingOrgId, ct);
         var user = await LoadUserAsync(userId, actingOrgId, ct);
         RequireMayManage(user);
         if (user.Role == UserRole.Admin && newRole != UserRole.Admin
@@ -197,6 +203,7 @@ public sealed class UserAdministrationService
         }
         user.Role = newRole;
         await _db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     /// <summary>
@@ -262,6 +269,20 @@ public sealed class UserAdministrationService
             .FirstOrDefaultAsync(ct);
         return name ?? $"#{userId}";
     }
+
+    /// <summary>
+    /// Takes a row lock on the organisation for the rest of the caller's
+    /// transaction. The last-admin guard counts admins and then saves; without
+    /// the lock two admins demoting or disabling each other at the same time
+    /// both counted two and the organisation was left with none (#1260). Every
+    /// path that can take an admin away goes through here first, so the
+    /// second waits for the first to commit and then counts what it left.
+    /// Locking the one organisations row rather than the admin rows means an
+    /// admin added in the meantime can't slip past either.
+    /// </summary>
+    private async Task LockAdminGuardAsync(int orgId, CancellationToken ct) =>
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM organizations WHERE id = {orgId} FOR UPDATE", ct);
 
     private async Task<int> CountActiveAdminsAsync(int orgId, CancellationToken ct)
     {

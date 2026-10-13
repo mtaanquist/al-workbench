@@ -572,19 +572,21 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
     }
 
     /// <summary>
-    /// Pulls the entity's own <c>OrganizationId</c> if it has one, falling
-    /// back to the request-scoped value. Audited types like
-    /// <see cref="AuditLogEntry"/>'s parent (<c>users</c> or seed-time
-    /// inserts) may not have a column to read.
+    /// Pulls the entity's own <c>OrganizationId</c>, falling back to the
+    /// request-scoped value when the column is still unset. An audited type
+    /// with no organisation column at all (<see cref="SystemSettings"/>,
+    /// <see cref="Backup"/>) belongs to the whole deployment, so its row is
+    /// filed under no organisation: filing it under the acting SiteAdmin's
+    /// home organisation showed the SMTP and off-site storage settings to
+    /// that organisation's Admins on their audit page (#1260). Rows with no
+    /// organisation are read only by the SiteAdmin audit view.
     /// </summary>
     private static int? ResolveEntityOrganizationId(EntityEntry entry, int? fallback)
     {
         var values = entry.State == EntityState.Added ? entry.CurrentValues : entry.OriginalValues;
-        if (values.Properties.Any(p => p.Name == "OrganizationId"))
-        {
-            var value = values["OrganizationId"];
-            if (value is int orgId && orgId > 0) return orgId;
-        }
+        if (!values.Properties.Any(p => p.Name == "OrganizationId")) return null;
+        var value = values["OrganizationId"];
+        if (value is int orgId && orgId > 0) return orgId;
         return fallback;
     }
 

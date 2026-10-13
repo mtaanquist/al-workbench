@@ -93,14 +93,12 @@
     else if (_teams.Count == 0)
     {
         <div class="card">
-            @* Present tense would be a lie: being on a team grants nothing
-               until the visibility slice lands, and security copy that
-               overstates what is enforced is the worst kind to get wrong.
-               Says what a team *is* today, and marks the rest as coming. *@
+            @* Team-based visibility ships: a solution limited to its teams is
+               visible only to their members (and Admins), so this says so. *@
             <EmptyState Icon="users" Title="No teams yet">
                 <Text>
-                    Teams group the colleagues who work on the same customer. Soon you'll be able to
-                    use a team to limit who can see and change that customer's solution.
+                    Teams group the colleagues who work on the same customer. Use a team on a
+                    solution's Access tab to limit who can see and change it.
                 </Text>
                 <Action>
                     @if (!_creating)
@@ -266,6 +264,12 @@
         catch (ProjectAccessDeniedException)
         {
             _error = "Only an organisation admin can delete teams.";
+        }
+        catch (PlanValidationException ex)
+        {
+            // A worded refusal, such as the last team on a private solution,
+            // is not an unexpected error (#1260).
+            _error = ex.Errors.Values.FirstOrDefault() ?? "The team was not deleted.";
         }
         catch (Exception ex)
         {

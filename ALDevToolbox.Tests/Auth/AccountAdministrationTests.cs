@@ -180,6 +180,40 @@ public sealed class AccountAdministrationTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_admins_taking_each_other_out_at_once_leave_one_admin_standing()
+    {
+        // Count-then-save without a lock let both calls count two admins and
+        // both go ahead, leaving the organisation with none (#1260). A race
+        // is not certain to interleave on any one try, so run several.
+        var orgId = TestDb.OtherOrgId;
+        var standing = await SeedActiveAdminAsync(orgId, "admin-0@example.com");
+        for (var round = 1; round <= 8; round++)
+        {
+            var challenger = await SeedActiveAdminAsync(orgId, $"admin-{round}@example.com");
+            var demoteFirst = round % 2 == 0;
+
+            async Task<bool> Attempt(Func<UserAdministrationService, Task> op)
+            {
+                await using var ctx = _db.NewContext();
+                try { await op(NewUserAdmin(ctx)); return true; }
+                catch (PlanValidationException ex) when (ex.Errors.ContainsKey("LastAdmin")) { return false; }
+            }
+
+            var outcomes = await Task.WhenAll(
+                Attempt(s => s.ChangeRoleAsync(demoteFirst ? standing : challenger, UserRole.User, orgId)),
+                Attempt(s => s.DisableUserAsync(demoteFirst ? challenger : standing, orgId)));
+
+            outcomes.Count(ok => ok).Should().Be(1, $"exactly one of the two may go ahead (round {round})");
+            await using var read = _db.NewContext();
+            var admins = await read.Users.IgnoreQueryFilters()
+                .Where(u => u.OrganizationId == orgId && u.Role == UserRole.Admin && u.Status == UserStatus.Active)
+                .Select(u => u.Id).ToListAsync();
+            admins.Should().ContainSingle($"the organisation keeps an admin (round {round})");
+            standing = admins[0];
+        }
+    }
+
+    [Fact]
     public async Task ChangeRole_singleton_demote_refuses_to_strip_the_last_active_admin()
     {
         var orgId = TestDb.OtherOrgId;
