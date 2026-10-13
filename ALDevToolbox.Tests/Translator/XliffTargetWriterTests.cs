@@ -235,6 +235,20 @@ public sealed class XliffTargetWriterTests
         XliffTargetWriter.SetTargetLanguage(original, "da-DK").Should().Be(original);
     }
 
+    [Theory]
+    [InlineData("""<xliff><file source-language="en-US" target-language="en-US"><body /></file></xliff>""", "da-DK", "da-DK")]
+    [InlineData("""<xliff><file source-language="en-US"><body /></file></xliff>""", "da-DK", "da-DK")]
+    [InlineData("""<xliff><file source-language="en-US" target-language="da-DK"><body /></file></xliff>""", "sv-SE", "da-DK")]
+    [InlineData("""<xliff><file source-language="en-US" target-language="en-US"><body /></file></xliff>""", "en-US", "en-US")]
+    [InlineData("""<xliff><file source-language="en-US" target-language="en-US"><body /></file></xliff>""", "", "en-US")]
+    public void Only_a_file_still_marked_untranslated_has_its_language_named(string original, string language, string expected)
+    {
+        var result = XliffTargetWriter.NameTargetLanguageOfUntranslatedFile(original, language);
+
+        result.Should().Contain($"target-language=\"{expected}\"");
+        if (expected != language) result.Should().Be(original, "anything else is left byte for byte");
+    }
+
     /// <summary>Concatenates everything that sits *outside* the matched blocks.</summary>
     private static string Between(string s, Regex blocks)
     {
