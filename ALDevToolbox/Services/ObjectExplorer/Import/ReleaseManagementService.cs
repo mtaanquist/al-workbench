@@ -209,6 +209,8 @@ public class ReleaseManagementService
     /// (objects / files / symbols / variables / references / translations) via
     /// the FK relationships. Scoped by <c>release_id</c>, which is a global
     /// identity already validated against the caller's org by the retry endpoint.
+    /// The import worker also calls it before a job resumed after a restart runs
+    /// again (#1209), for a release its job row was queued against.
     /// </summary>
     public async Task ClearIngestedDataAsync(int releaseId, CancellationToken ct = default)
     {

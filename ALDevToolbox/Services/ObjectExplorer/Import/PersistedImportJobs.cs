@@ -175,9 +175,11 @@ public sealed class PersistedImportJobs
             {
                 case "url" when !string.IsNullOrEmpty(row.DownloadUrl):
                     // Reset to queued so the worker re-runs from scratch. The
-                    // download is idempotent: it writes to a fresh temp file
-                    // and the importer creates a single transaction per
-                    // release.
+                    // download is idempotent: it writes to a fresh temp file.
+                    // The import is not: it saves each module, its files and
+                    // objects, and the release's references in separate chunks,
+                    // so the interrupted run can have left part of the release
+                    // behind. Resumed tells the worker to wipe it first (#1209).
                     row.Status = "queued";
                     row.StartedAt = null;
                     toResume.Add(new ReleaseImportJob(
@@ -186,11 +188,13 @@ public sealed class PersistedImportJobs
                             row.OrganizationId, row.UserId, row.IsSiteAdmin, row.IsSystemOrganization),
                         Source: new ReleaseImportSource.Url(row.DownloadUrl),
                         StoreSymbolReference: row.StoreSymbolReference,
-                        JobRowId: row.Id));
+                        JobRowId: row.Id,
+                        Resumed: true));
                     break;
                 case "bc_artifact" when !string.IsNullOrEmpty(row.DownloadUrl):
                     // Re-resolve happened at enqueue; the stored application URL
                     // is enough to re-download the whole artifact set on resume.
+                    // Partly written like a URL import, so wiped first (#1209).
                     row.Status = "queued";
                     row.StartedAt = null;
                     toResume.Add(new ReleaseImportJob(
@@ -199,7 +203,8 @@ public sealed class PersistedImportJobs
                             row.OrganizationId, row.UserId, row.IsSiteAdmin, row.IsSystemOrganization),
                         Source: new ReleaseImportSource.BcArtifact(row.DownloadUrl),
                         StoreSymbolReference: row.StoreSymbolReference,
-                        JobRowId: row.Id));
+                        JobRowId: row.Id,
+                        Resumed: true));
                     break;
                 case "project_build" when survivor.Build?.Status is ProjectBuildStatus.Ready or ProjectBuildStatus.Failed:
                     // The build had already finished: the restart landed while it was
@@ -214,6 +219,7 @@ public sealed class PersistedImportJobs
                     // Re-clone and rebuild from scratch; nothing on disk survives
                     // a restart, but the build row holds the commits its first
                     // clone recorded, so the rebuild is of the same code (#1110).
+                    // Its ingest may have been cut off part way, so wiped first (#1209).
                     row.Status = "queued";
                     row.StartedAt = null;
                     toResume.Add(new ReleaseImportJob(
@@ -225,7 +231,8 @@ public sealed class PersistedImportJobs
                         JobRowId: row.Id,
                         BuildOrder: survivor.Build is { } build
                             ? ProjectBuildOrder.For(build.PipelineId, build.BcTarget, build.Trigger)
-                            : ProjectBuildOrder.Unordered));
+                            : ProjectBuildOrder.Unordered,
+                        Resumed: true));
                     break;
                 case "backfill_system_references":
                     // A maintenance backfill interrupted by a restart. The

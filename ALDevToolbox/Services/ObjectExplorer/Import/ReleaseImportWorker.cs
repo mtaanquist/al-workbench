@@ -355,6 +355,12 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
         string? jobFailureMessage = null;
         try
         {
+            if (job.Resumed && !await ClearResumedReleaseAsync(scope.ServiceProvider, importer, job, ct).ConfigureAwait(false))
+            {
+                jobFailureMessage = ResumeClearFailedMessage;
+                return;
+            }
+
             // Legacy C/AL TXT has no .app uploads — parse the staged text file
             // directly through CalImportService and finalise via the shared
             // finally block below.
@@ -646,6 +652,45 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                     _logger.LogWarning(ex, "Failed to finalise job row {JobRowId}.", job.JobRowId);
                 }
             }
+        }
+    }
+
+    private const string ResumeClearFailedMessage =
+        "The import was interrupted by a restart and what it had saved could not be removed. Try again.";
+
+    /// <summary>
+    /// Wipes what the interrupted run of a resumed job had already saved, before the
+    /// job runs again (#1209). An import saves each module row first, then its files
+    /// and objects in chunks, then the release's references in chunks, so a restart
+    /// can leave a half-written module behind. Without the wipe, the re-run skips that
+    /// module as an identical re-upload (same hash) and stores every reference the
+    /// first run had already emitted a second time. Retry and rebuild clear the same
+    /// way. Returns false, with the release (and build) failed, when the wipe fails.
+    /// </summary>
+    private async Task<bool> ClearResumedReleaseAsync(
+        IServiceProvider services, ReleaseImportService importer, ReleaseImportJob job, CancellationToken ct)
+    {
+        try
+        {
+            await services.GetRequiredService<ReleaseManagementService>()
+                .ClearIngestedDataAsync(job.ReleaseId, ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw; // Shutdown again; the row stays running and the next start resumes it.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Release {ReleaseId}: clearing the interrupted run's rows before resuming failed.", job.ReleaseId);
+            await importer.MarkFailedAsync(job.ReleaseId, ResumeClearFailedMessage, ct).ConfigureAwait(false);
+            if (job.Source is ReleaseImportSource.ProjectBuild)
+            {
+                await services.GetRequiredService<ProjectBuildService>()
+                    .MarkBuildFailedAsync(job.ReleaseId, ResumeClearFailedMessage, ct).ConfigureAwait(false);
+                await NotifyBuildFinishedAsync(services, job.ReleaseId, ct).ConfigureAwait(false);
+            }
+            return false;
         }
     }
 
