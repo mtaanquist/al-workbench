@@ -178,10 +178,10 @@ public static class PiperTransform
 
         var formatted = options.Format switch
         {
-            PiperOutputFormat.BcAnd => string.Join("&", items.Select(i => "<>" + i)),
+            PiperOutputFormat.BcAnd => string.Join("&", items.Select(i => "<>" + QuoteBcFilterValue(i))),
             PiperOutputFormat.Sql => string.Join(",", items.Select(i => $"'{i.Replace("'", "''")}'")),
             PiperOutputFormat.Custom => string.Join(options.CustomJoin, items.Select(i => options.CustomPrefix + i + options.CustomSuffix)),
-            _ => string.Join("|", items),
+            _ => string.Join("|", items.Select(QuoteBcFilterValue)),
         };
 
         if (options.ResultPrefix.Length > 0 || options.ResultSuffix.Length > 0)
@@ -190,6 +190,29 @@ public static class PiperTransform
         }
 
         return new PiperResult(formatted, items.Length, delimiterDescription, detectedDisplay);
+    }
+
+    /// <summary>
+    /// Characters Business Central reads as filter operators rather than as
+    /// part of a value: <c>&amp;</c> and <c>|</c> join, <c>&lt; &gt; =</c>
+    /// compare, <c>..</c> is a range, <c>( )</c> group, <c>* ? @</c> are
+    /// wildcards and case folding, and <c>'</c> quotes.
+    /// </summary>
+    private static readonly System.Buffers.SearchValues<char> BcFilterOperators =
+        System.Buffers.SearchValues.Create("&|<>=.()*?@'");
+
+    /// <summary>
+    /// One value as a Business Central filter reads it literally. A value with
+    /// an operator character in it is single-quoted, with any quote inside it
+    /// doubled - so <c>Smith &amp; Sons</c> is one customer, not two filters
+    /// joined by "and". Plain values are left as they are, which is what a
+    /// person would type.
+    /// </summary>
+    internal static string QuoteBcFilterValue(string value)
+    {
+        var needsQuotes = value.AsSpan().IndexOfAny(BcFilterOperators) >= 0
+            || (value.Length > 0 && (char.IsWhiteSpace(value[0]) || char.IsWhiteSpace(value[^1])));
+        return needsQuotes ? "'" + value.Replace("'", "''") + "'" : value;
     }
 
     /// <summary>

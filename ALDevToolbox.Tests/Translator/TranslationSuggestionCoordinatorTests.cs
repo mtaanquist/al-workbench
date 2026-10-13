@@ -32,6 +32,68 @@ public sealed class TranslationSuggestionCoordinatorTests : IDisposable
             .Where(e => e.SourceText == sourceText).Select(e => e.Id).SingleAsync();
     }
 
+    /// <summary>
+    /// #1268 (L45): a lookup that finishes after the user switched language is
+    /// cached under the language it was made in, so the new language never
+    /// reads the old one's matches back.
+    /// </summary>
+    [Fact]
+    public async Task The_cache_is_kept_per_language_pair()
+    {
+        await using (var ctx = _db.NewContext())
+            await NewMemory(ctx).UpsertAsync(new[] { Pair("Posting Date", "Bogføringsdato") });
+
+        await using var shared = _db.NewContext();
+        using var coordinator = new TranslationSuggestionCoordinator(NewMemory(shared));
+
+        // The Danish lookup lands after the switch to German cleared the caches.
+        coordinator.ClearCaches();
+        var danish = await coordinator.LookupAndCacheAsync("Posting Date", "en-US", "da-DK");
+        danish.Should().ContainSingle();
+
+        coordinator.TryGetCached("Posting Date", "en-US", "de-DE", out _).Should().BeFalse();
+        coordinator.IsCached("Posting Date", "en-US", "de-DE").Should().BeFalse();
+        coordinator.TryGetCached("Posting Date", "en-US", "da-DK", out var hits).Should().BeTrue();
+        hits.Should().ContainSingle();
+
+        var mt = new TranslationSuggestion(0, "Buchungsdatum", "DeepL", "caption", 0, 0, 0, IsMachineTranslation: true);
+        coordinator.CacheMt("Posting Date", "en-US", "de-DE", mt);
+        coordinator.TryGetCachedMt("Posting Date", "en-US", "da-DK", out _).Should().BeFalse();
+        coordinator.TryGetCachedMt("Posting Date", "en-US", "de-DE", out _).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// #1268 (L43): learning after a repository save goes through the same gate
+    /// as the lookups, so the two never overlap on the circuit's context.
+    /// </summary>
+    [Fact]
+    public async Task Gate_serialises_learning_with_lookups_on_one_shared_context()
+    {
+        await using var shared = _db.NewContext();
+        using var coordinator = new TranslationSuggestionCoordinator(NewMemory(shared));
+        const string xml = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <xliff version="1.2" xmlns="urn:oasis:names:tc:xliff:document:1.2">
+              <file datatype="xml" source-language="en-US" target-language="da-DK" original="App">
+                <body><group id="body">
+                  <trans-unit id="u1"><source>Amount</source><target state="translated">Beløb</target></trans-unit>
+                </group></body>
+              </file>
+            </xliff>
+            """;
+
+        var work = new List<Task>();
+        for (var i = 0; i < 6; i++)
+            work.Add(coordinator.LookupGatedAsync("Amount", "en-US", "da-DK"));
+        work.Add(coordinator.LearnGatedAsync(xml, "App.da-DK.xlf", ["u1"]));
+
+        var act = async () => await Task.WhenAll(work);
+        await act.Should().NotThrowAsync();
+
+        await using var read = _db.NewContext();
+        (await NewMemory(read).SuggestAsync("Amount", "en-US", "da-DK")).Should().ContainSingle();
+    }
+
     [Fact]
     public async Task Gate_serialises_lookup_and_delete_on_one_shared_context()
     {

@@ -68,9 +68,17 @@ public sealed class TranslationMemoryService
     /// What to credit the pairs to. Null falls back to the file's own
     /// <c>&lt;file original&gt;</c> name, then to "Translator".
     /// </param>
+    /// <param name="unitIds">
+    /// When given, only these units are learned - the ones the user changed.
+    /// Every save used to re-learn the whole file, adding a hit to every unit
+    /// in it each time and skewing the tie-break between suggestions. Null
+    /// learns every translated unit, which is what a file from elsewhere wants.
+    /// </param>
     /// <returns>How many pairs were new.</returns>
-    public async Task<int> LearnFromXliffAsync(string xml, string? origin = null, CancellationToken ct = default)
+    public async Task<int> LearnFromXliffAsync(
+        string xml, string? origin = null, CancellationToken ct = default, IReadOnlyCollection<string>? unitIds = null)
     {
+        if (unitIds is { Count: 0 }) return 0;
         XliffDocument parsed;
         try
         {
@@ -86,6 +94,11 @@ public sealed class TranslationMemoryService
         if (string.IsNullOrEmpty(parsed.SourceLanguage)) return 0;
         var label = origin
             ?? (string.IsNullOrEmpty(parsed.OriginalName) ? "Translator" : parsed.OriginalName);
+        if (unitIds is not null)
+        {
+            var wanted = unitIds as IReadOnlySet<string> ?? new HashSet<string>(unitIds, StringComparer.Ordinal);
+            parsed = parsed with { Units = parsed.Units.Where(u => wanted.Contains(u.Id)).ToList() };
+        }
         return await UpsertAsync(PairsFrom(parsed, label), ct);
     }
 
@@ -159,10 +172,17 @@ public sealed class TranslationMemoryService
             ct.ThrowIfCancellationRequested();
 
             var srcHashes = chunk.Select(c => c.SourceHash).Distinct().ToList();
+            var srcLangs = chunk.Select(c => c.SourceLanguage).Distinct().ToList();
+            var tgtLangs = chunk.Select(c => c.TargetLanguage).Distinct().ToList();
             // Load existing rows that could match this chunk (same org via the
-            // query filter, same source hashes), keyed by full natural key.
+            // query filter, same source hashes and languages), keyed by full
+            // natural key. Without the language predicates a common source such
+            // as "Description" loaded its row for every language in the memory,
+            // only to discard all but one (#1268, L49).
             var existing = await _db.TranslationMemory
-                .Where(e => srcHashes.Contains(e.SourceHash))
+                .Where(e => srcHashes.Contains(e.SourceHash)
+                    && srcLangs.Contains(e.SourceLanguage)
+                    && tgtLangs.Contains(e.TargetLanguage))
                 .ToListAsync(ct).ConfigureAwait(false);
             var existingByKey = existing.ToDictionary(
                 e => $"{e.SourceLanguage}{e.TargetLanguage}{e.SourceHash}{e.TargetHash}",

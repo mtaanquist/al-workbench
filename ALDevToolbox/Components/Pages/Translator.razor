@@ -20,7 +20,6 @@
 @inject MachineTranslationService Mt
 @inject TranslationSuggestionCoordinator Coordinator
 @inject GitHubTranslationService RepoFiles
-@inject TranslationMemoryService Memory
 @inject ILogger<Translator> Log
 @inject IServiceScopeFactory ScopeFactory
 
@@ -1515,10 +1514,13 @@ else
 
             // Best effort, and after the user already has what they asked for:
             // the same learning an export does, so a translation saved to a
-            // repository still feeds the suggestions for the next file.
+            // repository still feeds the suggestions for the next file. Only
+            // the units this save committed, and behind the coordinator's gate
+            // - a suggestion lookup may be using the circuit's context.
             try
             {
-                await Memory.LearnFromXliffAsync(xml, _repoSource.FileName);
+                await Coordinator.LearnGatedAsync(xml, _repoSource.FileName,
+                    committed.Where(e => !string.IsNullOrEmpty(e.Value.Target)).Select(e => e.Key).ToList());
             }
             catch (Exception ex)
             {
@@ -1641,9 +1643,10 @@ else
         if (_sel is null || string.IsNullOrWhiteSpace(_sel.Source)) { _suggLoading = false; return; }
         var forId = _sel.Id;
         var source = _sel.Source;
+        var (sourceLang, targetLang) = (_sourceLang, _targetLang);
 
         List<TranslationSuggestion> memory;
-        if (Coordinator.TryGetCached(source, out var cached))
+        if (Coordinator.TryGetCached(source, sourceLang, targetLang, out var cached))
         {
             // Warm from a previous visit or a prefetch - no spinner, no DB hit.
             memory = cached;
@@ -1653,7 +1656,7 @@ else
             _suggLoading = true;
             try
             {
-                memory = await Coordinator.LookupAndCacheAsync(source, _sourceLang, _targetLang);
+                memory = await Coordinator.LookupAndCacheAsync(source, sourceLang, targetLang);
             }
             catch (Exception ex)
             {
@@ -1664,8 +1667,9 @@ else
             {
                 _suggLoading = false;
             }
-            // The user may have navigated away while we awaited the DB.
-            if (_sel?.Id != forId) return;
+            // The user may have navigated away, or switched language, while we
+            // awaited the DB - the result is then for something no longer shown.
+            if (_sel?.Id != forId || _sourceLang != sourceLang || _targetLang != targetLang) return;
         }
 
         _suggestions = MergeSuggestions(source, memory);
@@ -1684,7 +1688,7 @@ else
     private void ApplyMachineTranslation(string source)
     {
         if (_mtTrigger == MtTrigger.Off) return;
-        if (Coordinator.TryGetCachedMt(source, out var cached)) { AppendMtSuggestion(source, cached); return; }
+        if (Coordinator.TryGetCachedMt(source, _sourceLang, _targetLang, out var cached)) { AppendMtSuggestion(source, cached); return; }
 
         if (Coordinator.ShouldAutoTranslate(_mtTrigger, _suggestions))
             _ = LoadMachineTranslationAsync(source, userInitiated: false);
@@ -1707,9 +1711,10 @@ else
     {
         if (_mtLoading) return;
         var forId = _selId;
+        var (sourceLang, targetLang) = (_sourceLang, _targetLang);
         var context = _sel?.Note ?? (string.IsNullOrEmpty(_sel?.Kind) ? null : _sel!.Kind);
 
-        if (Coordinator.TryGetCachedMt(source, out var warm))
+        if (Coordinator.TryGetCachedMt(source, sourceLang, targetLang, out var warm))
         {
             AppendMtSuggestion(source, warm);
             return;
@@ -1725,7 +1730,7 @@ else
             // OrganizationConfigService on a cold cache. See #679.
             await using var scope = ScopeFactory.CreateAsyncScope();
             res = await scope.ServiceProvider.GetRequiredService<MachineTranslationService>()
-                .TranslateAsync(source, _sourceLang, _targetLang, context);
+                .TranslateAsync(source, sourceLang, targetLang, context);
         }
         catch (Exception ex)
         {
@@ -1736,14 +1741,14 @@ else
             _mtLoading = false;
         }
 
-        // The user may have moved to another unit while we awaited the provider.
-        if (_selId != forId) { StateHasChanged(); return; }
+        // The user may have moved to another unit, or language, while we awaited the provider.
+        if (_selId != forId || _sourceLang != sourceLang || _targetLang != targetLang) { StateHasChanged(); return; }
 
         if (res is not null && !string.IsNullOrWhiteSpace(res.TargetText))
         {
             var sugg = new TranslationSuggestion(0, res.TargetText, res.ProviderName,
                 _sel?.Kind ?? string.Empty, 0.0, 0, 0, IsMachineTranslation: true);
-            Coordinator.CacheMt(source, sugg);
+            Coordinator.CacheMt(source, sourceLang, targetLang, sugg);
             AppendMtSuggestion(source, sugg);
         }
         else if (userInitiated)
@@ -1791,9 +1796,10 @@ else
     /// </summary>
     private void PrefetchUpcoming()
     {
+        var (sourceLang, targetLang) = (_sourceLang, _targetLang);
         foreach (var source in UpcomingSources())
         {
-            if (string.IsNullOrWhiteSpace(source) || Coordinator.IsCached(source)) continue;
+            if (string.IsNullOrWhiteSpace(source) || Coordinator.IsCached(source, sourceLang, targetLang)) continue;
             var src = source;
             _ = Task.Run(async () =>
             {
@@ -1805,13 +1811,17 @@ else
                     await using var scope = ScopeFactory.CreateAsyncScope();
                     var hits = await scope.ServiceProvider
                         .GetRequiredService<TranslationSuggestionCoordinator>()
-                        .LookupGatedAsync(src, _sourceLang, _targetLang);
+                        .LookupGatedAsync(src, sourceLang, targetLang);
                     await InvokeAsync(() =>
                     {
-                        Coordinator.Cache(src, hits);
+                        // Cached under the languages it was looked up in, so a
+                        // prefetch that outlives a language switch cannot pass
+                        // itself off as the new language's answer.
+                        Coordinator.Cache(src, sourceLang, targetLang, hits);
                         // If the user already landed here while the panel was
                         // empty, fill it in now rather than make them re-select.
-                        if (_sel is not null && !_suggLoading && _suggestions.Count == 0
+                        if (_sourceLang == sourceLang && _targetLang == targetLang
+                            && _sel is not null && !_suggLoading && _suggestions.Count == 0
                             && string.Equals(_sel.Source, src, StringComparison.Ordinal))
                         {
                             _suggestions = MergeSuggestions(src, hits);
@@ -2115,7 +2125,11 @@ else
             switch (status)
             {
                 case "saved":
-                    SetUnsaved(false);
+                    // Edits typed while the save was in flight are not in the
+                    // file, so the unsaved guard stays up for them and they go
+                    // back into the overlay a refresh restores from (#1268, L44).
+                    if (SerializeEdits() == editsJson) SetUnsaved(false);
+                    else PersistEditsSoon();
                     // Deliberately not built from the rename box's value:
                     // saveInPlace writes to the handle the user picked, whose
                     // name on disk never changes. The rename affordance retitles
