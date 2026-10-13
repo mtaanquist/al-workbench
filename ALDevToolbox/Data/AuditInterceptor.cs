@@ -39,7 +39,7 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
     // an int and the EntityId stamps below narrow the "Id" value to int. The
     // long-keyed types (TranslationMemory*, every Object Explorer entity) would
     // need EntityId widened to long before they could be audited. #400
-    private static readonly IReadOnlyDictionary<Type, AuditEntityType> AuditedTypeMap =
+    internal static readonly IReadOnlyDictionary<Type, AuditEntityType> AuditedTypeMap =
         new Dictionary<Type, AuditEntityType>
         {
             [typeof(RuntimeTemplate)] = AuditEntityType.RuntimeTemplate,
@@ -393,7 +393,7 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
     /// log never captures secret history (ciphertext would leak the structure of the
     /// protected blob; the password hash is offline-cracking material). See #476/#485.
     /// </summary>
-    private static Dictionary<string, object?> OriginalValuesToDict(EntityEntry entry)
+    internal static Dictionary<string, object?> OriginalValuesToDict(EntityEntry entry)
     {
         var dict = new Dictionary<string, object?>();
         var hashContent = entry.Entity is WorkspaceExtensionFile or ModuleExtensionFile or OrganizationFile;

@@ -788,6 +788,73 @@ public sealed class AuditInterceptorTests : IDisposable
             .Should().Be(TestDb.DefaultOrgId, "the row's own organisation wins over the request's");
     }
 
+    [Theory]
+    [InlineData(nameof(OrganizationSettings.MachineTranslationApiKeyEncrypted))]
+    [InlineData(nameof(OrganizationSettings.EntraClientSecretEncrypted))]
+    [InlineData(nameof(OrganizationSettings.BcClientSecretEncrypted))]
+    public async Task An_organisation_secret_is_redacted_in_the_audit_snapshot(string property)
+    {
+        int settingsId;
+        await using (var seed = _db.NewContext())
+        {
+            var settings = await seed.OrganizationSettings.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(s => s.OrganizationId == TestDb.DefaultOrgId);
+            if (settings is null)
+            {
+                settings = new OrganizationSettings { OrganizationId = TestDb.DefaultOrgId };
+                seed.OrganizationSettings.Add(settings);
+            }
+            typeof(OrganizationSettings).GetProperty(property)!.SetValue(settings, "CfDJ8-ciphertext");
+            await seed.SaveChangesAsync();
+            settingsId = settings.Id;
+        }
+        await ClearAuditAsync();
+
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor("alice")))
+        {
+            var settings = await ctx.OrganizationSettings.IgnoreQueryFilters().SingleAsync(s => s.Id == settingsId);
+            typeof(OrganizationSettings).GetProperty(property)!.SetValue(settings, "CfDJ8-rotated");
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var row = await read.AuditLog.IgnoreQueryFilters()
+            .SingleAsync(r => r.EntityType == AuditEntityType.OrganizationSettings);
+        row.SnapshotJson.Should().NotContain("CfDJ8");
+        using var snapshot = JsonDocument.Parse(row.SnapshotJson!);
+        snapshot.RootElement.GetProperty(property).GetString().Should().Be("[redacted]");
+    }
+
+    [Fact]
+    public void Every_encrypted_column_on_an_audited_type_is_redacted()
+    {
+        // A new *Encrypted column on an audited entity, without a matching line
+        // in the redaction list, would copy its ciphertext into history.
+        using var ctx = _db.NewContext();
+        var checkedAny = false;
+        foreach (var type in AuditInterceptor.AuditedTypeMap.Keys)
+        {
+            var secrets = type.GetProperties()
+                .Where(p => p.Name.EndsWith("Encrypted", StringComparison.Ordinal) && p.PropertyType == typeof(string))
+                .ToList();
+            if (secrets.Count == 0) continue;
+
+            var entity = Activator.CreateInstance(type)!;
+            foreach (var secret in secrets) secret.SetValue(entity, "CfDJ8-ciphertext");
+            type.GetProperty("Id")?.SetValue(entity, 1);
+            var entry = ctx.Attach(entity); // tracked, never saved: the snapshot reads its original values
+            var snapshot = AuditInterceptor.OriginalValuesToDict(entry);
+
+            foreach (var secret in secrets)
+            {
+                snapshot.Should().ContainKey(secret.Name);
+                snapshot[secret.Name].Should().Be("[redacted]", $"{type.Name}.{secret.Name} must not reach the audit log");
+            }
+            checkedAny = true;
+        }
+        checkedAny.Should().BeTrue("at least the settings types carry secrets today");
+    }
+
     private static AuditInterceptor NewInterceptor(string name, int organizationId)
     {
         var http = new HttpContextAccessor();
