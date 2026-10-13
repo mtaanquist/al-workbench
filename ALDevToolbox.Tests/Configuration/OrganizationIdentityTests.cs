@@ -119,15 +119,55 @@ public sealed class OrganizationIdentityTests : IDisposable
     [Fact]
     public async Task Add_normalises_case_and_strips_leading_at()
     {
+        await SignInAdminAsync("mette@cronus.com");
         var ctx = _db.NewContext();
         var svc = _db.NewOrganizationAdminService(ctx);
 
-        await svc.AddEmailDomainAsync("@Acme.COM");
+        await svc.AddEmailDomainAsync("@Cronus.COM");
 
         await using var read = _db.NewContext();
         var rows = await read.OrganizationEmailDomains.IgnoreQueryFilters().ToListAsync();
         rows.Should().ContainSingle();
-        rows[0].Domain.Should().Be("acme.com");
+        rows[0].Domain.Should().Be("cronus.com");
+    }
+
+    [Fact]
+    public async Task Add_refuses_a_domain_other_than_the_admins_own()
+    {
+        // A claim routes every later signup from the domain here, so an Admin
+        // may only claim the domain of their own email (#1211).
+        await SignInAdminAsync("mette@cronus.com");
+        var svc = _db.NewOrganizationAdminService(_db.NewContext());
+
+        Func<Task> act = () => svc.AddEmailDomainAsync("fabrikam.com");
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("Domain");
+        ex.Which.Errors["Domain"].Should().Contain("your own email");
+
+        await using var read = _db.NewContext();
+        (await read.OrganizationEmailDomains.IgnoreQueryFilters().AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Add_refuses_a_parent_domain_of_the_admins_own()
+    {
+        await SignInAdminAsync("mette@dk.cronus.com");
+        var svc = _db.NewOrganizationAdminService(_db.NewContext());
+
+        Func<Task> act = () => svc.AddEmailDomainAsync("cronus.com");
+        await act.Should().ThrowAsync<PlanValidationException>();
+    }
+
+    [Fact]
+    public async Task Add_lets_a_site_admin_claim_any_domain()
+    {
+        await SignInAdminAsync("operator@cronus.com", siteAdmin: true);
+        var svc = _db.NewOrganizationAdminService(_db.NewContext());
+
+        await svc.AddEmailDomainAsync("fabrikam.com");
+
+        await using var read = _db.NewContext();
+        (await read.OrganizationEmailDomains.IgnoreQueryFilters().SingleAsync()).Domain.Should().Be("fabrikam.com");
     }
 
     [Fact]
@@ -145,6 +185,7 @@ public sealed class OrganizationIdentityTests : IDisposable
             await seed.SaveChangesAsync();
         }
 
+        await SignInAdminAsync("mette@shared.example");
         var ctx = _db.NewContext();
         var svc = _db.NewOrganizationAdminService(ctx);
 
@@ -157,6 +198,7 @@ public sealed class OrganizationIdentityTests : IDisposable
     [Fact]
     public async Task Add_rejects_garbage_domains_with_a_friendly_error()
     {
+        await SignInAdminAsync("mette@cronus.com");
         var ctx = _db.NewContext();
         var svc = _db.NewOrganizationAdminService(ctx);
 
@@ -221,5 +263,18 @@ public sealed class OrganizationIdentityTests : IDisposable
         await using var read = _db.NewContext();
         var org = await read.Organizations.AsNoTracking().FirstAsync(o => o.Id == TestDb.DefaultOrgId);
         org.McpEnabled.Should().BeFalse();
+    }
+
+    private async Task SignInAdminAsync(string email, bool siteAdmin = false)
+    {
+        await using var ctx = _db.NewContext();
+        var user = new User
+        {
+            OrganizationId = TestDb.DefaultOrgId, Email = email, DisplayName = "Mette", PasswordHash = "x",
+            Role = UserRole.Admin, Status = UserStatus.Active, IsSiteAdmin = siteAdmin, CreatedAt = DateTime.UtcNow,
+        };
+        ctx.Users.Add(user);
+        await ctx.SaveChangesAsync();
+        _db.OrgContext.CurrentUserId = user.Id;
     }
 }
