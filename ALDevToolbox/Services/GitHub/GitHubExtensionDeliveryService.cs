@@ -264,14 +264,7 @@ public sealed class GitHubExtensionDeliveryService
         }
 
         if (import.Workspace is not { } workspace) return null;
-        return new SiblingWorkspaceContext(
-            workspace.WorkspaceName,
-            workspace.SelectedModuleKeys,
-            import.Extensions.Select(e => e.Folder).ToList(),
-            workspace.ShortName,
-            workspace.ExtensionPrefix,
-            SavedPlan: workspace,
-            SavedExtensions: import.Extensions);
+        return SiblingWorkspaceContext.FromSavedWorkspace(workspace, import.Extensions);
     }
 
     /// <summary>

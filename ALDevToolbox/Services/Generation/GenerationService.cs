@@ -759,6 +759,25 @@ public record SiblingWorkspaceContext(
     /// </summary>
     string? CodeWorkspaceJson = null)
 {
+    /// <summary>
+    /// The context for a workspace read back from its saved settings, carrying
+    /// <see cref="SavedPlan"/> and <see cref="SavedExtensions"/> so the
+    /// generator checks the new extension's IDs against the saved ones, takes
+    /// the saved publisher, and writes the settings back with the new extension
+    /// listed. Shared by the GitHub delivery and the ZIP download so both build
+    /// the same context from the same file (#1239).
+    /// </summary>
+    public static SiblingWorkspaceContext FromSavedWorkspace(
+        ProjectPlan workspace, IReadOnlyList<WorkspaceExtensionIdentity> extensions) =>
+        new(
+            workspace.WorkspaceName,
+            workspace.SelectedModuleKeys,
+            extensions.Select(e => e.Folder).ToList(),
+            workspace.ShortName,
+            workspace.ExtensionPrefix,
+            SavedPlan: workspace,
+            SavedExtensions: extensions);
+
     /// <summary>The tenant with its fallback applied: this context's own, else the saved plan's, else blank.</summary>
     public string EffectiveTenantId => TenantId ?? SavedPlan?.TenantId ?? string.Empty;
 

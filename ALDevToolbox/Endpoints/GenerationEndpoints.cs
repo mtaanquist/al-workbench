@@ -76,7 +76,7 @@ internal static class GenerationEndpoints
             }
         }).RequireAuthorization();
 
-        app.MapPost("/generate/extension", async (HttpContext ctx, GenerationService gen, OrganizationConfigService orgConfig, ApplicationVersionService appVersions, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
+        app.MapPost("/generate/extension", async (HttpContext ctx, GenerationService gen, WorkspaceConfigService configs, OrganizationConfigService orgConfig, ApplicationVersionService appVersions, IAntiforgery antiforgery, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
@@ -122,28 +122,23 @@ internal static class GenerationEndpoints
                 Publisher: orgPublisher,
                 Dependencies: dependencies);
 
-            var workspaceName = form["WorkspaceName"].ToString().Trim();
-            SiblingWorkspaceContext? sibling = null;
-            if (!string.IsNullOrEmpty(workspaceName))
-            {
-                var workspaceModules = form["WorkspaceModuleKeys"]
-                    .Where(s => !string.IsNullOrEmpty(s))
-                    .Select(s => s!)
-                    .ToList();
-                var workspaceFolders = form["WorkspaceFolders"]
-                    .Where(s => !string.IsNullOrEmpty(s))
-                    .Select(s => s!)
-                    .ToList();
-                var workspaceShortName = form["WorkspaceShortName"].ToString().Trim();
-                var workspacePrefix = form["WorkspaceExtensionPrefix"].ToString().Trim();
-                var workspaceTenantId = form["WorkspaceTenantId"].ToString().Trim();
-                sibling = new SiblingWorkspaceContext(
-                    workspaceName, workspaceModules, workspaceFolders, workspaceShortName, workspacePrefix,
-                    TenantId: workspaceTenantId);
-            }
-
             try
             {
+                // Joining a workspace: the page posts the saved settings file it
+                // was filled in from, and it is read back here the way the "Add
+                // to repository" path reads it, so the download gets the same
+                // ID-range check, publisher and rewritten settings file (#1239).
+                SiblingWorkspaceContext? sibling = null;
+                var savedConfig = form["WorkspaceConfig"].ToString();
+                if (!string.IsNullOrWhiteSpace(savedConfig))
+                {
+                    var import = await configs.ParseAsync(savedConfig, ct);
+                    if (import.Workspace is { } workspace)
+                    {
+                        sibling = SiblingWorkspaceContext.FromSavedWorkspace(workspace, import.Extensions);
+                    }
+                }
+
                 var archive = await gen.GenerateExtensionAsync(plan, sibling, ct: ct);
                 WriteAttachmentHeaders(ctx, archive.FileName);
                 SetGenerationCompleteCookie(ctx, form["GenToken"].ToString());
