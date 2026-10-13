@@ -3988,6 +3988,58 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The same stranger may neither move an environment's delivery window nor cancel an
+    /// install Business Central has scheduled on it, and neither reaches the table or the
+    /// customer's tenant (#1276).
+    /// </summary>
+    [Fact]
+    public async Task A_non_owner_non_admin_can_neither_set_the_delivery_window_nor_cancel_a_scheduled_install()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        await NarrowAsync(projectId);
+        await SeedUserAsync(9501, "window-stranger@example.com", UserRole.User);
+        var apps = new FakeAppManagementClient();
+
+        _db.OrgContext.CurrentUserId = 9501;
+        try
+        {
+            await using var ctx = _db.NewContext();
+            var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+
+            await ((Func<Task>)(() => svc.SetUpdateWindowAsync(projectId, envId, Ten, Six)))
+                .Should().ThrowAsync<ProjectAccessDeniedException>();
+            await ((Func<Task>)(() => svc.CancelScheduledInstallAsync(
+                    projectId, envId, Guid.NewGuid(), "2.0.0.0", BcDeploymentSchedule.UpdateWindow)))
+                .Should().ThrowAsync<ProjectAccessDeniedException>();
+        }
+        finally
+        {
+            _db.OrgContext.CurrentUserId = OwnerUserId;
+        }
+
+        apps.Removed.Should().BeNull("nothing was cancelled in the customer's tenant");
+        await using var read = _db.NewContext();
+        var row = await read.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == envId);
+        row.UpdateWindowStart.Should().BeNull();
+        row.UpdateWindowEnd.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_delivery_window_with_only_one_end_is_refused(bool onlyStart)
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk())
+            .SetUpdateWindowAsync(projectId, envId, onlyStart ? Ten : null, onlyStart ? null : Six);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UpdateWindow"]
+            .Should().Contain("both a start and an end");
+    }
+
     // ── The organisation's own app registration ───────────────────────────
 
     /// <summary>Records the client id each token request signs in with.</summary>

@@ -448,10 +448,19 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
             detail.Lines.Single().AssigneeName.Should().Be("colleague@example.com");
         }
 
+        // A real person, in another organisation: the refusal must be about the organisation,
+        // not merely about an id nobody has (#1276).
+        var stranger = await SeedOtherOrganisationUserAsync();
         await using (var ctx = _f.Db.NewContext())
         {
-            var act = () => _f.Upgrades(ctx).AssignAsync(lineId, 424242);
+            var act = () => _f.Upgrades(ctx).AssignAsync(lineId, stranger);
             (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Assignee");
+        }
+
+        await using (var verify = _f.Db.NewContext())
+        {
+            (await verify.OeEnvironmentUpgradeLines.AsNoTracking().SingleAsync(l => l.Id == lineId))
+                .AssigneeUserId.Should().Be(UpgradeActionTestFixture.PlainTeamUserId);
         }
     }
 
@@ -941,7 +950,87 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Assignee");
     }
 
+    // ── Permission refusals on whole-upgrade moves (#1276) ──────────────
+    // Every move that changes all of an upgrade's lines needs the grant on each line's
+    // solution, including lines on a solution the caller cannot even see.
+
+    [Fact]
+    public async Task Marking_done_is_refused_without_the_grant_on_every_line()
+    {
+        var id = await UpgradeWithLineWithoutGrantAsync(ProjectVisibility.Public);
+
+        await using var ctx = _f.Db.NewContext();
+        await ((Func<Task>)(() => _f.Upgrades(ctx).CloseAsync(id))).Should().ThrowAsync<ProjectAccessDeniedException>();
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgrades.AsNoTracking().SingleAsync(u => u.Id == id)).ClosedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Marking_done_is_refused_when_a_line_sits_on_a_private_solution_the_caller_cannot_see()
+    {
+        var id = await UpgradeWithLineWithoutGrantAsync(ProjectVisibility.Private);
+
+        await using var ctx = _f.Db.NewContext();
+        await ((Func<Task>)(() => _f.Upgrades(ctx).CloseAsync(id))).Should().ThrowAsync<ProjectAccessDeniedException>(
+            "a line the caller cannot see still belongs to the upgrade they would close");
+    }
+
+    [Fact]
+    public async Task Reopening_is_refused_without_the_grant_on_every_line()
+    {
+        var id = await UpgradeWithLineWithoutGrantAsync(ProjectVisibility.Public);
+        await SetClosedAsync(id);
+
+        await using var ctx = _f.Db.NewContext();
+        await ((Func<Task>)(() => _f.Upgrades(ctx).ReopenAsync(id))).Should().ThrowAsync<ProjectAccessDeniedException>();
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgrades.AsNoTracking().SingleAsync(u => u.Id == id)).ClosedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Deleting_is_refused_without_the_grant_on_every_line()
+    {
+        var id = await UpgradeWithLineWithoutGrantAsync(ProjectVisibility.Private);
+
+        await using var ctx = _f.Db.NewContext();
+        await ((Func<Task>)(() => _f.Upgrades(ctx).DeleteAsync(id))).Should().ThrowAsync<ProjectAccessDeniedException>();
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgrades.AsNoTracking().AnyAsync(u => u.Id == id)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_second_pass_is_refused_without_the_grant_on_a_leftover_line()
+    {
+        var id = await UpgradeWithLineWithoutGrantAsync(ProjectVisibility.Public);
+        await SetClosedAsync(id);
+
+        await using var ctx = _f.Db.NewContext();
+        await ((Func<Task>)(() => _f.Upgrades(ctx).CreateFromLeftoversAsync(id, "28.5 stragglers")))
+            .Should().ThrowAsync<ProjectAccessDeniedException>();
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgrades.AsNoTracking().CountAsync()).Should().Be(1, "no second upgrade was made");
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// An open upgrade holding one line the caller may manage and one on a solution with no
+    /// update team, written straight to the table the way a colleague with the grant would
+    /// have added it.
+    /// </summary>
+    private async Task<int> UpgradeWithLineWithoutGrantAsync(ProjectVisibility visibility)
+    {
+        var (_, allowedEnv) = await _f.SeedCustomerAsync();
+        var (otherProject, otherEnv) = await SeedCustomerWithoutUpdateTeamAsync(visibility);
+        var id = await CreateAsync();
+        await AddAsync(id, allowedEnv);
+        await AddLineDirectlyAsync(id, otherProject, otherEnv);
+        return id;
+    }
 
     private async Task AddLineDirectlyAsync(int upgradeId, int projectId, int environmentId)
     {
@@ -951,6 +1040,16 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
             OrganizationId = TestDb.DefaultOrgId, UpgradeId = upgradeId, EnvironmentId = environmentId,
             ProjectId = projectId, IsOpen = true, AddedAt = DateTime.UtcNow,
         });
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>Marks an upgrade done straight in the table, past the grant the service would ask for.</summary>
+    private async Task SetClosedAsync(int upgradeId)
+    {
+        await using var ctx = _f.Db.NewContext();
+        var upgrade = await ctx.OeEnvironmentUpgrades.Include(u => u.Lines).SingleAsync(u => u.Id == upgradeId);
+        upgrade.ClosedAt = DateTime.UtcNow;
+        foreach (var line in upgrade.Lines) line.IsOpen = false;
         await ctx.SaveChangesAsync();
     }
 
