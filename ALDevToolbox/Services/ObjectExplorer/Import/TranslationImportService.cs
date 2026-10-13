@@ -171,9 +171,13 @@ public class TranslationImportService
             .Sum(e => e.Length);
         if (declaredXlfBytes > MaxTotalXliffBytes)
         {
-            throw new InvalidDataException(
-                $"The translation ZIP's XLIFF files expand to {declaredXlfBytes:N0} bytes, over the "
-                + $"{MaxTotalXliffBytes:N0}-byte limit.");
+            // Field-keyed so the upload form shows it next to the ZIP field
+            // rather than the request failing with a 500 (#1261).
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["ZipFile"] = $"The translation files in this ZIP unpack to {declaredXlfBytes:N0} bytes, "
+                    + $"over the {MaxTotalXliffBytes:N0}-byte limit. Split them across smaller ZIPs and upload each one.",
+            });
         }
 
         foreach (var entry in archive.Entries)
@@ -290,6 +294,15 @@ public class TranslationImportService
             list.Add((s.Id, s.Kind));
         }
 
+        // The delete and the chunked insert share one transaction, so a
+        // failed chunk or an abandoned request leaves the previous rows for
+        // this (module, language) in place instead of a half-empty language
+        // (#1261). The release amend already runs inside its own
+        // transaction; this joins it rather than nesting.
+        await using var tx = _db.Database.CurrentTransaction is null
+            ? await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false)
+            : null;
+
         // Clobber existing rows for (module, language) so re-upload
         // replaces wholesale rather than merging. Executed as one DELETE
         // for tracker hygiene; the unique index on (module, language,
@@ -349,6 +362,13 @@ public class TranslationImportService
         {
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
             _db.ChangeTracker.Clear();
+        }
+
+        if (tx is not null)
+        {
+            // Not cancellable: once every row is written, a request cancelled
+            // at the last step should not throw the work away.
+            await tx.CommitAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
         _logger.LogInformation(
