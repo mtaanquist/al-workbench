@@ -296,7 +296,8 @@ public sealed class ReleaseImportRequestService
     /// Re-runs a failed import in place — into the SAME release row (label /
     /// metadata preserved) instead of forcing a delete-and-reimport. A URL
     /// import re-runs from its original (or a freshly pasted) URL with no
-    /// re-upload; a staged-ZIP / C-AL import needs the file re-uploaded because
+    /// re-upload, and a Microsoft artifact import re-runs from the artifact it was
+    /// queued with; a staged-ZIP / C-AL import needs the file re-uploaded because
     /// its temp file is gone; a project build re-runs from its project id
     /// alone. Either way the previous attempt's partial data is wiped so the
     /// re-run starts clean. See the manage page.
@@ -343,6 +344,7 @@ public sealed class ReleaseImportRequestService
         // URL import) and validate it against the allow-list BEFORE we
         // touch the release, so a bad URL leaves the failed row untouched.
         string? urlToUse = null;
+        string? artifactUrl = null;
         if (dvdUrl.Length > 0)
         {
             urlToUse = dvdUrl;
@@ -352,6 +354,12 @@ public sealed class ReleaseImportRequestService
             if (origin is { Kind: "url", DownloadUrl: { Length: > 0 } originalUrl })
             {
                 urlToUse = originalUrl;
+            }
+            else if (origin is { Kind: "bc_artifact", DownloadUrl: { Length: > 0 } originalArtifactUrl })
+            {
+                // A Microsoft artifact import re-runs from the artifact address it
+                // was queued with, the same one a restart resumes from (#1222).
+                artifactUrl = originalArtifactUrl;
             }
             else
             {
@@ -375,7 +383,11 @@ public sealed class ReleaseImportRequestService
         await _management.ClearIngestedDataAsync(releaseId, ct).ConfigureAwait(false);
 
         ReleaseImportSource source;
-        if (urlToUse is not null)
+        if (artifactUrl is not null)
+        {
+            source = new ReleaseImportSource.BcArtifact(artifactUrl);
+        }
+        else if (urlToUse is not null)
         {
             source = new ReleaseImportSource.Url(urlToUse);
         }

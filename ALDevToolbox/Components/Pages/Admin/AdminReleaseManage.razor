@@ -320,6 +320,10 @@
                                 </small>
                             </label>
                         }
+                        @if (_origin?.Kind == "bc_artifact")
+                        {
+                            <p class="form-sec__cap">Downloads this version from Microsoft again. Nothing to upload.</p>
+                        }
                         @if (_origin?.Kind == "staged_zip")
                         {
                             <label class="field">

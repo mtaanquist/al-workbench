@@ -164,6 +164,33 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAsync_re_runs_a_failed_import_of_the_same_version_in_place()
+    {
+        // #1222: a failed import is not in the catalogue. The sweep and the
+        // Artifacts tab must re-run it rather than report it already imported.
+        await using var ctx = _db.NewContext();
+        var failed = Release("Business Central 28.2 (DK)", "bc-onprem:28.2:dk", status: "failed");
+        failed.StatusMessage = "The download was cut off.";
+        ctx.OeReleases.Add(failed);
+        await ctx.SaveChangesAsync();
+
+        var queue = new ReleaseImportQueue();
+        var outcome = await NewImporter(ctx, queue).ImportAsync("dk", version: null);
+
+        outcome.Status.Should().Be(ArtifactImportStatus.Queued);
+        outcome.ReleaseId.Should().Be(failed.Id, "the release is re-run in place, not duplicated");
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.DedupKey == "bc-onprem:28.2:dk");
+        release.Status.Should().Be("ingesting");
+        release.StatusMessage.Should().BeNull();
+
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.ReleaseId.Should().Be(failed.Id);
+        job.Source.Should().BeOfType<ReleaseImportSource.BcArtifact>();
+    }
+
+    [Fact]
     public async Task ImportPreviewsAsync_queues_one_flagged_preview_per_upcoming_major()
     {
         await using var ctx = _db.NewContext();
