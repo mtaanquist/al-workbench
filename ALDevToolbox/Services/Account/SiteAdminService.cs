@@ -109,7 +109,8 @@ public sealed class SiteAdminService
     }
 
     /// <summary>
-    /// Returns every organisation the given email is a member of. Drives the
+    /// Returns the organisation the given email is a member of (at most one since
+    /// emails became unique deployment-wide, #1207). Drives the
     /// per-user detail rendering on the SiteAdmin users page when an admin
     /// clicks through from the search results.
     /// </summary>

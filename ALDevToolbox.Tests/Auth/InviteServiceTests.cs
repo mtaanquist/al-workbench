@@ -259,4 +259,51 @@ public sealed class InviteServiceTests : IDisposable
         rows.Should().NotContain(r => r.TokenHash == token, "the raw token must never appear in the DB");
         rows.Should().AllSatisfy(r => r.TokenHash.Length.Should().Be(64, "hex SHA-256 is 64 characters"));
     }
+
+    private async Task<string> InviteAsync(User admin, string email)
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx, admin.Id, admin.OrganizationId);
+        var (token, _) = await svc.CreateAsync(email, UserRole.User, null);
+        return token;
+    }
+
+    private async Task<Func<Task<User>>> AcceptLaterAsync(string token)
+    {
+        var ctx = _db.NewContext();
+        var svc = new InviteService(ctx, new AmbientOrganizationContext(), _clock, NullLogger<InviteService>.Instance);
+        return () => svc.AcceptAsync(token, "Taken Person", "verylongpassword1!");
+    }
+
+    [Fact]
+    public async Task Invite_for_an_email_held_in_another_organisation_is_issued_but_cannot_be_accepted()
+    {
+        // Issue #1207: the admin learns nothing about other organisations when
+        // inviting; only the invitee, at acceptance, learns the address is taken.
+        await SeedAdminAsync(TestDb.OtherOrgId, userId: 700, email: "shared@example.com");
+        var admin = await SeedAdminAsync(TestDb.DefaultOrgId, userId: 701, email: "admin@example.com");
+
+        var token = await InviteAsync(admin, "shared@example.com");
+
+        var act = await AcceptLaterAsync(token);
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("Email");
+
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().CountAsync(u => u.Email == "shared@example.com")).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Accept_refuses_rather_than_returning_an_account_created_after_the_invite()
+    {
+        // Accepting used to hand back the existing account, which the endpoint then
+        // signed in without that account's password.
+        var admin = await SeedAdminAsync(TestDb.DefaultOrgId, userId: 710, email: "admin@example.com");
+        var token = await InviteAsync(admin, "late@example.com");
+        await SeedAdminAsync(TestDb.DefaultOrgId, userId: 711, email: "late@example.com");
+
+        var act = await AcceptLaterAsync(token);
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("Email");
+    }
 }

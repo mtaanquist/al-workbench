@@ -45,6 +45,11 @@ public sealed class ReleaseImportQueue : JobQueue<ReleaseImportJob>
 /// row's status (running → completed / failed) as it progresses so the admin
 /// page reflects current state and the startup reconciler can re-enqueue
 /// URL-source rows that survived a restart.</para>
+///
+/// <para><see cref="Resumed"/> marks a job the startup reconciler put back after a
+/// restart. The interrupted run may have left part of a module and some of the
+/// release's references behind, so the worker wipes the release's ingested rows
+/// before it runs the job again (#1209).</para>
 /// </summary>
 public sealed record ReleaseImportJob(
     int ReleaseId,
@@ -52,7 +57,8 @@ public sealed record ReleaseImportJob(
     ReleaseImportSource Source,
     bool StoreSymbolReference = false,
     long JobRowId = 0,
-    ProjectBuildOrder? BuildOrder = null);
+    ProjectBuildOrder? BuildOrder = null,
+    bool Resumed = false);
 
 /// <summary>Where the worker gets the bytes from.</summary>
 public abstract record ReleaseImportSource

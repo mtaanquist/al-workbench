@@ -155,6 +155,8 @@ public sealed class TemplateImportService
                 .ThenInclude(d => d.Module!)
                     .ThenInclude(m => m.Dependencies.OrderBy(dep => dep.Ordering))
             .Include(t => t.RootFolders.OrderBy(f => f.Ordering))
+            .Include(t => t.IncludedFiles.OrderBy(j => j.Ordering))
+                .ThenInclude(j => j.OrganizationFile)
             .Include(t => t.DefaultApplicationVersion)
             .FirstOrDefaultAsync(ct);
         if (source is null)
@@ -205,6 +207,8 @@ public sealed class TemplateImportService
             localModulesByKey[sourceModule.Key] = await EnsureModuleAsync(sourceModule, actingOrgId, now, ct);
         }
 
+        var includedFileIds = await MapIncludedFilesAsync(source, actingOrgId, ct);
+
         var clone = new RuntimeTemplate
         {
             OrganizationId = actingOrgId,
@@ -213,8 +217,10 @@ public sealed class TemplateImportService
             Name = source.Name,
             Description = source.Description,
             DefaultApplicationVersion = localVersion,
+            DefaultApplicationVersionLatest = source.DefaultApplicationVersionLatest,
             Defaults = source.Defaults,
             AppSourceCop = source.AppSourceCop,
+            CodeWorkspaceJson = source.CodeWorkspaceJson,
             CoreIdRangeFrom = source.CoreIdRangeFrom,
             CoreIdRangeTo = source.CoreIdRangeTo,
             ModuleIdRangeStart = source.ModuleIdRangeStart,
@@ -238,6 +244,14 @@ public sealed class TemplateImportService
                     Ordering = f.Ordering,
                 })
                 .ToList(),
+            IncludedFiles = includedFileIds
+                .Select((fileId, i) => new RuntimeTemplateIncludedFile
+                {
+                    OrganizationId = actingOrgId,
+                    OrganizationFileId = fileId,
+                    Ordering = i,
+                })
+                .ToList(),
         };
 
         var ordering = 0;
@@ -257,13 +271,61 @@ public sealed class TemplateImportService
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
-            "Imported template '{Key}' from system org {SystemOrgId} into org {OrgId}: {Extensions} extension(s), {Modules} module(s), elapsed {Elapsed}ms.",
+            "Imported template '{Key}' from system org {SystemOrgId} into org {OrgId}: {Extensions} extension(s), {Modules} module(s), {IncludedFiles} included file(s), elapsed {Elapsed}ms.",
             clone.Key, systemOrgId.Value, actingOrgId,
             clone.WorkspaceExtensions.Count,
             clone.DefaultModules.Count,
+            clone.IncludedFiles.Count,
             stopwatch.ElapsedMilliseconds);
 
         return clone;
+    }
+
+    /// <summary>
+    /// Resolves the source template's always-included files to the acting
+    /// org's own <see cref="OrganizationFile"/> rows, matched by path. The
+    /// join points at organisation files, which never cross the org boundary:
+    /// every org carries its own copy of the platform files (app.json, the
+    /// ruleset, .gitignore, the README) and may have edited them, so the
+    /// clone opts into the acting org's version rather than the system org's.
+    /// A path the acting org doesn't have is skipped with a warning. The
+    /// org's app.json is put first when the source didn't include it, as a
+    /// template created from scratch does, because without it AL does not
+    /// recognise the generated folders as projects.
+    /// </summary>
+    private async Task<List<int>> MapIncludedFilesAsync(
+        RuntimeTemplate source, int actingOrgId, CancellationToken ct)
+    {
+        // Normal query filter applies (acting org); the predicate pins it too.
+        var localFiles = await _db.OrganizationFiles
+            .AsNoTracking()
+            .Where(f => f.OrganizationId == actingOrgId)
+            .Select(f => new { f.Id, f.Path })
+            .ToListAsync(ct);
+        var idByPath = localFiles.ToDictionary(f => f.Path, f => f.Id, StringComparer.Ordinal);
+
+        var ids = new List<int>();
+        foreach (var join in source.IncludedFiles.OrderBy(j => j.Ordering))
+        {
+            var path = join.OrganizationFile?.Path;
+            if (path is null) continue;
+            if (idByPath.TryGetValue(path, out var id))
+            {
+                if (!ids.Contains(id)) ids.Add(id);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Template '{Key}' includes organisation file '{Path}', which org {OrgId} doesn't have; skipped on import.",
+                    source.Key, path, actingOrgId);
+            }
+        }
+
+        if (idByPath.TryGetValue(PlatformOrganizationFiles.AppJsonPath, out var appJsonId) && !ids.Contains(appJsonId))
+        {
+            ids.Insert(0, appJsonId);
+        }
+        return ids;
     }
 
     /// <summary>Deep-clones a workspace extension into a fresh entity graph owned by the importing org.</summary>

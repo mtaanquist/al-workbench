@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Text;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Cookbook;
 using static ALDevToolbox.Endpoints.EndpointHelpers;
@@ -26,6 +27,15 @@ internal static class CookbookEndpoints
         // status code is fixed. The recording GET has a side effect by design;
         // the download is a navigation and the trace is the point.
         //
+        // The archive is built in memory first and copied out asynchronously.
+        // ZipArchive writes its local headers and central directory with
+        // synchronous Stream.Write, which Kestrel refuses (AllowSynchronousIO
+        // is off), so writing straight into the response body sent a 200 and
+        // then a truncated, unreadable file every time (#1212). Building it
+        // first also means a failure here happens before anything is recorded
+        // or sent. Recipes are text and small, so buffering is cheap - the
+        // same trade WorkspaceZipBuilder makes.
+        //
         // GETs can't carry an antiforgery token, so the attribution write would
         // otherwise be CSRF-reachable: another origin could navigate the
         // victim's session here and record a download for an arbitrary customer
@@ -48,6 +58,8 @@ internal static class CookbookEndpoints
                 return;
             }
 
+            using var zip = BuildArchive(recipe);
+
             var customer = (ctx.Request.Query["customer"].ToString() ?? string.Empty).Trim();
             // Record the attribution only on a navigation we can positively
             // attribute to this origin; a forged cross-site navigation (or a
@@ -66,18 +78,35 @@ internal static class CookbookEndpoints
             var fileName = BuildArchiveFileName(recipe.Title, recipe.Id);
             WriteAttachmentHeaders(ctx, fileName);
 
-            using var archive = new ZipArchive(ctx.Response.Body, ZipArchiveMode.Create, leaveOpen: true);
+            ctx.Response.ContentLength = zip.Length;
+            await zip.CopyToAsync(ctx.Response.Body, ct);
+        }).RequireAuthorization();
+
+        return app;
+    }
+
+    /// <summary>
+    /// Writes every file of <paramref name="recipe"/> into an in-memory ZIP and
+    /// returns it rewound, ready to copy to the response. See the endpoint's
+    /// comment for why this must not write to the response body directly.
+    /// </summary>
+    private static MemoryStream BuildArchive(Recipe recipe)
+    {
+        var stream = new MemoryStream();
+        var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+        {
             foreach (var file in recipe.Files)
             {
                 var entryPath = BuildSafeEntryPath(file.RelativePath, file.FileName);
                 var entry = archive.CreateEntry(entryPath, CompressionLevel.Optimal);
-                await using var entryStream = entry.Open();
-                await using var writer = new StreamWriter(entryStream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-                await writer.WriteAsync(file.Content);
+                using var entryStream = entry.Open();
+                using var writer = new StreamWriter(entryStream, utf8);
+                writer.Write(file.Content);
             }
-        }).RequireAuthorization();
-
-        return app;
+        }
+        stream.Position = 0;
+        return stream;
     }
 
     /// <summary>

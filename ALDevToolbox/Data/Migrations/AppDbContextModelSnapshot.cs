@@ -6246,10 +6246,10 @@ namespace ALDevToolbox.Data.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("Email");
-
-                    b.HasIndex("OrganizationId", "Email")
+                    b.HasIndex("Email")
                         .IsUnique();
+
+                    b.HasIndex("OrganizationId");
 
                     b.ToTable("users", (string)null);
                 });
