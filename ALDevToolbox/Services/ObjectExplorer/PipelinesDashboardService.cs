@@ -72,7 +72,7 @@ public sealed class PipelinesDashboardService
 
         // ── Build side ─────────────────────────────────────────────────────────
         var pipelines = await _db.OePipelines.AsNoTracking()
-            .Where(p => p.DeletedAt == null)
+            .Where(p => p.DeletedAt == null && p.Project!.DeletedAt == null)
             .Where(p => _db.OeProjects.Where(visible).Any(v => v.Id == p.ProjectId))
             .Select(p => new { p.Id, p.Name, p.ProjectId, ProjectName = p.Project!.Name, p.PreviewCheck, Disabled = p.DisabledAt != null })
             .ToListAsync(ct);

@@ -1,4 +1,5 @@
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
@@ -254,6 +255,17 @@ public sealed class UpgradeActionWorker : BackgroundService
             .NotifyReadyToCheckAsync(ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Whether the person a booking runs as still has an active account. A row fires as
+    /// its requester, and the access gates read their role and teams but not whether the
+    /// account was disabled since, so this is asked first (#1235), the way a deployment
+    /// asks it of the person it runs as. A row nobody is recorded against runs as nobody.
+    /// </summary>
+    private static async Task<bool> IsRequesterActiveAsync(AppDbContext db, int? userId, CancellationToken ct) =>
+        userId is { } id
+        && await db.Users.AsNoTracking()
+            .AnyAsync(u => u.Id == id && u.Status == UserStatus.Active, ct).ConfigureAwait(false);
+
     /// <summary>What one due row came to: left alone, settled without a send, or sent.</summary>
     private enum RunOutcome { Skipped, Settled, Sent }
 
@@ -350,6 +362,11 @@ public sealed class UpgradeActionWorker : BackgroundService
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         try
         {
+            // A disabled account runs nothing, booked before it was disabled or not (#1235).
+            if (!await IsRequesterActiveAsync(db, action.RequestedByUserId, ct).ConfigureAwait(false))
+            {
+                throw new ProjectAccessDeniedException();
+            }
             var actions = scope.ServiceProvider.GetRequiredService<UpgradeActionService>();
             if (action.Kind == UpgradeActionKind.UploadApp)
             {
@@ -635,6 +652,11 @@ public sealed class UpgradeActionWorker : BackgroundService
                 .FirstOrDefaultAsync(ct).ConfigureAwait(false);
             try
             {
+                // Asked as the person who booked it, so only while their account is active (#1235).
+                if (!await IsRequesterActiveAsync(actionDb, row.RequestedByUserId, ct).ConfigureAwait(false))
+                {
+                    throw new ProjectAccessDeniedException();
+                }
                 var actions = actionScope.ServiceProvider.GetRequiredService<UpgradeActionService>();
                 var result = await actions.ConfirmInstallAsync(row.ProjectId, row.EnvironmentId, appId, operationId, ct, _heartbeat.Tick)
                     .ConfigureAwait(false);

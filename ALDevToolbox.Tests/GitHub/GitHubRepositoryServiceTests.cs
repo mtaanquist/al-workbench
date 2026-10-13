@@ -153,6 +153,41 @@ public sealed class GitHubRepositoryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task The_list_asks_github_once_which_repositories_the_user_can_reach_rather_than_once_per_repository()
+    {
+        await ReadyAsync();
+        var api = ListableApi(
+                granted: ["cronus-dk/solution-b", "cronus-dk/solution-a", "cronus-dk/secret"],
+                visible: [])
+            .On(HttpMethod.Get, $"/user/installations/{InstallationId}/repositories", HttpStatusCode.OK,
+                FakeGitHubApi.InstallationRepositoriesJson("cronus-dk/solution-a", "cronus-dk/solution-b"));
+        var (service, ctx, _) = NewService(api);
+        await using var _1 = ctx;
+
+        var repos = await service.ListAccessibleAsync();
+
+        repos.Select(r => r.FullName).Should().Equal("cronus-dk/solution-a", "cronus-dk/solution-b");
+        api.Calls.Should().NotContain(c => c.Contains("/repos/cronus-dk/"),
+            "one read of the person's reach replaces a call per repository (#1232)");
+    }
+
+    [Fact]
+    public async Task When_github_will_not_say_what_the_user_can_reach_each_repository_is_asked_about_instead()
+    {
+        await ReadyAsync();
+        var api = ListableApi(
+                granted: ["cronus-dk/solution-a", "cronus-dk/secret"],
+                visible: ["cronus-dk/solution-a"])
+            .On(HttpMethod.Get, "/repos/cronus-dk/secret", HttpStatusCode.NotFound)
+            .On(HttpMethod.Get, $"/user/installations/{InstallationId}/repositories", HttpStatusCode.Forbidden,
+                "{\"message\":\"API rate limit exceeded.\"}");
+        var (service, ctx, _) = NewService(api);
+        await using var _1 = ctx;
+
+        (await service.ListAccessibleAsync()).Select(r => r.FullName).Should().Equal("cronus-dk/solution-a");
+    }
+
+    [Fact]
     public async Task An_unlinked_user_is_offered_nothing_and_no_installation_token_is_minted()
     {
         await ConfigureDeploymentAsync();

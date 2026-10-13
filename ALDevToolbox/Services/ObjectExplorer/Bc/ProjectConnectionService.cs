@@ -1420,12 +1420,23 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// what a customer who has agreed a slot is asking for. This is the only operation that
     /// ever ignores the window. Gated on the environment-updates flag; refuses when there
     /// is no update to run.
+    /// <para>A booked start passes the version it was booked for as
+    /// <paramref name="expectedVersion"/>, and is refused when the next update has become
+    /// another one since: the person agreed to start that version, not whatever is next
+    /// when the slot arrives (#1234).</para>
     /// </summary>
-    public async Task RunUpdateNowAsync(int projectId, int environmentId, CancellationToken ct = default)
+    public async Task RunUpdateNowAsync(
+        int projectId, int environmentId, CancellationToken ct = default, string? expectedVersion = null)
     {
         var env = await ResolveEnvironmentAsync(projectId, environmentId, ct, EnvironmentGate.UpdateOps);
         var next = await ReadNextUpdateAsync(env, ct)
             ?? throw Validation("Update", "No update is available to run.");
+        if (expectedVersion is not null
+            && !string.Equals(next.TargetVersion, expectedVersion, StringComparison.OrdinalIgnoreCase))
+        {
+            throw Validation("Update",
+                $"The next update had become {next.TargetVersion}, not the {expectedVersion} that was booked.");
+        }
 
         var now = DateTimeOffset.UtcNow;
         await WriteUpdateScheduleAsync(env, next, now, ignoreUpdateWindow: true, ct);

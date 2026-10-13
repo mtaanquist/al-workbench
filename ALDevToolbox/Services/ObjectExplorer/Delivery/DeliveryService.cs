@@ -1611,7 +1611,8 @@ public sealed class DeliveryService
         var due = await _db.OeProjectDeliveries.AsNoTracking()
             // A deleted pipeline's deployments are cancelled with it (#1108); this is the backstop.
             .Where(d => d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= nowUtc
-                        && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null)
+                        && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null
+                        && d.Project!.DeletedAt == null)
             .OrderBy(d => d.ScheduledFor).ThenBy(d => d.Id)
             .Select(d => new { d.Id, d.OrganizationId, d.TriggeredByUserId })
             .ToListAsync(ct);
@@ -1624,7 +1625,8 @@ public sealed class DeliveryService
     /// <summary>
     /// Sets aside the deliveries still waiting on a stopped deployment pipeline: scheduled
     /// ones are cancelled and prepared ones dismissed, with their approval requests closed,
-    /// when the pipeline is deleted (#1108) or disabled (#1131). The delete or disable does
+    /// when the pipeline is deleted (#1108) or disabled (#1131), or its solution is deleted
+    /// (#1229). The delete or disable does
     /// this itself; this catches one made or prepared while it was committing, and those
     /// left behind by deletes from before it did. It writes through the same helper, so
     /// both leave the same record (#1179). Compare-and-set, like every cancel.
@@ -1633,16 +1635,24 @@ public sealed class DeliveryService
     {
         var stopped = await _db.OeProjectDeliveries.AsNoTracking()
             .Where(d => (d.Status == ProjectDeliveryStatus.Scheduled || d.Status == ProjectDeliveryStatus.Proposed)
-                        && (d.ReleasePipeline!.DeletedAt != null || d.ReleasePipeline.DisabledAt != null))
-            .Select(d => new { d.Id, d.Status, Deleted = d.ReleasePipeline!.DeletedAt != null })
+                        && (d.ReleasePipeline!.DeletedAt != null || d.ReleasePipeline.DisabledAt != null
+                            || d.Project!.DeletedAt != null))
+            .Select(d => new
+            {
+                d.Id,
+                d.Status,
+                Reason = d.Project!.DeletedAt != null ? ReleasePipelineService.DeletedSolutionReason
+                    : d.ReleasePipeline!.DeletedAt != null ? ReleasePipelineService.DeletedPipelineReason
+                    : ReleasePipelineService.DisabledPipelineReason,
+            })
             .ToListAsync(ct);
         if (stopped.Count == 0) return;
 
         var now = DateTime.UtcNow;
         var dismissed = new List<int>();
-        foreach (var group in stopped.GroupBy(d => (d.Status, d.Deleted)))
+        foreach (var group in stopped.GroupBy(d => (d.Status, d.Reason)))
         {
-            var reason = group.Key.Deleted ? ReleasePipelineService.DeletedPipelineReason : ReleasePipelineService.DisabledPipelineReason;
+            var reason = group.Key.Reason;
             var moved = await ReleasePipelineService.SetAsideForStoppedPipelineAsync(
                 _db, group.Select(d => d.Id).ToList(), group.Key.Status, reason, byUserId: null, now, ct);
             if (group.Key.Status == ProjectDeliveryStatus.Proposed) dismissed.AddRange(moved);
@@ -1761,6 +1771,7 @@ public sealed class DeliveryService
         var claimed = await _db.OeProjectDeliveries
             .Where(d => d.Id == deliveryId && d.Status == ProjectDeliveryStatus.Scheduled && d.ScheduledFor <= claimBy
                         && d.ReleasePipeline!.DeletedAt == null && d.ReleasePipeline.DisabledAt == null
+                        && d.Project!.DeletedAt == null
                         && d.TriggeredByUserId == runAs)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.Status, ProjectDeliveryStatus.Claimed)

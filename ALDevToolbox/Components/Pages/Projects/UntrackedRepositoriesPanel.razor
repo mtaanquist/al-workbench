@@ -6,6 +6,7 @@
 @inject IServiceScopeFactory Scopes
 @inject NavigationManager Nav
 @inject ILogger<UntrackedRepositoriesPanel> Logger
+@implements IDisposable
 
 @*
     "There are AL repositories here that no solution tracks yet" (issue #629),
@@ -235,10 +236,14 @@
         StateHasChanged();
         try
         {
-            var view = await ReadAsync(s => s.ListUntrackedAsync());
+            var view = await ReadAsync(s => s.ListUntrackedAsync(_gone.Token));
             _rows = view.Rows;
             _orgLogin = view.OrgLogin;
             _suggestedCountry = view.SuggestedCountry;
+        }
+        catch (OperationCanceledException) when (_gone.IsCancellationRequested)
+        {
+            // The page is gone; nobody is waiting for the list.
         }
         catch (Exception ex) when (ex is GitHubApiException or GitHubAppNotConfiguredException or HttpRequestException or TaskCanceledException)
         {
@@ -380,6 +385,15 @@
         }
 
         if (_actionError is null) await ReloadAsync();
+    }
+
+    // Cancelled when the panel goes, so leaving the page stops a list still loading (#1232).
+    private readonly CancellationTokenSource _gone = new();
+
+    public void Dispose()
+    {
+        _gone.Cancel();
+        _gone.Dispose();
     }
 
     /// <summary>
