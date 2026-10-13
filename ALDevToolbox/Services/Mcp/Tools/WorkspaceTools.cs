@@ -140,7 +140,7 @@ public sealed class WorkspaceTools
     {
         try
         {
-            var domainPlan = plan.ToDomain();
+            var domainPlan = await plan.ToDomainAsync(_templates, ct);
             // What the prefix resolved to under the organisation's policy, so
             // the agent is told the names it is getting rather than the ones it
             // asked for. The generator applies the same rule internally.

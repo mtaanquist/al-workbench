@@ -26,7 +26,7 @@ public sealed record ProjectPlanInput(
     bool IncludeExamples = true,
     [property: Description("Which of the template's optional extensions to generate, by path. get_template lists the legal values and says which are already required. Leave it out for the required ones only.")]
     IReadOnlyList<string>? SelectedExtensionPaths = null,
-    [property: Description("Which modules to generate, by key, from list_modules. Leave it out to use the template's own default modules, which get_template lists.")]
+    [property: Description("Which modules to generate, by key, from list_modules. Leave it out to use the template's own default modules, which get_template lists; pass an empty list for none.")]
     IReadOnlyList<string>? SelectedModuleKeys = null,
     [property: Description("Optional short form of the customer's name used in extension names, e.g. JM. Leave out to use the full name.")]
     string? ShortName = null)
@@ -45,6 +45,22 @@ public sealed record ProjectPlanInput(
         IncludeExamples,
         SelectedExtensionPaths ?? Array.Empty<string>(),
         SelectedModuleKeys ?? Array.Empty<string>());
+
+    /// <summary>
+    /// <see cref="ToDomain"/>, with a left-out <see cref="SelectedModuleKeys"/>
+    /// filled from the template's default modules, as the parameter's
+    /// description promises (#1243). An empty list stays empty: that is an
+    /// agent asking for no modules. Every tool that generates a workspace
+    /// from this input maps it through here.
+    /// </summary>
+    public async Task<ProjectPlan> ToDomainAsync(
+        ALDevToolbox.Services.Templates.TemplateService templates, CancellationToken ct)
+    {
+        var plan = ToDomain();
+        return SelectedModuleKeys is null
+            ? plan with { SelectedModuleKeys = await templates.GetDefaultModuleKeysAsync(TemplateKey, ct) }
+            : plan;
+    }
 }
 
 /// <summary>Mirror of <see cref="StandaloneExtensionPlan"/> for the MCP boundary.</summary>
