@@ -184,6 +184,92 @@ public sealed class PerTenantBackupServiceTests : IDisposable
             .Which.Errors.Should().ContainKey("BackupId");
     }
 
+    [Fact]
+    public async Task Restore_drops_the_cached_organisation_config()
+    {
+        // #1218: the restore rewrites organization_files underneath the cached
+        // config, which never expires on its own.
+        await SeedOrgAsync(OrgA, "a");
+        var backup = await CreateAsync(OrgA);
+        await using (var ctx = _db.NewContext())
+        {
+            // Written past the config service, so its cache is not dropped here.
+            ctx.OrganizationFiles.Add(new OrganizationFile
+            {
+                OrganizationId = OrgA, Path = "after-snapshot.txt", Content = "x", Ordering = 1,
+                UpdatedAt = _clock.GetUtcNow().UtcDateTime,
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var warm = await _db.NewOrganizationConfigService(ctx).GetForAsync(OrgA);
+            warm.Files.Select(f => f.Path).Should().Contain("after-snapshot.txt",
+                "the cache must hold the post-snapshot state before the restore");
+        }
+
+        await RestoreAsync(backup.Id);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var after = await _db.NewOrganizationConfigService(ctx).GetForAsync(OrgA);
+            after.Files.Select(f => f.Path).Should().Contain("a/.gitattributes")
+                .And.NotContain("after-snapshot.txt",
+                    "the config served after a restore must be the restored one, not the cached pre-restore copy");
+        }
+    }
+
+    [Fact]
+    public async Task Snapshot_reads_every_table_as_of_one_moment()
+    {
+        // #1217: a row committed while the snapshot is part-way through must not
+        // appear in a table read later. Hold a lock on a late table, commit a
+        // row into it once the snapshot is blocked there, and check the row is
+        // absent: an autocommit read would take a fresh view after the wait and
+        // include it, which is how orphan children got into snapshots.
+        await SeedOrgAsync(OrgA, "a");
+
+        await using var blocker = new NpgsqlConnection(_db.ConnectionString);
+        await blocker.OpenAsync();
+        await using var blockerTx = await blocker.BeginTransactionAsync();
+        await using (var cmd = blocker.CreateCommand())
+        {
+            cmd.Transaction = blockerTx;
+            cmd.CommandText =
+                "LOCK TABLE translation_memory IN ACCESS EXCLUSIVE MODE; " +
+                // A copy of the seeded row with a new id, text and hashes.
+                "INSERT INTO translation_memory SELECT (jsonb_populate_record(t, jsonb_build_object(" +
+                "'id', nextval(pg_get_serial_sequence('translation_memory', 'id')), 'source_text', 'Vendor', " +
+                "'source_hash', 'src-late', 'target_hash', 'tgt-late'))).* " +
+                "FROM translation_memory t WHERE t.organization_id = @org";
+            cmd.Parameters.AddWithValue("@org", OrgA);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var create = CreateAsync(OrgA);
+
+        // Wait until the snapshot is queued behind the lock, so its earlier
+        // tables have already been read.
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (await ScalarAsync(
+                   "SELECT COUNT(*) FROM pg_locks WHERE relation = 'translation_memory'::regclass AND NOT granted", null) == 0)
+        {
+            create.IsCompleted.Should().BeFalse("the snapshot must wait on the locked table");
+            DateTime.UtcNow.Should().BeBefore(deadline, "the snapshot never reached the locked table");
+            await Task.Delay(50);
+        }
+        await blockerTx.CommitAsync();
+
+        var backup = await create;
+
+        using var zip = ZipFile.OpenRead(PathFor(backup));
+        using var reader = new StreamReader(zip.GetEntry("translation_memory.json")!.Open());
+        var rows = JsonDocument.Parse(await reader.ReadToEndAsync()).RootElement;
+        rows.EnumerateArray().Select(r => r.GetProperty("source_text").GetString())
+            .Should().Equal(["Customer"], "a row committed after the snapshot began must not be in it");
+    }
+
     // ===== Fixture helpers =====
 
     private PerTenantBackupService NewService(AppDbContext ctx)
@@ -193,7 +279,7 @@ public sealed class PerTenantBackupServiceTests : IDisposable
             ["ConnectionStrings:DefaultConnection"] = _db.ConnectionString,
         }).Build();
         return new PerTenantBackupService(
-            ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), config,
+            ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), config,
             NullLogger<PerTenantBackupService>.Instance, _clock, _options);
     }
 

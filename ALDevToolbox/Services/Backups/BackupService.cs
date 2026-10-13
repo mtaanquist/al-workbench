@@ -53,6 +53,7 @@ public sealed class BackupService
     private readonly string _backupsDirectory;
     private readonly string _pgDumpPath;
     private readonly string _pgRestorePath;
+    private readonly SystemSettingsService? _systemSettings;
 
     public BackupService(
         AppDbContext db,
@@ -63,9 +64,13 @@ public sealed class BackupService
         TimeProvider clock,
         // Optional so the tests that build this service by hand keep compiling.
         // In production DI it is always the instance registered from configuration.
-        BackupOptions? options = null)
+        BackupOptions? options = null,
+        // Optional for the same reason; production DI always supplies it, and a
+        // restore re-applies the restored settings row through it (#1255).
+        SystemSettingsService? systemSettings = null)
     {
         _db = db;
+        _systemSettings = systemSettings;
         _orgContext = orgContext;
         _maintenance = maintenance;
         _logger = logger;
@@ -230,9 +235,22 @@ public sealed class BackupService
 
     /// <summary>
     /// In-place restore: flips maintenance mode on, drops every object in
-    /// the <c>public</c> schema, runs <c>pg_restore</c>, lifts maintenance
-    /// mode. The <c>backups</c> row stays in place after restore so the
-    /// audit log retains the link to the file that was restored.
+    /// the <c>public</c> schema, runs <c>pg_restore</c>, brings the restored
+    /// schema up to this version's migrations, puts back the inventory of
+    /// backup files, re-applies the restored settings to the in-memory copies,
+    /// and lifts maintenance mode.
+    ///
+    /// <para>
+    /// The <c>backups</c> and <c>per_tenant_backups</c> tables describe files
+    /// on disk, which a restore does not rewind. The dump carries those tables
+    /// as they were when it was taken (without its own row, which is inserted
+    /// after <c>pg_dump</c> finishes), so they are read before the drop and put
+    /// back afterwards; otherwise every newer backup, the restored one included,
+    /// would drop out of listing, restore and retention (#1254). Migrations and
+    /// the in-memory settings otherwise only run at startup, so a dump from an
+    /// older version would leave the application on the old schema until the
+    /// next restart (#1255).
+    /// </para>
     ///
     /// <para>
     /// <paramref name="ct"/> only covers the checks and the wait for the
@@ -266,6 +284,8 @@ public sealed class BackupService
         // issue #370.
         await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
 
+        var inventory = await CaptureInventoryAsync(ct);
+
         _maintenance.Enter($"Restoring backup {row.FileName}");
         var sw = Stopwatch.StartNew();
         // Deliberately not the caller's token from here on; see the remarks above.
@@ -293,6 +313,23 @@ public sealed class BackupService
                     path,
                 },
                 destructive);
+
+            // A dump taken by an older version restores an older schema.
+            // Startup is the only other place migrations run, so without this
+            // every query on a newer column fails until the next restart.
+            _db.Database.SetCommandTimeout(ALDevToolbox.Endpoints.StartupTasks.MigrationCommandTimeout);
+            try
+            {
+                await _db.Database.MigrateAsync(destructive);
+            }
+            finally
+            {
+                _db.Database.SetCommandTimeout((int?)null);
+            }
+
+            await RestoreInventoryAsync(inventory, destructive);
+            if (_systemSettings is not null) await _systemSettings.ReloadAfterRestoreAsync(destructive);
+
             sw.Stop();
             _logger.LogInformation(
                 "Restored backup {FileName} in {ElapsedMs} ms.", row.FileName, sw.ElapsedMilliseconds);
@@ -441,4 +478,68 @@ public sealed class BackupService
     }
 
     private void RequireSiteAdmin() => _orgContext.RequireSiteAdmin();
+
+    /// <summary>The <c>backups</c> and <c>per_tenant_backups</c> rows as JSON arrays, read before a restore drops them.</summary>
+    private sealed record BackupInventory(string Backups, string PerTenantBackups);
+
+    private async Task<BackupInventory> CaptureInventoryAsync(CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT (SELECT COALESCE(jsonb_agg(to_jsonb(b)), '[]'::jsonb)::text FROM backups b),
+                   (SELECT COALESCE(jsonb_agg(to_jsonb(p)), '[]'::jsonb)::text FROM per_tenant_backups p)
+            """;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        await reader.ReadAsync(ct);
+        return new BackupInventory(reader.GetString(0), reader.GetString(1));
+    }
+
+    /// <summary>
+    /// Replaces the restored <c>backups</c> and <c>per_tenant_backups</c> rows
+    /// with the ones read before the restore, so the tables again describe the
+    /// files actually on disk. Two references may not survive the restore: a
+    /// creator who does not exist in the restored database is cleared (the row
+    /// is kept), and a per-tenant snapshot whose organisation does not exist is
+    /// left out, since there is no organisation left to restore it into.
+    /// </summary>
+    private async Task RestoreInventoryAsync(BackupInventory inventory, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = """
+                DELETE FROM per_tenant_backups;
+                DELETE FROM backups;
+
+                INSERT INTO backups
+                SELECT * FROM jsonb_populate_recordset(NULL::backups, (
+                    SELECT COALESCE(jsonb_agg(
+                        CASE WHEN EXISTS (SELECT 1 FROM users u WHERE u.id = (e->>'created_by_user_id')::int)
+                             THEN e ELSE e - 'created_by_user_id' END), '[]'::jsonb)
+                    FROM jsonb_array_elements(@backups::jsonb) e));
+
+                INSERT INTO per_tenant_backups
+                SELECT * FROM jsonb_populate_recordset(NULL::per_tenant_backups, (
+                    SELECT COALESCE(jsonb_agg(
+                        CASE WHEN EXISTS (SELECT 1 FROM users u WHERE u.id = (e->>'created_by_user_id')::int)
+                             THEN e ELSE e - 'created_by_user_id' END), '[]'::jsonb)
+                    FROM jsonb_array_elements(@perTenant::jsonb) e
+                    WHERE EXISTS (SELECT 1 FROM organizations o WHERE o.id = (e->>'organization_id')::int)));
+
+                SELECT setval(pg_get_serial_sequence('backups', 'id'),
+                              GREATEST((SELECT COALESCE(MAX(id), 0) FROM backups), 1));
+                SELECT setval(pg_get_serial_sequence('per_tenant_backups', 'id'),
+                              GREATEST((SELECT COALESCE(MAX(id), 0) FROM per_tenant_backups), 1));
+                """;
+            cmd.Parameters.AddWithValue("backups", inventory.Backups);
+            cmd.Parameters.AddWithValue("perTenant", inventory.PerTenantBackups);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
 }

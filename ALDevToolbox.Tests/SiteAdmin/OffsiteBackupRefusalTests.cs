@@ -172,7 +172,7 @@ public sealed class OffsiteBackupRefusalTests : IDisposable
             ctx, _db.OrgContext, new MaintenanceModeState(), config,
             NullLogger<BackupService>.Instance, TimeProvider.System);
         var perTenant = new PerTenantBackupService(
-            ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), config,
+            ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), config,
             NullLogger<PerTenantBackupService>.Instance, TimeProvider.System);
         var systemSettings = new SystemSettingsService(
             ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, TimeProvider.System);

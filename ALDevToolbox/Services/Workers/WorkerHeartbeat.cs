@@ -15,9 +15,10 @@ namespace ALDevToolbox.Services.Workers;
 /// <list type="bullet">
 ///   <item>it has an in-flight job and <see cref="ActiveSinceUtc"/> is older
 ///     than <see cref="MaxActiveDuration"/> (stuck / wedged on one job), or</item>
-///   <item>it has a finite <see cref="MaxIdleSilence"/> and no <see cref="Tick"/>
-///     has landed within that window (the loop crashed or stalled outside a
-///     job). Queue-driven workers that legitimately sit idle for hours pass
+///   <item>it has no in-flight job, a finite <see cref="MaxIdleSilence"/>, and no
+///     <see cref="Tick"/> has landed within that window (the loop crashed or
+///     stalled outside a job). The idle bound does not apply while a job is in
+///     flight; <see cref="MaxActiveDuration"/> covers that. Queue-driven workers that legitimately sit idle for hours pass
 ///     <c>null</c> for <see cref="MaxIdleSilence"/> to opt out of this check.</item>
 /// </list>
 /// Schedulers pick <see cref="MaxIdleSilence"/> as ~3× their poll interval; the
@@ -94,7 +95,11 @@ public sealed class WorkerHeartbeat
             reason = $"{Name}: active job has been running for {(nowUtc - activeSince.Value).TotalMinutes:N0} min (limit {MaxActiveDuration.TotalMinutes:N0} min).";
             return false;
         }
-        if (MaxIdleSilence is { } idleCeiling)
+        // While a unit of work is in flight the active ceiling above is the
+        // bound that applies. PolledScheduler only ticks before and after a
+        // tick, so applying the idle bound as well would call a backup or a
+        // vacuum that runs past it "stalled" in the middle of normal work (#1256).
+        if (activeSince is null && MaxIdleSilence is { } idleCeiling)
         {
             var lastTick = LastTickUtc;
             if (lastTick is null || (nowUtc - lastTick.Value) > idleCeiling)

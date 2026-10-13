@@ -89,22 +89,38 @@ public sealed class S3Provider : IOffsiteStorageProvider, IDisposable
             Key = key,
         }, ct);
 
+        var metadata = CanonicalMetadata(response.Metadata);
+
+        var length = response.ContentLength > 0 ? response.ContentLength : (long?)null;
+        return new OffsiteDownload(response.ResponseStream, metadata, length);
+    }
+
+    public async Task<IReadOnlyDictionary<string, string>> GetMetadataAsync(string key, CancellationToken ct)
+    {
+        var response = await _client.GetObjectMetadataAsync(new GetObjectMetadataRequest
+        {
+            BucketName = _settings.Bucket,
+            Key = key,
+        }, ct);
+        return CanonicalMetadata(response.Metadata);
+    }
+
+    private static Dictionary<string, string> CanonicalMetadata(MetadataCollection source)
+    {
         var metadata = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var metaKey in response.Metadata.Keys)
+        foreach (var metaKey in source.Keys)
         {
             // The SDK exposes user metadata keys with the x-amz-meta- prefix;
             // strip it so callers look up the canonical name (e.g. "deployment-id").
             var canonical = metaKey.StartsWith("x-amz-meta-", StringComparison.OrdinalIgnoreCase)
                 ? metaKey["x-amz-meta-".Length..]
                 : metaKey;
-            metadata[canonical] = response.Metadata[metaKey];
+            metadata[canonical] = source[metaKey];
         }
-
-        var length = response.ContentLength > 0 ? response.ContentLength : (long?)null;
-        return new OffsiteDownload(response.ResponseStream, metadata, length);
+        return metadata;
     }
 
-    public async Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, int maxObjects, CancellationToken ct)
+    public async Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, int maxObjects, bool topLevelOnly, CancellationToken ct)
     {
         if (maxObjects < 1) maxObjects = 1;
         var results = new List<OffsiteStorageObject>(capacity: Math.Min(maxObjects, 256));
@@ -115,6 +131,9 @@ public sealed class S3Provider : IOffsiteStorageProvider, IDisposable
             {
                 BucketName = _settings.Bucket,
                 Prefix = prefix,
+                // With a delimiter S3 rolls everything under a further "/" up
+                // into CommonPrefixes, which are ignored here.
+                Delimiter = topLevelOnly ? "/" : null,
                 ContinuationToken = continuation,
                 MaxKeys = Math.Min(1000, maxObjects - results.Count),
             }, ct);

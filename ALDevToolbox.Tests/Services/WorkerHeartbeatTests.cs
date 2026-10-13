@@ -77,6 +77,24 @@ public sealed class WorkerHeartbeatTests
     }
 
     [Fact]
+    public void A_scheduler_tick_longer_than_the_idle_bound_is_healthy_until_the_active_bound()
+    {
+        // #1256: the backup scheduler's bounds. A 20-minute nightly backup is
+        // one tick, and the loop does not beat inside it; the idle bound must
+        // not call that a stall. The active ceiling still catches a real wedge.
+        var hb = new WorkerHeartbeatRegistry().Register("BackupScheduler",
+            maxActiveDuration: TimeSpan.FromHours(2),
+            maxIdleSilence: TimeSpan.FromMinutes(5));
+
+        hb.BeginActive();
+        var activeSince = hb.ActiveSinceUtc!.Value;
+
+        hb.IsHealthy(activeSince.AddMinutes(20), out var reason).Should().BeTrue(reason);
+        hb.IsHealthy(activeSince.AddHours(3), out reason).Should().BeFalse();
+        reason.Should().Contain("active job");
+    }
+
+    [Fact]
     public void EndActive_clears_the_active_window_so_completed_long_jobs_dont_trip_later()
     {
         var hb = new WorkerHeartbeatRegistry().Register("queue-worker",

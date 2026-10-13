@@ -143,8 +143,9 @@
                         {
                             var alreadyLocal = _localFiles.Contains((obj.Slug, obj.FileName));
                             var orgKnown = _localSlugs.Contains(obj.Slug);
+                            var foreign = obj.FromAnotherDeployment;
                             <tr>
-                                <td>@obj.Slug @(orgKnown ? "" : " (unknown)")</td>
+                                <td>@obj.Slug @(orgKnown ? "" : " (unknown)")@(foreign ? " (another installation)" : "")</td>
                                 <td><code>@obj.FileName</code></td>
                                 <td class="u-muted"><Timestamp Value="@obj.LastModified" Format="yyyy-MM-dd HH:mm:ss" /></td>
                                 <td class="data-table__num">@FormatBytes(obj.Size)</td>
@@ -154,9 +155,9 @@
                                         <AntiforgeryToken />
                                         <input type="hidden" name="ObjectKey" value="@obj.Key" />
                                         <button type="submit" class="btn btn--sm btn--icon"
-                                                title="@(alreadyLocal ? "A local snapshot with this name already exists" : (orgKnown ? "Download to local for restore" : "No local org with this slug - create or restore it first"))"
+                                                title="@(foreign ? "Taken by another AL Workbench installation that shares this storage - it can't be restored here" : alreadyLocal ? "A local snapshot with this name already exists" : (orgKnown ? "Download to local for restore" : "No local org with this slug - create or restore it first"))"
                                                 aria-label="Download to local"
-                                                disabled="@(alreadyLocal || !orgKnown)">
+                                                disabled="@(foreign || alreadyLocal || !orgKnown)">
                                             <Icon Name="archive-restore" Width="14" Height="14" />
                                         </button>
                                     </form>
@@ -376,7 +377,7 @@
         {
             try
             {
-                _offsite = await Offsite.ListPerTenantAsync(maxObjects: 200, CancellationToken.None);
+                _offsite = await Offsite.ListPerTenantAsync(maxObjects: 200, flagOtherDeployments: true, CancellationToken.None);
             }
             catch (Exception ex)
             {

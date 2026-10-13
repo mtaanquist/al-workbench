@@ -165,7 +165,7 @@ public sealed class BackupSchedulerTests : IDisposable
             ctx, _db.OrgContext, _maintenance, config,
             NullLogger<BackupService>.Instance, _clock, _options);
         var perTenant = new PerTenantBackupService(
-            ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), config,
+            ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), _db.NewOrganizationConfigService(ctx), config,
             NullLogger<PerTenantBackupService>.Instance, _clock, _options);
         var systemSettings = new SystemSettingsService(
             ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, _clock);
