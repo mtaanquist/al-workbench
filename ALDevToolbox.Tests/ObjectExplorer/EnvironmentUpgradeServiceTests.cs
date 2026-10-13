@@ -1,3 +1,4 @@
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
@@ -879,7 +880,93 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         (await _f.Upgrades(read).CountArchivedAsync()).Should().Be(0);
     }
 
+    // ── Several lines at once (#1265) ───────────────────────────────────
+
+    [Fact]
+    public async Task Removing_several_lines_takes_off_the_free_ones_and_names_the_one_that_stays()
+    {
+        var (projectId, free) = await _f.SeedCustomerAsync();
+        var acted = await SeedEnvironmentAsync(projectId, "UAT");
+        var id = await CreateAsync();
+        await AddAsync(id, free, acted);
+        var freeLine = await LineIdAsync(id, free);
+        var actedLine = await LineIdAsync(id, acted);
+        await BookFromUpgradeAsync(projectId, acted, id);
+
+        UpgradeLinesChangeResult result;
+        await using (var ctx = _f.Db.NewContext())
+            result = await _f.Upgrades(ctx).RemoveLinesAsync(id, [actedLine, freeLine]);
+
+        result.Changed.Should().Equal(freeLine);
+        result.Refused[actedLine.ToString()].Should().Contain("UAT").And.Contain("stays on it");
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgradeLines.AsNoTracking().Select(l => l.Id).ToListAsync()).Should().Equal(actedLine);
+    }
+
+    [Fact]
+    public async Task Assigning_several_lines_assigns_the_allowed_and_names_the_solution_it_refused()
+    {
+        var (_, allowedEnv) = await _f.SeedCustomerAsync();
+        var (otherProject, otherEnv) = await SeedCustomerWithoutUpdateTeamAsync(ProjectVisibility.Public);
+        var id = await CreateAsync();
+        await AddAsync(id, allowedEnv);
+        await AddLineDirectlyAsync(id, otherProject, otherEnv);
+        var allowedLine = await LineIdAsync(id, allowedEnv);
+        var otherLine = await LineIdAsync(id, otherEnv);
+
+        UpgradeLinesChangeResult result;
+        await using (var ctx = _f.Db.NewContext())
+            result = await _f.Upgrades(ctx).AssignLinesAsync(id, [allowedLine, otherLine], UpgradeActionTestFixture.PlainTeamUserId);
+
+        result.Changed.Should().Equal(allowedLine);
+        result.Refused[otherLine.ToString()].Should().Contain("CRONUS Sverige");
+        await using var verify = _f.Db.NewContext();
+        var assignees = await verify.OeEnvironmentUpgradeLines.AsNoTracking().ToDictionaryAsync(l => l.Id, l => l.AssigneeUserId);
+        assignees[allowedLine].Should().Be(UpgradeActionTestFixture.PlainTeamUserId);
+        assignees[otherLine].Should().BeNull("a refused line is left as it was");
+    }
+
+    [Fact]
+    public async Task Assigning_several_lines_to_someone_from_another_organisation_is_refused_outright()
+    {
+        var (_, envId) = await _f.SeedCustomerAsync();
+        var id = await CreateAsync();
+        await AddAsync(id, envId);
+        var lineId = await LineIdAsync(id, envId);
+        var stranger = await SeedOtherOrganisationUserAsync();
+
+        await using var ctx = _f.Db.NewContext();
+        var act = () => _f.Upgrades(ctx).AssignLinesAsync(id, [lineId], stranger);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Assignee");
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────
+
+    private async Task AddLineDirectlyAsync(int upgradeId, int projectId, int environmentId)
+    {
+        await using var ctx = _f.Db.NewContext();
+        ctx.OeEnvironmentUpgradeLines.Add(new OeEnvironmentUpgradeLine
+        {
+            OrganizationId = TestDb.DefaultOrgId, UpgradeId = upgradeId, EnvironmentId = environmentId,
+            ProjectId = projectId, IsOpen = true, AddedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>A real, active user in the second organisation.</summary>
+    private async Task<int> SeedOtherOrganisationUserAsync()
+    {
+        const int userId = 9790;
+        await using var ctx = _f.Db.NewContext();
+        ctx.Users.Add(new User
+        {
+            Id = userId, OrganizationId = TestDb.OtherOrgId, Email = "someone@fabrikam.example", PasswordHash = "x",
+            DisplayName = "Someone Else", Role = UserRole.Editor, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+        return userId;
+    }
 
     private async Task<int> CreateAsync(string name = "28.5 in November 2026", string version = "28.5", string? note = null)
     {

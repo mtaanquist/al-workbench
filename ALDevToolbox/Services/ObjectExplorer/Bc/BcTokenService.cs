@@ -30,7 +30,13 @@ public sealed class BcTokenService
         _logger = logger;
     }
 
-    private sealed record CachedToken(string AccessToken, DateTime ExpiresAtUtc);
+    /// <summary>
+    /// A cached token remembers which tenant and client it was issued for, so a lookup
+    /// with different credentials is a miss. <see cref="Invalidate"/> alone is not enough:
+    /// a request that resolved the old credentials before a save can finish after the
+    /// invalidation and put the old tenant's token back under the same project (#1265).
+    /// </summary>
+    private sealed record CachedToken(string AccessToken, DateTime ExpiresAtUtc, Guid TenantId, string ClientId);
 
     /// <summary>
     /// Returns a valid bearer token for the project, acquiring a fresh one when the
@@ -43,6 +49,8 @@ public sealed class BcTokenService
     {
         if (!forceRefresh
             && _cache.TryGetValue(projectId, out var cached)
+            && cached.TenantId == tenantId
+            && string.Equals(cached.ClientId, clientId, StringComparison.OrdinalIgnoreCase)
             && cached.ExpiresAtUtc - ExpiryMargin > DateTime.UtcNow)
         {
             return cached.AccessToken;
@@ -103,7 +111,7 @@ public sealed class BcTokenService
                 throw new BcApiException(response.StatusCode, "The Microsoft sign-in response didn't contain a token.");
             }
             var expiresIn = root.TryGetProperty("expires_in", out var ei) && ei.TryGetInt32(out var secs) ? secs : 3600;
-            return new CachedToken(accessToken, DateTime.UtcNow.AddSeconds(expiresIn));
+            return new CachedToken(accessToken, DateTime.UtcNow.AddSeconds(expiresIn), tenantId, clientId);
         }
     }
 }

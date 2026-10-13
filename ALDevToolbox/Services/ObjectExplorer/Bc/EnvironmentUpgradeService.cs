@@ -711,6 +711,162 @@ public sealed class EnvironmentUpgradeService
     }
 
     /// <summary>
+    /// Takes several environments off an open upgrade in one write. Each line is judged on
+    /// its own, as <see cref="RemoveLineAsync"/> would judge it, so one that must stay does
+    /// not cost the others: refusals come back keyed by line id and name the environment.
+    /// Only a problem with the upgrade itself throws.
+    /// </summary>
+    public async Task<UpgradeLinesChangeResult> RemoveLinesAsync(
+        int upgradeId, IEnumerable<int> lineIds, CancellationToken ct = default)
+    {
+        var (upgrade, lines, refused) = await LoadLinesForBatchAsync(upgradeId, lineIds, ct).ConfigureAwait(false);
+
+        var environmentIds = lines.Select(l => l.Line.EnvironmentId).ToList();
+        var acted = (await _db.OeEnvironmentUpgradeActions.AsNoTracking()
+            .Where(a => a.UpgradeId == upgradeId && environmentIds.Contains(a.EnvironmentId))
+            .Select(a => a.EnvironmentId)
+            .Distinct()
+            .ToListAsync(ct).ConfigureAwait(false)).ToHashSet();
+
+        var removed = new List<int>();
+        foreach (var (line, environmentName, projectName) in lines)
+        {
+            if (acted.Contains(line.EnvironmentId))
+            {
+                refused[Key(line.Id)] =
+                    $"Something has already been done to {environmentName} ({projectName}) from this upgrade, so it stays on it.";
+                continue;
+            }
+            _db.OeEnvironmentUpgradeLines.Remove(line);
+            removed.Add(line.Id);
+        }
+
+        if (removed.Count > 0)
+        {
+            var now = _clock.GetUtcNow().UtcDateTime;
+            upgrade.UpdatedAt = now;
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await NotificationSubject.MarkDoneAsync(
+                _db, removed.Select(NotificationSubject.UpgradeLine).ToList(), now, _logger, ct).ConfigureAwait(false);
+        }
+
+        _logger.LogInformation(
+            "User {UserId} took {Removed} environments off planned upgrade {UpgradeId} ({Refused} refused).",
+            _orgContext.CurrentUserId, removed.Count, upgradeId, refused.Count);
+        return new UpgradeLinesChangeResult(removed, refused);
+    }
+
+    /// <summary>
+    /// Sets who checks several lines in one write, or nobody with a null
+    /// <paramref name="userId"/>. Same per-line rules as <see cref="AssignAsync"/>; a line the
+    /// caller may not change is refused by name and the rest are still assigned. An assignee
+    /// outside the organisation refuses the whole call, since it is wrong for every line.
+    /// </summary>
+    public async Task<UpgradeLinesChangeResult> AssignLinesAsync(
+        int upgradeId, IEnumerable<int> lineIds, int? userId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        if (userId is { } assignee
+            && !await _db.Users.AsNoTracking().AnyAsync(u => u.Id == assignee, ct).ConfigureAwait(false))
+        {
+            throw Refusal("Assignee", "That person isn't in this organisation.");
+        }
+        var (upgrade, lines, refused) = await LoadLinesForBatchAsync(upgradeId, lineIds, ct).ConfigureAwait(false);
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var reassigned = new List<int>();
+        foreach (var (line, _, _) in lines)
+        {
+            if (line.AssigneeUserId != userId && line.CheckedAt is null)
+            {
+                // The previous checker is no longer asked; the new one is told by the next sweep.
+                reassigned.Add(line.Id);
+                if (userId is not null) line.UpdatedNotifiedAt = null;
+            }
+            line.AssigneeUserId = userId;
+        }
+        var assigned = lines.Select(l => l.Line.Id).ToList();
+
+        if (assigned.Count > 0)
+        {
+            if (reassigned.Count > 0)
+            {
+                // Before the save, so a sweep straight after it cannot have told the new one yet.
+                await NotificationSubject.MarkDoneAsync(
+                    _db, reassigned.Select(NotificationSubject.UpgradeLine).ToList(), now, _logger, ct).ConfigureAwait(false);
+            }
+            upgrade.UpdatedAt = now;
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
+
+        _logger.LogInformation(
+            "User {UserId} assigned {Assigned} environments on planned upgrade {UpgradeId} to user {AssigneeUserId} ({Refused} refused).",
+            _orgContext.CurrentUserId, assigned.Count, upgradeId, userId, refused.Count);
+        return new UpgradeLinesChangeResult(assigned, refused);
+    }
+
+    private sealed record BatchLine(OeEnvironmentUpgradeLine Line, string EnvironmentName, string ProjectName);
+
+    /// <summary>
+    /// The lines of a batch write, tracked, on an open upgrade: reached through the
+    /// visibility join, with the grant checked once per solution. A line that is gone or
+    /// hidden, or whose solution the caller may not manage, lands in the refusals instead.
+    /// </summary>
+    private async Task<(OeEnvironmentUpgrade Upgrade, List<BatchLine> Lines, Dictionary<string, string> Refused)>
+        LoadLinesForBatchAsync(int upgradeId, IEnumerable<int> lineIds, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(lineIds);
+        RequireOrganizationId();
+        var wanted = lineIds.Distinct().ToList();
+        if (wanted.Count == 0)
+        {
+            throw Refusal("Lines", "Pick at least one environment.");
+        }
+        var upgrade = await LoadOpenAsync(upgradeId, ct).ConfigureAwait(false);
+
+        var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
+        var lines = await _db.OeEnvironmentUpgradeLines
+            .Where(l => wanted.Contains(l.Id) && l.UpgradeId == upgradeId)
+            .Where(l => _db.OeProjects.Where(visible)
+                .Any(p => p.Id == l.ProjectId && p.DeletedAt == null))
+            .ToListAsync(ct).ConfigureAwait(false);
+        var foundIds = lines.Select(l => l.Id).ToList();
+        var names = await _db.OeEnvironmentUpgradeLines.AsNoTracking()
+            .Where(l => foundIds.Contains(l.Id))
+            .Select(l => new { l.Id, EnvironmentName = l.Environment!.Name, ProjectName = l.Project!.Name })
+            .ToDictionaryAsync(l => l.Id, ct).ConfigureAwait(false);
+
+        var refused = new Dictionary<string, string>();
+        foreach (var missing in wanted.Except(foundIds))
+        {
+            refused[Key(missing)] = "That environment is no longer on the upgrade. Reload the upgrade and try again.";
+        }
+
+        var grant = new Dictionary<int, bool>();
+        var allowed = new List<BatchLine>();
+        foreach (var line in lines.OrderBy(l => wanted.IndexOf(l.Id)))
+        {
+            var name = names[line.Id];
+            if (!grant.TryGetValue(line.ProjectId, out var mayAct))
+            {
+                grant[line.ProjectId] = mayAct =
+                    await _access.CanManageEnvironmentUpdatesAsync(line.ProjectId, ct).ConfigureAwait(false);
+            }
+            if (!mayAct)
+            {
+                refused[Key(line.Id)] =
+                    $"You can't manage updates for {name.ProjectName}, so {name.EnvironmentName} was left as it was.";
+                continue;
+            }
+            allowed.Add(new BatchLine(line, name.EnvironmentName, name.ProjectName));
+        }
+        return (upgrade, allowed, refused);
+    }
+
+    private static string Key(int id) => id.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
     /// Ticks or unticks a line's after-upgrade check and sets its note in one write. Ticking
     /// stamps the acting person and the time - once: ticking a line that is already ticked
     /// keeps the stamp of whoever did the check. Unticking clears both. The note replaces
@@ -1031,4 +1187,12 @@ public sealed record EnvironmentUpgradeLineRow(
 public sealed record AddUpgradeLinesResult(
     IReadOnlyList<int> Added,
     IReadOnlyList<int> AlreadyOnIt,
+    IReadOnlyDictionary<string, string> Refused);
+
+/// <summary>
+/// What a change to several of an upgrade's lines did: the line ids it changed, and the
+/// ones it refused, keyed by line id with the reason in words that name the environment.
+/// </summary>
+public sealed record UpgradeLinesChangeResult(
+    IReadOnlyList<int> Changed,
     IReadOnlyDictionary<string, string> Refused);
