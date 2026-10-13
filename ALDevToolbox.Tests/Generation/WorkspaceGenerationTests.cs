@@ -234,6 +234,35 @@ public sealed class WorkspaceGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task An_unknown_module_key_is_refused_rather_than_dropped()
+    {
+        // #1242: the key used to be skipped while the saved settings still
+        // listed it, and those settings then could not be read back.
+        await SeedTemplateAsync(TemplateBuilder.Default(), ModuleBuilder.Default("banking", "Banking"));
+
+        var act = () => NewService().GenerateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(selectedModules: new[] { "banking", "bankng" }));
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("SelectedModuleKeys")
+            .WhoseValue.Should().Contain("'bankng'").And.NotContain("'banking'");
+    }
+
+    [Fact]
+    public async Task A_deleted_module_key_is_refused()
+    {
+        var deleted = ModuleBuilder.Default("payroll", "Payroll");
+        deleted.DeletedAt = DateTime.UtcNow;
+        await SeedTemplateAsync(TemplateBuilder.Default(), deleted);
+
+        var errors = await NewService().ValidateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(selectedModules: new[] { "payroll" }));
+
+        errors.Should().ContainKey("SelectedModuleKeys")
+            .WhoseValue.Should().Contain("'payroll'");
+    }
+
+    [Fact]
     public async Task A_module_named_like_a_template_extension_is_refused_whatever_the_case()
     {
         var template = TemplateBuilder.Default();

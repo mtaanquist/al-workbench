@@ -162,7 +162,7 @@ Root-level folders come from two places: every emitted extension contributes one
 7. Stream the whole thing as a ZIP.
 ```
 
-Validation that doesn't fit the template-save validator (because it depends on plan-time inputs) runs upfront: `ValidateIdRanges` rejects a plan whose extensions resolve to overlapping ranges, surfacing a field-keyed `PlanValidationException`.
+Validation that doesn't fit the template-save validator (because it depends on plan-time inputs) runs upfront: `ValidateIdRanges` rejects a plan whose extensions resolve to overlapping ranges, surfacing a field-keyed `PlanValidationException`. Two more refusals are keyed on `SelectedModuleKeys`: a key that names no live module (mistyped, or deleted since the form loaded) is refused rather than skipped, because the saved `workspace.aldt.toml` would still list it and could then not be read back; and two extensions that would land in the same folder (two modules with one `extension_name`, or a module named like a template extension such as `Core`) are refused, compared case-insensitively, because the ZIP would carry both `app.json` files and only one survives extraction.
 
 ## `app.json` construction
 

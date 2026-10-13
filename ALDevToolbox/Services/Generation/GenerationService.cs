@@ -430,9 +430,25 @@ public class GenerationService
         // order the IN-clause matched.
         var byKey = modules.ToDictionary(m => m.Key);
         var ordered = new List<Module>(moduleKeys.Count);
+        var missing = new List<string>();
         foreach (var key in moduleKeys)
         {
             if (byKey.TryGetValue(key, out var module)) ordered.Add(module);
+            else missing.Add(key);
+        }
+
+        // A key that names no live module used to be skipped, yet the saved
+        // settings still listed it - and reading those settings back refuses
+        // unknown keys, so every extension added to the workspace later lost
+        // its naming and prefix (#1242). Refuse the plan instead.
+        if (missing.Count > 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["SelectedModuleKeys"] =
+                    $"No module with the key {string.Join(", ", missing.Select(k => $"'{k}'"))} exists. "
+                    + "It may have been deleted since the list was loaded. Pick again from the modules available now.",
+            });
         }
         return ordered;
     }
