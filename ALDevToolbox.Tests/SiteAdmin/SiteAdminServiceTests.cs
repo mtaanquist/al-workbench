@@ -38,20 +38,20 @@ public sealed class SiteAdminServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Get_memberships_lists_every_org_for_an_email()
+    public async Task Get_memberships_finds_the_account_for_an_email_in_another_org()
     {
+        // Emails are unique deployment-wide since #1207, so an address has at
+        // most one membership; the lookup still has to cross organisations.
         await using (var seed = _db.NewContext())
         {
-            seed.Users.AddRange(
-                NewUser("dual@example.com", TestDb.DefaultOrgId, role: UserRole.User),
-                NewUser("dual@example.com", TestDb.OtherOrgId, role: UserRole.Admin));
+            seed.Users.Add(NewUser("member@example.com", TestDb.OtherOrgId, role: UserRole.Admin));
             await seed.SaveChangesAsync();
         }
 
         var ctx = _db.NewContext();
         var svc = new SiteAdminService(ctx, NewSiteAdminContext(), NullLogger<SiteAdminService>.Instance);
-        var memberships = await svc.GetMembershipsAsync("dual@example.com");
-        memberships.Select(m => m.OrganizationId).Should().Contain(new[] { TestDb.DefaultOrgId, TestDb.OtherOrgId });
+        var memberships = await svc.GetMembershipsAsync("member@example.com");
+        memberships.Select(m => m.OrganizationId).Should().Equal(TestDb.OtherOrgId);
     }
 
     [Fact]
