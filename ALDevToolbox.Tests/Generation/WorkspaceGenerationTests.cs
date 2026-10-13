@@ -216,6 +216,36 @@ public sealed class WorkspaceGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_modules_with_the_same_extension_name_are_refused()
+    {
+        // #1240: both would be written to Banking/, and only one app.json
+        // would survive extraction.
+        var template = TemplateBuilder.Default();
+        await SeedTemplateAsync(template,
+            ModuleBuilder.Default("banking-dk", "Banking DK", extensionName: "Banking"),
+            ModuleBuilder.Default("banking-no", "Banking NO", extensionName: "Banking"));
+
+        var act = () => NewService().GenerateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(selectedModules: new[] { "banking-dk", "banking-no" }));
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("SelectedModuleKeys")
+            .WhoseValue.Should().Contain("banking-dk").And.Contain("banking-no").And.Contain("Banking");
+    }
+
+    [Fact]
+    public async Task A_module_named_like_a_template_extension_is_refused_whatever_the_case()
+    {
+        var template = TemplateBuilder.Default();
+        await SeedTemplateAsync(template, ModuleBuilder.Default("core-addon", "Core Addon", extensionName: "CORE"));
+
+        var errors = await NewService().ValidateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(selectedModules: new[] { "core-addon" }));
+
+        errors.Should().ContainKey("SelectedModuleKeys");
+    }
+
+    [Fact]
     public async Task Recursive_folder_tree_emits_files_at_correct_depth()
     {
         var template = TemplateBuilder.Default()

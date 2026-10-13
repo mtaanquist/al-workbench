@@ -388,6 +388,7 @@
                 <span class="field__hint">
                     Each module becomes its own extension folder, with its own ID range.
                 </span>
+                <FieldError Field="SelectedModuleKeys" Errors="_errors" />
             }
         </section>
     </Form>
@@ -1009,7 +1010,7 @@
     private static readonly HashSet<string> FieldedKeys = new(StringComparer.Ordinal)
     {
         "TemplateKey", "WorkspaceName", "ShortName", "CoreIdRangeFrom", "CoreIdRangeTo",
-        "ApplicationVersion", "RuntimeVersion",
+        "ApplicationVersion", "RuntimeVersion", "SelectedModuleKeys",
     };
 
     /// <summary>

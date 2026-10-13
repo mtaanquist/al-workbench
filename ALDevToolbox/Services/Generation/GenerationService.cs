@@ -227,6 +227,7 @@ public class GenerationService
             orgConfig.Settings.DefaultPublisher, template.Defaults.Publisher);
 
         var extensions = BuildExtensionList(template, plan, modules, publisher, orgConfig.Settings.NamingFolderStyle);
+        ValidateExtensionFolders(extensions);
         ValidateIdRanges(extensions);
         ValidateExtensionNames(extensions);
 
@@ -652,6 +653,34 @@ public class GenerationService
                 "The extension name would be longer than 200 characters, which Business Central "
                 + "refuses. Use a shorter short name.",
         });
+    }
+
+    /// <summary>
+    /// Every extension is written to the folder named by its path, and a
+    /// module clone's path is the module's extension name - which nothing
+    /// keeps apart from another module's or from a template extension's
+    /// ("Core"). Two extensions in one folder would put two <c>app.json</c>
+    /// entries in the ZIP, only one of which survives extraction, so the plan
+    /// is refused instead (#1240). Case-insensitive because Windows, where
+    /// most of these workspaces are unzipped, folds the two together.
+    /// </summary>
+    private static void ValidateExtensionFolders(IReadOnlyList<EmittableExtension> extensions)
+    {
+        var clashes = extensions
+            .GroupBy(e => e.Path, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => $"{string.Join(" and ", group.Select(Describe))} would share the folder {group.Key}")
+            .ToList();
+        if (clashes.Count == 0) return;
+
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["SelectedModuleKeys"] =
+                $"{string.Join("; ", clashes)}. Pick only one of them, or ask an editor to give one a different extension name.",
+        });
+
+        static string Describe(EmittableExtension e) =>
+            e.IsModuleClone ? $"the {e.ModuleName} module ({e.ModuleKey})" : $"the template's {e.Path} extension";
     }
 
     /// <summary>
