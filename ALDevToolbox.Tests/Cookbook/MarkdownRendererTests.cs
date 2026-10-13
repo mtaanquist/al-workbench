@@ -65,6 +65,40 @@ public sealed class MarkdownRendererTests
         html.Should().Contain("about:blank");
     }
 
+    [Theory]
+    [InlineData("<javascript:alert(1)>")]
+    [InlineData("<JAVASCRIPT:alert(1)>")]
+    [InlineData("<data:text/html,x>")]
+    [InlineData("<vbscript:msgbox(1)>")]
+    [InlineData("see <javascript:alert(1)> here")]
+    public void Render_does_not_link_autolinks_with_dangerous_schemes(string markdown)
+    {
+        var html = _sut.Render(markdown).Value;
+        html.Should().NotContain("<a");
+        html.Should().NotContainEquivalentOf("href=");
+    }
+
+    [Theory]
+    [InlineData("<https://example.com/page>", "href=\"https://example.com/page\"")]
+    [InlineData("<dev@example.com>", "href=\"mailto:dev@example.com\"")]
+    [InlineData("<mailto:dev@example.com>", "href=\"mailto:dev@example.com\"")]
+    public void Render_keeps_safe_autolinks(string markdown, string expectedHref)
+    {
+        _sut.Render(markdown).Value.Should().Contain(expectedHref);
+    }
+
+    [Theory]
+    [InlineData("[x](https://example.com){onclick=alert(1)}")]
+    [InlineData("## Setup {onmouseover=alert(1)}")]
+    [InlineData("[x](https://example.com){href=javascript:alert(1)}")]
+    public void Render_does_not_turn_attribute_blocks_into_element_attributes(string markdown)
+    {
+        var html = _sut.Render(markdown).Value;
+        html.Should().NotContain("onclick=\"");
+        html.Should().NotContain("onmouseover=\"");
+        html.Should().NotContainEquivalentOf("href=\"javascript:");
+    }
+
     [Fact]
     public void IsSafeUrl_strips_control_chars_before_scheme_check()
     {

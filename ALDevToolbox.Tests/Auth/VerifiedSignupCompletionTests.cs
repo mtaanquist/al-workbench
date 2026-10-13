@@ -30,7 +30,8 @@ public sealed class VerifiedSignupCompletionTests : IDisposable
             new SystemSettingsService(ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, _clock),
             new ALDevToolbox.Services.SingleTenant.SingleTenantModeState(singleTenant),
             NullLogger<AccountService>.Instance,
-            _clock);
+            _clock,
+            _db.OpenIddictTokens);
 
     private async Task<int> SeedVerifiedPendingAsync(string email)
     {

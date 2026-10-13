@@ -101,6 +101,10 @@ public sealed class OAuthClaimsTransformer : IClaimsTransformation
         {
             return principal;
         }
+        if (IssuedBeforeCredentialChange(principal, user.CredentialsChangedAt))
+        {
+            return principal;
+        }
 
         identity.AddClaim(new Claim(HttpOrganizationContext.UserIdClaim, userId.ToString()));
         identity.AddClaim(new Claim(HttpOrganizationContext.OrganizationIdClaim, orgId.ToString()));
@@ -118,6 +122,28 @@ public sealed class OAuthClaimsTransformer : IClaimsTransformation
             identity.AddClaim(new Claim(HttpOrganizationContext.SystemOrgClaim, "true"));
         }
         return principal;
+    }
+
+    /// <summary>
+    /// Whether the access token was issued before the user's password last
+    /// changed (<see cref="User.CredentialsChangedAt"/>). A change revokes the
+    /// user's OAuth tokens, but access tokens are validated locally without a
+    /// database lookup, so a revoked one would otherwise keep working until it
+    /// expires. This is the OAuth counterpart of the cookie check in
+    /// <c>CookieSessionRevalidation</c> (#675).
+    /// </summary>
+    /// <remarks>
+    /// Compared at whole-second precision: a token's creation date can be
+    /// serialised without fractions, so a token minted in the same second as
+    /// the change, after it, would otherwise read as older and be refused. A
+    /// token with no creation date at all is treated as older than any stamp.
+    /// </remarks>
+    private static bool IssuedBeforeCredentialChange(ClaimsPrincipal principal, DateTime? credentialsChangedAt)
+    {
+        if (credentialsChangedAt is not { } changedAt) return false;
+        if (principal.GetCreationDate() is not { } created) return true;
+        var changedAtSecond = new DateTimeOffset(changedAt.Ticks - changedAt.Ticks % TimeSpan.TicksPerSecond, TimeSpan.Zero);
+        return created < changedAtSecond;
     }
 }
 

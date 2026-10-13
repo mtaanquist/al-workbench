@@ -102,7 +102,7 @@ public sealed class DeliveryTools
     }
 
     [McpServerTool(Name = "list_github_releases", ReadOnly = true)]
-    [Description("Lists the GitHub releases a deployment pipeline can install, newest first, with each release's tag, title, publication date and the app files attached to it. Only works for a deployment pipeline whose apps come from a repository's GitHub releases - one that deploys a build pipeline's builds is refused, and you should use list_pipeline_builds for that. Releases with no app files attached cannot be installed. Requires permission to manage the solution.")]
+    [Description("Lists the GitHub releases a deployment pipeline can install, newest first, with each release's tag, title, publication date and the app files attached to it. Only works for a deployment pipeline whose apps come from a repository's GitHub releases - one that deploys a build pipeline's builds is refused, and you should use list_pipeline_builds for that. Releases with no app files attached cannot be installed. Requires permission to manage the solution, and a connected GitHub account that can see the repository.")]
     public async Task<IReadOnlyList<GitHubReleaseOption>> ListGitHubReleasesAsync(
         [Description("Deployment pipeline id (from list_deployment_pipelines).")] int deploymentPipelineId,
         CancellationToken ct = default)
@@ -133,7 +133,7 @@ public sealed class DeliveryTools
     }
 
     [McpServerTool(Name = "stage_github_release", ReadOnly = false, Idempotent = true)]
-    [Description("Downloads the app files attached to one GitHub release and records them as a build, so deploy_build can install them into the deployment pipeline's Business Central environment. Nothing is installed yet — this only fetches the files. Staging the same release twice returns the build already recorded rather than fetching it again. Refused when the deployment pipeline does not draw from GitHub releases, when the tag no longer exists, or when the release has no app files attached. Requires permission to manage the solution.")]
+    [Description("Downloads the app files attached to one GitHub release and records them as a build, so deploy_build can install them into the deployment pipeline's Business Central environment. Nothing is installed yet — this only fetches the files. Staging the same release twice returns the build already recorded rather than fetching it again. Refused when the deployment pipeline does not draw from GitHub releases, when the tag no longer exists, or when the release has no app files attached. Requires permission to manage the solution, and a connected GitHub account that can see the repository.")]
     public async Task<BuildRow> StageGitHubReleaseAsync(
         [Description("Deployment pipeline id (from list_deployment_pipelines) — says which repository the release is read from.")] int deploymentPipelineId,
         [Description("The release's tag, exactly as list_github_releases reports it (for example 'v1.2.3.0').")] string tag,

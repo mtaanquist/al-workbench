@@ -194,18 +194,23 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         cut.FindAll("#rpe-repo").Should().BeEmpty();
 
         // The page can still re-render from its own loading after the first paint, which
-        // retires the handler a found element points at; pick the source again until the
-        // change lands on the current render.
-        for (var attempt = 0; ; attempt++)
+        // retires the handler a found element points at. Let its reads finish first, then
+        // pick the source again if a late render still lands in between.
+        // On a loaded CI runner the markup the test reads could stay on the retired handler
+        // for good, so a retry re-renders the page before looking again.
+        _db.WaitForQueriesToSettle();
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (true)
         {
             try
             {
                 await cut.InvokeAsync(() => cut.Find("#rpe-source").Change(ReleaseArtifactSource.GithubRelease));
                 break;
             }
-            catch (Bunit.Rendering.UnknownEventHandlerIdException) when (attempt < 20)
+            catch (Bunit.Rendering.UnknownEventHandlerIdException) when (DateTime.UtcNow < deadline)
             {
-                await Task.Delay(50);
+                await Task.Delay(100);
+                cut.Render();
             }
         }
 

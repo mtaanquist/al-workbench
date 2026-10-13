@@ -22,11 +22,13 @@ namespace ALDevToolbox.Services.ObjectExplorer.Explore;
 /// query filter — the same property the find-references queries have. Every
 /// caller seeds from a release id it already obtained through an org-filtered
 /// EF read (the clicked file's release, or <c>ResolveReleaseAsync</c>), and a
-/// parent chain never crosses an org boundary (a parent can only be picked from
-/// the same org at import time, with no <c>IgnoreQueryFilters</c>), so the walk
-/// stays in-tenant. The dependency links a pipeline build adds (#901) keep that
-/// argument: the build writes them inside its own org scope, linking releases
-/// it read or created there, and the chain SQL does not take the link row's
+/// parent chain never crosses an org boundary: the import reads the chosen
+/// parent back through the org-filtered set and refuses one it cannot see, and
+/// the chain SQL's parent step follows only a release in the seed's own
+/// organisation as a backstop, so the walk stays in-tenant. The dependency
+/// links a pipeline build adds (#901) keep that argument: the build writes
+/// them inside its own org scope, linking releases it read or created there,
+/// and the chain SQL does not take the link row's
 /// word for it anyway - it follows a link only to a release in the seed's own
 /// organisation (<see cref="ReleaseAncestrySql.Chain"/>). Don't call these with
 /// a release id that hasn't been org-validated.</para>

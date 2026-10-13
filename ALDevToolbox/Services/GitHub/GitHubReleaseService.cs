@@ -71,7 +71,11 @@ public sealed record GitHubReleaseOption(
 /// Release is an act of the organisation, and the publish half runs inside the build
 /// worker where there may be no user at all. The repository is therefore checked
 /// against the connected GitHub organisation here: a repository outside it, or one
-/// that is not on GitHub, is refused in words rather than attempted.</para>
+/// that is not on GitHub, is refused in words rather than attempted. The token
+/// never stands in for a person's own rights: listing and staging Releases need the
+/// caller to see the repository with their own GitHub account, and a build is
+/// published only when the person it ran as can write to the repository (choosing
+/// the repository on a pipeline asks the same of whoever saves it).</para>
 ///
 /// <para>See <c>.design/github-integration-phase2.md</c> (#632).</para>
 /// </summary>
@@ -81,6 +85,7 @@ public sealed class GitHubReleaseService
     private readonly GitHubAppClient _github;
     private readonly GitHubConnectionService _connection;
     private readonly ProjectAccess _access;
+    private readonly GitHubAccessService _githubAccess;
     private readonly IOrganizationContext _orgContext;
     private readonly PublicOrigin _publicOrigin;
     private readonly TimeProvider _clock;
@@ -92,6 +97,7 @@ public sealed class GitHubReleaseService
         GitHubAppClient github,
         GitHubConnectionService connection,
         ProjectAccess access,
+        GitHubAccessService githubAccess,
         IOrganizationContext orgContext,
         PublicOrigin publicOrigin,
         TimeProvider clock,
@@ -103,6 +109,7 @@ public sealed class GitHubReleaseService
         _github = github;
         _connection = connection;
         _access = access;
+        _githubAccess = githubAccess;
         _orgContext = orgContext;
         _publicOrigin = publicOrigin;
         _clock = clock;
@@ -187,6 +194,7 @@ public sealed class GitHubReleaseService
                 RepositoryProvider = (RepositoryProvider?)b.Pipeline.GithubReleaseRepository.Provider,
                 PipelineName = b.Pipeline.Name,
                 b.BcTarget,
+                b.StartedByUserId,
             })
             .FirstOrDefaultAsync(ct);
 
@@ -206,7 +214,7 @@ public sealed class GitHubReleaseService
             // one repository would race between finding the release and creating it.
             using (await PublishGate.EnterAsync(build.RepositoryId.Value, ct))
             {
-                result = await TryPublishAsync(projectBuildId, build.RepositoryId.Value, build.RepositoryProvider, build.RepositoryUrl, ct);
+                result = await TryPublishAsync(projectBuildId, build.RepositoryId.Value, build.RepositoryProvider, build.RepositoryUrl, build.StartedByUserId, ct);
             }
         }
         catch (GitHubApiException ex)
@@ -236,7 +244,8 @@ public sealed class GitHubReleaseService
     internal static readonly ALDevToolbox.Services.Workers.KeyedGate<int> PublishGate = new();
 
     private async Task<GitHubReleasePublishResult> TryPublishAsync(
-        int projectBuildId, int repositoryId, RepositoryProvider? provider, string repositoryUrl, CancellationToken ct)
+        int projectBuildId, int repositoryId, RepositoryProvider? provider, string repositoryUrl, int? startedByUserId,
+        CancellationToken ct)
     {
         if (provider != RepositoryProvider.GitHub || !TryParseRepository(repositoryUrl, out var owner, out var name))
         {
@@ -269,6 +278,27 @@ public sealed class GitHubReleaseService
                 ? new GitHubReleasePublishResult(false, null, null, null,
                     "No extension changed since the last build, so no GitHub release was made.")
                 : NotPublished("This build produced no app files to publish.");
+        }
+
+        // The installation token can write to every repository in the organisation, so
+        // the release goes up only when the person this build ran as can write to this one
+        // on GitHub themselves. Checked here rather than only when the pipeline was saved:
+        // anyone who manages the solution can start a build, and a target saved long ago
+        // says nothing about who is building today.
+        if (startedByUserId is not { } builderId)
+        {
+            return NotPublished("Nobody is recorded as starting this build, so it was not published to GitHub.");
+        }
+        var canPush = await _githubAccess.TryCanPushRepoAsync(builderId, $"{owner}/{name}", ct);
+        if (canPush is null)
+        {
+            return NotPublished(
+                $"GitHub couldn't be reached to check that the person who started this build can publish to {owner}/{name}. Build again to retry.");
+        }
+        if (canPush is false)
+        {
+            return NotPublished(
+                $"The person who started this build can't publish to {owner}/{name} on GitHub, so it was not published. They need a connected GitHub account (Account → Repository access) with write access to the repository.");
         }
 
         var tag = ReleaseTag(artifacts.Select(a => a.AppVersion).ToList(), projectBuildId);
@@ -523,8 +553,9 @@ public sealed class GitHubReleaseService
 
     /// <summary>
     /// The access gate both Release-sourced calls share: the caller must be able to
-    /// manage the solution, the pipeline must actually draw from Releases, and its
-    /// repository must be one inside the connected GitHub organisation.
+    /// manage the solution, the pipeline must actually draw from Releases, its
+    /// repository must be one inside the connected GitHub organisation, and the
+    /// caller must be able to see that repository on GitHub with their own account.
     /// </summary>
     private async Task<ReleaseSource> ResolveSourceAsync(int releasePipelineId, CancellationToken ct)
     {
@@ -572,6 +603,22 @@ public sealed class GitHubReleaseService
         {
             throw Validation("GithubReleaseRepositoryId",
                 $"{owner}/{name} is outside the connected GitHub organisation ({connection.OrgLogin}).");
+        }
+        // The installation token below can read every repository in the organisation,
+        // so whoever asks must be able to see this one on GitHub themselves; managing
+        // the solution that names it is not enough (.design/github-integration.md).
+        var canSee = _orgContext.CurrentUserId is { } userId
+            ? await _githubAccess.TryCanAccessRepoAsync(userId, $"{owner}/{name}", ct)
+            : false;
+        if (canSee is null)
+        {
+            throw Validation("GithubReleaseRepositoryId",
+                $"GitHub couldn't be reached to check your access to {owner}/{name}. Try again in a few minutes.");
+        }
+        if (canSee is false)
+        {
+            throw Validation("GithubReleaseRepositoryId",
+                $"Your GitHub account doesn't have access to {owner}/{name}. Connect your GitHub account under Account → Repository access, or ask an owner of the repository for access, then try again.");
         }
 
         return new ReleaseSource(rp.ProjectId, rp.GithubReleaseRepositoryId.Value, owner, name, installationId);

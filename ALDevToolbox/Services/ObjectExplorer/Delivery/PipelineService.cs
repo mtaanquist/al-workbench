@@ -3,6 +3,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
+using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -23,13 +24,20 @@ public sealed class PipelineService
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
+    private readonly GitHubAccessService _githubAccess;
     private readonly ILogger<PipelineService> _logger;
 
-    public PipelineService(AppDbContext db, IOrganizationContext orgContext, ProjectAccess access, ILogger<PipelineService> logger)
+    public PipelineService(
+        AppDbContext db,
+        IOrganizationContext orgContext,
+        ProjectAccess access,
+        GitHubAccessService githubAccess,
+        ILogger<PipelineService> logger)
     {
         _db = db;
         _orgContext = orgContext;
         _access = access;
+        _githubAccess = githubAccess;
         _logger = logger;
     }
 
@@ -285,6 +293,27 @@ public sealed class PipelineService
     }
 
     /// <summary>
+    /// Why the acting user may not make <paramref name="repoFullName"/> a pipeline's
+    /// release target, or null when they may: they have to be able to write to it on
+    /// GitHub themselves. Asked only when the target is new or changes, so the person
+    /// choosing it hears about a refusal at once; every publish asks the same of the
+    /// person the build ran as (<see cref="GitHubReleaseService.PublishBuildAsync"/>),
+    /// so editing a pipeline that already publishes needs no second gate here.
+    /// </summary>
+    private async Task<string?> PublishRefusalAsync(string repoFullName, CancellationToken ct)
+    {
+        var canPush = _orgContext.CurrentUserId is { } userId
+            ? await _githubAccess.TryCanPushRepoAsync(userId, repoFullName, ct)
+            : false;
+        return canPush switch
+        {
+            true => null,
+            null => $"GitHub couldn't be reached to check your access to {repoFullName}. Try again in a few minutes.",
+            false => $"Your GitHub account can't publish to {repoFullName}. Connect your GitHub account under Account → Repository access, or ask an owner of the repository for write access.",
+        };
+    }
+
+    /// <summary>
     /// Validates the input against its project (which must exist and be manageable)
     /// and the per-project name uniqueness rule. Returns the name (generated from the
     /// branch and selection, unless the person typed one) and the selection serialised
@@ -315,13 +344,25 @@ public sealed class PipelineService
         int? releaseRepositoryId = null;
         if (input.GithubReleaseRepositoryId is { } repoId && repoId != 0)
         {
-            var belongs = await _db.OeProjectRepositories.AsNoTracking()
-                .AnyAsync(r => r.Id == repoId
-                               && r.ProjectId == input.ProjectId
-                               && r.Provider == RepositoryProvider.GitHub, ct);
-            if (!belongs)
+            var repositoryUrl = await _db.OeProjectRepositories.AsNoTracking()
+                .Where(r => r.Id == repoId
+                            && r.ProjectId == input.ProjectId
+                            && r.Provider == RepositoryProvider.GitHub)
+                .Select(r => r.Url)
+                .FirstOrDefaultAsync(ct);
+            if (repositoryUrl is null)
             {
                 errors["GithubReleaseRepositoryId"] = "Choose one of this solution's GitHub repositories, or don't publish releases.";
+            }
+            else if (!GitHubReleaseService.TryParseRepository(repositoryUrl, out var repoOwner, out var repoName))
+            {
+                errors["GithubReleaseRepositoryId"] =
+                    "This repository's link isn't a github.com repository address, so releases can't be published there. Fix the link on the solution, or don't publish releases.";
+            }
+            else if (repoId != existing?.GithubReleaseRepositoryId
+                     && await PublishRefusalAsync($"{repoOwner}/{repoName}", ct) is { } refusal)
+            {
+                errors["GithubReleaseRepositoryId"] = refusal;
             }
             else
             {

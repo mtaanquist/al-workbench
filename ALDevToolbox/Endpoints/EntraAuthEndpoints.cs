@@ -300,6 +300,7 @@ internal static class EntraAuthEndpoints
             EntraCompletionOutcome.EmailTakenElsewhere => "entra-email-taken",
             EntraCompletionOutcome.EmailNotVerified => "entra-email-unverified",
             EntraCompletionOutcome.IdentityTakenElsewhere => "entra-identity-taken",
+            EntraCompletionOutcome.LinkFromAccountRequired => "entra-link-required",
             _ => "entra-failed",
         };
         ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}={code}");

@@ -235,6 +235,10 @@
                 @foreach (var u in _active)
                 {
                     var state = u.Status == UserStatus.Active ? "active" : "archived";
+                    // Only a SiteAdmin may change a SiteAdmin's email, name, status
+                    // or role; the service refuses it either way, so the row just
+                    // doesn't offer what would be refused.
+                    var locked = IsLocked(u);
                     @* ?user=12 is where the search box lands for a person: that
                        row is marked and focused (which scrolls it into view). *@
                     <tr class="@RowStateIcon.RowClass(state) @(_selected.Contains(u.Id) ? "is-selected" : "") @(u.Id == TargetUserId ? "is-target" : "")"
@@ -261,6 +265,10 @@
                                        is not the answer for this row. *@
                                     <span class="tag" title="Signs in with a Microsoft account">Microsoft</span>
                                 }
+                                @if (u.IsSiteAdmin)
+                                {
+                                    <span class="tag" title="Runs this site. Only another site administrator can change this account.">Site admin</span>
+                                }
                             </span>
                         </td>
                         <td>@u.DisplayName</td>
@@ -268,7 +276,7 @@
                             <SelectBox>
                                 <select class="select select--sm" aria-label="@($"Role for {u.DisplayName}")"
                                         value="@u.Role"
-                                        disabled="@_busy"
+                                        disabled="@(_busy || locked)"
                                         @onchange="(e) => ChangeRoleAsync(u, e)">
                                     @foreach (var role in Enum.GetValues<UserRole>())
                                     {
@@ -280,32 +288,35 @@
                         <td class="u-muted u-num"><Timestamp Value="@u.LastLoginAt" Placeholder="—" /></td>
                         <td class="data-table__actions">
                             <span class="u-row">
-                                @if (u.Status == UserStatus.Active)
+                                @if (!locked && u.Status == UserStatus.Active)
                                 {
                                     <form method="post" action="/admin/users/@u.Id/disable">
                                         <AntiforgeryToken />
                                         <button type="submit" class="btn btn--sm">Disable</button>
                                     </form>
                                 }
-                                else if (u.Status == UserStatus.Disabled)
+                                else if (!locked && u.Status == UserStatus.Disabled)
                                 {
                                     <form method="post" action="/admin/users/@u.Id/enable">
                                         <AntiforgeryToken />
                                         <button type="submit" class="btn btn--sm">Re-enable</button>
                                     </form>
                                 }
-                                <button type="button" class="btn btn--sm" @onclick="() => OpenNameRow(u)">
-                                    <Icon Name="pencil" Width="14" Height="14" />
-                                    <span>Edit name</span>
-                                </button>
-                                <button type="button" class="btn btn--sm" @onclick="() => ToggleEmailRow(u.Id)">
-                                    <Icon Name="mail" Width="14" Height="14" />
-                                    <span>Change email</span>
-                                </button>
+                                @if (!locked)
+                                {
+                                    <button type="button" class="btn btn--sm" @onclick="() => OpenNameRow(u)">
+                                        <Icon Name="pencil" Width="14" Height="14" />
+                                        <span>Edit name</span>
+                                    </button>
+                                    <button type="button" class="btn btn--sm" @onclick="() => ToggleEmailRow(u.Id)">
+                                        <Icon Name="mail" Width="14" Height="14" />
+                                        <span>Change email</span>
+                                    </button>
+                                }
                             </span>
                         </td>
                     </tr>
-                    @if (_nameRowOpen == u.Id)
+                    @if (_nameRowOpen == u.Id && !locked)
                     {
                         <tr class="is-subrow">
                             <td colspan="7">
@@ -323,7 +334,7 @@
                             </td>
                         </tr>
                     }
-                    @if (_emailRowOpen == u.Id)
+                    @if (_emailRowOpen == u.Id && !locked)
                     {
                         <tr class="is-subrow">
                             <td colspan="7">
@@ -383,6 +394,8 @@
     private int _nameRowOpen;
     private string _nameDraft = string.Empty;
     private string? _nameError;
+
+    private bool IsLocked(User user) => user.IsSiteAdmin && !Org.IsSiteAdmin;
 
     private void ToggleEmailRow(int id) => _emailRowOpen = _emailRowOpen == id ? 0 : id;
 

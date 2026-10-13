@@ -169,6 +169,41 @@ public sealed class ReleaseDependencyChainTests : IDisposable
             .Should().NotBeNull();
     }
 
+    [Fact]
+    public async Task A_parent_pointer_to_another_organisations_release_is_never_followed()
+    {
+        // Another tenant's release, imported under its own org.
+        int foreignId;
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        try
+        {
+            foreignId = await ImportAsync("Foreign Core", "first_party", parentId: null,
+                SyntheticApp.Build(ForeignAppId, "Foreign Core", "Foreign", "1.0.0.0",
+                    symbolReferenceJson: Symbols(("Codeunits", 71000, "Foreign Mgt", null))));
+        }
+        finally
+        {
+            _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+        }
+
+        var ownId = await ImportAsync("Vendor Core 29.0.0.1 (symbols)", "third_party", parentId: null, VendorApp());
+
+        // A parent pointer the import would refuse, written directly.
+        await using (var seed = _db.NewContext())
+        {
+            var own = await seed.OeReleases.SingleAsync(r => r.Id == ownId);
+            own.ParentReleaseId = foreignId;
+            await seed.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        (await ChainObjectResolution.ResolveObjectAsync(read, ownId, "Foreign Mgt", "codeunit", null, CancellationToken.None))
+            .Should().BeNull("the chain follows a parent only to a release in the seed's own organisation");
+        // The release's own objects still resolve.
+        (await ChainObjectResolution.ResolveObjectAsync(read, ownId, "Vendor Mgt", "codeunit", null, CancellationToken.None))
+            .Should().NotBeNull();
+    }
+
     // ── Harness ───────────────────────────────────────────────────────
 
     /// <summary>

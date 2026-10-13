@@ -532,16 +532,17 @@ public sealed class GitHubWorkspaceRepositoryService
         {
             if (solutionId is { } id)
             {
-                return (id, await _projects.AddRepositoryAsync(id, row, ct), false, null);
+                // The App just made this repository for this person from what they
+                // generated, so it goes on without asking whether they can see it.
+                return (id, await _projects.AddCreatedRepositoryAsync(id, row, ct), false, null);
             }
 
             var name = plan.WorkspaceName.Trim();
-            var created = await _projects.CreateProjectAsync(new ProjectInput(
+            var created = await _projects.CreateProjectForCreatedRepositoryAsync(new ProjectInput(
                 name,
                 string.IsNullOrWhiteSpace(plan.ShortName) ? null : plan.ShortName!.Trim(),
                 await DefaultCountryAsync(ct),
-                [row]),
-                access: null, ct);
+                [row]), ct);
             return (created, name, true, null);
         }
         catch (Exception ex)

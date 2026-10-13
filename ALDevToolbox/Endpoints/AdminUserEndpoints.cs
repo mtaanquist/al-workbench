@@ -108,7 +108,13 @@ internal static class AdminUserEndpoints
             int id, HttpContext ctx, UserAdministrationService users, IOrganizationContext org, IAntiforgery antiforgery, CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
-            await users.EnableUserAsync(id, org.CurrentOrganizationId!.Value, ct);
+            try { await users.EnableUserAsync(id, org.CurrentOrganizationId!.Value, ct); }
+            catch (PlanValidationException ex)
+            {
+                var first = ex.Errors.FirstOrDefault();
+                ctx.Response.Redirect($"{RouteConstants.AdminUsers}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Value)}");
+                return;
+            }
             ctx.Response.Redirect(RouteConstants.AdminUsers);
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.AdminRole));
 

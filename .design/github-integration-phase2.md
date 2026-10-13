@@ -361,6 +361,17 @@ Releases page, and who sometimes has to redeploy a version the workbench did not
   (delete then upload) and its body updated; the tag is never moved. Installation token
   throughout - a Release is an act of the organisation, and there may be no user (a
   webhook build).
+- **The person is checked where there is one.** The installation token can reach every
+  repository in the organisation, so it never stands in for the acting user's own rights.
+  Every publish needs the person the build ran as (its recorded starter; for a build on
+  push, the person those builds run as) to have write access to the repository on GitHub,
+  asked with their own token; a build with nobody recorded is not published. Choosing (or
+  changing) a build pipeline's release repository asks the same of the person saving it,
+  so they hear about it at once. Listing and staging a repository's Releases need the
+  acting person to be able to see it on GitHub on every call, in the UI and through
+  `list_github_releases` / `stage_github_release` alike. No connected GitHub account counts
+  as no access; a rate limit, server error or timeout is reported as "GitHub couldn't be
+  reached, try again", never as a refusal. A renamed repository's redirect is followed.
 - **Deliver from a Release is a release-pipeline source.** `oe_release_pipelines` gains
   `artifact_source` (`build` | `github_release`) and `github_release_repository_id`;
   `build_pipeline_id` becomes nullable and is required exactly when the source is
@@ -941,7 +952,13 @@ checkbox in the pipeline editor). Mads chose one build per push on 2026-10-06:
 - **Whose identity.** The build runs as **the person who last saved the pipeline with
   building on push on** (`build_on_push_by_user_id`), the way a deployment pipeline's
   "deploy without approval" follows whoever saved it, so one manager cannot repoint a
-  pipeline and have it clone with someone else's access. As with the nightly preview check,
+  pipeline and have it clone with someone else's access. Adding a repository to the
+  solution, of either provider, or changing one's address, likewise makes whoever saves it
+  the person building on push and the nightly preview check run as, on every pipeline of
+  the solution (`ProjectService.FollowRepositoryChangeInPipelinesAsync`); a build already
+  waiting as the previous person is then refused when its turn comes. When the new person
+  has nothing to clone one of the solution's providers with, the pipeline shows it as
+  paused straight away. As with the nightly preview check,
   the access check, the clone credential (their connected GitHub account, then their build
   token), the name on the build and its notifications are theirs. It is not the GitHub
   App's installation token, which would let builds keep running with nobody's permission
@@ -1179,6 +1196,19 @@ Business Central, the way Dependabot does it, instead of remembering to press th
   person that saving will use their GitHub account. Resume refuses a person with no
   GitHub account connected rather than clearing the warning, and the warning is worded
   to the person it is about ("you have not connected your GitHub account").
+- **A repository in the connected organisation must be one you can see.** A pull-request
+  build clones every GitHub repository on the solution with the installation's token,
+  which reaches every repository in the connected GitHub organisation. So whoever adds a
+  GitHub repository there to a solution - on create, in the editor, or through "Add
+  repository", and also by changing an address - must be able to see it with their own
+  connected GitHub account (`GitHubAccessService.CanAccessRepoAsync`). Without a
+  connected account, or when GitHub cannot be asked, the repository is refused under its
+  row with what to do next. Repositories outside the connected organisation, Azure DevOps
+  ones and the ones a solution already has are not asked about. "Create repository" puts
+  the repository it just made on the solution without asking: it holds only what that
+  person generated, and in an organisation whose members get no access by default they
+  may not see it yet. That path is internal to the service, so no page or agent can
+  name a URL to skip the check with.
 - **`DependencyDriftScheduler` runs once a night at 05:00 UTC**, after the environment
   refresh, for every organisation with an imported first-party release: it rescans (so a
   customer moved to a new version during the day is measured against it, and the

@@ -122,7 +122,7 @@ public sealed class TestDb : IDisposable
 
     /// <summary>Org-admin actions on user accounts, wired to this fixture's clock and token manager.</summary>
     public ALDevToolbox.Services.Account.UserAdministrationService NewUserAdministrationService(AppDbContext ctx, TimeProvider clock) =>
-        new(ctx, clock, OpenIddictTokens);
+        new(ctx, clock, OpenIddictTokens, OrgContext);
 
     /// <summary>
     /// Builds the process-wide template database: migrate once, seed once. Every
@@ -358,6 +358,29 @@ public sealed class TestDb : IDisposable
             NullLogger<ALDevToolbox.Services.GitHub.GitHubConnectionService>.Instance, TimeProvider.System);
 
     /// <summary>
+    /// Gives <paramref name="userId"/> a GitHub link with a non-expiring
+    /// <paramref name="accessToken"/>, written straight to the row so a test that
+    /// only needs "this person is linked" does not replay the OAuth handshake.
+    /// </summary>
+    public async Task LinkGitHubAccountAsync(int userId, string accessToken = "ghu_access")
+    {
+        await using var ctx = NewContext();
+        ctx.UserExternalLogins.Add(new UserExternalLogin
+        {
+            UserId = userId,
+            Provider = ALDevToolbox.Services.GitHub.GitHubAccessService.ProviderName,
+            Issuer = ALDevToolbox.Services.GitHub.GitHubAccessService.IssuerValue,
+            Subject = $"gh-{userId}",
+            DisplayIdentity = $"user-{userId}",
+            CreatedAt = DateTime.UtcNow,
+            AccessTokenEncrypted = DataProtectionProvider
+                .CreateProtector(ALDevToolbox.Services.GitHub.GitHubAccessService.AccessTokenProtectionPurpose)
+                .Protect(accessToken),
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    /// <summary>
     /// The per-user GitHub account link. Takes the API client so a test can
     /// decide what GitHub answers; <paramref name="clock"/> lets the token-expiry
     /// tests move time without waiting eight hours.
@@ -369,6 +392,14 @@ public sealed class TestDb : IDisposable
         new(ctx, client, OrgContext, NewOrganizationConfigService(ctx), DataProtectionProvider,
             clock ?? TimeProvider.System,
             NullLogger<ALDevToolbox.Services.GitHub.GitHubAccessService>.Instance);
+
+    /// <summary>
+    /// The per-user GitHub account link with no GitHub behind it: every call to
+    /// GitHub fails. For a service that only needs one injected, in an organisation
+    /// that has not connected a GitHub organisation.
+    /// </summary>
+    public ALDevToolbox.Services.GitHub.GitHubAccessService NewOfflineGitHubAccessService(AppDbContext ctx) =>
+        NewGitHubAccessService(ctx, NewGitHubAppClient(ctx, new UnreachableHandler()));
 
     /// <summary>
     /// A <see cref="ALDevToolbox.Services.GitHub.GitHubAppClient"/> whose HTTP
@@ -474,9 +505,9 @@ public sealed class TestDb : IDisposable
         ILogger<ALDevToolbox.Services.GitHub.GitHubWorkspaceRepositoryService>? logger = null) =>
         new(NewGenerationService(ctx), NewGitHubRepositoryService(ctx, client, access),
             NewGitHubConnectionService(ctx, access), access, client,
-            NewGitHubRepositoryStandardsService(ctx), NewProjectService(ctx),
+            NewGitHubRepositoryStandardsService(ctx), NewProjectService(ctx, access),
             new ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService(
-                ctx, OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext),
+                ctx, OrgContext, new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext), access,
                 NullLogger<ALDevToolbox.Services.ObjectExplorer.Delivery.PipelineService>.Instance),
             NewOrganizationConfigService(ctx), NewToolEnablement(ctx, toolAvailability), ctx, OrgContext,
             logger ?? NullLogger<ALDevToolbox.Services.GitHub.GitHubWorkspaceRepositoryService>.Instance);
@@ -512,22 +543,24 @@ public sealed class TestDb : IDisposable
         string? publicOrigin = null,
         TimeProvider? clock = null) =>
         new(ctx, client, NewGitHubConnectionService(ctx, access),
-            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext), OrgContext,
+            new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext), access, OrgContext,
             new ALDevToolbox.Endpoints.PublicOrigin(publicOrigin),
             clock ?? TimeProvider.System,
             NewToolEnablement(ctx),
             NullLogger<ALDevToolbox.Services.GitHub.GitHubReleaseService>.Instance);
     /// A <see cref="ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService"/> on this
-    /// fixture's context, with the discovery queue nobody drains here.
+    /// fixture's context, with the discovery queue nobody drains here. With no
+    /// <paramref name="gitHubAccess"/>, GitHub cannot be reached.
     /// </summary>
-    public ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService NewProjectService(AppDbContext ctx)
+    public ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService NewProjectService(
+        AppDbContext ctx, ALDevToolbox.Services.GitHub.GitHubAccessService? gitHubAccess = null)
     {
         var projectAccess = new ALDevToolbox.Services.ObjectExplorer.ProjectAccess(ctx, OrgContext);
         var extensionDiscovery = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService(
             ctx, OrgContext, projectAccess, new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         return new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery,
+            ctx, OrgContext, projectAccess, extensionDiscovery, gitHubAccess ?? NewOfflineGitHubAccessService(ctx),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
     }
 
@@ -547,7 +580,7 @@ public sealed class TestDb : IDisposable
             ctx, OrgContext, projectAccess, new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         var projects = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery,
+            ctx, OrgContext, projectAccess, extensionDiscovery, access,
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
         return new ALDevToolbox.Services.GitHub.RepositoryDiscoveryService(
             ctx, client, access, NewGitHubConnectionService(ctx, access), NewOrganizationConfigService(ctx),

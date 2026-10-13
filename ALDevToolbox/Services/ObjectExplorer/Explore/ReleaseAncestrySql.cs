@@ -33,8 +33,10 @@ namespace ALDevToolbox.Services.ObjectExplorer.Explore;
 /// <para><b>Tenant fence.</b> The dependency seed joins both ends of each link
 /// to <c>oe_releases</c> and keeps only a dependency in the seed release's own
 /// organisation, so a link row naming another tenant's release is never
-/// followed even if one were written. The parent walk relies on the argument
-/// in <see cref="ChainObjectResolution"/>.</para>
+/// followed even if one were written. The parent step carries the same
+/// organisation predicate, so a parent pointer naming another tenant's release
+/// ends the walk there; the import refuses such a parent in the first place
+/// (see <see cref="ChainObjectResolution"/>).</para>
 /// </summary>
 internal static class ReleaseAncestrySql
 {
@@ -54,6 +56,7 @@ internal static class ReleaseAncestrySql
             SELECT r.id, r.parent_release_id, c.depth + 2
             FROM oe_releases r
             JOIN chain_walk c ON r.id = c.parent_release_id
+            WHERE r.organization_id = (SELECT organization_id FROM oe_releases WHERE id = {0})
         ),
         chain AS (
             SELECT id, MIN(depth) AS depth

@@ -60,6 +60,14 @@ public enum EntraCompletionOutcome
     /// sign-in is refused rather than 500ing (issue #754).
     /// </summary>
     IdentityTakenElsewhere,
+    /// <summary>
+    /// The email matches a SiteAdmin account that has no Microsoft identity
+    /// linked yet. The tenant allow-list and the verified domains are in an
+    /// org Admin's hands, so they are not enough to bind a Microsoft identity
+    /// to an account that reaches every organisation; the SiteAdmin connects it
+    /// themselves from their Account page (<see cref="EntraSignInService.LinkAsync"/>).
+    /// </summary>
+    LinkFromAccountRequired,
     /// <summary>Matched an account that is still pending approval.</summary>
     AccountPending,
     /// <summary>Matched an account that has been disabled.</summary>
@@ -361,6 +369,14 @@ public sealed class EntraSignInService
                     tid, domain ?? "(none)", resolved.OrganizationId);
                 return await RefuseAsync(EntraCompletionOutcome.EmailNotVerified, email, ip, now,
                     $"tenant {tid} did not prove ownership of domain {domain ?? "(none)"}", ct);
+            }
+            if (user.IsSiteAdmin)
+            {
+                // Everything that admits this match - Microsoft sign-in, the
+                // tenant allow-list, the verified domains - is set by an org
+                // Admin, not by the SiteAdmin whose account it would open.
+                return await RefuseAsync(EntraCompletionOutcome.LinkFromAccountRequired, email, ip, now,
+                    $"email matches a SiteAdmin account with no Microsoft link; tenant {tid}", ct);
             }
             // Saved on its own, ahead of FinishStatusCheckedAsync's bookkeeping,
             // so a lost race is settled while the link insert is the only thing

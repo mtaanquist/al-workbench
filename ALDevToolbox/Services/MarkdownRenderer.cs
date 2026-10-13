@@ -1,4 +1,5 @@
 using Markdig;
+using Markdig.Extensions.GenericAttributes;
 using Markdig.Syntax;
 using Markdig.Syntax.Inlines;
 using Microsoft.AspNetCore.Components;
@@ -13,11 +14,15 @@ namespace ALDevToolbox.Services;
 /// request.
 ///
 /// <para>
-/// Two sanitisation layers, both required: <c>DisableHtml()</c> drops inline /
-/// block HTML so a pasted <c>&lt;script&gt;</c> can't reach the page, and
-/// <see cref="SanitizeLinks"/> rewrites every link / image destination because
-/// <c>DisableHtml()</c> does <b>not</b> touch URI schemes — without it
-/// <c>[x](javascript:…)</c> renders a live, script-executing anchor. Only
+/// Three sanitisation layers, all required: <c>DisableHtml()</c> drops inline /
+/// block HTML so a pasted <c>&lt;script&gt;</c> can't reach the page;
+/// <see cref="SanitizeLinks"/> rewrites every link / image destination and
+/// every <c>&lt;scheme:...&gt;</c> autolink because <c>DisableHtml()</c> does
+/// <b>not</b> touch URI schemes — without it <c>[x](javascript:...)</c> and
+/// <c>&lt;javascript:...&gt;</c> render live, script-executing anchors; and the
+/// generic-attributes extension that <c>UseAdvancedExtensions()</c> brings in is
+/// removed, because its <c>{key=value}</c> syntax writes arbitrary attributes
+/// (event handlers, a second <c>href</c>) straight onto the element. Only
 /// http(s), mailto, tel, and relative / fragment URLs survive.
 /// </para>
 /// </summary>
@@ -32,10 +37,13 @@ public sealed class MarkdownRenderer
     {
         // UseAdvancedExtensions enables auto-links, fenced code, tables, task
         // lists, footnotes — the common GFM-ish set authors expect.
-        _pipeline = new MarkdownPipelineBuilder()
+        // GenericAttributes is dropped: "{onclick=...}" after a link or heading
+        // would otherwise land on the element verbatim, past every other check.
+        var builder = new MarkdownPipelineBuilder()
             .UseAdvancedExtensions()
-            .DisableHtml()
-            .Build();
+            .DisableHtml();
+        builder.Extensions.TryRemove<GenericAttributesExtension>();
+        _pipeline = builder.Build();
     }
 
     /// <summary>
@@ -62,17 +70,33 @@ public sealed class MarkdownRenderer
     /// <summary>
     /// Neutralises every <see cref="LinkInline"/> (covers both <c>&lt;a&gt;</c>
     /// and <c>&lt;img&gt;</c>) whose destination carries a disallowed URI
-    /// scheme, replacing it with <c>about:blank</c>. Relative URLs, fragments,
-    /// and the allow-listed schemes pass through unchanged.
+    /// scheme, replacing it with <c>about:blank</c>. A CommonMark autolink
+    /// (<c>&lt;scheme:...&gt;</c>) is a separate <see cref="AutolinkInline"/>
+    /// node the link check never sees, so an unsafe one is replaced by its
+    /// text as a plain literal. Email autolinks always render as
+    /// <c>mailto:</c> and are left alone. Relative URLs, fragments, and the
+    /// allow-listed schemes pass through unchanged.
     /// </summary>
     private static void SanitizeLinks(MarkdownObject node)
     {
+        var unsafeAutolinks = new List<AutolinkInline>();
         foreach (var descendant in node.Descendants())
         {
-            if (descendant is LinkInline link && !IsSafeUrl(link.Url))
+            switch (descendant)
             {
-                link.Url = "about:blank";
+                case LinkInline link when !IsSafeUrl(link.Url):
+                    link.Url = "about:blank";
+                    break;
+                case AutolinkInline autolink when !autolink.IsEmail && !IsSafeUrl(autolink.Url):
+                    unsafeAutolinks.Add(autolink);
+                    break;
             }
+        }
+        // Replaced after the walk: swapping nodes mid-enumeration would
+        // invalidate the descendant iterator.
+        foreach (var autolink in unsafeAutolinks)
+        {
+            autolink.ReplaceBy(new LiteralInline(autolink.Url));
         }
     }
 

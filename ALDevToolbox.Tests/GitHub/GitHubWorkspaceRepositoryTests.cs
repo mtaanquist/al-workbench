@@ -722,6 +722,29 @@ public sealed class GitHubWorkspaceRepositoryTests : IDisposable
         repo.DisplayName.Should().Be(RepoName);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_new_repository_goes_on_the_solution_even_when_its_creator_cannot_see_it_yet(bool chosenSolution)
+    {
+        // An organisation whose members get no access by default: the App made the
+        // repository, and the person who asked for it cannot see it on GitHub yet.
+        await ReadyAsync();
+        int? solutionId = chosenSolution ? await SeedSolutionAsync("CRONUS Customer", ownedByCaller: true) : null;
+        var api = WritableApi().On(HttpMethod.Get, $"/repos/{Repo}", HttpStatusCode.NotFound);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var created = await service.CreateAsync(
+            WorkspacePlan(), RepoName, isPrivate: true, solutionId: solutionId);
+
+        created.SolutionId.Should().NotBeNull();
+        created.SolutionWarning.Should().BeNull();
+        await using var read = _db.NewContext();
+        (await read.OeProjectRepositories.AsNoTracking().SingleAsync(r => r.ProjectId == created.SolutionId))
+            .Url.Should().Be($"https://github.com/{Repo}.git");
+    }
+
     [Fact]
     public async Task With_no_solution_chosen_the_customer_becomes_one()
     {
