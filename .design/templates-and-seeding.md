@@ -43,6 +43,7 @@ TemplateImportService.ImportTemplateAsync(systemTemplateId):
       - workspace_extension_dependencies per extension
       - default modules + their dependencies
       - default application version
+      - included organisation files (the join plus each file's path)
     refuse if the local org already has a template with the same key
     for each referenced Module:
         reuse the local module that shares the key, otherwise clone it
@@ -51,8 +52,14 @@ TemplateImportService.ImportTemplateAsync(systemTemplateId):
         local org
     for the default application version:
         reuse the local row that shares the key, otherwise clone it
+    for each included organisation file:
+        point the clone at the acting org's own file with the same path
+        (every org carries its own copy, possibly edited); skip a path the
+        acting org doesn't have, and put the acting org's app.json first
+        when the source didn't include it, as a new template does
     insert a fresh runtime_template row (organization_id = acting org)
-        plus the cloned WorkspaceExtension graph
+        plus the cloned WorkspaceExtension graph, root folders, the
+        .code-workspace overlay and the "Latest" default-version flag
     return the new template
 ```
 

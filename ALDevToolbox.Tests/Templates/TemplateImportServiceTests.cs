@@ -7,6 +7,8 @@ using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Templates;
+using ALDevToolbox.Services.Organizations;
+using System.IO.Compression;
 
 namespace ALDevToolbox.Tests.Templates;
 
@@ -201,7 +203,160 @@ public sealed class TemplateImportServiceTests : IDisposable
             .Which.AlreadyImported.Should().BeTrue();
     }
 
+    [Fact]
+    public async Task Import_then_generate_ships_the_included_files_workspace_overlay_and_latest_default()
+    {
+        // Regression for #1210: the clone dropped the included-file join, the
+        // .code-workspace overlay and the "Latest" flag, so a workspace
+        // generated from an imported template had no app.json at all.
+        await SeedSystemCatalogueAsync();
+        await SeedPlatformFilesAsync();
+        await using (var seed = _db.NewContext())
+        {
+            var systemFiles = await seed.OrganizationFiles.IgnoreQueryFilters()
+                .Where(f => f.OrganizationId == TestDb.DefaultOrgId)
+                .ToDictionaryAsync(f => f.Path, f => f.Id);
+            var template = await seed.RuntimeTemplates.IgnoreQueryFilters()
+                .SingleAsync(t => t.OrganizationId == TestDb.DefaultOrgId && t.Key == "runtime-system");
+            template.CodeWorkspaceJson = """{ "settings": { "imported.overlay": true } }""";
+            template.DefaultApplicationVersionLatest = true;
+            string[] paths =
+            [
+                PlatformOrganizationFiles.AppJsonPath,
+                PlatformOrganizationFiles.GitignorePath,
+                PlatformOrganizationFiles.ReadmePath,
+                PlatformOrganizationFiles.RulesetPath,
+            ];
+            for (var i = 0; i < paths.Length; i++)
+            {
+                seed.Add(new RuntimeTemplateIncludedFile
+                {
+                    OrganizationId = TestDb.DefaultOrgId,
+                    RuntimeTemplateId = template.Id,
+                    OrganizationFileId = systemFiles[paths[i]],
+                    Ordering = i,
+                });
+            }
+
+            // The importing org has edited its own .gitignore; the clone must
+            // point at that row, not at the system org's.
+            var otherGitignore = await seed.OrganizationFiles.IgnoreQueryFilters()
+                .SingleAsync(f => f.OrganizationId == TestDb.OtherOrgId && f.Path == PlatformOrganizationFiles.GitignorePath);
+            otherGitignore.Content = "# CRONUS gitignore";
+            await seed.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+
+        int systemTemplateId = await ResolveSystemTemplateIdAsync("runtime-system");
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).ImportTemplateAsync(systemTemplateId);
+        }
+
+        await using (var verify = _db.NewContext())
+        {
+            var imported = await verify.RuntimeTemplates
+                .Where(t => t.Key == "runtime-system")
+                .Include(t => t.IncludedFiles.OrderBy(j => j.Ordering)).ThenInclude(j => j.OrganizationFile)
+                .SingleAsync();
+            imported.OrganizationId.Should().Be(TestDb.OtherOrgId);
+            imported.DefaultApplicationVersionLatest.Should().BeTrue();
+            imported.CodeWorkspaceJson.Should().Contain("imported.overlay");
+            imported.IncludedFiles.Select(j => j.OrganizationFile!.Path).Should().Equal(
+                PlatformOrganizationFiles.AppJsonPath,
+                PlatformOrganizationFiles.GitignorePath,
+                PlatformOrganizationFiles.ReadmePath,
+                PlatformOrganizationFiles.RulesetPath);
+            imported.IncludedFiles.Should().OnlyContain(j =>
+                j.OrganizationId == TestDb.OtherOrgId && j.OrganizationFile!.OrganizationId == TestDb.OtherOrgId);
+        }
+
+        await using var genCtx = _db.NewContext();
+        var archive = await _db.NewGenerationService(genCtx).GenerateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(templateKey: "runtime-system", workspaceName: "Cronus Customer", extensionPrefix: "CRO"));
+        using var zip = new ZipArchive(archive.Stream, ZipArchiveMode.Read);
+
+        zip.GetEntry("CronusCustomer/Core/app.json").Should().NotBeNull("each extension needs an app.json for AL to see a project");
+        zip.GetEntry("CronusCustomer/README.md").Should().NotBeNull();
+        zip.GetEntry($"CronusCustomer/{PlatformOrganizationFiles.RulesetPath}").Should().NotBeNull();
+        var gitignore = zip.GetEntry("CronusCustomer/.gitignore");
+        gitignore.Should().NotBeNull();
+        using (var reader = new StreamReader(gitignore!.Open()))
+        {
+            (await reader.ReadToEndAsync()).Should().Contain("# CRONUS gitignore");
+        }
+        var codeWorkspace = zip.GetEntry("CronusCustomer/CronusCustomer.code-workspace");
+        codeWorkspace.Should().NotBeNull();
+        using (var reader = new StreamReader(codeWorkspace!.Open()))
+        {
+            (await reader.ReadToEndAsync()).Should().Contain("imported.overlay");
+        }
+    }
+
+    [Fact]
+    public async Task Import_puts_the_orgs_app_json_first_and_skips_files_the_org_lacks()
+    {
+        await SeedSystemCatalogueAsync();
+        await SeedPlatformFilesAsync();
+        await using (var seed = _db.NewContext())
+        {
+            var template = await seed.RuntimeTemplates.IgnoreQueryFilters()
+                .SingleAsync(t => t.OrganizationId == TestDb.DefaultOrgId && t.Key == "runtime-system");
+            var gitignoreId = await seed.OrganizationFiles.IgnoreQueryFilters()
+                .Where(f => f.OrganizationId == TestDb.DefaultOrgId && f.Path == PlatformOrganizationFiles.GitignorePath)
+                .Select(f => f.Id).SingleAsync();
+            var systemOnly = new OrganizationFile
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Path = "docs/system-only.md",
+                Content = "system only",
+                UpdatedAt = DateTime.UtcNow,
+            };
+            seed.OrganizationFiles.Add(systemOnly);
+            await seed.SaveChangesAsync();
+            seed.Add(new RuntimeTemplateIncludedFile
+            {
+                OrganizationId = TestDb.DefaultOrgId, RuntimeTemplateId = template.Id,
+                OrganizationFileId = gitignoreId, Ordering = 0,
+            });
+            seed.Add(new RuntimeTemplateIncludedFile
+            {
+                OrganizationId = TestDb.DefaultOrgId, RuntimeTemplateId = template.Id,
+                OrganizationFileId = systemOnly.Id, Ordering = 1,
+            });
+            await seed.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+
+        int systemTemplateId = await ResolveSystemTemplateIdAsync("runtime-system");
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).ImportTemplateAsync(systemTemplateId);
+        }
+
+        await using var verify = _db.NewContext();
+        var imported = await verify.RuntimeTemplates
+            .Where(t => t.Key == "runtime-system")
+            .Include(t => t.IncludedFiles.OrderBy(j => j.Ordering)).ThenInclude(j => j.OrganizationFile)
+            .SingleAsync();
+        imported.IncludedFiles.Select(j => j.OrganizationFile!.Path).Should().Equal(
+            PlatformOrganizationFiles.AppJsonPath,
+            PlatformOrganizationFiles.GitignorePath);
+    }
+
     // ===== Fixture =====
+
+    /// <summary>
+    /// Both orgs carry the platform files, as a real org does from signup
+    /// (the importing org) and from startup (the system org).
+    /// </summary>
+    private async Task SeedPlatformFilesAsync()
+    {
+        await using var ctx = _db.NewContext();
+        await PlatformOrganizationFileSeeder.EnsureForOrganizationAsync(ctx, TestDb.DefaultOrgId, DateTime.UtcNow);
+        await PlatformOrganizationFileSeeder.EnsureForOrganizationAsync(ctx, TestDb.OtherOrgId, DateTime.UtcNow);
+        await ctx.SaveChangesAsync();
+    }
 
     private async Task SeedSystemCatalogueAsync()
     {
