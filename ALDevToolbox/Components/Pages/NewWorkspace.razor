@@ -1071,7 +1071,7 @@
             CoreIdRangeTo: _coreIdRangeTo,
             IncludeExamples: _includeExamples,
             SelectedExtensionPaths: _selectedExtensionPaths.ToList(),
-            SelectedModuleKeys: _selectedModuleKeys.ToList(),
+            SelectedModuleKeys: SelectedModulesInOrder().Select(m => m.Key).ToList(),
             TenantId: _tenantId.Trim());
 
         SetErrors(await Gen.ValidateWorkspaceAsync(plan));
@@ -1393,21 +1393,17 @@
             : "Workspace";
 
     /// <summary>
-    /// The selected modules in the order the generator will emit them - which is
-    /// the order the user ticked them, not catalogue order. Shared by the
-    /// preview tree and its id-range allocation so the two cannot disagree.
+    /// The selected modules in the order the generator will emit them: the
+    /// order they are listed on the page, not the order they were ticked.
+    /// That is the order the checkboxes post in when Generate submits the form
+    /// natively, so the preview, the "Create repository" plan and the ZIP all
+    /// hand out the same ID ranges (#1238). A HashSet's enumeration order is
+    /// not something to lean on here.
     /// </summary>
-    private List<Module> SelectedModulesInOrder()
-    {
-        var ordered = new List<Module>();
-        if (_modules is null) return ordered;
-        foreach (var key in _selectedModuleKeys)
-        {
-            var module = _modules.FirstOrDefault(m => m.Key == key);
-            if (module is not null) ordered.Add(module);
-        }
-        return ordered;
-    }
+    private List<Module> SelectedModulesInOrder() =>
+        _modules is null
+            ? new List<Module>()
+            : _modules.Where(m => _selectedModuleKeys.Contains(m.Key)).ToList();
 
     private PreviewNode BuildPreview()
     {
