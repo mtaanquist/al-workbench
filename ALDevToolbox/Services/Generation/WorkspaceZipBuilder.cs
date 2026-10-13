@@ -747,7 +747,7 @@ public sealed class WorkspaceZipBuilder
             ct.ThrowIfCancellationRequested();
             if (file.Scope != Domain.ValueObjects.OrganizationFileScope.WorkspaceRoot) continue;
             var content = file.MustacheEnabled
-                ? _mustache.Render(file.Content, ctx with { FolderPath = file.Path })
+                ? _mustache.Render(file.Content, ctx with { FolderPath = file.Path }, jsonStrings: IsJsonFile(file.Path))
                 : file.Content;
             WriteString(archive, $"{rootFolder}/{file.Path}", content);
             written++;
@@ -791,7 +791,7 @@ public sealed class WorkspaceZipBuilder
             ct.ThrowIfCancellationRequested();
             if (file.Scope != Domain.ValueObjects.OrganizationFileScope.EveryExtension) continue;
             var content = file.MustacheEnabled
-                ? _mustache.Render(file.Content, ctx with { FolderPath = file.Path })
+                ? _mustache.Render(file.Content, ctx with { FolderPath = file.Path }, jsonStrings: IsJsonFile(file.Path))
                 : file.Content;
             // Re-serialise app.json into Microsoft's 2-space, pretty-printed-array
             // style so the inline {{dependencies_array}}/{{id_ranges_array}}
@@ -952,7 +952,7 @@ public sealed class WorkspaceZipBuilder
     /// </summary>
     private JsonObject ParseSubstitutedJsonObject(string source, MustacheContext ctx, string fieldKey)
     {
-        var substituted = _mustache.Render(source, ctx);
+        var substituted = _mustache.Render(source, ctx, jsonStrings: true);
         JsonNode? parsed;
         try
         {
@@ -1048,6 +1048,14 @@ public sealed class WorkspaceZipBuilder
     /// generation still emits a file — the AL compiler then surfaces the JSON
     /// error to the user — rather than aborting the whole ZIP.
     /// </summary>
+    /// <summary>
+    /// Whether an organisation file is JSON, so its placeholders render
+    /// JSON-escaped: a brief with a quote in it must not end the string it
+    /// sits in (#1241).
+    /// </summary>
+    private static bool IsJsonFile(string path) =>
+        path.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+
     private static string FormatAppJson(string substituted)
     {
         try

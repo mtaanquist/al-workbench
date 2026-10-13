@@ -423,6 +423,26 @@ public sealed class WorkspaceGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task App_json_stays_valid_when_the_brief_and_description_hold_quotes_and_backslashes()
+    {
+        // #1241: the canonical body is "brief": "{{brief}}", so an unescaped
+        // quote or backslash ended the string and the file was no longer JSON.
+        var template = TemplateBuilder.Default();
+        await SeedTemplateAsync(template);
+        const string brief = "Sync orders with \"Shopify\"";
+        const string description = @"Exports land in C:\exports";
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan(brief: brief) with { Description = description });
+        var content = ReadEntry(zip.GetEntry("AcmeCustomer/Core/app.json")!);
+
+        using var appJson = JsonDocument.Parse(content);
+        appJson.RootElement.GetProperty("brief").GetString().Should().Be(brief);
+        appJson.RootElement.GetProperty("description").GetString().Should().Be(description);
+        appJson.RootElement.GetProperty("dependencies").ValueKind.Should().Be(JsonValueKind.Array,
+            "the raw JSON fragments are still spliced in unescaped");
+    }
+
+    [Fact]
     public async Task Per_extension_id_range_override_takes_precedence_over_template_defaults()
     {
         var template = TemplateBuilder.Default();

@@ -261,6 +261,8 @@ Legacy camelCase names `{{workspaceName}}`, `{{shortName}}`, `{{moduleName}}` st
 
 If a variable in the content isn't recognised, leave it as-is (don't crash). Log a warning.
 
+In an organisation file whose path ends in `.json` (`app.json` above all), and in the `.code-workspace` layers, every value is JSON-escaped as it is substituted, because the placeholders there sit inside string literals: a brief of `Sync orders with "Shopify"` or a description naming `C:\exports` must stay text rather than end the string. `{{dependencies_array}}` and `{{id_ranges_array}}` are the exception — they are JSON fragments meant to land outside a string, and are spliced in as they are.
+
 The mustache implementation is intentionally naive — regex replacement of `\{\{(\w+)\}\}` is enough.
 
 ## ID range allocation
