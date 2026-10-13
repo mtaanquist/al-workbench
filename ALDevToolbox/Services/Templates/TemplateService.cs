@@ -69,11 +69,10 @@ public class TemplateService
             .Include(t => t.WorkspaceExtensions.OrderBy(e => e.Ordering))
             .Include(t => t.DefaultModules.OrderBy(d => d.Ordering))
                 .ThenInclude(d => d.Module!)
-            .Include(t => t.IncludedFiles.OrderBy(j => j.Ordering))
-                .ThenInclude(j => j.OrganizationFile!)
             .Include(t => t.RootFolders.OrderBy(f => f.Ordering))
             .Include(t => t.DefaultApplicationVersion)
             .ToListAsync(ct);
+        await AttachIncludedFileHeadersAsync(rows, ct);
 
         return rows
             .OrderBy(t => RuntimeSortKey(t.Runtime))
@@ -109,8 +108,9 @@ public class TemplateService
             .Where(t => t.IsDefault && t.DeletedAt == null && !t.Deprecated)
             .FirstOrDefaultAsync(ct);
 
-    public Task<RuntimeTemplate?> GetByKeyAsync(string key, CancellationToken ct = default) =>
-        _db.RuntimeTemplates
+    public async Task<RuntimeTemplate?> GetByKeyAsync(string key, CancellationToken ct = default)
+    {
+        var template = await _db.RuntimeTemplates
             .AsNoTracking()
             .Where(t => t.Key == key)
             .Include(t => t.WorkspaceExtensions.OrderBy(e => e.Ordering))
@@ -122,11 +122,52 @@ public class TemplateService
             // folder is what tells the preview to show real content there
             // rather than a placeholder. IncludedFiles was missing here, so
             // that preview was also silently dropping app.json.
-            .Include(t => t.IncludedFiles.OrderBy(j => j.Ordering))
-                .ThenInclude(j => j.OrganizationFile!)
             .Include(t => t.RootFolders.OrderBy(f => f.Ordering))
             .Include(t => t.DefaultApplicationVersion)
             .FirstOrDefaultAsync(ct);
+        if (template is not null) await AttachIncludedFileHeadersAsync([template], ct);
+        return template;
+    }
+
+    /// <summary>
+    /// Fills <see cref="RuntimeTemplate.IncludedFiles"/> with each joined
+    /// organisation file's path and scope, leaving its body in the database.
+    /// The read side only lists or previews these files; an Include would pull
+    /// every ruleset and README body along with them. The generator reads the
+    /// bodies through the organisation configuration instead.
+    /// </summary>
+    private async Task AttachIncludedFileHeadersAsync(IReadOnlyList<RuntimeTemplate> templates, CancellationToken ct)
+    {
+        if (templates.Count == 0) return;
+        var ids = templates.Select(t => t.Id).ToList();
+        var joins = await _db.RuntimeTemplateIncludedFiles
+            .AsNoTracking()
+            .Where(j => ids.Contains(j.RuntimeTemplateId))
+            .OrderBy(j => j.Ordering)
+            .Select(j => new RuntimeTemplateIncludedFile
+            {
+                Id = j.Id,
+                OrganizationId = j.OrganizationId,
+                RuntimeTemplateId = j.RuntimeTemplateId,
+                OrganizationFileId = j.OrganizationFileId,
+                Ordering = j.Ordering,
+                OrganizationFile = new OrganizationFile
+                {
+                    Id = j.OrganizationFile!.Id,
+                    OrganizationId = j.OrganizationFile.OrganizationId,
+                    Path = j.OrganizationFile.Path,
+                    Scope = j.OrganizationFile.Scope,
+                    Ordering = j.OrganizationFile.Ordering,
+                },
+            })
+            .ToListAsync(ct);
+
+        var byTemplate = joins.ToLookup(j => j.RuntimeTemplateId);
+        foreach (var template in templates)
+        {
+            template.IncludedFiles = byTemplate[template.Id].ToList();
+        }
+    }
 
     /// <summary>
     /// The keys of the modules a template pre-selects, in its order, leaving

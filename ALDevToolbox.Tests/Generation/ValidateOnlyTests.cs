@@ -195,6 +195,57 @@ public sealed class ValidateOnlyTests : IDisposable
         await AssertGenerateRefusesAsync(plan, expectedKeyFragment: "IdRange");
     }
 
+    /// <summary>
+    /// A ticked optional extension that depends on an unticked one used to
+    /// pass inline validation and only fail at ZIP emit, landing the user on
+    /// the error page (#1266, L31). The page now hears about it first, keyed on
+    /// the optional-extension checkboxes.
+    /// </summary>
+    [Fact]
+    public async Task Depending_on_an_unticked_optional_extension_is_reported_and_refused()
+    {
+        await SeedTemplateWithOptionalPairAsync();
+        var plan = PlanBuilder.WorkspacePlan() with { SelectedExtensionPaths = ["Test"] };
+
+        var errors = await NewService().ValidateWorkspaceAsync(plan);
+
+        errors.Should().ContainKey("SelectedExtensionPaths");
+        errors["SelectedExtensionPaths"].Should().Contain("Test needs Fixtures");
+        await AssertGenerateRefusesAsync(plan, "SelectedExtensionPaths");
+    }
+
+    [Fact]
+    public async Task Ticking_the_extension_it_depends_on_as_well_is_accepted()
+    {
+        await SeedTemplateWithOptionalPairAsync();
+        var plan = PlanBuilder.WorkspacePlan() with { SelectedExtensionPaths = ["Test", "Fixtures"] };
+
+        (await NewService().ValidateWorkspaceAsync(plan)).Should().BeEmpty();
+        var archive = await NewService().GenerateWorkspaceAsync(plan);
+        await using var stream = archive.Stream;
+        stream.Length.Should().BeGreaterThan(0);
+    }
+
+    /// <summary>
+    /// The extension flow checks the template exists with a probe rather than
+    /// loading it whole (L33); a deleted template still has to be refused.
+    /// </summary>
+    [Fact]
+    public async Task An_extension_plan_on_a_deleted_template_is_reported()
+    {
+        var template = TemplateBuilder.Default();
+        template.DeletedAt = DateTime.UtcNow;
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.RuntimeTemplates.Add(template);
+            await ctx.SaveChangesAsync();
+        }
+
+        var errors = await NewService().ValidateExtensionAsync(PlanBuilder.ExtensionPlan());
+
+        errors.Should().ContainKey("TemplateKey");
+    }
+
     // ===== standalone extension =====
 
     [Fact]
@@ -300,6 +351,38 @@ public sealed class ValidateOnlyTests : IDisposable
             mustache,
             new ALDevToolbox.Services.Generation.WorkspaceZipBuilder(mustache, new WorkspaceConfigService(ctx)),
             NullLogger<GenerationService>.Instance);
+    }
+
+    /// <summary>The default template plus two optional extensions, Test depending on Fixtures.</summary>
+    private async Task SeedTemplateWithOptionalPairAsync()
+    {
+        var template = TemplateBuilder.Default();
+        var test = new WorkspaceExtension
+        {
+            OrganizationId = template.OrganizationId,
+            Path = "Test",
+            NameTemplate = "Test",
+            Required = false,
+            Ordering = 1,
+        };
+        test.Dependencies.Add(new WorkspaceExtensionDependency
+        {
+            OrganizationId = template.OrganizationId,
+            RefExtensionPath = "Fixtures",
+            Ordering = 0,
+        });
+        template.WorkspaceExtensions.Add(test);
+        template.WorkspaceExtensions.Add(new WorkspaceExtension
+        {
+            OrganizationId = template.OrganizationId,
+            Path = "Fixtures",
+            NameTemplate = "Fixtures",
+            Required = false,
+            Ordering = 2,
+        });
+        await using var ctx = _db.NewContext();
+        ctx.RuntimeTemplates.Add(template);
+        await ctx.SaveChangesAsync();
     }
 
     private async Task SeedTemplateAsync()

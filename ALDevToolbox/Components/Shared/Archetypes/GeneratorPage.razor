@@ -68,7 +68,8 @@
                         </div>
                     }
 
-                    <button type="submit" class="btn btn--primary btn--lg gen__go" data-loading-button>
+                    <button type="submit" class="btn btn--primary btn--lg gen__go" data-loading-button
+                            disabled="@PrimaryDisabled">
                         <span class="btn__spinner" aria-hidden="true"></span>
                         <span class="btn__label">@PrimaryLabel</span>
                         <span class="btn__label-busy">@PrimaryBusyText</span>
@@ -133,6 +134,14 @@
     /// <summary>The primary button's label, icon included.</summary>
     [Parameter, EditorRequired] public RenderFragment? PrimaryLabel { get; set; }
     [Parameter] public string PrimaryBusyText { get; set; } = "Generating...";
+
+    /// <summary>
+    /// Holds the primary button while something else on the page is using the
+    /// circuit's data context - another delivery action, say. Not for the
+    /// button's own submission: generate.js disables it for that, and a Blazor
+    /// render clearing this flag mid-post would undo it.
+    /// </summary>
+    [Parameter] public bool PrimaryDisabled { get; set; }
 
     /// <summary>One line under the button saying what it is about to produce.</summary>
     [Parameter] public string? PrimaryNote { get; set; }

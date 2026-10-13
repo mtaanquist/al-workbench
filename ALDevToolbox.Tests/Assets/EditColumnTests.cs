@@ -65,6 +65,18 @@ public sealed class EditColumnTests
             $"{page} must close its .edit-col form before the audit panel, not wrap it");
     }
 
+    /// <summary>
+    /// CLAUDE.md allows one primary action per page. The module editor's
+    /// dependency "Add" was a second one beside "Save changes" (#1266, L36).
+    /// </summary>
+    [Fact]
+    public void The_module_editor_has_one_primary_button()
+    {
+        var body = Read("ALDevToolbox/Components/Pages/Admin/AdminModuleEdit.razor");
+        System.Text.RegularExpressions.Regex.Matches(body, "btn--primary").Count.Should().Be(1,
+            "only Save changes / Create module is primary; every other button is the outline style");
+    }
+
     private static string Read(string relative) =>
         File.ReadAllText(Path.Combine(Root(), relative));
 

@@ -276,6 +276,7 @@ public sealed class NewWorkspaceTests : IDisposable
     [Fact]
     public void Empty_template_set_renders_the_recovery_copy_pointing_at_admin()
     {
+        _auth.SetRoles("Editor");
         var cut = _ctx.Render<NewWorkspace>();
 
         cut.WaitForAssertion(() =>
@@ -289,6 +290,66 @@ public sealed class NewWorkspaceTests : IDisposable
                 "the form is gated by templates being available — rendering it with "
                 + "an empty dropdown would hide the actual problem");
         });
+    }
+
+    /// <summary>
+    /// A member with the User role cannot open the importer, so the empty state
+    /// tells them who to ask rather than linking to a page that refuses them
+    /// (#1266, L35).
+    /// </summary>
+    [Fact]
+    public void Empty_template_set_tells_a_member_who_to_ask_rather_than_linking_to_admin()
+    {
+        var cut = _ctx.Render<NewWorkspace>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".empty-state__title").TextContent.Trim().Should().Be("No workspace templates yet");
+            cut.FindAll("a[href^='/admin/']").Should().BeEmpty();
+            cut.Find(".empty-state__text").TextContent.Should().Contain("Ask one of your administrators");
+        });
+    }
+
+    /// <summary>
+    /// A ticked optional extension that needs an unticked one is shown next to
+    /// the checkboxes, not posted away to the error page (#1266, L31).
+    /// </summary>
+    [Fact]
+    public async Task Depending_on_an_unticked_extension_is_shown_under_the_checkboxes()
+    {
+        var template = TemplateBuilder.Default(key: "runtime-15");
+        var test = new ALDevToolbox.Domain.Entities.WorkspaceExtension
+        {
+            OrganizationId = template.OrganizationId, Path = "Test", NameTemplate = "Test", Required = false, Ordering = 1,
+        };
+        test.Dependencies.Add(new ALDevToolbox.Domain.Entities.WorkspaceExtensionDependency
+        {
+            OrganizationId = template.OrganizationId, RefExtensionPath = "Fixtures", Ordering = 0,
+        });
+        template.WorkspaceExtensions.Add(test);
+        template.WorkspaceExtensions.Add(new ALDevToolbox.Domain.Entities.WorkspaceExtension
+        {
+            OrganizationId = template.OrganizationId, Path = "Fixtures", NameTemplate = "Fixtures", Required = false, Ordering = 2,
+        });
+        await using (var seed = _db.NewContext())
+        {
+            seed.RuntimeTemplates.Add(template);
+            await seed.SaveChangesAsync();
+        }
+        _ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+        var cut = _ctx.Render<NewWorkspace>();
+        cut.WaitForAssertion(() => cut.Find("input[name='SelectedExtensionPaths'][value='Test']"));
+        cut.Find("input[name='SelectedExtensionPaths'][value='Test']").Change(true);
+        cut.Find("input[name='WorkspaceName']").Input("CRONUS");
+        await cut.Find("form[action='/generate/workspace']").SubmitAsync();
+
+        cut.WaitForAssertion(() =>
+        {
+            var section = cut.Find("input[value='Test']").Closest("section")!;
+            section.TextContent.Should().Contain("Test needs Fixtures");
+        });
+        _ctx.JSInterop.Invocations.Should().NotContain(i => i.Identifier == "aldtGenerate.submit");
     }
 
     [Fact]

@@ -41,6 +41,7 @@
                LoadingText="Loading templates..."
                IsEmpty="@(_templates is { Count: 0 })"
                FormId="gen-workspace-form" FormAction="/generate/workspace" OnSubmit="SubmitAsync"
+               PrimaryDisabled="@_repoBusy"
                PrimaryNote="@GenerateNote">
     <SubtitleContent>
         Spin up a fresh AL workspace from one of your organisation's
@@ -52,11 +53,23 @@
             <div class="empty-state">
                 <span class="empty-state__icon"><Icon Name="layers" Width="21" Height="21" /></span>
                 <span class="empty-state__title">No workspace templates yet</span>
-                <span class="empty-state__text">
-                    A template describes the folders, settings and modules a new workspace
-                    starts from. An admin can import one from the site catalogue.
-                </span>
-                <a class="btn btn--primary empty-state__action" href="/admin/templates">Import a template</a>
+                @* Importing is an editor's job; a member who cannot open that
+                   page is told who to ask instead of being sent to it. *@
+                <AuthorizeView Roles="Admin,Editor">
+                    <Authorized>
+                        <span class="empty-state__text">
+                            A template describes the folders, settings and modules a new workspace
+                            starts from. Import one from the site catalogue to get started.
+                        </span>
+                        <a class="btn btn--primary empty-state__action" href="/admin/templates">Import a template</a>
+                    </Authorized>
+                    <NotAuthorized>
+                        <span class="empty-state__text">
+                            A template describes the folders, settings and modules a new workspace
+                            starts from. Ask one of your administrators to import one.
+                        </span>
+                    </NotAuthorized>
+                </AuthorizeView>
             </div>
         </div>
     </Empty>
@@ -264,8 +277,10 @@
                     <input type="hidden" name="RuntimeVersion" value="@_runtimeVersion" />
                     <span class="field__hint">
                         No application versions have been added for your organisation yet.
-                        An admin can curate them under
-                        <a href="/admin/application-versions">Application versions</a>.
+                        <AuthorizeView Roles="Admin,Editor">
+                            <Authorized>Add them under <a href="/admin/application-versions">Application versions</a>.</Authorized>
+                            <NotAuthorized>Type one here, or ask one of your administrators to add them.</NotAuthorized>
+                        </AuthorizeView>
                     </span>
                     <FieldError Field="ApplicationVersion" Errors="_errors" />
                 </div>
@@ -343,6 +358,7 @@
                         </label>
                     }
                 </div>
+                <FieldError Field="SelectedExtensionPaths" Errors="_errors" />
             </section>
         }
 
@@ -691,7 +707,7 @@
                        button posts nothing, so there is no form
                        submission for that script to hang off. *@
                     <button type="button" class="btn ws-repo__create @(_repoBusy ? "btn--loading" : null)"
-                            disabled="@_repoBusy" aria-busy="@(_repoBusy ? "true" : null)"
+                            disabled="@(_repoBusy || _submitting)" aria-busy="@(_repoBusy ? "true" : null)"
                             @onclick="CreateRepositoryAsync">
                         <span class="btn__spinner" aria-hidden="true"></span>
                         <span class="btn__label">
@@ -929,6 +945,8 @@
     /// </summary>
     private string _repoVisibility = "private";
     private bool _repoBusy;
+    /// <summary>True while Generate is validating, before generate.js takes over the button.</summary>
+    private bool _submitting;
     private Dictionary<string, string> _repoErrors = new();
     private GitHubWorkspaceRepository? _createdRepo;
     /// <summary>
@@ -1022,12 +1040,24 @@
     /// </summary>
     private async Task SubmitAsync()
     {
-        var plan = await BuildValidPlanAsync();
-        if (plan is null) return;
+        // Validation runs queries on the circuit's one DbContext, so a second
+        // press - or Generate while Create repository is still working - would
+        // start a second query beside the first and take the circuit down.
+        if (_submitting || _repoBusy) return;
+        _submitting = true;
+        try
+        {
+            var plan = await BuildValidPlanAsync();
+            if (plan is null) return;
 
-        // Clean: hand off to generate.js, which starts the loading state and
-        // posts the form natively so the ZIP streams back as a download.
-        await JS.InvokeVoidAsync("aldtGenerate.submit", "gen-workspace-form");
+            // Clean: hand off to generate.js, which starts the loading state and
+            // posts the form natively so the ZIP streams back as a download.
+            await JS.InvokeVoidAsync("aldtGenerate.submit", "gen-workspace-form");
+        }
+        finally
+        {
+            _submitting = false;
+        }
     }
 
     /// <summary>
@@ -1093,6 +1123,8 @@
         // that happens at that yield still saw an idle button, and the create
         // itself (one call per generated file) ran with nothing on screen to
         // say so, which is what invited the second click (#812).
+        // Generate's validation shares this circuit's DbContext; wait for it.
+        if (_repoBusy || _submitting) return;
         _repoErrors = new();
         _createdRepo = null;
         _repoBusy = true;
@@ -1200,7 +1232,10 @@
     {
         _errors = errors;
         _unfieldedErrors = errors
-            .Where(e => !FieldedKeys.Contains(e.Key))
+            .Where(e => !FieldedKeys.Contains(e.Key)
+                // The checkbox list, and the slot under it, only exist when the
+                // template has optional extensions to tick.
+                && !(e.Key == "SelectedExtensionPaths" && _optionalExtensions.Count > 0))
             .Select(e => e.Value)
             .ToList();
     }
