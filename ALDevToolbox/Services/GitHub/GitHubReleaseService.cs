@@ -322,17 +322,27 @@ public sealed class GitHubReleaseService
                 .Where(c => c.ProjectBuildId == projectBuildId && c.ProjectRepositoryId == repositoryId)
                 .Select(c => c.CommitHash)
                 .FirstOrDefaultAsync(ct);
-            release = await _github.CreateReleaseAsync(token, owner, name, tag, tag, body, builtCommit, ct);
+            // As a draft: nobody can see or deploy it until every file is on it (#1230).
+            release = await _github.CreateReleaseAsync(token, owner, name, tag, tag, body, builtCommit, draft: true, ct);
         }
         else
         {
+            // Back to a draft before its files come off, for the same reason.
+            release = await _github.UpdateReleaseAsync(token, owner, name, existing.Id, existing.Name ?? tag, body, draft: true, ct);
             // Replace, don't append: GitHub refuses a second asset with the same
             // name, and a stale file beside a fresh one is worse than either.
-            foreach (var asset in existing.Assets)
+            try
             {
-                await _github.DeleteReleaseAssetAsync(token, owner, name, asset.Id, ct);
+                foreach (var asset in existing.Assets)
+                {
+                    await _github.DeleteReleaseAssetAsync(token, owner, name, asset.Id, ct);
+                }
             }
-            release = await _github.UpdateReleaseAsync(token, owner, name, existing.Id, existing.Name ?? tag, body, ct);
+            catch
+            {
+                await DiscardDraftAsync(token, owner, name, release.Id, tag);
+                throw;
+            }
         }
 
         // Without an upload address there is nowhere to put the files, and a
@@ -342,20 +352,49 @@ public sealed class GitHubReleaseService
             _logger.LogWarning(
                 "GitHub created the release {Tag} on {Owner}/{Repo} but said nothing about where to upload its files.",
                 tag, owner, name);
+            await DiscardDraftAsync(token, owner, name, release.Id, tag);
             return new GitHubReleasePublishResult(
-                false, tag, release.HtmlUrl,
-                "GitHub did not say where to upload the app files, so the release has none. Try publishing again.");
+                false, tag, null,
+                "GitHub did not say where to upload the app files, so the release was not published. Build again to retry.");
         }
 
-        foreach (var artifact in artifacts)
+        // Only a draft with every file on it is published. One that loses a file part-way
+        // is deleted rather than left on the Releases page for someone to deploy (#1230).
+        try
         {
-            await _github.UploadReleaseAssetAsync(token, release.UploadUrl, artifact.FileName, artifact.Content, ct);
+            foreach (var artifact in artifacts)
+            {
+                await _github.UploadReleaseAssetAsync(token, release.UploadUrl, artifact.FileName, artifact.Content, ct);
+            }
+            release = await _github.PublishReleaseAsync(token, owner, name, release.Id, ct);
+        }
+        catch
+        {
+            await DiscardDraftAsync(token, owner, name, release.Id, tag);
+            throw;
         }
 
         _logger.LogInformation(
             "Published build {BuildId} as the GitHub release {Tag} on {Owner}/{Repo} with {AssetCount} app file(s).",
             projectBuildId, tag, owner, name, artifacts.Count);
         return new GitHubReleasePublishResult(true, tag, release.HtmlUrl, null);
+    }
+
+    /// <summary>
+    /// Deletes a draft Release whose files did not all go up, so a half-made Release is
+    /// never left behind to be published or deployed (#1230). Best effort, and not
+    /// cancelled with the publish: the failure that brought us here is what gets reported.
+    /// </summary>
+    private async Task DiscardDraftAsync(string token, string owner, string name, long releaseId, string tag)
+    {
+        try
+        {
+            await _github.DeleteReleaseAsync(token, owner, name, releaseId, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is GitHubApiException or HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not delete the unfinished draft release {Tag} on {Owner}/{Repo}.", tag, owner, name);
+        }
     }
 
     /// <summary>
@@ -455,7 +494,8 @@ public sealed class GitHubReleaseService
     ///
     /// <para>Staging the same tag twice returns the build already staged rather than
     /// downloading it again: a second identical build in the history would make "which
-    /// one did we deploy" a question with two answers.</para>
+    /// one did we deploy" a question with two answers. "Identical" means the same app
+    /// files by name and size; a Release whose files changed since is staged again.</para>
     /// </summary>
     /// <exception cref="PlanValidationException">No such tag, or the Release carries no app files.</exception>
     /// <exception cref="ProjectAccessDeniedException">The caller may not manage the solution.</exception>
@@ -484,13 +524,24 @@ public sealed class GitHubReleaseService
             throw Validation("Tag", $"The release {tag} has no app files attached, so there is nothing to install.");
         }
 
-        var alreadyStaged = await _db.OeProjectBuilds.AsNoTracking()
+        // Reused only while the Release still carries the same files: one fixed since it
+        // was staged (a file added or uploaded again) is staged afresh, not answered with
+        // the build that missed it (#1230).
+        var stagedBefore = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.ProjectId == source.ProjectId
                         && b.PipelineId == null
                         && b.GithubReleaseTag == tag
                         && b.GithubReleaseUrl == release.HtmlUrl)
+            .OrderByDescending(b => b.Id)
+            .Select(b => new { b.Id, Files = b.Artifacts.Select(a => new { a.FileName, a.SizeBytes }).ToList() })
+            .ToListAsync(ct);
+        var wanted = assets
+            .Select(a => (a.Name, a.SizeBytes))
+            .ToHashSet();
+        var alreadyStaged = stagedBefore
+            .Where(b => b.Files.Count == wanted.Count && b.Files.All(f => wanted.Contains((f.FileName, f.SizeBytes))))
             .Select(b => (int?)b.Id)
-            .FirstOrDefaultAsync(ct);
+            .FirstOrDefault();
         if (alreadyStaged is { } existingId)
         {
             // The release link matched, so this is the same GitHub repository. Record the
