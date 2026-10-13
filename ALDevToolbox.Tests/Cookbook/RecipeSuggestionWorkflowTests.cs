@@ -339,6 +339,46 @@ public sealed class RecipeSuggestionWorkflowTests : IDisposable
         promoted.MinimumApplicationVersion!.Name.Should().Be("BC 2026 Wave 1");
     }
 
+    /// <summary>
+    /// #1278 (T26): rejecting a suggestion that has already been decided -
+    /// approved or rejected - is refused, and the first decision stands.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "approved")]
+    [InlineData(false, "rejected")]
+    public async Task Reject_refuses_when_already_decided(bool approveFirst, string decided)
+    {
+        var user = await SeedUserAsync(userId: 720);
+        _db.OrgContext.CurrentUserId = user.Id;
+        int suggestionId;
+        await using (var ctx = _db.NewContext())
+        {
+            suggestionId = await NewSuggestionService(ctx).SubmitAsync(new RecipeSuggestionInput(
+                "Decided once", "Body.", "", RecipeType.Snippet, new[] { new RecipeFileInput("A.al", "// a") }));
+        }
+
+        var admin = await SeedUserAsync(userId: 721, role: UserRole.Admin);
+        _db.OrgContext.CurrentUserId = admin.Id;
+        await using (var ctx = _db.NewContext())
+        {
+            if (approveFirst) await NewSuggestionService(ctx).ApproveAsync(suggestionId);
+            else await NewSuggestionService(ctx).RejectAsync(suggestionId, "first");
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> act = () => NewSuggestionService(ctx).RejectAsync(suggestionId, "second");
+            var ex = await act.Should().ThrowAsync<PlanValidationException>();
+            ex.Which.Errors.Should().ContainKey("Decision");
+            ex.Which.Errors["Decision"].Should().Contain(decided);
+        }
+
+        await using var verify = _db.NewContext();
+        var row = await verify.RecipeSuggestions.AsNoTracking().SingleAsync(s => s.Id == suggestionId);
+        row.Decision.Should().Be(approveFirst ? RecipeSuggestionDecision.Approved : RecipeSuggestionDecision.Rejected);
+        row.DecisionNote.Should().Be(approveFirst ? null : "first");
+    }
+
     [Fact]
     public async Task Approve_refuses_when_already_decided()
     {

@@ -203,7 +203,8 @@
             return;
         }
 
-        await FolderTree.HydrateExtensionFolderTreeAsync(new[] { template });
+        // The preview draws paths only; the example file bodies stay in the database.
+        await FolderTree.HydrateExtensionFolderTreeAsync(new[] { template }, pathsOnly: true);
 
         _template = template;
         _defaultsJson = JsonSerializer.Serialize(template.Defaults, PrettyJson);

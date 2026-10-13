@@ -77,25 +77,37 @@ internal static class TranslatorEndpoints
             result = XliffTargetWriter.NameTargetLanguageOfUntranslatedFile(
                 result, form["TargetLanguage"].ToString());
 
-            // Best-effort: feed the finished translations into the memory so
-            // they surface next time. Never let a memory hiccup fail the
-            // download the user actually asked for.
+            var bytes = Encoding.UTF8.GetBytes(result);
+            var cd = new Microsoft.Net.Http.Headers.ContentDispositionHeaderValue("attachment");
+            cd.SetHttpFileName(fileName);
+            ctx.Response.Headers.ContentDisposition = cd.ToString();
+            ctx.Response.ContentType = "application/xml; charset=utf-8";
+            ctx.Response.ContentLength = bytes.Length;
+            await ctx.Response.Body.WriteAsync(bytes, ct);
+            // The download is the user's; the memory is a side effect. Finish
+            // the response first so a large upsert never holds the file back.
+            await ctx.Response.CompleteAsync();
+
+            // Best-effort: feed the translations the user made into the memory
+            // so they surface next time - only the edited units, not the whole
+            // file, so a unit nobody touched does not gain a hit on every save
+            // (#1268, L48). Never let a memory hiccup fail the download. Not
+            // tied to the request's token: the client may hang up as soon as
+            // the file has arrived, and that is no reason to stop learning.
             try
             {
-                await memory.LearnFromXliffAsync(result, ct: ct);
+                var edited = edits
+                    .Where(e => !string.IsNullOrEmpty(e.Value.Target))
+                    .Select(e => e.Key)
+                    .ToHashSet(StringComparer.Ordinal);
+                await memory.LearnFromXliffAsync(result, unitIds: edited,
+                    ct: ctx.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
             }
             catch (Exception ex)
             {
                 loggerFactory.CreateLogger(typeof(TranslatorEndpoints))
                     .LogWarning(ex, "Translation memory population from export failed; export itself succeeded.");
             }
-
-            var bytes = Encoding.UTF8.GetBytes(result);
-            var cd = new Microsoft.Net.Http.Headers.ContentDispositionHeaderValue("attachment");
-            cd.SetHttpFileName(fileName);
-            ctx.Response.Headers.ContentDisposition = cd.ToString();
-            ctx.Response.ContentType = "application/xml; charset=utf-8";
-            await ctx.Response.Body.WriteAsync(bytes, ct);
         })
         .RequireAuthorization()
         .WithMetadata(new RequestSizeLimitAttribute(MaxRequestBytes))

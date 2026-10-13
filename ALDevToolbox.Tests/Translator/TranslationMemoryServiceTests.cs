@@ -473,6 +473,63 @@ public sealed class TranslationMemoryServiceTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// #1268 (L48): a save learns the units the user changed, so the ones it
+    /// did not touch keep their hit count.
+    /// </summary>
+    [Fact]
+    public async Task Learning_only_the_edited_units_leaves_the_rest_alone()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewMemory(ctx).LearnFromXliffAsync(Xliff("Amount", "Beløb"), unitIds: ["some other unit"]))
+                .Should().Be(0);
+            (await NewMemory(ctx).LearnFromXliffAsync(Xliff("Amount", "Beløb"), unitIds: []))
+                .Should().Be(0);
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewMemory(ctx).LearnFromXliffAsync(
+                    Xliff("Amount", "Beløb"), unitIds: ["Table 1 - Field 2 - Property Caption"]))
+                .Should().Be(1);
+            ctx.TranslationMemory.Count().Should().Be(1);
+        }
+    }
+
+    /// <summary>
+    /// #1268 (L49): the upsert narrows its lookup by language; the same source
+    /// in two languages is still two pairs, and a repeat bumps only its own.
+    /// </summary>
+    [Fact]
+    public async Task The_same_source_in_two_languages_counts_its_hits_apart()
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            await NewMemory(ctx).UpsertAsync(new[]
+            {
+                new TranslationMemoryUpsert("en-US", "da-DK", "Amount", "Beløb", "caption", "x"),
+                new TranslationMemoryUpsert("en-US", "de-DE", "Amount", "Betrag", "caption", "x"),
+            });
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewMemory(ctx).UpsertAsync(new[]
+            {
+                new TranslationMemoryUpsert("en-US", "de-DE", "Amount", "Betrag", "caption", "x"),
+            })).Should().Be(0);
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.TranslationMemory.OrderBy(e => e.TargetLanguage)
+                .Select(e => new { e.TargetLanguage, e.HitCount }).ToList()
+                .Should().BeEquivalentTo(new[]
+                {
+                    new { TargetLanguage = "da-DK", HitCount = 1 },
+                    new { TargetLanguage = "de-DE", HitCount = 2 },
+                }, o => o.WithStrictOrdering());
+        }
+    }
+
     [Fact]
     public async Task A_file_that_does_not_parse_teaches_nothing_rather_than_failing()
     {
@@ -582,6 +639,11 @@ public sealed class TranslationMemoryServiceTests : IDisposable
             var all = await memory.SearchAsync(new MemorySearchQuery());
             all.Items.Select(i => i.SourceRepository).Should().BeEquivalentTo(new[] { "cronus-dk/shared-app", null });
             all.Total.Should().Be(2);
+
+            // The MCP search reads one page and never the total (#1267, L40).
+            var uncounted = await memory.SearchAsync(new MemorySearchQuery(CountTotal: false));
+            uncounted.Total.Should().BeNull();
+            uncounted.Items.Should().HaveCount(2);
 
             (await memory.SuggestAsync("Rebate scheme", "en-US", "da-DK")).Should().BeEmpty();
             (await memory.GetExactMatchesAsync(new[] { "Rebate scheme" }, "en-US", "da-DK")).Should().BeEmpty();

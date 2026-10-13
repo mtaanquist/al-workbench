@@ -99,7 +99,8 @@ public sealed class ArtifactsTools
         BuildDetail? detail;
         try
         {
-            detail = await _artifacts.GetBuildDetailAsync(buildId, ct);
+            // Only whether a log exists is reported, so its text stays in the database.
+            detail = await _artifacts.GetBuildDetailAsync(buildId, ct, includeLogText: false);
         }
         catch (ProjectAccessDeniedException)
         {
