@@ -239,7 +239,7 @@ public sealed class ProjectAccess
         if (!await CanManageEnvironmentUpdatesAsync(projectId, ct).ConfigureAwait(false))
         {
             throw new ProjectAccessDeniedException(
-                "You need permission to manage environment updates for this project's team.");
+                "You need permission to manage environment updates for this solution's team.");
         }
     }
 
@@ -301,7 +301,7 @@ public sealed class ProjectAccess
         if (!await CanDeleteAsync(createdByUserId, ct).ConfigureAwait(false))
         {
             throw new ProjectAccessDeniedException(
-                "Only the project's owner or an organisation admin can delete it.");
+                "Only the solution's owner or an organisation admin can delete it.");
         }
     }
 
@@ -393,7 +393,7 @@ public sealed class ProjectAccess
         if (!await CanViewAsync(projectId, ct).ConfigureAwait(false))
         {
             throw new ProjectAccessDeniedException(
-                "This project is private. Ask its owner or a member of its team for access.");
+                "This solution is private. Ask its owner or a member of its team for access.");
         }
     }
 

@@ -381,7 +381,7 @@
         // The customer's project name is what tells a consultant with several projects
         // open *whose* tenant this writes to - an environment is often literally named
         // "Production" (#714).
-        _customerName = string.IsNullOrWhiteSpace(customerName) ? "this project" : customerName;
+        _customerName = string.IsNullOrWhiteSpace(customerName) ? "this solution" : customerName;
         _envName = envName;
         _isProduction = string.Equals(envType, "Production", StringComparison.OrdinalIgnoreCase);
         _envNameIsProduction = string.Equals(envName, "Production", StringComparison.OrdinalIgnoreCase);

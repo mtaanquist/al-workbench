@@ -312,7 +312,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         RequireOrganizationId();
         var project = await _db.OeProjects
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This project no longer exists.");
+            ?? throw Validation("BcTenantId", "This solution no longer exists.");
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
         var errors = new Dictionary<string, string>();
@@ -414,7 +414,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         RequireOrganizationId();
         var project = await _db.OeProjects
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This project no longer exists.");
+            ?? throw Validation("BcTenantId", "This solution no longer exists.");
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
         return await RefreshEnvironmentsCoreAsync(project, markVerified, ct);
@@ -437,7 +437,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     {
         var project = await _db.OeProjects
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This project no longer exists.");
+            ?? throw Validation("BcTenantId", "This solution no longer exists.");
 
         return await RefreshEnvironmentsCoreAsync(project, markVerified: false, ct);
     }
@@ -574,7 +574,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         RequireOrganizationId();
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("Environment", "This project no longer exists.");
+            ?? throw Validation("Environment", "This solution no longer exists.");
         // Looking is the view axis; making the customer's tenant answer again is not.
         await EnsureGateAsync(
             forceRefresh ? EnvironmentGate.Manage : EnvironmentGate.View,
@@ -786,7 +786,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         RequireOrganizationId();
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("Environment", "This project no longer exists.");
+            ?? throw Validation("Environment", "This solution no longer exists.");
         await EnsureGateAsync(gate, projectId, project.CreatedByUserId, ct);
 
         var env = await _db.OeProjectEnvironments.AsNoTracking()
@@ -835,7 +835,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 if (await _access.CanManageAsync(projectId, createdByUserId, ct)) break;
                 if (await _access.CanManageEnvironmentUpdatesAsync(projectId, ct)) break;
                 throw new ProjectAccessDeniedException(
-                    "You need to manage this project, or hold permission to manage environment updates for one of its teams.");
+                    "You need to manage this solution, or hold permission to manage environment updates for one of its teams.");
         }
     }
 
@@ -1707,7 +1707,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         RequireOrganizationId();
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("Environment", "This project no longer exists.");
+            ?? throw Validation("Environment", "This solution no longer exists.");
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
         var env = await _db.OeProjectEnvironments.AsNoTracking()
@@ -2416,7 +2416,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     {
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
-            ?? throw new BcApiException(null, "This project no longer exists.");
+            ?? throw new BcApiException(null, "This solution no longer exists.");
 
         var creds = await ResolveCredentialsAsync(project, ct)
             ?? throw new BcApiException(null,

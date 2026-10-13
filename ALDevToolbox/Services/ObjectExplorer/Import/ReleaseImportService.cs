@@ -775,7 +775,7 @@ public class ReleaseImportService
         }
         if (!string.Equals(release.Kind, "project", StringComparison.Ordinal))
         {
-            throw RetryError("Only a project build can be rebuilt this way.");
+            throw RetryError("Only a solution build can be rebuilt this way.");
         }
         if (release.Status is not ("ready" or "failed"))
         {

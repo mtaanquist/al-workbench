@@ -98,7 +98,7 @@ public sealed class ArtifactsToolsTests : IDisposable
 
         await using var read = _db.NewContext();
         var act = () => NewTools(read).CompareProjectBuildsAsync(b1, b2);
-        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("same project");
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("same solution");
     }
 
     [Fact]

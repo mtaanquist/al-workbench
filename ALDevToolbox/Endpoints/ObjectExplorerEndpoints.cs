@@ -345,7 +345,7 @@ internal static class ObjectExplorerEndpoints
             var origin = await persistedJobs.GetLatestForReleaseAsync(id, ct);
             if (origin is not { Kind: "project_build", ProjectId: int projectId })
             {
-                RedirectManage(ctx, id, "Symbols", "This release isn't a project build, so there's nothing to recover.");
+                RedirectManage(ctx, id, "Symbols", "This release isn't a solution build, so there's nothing to recover.");
                 return;
             }
 
