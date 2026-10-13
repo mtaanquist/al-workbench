@@ -52,7 +52,7 @@ public sealed class TranslatorTools
         var res = await _memory.SearchAsync(new MemorySearchQuery(
             query, sourceLanguage, targetLanguage,
             string.IsNullOrWhiteSpace(kind) ? null : kind,
-            origin, includeRemoved, 0, Math.Clamp(maxResults, 1, 100)), ct);
+            origin, includeRemoved, 0, Math.Clamp(maxResults, 1, 100), CountTotal: false), ct);
         return res.Items.Select(e => new TranslationMemoryHit(
             e.Id, e.SourceLanguage, e.TargetLanguage, e.SourceText, e.TargetText,
             e.Kind, e.Origin, e.Score, e.HitCount, e.IsDeleted,

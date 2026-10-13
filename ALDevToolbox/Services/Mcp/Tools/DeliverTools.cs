@@ -458,15 +458,24 @@ public sealed class DeliverTools
 
         var holders = await _modules.ListProjectIdsWithModuleAsync(entry.Id, ct);
         var visible = await _projects.ListSolutionOptionsAsync(ct: ct);
+        // Every visible holder in one batch: a per-solution read here cost a
+        // handful of queries and a catalogue load per solution (#1267, L38).
+        var shown = visible.Where(o => holders.Contains(o.Id)).ToList();
+        var holdings = (await _modules.GetModuleAcrossSolutionsAsync(entry.Id, shown.Select(o => o.Id).ToList(), ct))
+            .ToDictionary(h => h.ProjectId);
         var rows = new List<CustomerModuleRow>();
-        foreach (var option in visible.Where(o => holders.Contains(o.Id)))
+        foreach (var option in shown)
         {
-            var held = await _modules.GetSolutionModulesAsync(option.Id, ct);
-            var match = held.Modules.FirstOrDefault(m => m.ModuleId == entry.Id);
-            rows.Add(match is not null
-                ? ToModuleRow(match, option.Id, option.Name, held)
+            if (!holdings.TryGetValue(option.Id, out var held)) continue;
+            var source = held.ReadFromEnvironment ? "business_central" : "typed";
+            rows.Add(held.Module is { } match
+                ? new CustomerModuleRow(match.ModuleId, match.Name, match.Publisher, null, option.Id, option.Name, match.Version,
+                    source,
+                    held.ReadFromEnvironment ? held.EnvironmentName : null,
+                    held.ReadFromEnvironment ? held.FetchedAt : null,
+                    match.Note)
                 : new CustomerModuleRow(entry.Id, entry.Name, entry.Publisher, entry.AppId, option.Id, option.Name,
-                    null, held.ReadFromEnvironment ? "business_central" : "typed", held.EnvironmentName, held.FetchedAt, null));
+                    null, source, held.EnvironmentName, held.FetchedAt, null));
         }
         return rows;
     }

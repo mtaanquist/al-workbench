@@ -641,7 +641,14 @@ public sealed class ArtifactService
     /// repo, the deliverables (metadata only — no bytes), and the log sections.
     /// Null when the build isn't in the acting org.
     /// </summary>
-    public async Task<BuildDetail?> GetBuildDetailAsync(int buildId, CancellationToken ct = default)
+    /// <param name="buildId">The build.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <param name="includeLogText">
+    /// False when the caller only needs to know which log sections exist: the
+    /// sections come back with empty content instead of every line the build
+    /// wrote, which can run to megabytes.
+    /// </param>
+    public async Task<BuildDetail?> GetBuildDetailAsync(int buildId, CancellationToken ct = default, bool includeLogText = true)
     {
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.Id == buildId)
@@ -691,11 +698,12 @@ public sealed class ArtifactService
 
         var artifacts = await ListArtifactRowsAsync(buildId, ct);
 
-        var logSections = await _db.OeProjectBuildLogs.AsNoTracking()
+        var logs = _db.OeProjectBuildLogs.AsNoTracking()
             .Where(l => l.ProjectBuildId == buildId)
-            .OrderBy(l => l.Ordering)
-            .Select(l => new LogSectionRow(l.Section, l.Content))
-            .ToListAsync(ct);
+            .OrderBy(l => l.Ordering);
+        var logSections = includeLogText
+            ? await logs.Select(l => new LogSectionRow(l.Section, l.Content)).ToListAsync(ct)
+            : await logs.Select(l => new LogSectionRow(l.Section, string.Empty)).ToListAsync(ct);
 
         // Compiler diagnostics are parsed into rows for every build (#627), so the
         // card can say "3 errors, 12 warnings" instead of leaving the reader to

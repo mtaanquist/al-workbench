@@ -569,7 +569,7 @@ public sealed class TranslationMemoryService
                 || EF.Functions.ILike(e.TargetText, needle, "\\"));
         }
 
-        var total = await query.CountAsync(ct).ConfigureAwait(false);
+        int? total = q.CountTotal ? await query.CountAsync(ct).ConfigureAwait(false) : null;
         var take = Math.Clamp(q.Take, 1, 200);
         var rows = await query
             .OrderByDescending(e => e.Score).ThenByDescending(e => e.HitCount).ThenByDescending(e => e.LastSeenAt)
@@ -766,7 +766,10 @@ public sealed record MemorySearchQuery(
     string? Origin = null,
     bool IncludeDeleted = false,
     int Skip = 0,
-    int Take = 50);
+    int Take = 50,
+    // The management page pages by the total; the MCP search returns one page
+    // and never reads it, so it skips a COUNT over the whole match set.
+    bool CountTotal = true);
 
 /// <summary>
 /// One memory entry as shown in the management list.
@@ -790,5 +793,8 @@ public sealed record MemoryEntryView(
     string? SourceRepository = null,
     string? SourcePath = null);
 
-/// <summary>A page of <see cref="MemoryEntryView"/> plus the total match count.</summary>
-public sealed record MemorySearchResult(IReadOnlyList<MemoryEntryView> Items, int Total);
+/// <summary>
+/// A page of <see cref="MemoryEntryView"/> plus the total match count - null
+/// when the query asked not to count (<see cref="MemorySearchQuery.CountTotal"/>).
+/// </summary>
+public sealed record MemorySearchResult(IReadOnlyList<MemoryEntryView> Items, int? Total);

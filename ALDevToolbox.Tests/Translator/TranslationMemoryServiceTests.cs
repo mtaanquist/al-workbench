@@ -583,6 +583,11 @@ public sealed class TranslationMemoryServiceTests : IDisposable
             all.Items.Select(i => i.SourceRepository).Should().BeEquivalentTo(new[] { "cronus-dk/shared-app", null });
             all.Total.Should().Be(2);
 
+            // The MCP search reads one page and never the total (#1267, L40).
+            var uncounted = await memory.SearchAsync(new MemorySearchQuery(CountTotal: false));
+            uncounted.Total.Should().BeNull();
+            uncounted.Items.Should().HaveCount(2);
+
             (await memory.SuggestAsync("Rebate scheme", "en-US", "da-DK")).Should().BeEmpty();
             (await memory.GetExactMatchesAsync(new[] { "Rebate scheme" }, "en-US", "da-DK")).Should().BeEmpty();
             (await memory.SuggestAsync("Bin code", "en-US", "da-DK")).Should().ContainSingle();

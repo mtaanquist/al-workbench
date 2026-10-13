@@ -261,6 +261,20 @@ public sealed class GitHubTools
                 throw new McpException($"Could not read '{filePath}' as XLIFF v1.2: {ex.Message}");
             }
 
+            // A language file already says which language it holds. Writing
+            // da-DK strings into the German file and relabelling it would turn
+            // the German translation into a Danish one, so only the generated
+            // source file - which holds no translation yet - takes a new label.
+            if (!startedFromSource
+                && !string.IsNullOrWhiteSpace(parsed.TargetLanguage)
+                && !string.Equals(parsed.TargetLanguage, language, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new McpException(
+                    $"'{filePath}' holds the {parsed.TargetLanguage} translation, not {language}, so nothing was written. "
+                    + $"Pass targetLanguage '{parsed.TargetLanguage}' to edit it, or start from the generated source file "
+                    + $"to begin a {language} translation.");
+            }
+
             // Two edits for one id would silently drop one of them in the map
             // below, and the agent would be told the write succeeded. Say which
             // ids came twice instead.

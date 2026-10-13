@@ -177,11 +177,7 @@ public sealed class CustomerModuleService
         var matched = new List<SolutionModule>();
         foreach (var module in catalog)
         {
-            var app = module.AppId is { } id
-                ? apps.FirstOrDefault(a => a.AppId == id)
-                : apps.FirstOrDefault(a =>
-                    string.Equals(a.Name, module.Name, StringComparison.OrdinalIgnoreCase)
-                    && (module.Publisher is null || string.Equals(a.Publisher, module.Publisher, StringComparison.OrdinalIgnoreCase)));
+            var app = MatchApp(module, apps);
             if (app is not null)
                 matched.Add(new SolutionModule(0, module.Id, module.Name, module.Publisher ?? app.Publisher, app.Version, null, chosen.Id));
         }
@@ -260,6 +256,100 @@ public sealed class CustomerModuleService
         return ids.ToHashSet();
     }
 
+    /// <summary>
+    /// One module across many solutions, each read the way
+    /// <see cref="GetSolutionModulesAsync"/> reads it - typed for on-premises,
+    /// the chosen environment's report for online - but in a fixed handful of
+    /// queries rather than several per solution. A solution that does not
+    /// have the module still gets an entry, with no <see cref="ModuleHolding.Module"/>.
+    /// </summary>
+    /// <remarks>
+    /// No per-solution access check: callers pass only solutions the viewer can
+    /// already see (the MCP tool intersects with the visibility-filtered list).
+    /// </remarks>
+    public async Task<List<ModuleHolding>> GetModuleAcrossSolutionsAsync(
+        int moduleId, IReadOnlyCollection<int> projectIds, CancellationToken ct = default)
+    {
+        var module = await _db.CustomerModules.AsNoTracking().FirstOrDefaultAsync(m => m.Id == moduleId, ct);
+        if (module is null || projectIds.Count == 0) return [];
+
+        var projects = await _db.OeProjects.AsNoTracking()
+            .Where(p => projectIds.Contains(p.Id) && p.DeletedAt == null)
+            .Select(p => new { p.Id, p.HostingType })
+            .ToListAsync(ct);
+        var onPremisesIds = projects
+            .Where(p => p.HostingType is not (null or ProjectHostingType.MicrosoftCloud))
+            .Select(p => p.Id).ToList();
+        var onlineIds = projects.Select(p => p.Id).Except(onPremisesIds).ToList();
+
+        var typed = await _db.OeProjectModules.AsNoTracking()
+                .Where(m => onPremisesIds.Contains(m.ProjectId) && m.ModuleId == moduleId)
+                .Select(m => new { m.ProjectId, Row = new SolutionModule(m.Id, m.ModuleId, m.Module!.Name, m.Module.Publisher, m.Version, m.Note, null) })
+                .ToListAsync(ct);
+
+        // The same environment GetSolutionModulesAsync reads from: production
+        // first, then by name, never one that is deleted or missing.
+        var environments = await _db.OeProjectEnvironments.AsNoTracking()
+                .Where(EnvironmentQueries.NotSoftDeleted)
+                .Where(e => onlineIds.Contains(e.ProjectId) && e.MissingSince == null)
+                .Select(e => new { e.Id, e.ProjectId, e.Name, e.Type })
+                .ToListAsync(ct);
+        var chosen = environments
+            .GroupBy(e => e.ProjectId)
+            .ToDictionary(g => g.Key, g => g
+                .OrderByDescending(e => string.Equals(e.Type, "Production", StringComparison.OrdinalIgnoreCase))
+                .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                .First());
+        var chosenIds = chosen.Values.Select(e => e.Id).ToList();
+
+        var fetched = await _db.OeEnvironmentApps.AsNoTracking()
+                .Where(a => chosenIds.Contains(a.EnvironmentId))
+                .GroupBy(a => a.EnvironmentId)
+                .Select(g => new { EnvironmentId = g.Key, FetchedAt = g.Max(a => a.FetchedAt) })
+                .ToDictionaryAsync(g => g.EnvironmentId, g => g.FetchedAt, ct);
+
+        // Narrowed in SQL to the module's app id, or to its name for a catalogue
+        // entry without one; the publisher check stays with the shared matcher.
+        var appQuery = _db.OeEnvironmentApps.AsNoTracking().Where(a => chosenIds.Contains(a.EnvironmentId));
+        var moduleName = module.Name.ToLower();
+        appQuery = module.AppId is { } appId
+            ? appQuery.Where(a => a.AppId == appId)
+            : appQuery.Where(a => a.Name.ToLower() == moduleName);
+        var apps = await appQuery.ToListAsync(ct);
+
+        var result = new List<ModuleHolding>(projects.Count);
+        foreach (var project in projects)
+        {
+            if (onPremisesIds.Contains(project.Id))
+            {
+                result.Add(new ModuleHolding(project.Id, false,
+                    typed.FirstOrDefault(t => t.ProjectId == project.Id)?.Row, null, null));
+                continue;
+            }
+
+            if (!chosen.TryGetValue(project.Id, out var environment))
+            {
+                result.Add(new ModuleHolding(project.Id, true, null, null, null));
+                continue;
+            }
+
+            var app = MatchApp(module, apps.Where(a => a.EnvironmentId == environment.Id));
+            result.Add(new ModuleHolding(project.Id, true,
+                app is null ? null : new SolutionModule(0, module.Id, module.Name, module.Publisher ?? app.Publisher, app.Version, null, environment.Id),
+                environment.Name,
+                fetched.TryGetValue(environment.Id, out var at) ? at : null));
+        }
+        return result;
+    }
+
+    /// <summary>A catalogue entry's app among an environment's: by app id, or by name and publisher.</summary>
+    private static OeEnvironmentApp? MatchApp(CustomerModule module, IEnumerable<OeEnvironmentApp> apps) =>
+        module.AppId is { } id
+            ? apps.FirstOrDefault(a => a.AppId == id)
+            : apps.FirstOrDefault(a =>
+                string.Equals(a.Name, module.Name, StringComparison.OrdinalIgnoreCase)
+                && (module.Publisher is null || string.Equals(a.Publisher, module.Publisher, StringComparison.OrdinalIgnoreCase)));
+
     private static List<SolutionModule> Sorted(IEnumerable<SolutionModule> modules) =>
         modules.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase).ToList();
 
@@ -295,6 +385,13 @@ public sealed record SeenApp(Guid AppId, string Name, string Publisher, int Solu
 public sealed record SolutionModule(int RowId, int ModuleId, string Name, string? Publisher, string? Version, string? Note, int? EnvironmentId);
 
 public sealed record SolutionModuleInput(int? ModuleId, string? Version, string? Note);
+
+/// <summary>One solution's answer for one module, from <see cref="CustomerModuleService.GetModuleAcrossSolutionsAsync"/>.</summary>
+/// <param name="Module">The module as this solution has it, or null when it does not.</param>
+/// <param name="EnvironmentName">The environment read from, for an online solution that has one.</param>
+/// <param name="FetchedAt">When that environment last reported its apps.</param>
+public sealed record ModuleHolding(
+    int ProjectId, bool ReadFromEnvironment, SolutionModule? Module, string? EnvironmentName, DateTime? FetchedAt);
 
 /// <param name="ReadFromEnvironment">True for an online solution, whose list is read rather than typed.</param>
 /// <param name="EnvironmentName">The environment the list came from, when there is one.</param>
