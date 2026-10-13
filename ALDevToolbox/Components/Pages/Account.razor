@@ -28,6 +28,7 @@
 @inject UserRepositoryTokenService RepoTokens
 @inject GitHubAccessService GitHubAccess
 @inject SystemSettingsService Settings
+@inject ALDevToolbox.Services.Tools.ToolEnablement Tools
 @inject ILogger<Account> Logger
 
 @*
@@ -281,15 +282,22 @@ else
                                 <form method="post" class="u-row"
                                       action="@(_totpAction == "disable" ? "/auth/account/2fa/totp/disable" : "/auth/account/2fa/recovery/regenerate")">
                                     <AntiforgeryToken />
-                                    <input class="input" type="password" name="Password" required
-                                           autocomplete="current-password"
-                                           aria-label="Confirm with your current password"
-                                           placeholder="Confirm with your current password" />
+                                    @if (!_confirmedRecently)
+                                    {
+                                        <input class="input" type="password" name="Password" required
+                                               autocomplete="current-password"
+                                               aria-label="Confirm with your current password"
+                                               placeholder="Confirm with your current password" />
+                                    }
                                     <button type="submit" class="btn btn--sm @(_totpAction == "disable" ? "btn--danger" : "")">
                                         @(_totpAction == "disable" ? "Turn off" : "Generate codes")
                                     </button>
                                     <button type="button" class="btn btn--sm" @onclick="() => _totpAction = null">Cancel</button>
                                 </form>
+                                @if (_canConfirmWithoutPassword && !_confirmedRecently)
+                                {
+                                    <a class="form-actions__note" href="@ALDevToolbox.Endpoints.StepUpEndpoints.Url(ALDevToolbox.Endpoints.RouteConstants.AccountSecurity)">No password? Confirm it's you another way</a>
+                                }
                             }
                         </SettingRow>
 
@@ -306,11 +314,18 @@ else
                                 <form method="post" action="/auth/account/2fa/email/disable" class="u-row">
                                     <AntiforgeryToken />
                                     <StatusPill Tone="success">On</StatusPill>
-                                    <input class="input" type="password" name="Password" required
-                                           autocomplete="current-password" aria-label="Current password"
-                                           placeholder="Current password" />
+                                    @if (!_confirmedRecently)
+                                    {
+                                        <input class="input" type="password" name="Password" required
+                                               autocomplete="current-password" aria-label="Current password"
+                                               placeholder="Current password" />
+                                    }
                                     <button type="submit" class="btn btn--sm btn--danger">Turn off email codes</button>
                                 </form>
+                                @if (_canConfirmWithoutPassword && !_confirmedRecently)
+                                {
+                                    <a class="form-actions__note" href="@ALDevToolbox.Endpoints.StepUpEndpoints.Url(ALDevToolbox.Endpoints.RouteConstants.AccountSecurity)">No password? Confirm it's you another way</a>
+                                }
                             }
                             else if (_pendingEmailMfa)
                             {
@@ -1149,6 +1164,12 @@ else
     private bool _pendingEmailMfa;
     private int _recoveryRemaining;
     private string? _totpAction; // null, "regenerate" or "disable" — drives the inline password confirm
+    // A Microsoft-linked account may have no password it knows (#1259), so it can
+    // confirm two-step changes with a fresh step-up instead. _confirmedRecently
+    // means that step-up has happened and the password box is not needed.
+    private bool _canConfirmWithoutPassword;
+    private bool _confirmedRecently;
+    [CascadingParameter] private Task<AuthenticationState>? AuthStateTask { get; set; }
     private bool _busy;
     private string? _passkeyError;
     private IReadOnlyList<UserPasskey> _passkeys = Array.Empty<UserPasskey>();
@@ -1212,6 +1233,11 @@ else
             _passkeys = await Passkeys.ListForUserAsync(_user.Id);
         }
         _entraLinks = await Entra.ListLinksAsync(_user.Id);
+        _canConfirmWithoutPassword = _entraLinks.Count > 0;
+        if (_canConfirmWithoutPassword && AuthStateTask is not null)
+        {
+            _confirmedRecently = await Tools.IsFreshAsync((await AuthStateTask).User);
+        }
         _tokens = await Pats.ListForUserAsync(_user.Id);
         _clients = await OAuthClients.ListForUserAsync(_user.Id);
 

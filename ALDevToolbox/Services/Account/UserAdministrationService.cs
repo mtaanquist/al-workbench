@@ -149,11 +149,10 @@ public sealed class UserAdministrationService
             .ExecuteUpdateAsync(s => s.SetProperty(c => c.RevokedAt, now), ct);
         await _db.SaveChangesAsync(ct);
         // OpenIddict stores Subject = the user id (OAuthEndpoints.MapAuthorizeComplete).
-        // Its manager shares this scoped context, so the revocations join the transaction.
-        await foreach (var token in _oauthTokens.FindBySubjectAsync(userId.ToString(), ct))
-        {
-            await _oauthTokens.TryRevokeAsync(token, ct);
-        }
+        // Its manager shares this scoped context, so the revocation joins the transaction.
+        // One set-based UPDATE, not one per token: an assistant that refreshes hourly
+        // leaves hundreds of rows per user (#1259).
+        await _oauthTokens.RevokeBySubjectAsync(userId.ToString(), ct);
         await tx.CommitAsync(ct);
     }
 

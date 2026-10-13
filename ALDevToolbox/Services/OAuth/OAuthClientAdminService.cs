@@ -150,13 +150,11 @@ public sealed class OAuthClientAdminService
         if (application is not null)
         {
             var appId = await _applications.GetIdAsync(application, cancellationToken);
-            await foreach (var token in _tokens.FindBySubjectAsync(consent.UserId.ToString(), cancellationToken))
+            // One set-based UPDATE over (subject, application), not a walk over
+            // every token the user holds with one UPDATE each (#1259).
+            if (appId is not null)
             {
-                var tokenAppId = await _tokens.GetApplicationIdAsync(token, cancellationToken);
-                if (tokenAppId == appId)
-                {
-                    await _tokens.TryRevokeAsync(token, cancellationToken);
-                }
+                await _tokens.RevokeAsync(consent.UserId.ToString(), appId, status: null, type: null, cancellationToken);
             }
         }
 

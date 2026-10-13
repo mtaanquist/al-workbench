@@ -189,6 +189,7 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `DISABLE_GITHUB_WEBHOOK_RECOVERY_SCHEDULER` | `1` to stop asking GitHub every five minutes to resend webhook deliveries that did not get through, and to stop closing pull request checks a restart interrupted. | unset |
 | `DISABLE_TRANSLATION_MEMORY_INGEST_SCHEDULER` | `1` to disable the nightly pass that fills the translation memory from the `.xlf` files in each organisation's own repositories. | unset |
 | `DISABLE_LOGIN_ATTEMPT_PRUNE_SCHEDULER`       | `1` to disable the periodic prune of old login-attempt rows. | unset                |
+| `DISABLE_OAUTH_TOKEN_PRUNE_SCHEDULER`         | `1` to disable the periodic removal of expired and revoked AI-assistant sign-in tokens older than 14 days. | unset |
 | `DISABLE_EMAIL_OUTBOX_SCHEDULER`              | `1` to stop sending queued transactional email (resets, invites, sign-in links). Messages still queue up, nothing goes out, and nothing is cleaned up - queued messages keep their encrypted bodies until sending is switched back on. | unset |
 | `RELEASE_AUTO_IMPORT_HOUR_UTC`                | Hour (UTC, `0`-`23`) the release auto-import runs at.     | `4`                    |
 | `AUTH_WEBAUTHN_RP_ID` / `AUTH_WEBAUTHN_ORIGINS` | Passkey relying-party id and comma-separated `https://` origins. Leave blank to disable the passkey UI. | unset |

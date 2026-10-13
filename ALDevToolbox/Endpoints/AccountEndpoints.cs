@@ -74,7 +74,9 @@ internal static class AccountEndpoints
     /// row is always reachable) and verifies the supplied password. On mismatch,
     /// writes the standard "Password is incorrect." redirect to the account page
     /// and returns <c>null</c>; otherwise returns the loaded user. Shared by the
-    /// TOTP-disable, email-MFA-disable and recovery-regenerate handlers.
+    /// TOTP-disable, email-MFA-disable and recovery-regenerate handlers. A
+    /// Microsoft-linked account with a fresh step-up skips the password check
+    /// (<see cref="MayConfirmWithoutPasswordAsync"/>).
     /// </summary>
     internal static async Task<User?> LoadUserAndVerifyPasswordAsync(
         HttpContext ctx,
@@ -87,11 +89,32 @@ internal static class AccountEndpoints
         // Fence category 4 (explicitly scoped user-id lookup): pinned to the signed-in
         // user's own id.
         var user = await db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == org.CurrentUserId!.Value, ct);
+        if (await MayConfirmWithoutPasswordAsync(ctx, db, user.Id, ct)) return user;
         if (!auth.VerifyPassword(password, user.PasswordHash))
         {
             ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Password is incorrect.")}");
             return null;
         }
         return user;
+    }
+
+    /// <summary>
+    /// True when the signed-in user may confirm a two-step change without
+    /// their password: the account has a Microsoft sign-in linked and the
+    /// session proved a second factor within the organisation's step-up
+    /// window. An account created on first Microsoft sign-in has a random
+    /// password nobody knows, so without this it could turn on an
+    /// authenticator app but never turn it off again (#1259). A fresh step-up
+    /// is a stronger proof than the password it stands in for. Accounts with
+    /// no Microsoft link keep the password check alone.
+    /// </summary>
+    internal static async Task<bool> MayConfirmWithoutPasswordAsync(
+        HttpContext ctx, AppDbContext db, int userId, CancellationToken ct)
+    {
+        var tools = ctx.RequestServices.GetRequiredService<Services.Tools.ToolEnablement>();
+        if (!await tools.IsFreshAsync(ctx.User, ct)) return false;
+        // Filtered: the signed-in user's own links, inside their org.
+        return await db.UserExternalLogins.AsNoTracking()
+            .AnyAsync(l => l.UserId == userId && l.Provider == EntraSignInService.ProviderName, ct);
     }
 }

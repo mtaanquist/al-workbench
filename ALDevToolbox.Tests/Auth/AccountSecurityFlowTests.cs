@@ -165,6 +165,71 @@ public sealed class AccountSecurityFlowTests : IDisposable
         attempts.Count(a => a is not null).Should().BeLessThanOrEqualTo(AuthService.MaxMfaAttempts);
     }
 
+    [Fact]
+    public async Task A_reset_or_sign_in_link_request_does_not_lift_the_mfa_throttle()
+    {
+        // Issuing either link records a success row; that used to end the
+        // run of failures, so someone with the password could interleave
+        // requests and keep guessing (#1259).
+        await SeedMfaUserAsync(5350, "mfathrottle6@example.com");
+        await using var ctx = _db.NewContext();
+        var auth = NewAuth(ctx);
+        var resets = new PasswordResetService(ctx, auth, _clock, _db.OpenIddictTokens);
+        for (var i = 0; i < AuthService.MaxMfaAttempts; i++)
+            await auth.TryReserveMfaAttemptAsync(5350, "127.0.0.1", default);
+
+        _clock.Advance(TimeSpan.FromSeconds(1));
+        (await resets.CreatePasswordResetTokenAsync("mfathrottle6@example.com", "127.0.0.1")).Should().NotBeNull();
+        (await auth.TryReserveMfaAttemptAsync(5350, "127.0.0.1", default)).Should().BeNull();
+
+        _clock.Advance(TimeSpan.FromSeconds(1));
+        (await resets.CreateMagicLoginTokenAsync("mfathrottle6@example.com", "127.0.0.1")).Should().NotBeNull();
+        (await auth.TryReserveMfaAttemptAsync(5350, "127.0.0.1", default)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Successful_sign_ins_from_one_address_do_not_use_up_its_login_limit()
+    {
+        // An office behind one address: thirty good sign-ins must not lock
+        // the next person out (#1259). Each user signs in once, so the
+        // per-email limit never comes into it.
+        const int people = AuthService.MaxAttemptsPerIp + 1;
+        await using (var seed = _db.NewContext())
+        {
+            var hash = NewAuth(seed).HashPassword("verylongpassword12345");
+            for (var i = 0; i < people; i++)
+            {
+                seed.Users.Add(new User
+                {
+                    Id = 5500 + i, OrganizationId = TestDb.DefaultOrgId, Email = $"office{i}@example.com",
+                    PasswordHash = hash, DisplayName = "Office", Role = UserRole.User,
+                    Status = UserStatus.Active, CreatedAt = _clock.GetUtcNow().UtcDateTime,
+                });
+            }
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var auth = NewAuth(ctx);
+        for (var i = 0; i < people; i++)
+        {
+            var (outcome, _) = await auth.TryLoginAsync($"office{i}@example.com", "verylongpassword12345", "203.0.113.7");
+            outcome.Should().Be(LoginOutcome.Success, $"sign-in {i + 1} from the office address");
+        }
+    }
+
+    [Fact]
+    public async Task Failed_sign_ins_from_one_address_still_use_up_its_login_limit()
+    {
+        await using var ctx = _db.NewContext();
+        var auth = NewAuth(ctx);
+        for (var i = 0; i < AuthService.MaxAttemptsPerIp; i++)
+            await auth.TryLoginAsync($"nobody{i}@example.com", "wrong-password-123", "203.0.113.8");
+
+        var (outcome, _) = await auth.TryLoginAsync("nobody-else@example.com", "wrong-password-123", "203.0.113.8");
+        outcome.Should().Be(LoginOutcome.RateLimited);
+    }
+
     private async Task SeedMfaUserAsync(int id, string email)
     {
         await using var seed = _db.NewContext();

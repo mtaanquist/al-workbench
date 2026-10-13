@@ -150,10 +150,14 @@ public sealed class AccountAdministrationTests : IDisposable
 
         await using (var ctx = _db.NewContext()) await NewUserAdmin(ctx).DisableUserAsync(subjectId, orgId);
 
-        (await tokens.GetStatusAsync((await tokens.FindByIdAsync((await tokens.GetIdAsync(token))!))!))
+        // Read back through a fresh context: the revoke is one set-based UPDATE
+        // (#1259), which the manager's own tracked copy of the token doesn't see.
+        var tokenId = await tokens.GetIdAsync(token);
+        await using var read = _db.NewContext();
+        (await read.Set<OpenIddict.EntityFrameworkCore.Models.OpenIddictEntityFrameworkCoreToken>().AsNoTracking()
+                .SingleAsync(t => t.Id == tokenId)).Status
             .Should().Be(OpenIddict.Abstractions.OpenIddictConstants.Statuses.Revoked);
 
-        await using var read = _db.NewContext();
         var now = _clock.GetUtcNow().UtcDateTime;
         (await read.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == subjectId)).CredentialsChangedAt
             .Should().Be(now, "CookieSessionRevalidation drops sessions that started before this");
