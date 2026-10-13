@@ -80,8 +80,8 @@ public sealed class ReleaseComparisonService
         var leftModules = await LoadModuleCompareRowsAsync(leftReleaseId, ct);
         var rightModules = await LoadModuleCompareRowsAsync(rightReleaseId, ct);
 
-        var leftByApp = leftModules.ToDictionary(m => m.AppId);
-        var rightByApp = rightModules.ToDictionary(m => m.AppId);
+        var leftByApp = OneModulePerApp(leftModules);
+        var rightByApp = OneModulePerApp(rightModules);
 
         var added = new List<ModuleCompareEntry>();
         var removed = new List<ModuleCompareEntry>();
@@ -222,6 +222,22 @@ public sealed class ReleaseComparisonService
 
         return (added, removed, changed);
     }
+
+    /// <summary>
+    /// Keys a release's modules by app. A release can hold two versions of one app
+    /// (an amend accepts a newer one beside the old), so the higher version wins,
+    /// then the newer module: the same pick the chain queries make
+    /// (<see cref="ReleaseAncestrySql.WinningModules"/>), and a compare that used
+    /// to throw on the duplicate key (#1224).
+    /// </summary>
+    private static Dictionary<Guid, ModuleCompareRow> OneModulePerApp(List<ModuleCompareRow> modules)
+        => modules
+            .GroupBy(m => m.AppId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(m => Version.TryParse(m.Version, out var v) ? v : null)
+                      .ThenByDescending(m => m.ModuleId)
+                      .First());
 
     private Task<List<ModuleCompareRow>> LoadModuleCompareRowsAsync(int releaseId, CancellationToken ct)
         => _db.OeModules.AsNoTracking()
