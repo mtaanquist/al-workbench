@@ -754,6 +754,39 @@ public sealed class ObjectExplorerServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task SearchObjectsInReleaseAsync_ranks_before_the_cap_so_the_exact_name_is_not_cut()
+    {
+        // #1225: the cap used to cut the Kind-ordered rows before ranking, so
+        // codeunits (and enums, pages...) filled the page and table "Item" never
+        // made it in. Ranking now happens in the database first.
+        var releaseId = await SeedSingleReleaseAsync();
+        await using (var write = _db.NewContext())
+        {
+            var moduleId = await write.OeModules.Where(m => m.ReleaseId == releaseId).Select(m => m.Id).FirstAsync();
+            OeModuleObject Obj(string kind, int id, string name) => new()
+            {
+                OrganizationId = TestDb.DefaultOrgId, ModuleId = moduleId, Kind = kind, ObjectId = id, Name = name, LineNumber = 1,
+            };
+            for (var i = 0; i < 5; i++)
+            {
+                write.OeModuleObjects.Add(Obj("codeunit", 9000300 + i, $"Item Jnl.-Post {i}"));
+                write.OeModuleObjects.Add(Obj("codeunit", 9000400 + i, $"Subitem Handler {i}"));
+            }
+            write.OeModuleObjects.Add(Obj("table", 9000500, "Item"));
+            await write.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var hits = await NewSearch(read).SearchObjectsInReleaseAsync(releaseId,
+            new ObjectListFilter(Search: "item"), moduleId: null, namespacePrefix: null, take: 6);
+
+        hits.Should().HaveCount(6);
+        hits[0].Name.Should().Be("Item", "the exact name ranks first, whatever its kind");
+        hits.Skip(1).Should().OnlyContain(h => h.Name.StartsWith("Item Jnl."),
+            "word-start hits fill the rest of the page ahead of mid-word ones");
+    }
+
+    [Fact]
     public async Task SearchObjectsInReleaseAsync_pascal_case_boundaries_count_as_word_boundaries()
     {
         // Identifier-style names ("SalesHeader") have no separator, but

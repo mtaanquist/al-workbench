@@ -334,10 +334,15 @@ internal static class ObjectSearchRanking
     /// <summary>
     /// Materialises the filtered query under the legacy (Kind, ObjectId,
     /// Name) DB order — that order remains the result contract when no
-    /// search is supplied — and, when search tokens are present, re-ranks
-    /// the page in memory so word-boundary hits float above mid-word hits.
-    /// The in-memory pass is bounded by <paramref name="take"/>, so the
-    /// extra work is small even on releases with thousands of objects.
+    /// search is supplied — and, when search tokens are present, ranks before
+    /// the cap and again after it.
+    /// <para>The cap has to come after a ranking step: cutting the Kind-ordered
+    /// rows first let codeunits, enums and pages fill the page before a single
+    /// table, so searching "item" on the Base Application never showed table 27
+    /// "Item" (#1225). So the database orders by a coarse relevance
+    /// (<see cref="RelevanceInDatabase"/>) before the <c>Take</c>, and the page
+    /// is then re-ranked in memory with the finer rules SQL can't express
+    /// cheaply (PascalCase boundaries, earliness).</para>
     /// </summary>
     public static async Task<List<ReleaseObjectMatch>> ExecuteAndRankAsync(
         IQueryable<OeModuleObject> q,
@@ -345,8 +350,11 @@ internal static class ObjectSearchRanking
         int take,
         CancellationToken ct)
     {
-        var rows = await q
-            .OrderBy(o => o.Kind).ThenBy(o => o.ObjectId).ThenBy(o => o.Name)
+        var ordered = tokens.Count == 0
+            ? q.OrderBy(o => o.Kind)
+            : q.OrderByDescending(RelevanceInDatabase(tokens)).ThenBy(o => o.Kind);
+        var rows = await ordered
+            .ThenBy(o => o.ObjectId).ThenBy(o => o.Name)
             .Take(take)
             .Select(o => new ReleaseObjectMatch(
                 o.Id, o.Kind, o.ObjectId, o.Name, o.Namespace,
@@ -359,15 +367,69 @@ internal static class ObjectSearchRanking
         if (tokens.Count == 0)
             return rows;
 
+        var phrase = string.Join(' ', tokens);
         return rows
-            .Select(r => (Row: r, Score: ScoreNameMatch(r.Name, tokens)))
-            .OrderByDescending(x => x.Score.BoundaryHits)
+            .Select(r => (Row: r,
+                Exact: string.Equals(r.Name, phrase, StringComparison.OrdinalIgnoreCase),
+                Score: ScoreNameMatch(r.Name, tokens)))
+            .OrderByDescending(x => x.Exact)
+            .ThenByDescending(x => x.Score.BoundaryHits)
             .ThenByDescending(x => x.Score.Earliness)
             .ThenBy(x => x.Row.Kind)
             .ThenBy(x => x.Row.ObjectId)
             .ThenBy(x => x.Row.Name)
             .Select(x => x.Row)
             .ToList();
+    }
+
+    /// <summary>
+    /// The relevance the database sorts by before the cap: a name equal to the
+    /// whole search outranks everything, then one point per token that starts
+    /// the name or a word in it (after a space, <c>.</c>, <c>-</c>, <c>_</c> or
+    /// <c>/</c>). A coarser cut of <see cref="ScoreNameMatch"/>, which still
+    /// orders the page afterwards.
+    /// </summary>
+    private static Expression<Func<OeModuleObject, int>> RelevanceInDatabase(IReadOnlyList<string> tokens)
+    {
+        var o = Expression.Parameter(typeof(OeModuleObject), "o");
+        var phrase = Exact(string.Join(' ', tokens));
+        Expression<Func<OeModuleObject, int>> exact = x => EF.Functions.ILike(x.Name, phrase, "\\") ? 100 : 0;
+        Expression score = new ParameterSwap(exact.Parameters[0], o).Visit(exact.Body);
+        foreach (var token in tokens)
+        {
+            var start = Prefix(token);
+            var escaped = ObjectSearchService.EscapeLike(token);
+            var afterSpace = "% " + escaped + "%";
+            var afterDot = "%." + escaped + "%";
+            var afterDash = "%-" + escaped + "%";
+            var afterUnderscore = "%\\_" + escaped + "%"; // the separator itself escaped
+            var afterSlash = "%/" + escaped + "%";
+            Expression<Func<OeModuleObject, int>> hit = x =>
+                EF.Functions.ILike(x.Name, start, "\\")
+                || EF.Functions.ILike(x.Name, afterSpace, "\\")
+                || EF.Functions.ILike(x.Name, afterDot, "\\")
+                || EF.Functions.ILike(x.Name, afterDash, "\\")
+                || EF.Functions.ILike(x.Name, afterUnderscore, "\\")
+                || EF.Functions.ILike(x.Name, afterSlash, "\\")
+                    ? 1 : 0;
+            score = Expression.Add(score, new ParameterSwap(hit.Parameters[0], o).Visit(hit.Body));
+        }
+        return Expression.Lambda<Func<OeModuleObject, int>>(score, o);
+    }
+
+    /// <summary>Rebinds a lambda body to another parameter, so per-token lambdas can be summed into one.</summary>
+    private sealed class ParameterSwap : ExpressionVisitor
+    {
+        private readonly ParameterExpression _from;
+        private readonly ParameterExpression _to;
+
+        public ParameterSwap(ParameterExpression from, ParameterExpression to)
+        {
+            _from = from;
+            _to = to;
+        }
+
+        protected override Expression VisitParameter(ParameterExpression node) => node == _from ? _to : node;
     }
 
     /// <summary>
