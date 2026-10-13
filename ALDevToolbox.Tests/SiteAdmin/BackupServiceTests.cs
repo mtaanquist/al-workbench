@@ -267,6 +267,88 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     /// <summary>
+    /// A restore rewinds the database but not the backups directory. The
+    /// stand-in pg_restore restores nothing, which is the extreme of a dump
+    /// taken by an older version: the schema has to come back from this
+    /// version's migrations (#1255), the inventory of backup files has to
+    /// survive (#1254), and the in-memory settings have to follow the restored
+    /// row rather than keep what was there before (#1255).
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_migrates_keeps_the_backup_inventory_and_reloads_settings()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var tool = WriteFakeTool("fake-pg-restore", "exit 0");
+
+        var restoredId = await AddBackupRowWithFileAsync();
+        int newerId;
+        await using (var ctx = _db.NewContext())
+        {
+            var user = new User
+            {
+                OrganizationId = TestDb.DefaultOrgId, Email = "admin@cronus.example", DisplayName = "CRONUS Admin",
+                PasswordHash = "x", Role = UserRole.Admin, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            };
+            ctx.Users.Add(user);
+            await ctx.SaveChangesAsync();
+            var newer = new Backup
+            {
+                FileName = "aldevtoolbox-20260515T000000000Z-adhoc" + BackupService.BackupFileSuffix,
+                FileSizeBytes = 15,
+                CreatedAt = _clock.GetUtcNow().UtcDateTime.AddDays(1),
+                CreatedByUserId = user.Id,
+                Kind = BackupKind.AdHoc,
+                IsPinned = true,
+                OffsiteObjectKey = "aldevtoolbox-20260515T000000000Z-adhoc.dump",
+            };
+            ctx.Backups.Add(newer);
+            ctx.PerTenantBackups.Add(new PerTenantBackup
+            {
+                OrganizationId = TestDb.DefaultOrgId, FileName = "default-20260515T000000Z-adhoc.tenant.zip",
+                FileSizeBytes = 1, CreatedAt = DateTime.UtcNow, Kind = BackupKind.AdHoc, SchemaVersion = 3,
+            });
+            ctx.PerTenantBackups.Add(new PerTenantBackup
+            {
+                OrganizationId = TestDb.OtherOrgId, FileName = "other-20260515T000000Z-adhoc.tenant.zip",
+                FileSizeBytes = 1, CreatedAt = DateTime.UtcNow, Kind = BackupKind.AdHoc, SchemaVersion = 3,
+            });
+            await ctx.SaveChangesAsync();
+            newerId = newer.Id;
+        }
+
+        var mcp = new ALDevToolbox.Services.Mcp.McpAvailabilityState();
+        var tools = new ALDevToolbox.Services.Tools.ToolAvailabilityState(mcp);
+        tools.Set([ALDevToolbox.Domain.Tools.ToolKey.Piper]);
+        var svc = NewService(_options with { PgRestorePath = tool }, mcp, tools);
+
+        await svc.RestoreAsync(restoredId);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var rows = await ctx.Backups.AsNoTracking().OrderBy(b => b.Id).ToListAsync();
+            rows.Select(b => b.Id).Should().Equal([restoredId, newerId],
+                "the restored backup and every newer one must still be listed");
+            var newer = rows.Single(b => b.Id == newerId);
+            newer.IsPinned.Should().BeTrue();
+            newer.OffsiteObjectKey.Should().Be("aldevtoolbox-20260515T000000000Z-adhoc.dump");
+            newer.CreatedByUserId.Should().BeNull("the creator does not exist in the restored database");
+
+            (await ctx.PerTenantBackups.AsNoTracking().Select(b => b.OrganizationId).ToListAsync())
+                .Should().Equal([TestDb.DefaultOrgId], "a snapshot whose organisation is not in the restored database has nowhere to go");
+
+            // The identity sequence is realigned past the re-inserted ids.
+            var fresh = new Backup { FileName = "after.dump", CreatedAt = DateTime.UtcNow, Kind = BackupKind.AdHoc };
+            ctx.Backups.Add(fresh);
+            await ctx.SaveChangesAsync();
+            fresh.Id.Should().BeGreaterThan(newerId);
+        }
+
+        tools.IsSiteEnabled(ALDevToolbox.Domain.Tools.ToolKey.Piper)
+            .Should().BeTrue("the in-memory tool toggles must follow the restored settings row");
+        _maintenance.IsActive.Should().BeFalse();
+    }
+
+    /// <summary>
     /// An ad-hoc backup cancelled mid-dump must stop pg_dump rather than leave
     /// it running unsupervised after the backup lock has been released, and
     /// must not leave the partial file behind. See issue #1213.
@@ -347,7 +429,10 @@ public sealed class BackupServiceTests : IDisposable
         }
     }
 
-    private BackupService NewService(BackupOptions? options = null)
+    private BackupService NewService(
+        BackupOptions? options = null,
+        ALDevToolbox.Services.Mcp.McpAvailabilityState? mcp = null,
+        ALDevToolbox.Services.Tools.ToolAvailabilityState? tools = null)
     {
         var ctx = _db.NewContextWithAudit(TestDb.NewAuditInterceptor());
         var config = new ConfigurationBuilder()
@@ -356,7 +441,10 @@ public sealed class BackupServiceTests : IDisposable
                 ["ConnectionStrings:DefaultConnection"] = ctx.Database.GetConnectionString(),
             })
             .Build();
+        var systemSettings = new SystemSettingsService(
+            ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, _clock,
+            mcpAvailability: mcp, toolAvailability: tools);
         return new BackupService(ctx, _db.OrgContext, _maintenance, config,
-            NullLogger<BackupService>.Instance, _clock, options ?? _options);
+            NullLogger<BackupService>.Instance, _clock, options ?? _options, systemSettings);
     }
 }
