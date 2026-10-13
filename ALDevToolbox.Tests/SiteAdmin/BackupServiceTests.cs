@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
@@ -225,7 +226,128 @@ public sealed class BackupServiceTests : IDisposable
             "maintenance mode must be lifted even when pg_restore fails");
     }
 
-    private BackupService NewService()
+    /// <summary>
+    /// The restore POST is bound to the browser request. If the SiteAdmin
+    /// closes the tab (or a proxy drops the long request) after the schema has
+    /// been dropped, maintenance mode must stay on and the restore must run to
+    /// the end, not hand a half-loaded database back to every user while an
+    /// orphaned pg_restore keeps writing. See issue #1213.
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_keeps_maintenance_on_until_pg_restore_finishes_when_the_caller_cancels()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var started = Path.Combine(_backupsDir, "restore-started");
+        var release = Path.Combine(_backupsDir, "restore-release");
+        // Stand-in pg_restore: announces itself, then waits until the test lets
+        // it finish (or the fixture directory goes away, so it never outlives the test).
+        var tool = WriteFakeTool("fake-pg-restore", $"""
+            : > '{started}'
+            while [ -d '{_backupsDir}' ] && [ ! -f '{release}' ]; do sleep 0.05; done
+            exit 0
+            """);
+        var backupId = await AddBackupRowWithFileAsync();
+        var svc = NewService(_options with { PgRestorePath = tool });
+        using var cts = new CancellationTokenSource();
+
+        var restore = svc.RestoreAsync(backupId, cts.Token);
+        await WaitForFileAsync(started);
+        _maintenance.IsActive.Should().BeTrue();
+
+        await cts.CancelAsync();
+        await Task.Delay(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
+
+        restore.IsCompleted.Should().BeFalse("the restore keeps going after the caller has gone away");
+        _maintenance.IsActive.Should().BeTrue("maintenance mode stays on while pg_restore is still running");
+
+        await File.WriteAllTextAsync(release, "", TestContext.Current.CancellationToken);
+        await restore.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        _maintenance.IsActive.Should().BeFalse("maintenance mode is lifted once pg_restore has exited");
+    }
+
+    /// <summary>
+    /// An ad-hoc backup cancelled mid-dump must stop pg_dump rather than leave
+    /// it running unsupervised after the backup lock has been released, and
+    /// must not leave the partial file behind. See issue #1213.
+    /// </summary>
+    [Fact]
+    public async Task CreateAsync_stops_pg_dump_and_removes_the_partial_file_when_cancelled()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_dump.");
+        var pidFile = Path.Combine(_backupsDir, "dump-pid");
+        // Stand-in pg_dump: creates the -f target (the last argument), records
+        // its pid, then becomes a long sleep that only a kill will end.
+        var tool = WriteFakeTool("fake-pg-dump", $"""
+            for a; do last="$a"; done
+            : > "$last"
+            echo $$ > '{pidFile}.tmp' && mv '{pidFile}.tmp' '{pidFile}'
+            exec sleep 300
+            """);
+        var svc = NewService(_options with { PgDumpPath = tool });
+        using var cts = new CancellationTokenSource();
+
+        var create = svc.CreateAsync(BackupKind.AdHoc, cts.Token);
+        await WaitForFileAsync(pidFile);
+        var pid = int.Parse((await File.ReadAllTextAsync(pidFile, TestContext.Current.CancellationToken)).Trim());
+
+        try
+        {
+            await cts.CancelAsync();
+            Func<Task> act = () => create.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            await act.Should().ThrowAsync<OperationCanceledException>();
+
+            Directory.Exists($"/proc/{pid}").Should().BeFalse("the cancelled pg_dump must not keep running");
+            Directory.GetFiles(_backupsDir, "*" + BackupService.BackupFileSuffix)
+                .Should().BeEmpty("the partial dump is removed");
+            await using var ctx = _db.NewContext();
+            (await ctx.Backups.AsNoTracking().AnyAsync(TestContext.Current.CancellationToken))
+                .Should().BeFalse();
+        }
+        finally
+        {
+            // Without the fix the stand-in would outlive the test by five minutes.
+            try { Process.GetProcessById(pid).Kill(); } catch { /* already gone */ }
+        }
+    }
+
+    private string WriteFakeTool(string name, string body)
+    {
+        var path = Path.Combine(_backupsDir, name);
+        File.WriteAllText(path, "#!/bin/sh\n" + body.Replace("\r\n", "\n") + "\n");
+        File.SetUnixFileMode(path,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        return path;
+    }
+
+    private async Task<int> AddBackupRowWithFileAsync()
+    {
+        const string fileName = "aldevtoolbox-20260514T000000000Z-adhoc" + BackupService.BackupFileSuffix;
+        await File.WriteAllTextAsync(Path.Combine(_backupsDir, fileName), "not a real dump");
+        await using var ctx = _db.NewContext();
+        var row = new Backup
+        {
+            FileName = fileName,
+            FileSizeBytes = 15,
+            CreatedAt = _clock.GetUtcNow().UtcDateTime,
+            Kind = BackupKind.AdHoc,
+        };
+        ctx.Backups.Add(row);
+        await ctx.SaveChangesAsync();
+        return row.Id;
+    }
+
+    private static async Task WaitForFileAsync(string path)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!File.Exists(path))
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException($"{path} never appeared.");
+            await Task.Delay(25, TestContext.Current.CancellationToken);
+        }
+    }
+
+    private BackupService NewService(BackupOptions? options = null)
     {
         var ctx = _db.NewContextWithAudit(TestDb.NewAuditInterceptor());
         var config = new ConfigurationBuilder()
@@ -235,6 +357,6 @@ public sealed class BackupServiceTests : IDisposable
             })
             .Build();
         return new BackupService(ctx, _db.OrgContext, _maintenance, config,
-            NullLogger<BackupService>.Instance, _clock, _options);
+            NullLogger<BackupService>.Instance, _clock, options ?? _options);
     }
 }
