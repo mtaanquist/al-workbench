@@ -37,8 +37,7 @@
                 <textarea id="piper-input" rows="10" class="textarea"
                           placeholder="@_inputPlaceholder"
                           spellcheck="false"
-                          @ref="_inputRef"
-                          @bind="Input" @bind:event="oninput"></textarea>
+                          @ref="_inputRef"></textarea>
                 <p class="field__hint piper-meta">@_inputMetaText</p>
             </div>
 
@@ -88,13 +87,13 @@
                     <Icon Name="copy" Width="14" Height="14" />
                     <span>@(_justCopied ? "Copied!" : "Copy result")</span>
                 </button>
-                <button type="button" class="btn" @onclick="SwapInputOutput"
+                <button type="button" class="btn" @onclick="SwapInputOutputAsync"
                         disabled="@string.IsNullOrEmpty(_output)"
                         title="Move the result back into the input box for chained transforms">
                     <Icon Name="arrow-up" Width="14" Height="14" />
                     <span>Use result as input</span>
                 </button>
-                <button type="button" class="btn" @onclick="ClearAll">
+                <button type="button" class="btn" @onclick="ClearAllAsync">
                     <Icon Name="trash-2" Width="14" Height="14" />
                     <span>Clear both fields</span>
                 </button>
@@ -270,7 +269,9 @@
         _module = await JS.InvokeAsync<IJSObjectReference>(
             "import", "./Components/Pages/Piper.razor.js");
         _selfRef = DotNetObjectReference.Create(this);
-        await _module.InvokeVoidAsync("init", _selfRef);
+        // The input box reports its value through the module rather than a
+        // bind: see OnLargeInputChanged for why.
+        await _module.InvokeVoidAsync("init", _selfRef, _inputRef);
 
         // Restore the last-used input mode from localStorage. Done after the
         // first render so the SSR pass doesn't depend on per-browser state.
@@ -309,6 +310,56 @@
             StateHasChanged();
         }
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// The input box's value, from <c>Piper.razor.js</c>, when it is short
+    /// enough to travel as an ordinary call argument.
+    /// </summary>
+    [JSInvokable]
+    public Task OnInputChanged(string value)
+    {
+        Input = value ?? string.Empty;
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// The input box's value when it is too long for an ordinary call. A
+    /// <c>@bind</c> sent the whole box as one SignalR message per keystroke, and
+    /// the hub drops the connection on any message over 32 KB - so pasting a few
+    /// thousand item numbers broke the page, and every keystroke after it
+    /// broke it again (issue #1253). A stream is sent in chunks under that
+    /// limit, so the hub's own limit stays where it is. The size cap is
+    /// <see cref="PiperTransform.MaxInputLength"/>, applied to the byte count
+    /// before any of the bytes are sent.
+    /// </summary>
+    [JSInvokable]
+    public async Task OnLargeInputChanged(IJSStreamReference value)
+    {
+        string text;
+        try
+        {
+            await using var stream = await value.OpenReadStreamAsync(maxAllowedSize: PiperTransform.MaxInputLength);
+            using var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
+            text = await reader.ReadToEndAsync();
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            _input = string.Empty;
+            _output = string.Empty;
+            _table = null;
+            _inputMetaText = $"Input is too large ({value.Length:N0} bytes). Trim it under {PiperTransform.MaxInputLength:N0} and try again.";
+            StateHasChanged();
+            return;
+        }
+        finally
+        {
+            await value.DisposeAsync();
+        }
+
+        Input = text;
+        StateHasChanged();
     }
 
     private void Transform()
@@ -441,7 +492,7 @@
         }
     }
 
-    private void SwapInputOutput()
+    private async Task SwapInputOutputAsync()
     {
         if (string.IsNullOrEmpty(_output)) return;
         // The piped result is a flat string, not a table - flipping back to
@@ -456,9 +507,10 @@
         }
         _input = _output;
         Transform();
+        await ShowInputAsync();
     }
 
-    private void ClearAll()
+    private async Task ClearAllAsync()
     {
         _input = "";
         _output = "";
@@ -468,6 +520,15 @@
         _inputPlaceholder = TextPlaceholder;
         _table = null;
         _selectedColumn = null;
+        await ShowInputAsync();
+    }
+
+    /// <summary>Puts the input back into the box after the page changed it; the box has no bind to do that.</summary>
+    private async Task ShowInputAsync()
+    {
+        if (_module is null) return;
+        try { await _module.InvokeVoidAsync("setInput", _inputRef, _input); }
+        catch (JSDisconnectedException) { }
     }
 
     public async ValueTask DisposeAsync()
