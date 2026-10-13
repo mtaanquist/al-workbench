@@ -107,6 +107,50 @@ public static class XliffTargetWriter
             originalXml.AsSpan(file.Index + file.Length));
     }
 
+    /// <summary>
+    /// Names the language a translation started from the generated <c>.g.xlf</c>
+    /// is in, when the file still says it is in its source language (issue
+    /// #1250). The Translator keeps the generated text as its base and only
+    /// remembers the language it was asked to translate into, so a copy
+    /// exported from it would otherwise declare <c>target-language="en-US"</c>
+    /// however much Danish it held.
+    ///
+    /// <para>Only a file whose target language is its source language (or is
+    /// missing) is touched, which is the generated file's signature: an
+    /// ordinary language file already names its language, and rewriting it
+    /// would break the byte-fidelity contract above. Returns the input
+    /// unchanged when <paramref name="language"/> is blank or is the source
+    /// language itself.</para>
+    /// </summary>
+    public static string NameTargetLanguageOfUntranslatedFile(string originalXml, string? language)
+    {
+        ArgumentNullException.ThrowIfNull(originalXml);
+        if (string.IsNullOrWhiteSpace(language)) return originalXml;
+        language = language.Trim();
+
+        var file = FileOpenTagRegex.Match(originalXml);
+        if (!file.Success) return originalXml;
+
+        var source = AttributeValue(file.Value, SourceLanguageAttrRegex);
+        if (source is null || string.Equals(source, language, StringComparison.OrdinalIgnoreCase)) return originalXml;
+        var target = AttributeValue(file.Value, TargetLanguageAttrRegex);
+        if (target is not null && !string.Equals(target, source, StringComparison.OrdinalIgnoreCase)) return originalXml;
+
+        return SetTargetLanguage(originalXml, language);
+    }
+
+    private static readonly Regex SourceLanguageAttrRegex = new(
+        "\\bsource-language\\s*=\\s*(?:\"[^\"]*\"|'[^']*')",
+        RegexOptions.Compiled);
+
+    private static string? AttributeValue(string tag, Regex attribute)
+    {
+        var match = attribute.Match(tag);
+        if (!match.Success) return null;
+        var raw = match.Value[(match.Value.IndexOf('=') + 1)..].Trim();
+        return raw.Length >= 2 ? raw[1..^1].Trim() : null;
+    }
+
     public static string ApplyEdits(string originalXml, IReadOnlyDictionary<string, TargetEdit> edits)
     {
         ArgumentNullException.ThrowIfNull(originalXml);

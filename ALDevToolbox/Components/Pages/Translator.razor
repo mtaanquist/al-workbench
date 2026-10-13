@@ -719,6 +719,7 @@ else
             <input type="hidden" name="FileName" id="tr-export-filename" />
             <input type="hidden" name="OriginalXml" id="tr-export-original" />
             <input type="hidden" name="Edits" id="tr-export-edits" />
+            <input type="hidden" name="TargetLanguage" id="tr-export-target-language" />
         </form>
     </div>
 }
@@ -774,7 +775,8 @@ else
         new("en-US", "English (US)"),
     };
 
-    private sealed class UnitVm
+    // Internal rather than private only so MarkCommitted can be tested.
+    internal sealed class UnitVm
     {
         public required string Id { get; init; }
         public required string Short { get; init; }
@@ -1360,7 +1362,14 @@ else
         _parseError = null;
         try
         {
-            var content = await RepoFiles.OpenAsync(repo.FullName, file.Path);
+            // While the language's pull request is open its branch is ahead of
+            // the default branch, and a save is compared against the file there;
+            // opening the default branch's copy would make every save a conflict
+            // until the pull request is merged (#1244).
+            var content = (!file.IsSource && !string.IsNullOrEmpty(file.Language)
+                    ? await RepoFiles.OpenOnTranslationBranchAsync(repo.FullName, file.Path, file.Language)
+                    : null)
+                ?? await RepoFiles.OpenAsync(repo.FullName, file.Path);
             if (content is null)
             {
                 _parseError = $"\"{file.FileName}\" is not in {repo.FullName} any more. "
@@ -1465,7 +1474,10 @@ else
         _repoSaving = true;
         try
         {
-            var xml = XliffTargetWriter.ApplyEdits(_repoOriginalXml, BuildEdits());
+            // What goes into this commit, kept so that afterwards only these
+            // units count as saved. The editor stays live while GitHub answers.
+            var committed = BuildEdits();
+            var xml = XliffTargetWriter.ApplyEdits(_repoOriginalXml, committed);
             if (_repoGeneratedPath is not null)
             {
                 // Started from the compiler's generated file, which says its
@@ -1480,8 +1492,8 @@ else
             // The repository now holds what the editor holds, so the next save
             // starts from this version rather than from the one first opened.
             _repoOriginalXml = xml;
-            foreach (var u in _units) u.Dirty = false;
-            SetUnsaved(false);
+            MarkCommitted(_units, committed);
+            SetUnsaved(DirtyCount() > 0);
 
             // Rebase the browser's copy on what was just committed and drop the
             // edit overlay with it. Without this an "Export a copy" after two
@@ -1491,6 +1503,9 @@ else
             {
                 await _module.InvokeVoidAsync("putBaseStream", _fileName, _sourceLang, _targetLang, saved);
             }
+            // Edits typed while the save was in flight are not in that base,
+            // so they go back into the overlay a refresh restores from.
+            if (_unsaved) PersistEditsSoon();
 
             _toast?.Show(
                 save.IsNewPullRequest
@@ -1537,6 +1552,27 @@ else
     }
 
     /// <summary>
+    /// Marks saved only the units whose text and state are still exactly what
+    /// <paramref name="committed"/> carried (issue #1249). A unit typed into
+    /// while the save was in flight keeps its newer text on screen, so it has
+    /// to stay unsaved: clearing every unit would leave it out of the next save
+    /// and let the tab close without a warning.
+    /// </summary>
+    internal static void MarkCommitted(IEnumerable<UnitVm> units, IReadOnlyDictionary<string, TargetEdit> committed)
+    {
+        foreach (var u in units)
+        {
+            if (u.Dirty
+                && committed.TryGetValue(u.Id, out var sent)
+                && string.Equals(sent.Target, u.Target, StringComparison.Ordinal)
+                && string.Equals(sent.State, u.State, StringComparison.Ordinal))
+            {
+                u.Dirty = false;
+            }
+        }
+    }
+
+    /// <summary>
     /// Somebody else changed the file after this session opened it. Nothing has
     /// been written, and the only two ways forward are honest ones: keep
     /// editing (and export a copy), or start again from what the repository
@@ -1556,8 +1592,10 @@ else
         if (!take) return;
 
         _repo = source.Repository;
+        // Named with the language so the reopen reads the translation branch,
+        // which is the version the save was compared against.
         await OpenFromRepositoryAsync(new RepositoryTranslationFile(
-            source.Path, source.FileName, string.Empty, null, IsSource: false));
+            source.Path, source.FileName, string.Empty, _targetLang, IsSource: false));
     }
 
     /// <summary>The line the pull request body carries about how far the translation has got.</summary>

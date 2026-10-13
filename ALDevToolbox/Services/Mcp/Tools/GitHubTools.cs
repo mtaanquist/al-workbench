@@ -191,7 +191,8 @@ public sealed class GitHubTools
         "was and the diff is the translations themselves. Naming a string the file does not carry is " +
         "refused, and nothing is written. The commit goes out in your name, onto a branch named for the " +
         "language, never onto the default branch; translating the same language again while its pull " +
-        "request is open adds a commit to that pull request rather than opening a second one. Starting " +
+        "request is open adds a commit to that pull request rather than opening a second one, and the " +
+        "file is then read from that pull request's branch so the earlier translations are kept. Starting " +
         "from the compiler's generated source file writes a new language file beside it instead of " +
         "changing the generated one. A file that changed in the repository since it was read is refused " +
         "rather than written over. Only repositories in the GitHub organisation your organisation has " +
@@ -222,9 +223,25 @@ public sealed class GitHubTools
 
         try
         {
-            var file = await _translations.OpenAsync(repoFullName, filePath, ct)
+            // The generated file belongs to the compiler, so a translation
+            // started from it is written beside it as a language file.
+            var startedFromSource = filePath.EndsWith(SourceFileSuffix, StringComparison.OrdinalIgnoreCase);
+            var savedPath = startedFromSource
+                ? $"{filePath[..^SourceFileSuffix.Length]}.{language}.xlf"
+                : filePath;
+
+            // While the language's pull request is open its branch is ahead of
+            // the default branch, and the save is compared against the file
+            // there - so a second round starts from that version. A language
+            // file started from the generated one exists only on that branch.
+            var onBranch = await _translations.OpenOnTranslationBranchAsync(repoFullName, savedPath, language, ct);
+            var file = onBranch
+                ?? await _translations.OpenAsync(repoFullName, filePath, ct)
                 ?? throw new McpException(
                     $"'{filePath}' is not in {repoFullName}. Call list_translation_files to see what is.");
+
+            // Creating the language file, rather than adding to one already there.
+            var creating = startedFromSource && onBranch is null;
 
             // Parse the file that was just read, so an id that is not in it is
             // reported as such rather than silently doing nothing: applying an
@@ -280,20 +297,15 @@ public sealed class GitHubTools
             // The generated source file says its target language is its source
             // language, because nothing in it is translated yet. A file written
             // from it is a language file and has to say which language.
-            var startedFromSource = filePath.EndsWith(SourceFileSuffix, StringComparison.OrdinalIgnoreCase);
-            if (startedFromSource
+            if (creating
                 || !string.Equals(parsed.TargetLanguage, language, StringComparison.OrdinalIgnoreCase))
             {
                 xml = XliffTargetWriter.SetTargetLanguage(xml, language);
             }
 
-            // Where it lands, and which version it is based on. The generated
-            // file belongs to the compiler, so a translation started from it is
-            // written beside it as a file that does not exist yet - and a write
-            // that quotes no sha is the one that says so.
-            var savedPath = startedFromSource
-                ? $"{filePath[..^SourceFileSuffix.Length]}.{language}.xlf"
-                : filePath;
+            // Which version the write is based on. A language file being
+            // created does not exist yet, and a write that quotes no sha is the
+            // one that says so.
             // The repository as the one gate hands it over - the page passes the
             // one its picker offered, and this is the same object from the same
             // resolver. Opening the file above has already ruled out every
@@ -307,7 +319,7 @@ public sealed class GitHubTools
                 repo,
                 savedPath,
                 savedPath[(savedPath.LastIndexOf('/') + 1)..],
-                BaseSha: startedFromSource ? null : file.Sha);
+                BaseSha: creating ? null : file.Sha);
 
             var save = await _translations.SaveAsync(
                 source, language, xml,

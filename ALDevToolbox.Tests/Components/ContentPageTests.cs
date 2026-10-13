@@ -139,6 +139,26 @@ public sealed class ContentPageTests : IDisposable
     }
 
     /// <summary>
+    /// The Claude Code command has to be one the CLI accepts. It used to pass
+    /// the address as <c>--url</c>, which the CLI does not have, so every copy
+    /// failed and no server was registered (#1248). The address is a
+    /// positional argument after the server name.
+    /// </summary>
+    [Fact]
+    public void The_claude_code_command_passes_the_address_the_way_the_cli_takes_it()
+    {
+        _http.HttpContext!.Request.Scheme = "https";
+        _http.HttpContext!.Request.Host = new HostString("workbench.cronus.example");
+        Navigate("/docs/mcp?client=claude-code");
+        var page = _ctx.Render<McpDocs>();
+
+        var snippet = page.Find("#mcp-snippet").TextContent;
+        snippet.Should().NotContain("--url");
+        System.Text.RegularExpressions.Regex.Replace(snippet, @"\s*\\\s*\n\s*", " ").Should().StartWith(
+            "claude mcp add --transport http aldevtoolbox https://workbench.cronus.example/mcp --header");
+    }
+
+    /// <summary>
     /// A hand-typed or stale ?client= must not throw. The page looks the guide
     /// up with First(), so an unmatched key would be an unhandled exception on
     /// an anonymous page - reachable by anyone editing the address bar.

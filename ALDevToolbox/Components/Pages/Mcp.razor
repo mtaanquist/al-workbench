@@ -519,5 +519,5 @@
         """;
 
     private static string ClaudeCodeSnippet(string url, string token) =>
-        $"claude mcp add aldevtoolbox \\\n  --transport http \\\n  --url {url} \\\n  --header \"Authorization: Bearer {token}\"";
+        $"claude mcp add --transport http aldevtoolbox \\\n  {url} \\\n  --header \"Authorization: Bearer {token}\"";
 }

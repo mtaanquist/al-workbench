@@ -76,6 +76,28 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
         rows.Should().ContainSingle().Which.CustomerName.Should().Be("CRONUS A/S");
     }
 
+    [Fact]
+    public async Task A_deleted_recipe_is_not_found_rather_than_a_server_error()
+    {
+        // It used to build the ZIP and then fail recording the download, so a
+        // stale tab got a 500 instead of being told the recipe is gone (#1251).
+        await SeedUserAsync();
+        var recipeId = await SeedRecipeAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Recipes.SingleAsync(r => r.Id == recipeId)).DeletedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory);
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/cookbook/{recipeId}/download");
+        request.Headers.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private static string ReadEntry(ZipArchiveEntry entry)

@@ -69,6 +69,13 @@ internal static class TranslatorEndpoints
             }
 
             var result = XliffTargetWriter.ApplyEdits(originalXml, edits);
+            // A translation started from the generated .g.xlf keeps the
+            // generated text as its base, which still says its target language
+            // is the source one. The language picked in the Translator comes
+            // along so the copy says what it is (#1250) - and so the memory
+            // below learns the pairs under that language, not English.
+            result = XliffTargetWriter.NameTargetLanguageOfUntranslatedFile(
+                result, form["TargetLanguage"].ToString());
 
             // Best-effort: feed the finished translations into the memory so
             // they surface next time. Never let a memory hiccup fail the

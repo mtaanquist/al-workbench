@@ -146,6 +146,11 @@ export async function exportNow(fileName, editsJson) {
     form.querySelector("#tr-export-filename").value = fileName;
     form.querySelector("#tr-export-original").value = rec.originalXml;
     form.querySelector("#tr-export-edits").value = editsJson;
+    // The language being translated into. The server only uses it to name the
+    // language of a file still marked as untranslated (one started from the
+    // generated .g.xlf); every other file already says its language.
+    const lang = form.querySelector("#tr-export-target-language");
+    if (lang) lang.value = rec.targetLang || "";
     form.submit();
     return true;
 }
