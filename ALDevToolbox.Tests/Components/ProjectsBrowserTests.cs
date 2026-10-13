@@ -450,4 +450,32 @@ public sealed class ProjectsBrowserTests : IDisposable
             cut.Markup.Should().NotContain("Annette Hill").And.NotContain("NAV 2018");
         });
     }
+
+    /// <summary>
+    /// A search narrows the one list the page already read for its total (#1263): it
+    /// used to read every solution twice, once for the count and once for the rows.
+    /// The two renders must cost the same number of queries.
+    /// </summary>
+    [Fact]
+    public async Task A_search_filters_the_list_without_reading_it_twice()
+    {
+        await SeedProjectAsync("CRONUS Denmark", status: null, bcVersion: null);
+        await SeedProjectAsync("CRONUS Norway", status: null, bcVersion: null);
+        _db.WaitForQueriesToSettle();
+
+        var before = _db.CommandTracker.Total;
+        var all = _ctx.Render<ProjectsBrowser>();
+        all.WaitForAssertion(() => all.FindAll("tbody tr").Should().HaveCount(2));
+        _db.WaitForQueriesToSettle();
+        var unfiltered = _db.CommandTracker.Total - before;
+
+        RequestWith("?q=norway");
+        before = _db.CommandTracker.Total;
+        var cut = _ctx.Render<ProjectsBrowser>();
+        cut.WaitForAssertion(() => cut.FindAll("tbody tr").Should().ContainSingle()
+            .Which.TextContent.Should().Contain("CRONUS Norway"));
+        _db.WaitForQueriesToSettle();
+
+        (_db.CommandTracker.Total - before).Should().Be(unfiltered, "the search filters in memory");
+    }
 }

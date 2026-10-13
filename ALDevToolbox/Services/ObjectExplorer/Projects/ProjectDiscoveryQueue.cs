@@ -17,13 +17,18 @@ namespace ALDevToolbox.Services.ObjectExplorer.Projects;
 /// any queued/running entry rather than stranding a "discovering" flag. The flag
 /// also dedupes: enqueuing a project that's already queued/running is a no-op, so
 /// several pipeline editors refreshing the same project coalesce into one clone.
+/// A request for a project whose discovery is already running is held and run once
+/// it finishes, so a repository added mid-run is not missed.
 /// </para>
 /// </summary>
 public sealed class ProjectDiscoveryQueue : JobQueue<ProjectDiscoveryJob, int>
 {
     // A modest bound: discovery is cheap (a blobless app.json clone) and the
     // worker processes one project at a time, so a deep backlog isn't expected.
-    public ProjectDiscoveryQueue() : base(capacity: 64, keySelector: job => job.ProjectId) { }
+    // A request that lands while the solution's discovery is running is about a
+    // repository list the running clone may already have read, so it runs again
+    // afterwards rather than being folded in (#1263).
+    public ProjectDiscoveryQueue() : base(capacity: 64, keySelector: job => job.ProjectId, rerunIfRequestedWhileRunning: true) { }
 }
 
 /// <summary>

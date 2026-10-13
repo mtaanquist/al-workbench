@@ -714,6 +714,67 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         });
     }
 
+    /// <summary>
+    /// "Compare builds" keeps the person's pick when the page re-reads its data (#1263):
+    /// the poll while a build runs, or a toggle, used to put the two newest builds back
+    /// every time. The preview toggle stands in for a poll tick - both go through the
+    /// same reload.
+    /// </summary>
+    [Fact]
+    public async Task A_reload_keeps_the_builds_chosen_for_comparison()
+    {
+        var seed = await SeedAsync();
+        int oldestRelease;
+        await using (var ctx = _db.NewContext())
+        {
+            var now = DateTime.UtcNow;
+            foreach (var buildId in new[] { seed.OlderBuildId, seed.NewerBuildId })
+            {
+                var release = NewReadyRelease();
+                ctx.OeReleases.Add(release);
+                await ctx.SaveChangesAsync();
+                var build = await ctx.OeProjectBuilds.SingleAsync(b => b.Id == buildId);
+                build.ReleaseId = release.Id;
+            }
+            var oldest = NewReadyRelease();
+            ctx.OeReleases.Add(oldest);
+            await ctx.SaveChangesAsync();
+            oldestRelease = oldest.Id;
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, PipelineId = seed.PipelineId,
+                ReleaseId = oldest.Id, Status = ProjectBuildStatus.Ready, StartedAt = now.AddDays(-5), FinishedAt = now.AddDays(-5),
+            });
+            // A preview build, so the page offers the "Show preview builds" toggle that reloads it.
+            ctx.OeProjectBuilds.Add(new OeProjectBuild
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = seed.ProjectId, PipelineId = seed.PipelineId,
+                BcTarget = ProjectBuildTarget.NextMinor, Status = ProjectBuildStatus.Failed,
+                StartedAt = now.AddDays(-6), FinishedAt = now.AddDays(-6),
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = RenderPage(seed);
+        cut.WaitForAssertion(() => cut.FindAll("#pb-cmp-left option").Should().HaveCount(3));
+        cut.Find("#pb-cmp-left").Change(oldestRelease.ToString());
+
+        cut.Find(".card__head .check input").Change(true);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".card__head .check").ClassList.Should().Contain("is-checked");
+            cut.Find("#pb-cmp-left").GetAttribute("value").Should().Be(oldestRelease.ToString());
+        });
+    }
+
+    private static OeRelease NewReadyRelease() => new()
+    {
+        OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS", BcVersion = "",
+        DedupKey = Guid.NewGuid().ToString(), Kind = OeRelease.ProjectBuildKind, Status = "ready",
+        ImportedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow,
+    };
+
     private sealed class UnusedTokenSource : IDeliveryTokenSource
     {
         public Task<BcDeliveryContext> AcquireDeliveryContextAsync(int projectId, CancellationToken ct = default)

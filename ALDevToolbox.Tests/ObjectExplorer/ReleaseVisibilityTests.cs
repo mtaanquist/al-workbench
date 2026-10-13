@@ -606,7 +606,7 @@ public sealed class ReleaseVisibilityTests : IDisposable
             var artifacts = new ArtifactService(ctx, Access(ctx));
             await ((Func<Task>)(() => artifacts.GetArtifactBytesAsync(buildId, artifactId)))
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
-            await ((Func<Task>)(() => artifacts.GetAllArtifactBytesAsync(buildId)))
+            await ((Func<Task>)(() => artifacts.ListArtifactRowsAsync(buildId)))
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
             await ((Func<Task>)(() => artifacts.GetRawLogAsync(buildId)))
                 .Should().ThrowAsync<ProjectAccessDeniedException>();

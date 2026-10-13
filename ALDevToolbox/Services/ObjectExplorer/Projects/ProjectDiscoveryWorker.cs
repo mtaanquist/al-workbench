@@ -50,6 +50,8 @@ public sealed class ProjectDiscoveryWorker : QueueDrainWorker<ProjectDiscoveryJo
         await pipelines.RefreshGeneratedNamesAsync(job.ProjectId, ct).ConfigureAwait(false);
     }
 
+    protected override void OnJobStarting(ProjectDiscoveryJob job) => _queue.Start(job.ProjectId);
+
     protected override void OnJobFinished(ProjectDiscoveryJob job) => _queue.Complete(job.ProjectId);
 
     protected override string Describe(ProjectDiscoveryJob job) => $"ProjectId={job.ProjectId}";

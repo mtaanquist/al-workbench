@@ -43,6 +43,7 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
             Heartbeat.BeginActive();
             try
             {
+                OnJobStarting(job);
                 await RunJobAsync(job, stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -65,6 +66,12 @@ public abstract class QueueDrainWorker<TJob> : BackgroundService
 
     /// <summary>Runs one job. Implementations enter the job's org scope and its own DI scope.</summary>
     protected abstract Task RunJobAsync(TJob job, CancellationToken ct);
+
+    /// <summary>
+    /// Called as each job is picked up, before <see cref="RunJobAsync"/>. A queue that
+    /// re-runs a key requested while it ran marks it running here.
+    /// </summary>
+    protected virtual void OnJobStarting(TJob job) { }
 
     /// <summary>
     /// Called in <c>finally</c> after every job, success or failure. Queues with a

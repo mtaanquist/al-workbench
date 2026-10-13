@@ -1197,10 +1197,14 @@
         _latestDetail = s.LatestDetail;
         _comparable = s.Comparable;
         // Preselect the pipeline's own two newest builds; the nightly preview check's
-        // builds stay in the lists, labelled, but are not the default comparison.
+        // builds stay in the lists, labelled, but are not the default comparison. Only
+        // when the person's own choice is gone: this runs on every poll while a build
+        // runs, and a pick that snapped back every 2.5 s could never be compared (#1263).
         var defaults = _comparable.Where(c => !ProjectBuildTarget.IsPreview(c.BcTarget)).ToList();
         if (defaults.Count < 2) defaults = _comparable;
-        if (defaults.Count >= 2)
+        var choiceStands = _comparable.Any(c => c.ReleaseId == _compareLeft)
+            && _comparable.Any(c => c.ReleaseId == _compareRight);
+        if (!choiceStands && defaults.Count >= 2)
         {
             _compareLeft = defaults[0].ReleaseId;
             _compareRight = defaults[1].ReleaseId;

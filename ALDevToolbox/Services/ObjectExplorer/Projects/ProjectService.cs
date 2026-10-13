@@ -1034,10 +1034,12 @@ public sealed class ProjectService
             staged[name] = u.Content;
         }
 
-        // Replace same-named rows so a re-upload overwrites in place.
-        var names = staged.Keys.ToList();
+        // Replace same-named rows so a re-upload overwrites in place. Case-insensitive,
+        // like the batch above: "Foo.app" after "foo.app" is the same package, and two
+        // rows would hand builds the same app twice (#1263).
+        var names = staged.Keys.Select(n => n.ToLowerInvariant()).ToList();
         var existing = await _db.OeProjectSymbols
-            .Where(s => s.ProjectId == projectId && names.Contains(s.FileName))
+            .Where(s => s.ProjectId == projectId && names.Contains(s.FileName.ToLower()))
             .ToListAsync(ct);
         if (existing.Count > 0) _db.OeProjectSymbols.RemoveRange(existing);
 
