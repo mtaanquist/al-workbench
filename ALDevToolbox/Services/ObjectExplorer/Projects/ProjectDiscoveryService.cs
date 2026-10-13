@@ -55,7 +55,7 @@ public sealed class ProjectDiscoveryService
             .FirstOrDefaultAsync(ct).ConfigureAwait(false)
             ?? throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["Discovery"] = "This project no longer exists.",
+                ["Discovery"] = "This solution no longer exists.",
             });
 
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct).ConfigureAwait(false);

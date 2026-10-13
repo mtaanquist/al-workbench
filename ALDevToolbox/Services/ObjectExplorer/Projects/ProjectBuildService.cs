@@ -902,7 +902,7 @@ public sealed class ProjectBuildService
     {
         if (project.Repositories.Count == 0)
         {
-            return (Array.Empty<DiscoveredExtension>(), "Add at least one repository to this project before building.");
+            return (Array.Empty<DiscoveredExtension>(), "Add at least one repository to this solution before building.");
         }
 
         var gitPath = NullIfBlank(Environment.GetEnvironmentVariable("GIT_PATH")) ?? "git";
@@ -2710,7 +2710,7 @@ public sealed class ProjectBuildService
         if (string.IsNullOrWhiteSpace(projectCountry))
         {
             throw new InvalidOperationException(
-                "This project doesn't have a country code yet. Set one under the project's " +
+                "This solution doesn't have a country code yet. Set one under the solution's " +
                 "settings (e.g. 'dk', or 'w1' for the worldwide base) so the right Microsoft " +
                 "symbols can be resolved, then rebuild.");
         }

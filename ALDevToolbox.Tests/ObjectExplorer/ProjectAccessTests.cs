@@ -206,8 +206,9 @@ public sealed class ProjectAccessTests : IDisposable
         await using var ctx = _db.NewContext();
         var act = () => Svc(ctx).SetAccessAsync(projectId, ProjectVisibility.Public, new[] { teamId });
 
-        (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors.Should().ContainKey("Teams");
+        var errors = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors;
+        errors.Should().ContainKey("Teams");
+        errors["Teams"].Should().StartWith("A public solution is open to everyone");
     }
 
     [Fact]
@@ -274,6 +275,8 @@ public sealed class ProjectAccessTests : IDisposable
             var thrown = (await act.Should().ThrowAsync<PlanValidationException>()).Which;
             thrown.Errors.Should().ContainKey("Name");
             thrown.Errors["Name"].Should().Contain("CRONUS Denmark");
+            thrown.Errors["Name"].Should().Contain("the only team on the solution")
+                .And.NotContain("project", "a person reads this refusal, and they call it a solution");
         }
 
         await using (var verify = _db.NewContext())

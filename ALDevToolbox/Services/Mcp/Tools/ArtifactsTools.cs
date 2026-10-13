@@ -151,7 +151,7 @@ public sealed class ArtifactsTools
         if (leftProject != rightProject)
         {
             throw new McpException(
-                "Both builds must belong to the same project. compare_solution_builds is project-scoped; use compare_releases for cross-release diffs.");
+                "Both builds must belong to the same solution. compare_solution_builds compares builds within one solution; use compare_releases for cross-release diffs.");
         }
 
         var set = await _comparison.CompareReleaseObjectsAsync(

@@ -281,8 +281,8 @@ public sealed class TeamService
         if (blocking.Count > 0)
         {
             throw Validation("Name", blocking.Count == 1
-                ? $"{team.Name} is the only team on the project {blocking[0]}. Give that project another team, or make it public, then delete this team."
-                : $"{team.Name} is the only team on these projects: {string.Join(", ", blocking)}. Give them another team, or make them public, then delete this team.");
+                ? $"{team.Name} is the only team on the solution {blocking[0]}. Give that solution another team, or make it public, then delete this team."
+                : $"{team.Name} is the only team on these solutions: {string.Join(", ", blocking)}. Give them another team, or make them public, then delete this team.");
         }
 
         // Load the membership so the cascade runs through the change tracker and
