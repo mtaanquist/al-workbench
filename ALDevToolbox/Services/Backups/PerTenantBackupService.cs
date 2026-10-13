@@ -11,6 +11,7 @@ using Npgsql;
 
 using ALDevToolbox.Services.Configuration;
 using ALDevToolbox.Services.Organizations;
+using ALDevToolbox.Services.Operations;
 
 namespace ALDevToolbox.Services.Backups;
 
@@ -84,6 +85,7 @@ public sealed class PerTenantBackupService
     private readonly TimeProvider _clock;
     private readonly string _connectionString;
     private readonly string _backupsRoot;
+    private readonly DeploymentIdentity? _deployment;
 
     public PerTenantBackupService(
         AppDbContext db,
@@ -95,7 +97,10 @@ public sealed class PerTenantBackupService
         TimeProvider clock,
         // Optional so the tests that build this service by hand keep compiling.
         // In production DI it is always the instance registered from configuration.
-        BackupOptions? options = null)
+        BackupOptions? options = null,
+        // Optional for the same reason. Stamped into every manifest and checked
+        // on restore, so a snapshot another deployment took is refused (#1257).
+        DeploymentIdentity? deployment = null)
     {
         _db = db;
         _orgContext = orgContext;
@@ -107,6 +112,7 @@ public sealed class PerTenantBackupService
             ?? throw new InvalidOperationException(
                 "ConnectionStrings:DefaultConnection is required for PerTenantBackupService.");
         _backupsRoot = (options ?? new BackupOptions()).Directory;
+        _deployment = deployment;
     }
 
     /// <summary>Absolute path to the per-tenant subdirectory for the given org slug.</summary>
@@ -254,6 +260,7 @@ public sealed class PerTenantBackupService
                 organization_name = org.Name,
                 created_at = timestamp,
                 tables = includedTables,
+                deployment_id = _deployment?.Id,
             };
             var manifestEntry = zip.CreateEntry(ManifestEntryName, CompressionLevel.Optimal);
             await using var manifestStream = manifestEntry.Open();
@@ -346,6 +353,18 @@ public sealed class PerTenantBackupService
         {
             throw new InvalidOperationException(
                 $"Snapshot manifest organisation id {manifest.organization_id} does not match per_tenant_backups row {row.OrganizationId}.");
+        }
+        // Slugs and organisation ids repeat across deployments ("default", 1),
+        // so the org check above passes for a neighbour's snapshot pulled from a
+        // shared off-site bucket. Its rows would then point at another
+        // deployment's users. A manifest without a stamp predates it and is let
+        // through, as unstamped off-site dumps are.
+        if (_deployment?.IsForeign(manifest.deployment_id) == true)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["BackupId"] = "This snapshot was taken by another AL Workbench installation that shares the off-site storage. Restoring it would bring in that installation's users and settings, so it has been refused.",
+            });
         }
 
         await using var connection = new NpgsqlConnection(_connectionString);
@@ -629,4 +648,6 @@ public sealed record PerTenantBackupManifest(
     string organization_slug,
     string organization_name,
     DateTime created_at,
-    IReadOnlyList<string> tables);
+    IReadOnlyList<string> tables,
+    // Absent from snapshots taken before #1257.
+    string? deployment_id = null);

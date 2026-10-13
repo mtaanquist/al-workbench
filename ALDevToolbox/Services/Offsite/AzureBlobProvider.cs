@@ -99,10 +99,32 @@ public sealed class AzureBlobProvider : IOffsiteStorageProvider
         return new OffsiteDownload(result.Content, metadata, length);
     }
 
-    public async Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, int maxObjects, CancellationToken ct)
+    public async Task<IReadOnlyDictionary<string, string>> GetMetadataAsync(string key, CancellationToken ct)
+    {
+        var properties = await _container.GetBlobClient(key).GetPropertiesAsync(cancellationToken: ct);
+        return MapMetadataFromAzure(properties.Value.Metadata);
+    }
+
+    public async Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, int maxObjects, bool topLevelOnly, CancellationToken ct)
     {
         if (maxObjects < 1) maxObjects = 1;
         var results = new List<OffsiteStorageObject>(capacity: Math.Min(maxObjects, 256));
+        if (topLevelOnly)
+        {
+            // The hierarchy listing returns the blobs directly under the prefix
+            // and one virtual-directory item per deeper "/", which is skipped.
+            await foreach (var item in _container.GetBlobsByHierarchyAsync(
+                traits: BlobTraits.None, states: BlobStates.None, delimiter: "/", prefix: prefix, cancellationToken: ct))
+            {
+                if (!item.IsBlob) continue;
+                results.Add(new OffsiteStorageObject(
+                    item.Blob.Name,
+                    item.Blob.Properties.ContentLength ?? 0,
+                    (item.Blob.Properties.LastModified ?? default).UtcDateTime));
+                if (results.Count >= maxObjects) break;
+            }
+            return results;
+        }
         await foreach (var item in _container.GetBlobsAsync(
             traits: BlobTraits.None, states: BlobStates.None, prefix: prefix, cancellationToken: ct))
         {

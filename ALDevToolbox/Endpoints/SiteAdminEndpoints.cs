@@ -604,7 +604,7 @@ internal static class SiteAdminEndpoints
             // tenants/ namespace) so a tampered submit can't trigger a
             // download of an arbitrary key. The download method enforces
             // the same shape rules internally — this is belt-and-braces.
-            var listed = await offsite.ListPerTenantAsync(maxObjects: 1000, ct);
+            var listed = await offsite.ListPerTenantAsync(maxObjects: 1000, flagOtherDeployments: false, ct);
             var match = listed.FirstOrDefault(o => string.Equals(o.Key, key, StringComparison.Ordinal));
             if (match is null)
             {

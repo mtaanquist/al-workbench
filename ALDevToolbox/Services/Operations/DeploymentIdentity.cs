@@ -34,6 +34,17 @@ public sealed class DeploymentIdentity
     /// </summary>
     public bool IsPersistent { get; }
 
+    /// <summary>
+    /// True when <paramref name="stampedId"/> names another deployment and this
+    /// one's id is durable enough to say so. A missing stamp is a legacy upload
+    /// and is not foreign; an ephemeral id would call this deployment's own
+    /// earlier stamps foreign after a restart, so it never refuses.
+    /// </summary>
+    public bool IsForeign(string? stampedId) =>
+        IsPersistent
+        && !string.IsNullOrEmpty(stampedId)
+        && !string.Equals(stampedId, Id, StringComparison.Ordinal);
+
     private DeploymentIdentity(string id, bool isPersistent)
     {
         Id = id;
