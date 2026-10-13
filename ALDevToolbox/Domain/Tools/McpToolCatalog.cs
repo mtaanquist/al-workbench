@@ -10,9 +10,13 @@ namespace ALDevToolbox.Domain.Tools;
 /// consultant looking up what their assistant can do.</param>
 /// <param name="Writes">True when the tool changes something. Mirrors
 /// <c>McpServerToolAttribute.ReadOnly == false</c>; the catalogue test pins the two together.</param>
-/// <param name="Tool">For a writing tool, the toggleable tool whose step-up rule
-/// (Administration → Tools) governs it. Read-only tools carry none: a recent second factor
-/// guards the actions that spend a stored credential, not the lookups around them.
+/// <param name="Tool">The toggleable tool this one belongs to (Administration → Tools).
+/// Switching that tool off refuses the MCP tool and drops it from the list an assistant sees,
+/// the same as it 404s the tool's pages. For a writing tool it is also the tool whose step-up
+/// rule governs it; read-only tools are never gated by step-up, because a recent second factor
+/// guards the actions that spend a stored credential, not the lookups around them. Null only
+/// for a tool that serves several tools at once (<c>list_repositories</c>) or none of them
+/// (the quality guidance), which only the MCP switch itself turns off.
 /// <c>McpToolCatalogTests</c> requires every writing tool to name one.</param>
 public sealed record McpToolDescriptor(string Name, string Group, string Blurb, bool Writes, ToolKey? Tool = null);
 
@@ -34,9 +38,13 @@ public sealed record McpToolDescriptor(string Name, string Group, string Blurb, 
 /// </summary>
 public static class McpToolCatalog
 {
-    /// <summary>The toggleable tool a writing MCP tool belongs to, or null for a read-only or unknown one.</summary>
+    /// <summary>The toggleable tool an MCP tool belongs to, or null for a cross-cutting or unknown one.</summary>
     public static ToolKey? ToolFor(string mcpToolName) =>
-        All.FirstOrDefault(t => t.Name == mcpToolName)?.Tool;
+        Find(mcpToolName)?.Tool;
+
+    /// <summary>The descriptor for one wire name, or null for a name the catalogue does not know.</summary>
+    public static McpToolDescriptor? Find(string mcpToolName) =>
+        All.FirstOrDefault(t => t.Name == mcpToolName);
 
     public const string Generation = "Templates and generation";
     public const string ObjectExplorer = "Object Explorer";
@@ -55,13 +63,13 @@ public static class McpToolCatalog
     {
         // ---- Templates and generation ----
         new McpToolDescriptor("list_templates", Generation,
-            "Lists the workspace templates your organisation can generate from.", false),
+            "Lists the workspace templates your organisation can generate from.", false, ToolKey.Templates),
         new McpToolDescriptor("get_template", Generation,
-            "Shows what one template will generate, so the assistant can offer its optional parts.", false),
+            "Shows what one template will generate, so the assistant can offer its optional parts.", false, ToolKey.Templates),
         new McpToolDescriptor("list_modules", Generation,
-            "Lists the optional modules that can be added to a workspace.", false),
+            "Lists the optional modules that can be added to a workspace.", false, ToolKey.Templates),
         new McpToolDescriptor("list_well_known_dependencies", Generation,
-            "Lists the dependencies your organisation has on file, so the assistant names them correctly.", false),
+            "Lists the dependencies your organisation has on file, so the assistant names them correctly.", false, ToolKey.Templates),
         new McpToolDescriptor("generate_workspace", Generation,
             "Builds a new workspace and hands back the ZIP, or creates a repository for it in "
             + "your GitHub organisation.", true, ToolKey.Templates),
@@ -71,41 +79,41 @@ public static class McpToolCatalog
 
         // ---- Object Explorer ----
         new McpToolDescriptor("list_releases", ObjectExplorer,
-            "Lists the Business Central releases that have been imported.", false),
+            "Lists the Business Central releases that have been imported.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("list_release_modules", ObjectExplorer,
-            "Lists the apps and modules inside one release.", false),
+            "Lists the apps and modules inside one release.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("compare_releases", ObjectExplorer,
-            "Reports what changed between two releases.", false),
+            "Reports what changed between two releases.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("compare_release_files", ObjectExplorer,
             "Reports which files differ between two releases, including the ones that hold no "
-            + "objects, such as permission sets and translations.", false),
+            + "objects, such as permission sets and translations.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("search_objects", ObjectExplorer,
-            "Finds tables, pages, codeunits and the rest by name or number.", false),
+            "Finds tables, pages, codeunits and the rest by name or number.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("search_procedures", ObjectExplorer,
-            "Finds procedures by name across a release.", false),
+            "Finds procedures by name across a release.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("search_content", ObjectExplorer,
-            "Searches the AL source itself, for when you remember the code but not the object.", false),
+            "Searches the AL source itself, for when you remember the code but not the object.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("find_references", ObjectExplorer,
-            "Finds every place that touches a table, field or procedure.", false),
+            "Finds every place that touches a table, field or procedure.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("find_system_references", ObjectExplorer,
-            "Finds uses of platform types that the base application does not declare.", false),
+            "Finds uses of platform types that the base application does not declare.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("get_object_outline", ObjectExplorer,
-            "Returns one object's fields, procedures and triggers.", false),
+            "Returns one object's fields, procedures and triggers.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("get_procedure_source", ObjectExplorer,
-            "Returns the body of one procedure, up to 200 lines.", false),
+            "Returns the body of one procedure, up to 200 lines.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("list_procedure_calls", ObjectExplorer,
-            "Returns what one procedure calls and which fields it touches, so you can trace what it ends up doing.", false),
+            "Returns what one procedure calls and which fields it touches, so you can trace what it ends up doing.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("download_symbol_reference", ObjectExplorer,
-            "Fetches a release's symbol package, so the assistant can compile against it.", false),
+            "Fetches a release's symbol package, so the assistant can compile against it.", false, ToolKey.ObjectExplorer),
 
         // ---- Cookbook ----
         new McpToolDescriptor("search_recipes", Cookbook,
-            "Searches your organisation's recipes by title, description or keyword.", false),
+            "Searches your organisation's recipes by title, description or keyword.", false, ToolKey.Cookbook),
         new McpToolDescriptor("get_recipe", Cookbook,
-            "Returns one recipe in full, every file included.", false),
+            "Returns one recipe in full, every file included.", false, ToolKey.Cookbook),
         new McpToolDescriptor("get_cookbook_guidance", Cookbook,
             "Reads your organisation's house rules for writing a recipe, so its suggestions "
-            + "follow your house style.", false),
+            + "follow your house style.", false, ToolKey.Cookbook),
         new McpToolDescriptor("suggest_recipe", Cookbook,
             "Submits a new recipe for an editor to review. Nothing is published without a person.", true, ToolKey.Cookbook),
         new McpToolDescriptor("update_recipe_suggestion", Cookbook,
@@ -117,13 +125,13 @@ public static class McpToolCatalog
 
         // ---- Translator ----
         new McpToolDescriptor("list_translation_languages", Translator,
-            "Lists the languages a release has been translated into.", false),
+            "Lists the languages a release has been translated into.", false, ToolKey.Translator),
         new McpToolDescriptor("search_translations", Translator,
-            "Finds how a phrase was translated in a release.", false),
+            "Finds how a phrase was translated in a release.", false, ToolKey.Translator),
         new McpToolDescriptor("search_translation_memory", Translator,
-            "Searches your organisation's own past translations for a phrase.", false),
+            "Searches your organisation's own past translations for a phrase.", false, ToolKey.Translator),
         new McpToolDescriptor("machine_translate", Translator,
-            "Proposes a translation. It is a suggestion until someone accepts it.", false),
+            "Proposes a translation. It is a suggestion until someone accepts it.", false, ToolKey.Translator),
         new McpToolDescriptor("vote_translation", Translator,
             "Votes a suggested translation up or down.", true, ToolKey.Translator),
         new McpToolDescriptor("remove_translation", Translator,
@@ -131,57 +139,57 @@ public static class McpToolCatalog
 
         // ---- Solutions and pipelines ----
         new McpToolDescriptor("list_solutions", Projects,
-            "Lists the customer solutions you can see.", false),
+            "Lists the customer solutions you can see.", false, ToolKey.Projects),
         new McpToolDescriptor("list_solution_builds", Projects,
-            "Lists the builds recorded against one solution.", false),
+            "Lists the builds recorded against one solution.", false, ToolKey.Projects),
         new McpToolDescriptor("get_solution_build", Projects,
-            "Returns one build with its apps and their versions.", false),
+            "Returns one build with its apps and their versions.", false, ToolKey.Projects),
         new McpToolDescriptor("compare_solution_builds", Projects,
-            "Reports what changed between two builds of the same solution.", false),
+            "Reports what changed between two builds of the same solution.", false, ToolKey.Projects),
         new McpToolDescriptor("list_pipelines", Projects,
-            "Lists the build pipelines set up for a solution.", false),
+            "Lists the build pipelines set up for a solution.", false, ToolKey.Pipelines),
         new McpToolDescriptor("list_pipeline_builds", Projects,
-            "Lists what one pipeline has built, and how each run ended.", false),
+            "Lists what one pipeline has built, and how each run ended.", false, ToolKey.Pipelines),
         new McpToolDescriptor("list_deployment_pipelines", Projects,
-            "Lists the deployment pipelines that install builds into a Business Central environment.", false),
+            "Lists the deployment pipelines that install builds into a Business Central environment.", false, ToolKey.Releases),
         new McpToolDescriptor("list_deployments", Projects,
-            "Lists what one deployment pipeline has installed, when, and whether it landed.", false),
+            "Lists what one deployment pipeline has installed, when, and whether it landed.", false, ToolKey.Releases),
         new McpToolDescriptor("deploy_build", Projects,
             "Deploys a build to a Business Central environment.", true, ToolKey.Releases),
         new McpToolDescriptor("list_github_releases", Projects,
-            "Lists the GitHub releases a deployment pipeline can install.", false),
+            "Lists the GitHub releases a deployment pipeline can install.", false, ToolKey.Releases),
         new McpToolDescriptor("stage_github_release", Projects,
             "Fetches the app files from a GitHub release so they can be deployed.", true, ToolKey.Releases),
 
         // ---- Environments and customers (read-only; see DeliverTools) ----
         new McpToolDescriptor("get_solution", Operations,
-            "Shows where a customer's Business Central runs, which version, and whether it is connected.", false),
+            "Shows where a customer's Business Central runs, which version, and whether it is connected.", false, ToolKey.Projects),
         new McpToolDescriptor("list_environments", Operations,
             "Lists your customers' Business Central environments with version, storage and next update, "
-            + "filtered the way you ask.", false),
+            + "filtered the way you ask.", false, ToolKey.Projects),
         new McpToolDescriptor("get_environment", Operations,
-            "Shows one environment in full, including the apps installed in it.", false),
+            "Shows one environment in full, including the apps installed in it.", false, ToolKey.Projects),
         new McpToolDescriptor("list_environment_history", Operations,
-            "Lists what was done to an environment from the workbench, and by whom.", false),
+            "Lists what was done to an environment from the workbench, and by whom.", false, ToolKey.Projects),
         new McpToolDescriptor("list_upgrades", Operations,
             "Lists the platform updates coming to each environment, and when. Needs permission to "
-            + "manage environment updates.", false),
+            + "manage environment updates.", false, ToolKey.Projects),
         new McpToolDescriptor("list_planned_upgrades", Operations,
             "Lists the planned upgrades, open and done, with how far each one has got. Needs "
-            + "permission to manage environment updates.", false),
+            + "permission to manage environment updates.", false, ToolKey.Projects),
         new McpToolDescriptor("get_upgrade", Operations,
             "Shows one planned upgrade: each environment on it, where its update has got, and who "
-            + "checked it. Needs permission to manage environment updates.", false),
+            + "checked it. Needs permission to manage environment updates.", false, ToolKey.Projects),
         new McpToolDescriptor("list_recent_deployments", Operations,
-            "Lists recent deployments across all your customers, and why any of them failed.", false),
+            "Lists recent deployments across all your customers, and why any of them failed.", false, ToolKey.Releases),
         new McpToolDescriptor("list_customer_contacts", Operations,
-            "Lists who to call or write to at a customer, with phone numbers and email addresses.", false),
+            "Lists who to call or write to at a customer, with phone numbers and email addresses.", false, ToolKey.Projects),
         new McpToolDescriptor("get_customer_access", Operations,
-            "Returns the notes on how to get into a customer's system, and what it is integrated with.", false),
+            "Returns the notes on how to get into a customer's system, and what it is integrated with.", false, ToolKey.Projects),
         new McpToolDescriptor("list_customer_knowledge", Operations,
-            "Tells you who here knows a customer, or which customers a colleague knows.", false),
+            "Tells you who here knows a customer, or which customers a colleague knows.", false, ToolKey.Projects),
         new McpToolDescriptor("list_customer_modules", Operations,
-            "Tells you which customers have a module, or which modules a customer has.", false),
+            "Tells you which customers have a module, or which modules a customer has.", false, ToolKey.Projects),
 
         // ---- GitHub repositories ----
         new McpToolDescriptor("list_repositories", Repositories,
@@ -192,7 +200,7 @@ public static class McpToolCatalog
         new McpToolDescriptor("add_extension_to_repository", Repositories,
             "Adds a new extension to one of your repositories as a pull request, in your name.", true, ToolKey.Templates),
         new McpToolDescriptor("list_translation_files", Repositories,
-            "Lists the translation files in one of your repositories.", false),
+            "Lists the translation files in one of your repositories.", false, ToolKey.Translator),
         new McpToolDescriptor("open_translation_pr", Repositories,
             "Writes translations into a file in one of your repositories and opens a pull request "
             + "for them.", true, ToolKey.Translator),
