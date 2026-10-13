@@ -127,6 +127,27 @@ public sealed class UpgradeActionWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_booking_made_by_someone_disabled_since_does_not_run()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var actionId = await BookAsync(projectId, envId, hoursAhead: 12);
+
+        // The person who booked it leaves and their account is disabled (#1235).
+        await using (var ctx = _f.Db.NewContext())
+        {
+            await ctx.Users.Where(u => u.Id == UpgradeActionTestFixture.FlagUserId)
+                .ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, ALDevToolbox.Domain.Entities.UserStatus.Disabled));
+        }
+        _f.Clock.Advance(TimeSpan.FromHours(13));
+        await _f.Worker().RunDueActionsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        _f.Admin.Writes.Should().Be(0, "a disabled account runs nothing");
+        var stored = await _f.ReadActionAsync(actionId);
+        stored.Status.Should().Be(UpgradeActionStatus.Failed);
+        stored.Outcome.Should().Contain("no longer had permission");
+    }
+
+    [Fact]
     public async Task One_customers_failure_does_not_stop_the_others()
     {
         var (projectA, envA) = await _f.SeedCustomerAsync("CRONUS Denmark");
