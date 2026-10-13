@@ -187,6 +187,35 @@ public sealed class WorkspaceGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task Module_clone_does_not_depend_on_a_ticked_optional_extension()
+    {
+        // #1237: the implicit dependency is on required template extensions
+        // only. A ticked optional "Test" extension must not become a
+        // dependency of every module.
+        var template = TemplateBuilder.Default();
+        template.WorkspaceExtensions.Add(new WorkspaceExtension
+        {
+            OrganizationId = template.OrganizationId,
+            Path = "Test",
+            NameTemplate = "{{extension_prefix}} Test",
+            Required = false,
+            Ordering = 1,
+        });
+        var module = ModuleBuilder.Default("document-capture", "Document Capture");
+        await SeedTemplateAsync(template, module);
+
+        using var zip = await GenerateAsync(PlanBuilder.WorkspacePlan(
+            selectedExtensions: new[] { "Test" },
+            selectedModules: new[] { "document-capture" }));
+
+        zip.GetEntry("AcmeCustomer/Test/app.json").Should().NotBeNull();
+        var moduleAppJson = JsonDocument.Parse(ReadEntry(zip.GetEntry("AcmeCustomer/DocumentCapture/app.json")!));
+        moduleAppJson.RootElement.GetProperty("dependencies").EnumerateArray()
+            .Select(d => d.GetProperty("name").GetString())
+            .Should().Equal("ACME Core");
+    }
+
+    [Fact]
     public async Task Recursive_folder_tree_emits_files_at_correct_depth()
     {
         var template = TemplateBuilder.Default()

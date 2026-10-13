@@ -191,7 +191,8 @@ public sealed class WorkspaceZipBuilder
                 ModuleKey: null,
                 ModuleName: plan.ExtensionName,
                 FolderRoots: scaffoldFolderRoots,
-                Dependencies: standaloneDeps);
+                Dependencies: standaloneDeps,
+                Required: true);
             var standaloneAsWorkspacePlan = new ProjectPlan(
                 TemplateKey: plan.TemplateKey,
                 // A standalone extension has no customer behind it, so there is
@@ -570,12 +571,15 @@ public sealed class WorkspaceZipBuilder
 
         // Module clones get implicit dependencies on required template
         // extensions (typically just Core). Emitted before the module's own
-        // deps so Core is listed first in the resulting app.json.
+        // deps so Core is listed first in the resulting app.json. A ticked
+        // optional extension (a Test app, say) is left out: depending on it
+        // would drag it into every module, and one that itself depends on a
+        // module would close a cycle AL refuses (#1237).
         if (ext.IsModuleClone)
         {
             foreach (var other in allExtensions)
             {
-                if (other.IsModuleClone) continue;
+                if (other.IsModuleClone || !other.Required) continue;
                 if (other.Id == ext.Id) continue;
                 if (!emitted.Add(other.Id)) continue;
                 array.Add(BuildDepNode(other.Id.ToString(), other.Name, other.Publisher, "0.0.0.1"));

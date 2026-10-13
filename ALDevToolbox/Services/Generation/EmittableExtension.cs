@@ -19,7 +19,11 @@ internal sealed record EmittableExtension(
     string? ModuleKey,
     string ModuleName,
     IReadOnlyList<FolderNode> FolderRoots,
-    IReadOnlyList<EmittableDependency> Dependencies);
+    IReadOnlyList<EmittableDependency> Dependencies,
+    // True for a template extension every workspace emits (Core, Hotfix);
+    // false for a ticked optional one and for a module clone. Module clones
+    // depend implicitly on the required ones only (generation-engine.md).
+    bool Required);
 
 /// <summary>Folder + its files + its children (recursive). Built once at load time.</summary>
 internal sealed record FolderNode(

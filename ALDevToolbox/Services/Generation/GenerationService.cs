@@ -494,7 +494,8 @@ public class GenerationService
             Dependencies: ext.Dependencies
                 .OrderBy(d => d.Ordering)
                 .Select(d => new EmittableDependency(d.RefExtensionPath, d.RefModuleKey, d.LitId, d.LitName, d.LitPublisher, d.LitVersion))
-                .ToList());
+                .ToList(),
+            Required: ext.Required);
     }
 
     private EmittableExtension BuildFromModule(Module module, RuntimeTemplate template, ProjectPlan plan, int from, int to, string publisher, NamingStyle folderStyle)
@@ -529,7 +530,8 @@ public class GenerationService
             ModuleKey: module.Key,
             ModuleName: module.ExtensionName,
             FolderRoots: BuildModuleFolderTree(module.ExtensionFolders),
-            Dependencies: deps);
+            Dependencies: deps,
+            Required: false);
     }
 
     private static List<FolderNode> BuildFolderTree(IEnumerable<WorkspaceExtensionFolder> roots) =>
