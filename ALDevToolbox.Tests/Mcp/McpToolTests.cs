@@ -112,6 +112,26 @@ public sealed class McpToolTests : IDisposable
     }
 
     [Fact]
+    public async Task GetRecipe_does_not_hand_an_agent_a_deleted_recipe()
+    {
+        int recipeId;
+        await using (var ctx = _db.NewContext())
+        {
+            var s = RecipeBuilder.Default("Withdrawn").WithFile("a.al", "// wrong");
+            s.DeletedAt = DateTime.UtcNow;
+            ctx.Recipes.Add(s);
+            await ctx.SaveChangesAsync();
+            recipeId = s.Id;
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var tools = NewCookbookTools(ctx2);
+
+        await FluentActions.Awaiting(() => tools.GetAsync(recipeId))
+            .Should().ThrowAsync<McpException>();
+    }
+
+    [Fact]
     public async Task GetCookbookGuidance_returns_org_text_builtin_type_descriptions_and_a_token()
     {
         // No row yet — built-in copy still surfaces, and we still get a token.

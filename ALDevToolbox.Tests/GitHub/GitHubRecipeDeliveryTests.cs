@@ -225,6 +225,29 @@ public sealed class GitHubRecipeDeliveryTests : IDisposable
     }
 
     [Fact]
+    public async Task A_deleted_recipe_is_refused_before_github_is_asked_anything()
+    {
+        // It used to pass the lookup, create the branch, the commit and the
+        // pull request, and only then fail recording the apply (#1251).
+        await ReadyAsync();
+        var recipeId = await SeedRecipeAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Recipes.SingleAsync(r => r.Id == recipeId)).DeletedAt = DateTime.UtcNow;
+            await ctx.SaveChangesAsync();
+        }
+        var api = WritableApi();
+        var (service, svcCtx) = NewService(api);
+        await using var _ = svcCtx;
+
+        var act = () => service.ApplyAsync(recipeId, Repo);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("Recipe");
+        api.Calls.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task A_recipe_with_no_files_is_refused_with_a_reason_an_editor_can_act_on()
     {
         await ReadyAsync();
