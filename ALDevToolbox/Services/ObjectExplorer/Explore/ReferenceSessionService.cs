@@ -103,7 +103,7 @@ public sealed class ReferenceSessionService
             TargetObjectName: head.Name);
 
         if (!await SeedAndTargetVisibleAsync(seedReleaseId, head.ReleaseId, ct)) return null;
-        var results = await _references.FindReferencesAsync(seedReleaseId, query, ct);
+        var results = await _references.FindReferencesAsync(seedReleaseId, query, ct: ct);
         var label = head.ObjectId is { } oid
             ? $"references to {head.Kind} {oid} {head.Name}"
             : $"references to {head.Kind} {head.Name}";
@@ -141,7 +141,7 @@ public sealed class ReferenceSessionService
             TargetObjectName: head.Name);
 
         if (!await SeedAndTargetVisibleAsync(seedReleaseId, head.ReleaseId, ct)) return null;
-        var results = await _references.FindSystemReferencesAsync(seedReleaseId, query, ct);
+        var results = await _references.FindSystemReferencesAsync(seedReleaseId, query, ct: ct);
         var label = head.ObjectId is { } oid
             ? $"system references to {head.Kind} {oid} {head.Name}"
             : $"system references to {head.Kind} {head.Name}";
@@ -190,7 +190,7 @@ public sealed class ReferenceSessionService
             TargetMemberKind: head.Kind);
 
         var results = await _references.FindReferencesForSymbolAsync(
-            seedReleaseId, query, ct);
+            seedReleaseId, query, ct: ct);
 
         var sigPart = string.IsNullOrEmpty(head.Signature) ? "" : head.Signature;
         var label = head.OwnerObjectId is { } oid

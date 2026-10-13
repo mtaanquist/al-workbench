@@ -1749,6 +1749,42 @@ public sealed class ObjectExplorerServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task FindReferencesAsync_fetches_only_one_row_past_the_callers_cap()
+    {
+        // #1247: find_references used to fetch and snippet up to 5,001 rows, then
+        // hand back 200 without saying so. The cap now goes into the query.
+        var releaseId = await SeedSingleReleaseAsync();
+        await using var read = _db.NewContext();
+        // Self-discovering: the object-level target the fixture references most.
+        var target = await read.OeModuleReferences.AsNoTracking()
+            .Where(r => r.Module!.ReleaseId == releaseId && r.TargetObjectId != null && r.TargetMemberName == null)
+            .GroupBy(r => new { r.TargetAppId, r.TargetObjectKind, r.TargetObjectId, r.TargetObjectName })
+            .OrderByDescending(g => g.Count())
+            .Select(g => g.Key)
+            .FirstAsync();
+        var query = new FindReferencesQuery(
+            TargetAppId: target.TargetAppId,
+            TargetObjectKind: target.TargetObjectKind,
+            TargetObjectId: target.TargetObjectId,
+            TargetObjectName: target.TargetObjectName);
+
+        var all = await NewReferences(read).FindReferencesAsync(releaseId, query);
+        all.Count.Should().BeGreaterThan(2, "the fixture needs more references than the cap below");
+
+        var capped = await NewReferences(read).FindReferencesAsync(releaseId, query, take: 1);
+        capped.Select(m => m.Id).Should().Equal(all.Take(2).Select(m => m.Id),
+            "one row past the cap, in the same order, so the caller can tell it was cut");
+
+        var result = ALDevToolbox.Services.Mcp.Tools.ReferenceSearchResult.From(capped, 1, "Narrow it.");
+        result.Rows.Should().HaveCount(1);
+        result.Truncated.Should().BeTrue();
+        result.Note.Should().Contain("first 1").And.Contain("Narrow it.");
+
+        ALDevToolbox.Services.Mcp.Tools.ReferenceSearchResult.From(all, all.Count, "Narrow it.")
+            .Truncated.Should().BeFalse("an exactly-fitting result is not cut");
+    }
+
+    [Fact]
     public async Task FindReferencesAsync_falls_back_to_name_when_id_is_null()
     {
         var releaseId = await SeedSingleReleaseAsync();
