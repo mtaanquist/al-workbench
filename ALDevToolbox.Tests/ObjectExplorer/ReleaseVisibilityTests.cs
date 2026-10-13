@@ -509,6 +509,54 @@ public sealed class ReleaseVisibilityTests : IDisposable
     }
 
     /// <summary>
+    /// Seeding the session at a visible release (<c>?from=</c>) must not unlock a
+    /// target that lives in a hidden one: the label names the target's kind,
+    /// number, name and member signature (#1227). All three lookups by target id
+    /// are covered.
+    /// </summary>
+    [Fact]
+    public async Task No_reference_session_is_minted_for_a_hidden_target_seeded_from_a_visible_release()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, hidden.ReleaseId);
+        var visible = await SeedReleaseAsync("BC 26.0 (DK)", kind: "first_party");
+        long symbolId;
+        await using (var ctx = _db.NewContext())
+        {
+            var symbol = new OeModuleSymbol
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ModuleId = hidden.ModuleId,
+                ObjectId = hidden.ObjectId,
+                Kind = "procedure",
+                Name = "GrantPoints",
+                Signature = "(Points: Integer)",
+            };
+            ctx.OeModuleSymbols.Add(symbol);
+            await ctx.SaveChangesAsync();
+            symbolId = symbol.Id;
+        }
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var sessions = Sessions(ctx);
+            (await sessions.CreateFromSymbolAsync(hidden.ObjectId, "outsider", visible.ReleaseId)).Should().BeNull();
+            (await sessions.CreateSystemReferencesFromObjectAsync(hidden.ObjectId, "outsider", visible.ReleaseId)).Should().BeNull();
+            (await sessions.CreateFromMemberSymbolAsync(symbolId, "outsider", visible.ReleaseId)).Should().BeNull();
+            // The visible release's own objects still work from there.
+            (await sessions.CreateFromSymbolAsync(visible.ObjectId, "outsider", visible.ReleaseId)).Should().NotBeNull();
+        }
+
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Sessions(ctx).CreateFromMemberSymbolAsync(symbolId, "member", visible.ReleaseId)).Should().NotBeNull();
+        }
+    }
+
+    /// <summary>
     /// What <c>Endpoints/ArtifactEndpoints.cs</c> turns into its existing 404: the
     /// byte getters refuse a non-member with <see cref="ProjectAccessDeniedException"/>
     /// rather than streaming a Private project's compiled <c>.app</c>.

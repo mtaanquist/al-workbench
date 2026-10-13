@@ -54,6 +54,17 @@ public sealed class ReferenceSessionService
         => _access.IsReleaseVisibleAsync(seedReleaseId, ct);
 
     /// <summary>
+    /// <see cref="SeedVisibleAsync"/> for a lookup by target id that may be seeded
+    /// elsewhere (the <c>from</c> release). The label names the target, so the
+    /// release holding it must be visible too: checking only the seed let anyone
+    /// step through ids from a release they can see and read a hidden solution's
+    /// object names and signatures (#1227).
+    /// </summary>
+    private async Task<bool> SeedAndTargetVisibleAsync(int seedReleaseId, int targetReleaseId, CancellationToken ct)
+        => await SeedVisibleAsync(targetReleaseId, ct)
+           && (seedReleaseId == targetReleaseId || await SeedVisibleAsync(seedReleaseId, ct));
+
+    /// <summary>
     /// Mints a session keyed off a source-object id. Resolves the object's
     /// owning Module to get the <c>AppId</c> for the underlying
     /// <see cref="ReferenceQueryService.FindReferencesAsync"/> call. Returns
@@ -91,7 +102,7 @@ public sealed class ReferenceSessionService
             TargetObjectId: head.ObjectId,
             TargetObjectName: head.Name);
 
-        if (!await SeedVisibleAsync(seedReleaseId, ct)) return null;
+        if (!await SeedAndTargetVisibleAsync(seedReleaseId, head.ReleaseId, ct)) return null;
         var results = await _references.FindReferencesAsync(seedReleaseId, query, ct);
         var label = head.ObjectId is { } oid
             ? $"references to {head.Kind} {oid} {head.Name}"
@@ -129,7 +140,7 @@ public sealed class ReferenceSessionService
             TargetObjectId: head.ObjectId,
             TargetObjectName: head.Name);
 
-        if (!await SeedVisibleAsync(seedReleaseId, ct)) return null;
+        if (!await SeedAndTargetVisibleAsync(seedReleaseId, head.ReleaseId, ct)) return null;
         var results = await _references.FindSystemReferencesAsync(seedReleaseId, query, ct);
         var label = head.ObjectId is { } oid
             ? $"system references to {head.Kind} {oid} {head.Name}"
@@ -169,7 +180,7 @@ public sealed class ReferenceSessionService
         if (head is null) return null;
 
         var seedReleaseId = viewReleaseId ?? head.ReleaseId;
-        if (!await SeedVisibleAsync(seedReleaseId, ct)) return null;
+        if (!await SeedAndTargetVisibleAsync(seedReleaseId, head.ReleaseId, ct)) return null;
         var query = new FindReferencesQuery(
             TargetAppId: head.OwnerAppId,
             TargetObjectKind: head.OwnerKind,
