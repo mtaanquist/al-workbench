@@ -1326,6 +1326,33 @@ public sealed class ReleaseImportServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Amend_does_not_duplicate_system_references()
+    {
+        // #1223: the reindex re-emits system references for every module in the
+        // release, so it has to clear the old ones first.
+        var releaseId = await SeedReadyReleaseAsync("Amend system refs", "Microsoft_DK_Core.app");
+        int before;
+        await using (var read = _db.NewContext())
+        {
+            before = await read.OeModuleSystemReferences.AsNoTracking()
+                .CountAsync(r => r.Module!.ReleaseId == releaseId);
+        }
+        before.Should().BeGreaterThan(0);
+
+        await using (var ctx = _db.NewContext())
+        {
+            await using var same = File.OpenRead(Path.Combine(FixtureRoot, "Microsoft_DK_Core.app"));
+            var amend = await NewService(ctx).AmendReleaseAsync(
+                releaseId, new[] { new AppFileUpload("Microsoft_DK_Core.app", same, SourceZipStream: null) });
+            amend.ModulesSkipped.Should().Be(1);
+        }
+
+        await using var after = _db.NewContext();
+        (await after.OeModuleSystemReferences.AsNoTracking()
+            .CountAsync(r => r.Module!.ReleaseId == releaseId)).Should().Be(before);
+    }
+
+    [Fact]
     public async Task Amend_re_emits_call_site_references_against_the_full_module_set()
     {
         // Bring in DK Core first (its source contains member-access patterns

@@ -398,6 +398,9 @@ public class ReleaseImportService
             await ResolveNumericSourceTableNamesAsync(release.Id, ct).ConfigureAwait(false);
             await ResolveVariableTargetsAsync(release.Id, ct).ConfigureAwait(false);
             await DeleteExtractedCallSiteReferencesAsync(release.Id, ct).ConfigureAwait(false);
+            // The emit also writes a system reference per built-in call site,
+            // for every module in the release, so those go too (#1223).
+            await DeleteSystemReferencesAsync(release.Id, ct).ConfigureAwait(false);
             totals.ReferencesImported += await _callSites.EmitAsync(orgId, release.Id, ct).ConfigureAwait(false);
 
             _db.ChangeTracker.Clear();
