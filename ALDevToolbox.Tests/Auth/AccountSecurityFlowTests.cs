@@ -357,6 +357,7 @@ public sealed class AccountSecurityFlowTests : IDisposable
                 CreatedAt = _clock.GetUtcNow().UtcDateTime });
             await seed.SaveChangesAsync();
         }
+        _db.OrgContext.IsSiteAdmin = true;
         await using (var ctx = _db.NewContext())
         {
             await NewUserAdmin(ctx).ResetMfaAsync(5600);
@@ -368,5 +369,28 @@ public sealed class AccountSecurityFlowTests : IDisposable
         (await read.UserTotpSecrets.IgnoreQueryFilters().CountAsync(s => s.UserId == 5600)).Should().Be(0);
         (await read.UserRecoveryCodes.IgnoreQueryFilters().CountAsync(c => c.UserId == 5600)).Should().Be(0);
         (await read.UserPasskeys.IgnoreQueryFilters().CountAsync(p => p.UserId == 5600)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task ResetMfa_refuses_a_caller_who_is_not_a_site_admin()
+    {
+        // The reads cross the tenant fence, so the service checks the role
+        // itself rather than trusting the route to have done it (#1272).
+        await using (var seed = _db.NewContext())
+        {
+            seed.Users.Add(new User { Id = 5610, OrganizationId = TestDb.DefaultOrgId, Email = "keep@example.com",
+                PasswordHash = "x", DisplayName = "K", Role = UserRole.User, Status = UserStatus.Active,
+                TotpEnabled = true, CreatedAt = _clock.GetUtcNow().UtcDateTime });
+            await seed.SaveChangesAsync();
+        }
+        _db.OrgContext.IsSiteAdmin = false;
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewUserAdmin(ctx).ResetMfaAsync(5610);
+            await act.Should().ThrowAsync<InvalidOperationException>();
+        }
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == 5610)).TotpEnabled.Should().BeTrue();
     }
 }

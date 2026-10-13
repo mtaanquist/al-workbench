@@ -480,6 +480,9 @@ public sealed class UserAdministrationService
     /// </summary>
     public async Task ResetMfaAsync(int targetUserId, CancellationToken ct = default)
     {
+        // Checked here, not only on the endpoint: the reads below cross the
+        // fence, and the route's role was their only guard (#1272).
+        _orgContext.RequireSiteAdmin();
         // Fence category 2 (SiteAdmin cross-org console): break-glass MFA reset, reached only
         // from /site-admin/users; every read is pinned to targetUserId.
         var user = await _db.Users.IgnoreQueryFilters()
