@@ -1,3 +1,4 @@
+using System.Data;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Text;
@@ -206,6 +207,20 @@ public sealed class PerTenantBackupService
         await using (var connection = new NpgsqlConnection(_connectionString))
         {
             await connection.OpenAsync(ct);
+            // Every table is read from one snapshot (#1217). On autocommit
+            // reads each SELECT sees the database as of its own moment, so a
+            // parent and child committed between two reads land in the ZIP as
+            // an orphan child, and the restore - which inserts in FK order
+            // with immediate constraints - rolls back on it. REPEATABLE READ
+            // fixes the snapshot at the first query; READ ONLY because this
+            // transaction must never write.
+            await using var readTx = await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
+            await using (var readOnly = connection.CreateCommand())
+            {
+                readOnly.Transaction = readTx;
+                readOnly.CommandText = "SET TRANSACTION READ ONLY";
+                await readOnly.ExecuteNonQueryAsync(ct);
+            }
             using var zip = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true);
 
             var includedTables = new List<string>();
@@ -240,6 +255,7 @@ public sealed class PerTenantBackupService
             var manifestEntry = zip.CreateEntry(ManifestEntryName, CompressionLevel.Optimal);
             await using var manifestStream = manifestEntry.Open();
             await JsonSerializer.SerializeAsync(manifestStream, manifest, ManifestJson, ct);
+            await readTx.CommitAsync(ct);
         }
         size = new FileInfo(targetPath).Length;
         sw.Stop();
