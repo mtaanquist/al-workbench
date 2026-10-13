@@ -230,6 +230,34 @@ public sealed class UpgradeActionWorkerTests : IDisposable
         _f.Admin.Writes.Should().Be(0, "repeating 'start the update now' on a guess is not a safe default");
     }
 
+    /// <summary>
+    /// A row whose settling write was lost stays claimed and pending, which nobody can
+    /// cancel. The regular sweep settles it once it is older than an install can take,
+    /// and leaves a recent claim alone (#1265).
+    /// </summary>
+    [Fact]
+    public async Task A_sweep_settles_a_row_whose_outcome_was_never_written_and_leaves_a_fresh_claim_alone()
+    {
+        var (projectId, envId) = await _f.SeedCustomerAsync();
+        var lost = await BookAsync(projectId, envId, hoursAhead: 12);
+        var fresh = await BookAsync(projectId, envId, hoursAhead: 13);
+
+        await using (var ctx = _f.Db.NewContext())
+        {
+            var now = _f.Clock.GetUtcNow().UtcDateTime;
+            (await ctx.OeEnvironmentUpgradeActions.SingleAsync(a => a.Id == lost)).SentAt = now.AddHours(-1);
+            (await ctx.OeEnvironmentUpgradeActions.SingleAsync(a => a.Id == fresh)).SentAt = now.AddMinutes(-1);
+            await ctx.SaveChangesAsync();
+        }
+
+        await _f.Worker().SettleStaleClaimsAsync(TestDb.DefaultOrgId, isSystem: false, CancellationToken.None);
+
+        (await _f.ReadActionAsync(lost)).Status.Should().Be(UpgradeActionStatus.Failed);
+        (await _f.ReadActionAsync(fresh)).Status.Should().Be(UpgradeActionStatus.Pending,
+            "a claim younger than an install can take may still be mid-send");
+        _f.Admin.Writes.Should().Be(0);
+    }
+
     // ── Notifications (#1046) ───────────────────────────────────────────
     // Whoever booked a change hears how it went, once, when it has settled.
 

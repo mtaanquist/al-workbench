@@ -1405,6 +1405,24 @@ public sealed class DeliveryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task CancelDeliveryAsync_is_refused_without_manage_rights()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        var deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+        await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.Visibility, ProjectVisibility.ReadOnly));
+        _db.OrgContext.IsSiteAdmin = false;
+        _db.OrgContext.CurrentUserId = await SeedUserAsync("Someone else");
+
+        var act = () => NewService(_db.NewContext()).CancelDeliveryAsync(deliveryId);
+
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+        (await _db.NewContext().OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId)).Status
+            .Should().Be(ProjectDeliveryStatus.Scheduled, "a refused cancel leaves the delivery as it was");
+    }
+
+    [Fact]
     public async Task RescheduleDeliveryAsync_moves_a_scheduled_delivery_to_a_picked_time()
     {
         await using var ctx = _db.NewContext();

@@ -74,7 +74,9 @@ public sealed class UpgradeActionWorker : BackgroundService
         try { await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); }
         catch (OperationCanceledException) { return; }
 
-        var recovered = false;
+        // Per organisation, so one org whose recovery threw is tried again next sweep
+        // rather than marked done with the rest (#1265).
+        var recovered = new HashSet<int>();
         while (!stoppingToken.IsCancellationRequested)
         {
             _heartbeat.Tick();
@@ -83,13 +85,18 @@ public sealed class UpgradeActionWorker : BackgroundService
                 _heartbeat.BeginActive();
                 try
                 {
-                    if (!recovered)
+                    await ForEachOrgAsync(async (org, sys, ct) =>
                     {
+                        if (recovered.Contains(org))
+                        {
+                            await SettleStaleClaimsAsync(org, sys, ct).ConfigureAwait(false);
+                            return;
+                        }
                         // Nothing of ours is running yet, so anything found mid-send was
-                        // orphaned by a restart. Once only.
-                        await ForEachOrgAsync(FailInterruptedAsync, stoppingToken).ConfigureAwait(false);
-                        recovered = true;
-                    }
+                        // orphaned by a restart. Once per org, until it succeeds.
+                        await FailInterruptedAsync(org, sys, ct).ConfigureAwait(false);
+                        recovered.Add(org);
+                    }, stoppingToken).ConfigureAwait(false);
                     // Two passes. Every organisation's platform-update moves first - a
                     // date the customer agreed, seconds each - then one booked app install
                     // in all (an upload or an AppSource update, or a second look at one
@@ -485,17 +492,51 @@ public sealed class UpgradeActionWorker : BackgroundService
         // An unconfirmed one is asked about again only when its operation was stamped:
         // without both ids there is nothing to ask about.
         var finishedAt = _clock.GetUtcNow().UtcDateTime;
-        await db.OeEnvironmentUpgradeActions
-            .Where(a => a.Id == action.Id)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(a => a.Status, status)
-                .SetProperty(a => a.Outcome, outcome)
-                .SetProperty(a => a.PackageContent, (byte[]?)null)
-                .SetProperty(a => a.ConfirmationDue, a => confirmationDue && a.BcAppId != null && a.BcOperationId != null)
-                .SetProperty(a => a.SentAt, finishedAt), ct).ConfigureAwait(false);
+        if (!await SettleAsync(db, action.Id, status, outcome, confirmationDue, finishedAt).ConfigureAwait(false))
+        {
+            // Still claimed and pending: a later sweep's SettleStaleClaimsAsync settles it.
+            return RunOutcome.Sent;
+        }
         // One left to be asked about again is announced by that second look instead.
         await NotifyAsync(scope, action.Id, confirmationDue).ConfigureAwait(false);
         return RunOutcome.Sent;
+    }
+
+    /// <summary>
+    /// Writes how a sent row ended. Not cancellable, and tried a few times: the send has
+    /// happened, and a row left claimed and pending cannot be cancelled by the person who
+    /// booked it (#1265). Returns false when every attempt failed, which a later sweep's
+    /// <see cref="SettleStaleClaimsAsync"/> then puts right.
+    /// </summary>
+    private async Task<bool> SettleAsync(
+        AppDbContext db, int actionId, UpgradeActionStatus status, string outcome, bool confirmationDue, DateTime finishedAt)
+    {
+        const int attempts = 3;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await db.OeEnvironmentUpgradeActions
+                    .Where(a => a.Id == actionId)
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(a => a.Status, status)
+                        .SetProperty(a => a.Outcome, outcome)
+                        .SetProperty(a => a.PackageContent, (byte[]?)null)
+                        .SetProperty(a => a.ConfirmationDue, a => confirmationDue && a.BcAppId != null && a.BcOperationId != null)
+                        .SetProperty(a => a.SentAt, finishedAt), CancellationToken.None).ConfigureAwait(false);
+                return true;
+            }
+            catch (Exception ex) when (attempt < attempts)
+            {
+                _logger.LogWarning(ex, "Couldn't record how upgrade action {ActionId} ended (attempt {Attempt}); trying again.", actionId, attempt);
+                await Task.Delay(TimeSpan.FromSeconds(attempt), CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Couldn't record how upgrade action {ActionId} ended; a later sweep settles it.", actionId);
+                return false;
+            }
+        }
     }
 
     /// <summary>
@@ -532,6 +573,15 @@ public sealed class UpgradeActionWorker : BackgroundService
     }
 
     /// <summary>
+    /// The per-sweep half of <see cref="FailInterruptedAsync"/>: settles rows claimed
+    /// longer ago than an install can take. Sweeps run one after another, so a row that
+    /// old is never one this process is still sending.
+    /// </summary>
+    internal Task SettleStaleClaimsAsync(int orgId, bool isSystem, CancellationToken ct) =>
+        FailInterruptedAsync(orgId, isSystem, ct,
+            _clock.GetUtcNow().UtcDateTime - (ProjectConnectionService.DefaultUploadPollTimeout + StaleClaimSlack));
+
+    /// <summary>
     /// Settles any action left claimed-but-unfinished by a restart. Called once per org on
     /// the first sweep, when nothing of ours is running, so it can never trip a live one.
     /// An install Business Central had already accepted is recorded as sent and marked to
@@ -539,13 +589,23 @@ public sealed class UpgradeActionWorker : BackgroundService
     /// (<see cref="ConfirmOneAsync"/>). Anything else is failed rather than retried: we
     /// know the send started and not whether it landed, and repeating "start the update
     /// now" on a guess is not a safe default.
+    /// <para>
+    /// With <paramref name="claimedBefore"/> it settles only rows claimed before that
+    /// instant: every sweep does this for rows claimed longer ago than an install can
+    /// take, so a row whose settling write was lost is not left pending, and
+    /// uncancellable, until the next restart (#1265).
+    /// </para>
     /// </summary>
-    internal async Task FailInterruptedAsync(int orgId, bool isSystem, CancellationToken ct)
+    internal async Task FailInterruptedAsync(int orgId, bool isSystem, CancellationToken ct, DateTime? claimedBefore = null)
     {
         using var ambient = AmbientOrganizationScope.Enter(
             AmbientOrganizationScope.OrganizationIdentity.ForOrganization(orgId, isSystem));
         await using var scope = _services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        System.Linq.Expressions.Expression<Func<OeEnvironmentUpgradeAction, bool>> claimedFilter = claimedBefore is { } cutoff
+            ? a => a.Status == UpgradeActionStatus.Pending && a.SentAt != null && a.SentAt < cutoff
+            : a => a.Status == UpgradeActionStatus.Pending && a.SentAt != null;
 
         // An upload or AppSource update Business Central had already accepted went on
         // installing without us: it is recorded as sent, unconfirmed, and marked so the
@@ -554,12 +614,12 @@ public sealed class UpgradeActionWorker : BackgroundService
         // (no app id was stamped) or until it does.
         // Read first, so each person hears how their interrupted change was left.
         var interrupted = await db.OeEnvironmentUpgradeActions.AsNoTracking()
-            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt != null)
+            .Where(claimedFilter)
             .Select(a => a.Id)
             .ToListAsync(ct).ConfigureAwait(false);
 
         var unconfirmed = await db.OeEnvironmentUpgradeActions
-            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt != null && a.BcOperationId != null)
+            .Where(claimedFilter).Where(a => a.BcOperationId != null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(a => a.Status, UpgradeActionStatus.Sent)
                 .SetProperty(a => a.PackageContent, (byte[]?)null)
@@ -576,7 +636,7 @@ public sealed class UpgradeActionWorker : BackgroundService
             "The workbench restarted while this was being sent, so we can't say whether it reached Business Central. "
             + "Check the environment, then schedule it again if you need to.";
         var failed = await db.OeEnvironmentUpgradeActions
-            .Where(a => a.Status == UpgradeActionStatus.Pending && a.SentAt != null)
+            .Where(claimedFilter)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(a => a.Status, UpgradeActionStatus.Failed)
                 .SetProperty(a => a.PackageContent, (byte[]?)null)

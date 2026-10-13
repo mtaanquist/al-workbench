@@ -27,6 +27,7 @@ public sealed class CookieSessionRevalidationTests : IDisposable
     private readonly FakeTimeProvider _clock = new(new DateTimeOffset(2026, 5, 14, 9, 0, 0, TimeSpan.Zero));
     private readonly ServiceProvider _services;
     private readonly RecordingAuthenticationService _auth = new();
+    private readonly ALDevToolbox.Services.Operations.MaintenanceModeState _maintenance = new();
     private int _contextsCreated;
 
     public CookieSessionRevalidationTests()
@@ -34,6 +35,7 @@ public sealed class CookieSessionRevalidationTests : IDisposable
         var db = _db;
         _services = new ServiceCollection()
             .AddSingleton<TimeProvider>(_clock)
+            .AddSingleton(_maintenance)
             .AddSingleton<IAuthenticationService>(_auth)
             .AddScoped(_ =>
             {
@@ -227,6 +229,33 @@ public sealed class CookieSessionRevalidationTests : IDisposable
 
         context.Principal.Should().NotBeNull();
         _contextsCreated.Should().Be(0);
+    }
+
+    /// <summary>
+    /// During a restore the users table is emptied or missing, and this check runs ahead
+    /// of the maintenance 503. It must leave the cookie alone rather than sign the person
+    /// out or fail the request (#1269).
+    /// </summary>
+    [Fact]
+    public async Task During_a_restore_a_cookie_due_for_a_check_is_left_alone()
+    {
+        var user = await SeedUserAsync();
+        // Stands in for the row a restore has not brought back yet.
+        await UpdateUserAsync(user.Id, u => u.Status = UserStatus.Disabled);
+        _maintenance.Enter("Restoring from a backup.");
+        var context = NewValidationContext(user);
+
+        await CookieSessionRevalidation.ValidateAsync(context);
+
+        context.Principal.Should().NotBeNull();
+        context.ShouldRenew.Should().BeFalse();
+        _auth.SignedOutSchemes.Should().BeEmpty();
+        _contextsCreated.Should().Be(0, "nothing may be read from a database that is being restored");
+
+        _maintenance.Exit();
+        var after = NewValidationContext(user);
+        await CookieSessionRevalidation.ValidateAsync(after);
+        after.Principal.Should().BeNull("the check resumes once the restore is over");
     }
 
     /// <summary>

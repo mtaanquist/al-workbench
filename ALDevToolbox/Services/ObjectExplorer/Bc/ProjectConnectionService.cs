@@ -660,6 +660,16 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             {
                 _logger.LogWarning(ex, "Couldn't mirror the installed apps of environment {EnvironmentId}.", environmentId);
             }
+            finally
+            {
+                // The page's context outlives this read. A failed mirror would otherwise
+                // leave its Added/Deleted rows tracked and replay them, and fail, on every
+                // later save on the page; a successful one has no further use for them (#1265).
+                foreach (var entry in _db.ChangeTracker.Entries<OeEnvironmentApp>().ToList())
+                {
+                    entry.State = EntityState.Detached;
+                }
+            }
         }
         return panel;
     }
@@ -1994,9 +2004,10 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         var requestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
         var batchId = cleaned.Count > 1 ? Guid.NewGuid() : (Guid?)null;
+        var booked = new List<OeEnvironmentUpgradeAction>(cleaned.Count);
         for (var i = 0; i < cleaned.Count; i++)
         {
-            _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            booked.Add(new OeEnvironmentUpgradeAction
             {
                 OrganizationId = RequireOrganizationId(),
                 ProjectId = projectId,
@@ -2013,7 +2024,21 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 BatchOrder = batchId is null ? null : i,
             });
         }
-        await _db.SaveChangesAsync(ct);
+        _db.OeEnvironmentUpgradeActions.AddRange(booked);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        finally
+        {
+            // Up to ten 50 MB packages: once written they are the worker's, and the page's
+            // context would otherwise pin them, and compare them on every later save, for
+            // the life of the circuit (#1265).
+            foreach (var action in booked)
+            {
+                _db.Entry(action).State = EntityState.Detached;
+            }
+        }
 
         _logger.LogInformation(
             "User {UserId} booked {Count} app(s) ({Files}) for {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}).",

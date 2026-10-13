@@ -2057,6 +2057,64 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             "an environment always has the base application, so nothing at all means the read went wrong");
     }
 
+    /// <summary>
+    /// Writes the same app through a second context just before the mirror's save, the
+    /// way a colleague's panel read landing first would, so the mirror hits the unique index.
+    /// </summary>
+    private sealed class RacingMirrorInterceptor : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
+    {
+        private readonly TestDb _db;
+        private bool _raced;
+        public RacingMirrorInterceptor(TestDb db) => _db = db;
+
+        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> SavingChangesAsync(
+            Microsoft.EntityFrameworkCore.Diagnostics.DbContextEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+            CancellationToken ct = default)
+        {
+            var added = eventData.Context!.ChangeTracker.Entries<OeEnvironmentApp>()
+                .FirstOrDefault(e => e.State == EntityState.Added)?.Entity;
+            if (added is not null && !_raced)
+            {
+                _raced = true;
+                await using var other = _db.NewContext();
+                other.OeEnvironmentApps.Add(new OeEnvironmentApp
+                {
+                    OrganizationId = added.OrganizationId,
+                    EnvironmentId = added.EnvironmentId,
+                    AppId = added.AppId,
+                    Name = added.Name,
+                    Publisher = added.Publisher,
+                    Version = added.Version,
+                    FetchedAt = added.FetchedAt,
+                });
+                await other.SaveChangesAsync(ct);
+            }
+            return result;
+        }
+    }
+
+    [Fact]
+    public async Task A_mirror_that_loses_a_race_does_not_break_the_next_save_on_the_page()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        var apps = new FakeAppManagementClient { OnInstalled = () => [App("CRONUS Toolbox")] };
+
+        await using var ctx = _db.NewContext(new RacingMirrorInterceptor(_db));
+        var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+
+        (await svc.GetEnvironmentPanelAsync(projectId, envId))
+            .InstalledApps.Select(a => a.Name).Should().Equal("CRONUS Toolbox");
+
+        // An unrelated save on the same page must not replay the failed mirror.
+        await svc.SetAppUpdateCadenceAsync(projectId, envId, BcAppUpdateCadence.DuringMajorUpgrade);
+
+        await using var verify = _db.NewContext();
+        (await verify.OeEnvironmentApps.AsNoTracking().CountAsync()).Should().Be(1);
+        (await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == envId))
+            .AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.DuringMajorUpgrade);
+    }
+
     private static BcInstalledApp Installed(Guid appId, string name, string version) =>
         new(appId, name, "Continia Software", version, "Installed", "global", true, null, string.Empty);
 
@@ -2616,6 +2674,22 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         rows.Select(r => r.BatchOrder).Should().Equal(0, 1, 2);
         rows.Select(r => r.BatchId).Distinct().Should().ContainSingle().Which.Should().NotBeNull();
         rows.Should().OnlyContain(r => r.Status == UpgradeActionStatus.Pending && r.ExecuteAfter == rows[0].ExecuteAfter);
+    }
+
+    [Fact]
+    public async Task Booked_packages_are_not_kept_on_the_pages_context_once_written()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+
+        await using var ctx = _db.NewContext();
+        await Svc(ctx, TokenOk(), new FakeAdminClient(), new FakeAppManagementClient())
+            .InstallUploadedAppsAsync(projectId, envId,
+                new[] { Pkg("Core.app", 1), Pkg("Connector.app", 2) }, UploadAppTiming.Now);
+
+        ctx.ChangeTracker.Entries<OeEnvironmentUpgradeAction>().Should().BeEmpty(
+            "the packages are the worker's once booked, and the page's context lives as long as the page");
+        await using var read = _db.NewContext();
+        (await read.OeEnvironmentUpgradeActions.AsNoTracking().CountAsync(a => a.EnvironmentId == envId)).Should().Be(2);
     }
 
     [Fact]
@@ -3914,6 +3988,58 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The same stranger may neither move an environment's delivery window nor cancel an
+    /// install Business Central has scheduled on it, and neither reaches the table or the
+    /// customer's tenant (#1276).
+    /// </summary>
+    [Fact]
+    public async Task A_non_owner_non_admin_can_neither_set_the_delivery_window_nor_cancel_a_scheduled_install()
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+        await NarrowAsync(projectId);
+        await SeedUserAsync(9501, "window-stranger@example.com", UserRole.User);
+        var apps = new FakeAppManagementClient();
+
+        _db.OrgContext.CurrentUserId = 9501;
+        try
+        {
+            await using var ctx = _db.NewContext();
+            var svc = Svc(ctx, TokenOk(), new FakeAdminClient(), apps);
+
+            await ((Func<Task>)(() => svc.SetUpdateWindowAsync(projectId, envId, Ten, Six)))
+                .Should().ThrowAsync<ProjectAccessDeniedException>();
+            await ((Func<Task>)(() => svc.CancelScheduledInstallAsync(
+                    projectId, envId, Guid.NewGuid(), "2.0.0.0", BcDeploymentSchedule.UpdateWindow)))
+                .Should().ThrowAsync<ProjectAccessDeniedException>();
+        }
+        finally
+        {
+            _db.OrgContext.CurrentUserId = OwnerUserId;
+        }
+
+        apps.Removed.Should().BeNull("nothing was cancelled in the customer's tenant");
+        await using var read = _db.NewContext();
+        var row = await read.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == envId);
+        row.UpdateWindowStart.Should().BeNull();
+        row.UpdateWindowEnd.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_delivery_window_with_only_one_end_is_refused(bool onlyStart)
+    {
+        var (projectId, envId) = await SeedEnvironmentAsync();
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk())
+            .SetUpdateWindowAsync(projectId, envId, onlyStart ? Ten : null, onlyStart ? null : Six);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["UpdateWindow"]
+            .Should().Contain("both a start and an end");
+    }
+
     // ── The organisation's own app registration ───────────────────────────
 
     /// <summary>Records the client id each token request signs in with.</summary>
@@ -3926,6 +4052,68 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             ClientIds.Add(System.Web.HttpUtility.ParseQueryString(form)["client_id"] ?? string.Empty);
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"access_token\":\"tok\",\"expires_in\":3600}") };
         }
+    }
+
+    /// <summary>Hands out a token named after the tenant in the sign-in URL, and records each round-trip.</summary>
+    private sealed class PerTenantTokenHandler : HttpMessageHandler
+    {
+        public List<string> Tenants { get; } = new();
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var tenant = request.RequestUri!.Segments[1].TrimEnd('/');
+            Tenants.Add(tenant);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"{{\"access_token\":\"tok-{tenant}\",\"expires_in\":3600}}"),
+            });
+        }
+    }
+
+    [Fact]
+    public async Task A_cached_token_is_never_handed_out_for_a_different_tenant_or_client()
+    {
+        // The race in #1265: a request that resolved the old credentials re-caches the old
+        // tenant's token after the save invalidated it. The next caller, with the new
+        // tenant, must not get that token back.
+        var handler = new PerTenantTokenHandler();
+        var tokens = new BcTokenService(new StubFactory(handler), NullLogger<BcTokenService>.Instance);
+        var oldTenant = Guid.NewGuid();
+        var newTenant = Guid.NewGuid();
+
+        (await tokens.GetTokenAsync(7, oldTenant, "client-abc", "s")).Should().Be($"tok-{oldTenant}");
+        (await tokens.GetTokenAsync(7, oldTenant, "client-abc", "s")).Should().Be($"tok-{oldTenant}", "the same credentials reuse the cache");
+        (await tokens.GetTokenAsync(7, newTenant, "client-abc", "s")).Should().Be($"tok-{newTenant}");
+        (await tokens.GetTokenAsync(7, newTenant, "client-xyz", "s")).Should().Be($"tok-{newTenant}");
+
+        handler.Tenants.Should().HaveCount(3, "a tenant or client change is a cache miss");
+    }
+
+    [Fact]
+    public async Task Saving_a_new_tenant_drops_the_cached_token_on_a_shared_token_service()
+    {
+        var id = await SeedProjectAsync();
+        var handler = new PerTenantTokenHandler();
+        var tokens = new BcTokenService(new StubFactory(handler), NullLogger<BcTokenService>.Instance);
+        var oldTenant = Guid.NewGuid();
+        var newTenant = Guid.NewGuid();
+
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx, tokens).SaveConnectionAsync(id,
+                new BcConnectionInput(oldTenant, "client-abc", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+        }
+        await using (var ctx = _db.NewContext())
+            (await Svc(ctx, tokens).AcquireDeliveryContextAsync(id)).AccessToken.Should().Be($"tok-{oldTenant}");
+
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx, tokens).SaveConnectionAsync(id,
+                new BcConnectionInput(newTenant, "client-abc", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+        }
+        await using (var ctx = _db.NewContext())
+            (await Svc(ctx, tokens).AcquireDeliveryContextAsync(id)).AccessToken.Should().Be($"tok-{newTenant}");
+
+        handler.Tenants.Should().Equal(oldTenant.ToString(), newTenant.ToString());
     }
 
     private const string OrgClientId = "22222222-2222-2222-2222-222222222222";

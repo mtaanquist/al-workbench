@@ -1095,16 +1095,28 @@
             + (one ? "It" : "They") + " can go on another upgrade afterwards.";
         if (!await _removeConfirm.OpenAsync(title, message, "Remove", "btn--danger", "trash-2")) return;
 
-        if (await WriteAsync(async () =>
-            {
-                foreach (var line in lines) await Upgrades.RemoveLineAsync(line.LineId);
-            }))
+        UpgradeLinesChangeResult? result = null;
+        if (await WriteAsync(async () => result = await Upgrades.RemoveLinesAsync(Id, lines.Select(l => l.LineId))))
         {
-            foreach (var line in lines) _selection.Set(line.Environment.EnvironmentId, false);
+            foreach (var line in lines.Where(l => result!.Changed.Contains(l.LineId)))
+            {
+                _selection.Set(line.Environment.EnvironmentId, false);
+            }
             ApplyFilters();
-            _notice = new UpgradeNotice(one ? "Took 1 environment off the upgrade." : $"Took {lines.Count} environments off the upgrade.", "info", false);
+            _notice = LinesNotice(result!, result!.Changed.Count switch
+            {
+                0 => "No environments were taken off the upgrade.",
+                1 => "Took 1 environment off the upgrade.",
+                var n => $"Took {n} environments off the upgrade.",
+            });
         }
     }
+
+    /// <summary>What a change to several lines did, in one line: the count, then each refusal in its own words.</summary>
+    internal static UpgradeNotice LinesNotice(UpgradeLinesChangeResult result, string done) =>
+        result.Refused.Count == 0
+            ? new UpgradeNotice(done, "info", false)
+            : new UpgradeNotice(done + " " + string.Join(" ", result.Refused.Values), "warn", false);
 
     private Task AssignAsync(EnvironmentUpgradeLineRow line, int? userId) =>
         WriteAsync(() => Upgrades.AssignAsync(line.LineId, userId));
@@ -1121,10 +1133,17 @@
         var choice = await _assign.OpenAsync(title, current is [{ } only] ? only : null);
         if (choice is null) return;
 
-        await WriteAsync(async () =>
+        UpgradeLinesChangeResult? result = null;
+        if (await WriteAsync(async () => result = await Upgrades.AssignLinesAsync(Id, lines.Select(l => l.LineId), choice.UserId))
+            && result!.Refused.Count > 0)
         {
-            foreach (var line in lines) await Upgrades.AssignAsync(line.LineId, choice.UserId);
-        });
+            _notice = LinesNotice(result, result.Changed.Count switch
+            {
+                0 => "No environments were changed.",
+                1 => "Changed who checks 1 environment.",
+                var n => $"Changed who checks {n} environments.",
+            });
+        }
     }
 
     /// <summary>
