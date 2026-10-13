@@ -550,6 +550,48 @@ public sealed class AccountServiceTests : IDisposable
         // Second use of the same token must fail.
         Func<Task> reuse = () => svc.ConsumePasswordResetTokenAsync(token!, "verylongnewpassword!");
         await reuse.Should().ThrowAsync<PlanValidationException>();
+
+        // And a fresh token stops working once its hour is up (#1271).
+        var late = await svc.CreatePasswordResetTokenAsync("reset@example.com", "10.0.0.1");
+        _clock.Advance(PasswordResetService.ResetTokenLifetime + TimeSpan.FromSeconds(1));
+        Func<Task> expired = () => svc.ConsumePasswordResetTokenAsync(late!, "anotherlongpassword!");
+        (await expired.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Token");
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == 200);
+        NewAuth(read).VerifyPassword("verylongnewpassword!", user.PasswordHash)
+            .Should().BeTrue("the expired link must not have changed the password");
+    }
+
+    [Fact]
+    public async Task Reset_token_is_refused_once_the_account_is_no_longer_active()
+    {
+        // A link issued before the account was disabled must not set a
+        // password on it afterwards (#1271).
+        await using (var seed = _db.NewContext())
+        {
+            seed.Users.Add(new User
+            {
+                Id = 201, OrganizationId = TestDb.DefaultOrgId, Email = "leaver@example.com",
+                PasswordHash = "old", DisplayName = "Leaver", Role = UserRole.User,
+                Status = UserStatus.Active, CreatedAt = _clock.GetUtcNow().UtcDateTime,
+            });
+            await seed.SaveChangesAsync();
+        }
+        var ctx = _db.NewContext();
+        var svc = NewPasswordReset(ctx);
+        var token = await svc.CreatePasswordResetTokenAsync("leaver@example.com", "10.0.0.1");
+        token.Should().NotBeNull();
+        await using (var disable = _db.NewContext())
+        {
+            await disable.Users.IgnoreQueryFilters().Where(u => u.Id == 201)
+                .ExecuteUpdateAsync(s => s.SetProperty(u => u.Status, UserStatus.Disabled));
+        }
+
+        await using var fresh = _db.NewContext();
+        Func<Task> act = () => NewPasswordReset(fresh).ConsumePasswordResetTokenAsync(token!, "verylongnewpassword!");
+        await act.Should().ThrowAsync<PlanValidationException>();
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == 201)).PasswordHash.Should().Be("old");
     }
 
     [Fact]
