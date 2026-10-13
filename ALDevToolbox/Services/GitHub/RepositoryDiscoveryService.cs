@@ -146,6 +146,7 @@ public sealed class RepositoryDiscoveryService
         }
 
         var found = new List<(GitHubRepositorySummary Repo, string Path, AppJsonManifest Manifest)>();
+        var unread = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var repo in repositories)
         {
             ct.ThrowIfCancellationRequested();
@@ -155,12 +156,17 @@ public sealed class RepositoryDiscoveryService
             }
             catch (Exception ex) when (ex is GitHubApiException or HttpRequestException or TaskCanceledException)
             {
+                unread.Add(repo.FullName);
                 _logger.LogWarning(ex,
                     "Could not probe {RepoFullName} for an app.json; it is left out of this sweep.", repo.FullName);
             }
         }
 
-        await ReconcileAsync(orgId, found, ct);
+        // Only what this sweep actually read can be dropped: a repository whose probe
+        // failed, or that sits past the listing's cut, keeps its row and its Ignore (#1231).
+        var listed = repositories.Select(r => r.FullName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        await ReconcileAsync(orgId, found,
+            fullName => !unread.Contains(fullName) && (listed.Contains(fullName) || !listing.Truncated), ct);
         _logger.LogInformation(
             "Repository discovery for organisation {OrgId} found {AlCount} AL repositories of the installation's {RepositoryCount}.",
             orgId, found.Count, repositories.Count);
@@ -245,11 +251,14 @@ public sealed class RepositoryDiscoveryService
     /// deliberate even for an ignored row whose repository stopped being an AL
     /// repository - the finding is gone, so the decision about it has nothing
     /// left to apply to. An ignored row whose repository is still found keeps its
-    /// <c>ignored_at</c>.
+    /// <c>ignored_at</c>. A row is dropped only when <paramref name="settled"/> says the
+    /// sweep has a real answer for its repository: read without an app.json, or gone from
+    /// a complete listing. One it could not read stays as it was (#1231).
     /// </summary>
     private async Task ReconcileAsync(
         int orgId,
         IReadOnlyList<(GitHubRepositorySummary Repo, string Path, AppJsonManifest Manifest)> found,
+        Func<string, bool> settled,
         CancellationToken ct)
     {
         var now = _clock.GetUtcNow().UtcDateTime;
@@ -280,7 +289,7 @@ public sealed class RepositoryDiscoveryService
             row.LastSeenAt = now;
         }
 
-        var vanished = existing.Where(c => !seen.Contains(c.FullName)).ToList();
+        var vanished = existing.Where(c => !seen.Contains(c.FullName) && settled(c.FullName)).ToList();
         if (vanished.Count > 0) _db.GitHubRepositoryCandidates.RemoveRange(vanished);
 
         await _db.SaveChangesAsync(ct);
