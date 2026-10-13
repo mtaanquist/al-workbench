@@ -229,7 +229,7 @@ public sealed class ArtifactService
         // Pipelines inherit their project's visibility; a locked project has no
         // locked pipeline row, it simply isn't listed here.
         var pipelines = await _db.OePipelines.AsNoTracking()
-            .Where(p => p.DeletedAt == null)
+            .Where(p => p.DeletedAt == null && p.Project!.DeletedAt == null)
             .Where(p => _db.OeProjects.Where(visible).Any(v => v.Id == p.ProjectId))
             .Select(p => new
             {
@@ -329,7 +329,7 @@ public sealed class ArtifactService
     {
         await EnsureCanViewPipelineAsync(pipelineId, ct);
         var header = await _db.OePipelines.AsNoTracking()
-            .Where(p => p.Id == pipelineId && p.DeletedAt == null)
+            .Where(p => p.Id == pipelineId && p.DeletedAt == null && p.Project!.DeletedAt == null)
             .Select(p => new PipelineHeader(
                 p.Id, p.Name, p.ProjectId, p.Project!.Name,
                 p.Project.CreatedByUser != null ? p.Project.CreatedByUser.DisplayName : null,

@@ -86,7 +86,7 @@ public sealed class ReleasePipelineService
     /// </summary>
     public async Task<List<ReleasePipelineRow>> ListReleasePipelinesAsync(int? projectId = null, CancellationToken ct = default)
     {
-        var query = _db.OeReleasePipelines.AsNoTracking().Where(r => r.DeletedAt == null);
+        var query = _db.OeReleasePipelines.AsNoTracking().Where(r => r.DeletedAt == null && r.Project!.DeletedAt == null);
         if (projectId is { } pid)
         {
             await _access.EnsureCanViewAsync(pid, ct);
@@ -558,6 +558,9 @@ public sealed class ReleasePipelineService
 
     /// <summary>Why a deployment was set aside when its pipeline was disabled, for its history.</summary>
     internal const string DisabledPipelineReason = "The deployment pipeline was disabled";
+
+    /// <summary>Why a deployment was set aside when its solution was deleted, for its history (#1229).</summary>
+    internal const string DeletedSolutionReason = "The solution was deleted";
 
     /// <summary>
     /// What deleting this deployment pipeline would affect: deployments waiting to run here

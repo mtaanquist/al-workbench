@@ -70,7 +70,7 @@ public sealed class PipelineService
     /// </summary>
     public async Task<List<OePipeline>> ListPipelinesAsync(int? projectId = null, CancellationToken ct = default)
     {
-        var query = _db.OePipelines.AsNoTracking().Where(p => p.DeletedAt == null);
+        var query = _db.OePipelines.AsNoTracking().Where(p => p.DeletedAt == null && p.Project!.DeletedAt == null);
         if (projectId is { } pid)
         {
             await _access.EnsureCanViewAsync(pid, ct);
@@ -93,7 +93,7 @@ public sealed class PipelineService
     {
         await EnsureCanViewPipelineAsync(id, ct);
         return await _db.OePipelines.AsNoTracking()
-            .Where(p => p.Id == id && p.DeletedAt == null)
+            .Where(p => p.Id == id && p.DeletedAt == null && p.Project!.DeletedAt == null)
             .Include(p => p.Project)
             .FirstOrDefaultAsync(ct);
     }

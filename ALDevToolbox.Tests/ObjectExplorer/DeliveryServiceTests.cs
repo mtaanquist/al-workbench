@@ -996,6 +996,75 @@ public sealed class DeliveryServiceTests : IDisposable
         rows.Values.SelectMany(d => d.Results).Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
     }
 
+    // ── Deleting the solution (#1229) ──────────────────────────────────────────
+
+    [Fact]
+    public async Task Deleting_the_solution_stops_its_pipelines_and_sets_aside_what_waits()
+    {
+        int scheduledId, proposedId;
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+            proposedId = (await NewService(ctx).ProposeReleasesForBuildAsync(seed.BuildId)).Single();
+            scheduledId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(1));
+            DrainQueue();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewProjectService(ctx).SoftDeleteProjectAsync(seed.ProjectId);
+        }
+
+        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow.AddHours(2))).Should().Be(0);
+        (await NewService(_db.NewContext()).RunDeliveryAsync(scheduledId)).Should().BeFalse();
+        _apps.UploadedOrder.Should().BeEmpty();
+
+        await using var read = _db.NewContext();
+        var rows = await read.OeProjectDeliveries.Include(d => d.Results)
+            .Where(d => d.Id == scheduledId || d.Id == proposedId)
+            .ToDictionaryAsync(d => d.Id);
+        rows[scheduledId].Status.Should().Be(ProjectDeliveryStatus.Cancelled);
+        rows[scheduledId].DiagnosticsLog.Should().Contain("The solution was deleted");
+        rows[proposedId].Status.Should().Be(ProjectDeliveryStatus.Dismissed);
+        rows[proposedId].DismissReason.Should().Be("The solution was deleted");
+        rows.Values.SelectMany(d => d.Results).Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
+
+        (await read.OePipelines.SingleAsync(p => p.Id == seed.BuildPipelineId)).DeletedAt.Should().NotBeNull();
+        (await read.OeReleasePipelines.SingleAsync(r => r.Id == seed.ReleasePipelineId)).DeletedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Pipelines_of_a_solution_deleted_before_they_were_stopped_are_neither_listed_nor_deployed()
+    {
+        int deliveryId;
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+            deliveryId = await NewService(ctx).ScheduleDeliveryAsync(seed.ReleasePipelineId, seed.BuildId, DateTime.UtcNow.AddHours(5));
+            DrainQueue();
+            // A solution deleted before the delete stopped its pipelines.
+            await ctx.OeProjects.Where(p => p.Id == seed.ProjectId)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+            await ctx.OeProjectDeliveries.Where(d => d.Id == deliveryId)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.ScheduledFor, DateTime.UtcNow.AddMinutes(-1)));
+        }
+
+        (await NewService(_db.NewContext()).RunDeliveryAsync(deliveryId)).Should().BeFalse();
+        (await NewService(_db.NewContext()).EnqueueDueDeliveriesAsync(DateTime.UtcNow)).Should().Be(0);
+        _apps.UploadedOrder.Should().BeEmpty();
+
+        await using var read = _db.NewContext();
+        var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == deliveryId);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Cancelled);
+        delivery.DiagnosticsLog.Should().Contain("The solution was deleted");
+
+        (await NewReleasePipelineService(read).ListReleasePipelinesAsync()).Should().BeEmpty();
+        (await NewPipelineService(read).ListPipelinesAsync()).Should().BeEmpty();
+    }
+
     // ── Disabling a deployment pipeline (#1131) ───────────────────────────────
 
     [Fact]
@@ -3573,6 +3642,14 @@ public sealed class DeliveryServiceTests : IDisposable
 
     private ReleasePipelineService NewReleasePipelineService(AppDbContext ctx) =>
         new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _db.NewToolEnablement(ctx), NullLogger<ReleasePipelineService>.Instance);
+
+    private ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService NewProjectService(AppDbContext ctx) =>
+        _db.NewProjectService(ctx);
+
+    private PipelineService NewPipelineService(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
+            _db.NewOfflineGitHubAccessService(ctx),
+            NullLogger<PipelineService>.Instance);
 
     private DeliveryService NewService(AppDbContext ctx, ALDevToolbox.Services.Tools.ToolEnablement? tools = null, TimeProvider? clock = null)
     {

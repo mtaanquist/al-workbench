@@ -3,6 +3,8 @@ using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Generation;
 using ALDevToolbox.Services.GitHub;
+using ALDevToolbox.Services.Notifications;
+using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol;
 
@@ -1078,7 +1080,10 @@ public sealed class ProjectService
             symbolId, symbol.FileName, projectId);
     }
 
-    /// <summary>Soft-deletes a project (its repositories ride along via the soft-delete marker).</summary>
+    /// <summary>
+    /// Soft-deletes a project (its repositories ride along via the soft-delete marker), its
+    /// build and deployment pipelines, and sets aside its waiting deployments.
+    /// </summary>
     public async Task SoftDeleteProjectAsync(int id, CancellationToken ct = default)
     {
         RequireOrganizationId();
@@ -1090,10 +1095,45 @@ public sealed class ProjectService
         // project, it doesn't get to end it. See .design/teams-and-visibility.md.
         await _access.EnsureCanDeleteAsync(project.CreatedByUserId, ct);
 
-        project.DeletedAt = DateTime.UtcNow;
-        project.UpdatedAt = project.DeletedAt.Value;
+        // Its pipelines go with it, and what its deployment pipelines still had waiting is
+        // set aside the way deleting a pipeline does, so nothing builds, lists or deploys
+        // for a solution that is gone (#1229). Deployments made while this commits are
+        // caught by the delivery scheduler's sweep, which treats a deleted solution as a
+        // stopped pipeline.
+        var now = DateTime.UtcNow;
+        var userId = _orgContext.CurrentUserId;
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        project.DeletedAt = now;
+        project.UpdatedAt = now;
         await _db.SaveChangesAsync(ct);
-        _logger.LogInformation("Soft-deleted project {ProjectId}.", id);
+
+        await _db.OePipelines
+            .Where(p => p.ProjectId == id && p.DeletedAt == null)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, now).SetProperty(p => p.UpdatedAt, now), ct);
+        await _db.OeReleasePipelines
+            .Where(r => r.ProjectId == id && r.DeletedAt == null)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.DeletedAt, now).SetProperty(r => r.UpdatedAt, now), ct);
+
+        var reason = ReleasePipelineService.DeletedSolutionReason;
+        var proposed = await _db.OeProjectDeliveries
+            .Where(d => d.ProjectId == id && d.Status == ProjectDeliveryStatus.Proposed)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        var dismissed = await ReleasePipelineService.SetAsideForStoppedPipelineAsync(
+            _db, proposed, ProjectDeliveryStatus.Proposed, reason, userId, now, ct);
+        var scheduled = await _db.OeProjectDeliveries
+            .Where(d => d.ProjectId == id && d.Status == ProjectDeliveryStatus.Scheduled)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        var cancelled = await ReleasePipelineService.SetAsideForStoppedPipelineAsync(
+            _db, scheduled, ProjectDeliveryStatus.Scheduled, reason, userId, now, ct);
+        await tx.CommitAsync(ct);
+
+        await NotificationSubject.MarkDoneAsync(
+            _db, dismissed.Select(NotificationSubject.Delivery).ToList(), now, _logger, ct);
+        _logger.LogInformation(
+            "Soft-deleted project {ProjectId}; cancelled {Cancelled} scheduled and dismissed {Dismissed} prepared deliveries.",
+            id, cancelled.Count, dismissed.Count);
     }
 
     /// <summary>
