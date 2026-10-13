@@ -76,6 +76,56 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
         rows.Should().ContainSingle().Which.CustomerName.Should().Be("CRONUS A/S");
     }
 
+    /// <summary>
+    /// #1278 (T25): the attribution is a write a GET cannot protect with an
+    /// antiforgery token, so it is gated on fetch metadata and fails closed.
+    /// An address-bar navigation ("none") records like same-origin does; a
+    /// cross-site navigation, a same-site one and a request with no header at
+    /// all still get the ZIP but record nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("none", true)]
+    [InlineData("cross-site", false)]
+    [InlineData("same-site", false)]
+    [InlineData(null, false)]
+    public async Task Only_a_navigation_from_this_origin_records_the_attribution(string? fetchSite, bool records)
+    {
+        await SeedUserAsync();
+        var recipeId = await SeedRecipeAsync();
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory);
+        using var request = new HttpRequestMessage(
+            HttpMethod.Get, $"/api/cookbook/{recipeId}/download?customer=CRONUS%20A%2FS");
+        if (fetchSite is not null) request.Headers.Add("Sec-Fetch-Site", fetchSite);
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK, "the ZIP itself is served either way");
+        response.Content.Headers.ContentType!.MediaType.Should().Be("application/zip");
+        await using var ctx = _db.NewContext();
+        (await ctx.RecipeDownloads.AsNoTracking().CountAsync(d => d.RecipeId == recipeId))
+            .Should().Be(records ? 1 : 0);
+    }
+
+    /// <summary>#1278 (T25): another organisation's recipe id is not found, and nothing is recorded.</summary>
+    [Fact]
+    public async Task Another_organisations_recipe_is_not_found()
+    {
+        await SeedUserAsync();
+        var foreignId = await SeedRecipeAsync(TestDb.OtherOrgId);
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory);
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/cookbook/{foreignId}/download");
+        request.Headers.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        await using var ctx = _db.NewContext();
+        (await ctx.RecipeDownloads.IgnoreQueryFilters().AsNoTracking().CountAsync(d => d.RecipeId == foreignId))
+            .Should().Be(0);
+    }
+
     [Fact]
     public async Task A_deleted_recipe_is_not_found_rather_than_a_server_error()
     {
@@ -106,13 +156,13 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
         return reader.ReadToEnd();
     }
 
-    private async Task<int> SeedRecipeAsync()
+    private async Task<int> SeedRecipeAsync(int organizationId = TestDb.DefaultOrgId)
     {
         await using var ctx = _db.NewContext();
         var now = new DateTime(2026, 10, 1, 9, 0, 0, DateTimeKind.Utc);
         var recipe = new Recipe
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = organizationId,
             Title = "Setup table pattern",
             Description = "A setup table with its page.",
             Type = RecipeType.Pattern,
@@ -122,12 +172,12 @@ public sealed class CookbookDownloadEndpointTests : IDisposable
             [
                 new RecipeFile
                 {
-                    OrganizationId = TestDb.DefaultOrgId, Ordering = 0, RelativePath = "src/Setup",
+                    OrganizationId = organizationId, Ordering = 0, RelativePath = "src/Setup",
                     FileName = "CronusSetup.Table.al", Content = "table 50100 \"CRONUS Setup\" { }",
                 },
                 new RecipeFile
                 {
-                    OrganizationId = TestDb.DefaultOrgId, Ordering = 1, RelativePath = "src/Setup",
+                    OrganizationId = organizationId, Ordering = 1, RelativePath = "src/Setup",
                     FileName = "CronusSetup.Page.al", Content = "page 50100 \"CRONUS Setup\" { }",
                 },
             ],
