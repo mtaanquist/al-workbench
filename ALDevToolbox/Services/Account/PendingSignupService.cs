@@ -166,16 +166,24 @@ public sealed class PendingSignupService
         // lives for ~30 minutes, so cap wrong submissions. Once the row is
         // maxed out it's dead — the visitor must request a fresh code (which
         // supersedes this row). The high-entropy link token path is unaffected. #409
-        if (row.FailedCodeAttempts >= MaxCodeAttempts) return null;
+        //
+        // The attempt is spent before the comparison, in one conditional
+        // update, so parallel guesses can't all read the same count and slip
+        // past the cap together; a right code gives it back. #1208
+        var spent = await _db.PendingSignups
+            .Where(p => p.Id == row.Id && p.FailedCodeAttempts < MaxCodeAttempts)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.FailedCodeAttempts, p => p.FailedCodeAttempts + 1), ct);
+        if (spent == 0) return null;
 
         var candidate = HashCode(trimmed, row.LinkTokenHash);
         if (!CryptographicOperations.FixedTimeEquals(
                 Encoding.ASCII.GetBytes(candidate), Encoding.ASCII.GetBytes(row.CodeHash)))
         {
-            row.FailedCodeAttempts++;
-            await _db.SaveChangesAsync(ct);
             return null;
         }
+        await _db.PendingSignups
+            .Where(p => p.Id == row.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.FailedCodeAttempts, p => p.FailedCodeAttempts - 1), ct);
 
         if (row.VerifiedAt is null)
         {

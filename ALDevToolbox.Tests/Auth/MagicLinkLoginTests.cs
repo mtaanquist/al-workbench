@@ -66,6 +66,35 @@ public sealed class MagicLinkLoginTests : IDisposable
     }
 
     [Fact]
+    public async Task Magic_link_opened_twice_at_once_signs_in_once()
+    {
+        // Two requests carrying the same link, both past the read before
+        // either wrote (#1208).
+        await SeedActiveUserAsync("twice@example.com", 701);
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            token = (await NewSvc(ctx).CreateMagicLoginTokenAsync("twice@example.com", "1.2.3.4"))!;
+        }
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 2).Select(async _ =>
+        {
+            await using var ctx = _db.NewContext();
+            try
+            {
+                await NewSvc(ctx).ConsumeMagicLoginTokenAsync(token);
+                return true;
+            }
+            catch (PlanValidationException)
+            {
+                return false;
+            }
+        }));
+
+        results.Count(r => r).Should().Be(1);
+    }
+
+    [Fact]
     public async Task Magic_link_token_expires_at_the_fifteen_minute_boundary()
     {
         await SeedActiveUserAsync();

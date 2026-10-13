@@ -82,11 +82,15 @@ public sealed class EmailMfaService
         // All live (unconsumed, unexpired) challenges for this user. Issuance
         // doesn't invalidate prior codes, so more than one can be live within
         // the issue window; any of them is still acceptable.
-        var live = await _db.PasswordResetTokens.IgnoreQueryFilters()
-            .Where(t => t.UserId == userId
-                        && t.Purpose == TokenPurpose.EmailMfaChallenge
-                        && t.ConsumedAt == null
-                        && t.ExpiresAt > now)
+        //
+        // Fence category 4 (explicitly scoped user-id lookup): pinned to t.UserId == userId
+        // (the half-authenticated login state or the signed-in user). The writes
+        // below narrow this same query to one of its rows.
+        var userChallenges = _db.PasswordResetTokens.IgnoreQueryFilters()
+            .Where(t => t.UserId == userId && t.Purpose == TokenPurpose.EmailMfaChallenge);
+        var live = await userChallenges
+            .Where(t => t.ConsumedAt == null && t.ExpiresAt > now)
+            .AsNoTracking()
             .ToListAsync(ct);
         if (live.Count == 0) return false;
 
@@ -94,20 +98,30 @@ public sealed class EmailMfaService
         // the 6-digit space can't be walked before the codes expire. Once the
         // cap is hit the user must request a fresh challenge (the issue throttle
         // bounds how often that can happen). #409
-        if (live.Sum(t => t.FailedAttempts) >= MaxVerifyAttempts) return false;
+        //
+        // Guesses are charged to the newest live challenge, and the charge is
+        // made before comparing, in one conditional update, so parallel
+        // guesses can't all read the same total and slip past the cap
+        // together. A right code gives the attempt back. #1208
+        var newest = live.OrderByDescending(t => t.CreatedAt).ThenByDescending(t => t.Id).First();
+        var allowance = MaxVerifyAttempts - live.Where(t => t.Id != newest.Id).Sum(t => t.FailedAttempts);
+        var charged = await userChallenges
+            .Where(t => t.Id == newest.Id && t.FailedAttempts < allowance)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.FailedAttempts, t => t.FailedAttempts + 1), ct);
+        if (charged == 0) return false;
 
         var match = live.FirstOrDefault(t => CryptographicOperations.FixedTimeEquals(
             Encoding.ASCII.GetBytes(t.TokenHash), Encoding.ASCII.GetBytes(hash)));
-        if (match is null)
-        {
-            // Attribute the failure to the newest live challenge.
-            live.OrderByDescending(t => t.CreatedAt).First().FailedAttempts++;
-            await _db.SaveChangesAsync(ct);
-            return false;
-        }
-        match.ConsumedAt = now;
-        await _db.SaveChangesAsync(ct);
-        return true;
+        if (match is null) return false;
+
+        await userChallenges
+            .Where(t => t.Id == newest.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.FailedAttempts, t => t.FailedAttempts - 1), ct);
+        // Single use, claimed: of two posts of the same right code, one wins.
+        var consumed = await userChallenges
+            .Where(t => t.Id == match.Id && t.ConsumedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);
+        return consumed == 1;
     }
 
     /// <summary>Flips <see cref="User.EmailMfaEnabled"/>. Caller verifies the code first.</summary>

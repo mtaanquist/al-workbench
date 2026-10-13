@@ -39,8 +39,10 @@ internal static class AccountMfaEndpoints
             if (state is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
             // Brute-force guard: the attacker already has the password (that's
             // how they reached the challenge), so cap wrong second-factor
-            // guesses before verifying. See #477.
-            if (await auth.IsMfaThrottledAsync(state.UserId, clock.GetUtcNow().UtcDateTime, ct))
+            // guesses. The attempt is taken before verifying, so parallel
+            // guesses count against each other. See #477 and #1208.
+            var attempt = await auth.TryReserveMfaAttemptAsync(state.UserId, ResolveIp(ctx), ct);
+            if (attempt is null)
             {
                 ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=too-many-attempts");
                 return;
@@ -49,10 +51,10 @@ internal static class AccountMfaEndpoints
             var code = form["Code"].ToString();
             if (!await totp.VerifyAsync(state.UserId, code, ct))
             {
-                await auth.RecordMfaFailureAsync(state.UserId, ResolveIp(ctx), ct);
                 ctx.Response.Redirect($"/login/challenge?{RouteConstants.ErrQuery}=invalid");
                 return;
             }
+            await auth.ReleaseMfaAttemptAsync(attempt.Value, ct);
             await CompleteMfaSignIn(ctx, auth, state, SignInMethod.Totp, ct, logger);
         });
 
@@ -128,7 +130,8 @@ internal static class AccountMfaEndpoints
             // Same brute-force guard as the TOTP path — recovery codes are a
             // longer but still finite space, and the counter is shared so an
             // attacker can't dodge it by alternating methods. See #477.
-            if (await auth.IsMfaThrottledAsync(state.UserId, clock.GetUtcNow().UtcDateTime, ct))
+            var attempt = await auth.TryReserveMfaAttemptAsync(state.UserId, ResolveIp(ctx), ct);
+            if (attempt is null)
             {
                 ctx.Response.Redirect($"/login/challenge?method=recovery&{RouteConstants.ErrQuery}=too-many-attempts");
                 return;
@@ -137,10 +140,10 @@ internal static class AccountMfaEndpoints
             var code = form["Code"].ToString();
             if (!await recovery.ConsumeAsync(state.UserId, code, ct))
             {
-                await auth.RecordMfaFailureAsync(state.UserId, ResolveIp(ctx), ct);
                 ctx.Response.Redirect($"/login/challenge?method=recovery&{RouteConstants.ErrQuery}=invalid");
                 return;
             }
+            await auth.ReleaseMfaAttemptAsync(attempt.Value, ct);
             await CompleteMfaSignIn(ctx, auth, state, SignInMethod.RecoveryCode, ct, logger);
         });
 
