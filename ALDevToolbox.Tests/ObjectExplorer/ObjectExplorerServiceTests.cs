@@ -1612,7 +1612,82 @@ public sealed class ObjectExplorerServiceTests : IDisposable
         var hit = await query.FindInFileAsync(fileId, decl.Line, decl.ColumnStart);
         hit.Should().NotBeNull();
         hit!.Occurrences.Should().NotBeEmpty();
-        hit.Occurrences.Should().OnlyContain(o => o.LineText.Contains(hit.Word, StringComparison.Ordinal));
+        hit.Occurrences.Should().OnlyContain(o => o.LineText.Contains(hit.Word, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// AL identifiers are case-insensitive, so "Find in this file" must match
+    /// <c>insert</c> and <c>INSERT</c> when the click was on <c>Insert</c>, and
+    /// must not match the word inside <c>InsertRecord</c> (#1262).
+    /// </summary>
+    [Fact]
+    public async Task FindInFileAsync_ignores_case_and_matches_whole_words_only()
+    {
+        var lines = new[]
+        {
+            "codeunit 50100 Finder",
+            "{",
+            "    procedure Insert()",
+            "    begin",
+            "        insert(true);",
+            "        InsertRecord();",
+            "        Rec.INSERT;",
+            "    end;",
+            "}",
+        };
+        long fileId;
+        await using (var write = _db.NewContext())
+        {
+            var release = new OeRelease
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Label = "Find in file fixture",
+                Kind = "first_party",
+                Status = "ready",
+                ImportedAt = DateTime.UtcNow,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            };
+            write.OeReleases.Add(release);
+            await write.SaveChangesAsync();
+            var module = new OeModule
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ReleaseId = release.Id,
+                AppId = Guid.NewGuid(),
+                Name = "Finder",
+                Publisher = "CRONUS",
+                Version = "1.0.0.0",
+                CreatedAt = DateTime.UtcNow,
+            };
+            write.OeModules.Add(module);
+            await write.SaveChangesAsync();
+            var content = string.Join("\n", lines);
+            var hash = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            write.OeFileContents.Add(new OeFileContent
+            {
+                ContentHash = hash, Content = content, ContentLength = content.Length, LineCount = lines.Length,
+            });
+            var file = new OeModuleFile
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ModuleId = module.Id,
+                Path = "src/Finder.Codeunit.al",
+                ContentHash = hash,
+                LineCount = lines.Length,
+            };
+            write.OeModuleFiles.Add(file);
+            await write.SaveChangesAsync();
+            fileId = file.Id;
+        }
+
+        await using var read = _db.NewContext();
+        // Line 3, on the "I" of "Insert".
+        var hit = await NewSourceViewer(read).FindInFileAsync(fileId, 3, 15);
+
+        hit.Should().NotBeNull();
+        hit!.Word.Should().Be("Insert");
+        hit.Occurrences.Select(o => o.Line).Should().Equal(3, 5, 7);
     }
 
     [Fact]

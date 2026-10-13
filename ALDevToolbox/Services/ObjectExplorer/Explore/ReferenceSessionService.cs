@@ -339,7 +339,7 @@ public sealed class ReferenceSessionService
     /// (letter, digit, underscore). Stops <c>Item</c> from matching
     /// inside <c>ItemNo</c>.
     /// </summary>
-    private static int IndexOfWord(string haystack, string word, int start)
+    internal static int IndexOfWord(string haystack, string word, int start)
     {
         var i = start;
         while (i <= haystack.Length - word.Length)

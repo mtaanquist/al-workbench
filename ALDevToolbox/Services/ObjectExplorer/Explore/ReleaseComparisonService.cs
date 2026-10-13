@@ -315,7 +315,10 @@ public sealed class ReleaseComparisonService
         // per-bucket database reads take the same number in the final sort
         // order, which is safe: rows for one module are contiguous in a
         // (ModuleName, Path) sort, so any row inside the global first N is also
-        // inside its own bucket's first N.
+        // inside its own bucket's first N. That only holds while the database
+        // and the in-memory sort agree, so both order by the lower-cased value
+        // compared byte by byte: the column's own collation (en_US) ranks
+        // punctuation and digits differently, and left gaps in the cut (#1262).
         var fetch = take.HasValue ? take.Value + 1 : int.MaxValue;
 
         // Added / Removed modules: every file in that module is added/removed.
@@ -329,7 +332,9 @@ public sealed class ReleaseComparisonService
             var addedFiles = await _db.OeModuleFiles.AsNoTracking()
                 .Where(f => addedRightModuleIds.Contains(f.ModuleId))
                 .Select(f => new { f.Id, f.Path, f.ModuleId, ModuleAppId = f.Module!.AppId, ModuleName = f.Module!.Name })
-                .OrderBy(f => f.ModuleName).ThenBy(f => f.Path)
+                .OrderBy(f => EF.Functions.Collate(f.ModuleName.ToLower(), "C"))
+                .ThenBy(f => EF.Functions.Collate(f.Path.ToLower(), "C"))
+                .ThenBy(f => EF.Functions.Collate(f.Path, "C"))
                 .Take(fetch)
                 .ToListAsync(ct);
             rows.AddRange(addedFiles.Select(f => new ReleaseCompareFileRow(
@@ -341,7 +346,9 @@ public sealed class ReleaseComparisonService
             var removedFiles = await _db.OeModuleFiles.AsNoTracking()
                 .Where(f => removedLeftModuleIds.Contains(f.ModuleId))
                 .Select(f => new { f.Id, f.Path, f.ModuleId, ModuleAppId = f.Module!.AppId, ModuleName = f.Module!.Name })
-                .OrderBy(f => f.ModuleName).ThenBy(f => f.Path)
+                .OrderBy(f => EF.Functions.Collate(f.ModuleName.ToLower(), "C"))
+                .ThenBy(f => EF.Functions.Collate(f.Path.ToLower(), "C"))
+                .ThenBy(f => EF.Functions.Collate(f.Path, "C"))
                 .Take(fetch)
                 .ToListAsync(ct);
             rows.AddRange(removedFiles.Select(f => new ReleaseCompareFileRow(
@@ -378,8 +385,9 @@ public sealed class ReleaseComparisonService
         }
 
         var ordered = rows
-            .OrderBy(r => r.ModuleName, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(r => r.Path, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(r => r.ModuleName.ToLowerInvariant(), StringComparer.Ordinal)
+            .ThenBy(r => r.Path.ToLowerInvariant(), StringComparer.Ordinal)
+            .ThenBy(r => r.Path, StringComparer.Ordinal)
             .Take(fetch)
             .ToList();
 
@@ -395,9 +403,10 @@ public sealed class ReleaseComparisonService
 
     /// <summary>
     /// Object-level diff between two releases, matched by <c>(Kind, ObjectId)</c>
-    /// (or <c>(Kind, Name)</c> when an object has no id). Each object's
-    /// source-slice <c>content_hash</c> decides added / removed / modified /
-    /// unchanged. This is the matcher the legacy C/AL Base-vs-Customer compare
+    /// (or <c>(Kind, Name)</c> when an object has no id). The <c>content_hash</c>
+    /// of the source file holding each object decides modified / unchanged, and
+    /// for objects with no source on either side the owning app stands in (see
+    /// <see cref="SameObject"/>). This is the matcher the legacy C/AL Base-vs-Customer compare
     /// uses — the module/AppId-keyed <see cref="CompareReleasesAsync"/> can't
     /// line two independent releases up because each carries a distinct AppId.
     /// <para>Bounded like the file diff (#1228): unchanged objects, the bulk of
@@ -428,7 +437,7 @@ public sealed class ReleaseComparisonService
         {
             if (rightByKey.TryGetValue(key, out var r))
             {
-                var status = l.Hash is not null && l.Hash == r.Hash ? "unchanged" : "modified";
+                var status = SameObject(l, r) ? "unchanged" : "modified";
                 rows.Add(new ObjectCompareRow(l.Kind, l.ObjectId, l.Name, status, l.FileId, r.FileId));
             }
             else
@@ -505,8 +514,23 @@ public sealed class ReleaseComparisonService
             .Where(o => o.Module!.ReleaseId == releaseId)
             .Select(o => new CompareObject(
                 o.Kind, o.ObjectId, o.Name, o.SourceFileId,
-                o.SourceFile != null ? o.SourceFile.ContentHash : null))
+                o.SourceFile != null ? o.SourceFile.ContentHash : null,
+                o.Module!.AppId, o.Module.Version, o.Module.AppFileHash))
             .ToListAsync(ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// Whether two matched objects are the same. The hash is the source file's,
+    /// so with source on both sides it decides. An object from a symbols-only
+    /// app has no source file, and used to read "modified" on every compare
+    /// (#1262); with no source on either side, the same app package (by file
+    /// hash, else by app id and version) is the best evidence there is.
+    /// </summary>
+    private static bool SameObject(CompareObject l, CompareObject r)
+    {
+        if (l.Hash is not null || r.Hash is not null) return l.Hash == r.Hash;
+        if (l.AppFileHash is not null && r.AppFileHash is not null) return l.AppFileHash == r.AppFileHash;
+        return l.AppId == r.AppId && string.Equals(l.Version, r.Version, StringComparison.Ordinal);
+    }
 
     private static Dictionary<string, CompareObject> ToKeyedMap(IEnumerable<CompareObject> objects)
     {
@@ -523,7 +547,9 @@ public sealed class ReleaseComparisonService
         return map;
     }
 
-    private sealed record CompareObject(string Kind, int? ObjectId, string Name, long? FileId, string? Hash);
+    private sealed record CompareObject(
+        string Kind, int? ObjectId, string Name, long? FileId, string? Hash,
+        Guid AppId, string Version, string? AppFileHash);
 
     /// <summary>
     /// Releases other than the file's own that contain a file at the same

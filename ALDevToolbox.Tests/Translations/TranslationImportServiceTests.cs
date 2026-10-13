@@ -5,6 +5,7 @@ using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ALDevToolbox.Tests.Translations;
@@ -305,5 +306,80 @@ public sealed class TranslationImportServiceTests : IDisposable
         hits.Should().Contain(h => h.ObjectName == "OIOUBL-Check Sales Header"
                                 && h.SubName == "DiscountAmountNegativeErr"
                                 && h.Kind == "label");
+    }
+
+    [Fact]
+    public async Task ImportSingleAsync_keeps_previous_rows_when_the_insert_fails()
+    {
+        // #1261: the delete used to commit on its own, so an insert that
+        // failed afterwards left the language empty until the next upload.
+        var (releaseId, moduleId) = await SeedOioublReleaseAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await using var s = File.OpenRead(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf"));
+            await NewTranslator(ctx).ImportSingleAsync(releaseId, moduleId, s, "OIOUBL.daDK.xlf");
+        }
+
+        await using (var ctx = _db.NewContext(new FailTranslationInsert()))
+        {
+            await using var s = File.OpenRead(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf"));
+            var act = () => NewTranslator(ctx).ImportSingleAsync(releaseId, moduleId, s, "OIOUBL.daDK.xlf");
+            await act.Should().ThrowAsync<InvalidOperationException>();
+        }
+
+        await using var read = _db.NewContext();
+        (await read.OeModuleTranslations.CountAsync(t => t.ModuleId == moduleId && t.LanguageCode == "da-DK"))
+            .Should().Be(436, because: "a failed re-upload must leave the previous translations in place");
+    }
+
+    [Fact]
+    public async Task ImportZipAsync_refuses_an_oversized_zip_with_a_field_error()
+    {
+        // #1261: the aggregate size guard used to throw InvalidDataException,
+        // which the upload endpoint turned into a 500.
+        var (releaseId, _) = await SeedOioublReleaseAsync();
+
+        var zipBuffer = new MemoryStream();
+        using (var archive = new ZipArchive(zipBuffer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var entry = archive.CreateEntry("Big.daDK.xlf", CompressionLevel.NoCompression);
+            await using var es = entry.Open();
+            await es.WriteAsync("<xliff/>"u8.ToArray());
+        }
+
+        // Rewrite the central directory's uncompressed size so the entry
+        // declares ~4 GB without the test having to produce it.
+        var bytes = zipBuffer.ToArray();
+        var cd = FindSignature(bytes, 0x02014b50);
+        BitConverter.GetBytes(0xFFFFFFF0u).CopyTo(bytes, cd + 24);
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewTranslator(ctx).ImportZipAsync(releaseId, new MemoryStream(bytes));
+        var thrown = await act.Should().ThrowAsync<PlanValidationException>();
+        thrown.Which.Errors.Should().ContainKey("ZipFile");
+    }
+
+    private static int FindSignature(byte[] bytes, uint signature)
+    {
+        for (var i = 0; i <= bytes.Length - 4; i++)
+        {
+            if (BitConverter.ToUInt32(bytes, i) == signature) return i;
+        }
+        throw new InvalidOperationException("Signature not found.");
+    }
+
+    /// <summary>Fails the first save that inserts translation rows, after the delete has run.</summary>
+    private sealed class FailTranslationInsert : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (eventData.Context!.ChangeTracker.Entries<ALDevToolbox.Domain.Entities.ObjectExplorer.OeModuleTranslation>()
+                .Any(e => e.State == EntityState.Added))
+            {
+                throw new InvalidOperationException("Simulated insert failure.");
+            }
+            return base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
     }
 }

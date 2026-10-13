@@ -515,7 +515,9 @@ public sealed class ExplorerTreeService
         var needle = (query ?? string.Empty).Trim();
         if (needle.Length < 2) return [];
 
-        var pattern = "%" + needle + "%";
+        // Escaped so a search for "_" or "%" matches those characters
+        // rather than everything (#1262), as the object search does.
+        var pattern = "%" + ObjectSearchService.EscapeLike(needle) + "%";
         var cap = MaxSearchResults + 1;
 
         // Object-name half. Driven off oe_module_objects so the trigram index
@@ -534,7 +536,7 @@ public sealed class ExplorerTreeService
         var nameHits = await _db.OeModuleObjects.AsNoTracking()
             .Where(o => o.Module!.ReleaseId == releaseId
                      && o.SourceFileId != null
-                     && EF.Functions.ILike(o.Name, pattern))
+                     && EF.Functions.ILike(o.Name, pattern, "\\"))
             .GroupBy(o => o.SourceFileId!.Value)
             .OrderBy(g => g.Min(o => o.Name))
             .Select(g => g.Key)
@@ -544,7 +546,7 @@ public sealed class ExplorerTreeService
         // Path half - the fallback for files with no object at all.
         var pathHits = await _db.OeModuleFiles.AsNoTracking()
             .Where(f => f.Module!.ReleaseId == releaseId
-                     && EF.Functions.ILike(f.Path, pattern))
+                     && EF.Functions.ILike(f.Path, pattern, "\\"))
             .OrderBy(f => f.Path)
             .Select(f => f.Id)
             .Take(cap)
