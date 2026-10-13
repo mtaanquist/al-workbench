@@ -169,6 +169,7 @@ public sealed class PersistedImportJobsTests : IDisposable
         resumable[0].Source.Should().BeOfType<ReleaseImportSource.Url>()
             .Which.DownloadUrl.Should().Be("https://download.microsoft.com/x.zip");
         resumable[0].JobRowId.Should().Be(id);
+        resumable[0].Resumed.Should().BeTrue("the interrupted run may have left part of the release behind (#1209)");
 
         await using var read = _db.NewContext();
         var row = await read.OeImportJobs.AsNoTracking().SingleAsync(j => j.Id == id);
