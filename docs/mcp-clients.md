@@ -152,9 +152,8 @@ Cursor reloads MCP servers automatically.
 Run from any project directory:
 
 ```sh
-claude mcp add aldevtoolbox \
-  --transport http \
-  --url ${SERVER}/mcp \
+claude mcp add --transport http aldevtoolbox \
+  ${SERVER}/mcp \
   --header "Authorization: Bearer ${PAT}"
 ```
 
