@@ -568,6 +568,48 @@ public sealed partial class GitHubAppClient
     private const int MaxRepositoryPages = 10;
 
     /// <summary>
+    /// The repositories of installation <paramref name="installationId"/> that
+    /// <paramref name="userToken"/>'s owner can reach themselves, in one paged read
+    /// rather than a call per repository (#1232). Empty when GitHub says the person
+    /// cannot reach the installation at all (404). Stops at the same thousand as
+    /// <see cref="ListInstallationRepositoriesAsync"/>.
+    /// </summary>
+    /// <exception cref="GitHubApiException">GitHub refused the call, e.g. a revoked token or a rate limit.</exception>
+    public async Task<GitHubInstallationRepositories> ListUserInstallationRepositoriesAsync(
+        string userToken, long installationId, CancellationToken ct = default)
+    {
+        var repositories = new List<GitHubRepositorySummary>();
+        var truncated = false;
+        for (var page = 1; page <= MaxRepositoryPages; page++)
+        {
+            using var request = NewRequest(
+                HttpMethod.Get, $"user/installations/{installationId}/repositories?per_page=100&page={page}", userToken);
+            using var document = await SendOrNotFoundAsync(request, ct);
+            if (document is null) break;
+            var root = document.RootElement;
+            // An answer that lists nothing is not "no repositories": the caller falls back
+            // to asking per repository rather than offering none.
+            if (!root.TryGetProperty("repositories", out var list) || list.ValueKind != JsonValueKind.Array)
+            {
+                throw new GitHubApiException(HttpStatusCode.BadGateway, "GitHub did not list the installation's repositories.");
+            }
+
+            var returned = list.GetArrayLength();
+            foreach (var element in list.EnumerateArray())
+            {
+                if (ReadRepository(element) is { } repository) repositories.Add(repository);
+            }
+            if (returned < 100) break;
+            if (page == MaxRepositoryPages) truncated = true;
+        }
+
+        _logger.LogInformation(
+            "GitHub reported {RepositoryCount} repositories of installation {InstallationId} the acting user can reach.",
+            repositories.Count, installationId);
+        return new GitHubInstallationRepositories(repositories, truncated);
+    }
+
+    /// <summary>
     /// One repository as <paramref name="credential"/>'s owner sees it, or
     /// <see langword="null"/> when they cannot see it.
     ///
