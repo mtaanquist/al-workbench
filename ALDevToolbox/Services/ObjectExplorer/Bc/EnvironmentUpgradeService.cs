@@ -842,8 +842,26 @@ public sealed class EnvironmentUpgradeService
             $"{int.Parse(parts[0], CultureInfo.InvariantCulture)}.{int.Parse(parts[1], CultureInfo.InvariantCulture)}");
     }
 
+    /// <summary>
+    /// Lets go of the upgrades and lines an earlier write in this scope left tracked, so
+    /// the load that follows reads them as they are now. A Blazor circuit keeps one context
+    /// for hours, and a tracking query hands back the instance it already holds, values and
+    /// all: without this, a "marked done" another person undid since would still refuse
+    /// every write here, and a close they made would not stop one (#1236). Only unchanged
+    /// rows go; every write here saves before it returns.
+    /// </summary>
+    private void ForgetTrackedUpgrades()
+    {
+        var stale = _db.ChangeTracker.Entries()
+            .Where(e => e.State == EntityState.Unchanged
+                        && e.Entity is OeEnvironmentUpgrade or OeEnvironmentUpgradeLine)
+            .ToList();
+        foreach (var entry in stale) entry.State = EntityState.Detached;
+    }
+
     private async Task<OeEnvironmentUpgrade> LoadOpenAsync(int upgradeId, CancellationToken ct)
     {
+        ForgetTrackedUpgrades();
         var upgrade = await _db.OeEnvironmentUpgrades
             .FirstOrDefaultAsync(u => u.Id == upgradeId, ct).ConfigureAwait(false)
             ?? throw Gone();
@@ -852,11 +870,14 @@ public sealed class EnvironmentUpgradeService
     }
 
     /// <summary>The header with every line, visible or not: done, reopen and delete act on all of them.</summary>
-    private async Task<OeEnvironmentUpgrade> LoadWithLinesAsync(int upgradeId, CancellationToken ct) =>
-        await _db.OeEnvironmentUpgrades
+    private async Task<OeEnvironmentUpgrade> LoadWithLinesAsync(int upgradeId, CancellationToken ct)
+    {
+        ForgetTrackedUpgrades();
+        return await _db.OeEnvironmentUpgrades
             .Include(u => u.Lines)
             .FirstOrDefaultAsync(u => u.Id == upgradeId, ct).ConfigureAwait(false)
-        ?? throw Gone();
+            ?? throw Gone();
+    }
 
     /// <summary>
     /// One line, tracked, for a write: reached through the visibility join (a line from a
@@ -865,6 +886,7 @@ public sealed class EnvironmentUpgradeService
     /// </summary>
     private async Task<OeEnvironmentUpgradeLine> LoadLineForWriteAsync(int lineId, CancellationToken ct)
     {
+        ForgetTrackedUpgrades();
         var snapshot = await _access.GetSnapshotAsync(ct).ConfigureAwait(false);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
         var line = await _db.OeEnvironmentUpgradeLines

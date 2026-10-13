@@ -509,6 +509,48 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_page_that_marked_an_upgrade_done_sees_someone_else_reopen_it()
+    {
+        var (projectId, a) = await _f.SeedCustomerAsync();
+        var b = await SeedEnvironmentAsync(projectId, "UAT");
+        var id = await CreateAsync();
+        await AddAsync(id, a);
+
+        // Ann's page keeps one context for the whole visit (#1236).
+        await using var ann = _f.Db.NewContext();
+        await _f.Upgrades(ann).CloseAsync(id);
+
+        await using (var bob = _f.Db.NewContext())
+        {
+            await _f.Upgrades(bob).ReopenAsync(id);
+        }
+
+        // Ann's next write reads it open, as it is.
+        (await _f.Upgrades(ann).AddLinesAsync(id, [b])).Added.Should().Equal(b);
+    }
+
+    [Fact]
+    public async Task A_page_that_reopened_an_upgrade_sees_someone_else_mark_it_done()
+    {
+        var (projectId, a) = await _f.SeedCustomerAsync();
+        var b = await SeedEnvironmentAsync(projectId, "UAT");
+        var id = await CreateAsync();
+        await AddAsync(id, a);
+        await CloseAsync(id);
+
+        await using var ann = _f.Db.NewContext();
+        await _f.Upgrades(ann).ReopenAsync(id);
+
+        await CloseAsync(id);
+
+        // Ann's page still has it open; the write must not put open lines on a done upgrade.
+        var add = () => _f.Upgrades(ann).AddLinesAsync(id, [b]);
+        await add.Should().ThrowAsync<PlanValidationException>();
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgradeLines.AsNoTracking().AnyAsync(l => l.EnvironmentId == b)).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task Reopen_is_refused_when_an_environment_has_moved_to_another_open_upgrade()
     {
         var (_, envId) = await _f.SeedCustomerAsync();
