@@ -28,6 +28,9 @@ namespace ALDevToolbox.Services.Mcp.Tools;
 [McpServerToolType]
 public sealed class ArtifactsTools
 {
+    /// <summary>Row cap on <c>compare_solution_builds</c>: the 200 the Object Explorer compare tools use (#1228).</summary>
+    private const int MaxCompareRows = 200;
+
     private readonly ArtifactService _artifacts;
     private readonly ReleaseComparisonService _comparison;
     private readonly ProjectService _projects;
@@ -134,11 +137,13 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "compare_solution_builds", ReadOnly = true)]
-    [Description("Diffs two of the SAME solution's builds at the object level (added / removed / modified / unchanged), so you can see what objects changed between two compiles. Both builds must be 'ready'; nightly preview check builds hold compile results only and cannot be compared. This is deliberately solution-scoped — use compare_releases for Microsoft/third-party releases.")]
-    public async Task<IReadOnlyList<ObjectCompareRow>> CompareProjectBuildsAsync(
+    [Description("Diffs two of the SAME solution's builds at the object level (added / removed / modified / unchanged), so you can see what objects changed between two compiles. Both builds must be 'ready'; nightly preview check builds hold compile results only and cannot be compared. Capped at 200 rows ordered by kind, then id; Truncated and Note say whether anything was left out, and kind / namePattern narrow it. This is deliberately solution-scoped — use compare_releases for Microsoft/third-party releases.")]
+    public async Task<ObjectCompareResult> CompareProjectBuildsAsync(
         [Description("First (earlier / base) build id.")] int baseBuildId,
         [Description("Second (later) build id.")] int otherBuildId,
         [Description("When true (default), omit unchanged objects and return only added / removed / modified.")] bool changesOnly = true,
+        [Description("Optional AL kind to compare only ('table', 'page', 'codeunit', ...). Null compares every kind.")] string? kind = null,
+        [Description("Optional case-insensitive substring of the object name. Null compares every object.")] string? namePattern = null,
         CancellationToken ct = default)
     {
         var (leftProject, leftRelease) = await _projects.ResolveReadyBuildAsync(baseBuildId, ct);
@@ -149,8 +154,9 @@ public sealed class ArtifactsTools
                 "Both builds must belong to the same project. compare_solution_builds is project-scoped; use compare_releases for cross-release diffs.");
         }
 
-        var rows = await _comparison.CompareReleaseObjectsAsync(leftRelease, rightRelease, ct);
-        return changesOnly ? rows.Where(r => r.Status != "unchanged").ToList() : rows;
+        var set = await _comparison.CompareReleaseObjectsAsync(
+            leftRelease, rightRelease, MaxCompareRows, includeUnchanged: !changesOnly, kind, namePattern, ct);
+        return ObjectCompareResult.From(set, MaxCompareRows);
     }
 
     // ── helpers ─────────────────────────────────────────────────────────

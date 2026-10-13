@@ -122,6 +122,36 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Retrying_a_failed_artifact_import_queues_it_again_from_its_artifact_address()
+    {
+        // #1222: a Microsoft artifact import has nothing to re-upload, so Retry
+        // with no input must re-run it from the address it was queued with.
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "Business Central 27.1 (DK)", Kind = "first_party", Status = "failed",
+            DedupKey = "bc-onprem:27.1:dk", ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        const string artifactUrl = "https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/onprem/27.1.0.0/dk";
+        await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new ReleaseImportSource.BcArtifact(artifactUrl), storeSymbolReference: false);
+        var queue = new ReleaseImportQueue();
+
+        var outcome = await NewService(ctx, queue).RetryAsync(release.Id, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null, CalTxtFile: null));
+
+        outcome.Should().BeOfType<ReleaseImportOutcome.Queued>();
+        (await StatusAsync(release.Id)).Should().Be("ingesting");
+        queue.Reader.TryRead(out var job).Should().BeTrue();
+        job!.Source.Should().BeOfType<ReleaseImportSource.BcArtifact>()
+            .Which.ApplicationUrl.Should().Be(artifactUrl);
+    }
+
     private async Task<string?> StatusAsync(int releaseId)
     {
         await using var read = _db.NewContext();

@@ -80,8 +80,8 @@ public sealed class ReleaseComparisonService
         var leftModules = await LoadModuleCompareRowsAsync(leftReleaseId, ct);
         var rightModules = await LoadModuleCompareRowsAsync(rightReleaseId, ct);
 
-        var leftByApp = leftModules.ToDictionary(m => m.AppId);
-        var rightByApp = rightModules.ToDictionary(m => m.AppId);
+        var leftByApp = OneModulePerApp(leftModules);
+        var rightByApp = OneModulePerApp(rightModules);
 
         var added = new List<ModuleCompareEntry>();
         var removed = new List<ModuleCompareEntry>();
@@ -222,6 +222,22 @@ public sealed class ReleaseComparisonService
 
         return (added, removed, changed);
     }
+
+    /// <summary>
+    /// Keys a release's modules by app. A release can hold two versions of one app
+    /// (an amend accepts a newer one beside the old), so the higher version wins,
+    /// then the newer module: the same pick the chain queries make
+    /// (<see cref="ReleaseAncestrySql.WinningModules"/>), and a compare that used
+    /// to throw on the duplicate key (#1224).
+    /// </summary>
+    private static Dictionary<Guid, ModuleCompareRow> OneModulePerApp(List<ModuleCompareRow> modules)
+        => modules
+            .GroupBy(m => m.AppId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(m => Version.TryParse(m.Version, out var v) ? v : null)
+                      .ThenByDescending(m => m.ModuleId)
+                      .First());
 
     private Task<List<ModuleCompareRow>> LoadModuleCompareRowsAsync(int releaseId, CancellationToken ct)
         => _db.OeModules.AsNoTracking()
@@ -384,16 +400,27 @@ public sealed class ReleaseComparisonService
     /// unchanged. This is the matcher the legacy C/AL Base-vs-Customer compare
     /// uses — the module/AppId-keyed <see cref="CompareReleasesAsync"/> can't
     /// line two independent releases up because each carries a distinct AppId.
+    /// <para>Bounded like the file diff (#1228): unchanged objects, the bulk of
+    /// any DVD-to-DVD compare, are left out unless
+    /// <paramref name="includeUnchanged"/> asks for them, the optional
+    /// <paramref name="kind"/> and <paramref name="nameContains"/> narrow the set
+    /// before the cap, and at most <paramref name="take"/> rows come back, with
+    /// <see cref="ObjectCompareSet.Truncated"/> saying whether more matched.</para>
     /// </summary>
-    public async Task<List<ObjectCompareRow>> CompareReleaseObjectsAsync(
-        int leftReleaseId, int rightReleaseId, CancellationToken ct = default)
+    public async Task<ObjectCompareSet> CompareReleaseObjectsAsync(
+        int leftReleaseId, int rightReleaseId,
+        int? take = MaxCompareObjectRows,
+        bool includeUnchanged = false,
+        string? kind = null,
+        string? nameContains = null,
+        CancellationToken ct = default)
     {
-        if (!await BothSidesVisibleAsync(leftReleaseId, rightReleaseId, ct)) return new();
+        if (!await BothSidesVisibleAsync(leftReleaseId, rightReleaseId, ct)) return new([], 0, false);
         var left = await LoadCompareObjectsAsync(leftReleaseId, ct).ConfigureAwait(false);
         var right = await LoadCompareObjectsAsync(rightReleaseId, ct).ConfigureAwait(false);
 
-        var leftByKey = ToKeyedMap(left);
-        var rightByKey = ToKeyedMap(right);
+        var leftByKey = ToKeyedMap(left.Where(o => MatchesFilter(o, kind, nameContains)));
+        var rightByKey = ToKeyedMap(right.Where(o => MatchesFilter(o, kind, nameContains)));
 
         var rows = new List<ObjectCompareRow>();
 
@@ -415,12 +442,35 @@ public sealed class ReleaseComparisonService
                 rows.Add(new ObjectCompareRow(r.Kind, r.ObjectId, r.Name, "added", null, r.FileId));
         }
 
-        return rows
+        var objectCount = rows.Count;
+        var ordered = rows
+            .Where(r => includeUnchanged || r.Status != "unchanged")
             .OrderBy(r => r.Kind, StringComparer.OrdinalIgnoreCase)
             .ThenBy(r => r.ObjectId ?? int.MaxValue)
             .ThenBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
+
+        var truncated = take.HasValue && ordered.Count > take.Value;
+        if (truncated)
+        {
+            _logger.LogInformation(
+                "Object compare of releases {Left} and {Right} truncated at {Cap} rows",
+                leftReleaseId, rightReleaseId, take!.Value);
+            ordered = ordered.Take(take!.Value).ToList();
+        }
+        return new ObjectCompareSet(ordered, objectCount, truncated);
     }
+
+    /// <summary>
+    /// Default cap on object-level diff rows: the same ceiling as the file diff
+    /// (<see cref="MaxCompareFileRows"/>) and find-references, for the same
+    /// reason (#1228).
+    /// </summary>
+    public const int MaxCompareObjectRows = MaxCompareFileRows;
+
+    private static bool MatchesFilter(CompareObject o, string? kind, string? nameContains)
+        => (string.IsNullOrWhiteSpace(kind) || string.Equals(o.Kind, kind.Trim(), StringComparison.OrdinalIgnoreCase))
+           && (string.IsNullOrWhiteSpace(nameContains) || o.Name.Contains(nameContains.Trim(), StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// The source file of the counterpart object in another Release, matched by

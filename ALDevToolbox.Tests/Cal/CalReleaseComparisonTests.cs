@@ -65,7 +65,7 @@ public sealed class CalReleaseComparisonTests : IDisposable
 
         await using var ctx = _db.NewContext();
         var svc = new ReleaseComparisonService(ctx, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseComparisonService>.Instance);
-        var rows = await svc.CompareReleaseObjectsAsync(baseId, custId);
+        var rows = (await svc.CompareReleaseObjectsAsync(baseId, custId, includeUnchanged: true)).Rows;
 
         rows.Single(r => r.Kind == "table" && r.ObjectId == 18).Status.Should().Be("modified");
         rows.Single(r => r.Kind == "table" && r.ObjectId == 18).LeftFileId.Should().NotBeNull();
@@ -74,5 +74,41 @@ public sealed class CalReleaseComparisonTests : IDisposable
         rows.Single(r => r.Kind == "codeunit" && r.ObjectId == 50000).Status.Should().Be("unchanged");
         rows.Single(r => r.Kind == "page" && r.ObjectId == 21).Status.Should().Be("removed");
         rows.Single(r => r.Kind == "table" && r.ObjectId == 50001).Status.Should().Be("added");
+
+        // #1228: by default the unchanged bulk is left out, but still counted.
+        var changed = await svc.CompareReleaseObjectsAsync(baseId, custId);
+        changed.Rows.Should().NotContain(r => r.Status == "unchanged");
+        changed.Rows.Should().HaveCount(3);
+        changed.ObjectCount.Should().Be(4);
+        changed.Truncated.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Object_compare_is_capped_and_narrows_by_kind_and_name_before_the_cap()
+    {
+        // #1228: the object diff used to return every object of both releases.
+        var baseCal =
+            Obj("Table 18 Customer", "  FIELDS\r\n  {\r\n    { 1 ; ;No. ;Code20 }\r\n  }")
+          + Obj("Page 21 Customer Card", "  PROPERTIES\r\n  {\r\n    SourceTable=Table18;\r\n  }");
+        var custCal =
+            Obj("Table 50001 Loyalty", "  FIELDS\r\n  {\r\n    { 1 ; ;Code ;Code20 }\r\n  }")
+          + Obj("Table 50002 Loyalty Tier", "  FIELDS\r\n  {\r\n    { 1 ; ;Code ;Code20 }\r\n  }");
+
+        var baseId = await ImportAsync(baseCal, "Base capped", "first_party", null);
+        var custId = await ImportAsync(custCal, "Customer capped", "project", baseId);
+
+        await using var ctx = _db.NewContext();
+        var svc = new ReleaseComparisonService(ctx, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseComparisonService>.Instance);
+
+        var capped = await svc.CompareReleaseObjectsAsync(baseId, custId, take: 2);
+        capped.Rows.Should().HaveCount(2);
+        capped.Truncated.Should().BeTrue("four objects changed and the cap is two");
+
+        var exact = await svc.CompareReleaseObjectsAsync(baseId, custId, take: 4);
+        exact.Truncated.Should().BeFalse("an exactly-fitting result is not cut");
+
+        var tables = await svc.CompareReleaseObjectsAsync(baseId, custId, take: 2, kind: "table", nameContains: "loyalty");
+        tables.Rows.Select(r => r.ObjectId).Should().Equal(50001, 50002);
+        tables.Truncated.Should().BeFalse("the filters narrow the set before the cap");
     }
 }

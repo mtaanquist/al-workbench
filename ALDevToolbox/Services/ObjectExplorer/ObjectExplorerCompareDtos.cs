@@ -106,3 +106,15 @@ public sealed record ObjectCompareRow(
     string Status,            // "added" | "removed" | "modified" | "unchanged"
     long? LeftFileId,
     long? RightFileId);
+
+/// <summary>
+/// One object-level diff: the rows, capped, plus what the caller needs to say
+/// so. <see cref="ObjectCount"/> is how many objects matched the filters across
+/// both releases, unchanged ones included, so a page can still say "all N are
+/// identical" when <see cref="Rows"/> leaves them out. <see cref="Truncated"/> is
+/// true when more rows matched than <see cref="Rows"/> holds (#1228).
+/// </summary>
+public sealed record ObjectCompareSet(
+    IReadOnlyList<ObjectCompareRow> Rows,
+    int ObjectCount,
+    bool Truncated);

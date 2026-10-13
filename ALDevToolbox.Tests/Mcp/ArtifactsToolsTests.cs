@@ -359,7 +359,7 @@ public sealed class ArtifactsToolsTests : IDisposable
         await using (var read = _db.NewContext())
         {
             // Both releases are empty, so the diff is empty - but it runs.
-            (await NewTools(read).CompareProjectBuildsAsync(firstBuild, secondBuild)).Should().BeEmpty();
+            (await NewTools(read).CompareProjectBuildsAsync(firstBuild, secondBuild)).Rows.Should().BeEmpty();
         }
     }
 

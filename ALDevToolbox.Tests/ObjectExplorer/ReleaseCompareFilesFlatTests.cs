@@ -104,6 +104,55 @@ public sealed class ReleaseCompareFilesFlatTests : IDisposable
         uncut.Should().HaveCount(6, "an exactly-fitting result has no extra row to flag");
     }
 
+    /// <summary>
+    /// An amend can put a newer version of an app beside the old one in the same
+    /// release. Compare used to throw on the duplicate app id; it now compares the
+    /// higher version, and the chain queries pick the same module (#1224). The
+    /// newer version is inserted first so a pick by row id alone would get it wrong.
+    /// </summary>
+    [Fact]
+    public async Task Compare_picks_the_higher_version_when_a_release_holds_two_of_one_app()
+    {
+        await using var ctx = _db.NewContext();
+        var left = NewRelease("CRONUS 2.0.0.0");
+        var right = NewRelease("CRONUS amended");
+        ctx.OeReleases.AddRange(left, right);
+        await ctx.SaveChangesAsync();
+        if (!await ctx.OeFileContents.AnyAsync(c => c.ContentHash == HashA))
+        {
+            ctx.OeFileContents.Add(new OeFileContent { ContentHash = HashA, Content = "// a", ContentLength = 4, LineCount = 1 });
+        }
+        if (!await ctx.OeFileContents.AnyAsync(c => c.ContentHash == HashB))
+        {
+            ctx.OeFileContents.Add(new OeFileContent { ContentHash = HashB, Content = "// b", ContentLength = 4, LineCount = 1 });
+        }
+        var appId = Guid.NewGuid();
+        var oldLeft = NewModule(left.Id, appId, "Contoso", "2.0.0.0");
+        var newer = NewModule(right.Id, appId, "Contoso", "2.0.10.0");
+        ctx.OeModules.AddRange(oldLeft, newer);
+        await ctx.SaveChangesAsync();
+        var older = NewModule(right.Id, appId, "Contoso", "2.0.9.0");
+        ctx.OeModules.Add(older);
+        await ctx.SaveChangesAsync();
+        ctx.OeModuleFiles.AddRange(
+            NewFile(oldLeft.Id, "src/Contoso.al", HashA),
+            NewFile(older.Id, "src/Contoso.al", HashA),
+            NewFile(newer.Id, "src/Contoso.al", HashB));
+        await ctx.SaveChangesAsync();
+
+        await using var read = _db.NewContext();
+        var summary = await NewComparison(read).CompareReleasesAsync(left.Id, right.Id);
+
+        summary.Should().NotBeNull();
+        summary!.Changed.Should().ContainSingle()
+            .Which.RightModuleId.Should().Be(newer.Id);
+
+        var winning = await read.Database
+            .SqlQueryRaw<long>(ReleaseAncestrySql.WinningModules + "\nSELECT id AS \"Value\" FROM winning", right.Id)
+            .ToListAsync();
+        winning.Should().Equal(newer.Id);
+    }
+
     private ReleaseComparisonService NewComparison(AppDbContext ctx) =>
         new(ctx, new ProjectAccess(ctx, _db.OrgContext), NullLogger<ReleaseComparisonService>.Instance);
 

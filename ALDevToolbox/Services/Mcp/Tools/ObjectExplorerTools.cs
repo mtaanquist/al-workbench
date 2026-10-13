@@ -51,17 +51,20 @@ public sealed class ObjectExplorerTools
         await _explorer.ListReleasesAsync(includeSoftDeleted: false, ct: ct);
 
     [McpServerTool(Name = "compare_releases", ReadOnly = true)]
-    [Description("Diffs two releases at the object level, matched by (kind, object id). Returns each object's Status — 'added' (in the second only), 'removed' (in the first only), 'modified' (source differs), or 'unchanged' — plus the LeftFileId / RightFileId for a side-by-side source diff. Built for the legacy C/AL Base-vs-Customer comparison: pass the bare-Microsoft 'Base' release first and the customer export second.")]
-    public async Task<IReadOnlyList<ObjectCompareRow>> CompareReleasesAsync(
+    [Description("Diffs two releases at the object level, matched by (kind, object id). Returns each object's Status — 'added' (in the second only), 'removed' (in the first only), 'modified' (source differs), or 'unchanged' — plus the LeftFileId / RightFileId for a side-by-side source diff; Truncated and Note say whether anything was left out. Capped at 200 rows ordered by kind, then id — two Business Central versions differ in far more objects than that, so pass kind and/or namePattern to narrow it. Built for the legacy C/AL Base-vs-Customer comparison: pass the bare-Microsoft 'Base' release first and the customer export second.")]
+    public async Task<ObjectCompareResult> CompareReleasesAsync(
         [Description("First (left / Base) release Label or numeric id.")] string baseReleaseLabelOrId,
         [Description("Second (right / Customer) release Label or numeric id.")] string otherReleaseLabelOrId,
         [Description("When true (default), omit unchanged objects and return only added / removed / modified.")] bool changesOnly = true,
+        [Description("Optional AL kind to compare only ('table', 'page', 'codeunit', ...). Null compares every kind.")] string? kind = null,
+        [Description("Optional case-insensitive substring of the object name. Null compares every object.")] string? namePattern = null,
         CancellationToken ct = default)
     {
         var leftId = await _explorer.ResolveReleaseAsync(baseReleaseLabelOrId, ct);
         var rightId = await _explorer.ResolveReleaseAsync(otherReleaseLabelOrId, ct);
-        var rows = await _comparison.CompareReleaseObjectsAsync(leftId, rightId, ct);
-        return changesOnly ? rows.Where(r => r.Status != "unchanged").ToList() : rows;
+        var set = await _comparison.CompareReleaseObjectsAsync(
+            leftId, rightId, MaxResults, includeUnchanged: !changesOnly, kind, namePattern, ct);
+        return ObjectCompareResult.From(set, MaxResults);
     }
 
     [McpServerTool(Name = "compare_release_files", ReadOnly = true)]
@@ -153,8 +156,8 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "find_references", ReadOnly = true)]
-    [Description("Finds every place in a BC release that references a specific table, page, or codeunit — optionally narrowed to a specific field or procedure on it. Resolves the target by name; pass 'Sales Line' + field 'No.' to answer 'which procedures change the No. field on Sales Line?'-style questions.")]
-    public async Task<IReadOnlyList<ReferenceMatch>> FindReferencesAsync(
+    [Description("Finds the places in a BC release that reference a specific table, page, or codeunit — optionally narrowed to a specific field or procedure on it. Resolves the target by name; pass 'Sales Line' + field 'No.' to answer 'which procedures change the No. field on Sales Line?'-style questions. Capped at 200 rows ordered by module, then object; Truncated and Note say whether more were left out — a popular base table runs well past that, so narrow with targetField or targetProcedure.")]
+    public async Task<ReferenceSearchResult> FindReferencesAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Name of the target object — table, page, codeunit, etc. Resolved case-insensitively against oe_module_objects.")] string targetObject,
         [Description("AL kind of the target object. Defaults to 'table'.")] string targetKind = "table",
@@ -200,15 +203,18 @@ public sealed class ObjectExplorerTools
         // additional buckets — sibling declarations across the chain and
         // the "implementation" set for interface methods — surface in
         // the response. Object-only queries stay on the lighter path.
+        // The cap goes into the query, so only the rows returned are fetched and
+        // given a code snippet (#1247).
         var matches = memberName is null
-            ? await _references.FindReferencesAsync(releaseId, query, ct)
-            : await _references.FindReferencesForSymbolAsync(releaseId, query, ct);
-        return matches.Count > MaxResults ? matches.Take(MaxResults).ToList() : matches;
+            ? await _references.FindReferencesAsync(releaseId, query, MaxResults, ct)
+            : await _references.FindReferencesForSymbolAsync(releaseId, query, MaxResults, ct);
+        return ReferenceSearchResult.From(matches, MaxResults,
+            "Pass targetField or targetProcedure to narrow the search.");
     }
 
     [McpServerTool(Name = "find_system_references", ReadOnly = true)]
-    [Description("Finds every call to a built-in / system method (Insert, Modify, ModifyAll, Delete, DeleteAll, SetRange, Validate, etc.) on a specific object in a BC release — the calls that find_references deliberately omits. Use this to answer 'where is this table inserted/modified/deleted?'. Optionally narrow to one method.")]
-    public async Task<IReadOnlyList<ReferenceMatch>> FindSystemReferencesAsync(
+    [Description("Finds the calls to a built-in / system method (Insert, Modify, ModifyAll, Delete, DeleteAll, SetRange, Validate, etc.) on a specific object in a BC release — the calls that find_references deliberately omits. Use this to answer 'where is this table inserted/modified/deleted?'. Optionally narrow to one method. Capped at 200 rows ordered by module, then object; Truncated and Note say whether more were left out.")]
+    public async Task<ReferenceSearchResult> FindSystemReferencesAsync(
         [Description("Release Label or numeric id.")] string releaseLabelOrId,
         [Description("Name of the target object — usually a table. Resolved case-insensitively against oe_module_objects.")] string targetObject,
         [Description("AL kind of the target object. Defaults to 'table'.")] string targetKind = "table",
@@ -234,8 +240,9 @@ public sealed class ObjectExplorerTools
             TargetObjectName: owner.Name,
             SystemMethodName: string.IsNullOrWhiteSpace(systemMethod) ? null : systemMethod.Trim());
 
-        var matches = await _references.FindSystemReferencesAsync(releaseId, query, ct);
-        return matches.Count > MaxResults ? matches.Take(MaxResults).ToList() : matches;
+        var matches = await _references.FindSystemReferencesAsync(releaseId, query, MaxResults, ct);
+        return ReferenceSearchResult.From(matches, MaxResults,
+            "Pass systemMethod to narrow the search to one method.");
     }
 
     [McpServerTool(Name = "get_object_outline", ReadOnly = true)]
@@ -392,6 +399,45 @@ public sealed record ReleaseFileCompareResult(
     IReadOnlyList<ReleaseCompareFileRow> Rows,
     bool Truncated,
     string? Note);
+
+/// <summary>
+/// What <c>find_references</c> and <c>find_system_references</c> return: at most
+/// the tool's cap of rows, with <see cref="Truncated"/> and <see cref="Note"/>
+/// saying when more matched, the same shape as <see cref="ReleaseFileCompareResult"/>.
+/// These tools used to drop everything past the cap without a word (#1247).
+/// </summary>
+public sealed record ReferenceSearchResult(
+    IReadOnlyList<ReferenceMatch> Rows,
+    bool Truncated,
+    string? Note)
+{
+    /// <summary>Cuts <paramref name="matches"/> (fetched one past the cap) to <paramref name="cap"/> and says so.</summary>
+    internal static ReferenceSearchResult From(IReadOnlyList<ReferenceMatch> matches, int cap, string narrowHint)
+    {
+        if (matches.Count <= cap) return new(matches, false, null);
+        return new(matches.Take(cap).ToList(), true,
+            $"Showing the first {cap} references (ordered by module, then object); more were left out. {narrowHint}");
+    }
+}
+
+/// <summary>
+/// The object-level diff the <c>compare_releases</c> and
+/// <c>compare_solution_builds</c> MCP tools return: at most the tool's cap of
+/// rows, with <see cref="Truncated"/> and <see cref="Note"/> saying when more
+/// matched, the same shape as <see cref="ReleaseFileCompareResult"/> (#1228).
+/// </summary>
+public sealed record ObjectCompareResult(
+    IReadOnlyList<ObjectCompareRow> Rows,
+    bool Truncated,
+    string? Note)
+{
+    internal static ObjectCompareResult From(ObjectCompareSet set, int cap) =>
+        new(set.Rows,
+            set.Truncated,
+            set.Truncated
+                ? $"Showing the first {cap} objects (ordered by kind, then id); more were left out. Pass kind or namePattern to narrow the comparison."
+                : null);
+}
 
 /// <summary>
 /// Download link + identity for one module's stored <c>SymbolReference.json</c>,
