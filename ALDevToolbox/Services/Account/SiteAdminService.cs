@@ -82,6 +82,7 @@ public sealed class SiteAdminService
         // ILike is Postgres-native and pg_trgm-indexable; ToLower().Contains
         // would force a sequential scan on every email column.
         var pattern = "%" + trimmed + "%";
+        // Fence category 2 (SiteAdmin cross-org console): RequireSiteAdmin() above.
         var users = _db.Users.IgnoreQueryFilters().AsNoTracking();
         if (trimmed.Length > 0)
         {
@@ -167,6 +168,8 @@ public sealed class SiteAdminService
         // non-disabled SiteAdmins (the previous shape) misbehaved at the
         // boundary: it includes the subject when they're active, and it
         // counts pending users (who can't actually act) toward the quorum.
+        // Fence category 2 (SiteAdmin cross-org console): RequireSiteAdmin() above;
+        // SiteAdmins span organisations, so the count has to as well.
         var otherActiveSiteAdmins = await _db.Users.IgnoreQueryFilters()
             .CountAsync(u => u.Id != user.Id
                              && u.IsSiteAdmin

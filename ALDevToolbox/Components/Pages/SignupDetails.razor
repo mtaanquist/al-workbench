@@ -137,8 +137,8 @@ else
         var domain = EmailAddress.DomainOf(_email);
         if (domain is not null)
         {
-            // Pre-auth read across the tenant fence: the visitor isn't signed in
-            // and the domain claim is globally unique.
+            // Fence category 1 (pre-auth routing): the visitor isn't signed in and
+            // the domain claim is globally unique; pinned to d.Domain == domain.
             _domainOrgName = await Db.OrganizationEmailDomains
                 .IgnoreQueryFilters()
                 .AsNoTracking()

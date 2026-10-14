@@ -169,9 +169,9 @@ public sealed class AuthService
     public async Task<bool> IsLocalLoginDisabledAsync(User user, CancellationToken ct = default)
     {
         if (user.IsSiteAdmin) return false;
-        // Pre-auth: every caller but one is a login / password-reset /
-        // magic-link path running before a cookie exists, so there is no
-        // current organisation. The read is pinned to the subject's own org.
+        // Fence category 1 (pre-auth routing): every caller but one is a login /
+        // password-reset / magic-link path running before a cookie exists, so
+        // there is no current organisation. Pinned to s.OrganizationId == user.OrganizationId.
         return await _db.OrganizationSettings.IgnoreQueryFilters().AsNoTracking()
             .AnyAsync(s => s.OrganizationId == user.OrganizationId
                 && s.LocalLoginPolicy == Domain.ValueObjects.LocalLoginPolicy.EntraOnly, ct);

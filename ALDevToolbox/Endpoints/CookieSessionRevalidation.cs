@@ -63,8 +63,8 @@ internal static class CookieSessionRevalidation
             return;
         }
 
-        // Read across the tenant fence by the cookie's user id — the same trust
-        // posture StrongAuthGate uses for its per-request enrolment re-check.
+        // Fence category 4 (explicitly scoped user-id lookup): pinned to u.Id == userId,
+        // the cookie's own user id - the same posture as StrongAuthGate's re-check.
         var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
         var user = await db.Users.IgnoreQueryFilters()
             .Include(u => u.Organization)

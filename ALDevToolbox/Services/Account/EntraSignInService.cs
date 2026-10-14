@@ -612,6 +612,7 @@ public sealed class EntraSignInService
         // fast, specific refusal - the catch on the save below is what
         // actually guarantees it, for the identity that gets claimed
         // elsewhere between this read and that save (issue #736).
+        // Fence category 6 (existence-only uniqueness probe): projects a bool.
         var takenElsewhere = await _db.UserExternalLogins.IgnoreQueryFilters()
             .AnyAsync(l => l.Provider == ProviderName && l.Issuer == tid && l.Subject == token.ObjectId, ct);
         if (takenElsewhere)

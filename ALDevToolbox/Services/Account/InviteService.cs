@@ -78,6 +78,8 @@ public sealed class InviteService
         // the most recent admin click is the canonical invite. Older rows stay
         // for audit history with their RevokedAt stamped.
         var now = _clock.GetUtcNow().UtcDateTime;
+        // Fence category 4 (explicitly scoped org-id lookup): pinned to
+        // i.OrganizationId == actingOrgId from the signed-in admin's context.
         var stale = await _db.Invites.IgnoreQueryFilters()
             .Where(i => i.OrganizationId == actingOrgId
                         && i.Email == normalised

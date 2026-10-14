@@ -330,7 +330,7 @@ public sealed class AccountAdministrationTests : IDisposable
     [Fact]
     public async Task Change_password_rejects_wrong_current_password()
     {
-        var userId = await SeedActiveUserWithPasswordAsync(TestDb.OtherOrgId, "p@example.com", "correctpasswordlong");
+        var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "p@example.com", "correctpasswordlong");
 
         await using var ctx = _db.NewContext();
         Func<Task> act = () => NewService(ctx).ChangePasswordAsync(userId, "wrong-current", "newpasswordlong12345");
@@ -341,7 +341,7 @@ public sealed class AccountAdministrationTests : IDisposable
     [Fact]
     public async Task Change_password_rejects_new_password_that_fails_policy()
     {
-        var userId = await SeedActiveUserWithPasswordAsync(TestDb.OtherOrgId, "p@example.com", "correctpasswordlong");
+        var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "p@example.com", "correctpasswordlong");
 
         await using var ctx = _db.NewContext();
         Func<Task> act = () => NewService(ctx).ChangePasswordAsync(userId, "correctpasswordlong", "short");
@@ -352,7 +352,7 @@ public sealed class AccountAdministrationTests : IDisposable
     [Fact]
     public async Task Change_password_happy_path_re_hashes_so_old_password_no_longer_verifies()
     {
-        var userId = await SeedActiveUserWithPasswordAsync(TestDb.OtherOrgId, "p@example.com", "correctpasswordlong");
+        var userId = await SeedActiveUserWithPasswordAsync(TestDb.DefaultOrgId, "p@example.com", "correctpasswordlong");
 
         await using (var ctx = _db.NewContext())
         {
@@ -371,7 +371,7 @@ public sealed class AccountAdministrationTests : IDisposable
     [Fact]
     public async Task Change_display_name_trims_whitespace_and_rejects_too_short()
     {
-        var userId = await SeedActiveUserAsync(TestDb.OtherOrgId, "name@example.com", UserRole.User);
+        var userId = await SeedActiveUserAsync(TestDb.DefaultOrgId, "name@example.com", UserRole.User);
 
         await using (var ctx = _db.NewContext())
         {
@@ -387,6 +387,27 @@ public sealed class AccountAdministrationTests : IDisposable
         Func<Task> act = () => NewService(rejectCtx).ChangeDisplayNameAsync(userId, " ");
         var ex = await act.Should().ThrowAsync<PlanValidationException>();
         ex.Which.Errors.Should().ContainKey("DisplayName");
+    }
+
+    [Fact]
+    public async Task Self_service_changes_cannot_reach_a_user_in_another_organisation()
+    {
+        // Both run inside the tenant filter now (#1336): the signed-in user's
+        // own row is in their own organisation, so a foreign id finds nothing.
+        var strangerId = await SeedActiveUserWithPasswordAsync(TestDb.OtherOrgId, "stranger@example.com", "correctpasswordlong");
+
+        await using (var ctx = _db.NewContext())
+        {
+            Func<Task> rename = () => NewService(ctx).ChangeDisplayNameAsync(strangerId, "Renamed");
+            await rename.Should().ThrowAsync<InvalidOperationException>();
+            Func<Task> repassword = () => NewService(ctx).ChangePasswordAsync(strangerId, "correctpasswordlong", "newcorrectpasswordlong");
+            await repassword.Should().ThrowAsync<InvalidOperationException>();
+        }
+
+        await using var read = _db.NewContext();
+        var stranger = await read.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == strangerId);
+        stranger.DisplayName.Should().NotBe("Renamed");
+        NewAuth(read).VerifyPassword("correctpasswordlong", stranger.PasswordHash).Should().BeTrue();
     }
 
     // ===== GetAccountOverviewAsync (the Account page's opening read) =====
