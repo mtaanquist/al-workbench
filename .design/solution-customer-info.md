@@ -61,7 +61,10 @@ not lose its tabs on the day this ships.
 Solution's rows on Environments and Upgrades - the surfaces that call the admin API.
 General, Repositories, Customer (below) and Access stay; so do pipelines that only build.
 Setting an on-premises hosting type is refused while Business Central online reports
-environments for the Solution, rather than silently hiding live ones.
+environments for the Solution, rather than silently hiding live ones. The on-premises
+gateway (`on-prem-gateway.md`, being built in milestone #8) brings environments and
+deployment pipelines back for an on-premises Solution with linked service tiers; that
+document has the revised rule, and this section changes with it when #1366 ships.
 
 **The tenant id is not the test.** It is the customer's Microsoft tenant, and most
 on-premises customers have one too. It stays the one `bc_tenant_id` column: the Business
