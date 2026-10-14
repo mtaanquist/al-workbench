@@ -37,6 +37,7 @@ namespace ALDevToolbox.Data.Migrations
                     claimed_at = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
                     started_at = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
                     last_reported_at = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
+                    last_progress_sequence = table.Column<long>(type: "bigint", nullable: false),
                     finished_at = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
                     result = table.Column<string>(type: "jsonb", nullable: true),
                     failure_message = table.Column<string>(type: "text", nullable: true),

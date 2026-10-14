@@ -377,8 +377,24 @@ public sealed class GatewayCommandService
     /// failed it, say), or the gateway is not approved (re-keyed and waiting, say):
     /// the gateway should stop reporting on it.
     /// </summary>
-    public async Task<bool> AppendProgressAsync(int gatewayId, long commandId, IReadOnlyList<string> lines, CancellationToken ct = default)
+    public async Task<bool> AppendProgressAsync(int gatewayId, long commandId, IReadOnlyList<string> lines, CancellationToken ct = default) =>
+        await AppendProgressAsync(gatewayId, commandId, lines, sequence: 0, ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// As <see cref="AppendProgressAsync(int, long, IReadOnlyList{string}, CancellationToken)"/>,
+    /// for a numbered batch: a <paramref name="sequence"/> at or below the last one
+    /// appended is a batch sent again after its answer was lost, so it is accepted
+    /// (true) without appending its lines a second time. 0 is always appended.
+    /// </summary>
+    public async Task<bool> AppendProgressAsync(int gatewayId, long commandId, IReadOnlyList<string> lines, long sequence, CancellationToken ct = default)
     {
+        if (sequence < 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["sequence"] = "A progress batch number cannot be negative.",
+            });
+        }
         ArgumentNullException.ThrowIfNull(lines);
         RequireOrganizationId();
         if (lines.Count > MaxProgressLines)
@@ -413,8 +429,9 @@ public sealed class GatewayCommandService
                 .SetProperty(c => c.Status, GatewayCommandStatus.Running)
                 .SetProperty(c => c.StartedAt, c => c.StartedAt ?? now)
                 .SetProperty(c => c.LastReportedAt, now)
+                .SetProperty(c => c.LastProgressSequence, c => sequence > c.LastProgressSequence ? sequence : c.LastProgressSequence)
                 .SetProperty(c => c.Log, c =>
-                    c.Log.Length >= MaxLogLength ? c.Log
+                    (sequence > 0 && sequence <= c.LastProgressSequence) || c.Log.Length >= MaxLogLength ? c.Log
                     : c.Log.Length + append.Length < MaxLogLength ? c.Log + append
                     : (c.Log + append).Substring(0, MaxLogLength) + LogTruncatedMarker), ct)
             .ConfigureAwait(false);

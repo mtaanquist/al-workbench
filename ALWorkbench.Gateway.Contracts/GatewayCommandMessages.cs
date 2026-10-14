@@ -66,6 +66,15 @@ public sealed record GatewayCommandProgressRequest
 {
     [JsonPropertyName("lines")]
     public IReadOnlyList<string> Lines { get; init; } = [];
+
+    /// <summary>
+    /// This batch's number within the command, from 1 up. A batch whose answer was
+    /// lost is sent again with the same number, and the workbench appends a number it
+    /// has already appended only once. 0 (a gateway that does not send it) is always
+    /// appended. Additive: no protocol version bump.
+    /// </summary>
+    [JsonPropertyName("sequence")]
+    public long Sequence { get; init; }
 }
 
 /// <summary>Body of <c>POST /gateway/commands/{id}/result</c>: how the command ended.</summary>

@@ -82,6 +82,13 @@ public class GatewayCommand
     /// </summary>
     public DateTime? LastReportedAt { get; set; }
 
+    /// <summary>
+    /// The highest progress batch number appended to <see cref="Log"/>, so a batch the
+    /// gateway sends again after a lost answer is not appended twice. 0 until a
+    /// numbered batch arrives.
+    /// </summary>
+    public long LastProgressSequence { get; set; }
+
     public DateTime? FinishedAt { get; set; }
 
     /// <summary>What the verb reported back, a JSON object (jsonb); null until it finishes.</summary>
