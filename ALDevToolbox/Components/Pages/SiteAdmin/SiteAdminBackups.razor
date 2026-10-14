@@ -136,6 +136,20 @@
                 }
                 else
                 {
+                    @if (_canRecover && _offsite.Any(o => o.FromAnotherDeployment))
+                    {
+                        <div class="card__body">
+                            <Alert Tone="AlertTone.Info">
+                                <span>
+                                    This installation is new. If it is replacing an installation that was lost,
+                                    that installation's backups are the ones marked "Another installation".
+                                    Pick Recover on the one you want, then restore it from the table below.
+                                    From then on this installation treats that installation's off-site backups,
+                                    including its organisation snapshots, as its own.
+                                </span>
+                            </Alert>
+                        </div>
+                    }
                     <table class="data-table">
                         <thead>
                             <tr>
@@ -150,22 +164,46 @@
                             @foreach (var obj in _offsite)
                             {
                                 var alreadyLocal = _localFileNames.Contains(obj.FileName);
+                                var foreign = obj.FromAnotherDeployment;
                                 <tr>
-                                    <td><code>@obj.FileName</code></td>
+                                    <td>
+                                        <code>@obj.FileName</code>
+                                        @if (foreign)
+                                        {
+                                            <span class="tag">Another installation</span>
+                                        }
+                                    </td>
                                     <td><Timestamp Value="@obj.LastModified" Format="yyyy-MM-dd HH:mm:ss" /></td>
                                     <td>@FormatSize(obj.Size)</td>
                                     <td>@(alreadyLocal ? "Yes" : "No")</td>
                                     <td class="data-table__actions">
-                                        <form method="post" action="/site-admin/backups/offsite/download">
-                                            <AntiforgeryToken />
-                                            <input type="hidden" name="ObjectKey" value="@obj.Key" />
-                                            <button type="submit" class="btn btn--sm btn--icon"
-                                                    title="@(alreadyLocal ? "A local backup with this name already exists" : "Download to local for restore")"
-                                                    aria-label="Download to local"
-                                                    disabled="@alreadyLocal">
-                                                <Icon Name="archive-restore" Width="14" Height="14" />
-                                            </button>
-                                        </form>
+                                        @if (foreign && _canRecover && !alreadyLocal)
+                                        {
+                                            <form method="post" action="/site-admin/backups/offsite/download"
+                                                  onsubmit="return confirm('Only continue if this installation is replacing the one that made this backup. Restoring it will replace everything here, and the other backups that installation left off-site will be treated as this installation\'s own.');">
+                                                <AntiforgeryToken />
+                                                <input type="hidden" name="ObjectKey" value="@obj.Key" />
+                                                <input type="hidden" name="RecoverFromAnotherInstallation" value="true" />
+                                                <button type="submit" class="btn btn--sm"
+                                                        title="Download this backup to rebuild the installation that made it">
+                                                    <Icon Name="archive-restore" Width="14" Height="14" />
+                                                    <span>Recover</span>
+                                                </button>
+                                            </form>
+                                        }
+                                        else
+                                        {
+                                            <form method="post" action="/site-admin/backups/offsite/download">
+                                                <AntiforgeryToken />
+                                                <input type="hidden" name="ObjectKey" value="@obj.Key" />
+                                                <button type="submit" class="btn btn--sm btn--icon"
+                                                        title="@(foreign ? "Made by another AL Workbench installation that shares this storage - it can't be restored here" : alreadyLocal ? "A local backup with this name already exists" : "Download to local for restore")"
+                                                        aria-label="Download to local"
+                                                        disabled="@(foreign || alreadyLocal)">
+                                                    <Icon Name="archive-restore" Width="14" Height="14" />
+                                                </button>
+                                            </form>
+                                        }
                                     </td>
                                 </tr>
                             }
@@ -385,6 +423,7 @@
     private IReadOnlyList<OffsiteObjectInfo>? _offsite;
     private string? _offsiteError;
     private bool _offsiteEnabled;
+    private bool _canRecover;
     private HashSet<string> _localFileNames = new(StringComparer.Ordinal);
     private List<OffsiteRestoreJob> _activeJobs = new();
 
@@ -401,7 +440,8 @@
         {
             try
             {
-                _offsite = await Offsite.ListAsync(maxObjects: 200, CancellationToken.None);
+                _offsite = await Offsite.ListAsync(maxObjects: 100, flagOtherDeployments: true, CancellationToken.None);
+                _canRecover = await Offsite.CanRecoverAnotherInstallationAsync(CancellationToken.None);
             }
             catch (Exception ex)
             {

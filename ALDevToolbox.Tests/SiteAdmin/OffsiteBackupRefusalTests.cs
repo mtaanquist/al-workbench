@@ -79,7 +79,7 @@ public sealed class OffsiteBackupRefusalTests : IDisposable
         await using var ctx = _db.NewContext();
         await ConfigureOffsiteAsync(ctx);
 
-        var act = () => NewService(ctx).DownloadAsync("../../etc/passwd", progress: null, default);
+        var act = () => NewService(ctx).DownloadAsync("../../etc/passwd", progress: null, recoverFromAnotherInstallation: false, default);
 
         (await act.Should().ThrowAsync<InvalidOperationException>())
             .WithMessage("*suspicious leaf name*");
@@ -91,7 +91,7 @@ public sealed class OffsiteBackupRefusalTests : IDisposable
         await using var ctx = _db.NewContext();
         await ConfigureOffsiteAsync(ctx);
 
-        var act = () => NewService(ctx).DownloadAsync("not-a-dump.txt", progress: null, default);
+        var act = () => NewService(ctx).DownloadAsync("not-a-dump.txt", progress: null, recoverFromAnotherInstallation: false, default);
 
         (await act.Should().ThrowAsync<InvalidOperationException>())
             .WithMessage("*non-dump object*");

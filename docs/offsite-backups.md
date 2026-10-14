@@ -153,11 +153,37 @@ If the deployment is completely gone (lost host, lost `pg-data`, lost
    empty `pg-data` and the bucket is untouched.
 2. Sign in as the bootstrap admin. Configure off-site under
    `/site-admin/settings` with the same bucket, prefix, and credentials.
-3. Open `/site-admin/backups`. The catalogue lists every object that
-   survived the loss. Download the snapshot you want, wait for the
-   progress bar to finish, click **Restore**, confirm.
+3. Open `/site-admin/backups`. The catalogue lists the newest objects
+   that survived the loss. Every dump is stamped with the id of the
+   installation that uploaded it (the `deployment-id` file on the
+   `app-keys` volume), and the new host has a new id, so the lost
+   installation's dumps are tagged **Another installation**. While this
+   installation is still fresh (no organisation besides the default one,
+   and no user besides the bootstrap admin) each of them carries a
+   **Recover** button instead of the plain download. Click **Recover** on
+   the dump you want and confirm, wait for the progress bar to finish,
+   click **Restore**, confirm.
 4. The bootstrap user's identity will be replaced by whatever the dump
    carried — sign in again with the original credentials.
+
+**What Recover changes.** It records the lost installation's id in
+`deployment-id.trusted`, next to `deployment-id` on the `app-keys`
+volume. From then on this installation treats every off-site object
+stamped with that id as its own: the per-tenant snapshots can be pulled
+back and restored after the whole-database restore, and retention prunes
+the lost installation's objects as they age out. This installation's own
+id does not change, and its new uploads carry it. Recover is refused
+once the installation holds organisations or users of its own, because
+restoring another installation's dump over real data is exactly what the
+stamp is there to stop.
+
+**If you still have the old `app-keys` volume** (or a copy of its
+`deployment-id` file), put it back before the first start on the new
+host. The new host then has the old id, its dumps are not "another
+installation" at all, and Recover is not needed. Carrying `app-keys`
+over also keeps the Data Protection key ring, which is what keeps the
+stored SMTP, off-site, Microsoft sign-in and GitHub secrets readable
+after the restore.
 
 ## Restoring a per-tenant snapshot from off-site
 
@@ -188,8 +214,10 @@ mirrors the whole-DB one:
 know about the org (by slug). If you've just stood up a fresh stack
 after losing `pg-data`, restore the whole-DB dump first — that brings
 the `organizations` row back. Then come here and pull the per-tenant
-ZIP. The download button is disabled with a tooltip when the slug isn't
-recognised locally.
+ZIP. The download button is disabled with a tooltip when no local
+organisation has that slug. If the whole-DB dump was restored with
+**Recover**, the lost installation's per-tenant snapshots are accepted
+as this installation's own.
 
 ### Job lifetime and host restarts
 
@@ -272,7 +300,25 @@ Symptoms → things to check.
   Download button is disabled.** The deployment doesn't have an
   organisation with that slug. Restore the whole-DB dump first so the
   `organizations` row exists, then come back to pull the per-tenant
-  snapshot.
+  snapshot. An organisation counts as known as soon as it exists; it
+  does not need a local snapshot of its own.
+- **Download fails with "created by a different deployment" or the
+  catalogue tags a dump "Another installation".** The object carries
+  another installation's `deployment-id` stamp. If another installation
+  shares the bucket and prefix, that is the guard working: give each
+  installation its own prefix. If it is the installation you are
+  rebuilding, use **Recover** on a fresh installation (see the
+  disaster-recovery steps above). If `app-keys` was lost while `pg-data`
+  survived, the installation is not fresh and Recover is not offered:
+  read the lost id from the object's metadata in your storage console
+  (`x-amz-meta-deployment-id` on S3, `deploymentid` on Azure), add it on
+  a line of its own to `deployment-id.trusted` in the `app-keys` volume,
+  and restart the app.
+- **The catalogue does not show every object.** The database catalogue
+  shows the newest 100 dumps, and the per-tenant catalogue the newest 14
+  snapshots of each organisation. Both list the whole prefix and sort by
+  date before cutting, so the most recent are always there; older ones
+  are in the bucket and can be fetched with your storage tool.
 - **Per-tenant download fails with "Snapshot manifest names org … but
   the object key is under …".** The object's key path and the
   snapshot's manifest don't agree on which org it belongs to.

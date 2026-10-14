@@ -120,10 +120,9 @@ public sealed class S3Provider : IOffsiteStorageProvider, IDisposable
         return metadata;
     }
 
-    public async Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, int maxObjects, bool topLevelOnly, CancellationToken ct)
+    public async Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, bool topLevelOnly, CancellationToken ct)
     {
-        if (maxObjects < 1) maxObjects = 1;
-        var results = new List<OffsiteStorageObject>(capacity: Math.Min(maxObjects, 256));
+        var results = new List<OffsiteStorageObject>();
         string? continuation = null;
         do
         {
@@ -135,7 +134,7 @@ public sealed class S3Provider : IOffsiteStorageProvider, IDisposable
                 // into CommonPrefixes, which are ignored here.
                 Delimiter = topLevelOnly ? "/" : null,
                 ContinuationToken = continuation,
-                MaxKeys = Math.Min(1000, maxObjects - results.Count),
+                MaxKeys = 1000,
             }, ct);
 
             // AWS SDK v4 leaves response collections null rather than empty, so a
@@ -149,12 +148,9 @@ public sealed class S3Provider : IOffsiteStorageProvider, IDisposable
                     obj.Key,
                     obj.Size ?? 0,
                     obj.LastModified?.ToUniversalTime() ?? default));
-                if (results.Count >= maxObjects) break;
             }
 
-            continuation = resp.IsTruncated == true && results.Count < maxObjects
-                ? resp.NextContinuationToken
-                : null;
+            continuation = resp.IsTruncated == true ? resp.NextContinuationToken : null;
         } while (continuation is not null);
 
         return results;

@@ -71,16 +71,18 @@ public interface IOffsiteStorageProvider
     Task<IReadOnlyDictionary<string, string>> GetMetadataAsync(string key, CancellationToken ct);
 
     /// <summary>
-    /// Lists objects whose key starts with <paramref name="prefix"/>, newest
-    /// first not required (the service sorts), capped at
-    /// <paramref name="maxObjects"/>. Implementations page internally and stop
-    /// at the cap so neither walks an unbounded bucket. With
+    /// Lists every object whose key starts with <paramref name="prefix"/>,
+    /// paging through the backend until the listing is exhausted. The order is
+    /// the backend's (key order), so the service sorts by date before it cuts
+    /// anything: a cap applied here would keep the alphabetically first keys,
+    /// which for per-tenant snapshots is the oldest of the first organisations
+    /// (#1333). Retention bounds what sits under the prefix. With
     /// <paramref name="topLevelOnly"/> only the objects directly under
     /// <paramref name="prefix"/> are returned, not those under a further
     /// <c>/</c>; the whole-database listing uses that to step over the
     /// per-tenant subtree instead of paging through it.
     /// </summary>
-    Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, int maxObjects, bool topLevelOnly, CancellationToken ct);
+    Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, bool topLevelOnly, CancellationToken ct);
 
     /// <summary>Deletes the given keys. The provider chooses batch vs per-object.</summary>
     Task DeleteAsync(IReadOnlyCollection<string> keys, CancellationToken ct);

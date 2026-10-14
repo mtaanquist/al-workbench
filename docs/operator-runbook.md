@@ -166,6 +166,16 @@ redirected to login) and the encrypted SMTP password becomes unreadable.
    uses the freshly-encrypted value.
 4. Audit log entries that captured the encrypted SMTP password before the
    loss stay redacted; they were already redacted at write time.
+5. If off-site backups are configured: the `app-keys` volume also holds
+   `deployment-id`, the id every off-site backup is stamped with, and
+   restarting creates a new one. Until it is carried over, every backup
+   this installation uploaded before the loss is refused as "created by
+   a different deployment", and retention stops pruning them. Put the
+   old file back if you have a copy. If not, read the old id from any
+   pre-loss object's metadata in your storage console
+   (`x-amz-meta-deployment-id` on S3, `deploymentid` on Azure), add it on
+   a line of its own to `deployment-id.trusted` in the same directory,
+   and restart. See [offsite-backups.md](offsite-backups.md).
 
 Verify: `/healthz` returns 200 after the restart; sending a test email from
 `/site-admin/settings` succeeds.

@@ -112,6 +112,7 @@
                 the local backups volume; the row that appears below can
                 then be restored with the usual button. The download runs
                 in the background and survives this page being closed.
+                The newest @OffsiteSnapshotsPerOrganization snapshots of each organisation are listed.
             </p>
             @if (_offsiteError is not null)
             {
@@ -350,6 +351,12 @@
     [SupplyParameterFromQuery(Name = "ok")] public string? Ok { get; set; }
     [SupplyParameterFromQuery(Name = "msg")] public string? Msg { get; set; }
 
+    /// <summary>
+    /// Two weeks of nightly snapshots per organisation. The catalogue is for
+    /// pulling back a recent one; each row shown costs a stamp read.
+    /// </summary>
+    private const int OffsiteSnapshotsPerOrganization = 14;
+
     private List<PerTenantBackupRow>? _rows;
     private IReadOnlyList<OffsitePerTenantObjectInfo>? _offsite;
     private string? _offsiteError;
@@ -369,7 +376,10 @@
         }
         _rows = await Backups.ListAsync(null, CancellationToken.None);
         _localFiles = _rows.Select(r => (r.OrganizationSlug, r.FileName)).ToHashSet();
-        _localSlugs = _rows.Select(r => r.OrganizationSlug).ToHashSet(StringComparer.Ordinal);
+        // Known organisations come from the organisations themselves, not from
+        // local snapshot rows: a whole-database restore brings organisations
+        // back with no snapshots, and the download only needs the org (#1334).
+        _localSlugs = await Backups.ListOrganizationSlugsAsync(CancellationToken.None);
 
         var offsiteView = await Settings.GetOffsiteViewAsync();
         _offsiteEnabled = offsiteView.Enabled && !string.IsNullOrWhiteSpace(offsiteView.Bucket);
@@ -377,7 +387,7 @@
         {
             try
             {
-                _offsite = await Offsite.ListPerTenantAsync(maxObjects: 200, flagOtherDeployments: true, CancellationToken.None);
+                _offsite = await Offsite.ListPerTenantAsync(maxPerOrganization: OffsiteSnapshotsPerOrganization, flagOtherDeployments: true, CancellationToken.None);
             }
             catch (Exception ex)
             {

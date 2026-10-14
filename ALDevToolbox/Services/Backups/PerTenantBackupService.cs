@@ -160,6 +160,25 @@ public sealed class PerTenantBackupService
     }
 
     /// <summary>
+    /// The slugs of every organisation on this installation: the ones an
+    /// off-site snapshot can be pulled back for, by the same rule
+    /// <see cref="OffsiteBackupService.DownloadPerTenantAsync"/> applies. The
+    /// off-site catalogue once derived this from local snapshot rows, which a
+    /// whole-database restore leaves empty, and so called every organisation it
+    /// had just brought back unknown (#1334). SiteAdmin-only; the
+    /// <c>organizations</c> table has no query filter, so nothing is bypassed.
+    /// </summary>
+    public async Task<HashSet<string>> ListOrganizationSlugsAsync(CancellationToken ct = default)
+    {
+        _orgContext.RequireSiteAdmin();
+        var slugs = await _db.Organizations
+            .AsNoTracking()
+            .Select(o => o.Slug)
+            .ToListAsync(ct);
+        return slugs.ToHashSet(StringComparer.Ordinal);
+    }
+
+    /// <summary>
     /// Streams a per-tenant snapshot to the caller. Returns <c>null</c> when
     /// the row is missing or the file on disk has been removed out-of-band.
     /// </summary>

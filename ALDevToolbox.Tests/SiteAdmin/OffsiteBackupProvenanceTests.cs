@@ -225,7 +225,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
         PutSnapshot("default", "theirs", _neighbour, Now.AddDays(-2));
         PutSnapshot("default", "legacy", null, Now.AddDays(-3));
 
-        var listed = await NewOffsite(_us).ListPerTenantAsync(maxObjects: 50, flagOtherDeployments: true, default);
+        var listed = await NewOffsite(_us).ListPerTenantAsync(maxPerOrganization: 50, flagOtherDeployments: true, default);
 
         listed.ToDictionary(o => o.FileName, o => o.FromAnotherDeployment).Should().BeEquivalentTo(
             new Dictionary<string, bool>
@@ -244,7 +244,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
         await ConfigureOffsiteAsync();
         PutDump("theirs", _neighbour, Now.AddDays(-1));
 
-        var act = () => NewOffsite(_us).DownloadAsync(DumpKey("theirs"), progress: null, default);
+        var act = () => NewOffsite(_us).DownloadAsync(DumpKey("theirs"), progress: null, recoverFromAnotherInstallation: false, default);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*different deployment*");
         Directory.GetFiles(_options.Directory).Should().BeEmpty("nothing of another deployment's may land here");
@@ -258,7 +258,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
         await ConfigureOffsiteAsync();
         PutDump("legacy", null, Now.AddDays(-1));
 
-        var id = await NewOffsite(_us).DownloadAsync(DumpKey("legacy"), progress: null, default);
+        var id = await NewOffsite(_us).DownloadAsync(DumpKey("legacy"), progress: null, recoverFromAnotherInstallation: false, default);
 
         await using var ctx = _db.NewContext();
         var row = await ctx.Backups.AsNoTracking().SingleAsync(b => b.Id == id);
@@ -293,14 +293,201 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
         await ConfigureOffsiteAsync();
         _store.Put(key, [1], Stamp(_us), Now.AddDays(-2));
 
-        var id = await NewOffsite(_us).DownloadAsync(key, progress: null, default);
+        var id = await NewOffsite(_us).DownloadAsync(key, progress: null, recoverFromAnotherInstallation: false, default);
 
         await using var ctx = _db.NewContext();
         (await ctx.Backups.AsNoTracking().SingleAsync(b => b.Id == id)).CreatedAt
             .Should().Be(new DateTime(2026, 8, 30, 2, 0, 0, milliseconds, DateTimeKind.Utc), "not the moment it was downloaded");
     }
 
+    // ---- #1322: rebuilding a lost installation on a fresh one ----------------
+
+    [Fact]
+    public async Task A_fresh_installation_recovers_a_lost_installations_dump_and_takes_over_its_backups()
+    {
+        await ConfigureOffsiteAsync();
+        await MakeFreshAsync();
+        PutDump("lost", _neighbour, Now.AddDays(-1));
+
+        var id = await NewOffsite(_us).DownloadAsync(DumpKey("lost"), progress: null, recoverFromAnotherInstallation: true, default);
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Backups.AsNoTracking().SingleAsync(b => b.Id == id)).OffsiteObjectKey.Should().Be(DumpKey("lost"));
+        }
+        _us.IsForeign(_neighbour.Id).Should().BeFalse("the lost installation's other backups are this one's now");
+        DeploymentIdentity.LoadOrCreate(Path.Combine(_root, "us"), NullLogger.Instance).IsOwn(_neighbour.Id)
+            .Should().BeTrue("the takeover outlives a restart, and the restore that replaces every table");
+    }
+
+    [Fact]
+    public async Task After_a_recovery_the_lost_installations_snapshots_are_offered_and_pruned_as_ours()
+    {
+        await ConfigureOffsiteAsync();
+        await MakeFreshAsync();
+        PutDump("lost", _neighbour, Now.AddDays(-1));
+        await NewOffsite(_us).DownloadAsync(DumpKey("lost"), progress: null, recoverFromAnotherInstallation: true, default);
+        PutSnapshot("default", "lost-1", _neighbour, Now.AddDays(-1));
+        PutSnapshot("default", "lost-2", _neighbour, Now.AddDays(-2));
+        PutSnapshot("default", "lost-3", _neighbour, Now.AddDays(-3));
+        PutSnapshot("default", "lost-30", _neighbour, Now.AddDays(-30));
+
+        var listed = await NewOffsite(_us).ListPerTenantAsync(maxPerOrganization: 10, flagOtherDeployments: true, default);
+        listed.Should().OnlyContain(o => !o.FromAnotherDeployment);
+
+        await PruneAsync();
+        _store.Keys.Should().NotContain(SnapshotKey("default", "lost-30"), "it is past retention and now ours to prune");
+    }
+
+    [Fact]
+    public async Task Recovering_another_installations_dump_is_refused_once_this_one_has_organisations()
+    {
+        await ConfigureOffsiteAsync();
+        PutDump("theirs", _neighbour, Now.AddDays(-1));
+
+        var act = () => NewOffsite(_us).DownloadAsync(DumpKey("theirs"), progress: null, recoverFromAnotherInstallation: true, default);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*fresh installation*");
+        _us.IsForeign(_neighbour.Id).Should().BeTrue("a refused recovery takes nothing over");
+        await using var ctx = _db.NewContext();
+        (await ctx.Backups.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Recovering_another_installations_dump_is_refused_once_this_one_has_users()
+    {
+        await ConfigureOffsiteAsync();
+        await MakeFreshAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            foreach (var name in new[] { "admin", "colleague" })
+            {
+                ctx.Users.Add(new User
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Email = $"{name}@cronus.example", DisplayName = name,
+                    Role = UserRole.Admin, Status = UserStatus.Active, CreatedAt = Now,
+                });
+            }
+            await ctx.SaveChangesAsync();
+        }
+        PutDump("theirs", _neighbour, Now.AddDays(-1));
+
+        await using var offsiteCtx = _db.NewContext();
+        var offsite = NewOffsite(_us, offsiteCtx);
+        (await offsite.CanRecoverAnotherInstallationAsync(default)).Should().BeFalse();
+        var act = () => offsite.DownloadAsync(DumpKey("theirs"), progress: null, recoverFromAnotherInstallation: true, default);
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*fresh installation*");
+    }
+
+    [Fact]
+    public async Task The_database_catalogue_flags_another_installations_dumps()
+    {
+        await ConfigureOffsiteAsync();
+        PutDump("ours", _us, Now.AddDays(-1));
+        PutDump("theirs", _neighbour, Now.AddDays(-2));
+
+        var listed = await NewOffsite(_us).ListAsync(maxObjects: 10, flagOtherDeployments: true, default);
+
+        listed.ToDictionary(o => o.FileName, o => o.FromAnotherDeployment).Should().BeEquivalentTo(
+            new Dictionary<string, bool> { [DumpKey("ours")] = false, [DumpKey("theirs")] = true });
+    }
+
+    [Fact]
+    public void A_trusted_id_must_look_like_a_deployment_id()
+    {
+        var act = () => _us.Trust("../../etc\npasswd");
+
+        act.Should().Throw<ArgumentException>();
+        _us.TrustedFormerIds.Should().BeEmpty();
+    }
+
+    // ---- #1333: the catalogues cut after sorting, not before -----------------
+
+    [Fact]
+    public async Task The_database_catalogue_keeps_the_newest_dumps_when_it_cuts()
+    {
+        await ConfigureOffsiteAsync();
+        // Names sort oldest first, as the timestamped dump names do.
+        for (var day = 1; day <= 30; day++)
+        {
+            PutDump($"2026{day:00}", _us, Now.AddDays(-31 + day));
+        }
+
+        var listed = await NewOffsite(_us).ListAsync(maxObjects: 5, flagOtherDeployments: false, default);
+
+        listed.Select(o => o.FileName).Should().Equal(
+            DumpKey("202630"), DumpKey("202629"), DumpKey("202628"), DumpKey("202627"), DumpKey("202626"));
+    }
+
+    [Fact]
+    public async Task The_tenant_catalogue_shows_every_organisations_newest_snapshots_and_reads_only_their_stamps()
+    {
+        await ConfigureOffsiteAsync();
+        foreach (var slug in new[] { "alpha", "bravo", "charlie" })
+        {
+            for (var day = 1; day <= 20; day++)
+            {
+                PutSnapshot(slug, $"2026{day:00}", _us, Now.AddDays(-21 + day));
+            }
+        }
+
+        var listed = await NewOffsite(_us).ListPerTenantAsync(maxPerOrganization: 2, flagOtherDeployments: true, default);
+
+        listed.Select(o => (o.Slug, o.LastModified)).Should().Equal(
+            ("alpha", Now.AddDays(-1)), ("alpha", Now.AddDays(-2)),
+            ("bravo", Now.AddDays(-1)), ("bravo", Now.AddDays(-2)),
+            ("charlie", Now.AddDays(-1)), ("charlie", Now.AddDays(-2)));
+        _store.MetadataReads.Should().HaveCount(6, "only the rows shown need their stamp");
+    }
+
+    [Fact]
+    public async Task Finding_a_dump_checks_its_shape_and_that_it_exists()
+    {
+        await ConfigureOffsiteAsync();
+        PutDump("there", _us, Now);
+        PutSnapshot("default", "snap", _us, Now);
+        var offsite = NewOffsite(_us);
+
+        (await offsite.FindDumpAsync(DumpKey("there"), default)).Should().Be(DumpKey("there"));
+        (await offsite.FindDumpAsync(DumpKey("gone"), default)).Should().BeNull("there is no such object");
+        (await offsite.FindDumpAsync(SnapshotKey("default", "snap"), default)).Should().BeNull("a snapshot is not a dump");
+        (await offsite.FindDumpAsync("../" + DumpKey("there"), default)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Finding_a_snapshot_checks_its_shape_and_that_it_exists()
+    {
+        await ConfigureOffsiteAsync();
+        PutDump("there", _us, Now);
+        PutSnapshot("default", "snap", _us, Now);
+        var offsite = NewOffsite(_us);
+
+        (await offsite.FindPerTenantSnapshotAsync(SnapshotKey("default", "snap"), default))
+            .Should().Be($"default-snap{PerTenantBackupService.FileSuffix}");
+        (await offsite.FindPerTenantSnapshotAsync(SnapshotKey("default", "gone"), default)).Should().BeNull();
+        (await offsite.FindPerTenantSnapshotAsync(DumpKey("there"), default)).Should().BeNull();
+    }
+
+    // ---- #1334: the tenant catalogue knows organisations, not snapshot rows --
+
+    [Fact]
+    public async Task Organisation_slugs_include_organisations_with_no_local_snapshot()
+    {
+        await using var ctx = _db.NewContext();
+
+        var slugs = await NewPerTenant(ctx, _us).ListOrganizationSlugsAsync(default);
+
+        slugs.Should().Contain("other", "it has no snapshot here, as after a whole-database restore");
+    }
+
     // ---- plumbing -----------------------------------------------------------
+
+    /// <summary>The shape of a just-built host: the system org alone.</summary>
+    private async Task MakeFreshAsync()
+    {
+        await using var ctx = _db.NewContext();
+        await ctx.Organizations.Where(o => o.Id == TestDb.OtherOrgId).ExecuteDeleteAsync();
+    }
 
     private static string DumpKey(string name) => $"aldevtoolbox-{name}{BackupService.BackupFileSuffix}";
 
@@ -413,17 +600,24 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
             return Task.FromResult(new OffsiteDownload(new MemoryStream(entry.Body), entry.Metadata, entry.Body.Length));
         }
 
-        public Task<IReadOnlyDictionary<string, string>> GetMetadataAsync(string key, CancellationToken ct) =>
-            Task.FromResult(_objects[key].Metadata);
+        public ConcurrentBag<string> MetadataReads { get; } = new();
 
-        public Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, int maxObjects, bool topLevelOnly, CancellationToken ct)
+        public Task<IReadOnlyDictionary<string, string>> GetMetadataAsync(string key, CancellationToken ct)
+        {
+            MetadataReads.Add(key);
+            // Both SDKs throw for a missing object; KeyNotFoundException stands in.
+            return Task.FromResult(_objects[key].Metadata);
+        }
+
+        public Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, bool topLevelOnly, CancellationToken ct)
         {
             Listings.Add((prefix, topLevelOnly));
+            // Key order, as S3 and Azure both list.
             IReadOnlyList<OffsiteStorageObject> listed = _objects
                 .Where(o => o.Key.StartsWith(prefix, StringComparison.Ordinal))
                 .Where(o => !topLevelOnly || !o.Key[prefix.Length..].Contains('/'))
+                .OrderBy(o => o.Key, StringComparer.Ordinal)
                 .Select(o => new OffsiteStorageObject(o.Key, o.Value.Body.Length, o.Value.Modified))
-                .Take(maxObjects)
                 .ToList();
             return Task.FromResult(listed);
         }

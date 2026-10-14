@@ -270,21 +270,30 @@ internal static class SiteAdminEndpoints
                     + Uri.EscapeDataString("Pick an object to download."));
                 return;
             }
-            // The form already lists the bucket's objects; cross-checking
-            // membership here costs another S3 round-trip but stops a
-            // tampered submit from triggering a download of an arbitrary
-            // object outside the configured prefix. The download service
-            // ALSO enforces the prefix and dump-suffix rule, so this is
-            // belt-and-braces.
-            var listed = await offsite.ListAsync(maxObjects: 1000, ct);
-            var match = listed.FirstOrDefault(o => string.Equals(o.Key, key, StringComparison.Ordinal));
-            if (match is null)
+            // Check the submitted key itself - its shape under the configured
+            // prefix and that the object exists - so a tampered submit can't
+            // download an arbitrary object. Checking it against a listing, as
+            // this once did, refused any dump the listing's cap cut off (#1333).
+            // The download service enforces the shape again.
+            var fileName = await offsite.FindDumpAsync(key, ct);
+            if (fileName is null)
             {
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}="
                     + Uri.EscapeDataString("That object is no longer in the bucket or doesn't look like one of our backups."));
                 return;
             }
-            var id = jobs.Enqueue(OffsiteRestoreJobKind.WholeDb, match.Key, match.FileName);
+            // Recovering another installation's dump is only offered on a fresh
+            // installation (#1322). The worker checks again before it trusts the
+            // dump, but off a request it cannot count users, so the full check is
+            // here.
+            var recover = string.Equals(form["RecoverFromAnotherInstallation"].ToString(), "true", StringComparison.OrdinalIgnoreCase);
+            if (recover && !await offsite.CanRecoverAnotherInstallationAsync(ct))
+            {
+                ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString("Recovering another installation's backup is only possible on a fresh installation, before any organisations or other users are added."));
+                return;
+            }
+            var id = jobs.Enqueue(OffsiteRestoreJobKind.WholeDb, key, fileName, recover);
             ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?job={Uri.EscapeDataString(id.ToString())}");
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
 
@@ -600,19 +609,19 @@ internal static class SiteAdminEndpoints
                     + Uri.EscapeDataString("Pick a per-tenant object to download."));
                 return;
             }
-            // Cross-check membership in the listed bucket (under the
-            // tenants/ namespace) so a tampered submit can't trigger a
-            // download of an arbitrary key. The download method enforces
-            // the same shape rules internally — this is belt-and-braces.
-            var listed = await offsite.ListPerTenantAsync(maxObjects: 1000, flagOtherDeployments: false, ct);
-            var match = listed.FirstOrDefault(o => string.Equals(o.Key, key, StringComparison.Ordinal));
-            if (match is null)
+            // Check the submitted key itself - its shape under the tenants/
+            // namespace and that the object exists - so a tampered submit can't
+            // download an arbitrary key. A listing, as this once used, was
+            // capped and refused every snapshot past the cap (#1333). The
+            // download method enforces the same shape rules again.
+            var fileName = await offsite.FindPerTenantSnapshotAsync(key, ct);
+            if (fileName is null)
             {
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?{RouteConstants.MsgQuery}="
                     + Uri.EscapeDataString("That per-tenant object is no longer in the bucket or doesn't look like one of our snapshots."));
                 return;
             }
-            var id = jobs.Enqueue(OffsiteRestoreJobKind.PerTenant, match.Key, match.FileName);
+            var id = jobs.Enqueue(OffsiteRestoreJobKind.PerTenant, key, fileName);
             ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?job={Uri.EscapeDataString(id.ToString())}");
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole))
           .AddEndpointFilter(BlockInSingleTenant);
