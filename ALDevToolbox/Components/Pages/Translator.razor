@@ -766,6 +766,7 @@ else
             <input type="hidden" name="FileName" id="tr-export-filename" />
             <input type="hidden" name="OriginalXml" id="tr-export-original" />
             <input type="hidden" name="Edits" id="tr-export-edits" />
+            <input type="hidden" name="Learn" id="tr-export-learn" />
             <input type="hidden" name="TargetLanguage" id="tr-export-target-language" />
         </form>
     </div>
@@ -855,6 +856,14 @@ else
         [JsonPropertyName("sourceLang")] public string? SourceLang { get; set; }
         [JsonPropertyName("targetLang")] public string? TargetLang { get; set; }
         [JsonPropertyName("edits")] public Dictionary<string, EditDto> Edits { get; set; } = new();
+        [JsonPropertyName("learned")] public LearnedDto? Learned { get; set; }
+    }
+
+    /// <summary>What each unit last taught the translation memory, per scope (#1343).</summary>
+    private sealed class LearnedDto
+    {
+        [JsonPropertyName("local")] public Dictionary<string, string> Local { get; set; } = new();
+        [JsonPropertyName("repository")] public Dictionary<string, string> Repository { get; set; } = new();
     }
 
     private readonly int _maxFileMb = 100;
@@ -878,6 +887,17 @@ else
     private bool _editingName;
 
     private List<UnitVm> _units = new();
+
+    // The target each unit last taught the translation memory, by unit id, for
+    // this file. Saving in place and exporting leave units marked as edited, so
+    // without this every save re-taught - and added a hit to - every unit
+    // touched since the file was opened (#1343). Kept per scope: an export
+    // teaches the organisation-wide memory, a repository save teaches it under
+    // that repository (#1324), and one must not stand in for the other. Kept in
+    // the browser's session record with the edits, so a reload does not start
+    // over.
+    private readonly Dictionary<string, string> _learnedLocally = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _learnedToRepository = new(StringComparer.Ordinal);
     private List<UnitVm> _filtered = new();
     private string _filter = "todo";
     private string _kind = "All kinds";
@@ -1235,6 +1255,8 @@ else
         _targetLang = string.IsNullOrEmpty(parsed.TargetLanguage) ? _targetLang : parsed.TargetLanguage;
         _original = parsed.OriginalName;
         _units = parsed.Units.Select(ToVm).ToList();
+        _learnedLocally.Clear();
+        _learnedToRepository.Clear();
         _hasFile = true;
         // Default to download-only; the picker/drop/restore paths flip this on
         // when they carry a writable handle, and the repository path sets its
@@ -1354,6 +1376,13 @@ else
                 if (!string.IsNullOrEmpty(ed.S)) vm.State = ed.S!;
                 vm.Dirty = true;
             }
+            // What the memory already learned from this session, so the next
+            // save does not teach it the same units again (#1343).
+            if (meta.Learned is { } learnedBefore)
+            {
+                foreach (var (id, target) in learnedBefore.Local) _learnedLocally[id] = target;
+                foreach (var (id, target) in learnedBefore.Repository) _learnedToRepository[id] = target;
+            }
             // A restored session with edits is unsaved until it's exported.
             if (meta.Edits.Count > 0) SetUnsaved(true);
             RecomputeFiltered();
@@ -1379,6 +1408,8 @@ else
         _fromGeneratedFile = false;
         _hasFile = false;
         _units = new();
+        _learnedLocally.Clear();
+        _learnedToRepository.Clear();
         _filtered = new();
         _sel = null;
         _selId = null;
@@ -1601,8 +1632,9 @@ else
                 await _module.InvokeVoidAsync("putBaseStream", _fileName, _sourceLang, _targetLang, saved);
             }
             // Edits typed while the save was in flight are not in that base,
-            // so they go back into the overlay a refresh restores from.
-            if (_unsaved) PersistEditsSoon();
+            // so they go back into the overlay a refresh restores from - as does
+            // what the memory has learned, which the new base record dropped.
+            PersistEditsSoon();
 
             _toast?.Show(
                 save.IsNewPullRequest
@@ -1620,9 +1652,10 @@ else
             // Private solution's team may see that repository (#1324).
             try
             {
-                await Coordinator.LearnGatedAsync(xml, _repoSource.FileName,
-                    committed.Where(e => !string.IsNullOrEmpty(e.Value.Target)).Select(e => e.Key).ToList(),
+                var learn = UnitsToLearn(committed, _learnedToRepository);
+                await Coordinator.LearnGatedAsync(xml, _repoSource.FileName, learn.Keys.ToList(),
                     _repoSource.Repository.FullName, _repoSource.Path);
+                RememberLearned(_learnedToRepository, learn);
             }
             catch (Exception ex)
             {
@@ -2225,13 +2258,16 @@ else
     // File System Access flow in Translator.razor.js.
     private async Task SaveInPlaceAsync(string editsJson)
     {
+        var learn = PendingLearning(editsJson);
         _busy = true;
         try
         {
-            var status = await _module!.InvokeAsync<string>("saveInPlace", _fileName, editsJson);
+            var status = await _module!.InvokeAsync<string>("saveInPlace", _fileName, editsJson,
+                JsonSerializer.Serialize(learn.Keys));
             switch (status)
             {
                 case "saved":
+                    RememberLearned(_learnedLocally, learn);
                     // Edits typed while the save was in flight are not in the
                     // file, so the unsaved guard stays up for them and they go
                     // back into the overlay a refresh restores from (#1268, L44).
@@ -2269,6 +2305,7 @@ else
 
     private async Task DownloadExportAsync(string editsJson)
     {
+        var learn = PendingLearning(editsJson);
         // Exporting *is* saving: the user now has a copy on disk. Drop the
         // unsaved-changes guard *before* the submit so the form POST (which the
         // browser treats as a navigation) doesn't trip the leave-confirm modal
@@ -2276,11 +2313,55 @@ else
         // LocationChanging handler stays quiet; the JS side detaches the
         // beforeunload listener synchronously right before `form.submit()`.
         SetUnsaved(false);
-        var ok = await _module!.InvokeAsync<bool>("exportNow", _fileName, editsJson);
-        if (!ok)
+        var ok = await _module!.InvokeAsync<bool>("exportNow", _fileName, editsJson,
+            JsonSerializer.Serialize(learn.Keys));
+        if (ok)
+        {
+            RememberLearned(_learnedLocally, learn);
+        }
+        else
         {
             Flash("Nothing to export yet", ToastKind.Warn);
         }
+    }
+
+    /// <summary>The units in <paramref name="editsJson"/> the translation memory has not yet learned with their current text.</summary>
+    private Dictionary<string, string> PendingLearning(string editsJson)
+    {
+        var posted = JsonSerializer.Deserialize<Dictionary<string, EditDto>>(editsJson) ?? new();
+        return UnitsToLearn(posted.ToDictionary(e => e.Key, e => new TargetEdit(e.Value.T, e.Value.S)), _learnedLocally);
+    }
+
+    private void RememberLearned(Dictionary<string, string> scope, IReadOnlyDictionary<string, string> learned)
+    {
+        if (learned.Count == 0) return;
+        foreach (var (id, target) in learned) scope[id] = target;
+        PersistEditsSoon();
+    }
+
+    private string SerializeLearned() => JsonSerializer.Serialize(new LearnedDto
+    {
+        Local = new(_learnedLocally, StringComparer.Ordinal),
+        Repository = new(_learnedToRepository, StringComparer.Ordinal),
+    });
+
+    /// <summary>
+    /// The edits worth teaching the translation memory, by unit id with the
+    /// target they carry: those with text that differs from what the unit last
+    /// taught it (#1343). A save that changed nothing about a unit since the
+    /// last one adds no further hit to it.
+    /// </summary>
+    internal static Dictionary<string, string> UnitsToLearn(
+        IReadOnlyDictionary<string, TargetEdit> edits, IReadOnlyDictionary<string, string> learned)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (id, edit) in edits)
+        {
+            if (string.IsNullOrEmpty(edit.Target)) continue;
+            if (learned.TryGetValue(id, out var last) && string.Equals(last, edit.Target, StringComparison.Ordinal)) continue;
+            result[id] = edit.Target;
+        }
+        return result;
     }
 
     // ── Keyboard (from Translator.razor.js) ───────────────────────────────
@@ -2467,13 +2548,14 @@ else
         _persistCts = new CancellationTokenSource();
         var token = _persistCts.Token;
         var json = SerializeEdits();
+        var learned = SerializeLearned();
         _ = Task.Run(async () =>
         {
             try
             {
                 await Task.Delay(400, token);
                 if (token.IsCancellationRequested || _module is null) return;
-                await _module.InvokeVoidAsync("putEdits", json);
+                await _module.InvokeVoidAsync("putEdits", json, learned);
             }
             catch { /* debounced away or storage unavailable */ }
         });

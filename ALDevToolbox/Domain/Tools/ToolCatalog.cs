@@ -37,12 +37,19 @@ public enum ToolKey
 /// under (used by the route-access gate to 404 a disabled tool). Admin /
 /// authoring routes (<c>/admin/*</c>) are deliberately excluded — disabling a
 /// tool hides its end-user surface but leaves content authoring reachable.
+///
+/// <para><paramref name="SwitchOnlyPrefixes"/> are the tool's <c>/api</c> endpoints:
+/// switching the tool off closes them like its pages, but they never ask for the
+/// organisation's step-up (#1343). They download a file or save one locally and
+/// spend no stored credential - the step-up stays on the routes that write to
+/// GitHub - and the page that calls them already passed it on the way in.</para>
 /// </summary>
 public sealed record ToolDescriptor(
     ToolKey Key,
     string Name,
     string Blurb,
-    IReadOnlyList<string> RoutePrefixes);
+    IReadOnlyList<string> RoutePrefixes,
+    IReadOnlyList<string>? SwitchOnlyPrefixes = null);
 
 /// <summary>
 /// Single source of truth for the toggleable tools. Feeds the sidebar, the
@@ -67,12 +74,18 @@ public static class ToolCatalog
         new ToolDescriptor(ToolKey.Templates, "Templates",
             "Browse templates and generate AL workspaces and extensions.",
             new[] { "/templates" }),
+        // A tool's own /api endpoints go with its switch (#1343): the recipe download
+        // and the Translator's export are what those pages exist to hand out, and the
+        // Object Explorer's are what its code viewer reads. /api/compare is not
+        // listed: it is anonymous and shared with Object Explorer's diff views.
         new ToolDescriptor(ToolKey.Cookbook, "Cookbook",
             "Browse reusable AL code recipes.",
-            new[] { "/cookbook" }),
+            new[] { "/cookbook" },
+            SwitchOnlyPrefixes: new[] { "/api/cookbook" }),
         new ToolDescriptor(ToolKey.ObjectExplorer, "Object Explorer",
             "Explore Business Central objects, fields and references.",
-            new[] { "/object-explorer" }),
+            new[] { "/object-explorer" },
+            SwitchOnlyPrefixes: new[] { "/api/object-explorer" }),
         // The key stays ToolKey.Projects: it is persisted in
         // organization_settings.disabled_tools by name, so renaming it would silently
         // re-enable the tool everywhere it had been turned off. Both paths are listed so
@@ -92,7 +105,8 @@ public static class ToolCatalog
             new[] { "/pipelines/deployments", "/releases" }),
         new ToolDescriptor(ToolKey.Translator, "Translator",
             "Translate AL apps and manage XLIFF files.",
-            new[] { "/translator" }),
+            new[] { "/translator" },
+            SwitchOnlyPrefixes: new[] { "/api/translator" }),
         new ToolDescriptor(ToolKey.Mcp, "MCP",
             "Let AI coding assistants connect to your tools.",
             new[] { "/tools/mcp" }),
