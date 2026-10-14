@@ -233,9 +233,14 @@ public class TemplateService
             DefaultApplicationVersionKey: template.DefaultApplicationVersionLatest
                 ? null
                 : template.DefaultApplicationVersion?.Key,
+            // Soft-deleted modules are left out: the editor draws a checkbox
+            // only for live modules, so a deleted key here could never be
+            // unticked and would fail every save with "Unknown default
+            // module(s)" (#1326). The link itself survives the save - see
+            // ReconcileDefaultModules - so restoring the module brings it back.
             DefaultModuleKeys: template.DefaultModules
                 .OrderBy(d => d.Ordering)
-                .Where(d => d.Module is not null)
+                .Where(d => d.Module is not null && d.Module.DeletedAt == null)
                 .Select(d => d.Module!.Key)
                 .ToList(),
             Extensions: extensions,
@@ -408,7 +413,8 @@ public class TemplateService
             .ToList();
         foreach (var ext in fresh) existing.WorkspaceExtensions.Add(ext);
 
-        ReconcileDefaultModules(existing, defaultModuleIds, orgId);
+        var retiredModuleIds = await RetiredDefaultModuleIdsAsync(existing, ct);
+        ReconcileDefaultModules(existing, defaultModuleIds, orgId, retiredModuleIds);
         ReconcileIncludedFiles(existing, includedFileIds, orgId);
         ReconcileRootFolders(existing, NormaliseRootFolderPaths(input), orgId);
 
@@ -428,8 +434,16 @@ public class TemplateService
     /// cycle — mutating two rows' <c>module_id</c> in one batch would trip
     /// the <c>(runtime_template_id, module_id)</c> unique index, which EF's
     /// command-batcher detects and refuses to topologically sort.
+    ///
+    /// <para>Links to soft-deleted modules (<paramref name="retiredModuleIds"/>)
+    /// are kept, ordered after the live ones: the authoring model leaves them
+    /// out because the editor cannot show them (#1326), so their absence from
+    /// the input does not mean the editor unticked them. Keeping the link means
+    /// restoring the module makes it a default of this template again, as it
+    /// was before it was deleted.</para>
     /// </summary>
-    private static void ReconcileDefaultModules(RuntimeTemplate existing, IReadOnlyList<int> moduleIds, int orgId)
+    private static void ReconcileDefaultModules(
+        RuntimeTemplate existing, IReadOnlyList<int> moduleIds, int orgId, IReadOnlySet<int> retiredModuleIds)
     {
         var existingByModuleId = existing.DefaultModules.ToDictionary(d => d.ModuleId);
 
@@ -453,13 +467,42 @@ public class TemplateService
             }
         }
 
-        // Remove rows whose ModuleId fell off the input list.
+        // Retired links stay, after the live ones, in their previous order.
         var keep = new HashSet<int>(moduleIds);
+        var ordering = moduleIds.Count;
+        foreach (var row in existing.DefaultModules
+                     .Where(d => !keep.Contains(d.ModuleId) && retiredModuleIds.Contains(d.ModuleId))
+                     .OrderBy(d => d.Ordering)
+                     .ToList())
+        {
+            if (row.Ordering != ordering) row.Ordering = ordering;
+            ordering++;
+            keep.Add(row.ModuleId);
+        }
+
+        // Remove rows whose ModuleId fell off the input list.
         var toRemove = existing.DefaultModules.Where(d => !keep.Contains(d.ModuleId)).ToList();
         foreach (var row in toRemove)
         {
             existing.DefaultModules.Remove(row);
         }
+    }
+
+    /// <summary>
+    /// The ids of the soft-deleted modules this template still links as
+    /// defaults. Read separately rather than included on the tracked template,
+    /// so the reconcile pass never holds a tracked module it could orphan.
+    /// </summary>
+    private async Task<IReadOnlySet<int>> RetiredDefaultModuleIdsAsync(RuntimeTemplate existing, CancellationToken ct)
+    {
+        var linkedIds = existing.DefaultModules.Select(d => d.ModuleId).ToList();
+        if (linkedIds.Count == 0) return new HashSet<int>();
+        var retired = await _db.Modules
+            .AsNoTracking()
+            .Where(m => linkedIds.Contains(m.Id) && m.DeletedAt != null)
+            .Select(m => m.Id)
+            .ToListAsync(ct);
+        return retired.ToHashSet();
     }
 
     /// <summary>
