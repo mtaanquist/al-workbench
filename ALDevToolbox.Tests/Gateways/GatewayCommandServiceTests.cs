@@ -61,6 +61,25 @@ public sealed class GatewayCommandServiceTests : IDisposable
         return await Service(ctx).ClaimNextAsync(gatewayId);
     }
 
+    /// <summary>Re-keys the gateway the way a rotation code does: it is pending again until an Admin approves the new key.</summary>
+    private async Task RekeyAsync(int gatewayId)
+    {
+        var previousUser = _db.OrgContext.CurrentUserId;
+        _db.OrgContext.CurrentUserId = _admin.Id;
+        IssuedGatewayCode code;
+        await using (var ctx = _db.NewContext())
+        {
+            code = await GatewayTestKit.NewService(ctx, _db.OrgContext, _clock).CreateRotationCodeAsync(gatewayId);
+        }
+        _db.OrgContext.CurrentUserId = previousUser;
+        var anonymous = new AmbientOrganizationContext();
+        using var key = GatewayTestKit.NewKey();
+        await using (var ctx = _db.NewContext(anonymous))
+        {
+            await GatewayTestKit.NewService(ctx, anonymous, _clock).RegisterAsync(GatewayTestKit.Request(code.Code, key));
+        }
+    }
+
     private async Task<GatewayCommand> LoadAsync(long id)
     {
         await using var ctx = _db.NewContext();
@@ -241,14 +260,15 @@ public sealed class GatewayCommandServiceTests : IDisposable
         for (var i = 0; i < 12; i++) queued.Add(await EnqueueAsync(gateway));
 
         var claimed = new System.Collections.Concurrent.ConcurrentBag<long>();
+        // A claim only answers Nothing once no candidate remains (a lost race is
+        // retried), so each claimer can stop at its first Nothing.
         async Task ClaimUntilEmptyAsync()
         {
-            var misses = 0;
-            while (misses < 3)
+            while (true)
             {
                 var result = await ClaimAsync(gateway);
-                if (result.Outcome == GatewayClaimOutcome.Claimed) claimed.Add(result.Command!.Id);
-                else misses++;
+                if (result.Outcome != GatewayClaimOutcome.Claimed) return;
+                claimed.Add(result.Command!.Id);
             }
         }
         await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(ClaimUntilEmptyAsync)));
@@ -581,7 +601,12 @@ public sealed class GatewayCommandServiceTests : IDisposable
 
         var served = await service.OpenFileAsync(mine, id, fileId);
         served.Outcome.Should().Be(GatewayFileOutcome.Found);
-        served.File!.Content.Should().Equal(content);
+        served.File!.Size.Should().Be(content.Length);
+        using (var streamed = new MemoryStream())
+        {
+            (await service.CopyFileContentAsync(served.File.Id, streamed)).Should().BeTrue();
+            streamed.ToArray().Should().Equal(content);
+        }
         served.File.Sha256.Should().Be(Convert.ToHexStringLower(SHA256.HashData(content)));
 
         (await service.OpenFileAsync(other, id, fileId)).Outcome.Should().Be(GatewayFileOutcome.NotFound, "another gateway's command");
@@ -640,5 +665,124 @@ public sealed class GatewayCommandServiceTests : IDisposable
         var act = () => EnqueueAsync(gateway, files: [new GatewayCommandFileInput(name, [1])]);
 
         (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("files");
+    }
+
+    // ---------------------------------------------------------------- review follow-ups
+
+    [Fact]
+    public async Task A_file_over_the_size_limit_is_refused()
+    {
+        var gateway = await GatewayAsync();
+        var huge = new byte[GatewayCommandService.MaxFileBytes + 1];
+
+        var act = () => EnqueueAsync(gateway, GatewayVerb.PublishInstall, files: [new GatewayCommandFileInput("CRONUS_Coffee_1.4.0.0.app", huge)]);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["files"].Should().Contain("128 MB");
+    }
+
+    [Fact]
+    public async Task The_sweep_drops_a_final_commands_file_content_and_keeps_its_record()
+    {
+        var gateway = await GatewayAsync();
+        var done = await EnqueueAsync(gateway, GatewayVerb.ImportLicence, files: [new GatewayCommandFileInput("CRONUS.bclicense", [1, 2, 3])]);
+        var open = await EnqueueAsync(gateway, GatewayVerb.ImportLicence, files: [new GatewayCommandFileInput("Other.bclicense", [4, 5])]);
+        var claim = await ClaimAsync(gateway);
+        claim.Command!.Id.Should().Be(done);
+        await ClaimAsync(gateway);
+        await using (var ctx = _db.NewContext())
+        {
+            await Service(ctx).CompleteAsync(gateway, done, new GatewayCommandResultRequest { Succeeded = true });
+            await Service(ctx).SweepAsync();
+        }
+
+        await using var check = _db.NewContext();
+        var files = await check.GatewayCommandFiles.AsNoTracking().ToListAsync();
+        var spent = files.Single(f => f.CommandId == done);
+        spent.Content.Should().BeNull();
+        spent.FileName.Should().Be("CRONUS.bclicense");
+        spent.Size.Should().Be(3);
+        files.Single(f => f.CommandId == open).Content.Should().Equal(4, 5);
+        using var streamed = new MemoryStream();
+        (await Service(check).CopyFileContentAsync(spent.Id, streamed)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task The_log_stops_at_its_cap_with_one_truncation_marker()
+    {
+        var gateway = await GatewayAsync();
+        var id = await EnqueueAsync(gateway);
+        await ClaimAsync(gateway);
+        var lines = Enumerable.Repeat(new string('x', GatewayCommandService.MaxLineLength), GatewayCommandService.MaxProgressLines).ToList();
+        await using var ctx = _db.NewContext();
+        var service = Service(ctx);
+
+        for (var post = 0; post < 3; post++)
+        {
+            (await service.AppendProgressAsync(gateway, id, lines)).Should().BeTrue();
+        }
+
+        var log = (await LoadAsync(id)).Log;
+        log.Length.Should().Be(GatewayCommandService.MaxLogLength + GatewayCommandService.LogTruncatedMarker.Length);
+        log.Should().EndWith(GatewayCommandService.LogTruncatedMarker);
+        log.Split("[Log truncated").Should().HaveCount(2, "the marker appears exactly once");
+    }
+
+    [Fact]
+    public async Task A_rekeyed_gateway_cannot_report_on_or_keep_alive_its_old_commands()
+    {
+        var gateway = await GatewayAsync();
+        var running = await EnqueueAsync(gateway);
+        var claimed = await EnqueueAsync(gateway);
+        await ClaimAsync(gateway);
+        await ClaimAsync(gateway);
+        await using (var ctx = _db.NewContext())
+        {
+            await Service(ctx).AppendProgressAsync(gateway, running, ["Publishing"]);
+        }
+
+        await RekeyAsync(gateway);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var service = Service(ctx);
+            (await service.AppendProgressAsync(gateway, running, ["late"])).Should().BeFalse();
+            (await service.CompleteAsync(gateway, running, new GatewayCommandResultRequest { Succeeded = true })).Should().BeFalse();
+            (await service.ApplyHeartbeatAsync(gateway, running: [running], interrupted: [claimed])).Should().Be(0);
+        }
+        (await LoadAsync(running)).Status.Should().Be(GatewayCommandStatus.Running);
+        (await LoadAsync(claimed)).Status.Should().Be(GatewayCommandStatus.Claimed);
+    }
+
+    [Fact]
+    public async Task The_sweep_fails_a_rekeyed_gateways_open_commands_and_leaves_finished_ones()
+    {
+        var gateway = await GatewayAsync();
+        var other = await GatewayAsync(machine: "CRONUS-BC02");
+        var done = await EnqueueAsync(gateway);
+        var claimed = await EnqueueAsync(gateway);
+        var queued = await EnqueueAsync(gateway);
+        var otherGateways = await EnqueueAsync(other);
+        await using (var ctx = _db.NewContext())
+        {
+            var service = Service(ctx);
+            (await service.ClaimNextAsync(gateway)).Command!.Id.Should().Be(done);
+            await service.CompleteAsync(gateway, done, new GatewayCommandResultRequest { Succeeded = true });
+            (await service.ClaimNextAsync(gateway)).Command!.Id.Should().Be(claimed);
+        }
+
+        await RekeyAsync(gateway);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Service(ctx).SweepAsync()).FailedRekeyed.Should().Be(2);
+        }
+
+        foreach (var id in new[] { claimed, queued })
+        {
+            var row = await LoadAsync(id);
+            row.Status.Should().Be(GatewayCommandStatus.Failed, $"command {id}");
+            row.FailureMessage.Should().Be(GatewayCommandService.RekeyedMessage);
+        }
+        (await LoadAsync(done)).Status.Should().Be(GatewayCommandStatus.Succeeded);
+        (await LoadAsync(otherGateways)).Status.Should().Be(GatewayCommandStatus.Queued);
     }
 }

@@ -119,5 +119,10 @@ public class GatewayCommandFile
 
     public long Size { get; set; }
 
-    public byte[] Content { get; set; } = [];
+    /// <summary>
+    /// The file itself, until its command is final: the sweep then clears it, since a
+    /// finished command is never downloaded again and an .app or licence file kept
+    /// forever is pure weight. The name, hash and size stay as the record of what was sent.
+    /// </summary>
+    public byte[]? Content { get; set; }
 }

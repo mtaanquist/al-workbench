@@ -263,4 +263,41 @@ public sealed class GatewayCommandEndpointTests : IDisposable
         response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         (await ErrorsOf(response)).Should().ContainKey("body");
     }
+
+    [Fact]
+    public async Task A_rekeyed_gateway_is_refused_reports_and_its_heartbeat_lists_are_ignored()
+    {
+        using var client = _factory.CreateClient();
+        using var key = GatewayTestKit.NewKey();
+        var gateway = await GatewayAsync(key);
+        var id = await EnqueueAsync(gateway);
+        using (await client.SendAsync(Signed(key, gateway, HttpMethod.Get, GatewayProtocol.NextCommandPath))) { }
+
+        // A rotation code redeemed with a new key: the gateway is pending until an Admin approves it.
+        _db.OrgContext.CurrentUserId = _admin!.Id;
+        IssuedGatewayCode code;
+        await using (var ctx = _db.NewContext())
+        {
+            code = await GatewayTestKit.NewService(ctx, _db.OrgContext, TimeProvider.System).CreateRotationCodeAsync(gateway);
+        }
+        using var newKey = GatewayTestKit.NewKey();
+        var anonymous = new AmbientOrganizationContext();
+        await using (var ctx = _db.NewContext(anonymous))
+        {
+            await GatewayTestKit.NewService(ctx, anonymous, TimeProvider.System).RegisterAsync(GatewayTestKit.Request(code.Code, newKey));
+        }
+
+        using var progress = await client.SendAsync(SignedJson(newKey, gateway, GatewayProtocol.CommandProgressPath(id),
+            new GatewayCommandProgressRequest { Lines = ["still here"] }));
+        progress.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        using var result = await client.SendAsync(SignedJson(newKey, gateway, GatewayProtocol.CommandResultPath(id),
+            new GatewayCommandResultRequest { Succeeded = true }));
+        result.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await ErrorsOf(result))["authorization"].Should().Contain("waiting for an Admin to approve");
+
+        using var heartbeat = await client.SendAsync(SignedJson(newKey, gateway, GatewayProtocol.HeartbeatPath,
+            new GatewayHeartbeatRequest { Version = "1.0.0", MachineName = "CRONUS-BC01", InterruptedCommandIds = [id] }));
+        heartbeat.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await StatusAsync(id)).Should().Be(GatewayCommandStatus.Claimed, "a pending gateway's command lists are ignored");
+    }
 }

@@ -73,7 +73,7 @@ internal sealed class GatewayCommandFileConfiguration : IEntityTypeConfiguration
         entity.Property(e => e.FileName).HasColumnName("file_name").IsRequired();
         entity.Property(e => e.Sha256).HasColumnName("sha256").HasMaxLength(64).IsRequired();
         entity.Property(e => e.Size).HasColumnName("size").IsRequired();
-        entity.Property(e => e.Content).HasColumnName("content").IsRequired();
+        entity.Property(e => e.Content).HasColumnName("content");
 
         entity.HasIndex(e => e.CommandId);
 

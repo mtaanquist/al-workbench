@@ -67,8 +67,13 @@ public static class GatewayEndpoints
             {
                 var response = await gateways.HeartbeatAsync(gatewayId, request, ct);
                 if (response is null) return RevokedResult();
-                // Keeps the commands it lists alive, and fails the ones a restart cut short.
-                await commands.ApplyHeartbeatAsync(gatewayId, request.RunningCommandIds, request.InterruptedCommandIds, ct);
+                // Keeps the commands it lists alive, and fails the ones a restart cut
+                // short. A pending gateway's lists are ignored: it may be a re-keyed
+                // machine nobody has approved yet, and the sweep fails its commands.
+                if (IsApproved(ctx))
+                {
+                    await commands.ApplyHeartbeatAsync(gatewayId, request.RunningCommandIds, request.InterruptedCommandIds, ct);
+                }
                 return Results.Json(response);
             }
             catch (PlanValidationException ex)
@@ -105,6 +110,7 @@ public static class GatewayEndpoints
 
         group.MapPost("/commands/{id:long}/progress", async (long id, HttpContext ctx, GatewayCommandService commands, CancellationToken ct) =>
         {
+            if (!IsApproved(ctx)) return NotApprovedResult();
             var request = await ReadJsonAsync<GatewayCommandProgressRequest>(ctx, MaxProgressBodyBytes, ct);
             if (request is null) return Malformed();
             try
@@ -122,6 +128,7 @@ public static class GatewayEndpoints
 
         group.MapPost("/commands/{id:long}/result", async (long id, HttpContext ctx, GatewayCommandService commands, CancellationToken ct) =>
         {
+            if (!IsApproved(ctx)) return NotApprovedResult();
             // A result can carry a verb's whole report, so it may use the full body
             // the authentication handler accepts.
             var request = await ReadJsonAsync<GatewayCommandResultRequest>(ctx, GatewayProtocol.MaxRequestBodyBytes, ct);
@@ -147,7 +154,7 @@ public static class GatewayEndpoints
             var (outcome, file) = await commands.OpenFileAsync(GatewayIdOf(ctx), id, fileId, ct);
             return outcome switch
             {
-                GatewayFileOutcome.Found => Results.File(file!.Content, "application/octet-stream", file.FileName),
+                GatewayFileOutcome.Found => StreamFile(ctx, commands, file!),
                 GatewayFileOutcome.NotRunning => NotRunningResult(),
                 _ => Refused(
                     new Dictionary<string, string> { ["file"] = "This gateway has no such file to download." },
@@ -157,6 +164,24 @@ public static class GatewayEndpoints
         .RequireAuthorization(GatewayAuthenticationHandler.PolicyName);
 
         return app;
+    }
+
+    /// <summary>
+    /// Streams the file rather than buffering it (it may be 128 MB). The length is
+    /// known up front, so the gateway can tell a cut-short download from a whole one;
+    /// if the content vanished between the check and the copy (the command became
+    /// final), the connection is aborted rather than answered with a short body.
+    /// </summary>
+    private static IResult StreamFile(HttpContext ctx, GatewayCommandService commands, GatewayCommandFileDownload file)
+    {
+        ctx.Response.ContentLength = file.Size;
+        return Results.Stream(async body =>
+        {
+            if (!await commands.CopyFileContentAsync(file.Id, body, ctx.RequestAborted))
+            {
+                ctx.Abort();
+            }
+        }, "application/octet-stream", file.FileName);
     }
 
     private static int GatewayIdOf(HttpContext ctx) =>
