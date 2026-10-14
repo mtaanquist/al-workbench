@@ -94,7 +94,7 @@ public sealed class TotpService
             // factor out from under the user.
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["Totp"] = "TOTP is already enabled. Disable it first if you want to re-enroll."
+                ["Totp"] = "The authenticator app is already turned on. Turn it off first if you want to set it up again."
             });
         }
         await _db.SaveChangesAsync(ct);
@@ -115,7 +115,7 @@ public sealed class TotpService
         // Fence category 4 (explicitly scoped user-id lookup): pinned to s.UserId == userId.
         var secret = await _db.UserTotpSecrets.IgnoreQueryFilters()
             .FirstOrDefaultAsync(s => s.UserId == userId, ct)
-            ?? throw new PlanValidationException(new Dictionary<string, string> { ["Totp"] = "Start a TOTP enrollment first." });
+            ?? throw new PlanValidationException(new Dictionary<string, string> { ["Totp"] = "Start setting up the authenticator app first." });
 
         var base32 = _protector.Unprotect(secret.SecretEncrypted);
         if (!VerifyCode(base32, code))

@@ -193,7 +193,7 @@ internal static class AccountMfaEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             if (!await emailSvc.IsConfiguredAsync(ct))
             {
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("SMTP isn't configured. Ask a SiteAdmin.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Email isn't set up on this site yet. Ask a site administrator.")}");
                 return;
             }
             try
@@ -201,7 +201,7 @@ internal static class AccountMfaEndpoints
                 var code = await mfa.IssueChallengeAsync(org.CurrentUserId!.Value, ct);
                 if (code is null)
                 {
-                    ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Try again in a few minutes.")}");
+                    ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Several codes were sent recently. Wait a few minutes before asking for another one.")}");
                     return;
                 }
                 // Fence category 4 (explicitly scoped user-id lookup): pinned to the signed-in
@@ -217,7 +217,7 @@ internal static class AccountMfaEndpoints
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Email-MFA setup failed.");
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Failed to send code.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Email&{RouteConstants.MsgQuery}={Uri.EscapeDataString("We couldn't send the email code. Try again in a few minutes.")}");
             }
         }).RequireAuthorization();
 
@@ -261,7 +261,7 @@ internal static class AccountMfaEndpoints
             if (user is null) return;
             if (!user.TotpEnabled)
             {
-                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Totp&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Enable TOTP first.")}");
+                ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Totp&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Turn on the authenticator app first.")}");
                 return;
             }
             var codes = await recovery.RegenerateAsync(user.Id, ct);
