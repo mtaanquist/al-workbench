@@ -246,6 +246,19 @@ public sealed class ReleaseComparisonService
             .ToListAsync(ct);
 
     /// <summary>
+    /// The ids of a release's modules that <see cref="OneModulePerApp"/> picks, so
+    /// the object loads can be restricted to them in the query (#1332). Without it
+    /// the object compare and "Compare with..." read whichever of two versions of
+    /// one app the database returned first, usually the older one. A release holds
+    /// tens to a few hundred modules, so picking in memory costs one small read.
+    /// </summary>
+    private async Task<List<long>> LoadWinningModuleIdsAsync(int releaseId, CancellationToken ct)
+        => OneModulePerApp(await LoadModuleCompareRowsAsync(releaseId, ct).ConfigureAwait(false))
+            .Values
+            .Select(m => m.ModuleId)
+            .ToList();
+
+    /// <summary>
     /// File-pair diff for one Changed module. Files are joined on canonical
     /// <c>Path</c>. Returns null when either module id is missing.
     /// </summary>
@@ -496,8 +509,9 @@ public sealed class ReleaseComparisonService
         int releaseId, string kind, int? objectId, string name, CancellationToken ct = default)
     {
         if (!await _access.IsReleaseVisibleAsync(releaseId, ct)) return null;
+        var moduleIds = await LoadWinningModuleIdsAsync(releaseId, ct).ConfigureAwait(false);
         var query = _db.OeModuleObjects.AsNoTracking()
-            .Where(o => o.Module!.ReleaseId == releaseId
+            .Where(o => moduleIds.Contains(o.ModuleId)
                         && o.Kind == kind
                         && o.SourceFileId != null);
         query = objectId is int id
@@ -509,14 +523,22 @@ public sealed class ReleaseComparisonService
             .ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// A release's objects, from the one module per app the module compare picks
+    /// (<see cref="LoadWinningModuleIdsAsync"/>), so a release amended with a newer
+    /// version of an app compares that version's objects (#1332).
+    /// </summary>
     private async Task<List<CompareObject>> LoadCompareObjectsAsync(int releaseId, CancellationToken ct)
-        => await _db.OeModuleObjects.AsNoTracking()
-            .Where(o => o.Module!.ReleaseId == releaseId)
+    {
+        var moduleIds = await LoadWinningModuleIdsAsync(releaseId, ct).ConfigureAwait(false);
+        return await _db.OeModuleObjects.AsNoTracking()
+            .Where(o => moduleIds.Contains(o.ModuleId))
             .Select(o => new CompareObject(
                 o.Kind, o.ObjectId, o.Name, o.SourceFileId,
                 o.SourceFile != null ? o.SourceFile.ContentHash : null,
                 o.Module!.AppId, o.Module.Version, o.Module.AppFileHash))
             .ToListAsync(ct).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Whether two matched objects are the same. The hash is the source file's,
