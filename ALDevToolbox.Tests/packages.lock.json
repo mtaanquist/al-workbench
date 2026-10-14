@@ -956,7 +956,8 @@
       "alworkbench.gateway.core": {
         "type": "Project",
         "dependencies": {
-          "ALWorkbench.Gateway.Contracts": "[1.0.0, )"
+          "ALWorkbench.Gateway.Contracts": "[1.0.0, )",
+          "Tomlyn": "[2.10.1, )"
         }
       }
     }

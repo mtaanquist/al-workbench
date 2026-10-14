@@ -22,6 +22,10 @@ public static partial class GatewayLog
     public const int ReconnectedId = 2004;
     public const int CredentialRefusedId = 2005;
     public const int NotRegisteredId = 2006;
+    public const int PolicyLoadedId = 3000;
+    public const int PolicyInvalidId = 3001;
+    public const int PolicyMissingId = 3002;
+    public const int PolicyUnsafeId = 3003;
 
     [LoggerMessage(EventId = CommandStartedId, Level = LogLevel.Information,
         Message = "Started command {CommandId} ({Verb}), requested by {RequestedBy}.")]
@@ -66,6 +70,22 @@ public static partial class GatewayLog
     [LoggerMessage(EventId = CredentialRefusedId, Level = LogLevel.Error,
         Message = "AL Workbench refused this gateway's credentials: {Reason} Trying again in {Seconds} seconds. If the reason mentions the time, correct this computer's clock; the gateway carries on by itself once it is right. If the gateway was revoked, ask an Admin for a new registration code and run 'register' again.")]
     public static partial void CredentialRefused(this ILogger logger, string reason, int seconds);
+
+    [LoggerMessage(EventId = PolicyLoadedId, Level = LogLevel.Information,
+        Message = "Read the gateway settings in {PolicyFile}: {Count} service tiers listed. Anything not listed there is refused.")]
+    public static partial void PolicyLoaded(this ILogger logger, string policyFile, int count);
+
+    [LoggerMessage(EventId = PolicyInvalidId, Level = LogLevel.Error,
+        Message = "The gateway settings in {PolicyFile} have mistakes, so until they are corrected the gateway only reads (inventory) from the tiers the last correct version listed and refuses every change. {Problems}")]
+    public static partial void PolicyInvalid(this ILogger logger, string policyFile, string problems);
+
+    [LoggerMessage(EventId = PolicyMissingId, Level = LogLevel.Warning,
+        Message = "There are no gateway settings at {PolicyFile}, so the gateway refuses every command. Copy gateway.example.toml to gateway.toml beside the program and list the service tiers the gateway may manage.")]
+    public static partial void PolicyMissing(this ILogger logger, string policyFile);
+
+    [LoggerMessage(EventId = PolicyUnsafeId, Level = LogLevel.Error,
+        Message = "The gateway's program folder, its settings file or a script the settings name can be changed by someone other than administrators, and whoever can change them can run code as a Business Central administrator. {Problems} Only Administrators and SYSTEM may have write access to them. Until this is fixed the gateway runs no commands, and a gateway that is starting stops.")]
+    public static partial void PolicyUnsafe(this ILogger logger, string problems);
 
     [LoggerMessage(EventId = NotRegisteredId, Level = LogLevel.Error,
         Message = "This gateway is not registered yet. Run 'ALWorkbench.Gateway register --url <address> --code <code>' as an administrator, then start the service.")]

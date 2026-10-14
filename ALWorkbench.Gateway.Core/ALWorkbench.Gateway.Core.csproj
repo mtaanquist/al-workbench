@@ -21,6 +21,9 @@
          Microsoft.Extensions.Hosting the Windows host references. Kept in step
          with the app's 10.0.x packages. -->
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
+    <!-- Reads gateway.toml (#1373). The app's own TOML library, at the same version,
+         so the repository has one TOML reader; no dependencies on net10.0. -->
+    <PackageReference Include="Tomlyn" Version="2.10.1" />
   </ItemGroup>
 
   <ItemGroup>

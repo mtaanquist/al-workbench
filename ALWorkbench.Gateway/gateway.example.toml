@@ -1,0 +1,164 @@
+# AL Workbench Gateway settings
+#
+# This file decides what the gateway may do on your Business Central servers.
+# You own it: AL Workbench can read what it allows, but can never change it, and
+# the gateway refuses anything this file does not allow, whatever AL Workbench asks.
+#
+# To use it:
+#   1. Copy this file to gateway.toml in the same folder as ALWorkbench.Gateway.exe.
+#   2. Replace the examples below with your own service tiers.
+#   3. Run "ALWorkbench.Gateway check" from a command prompt opened with
+#      "Run as administrator". It shows any mistakes, what each service tier is
+#      allowed, and whether the gateway can reach each tier on this computer.
+#
+# The gateway reads the file again every minute and before every command, so you
+# do not need to restart the service after an edit.
+#
+# If the file has a mistake, the gateway keeps running but only reads from your
+# service tiers (versions, apps, licence) until the mistake is fixed. It writes the
+# mistake, with its line number, to the Windows event log (Application, source
+# "AL Workbench Gateway") and shows it in AL Workbench.
+#
+# Security: only Administrators and SYSTEM may be able to change this file, the
+# gateway's program folder and any script named below. Not even the gateway's own
+# service account. If anyone else can, the gateway refuses to run, because whoever
+# can change them can run commands as a Business Central administrator. The
+# default rights on C:\Program Files are fine. A folder you create yourself, such
+# as C:\ALWorkbench, usually lets ordinary users add files: remove that before you
+# put scripts there.
+#
+# Write text in "double quotes", or in 'single quotes' for Windows paths so the
+# backslashes are kept. Lines starting with # are comments.
+
+
+# ---------------------------------------------------------------------------
+# What each kind of environment may do by default
+# ---------------------------------------------------------------------------
+#
+# A service tier uses the defaults for its kind of environment (production, test
+# or development) unless it sets its own "allow" or "change_hours". A tier's own
+# setting replaces the default completely; the two lists are never combined.
+# A tier with no "allow" and no default for its kind may only be read.
+#
+# The permissions:
+#   inventory        read versions, tenants, apps, the number of open sessions
+#                    and the licence
+#   session_users    also report who is signed in (personal data: leave it out
+#                    unless you need it)
+#   publish          publish, synchronise, install and upgrade apps
+#   unpublish        remove an app's previous version after an upgrade
+#   restart          restart the tier as part of a deployment or licence import
+#   service_control  stop, start and restart the tier on request
+#   licence          import a licence file
+#   scripts          run the before and after scripts named for its database
+#
+# change_hours limits every permission except inventory to a local time window on
+# this computer's clock, for example "20:00-06:00" for 8 in the evening to 6 in the
+# morning. Leave it out to allow changes at any time.
+
+[defaults.production]
+allow = ["inventory", "publish", "restart"]
+change_hours = "20:00-06:00"
+
+[defaults.test]
+allow = ["inventory", "publish", "unpublish", "restart", "service_control", "licence"]
+
+
+# ---------------------------------------------------------------------------
+# Service tiers the gateway may touch
+# ---------------------------------------------------------------------------
+#
+# One [[instance]] section per service tier. Anything not listed is refused.
+#
+#   machine         the computer the tier runs on
+#   name            the server instance name, as in the Business Central
+#                   Administration Shell (Get-NAVServerInstance)
+#   environment     "production", "test" or "development". Leave it out and the
+#                   tier counts as production, which is the most careful choice.
+#                   AL Workbench shows this and cannot change it.
+#   allow           this tier's own permissions, replacing the default
+#   change_hours    this tier's own time window, replacing the default
+#   tenants         on a multitenant server, the tenants the gateway may act on.
+#                   Leave it out on a single-tenant server.
+#   publishers      only publish apps from these publishers. Leave it out to
+#                   allow any publisher.
+#   allow_unsigned  true to allow apps that are not signed. Apps built by
+#                   AL Workbench are not signed today, so deployments need this.
+#   scope           "tenant" (the default) publishes an app for one tenant only;
+#                   "global" publishes it for the whole server.
+#   powershell      "5.1" or "7" to choose the PowerShell for this tier. Leave it
+#                   out and the gateway picks one from the tier's version.
+
+[[instance]]
+machine = "CRONUS-BC01"        # this computer
+name = "BC140"
+environment = "production"
+allow = ["inventory", "publish", "unpublish", "restart", "licence"]
+tenants = ["default"]
+publishers = ["CRONUS Partner"]
+allow_unsigned = true
+
+[[instance]]
+machine = "CRONUS-BC02"
+name = "BC140"
+environment = "production"
+allow = ["inventory", "restart"]   # restarted with the database, never published to
+
+[[instance]]
+machine = "CRONUS-BC01"
+name = "BC140TEST"
+environment = "test"               # uses [defaults.test] above
+allow_unsigned = true
+
+
+# ---------------------------------------------------------------------------
+# Service tiers that share a database
+# ---------------------------------------------------------------------------
+#
+# When several tiers use one database, apps are published on one of them and all
+# of them are restarted afterwards, so no session keeps running old code.
+#
+#   name            your name for the database, shown in AL Workbench
+#   publish_on      the tier that publishes apps and imports licences
+#   restart         the tiers restarted after an install or a licence import.
+#                   Leave it out to restart only the publishing tier.
+#   restart_mode    "stop-all-then-start-all" (the default) or "one-by-one"
+#   shared_restart  true only if restarting these tiers may affect more than one
+#                   customer; otherwise such a restart is refused
+#   licence_target  where licences are imported: "NavDatabase", "Master",
+#                   "Default" or "Tenant". Leave it out to refuse licence imports.
+#   before, after   optional: the full path of your own PowerShell script to run
+#                   before a deployment and after the restart. A failing before
+#                   script stops the deployment before anything is published.
+#
+# A tier may belong to one database only.
+
+[[database]]
+name = "CRONUS-SQL/BC140"
+publish_on = { machine = "CRONUS-BC01", instance = "BC140" }
+restart = [
+  { machine = "CRONUS-BC01", instance = "BC140" },
+  { machine = "CRONUS-BC02", instance = "BC140" },
+]
+restart_mode = "stop-all-then-start-all"
+shared_restart = false
+licence_target = "NavDatabase"
+# before = 'C:\Program Files\AL Workbench Gateway\scripts\before-deploy.ps1'
+# after = 'C:\Program Files\AL Workbench Gateway\scripts\after-restart.ps1'
+
+
+# ---------------------------------------------------------------------------
+# How to reach other computers
+# ---------------------------------------------------------------------------
+#
+# One [[machine]] section for every computer other than this one that has a tier
+# listed above.
+#
+#   method  "service-manager" stops and starts the tier through Windows' remote
+#           service control (needs remote procedure call and file sharing open
+#           inside your network); "powershell-remoting" uses PowerShell remoting
+#           (WinRM).
+
+[[machine]]
+name = "CRONUS-BC02"
+method = "service-manager"
