@@ -184,6 +184,20 @@ jobs:
         # --output Detailed is the per-test console output --logger used to give.
         run: dotnet test --configuration Release --no-build --output Detailed
 
+      - name: Publish the gateway as a release would
+        # The same single-file win-x64 publish release.yml runs on Windows, cross-
+        # compiled here so a change that breaks it (a single-file warning, a
+        # runtime pack) fails the PR instead of the next release tag (#1363). No
+        # Windows job: the Windows-only code compiles in the Build step already,
+        # it has no tests that could run without a real Windows service and key
+        # store, and the test suite needs the Postgres service container, which
+        # Windows runners do not offer. After Test, so its rebuild of the shared
+        # projects cannot touch what the tests ran against.
+        run: >-
+          dotnet publish ALWorkbench.Gateway/ALWorkbench.Gateway.csproj -c Release -r win-x64 --self-contained
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=embedded
+          -p:ReleaseVersion=0.0.0-ci -o "$RUNNER_TEMP/gateway"
+
   compose-smoke:
     # Boots the published image against a real `db` container to lock in the
     # M16 done-when criterion: `docker compose up` brings up Postgres + app

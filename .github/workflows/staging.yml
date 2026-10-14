@@ -32,6 +32,65 @@ permissions:
   packages: write
 
 jobs:
+  # The on-premises gateway built from the same commit, for trying a branch's
+  # gateway changes against its staging instance (#1363). Kept as a workflow
+  # artifact on the run, not a GitHub release: a staging preview is for looking
+  # at, and a release (even a prerelease) is what operators and customer IT are
+  # told to download. Never signed. It reports 0.0.0-staging.<commit>, which AL
+  # Workbench treats as a preview: never refused for its version and never
+  # listed as out of date. The staging image itself carries no release stamp, so
+  # its Gateways page offers no download and says so.
+  gateway:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish the gateway
+        id: publish
+        shell: pwsh
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          $version = "0.0.0-staging.$($env:SHA.Substring(0, 7))"
+          dotnet publish ALWorkbench.Gateway/ALWorkbench.Gateway.csproj -c Release -r win-x64 --self-contained `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=embedded `
+            -p:ReleaseVersion=$version -o out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash out\ALWorkbench.Gateway.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("out\ALWorkbench.Gateway.exe.sha256", "$hash  ALWorkbench.Gateway.exe`n")
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Keep the gateway on the run
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gateway-${{ steps.publish.outputs.version }}
+          path: |
+            out/ALWorkbench.Gateway.exe
+            out/ALWorkbench.Gateway.exe.sha256
+            out/gateway.example.toml
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summary
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.publish.outputs.version }}
+          SHA256: ${{ steps.publish.outputs.sha256 }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          @(
+            "### Staging gateway published"
+            ""
+            "Built from ``$env:REF_NAME`` as version ``$env:VERSION``, unsigned. Download it from this run's artifacts (kept 14 days)."
+            ""
+            "SHA-256: ``$env:SHA256``"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
   image:
     runs-on: ubuntu-latest
     steps:
