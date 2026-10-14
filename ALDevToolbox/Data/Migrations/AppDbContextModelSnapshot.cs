@@ -505,6 +505,7 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnName("approved_by_user_id");
 
                     b.Property<string>("KeyFingerprint")
+                        .IsConcurrencyToken()
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("key_fingerprint");

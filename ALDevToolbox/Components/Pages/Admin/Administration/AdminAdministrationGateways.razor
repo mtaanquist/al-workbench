@@ -312,7 +312,9 @@
         if (!await _approveDialog.OpenAsync($"Approve {gateway.Name}?", string.Empty, "Approve gateway", "btn--primary", "shield")) return;
         await RunAsync(async () =>
         {
-            await Gateways.ApproveAsync(gateway.Id);
+            // The fingerprint the Admin just compared: if the gateway registered a new
+            // key since this list was read, the service refuses rather than approving it.
+            await Gateways.ApproveAsync(gateway.Id, gateway.KeyFingerprint);
             _success = $"Approved. {gateway.Name} can now receive work from AL Workbench.";
         });
     }

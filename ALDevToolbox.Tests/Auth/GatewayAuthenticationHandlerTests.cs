@@ -132,7 +132,42 @@ public sealed class GatewayAuthenticationHandlerTests : IDisposable
         var result = await AuthenticateAsync(Request(token, body));
 
         result.Succeeded.Should().BeFalse();
-        result.Failure!.Message.Should().Contain("signature");
+        // The same words as for a gateway that does not exist; the log has the difference.
+        result.Failure!.Message.Should().Be(GatewayAuthenticationHandler.UnrecognisedMessage);
+    }
+
+    [Fact]
+    public async Task An_unknown_gateway_and_a_bad_signature_are_refused_with_the_same_message()
+    {
+        var (gateway, key) = await RegisterAsync();
+        using var _ = key;
+        using var stranger = GatewayTestKit.NewKey();
+        var (body, forged) = GatewayTestKit.SignedHeartbeat(stranger, gateway.GatewayId, _clock.GetUtcNow());
+        var (otherBody, unknown) = GatewayTestKit.SignedHeartbeat(stranger, gateway.GatewayId + 1000, _clock.GetUtcNow());
+
+        var badSignature = await AuthenticateAsync(Request(forged, body));
+        var unknownGateway = await AuthenticateAsync(Request(unknown, otherBody));
+
+        badSignature.Failure!.Message.Should().Be(unknownGateway.Failure!.Message);
+    }
+
+    [Fact]
+    public async Task An_unsigned_request_is_refused_without_its_body_being_read()
+    {
+        var (gateway, key) = await RegisterAsync();
+        using var _ = key;
+        using var stranger = GatewayTestKit.NewKey();
+        var (_, forged) = GatewayTestKit.SignedHeartbeat(stranger, gateway.GatewayId, _clock.GetUtcNow());
+        var http = Request(forged, []);
+        var body = new UnreadableStream();
+        http.Request.Body = body;
+        http.Request.ContentLength = GatewayProtocol.MaxRequestBodyBytes;
+
+        var result = await AuthenticateAsync(http);
+
+        result.Succeeded.Should().BeFalse();
+        result.Failure!.Message.Should().Be(GatewayAuthenticationHandler.UnrecognisedMessage);
+        body.WasRead.Should().BeFalse();
     }
 
     [Fact]
@@ -147,6 +182,37 @@ public sealed class GatewayAuthenticationHandlerTests : IDisposable
         var result = await AuthenticateAsync(Request(none + "." + parts[1] + ".", body));
 
         result.Succeeded.Should().BeFalse();
+        // To the caller, a token whose signature was never checked is a stranger's.
+        result.Failure!.Message.Should().Be(GatewayAuthenticationHandler.UnrecognisedMessage);
+        // The validator's own reason, which is what the log records.
+        var (validatedNone, refusal) = GatewayTokenValidator.Validate(
+            none + "." + parts[1] + ".", key.ExportSubjectPublicKeyInfo(), gateway.GatewayId, TokenRequest());
+        validatedNone.Should().BeNull();
+        refusal!.Reason.Should().Be("The token must be signed with ES256.");
+        refusal.BeforeSignature.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_token_signed_HS256_with_the_public_key_as_secret_is_refused()
+    {
+        var (gateway, key) = await RegisterAsync();
+        using var _ = key;
+        var (body, token) = GatewayTestKit.SignedHeartbeat(key, gateway.GatewayId, _clock.GetUtcNow());
+        var payload = token.Split('.')[1];
+        var header = Base64Url.EncodeToString(Encoding.UTF8.GetBytes("{\"alg\":\"HS256\",\"typ\":\"JWT\"}"));
+        // The classic confusion: the public key is no secret, so an attacker can HMAC
+        // with it, and a verifier that takes "alg" from the token would accept it.
+        var publicKey = key.ExportSubjectPublicKeyInfo();
+        var mac = System.Security.Cryptography.HMACSHA256.HashData(publicKey, Encoding.ASCII.GetBytes(header + "." + payload));
+        var forged = header + "." + payload + "." + Base64Url.EncodeToString(mac);
+
+        var (validated, refusal) = GatewayTokenValidator.Validate(forged, publicKey, gateway.GatewayId, TokenRequest());
+        var result = await AuthenticateAsync(Request(forged, body));
+
+        validated.Should().BeNull();
+        refusal!.Reason.Should().Be("The token must be signed with ES256.");
+        result.Succeeded.Should().BeFalse();
+        result.Failure!.Message.Should().Be(GatewayAuthenticationHandler.UnrecognisedMessage);
     }
 
     [Fact]
@@ -302,7 +368,7 @@ public sealed class GatewayAuthenticationHandlerTests : IDisposable
         var result = await AuthenticateAsync(Request(token, body));
 
         result.Succeeded.Should().BeFalse();
-        result.Failure!.Message.Should().Contain("revoked");
+        result.Failure!.Message.Should().Be(GatewayAuthenticationHandler.UnrecognisedMessage);
     }
 
     [Fact]
@@ -368,6 +434,30 @@ public sealed class GatewayAuthenticationHandlerTests : IDisposable
         entry.ChangedBy.Should().Be("Gateway CRONUS-BC01");
         entry.ChangedByUserId.Should().BeNull();
         entry.OrganizationId.Should().Be(TestDb.DefaultOrgId);
+    }
+
+    private GatewayTokenRequest TokenRequest() =>
+        new("POST", GatewayProtocol.HeartbeatPath, GatewayTestKit.Audience, _clock.GetUtcNow());
+
+    /// <summary>A request body that records whether anyone tried to read it.</summary>
+    private sealed class UnreadableStream : Stream
+    {
+        public bool WasRead { get; private set; }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) { WasRead = true; return 0; }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            WasRead = true;
+            return ValueTask.FromResult(0);
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private sealed class StaticOptions(AuthenticationSchemeOptions value) : IOptionsMonitor<AuthenticationSchemeOptions>

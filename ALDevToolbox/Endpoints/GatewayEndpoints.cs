@@ -11,7 +11,8 @@ namespace ALDevToolbox.Endpoints;
 /// antiforgery, JSON in and out. <c>/gateway/register</c> is anonymous and
 /// rate-limited per client address, because the registration code in its body is
 /// the credential; everything else requires the gateway policy and nothing else
-/// (<see cref="GatewayAuthenticationHandler"/>). See <c>.design/on-prem-gateway.md</c>.
+/// (<see cref="GatewayAuthenticationHandler"/>), under a looser per-address limit
+/// that bounds the lookup and signature check a stranger can trigger. See <c>.design/on-prem-gateway.md</c>.
 ///
 /// <para>Every refusal is a <see cref="GatewayErrorResponse"/> with a body, so
 /// <c>UseStatusCodePagesWithReExecute</c> leaves it alone and the gateway can log
@@ -22,6 +23,13 @@ public static class GatewayEndpoints
     /// <summary>Rate-limit policy name for the registration exchange, registered in <c>OperationsRegistration</c>.</summary>
     public const string RegisterRateLimitPolicy = "gateway-register";
 
+    /// <summary>
+    /// Rate-limit policy for every gateway route, per client address, registered in
+    /// <c>OperationsRegistration</c>. Set on the group so a new route gets it without
+    /// asking; <c>/register</c> replaces it with <see cref="RegisterRateLimitPolicy"/>.
+    /// </summary>
+    public const string GatewayRateLimitPolicy = "gateway";
+
     /// <summary>A registration or heartbeat body is a few hundred bytes; this is generous.</summary>
     private const int MaxSmallBodyBytes = 64 * 1024;
 
@@ -30,7 +38,9 @@ public static class GatewayEndpoints
 
     public static IEndpointRouteBuilder MapGatewayEndpoints(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup(GatewayProtocol.PathPrefix).DisableAntiforgery();
+        var group = app.MapGroup(GatewayProtocol.PathPrefix)
+            .DisableAntiforgery()
+            .RequireRateLimiting(GatewayRateLimitPolicy);
 
         group.MapPost("/register", async (HttpContext ctx, GatewayService gateways, CancellationToken ct) =>
         {

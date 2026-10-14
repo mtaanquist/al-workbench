@@ -58,7 +58,8 @@ public static class GatewayProtocol
     /// <summary>
     /// The largest request body a gateway sends. The body is hashed into the token
     /// (<see cref="GatewayTokenClaims.BodyHash"/>), so the workbench reads all of it
-    /// before it knows who is calling; this caps what a stranger can make it read.
+    /// to check the hash - only after the token's signature has verified, so a
+    /// stranger cannot make it read any; this caps what a registered gateway can.
     /// </summary>
     public const int MaxRequestBodyBytes = 4 * 1024 * 1024;
 

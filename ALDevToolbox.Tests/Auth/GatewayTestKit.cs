@@ -88,7 +88,7 @@ internal static class GatewayTestKit
             if (approve)
             {
                 await using var ctx = db.NewContext();
-                await NewService(ctx, db.OrgContext, clock).ApproveAsync(registered.GatewayId);
+                await NewService(ctx, db.OrgContext, clock).ApproveAsync(registered.GatewayId, registered.KeyFingerprint);
             }
             return registered;
         }

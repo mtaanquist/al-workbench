@@ -167,7 +167,8 @@ public sealed class GatewayService
     /// <summary>
     /// Makes a code that gives gateway <paramref name="gatewayId"/> a new key. The old
     /// key keeps working until the code is used; from then on only the new key does,
-    /// and the gateway waits for an Admin to approve it again.
+    /// and the gateway waits for an Admin to approve it again. Any earlier rotation
+    /// code for the same gateway stops working: only the newest one is accepted.
     /// </summary>
     public async Task<IssuedGatewayCode> CreateRotationCodeAsync(int gatewayId, CancellationToken ct = default)
     {
@@ -240,7 +241,7 @@ public sealed class GatewayService
         {
             errors["publicKey"] = "The gateway's public key could not be read. It must be an ECDSA P-256 key.";
         }
-        var machineName = request.MachineName.Trim();
+        var machineName = (request.MachineName ?? string.Empty).Trim();
         if (machineName.Length == 0)
         {
             errors["machineName"] = "The gateway did not say which computer it runs on.";
@@ -249,7 +250,7 @@ public sealed class GatewayService
         {
             errors["machineName"] = $"The computer name is longer than {MaxReportedLength} characters.";
         }
-        var version = request.Version.Trim();
+        var version = (request.Version ?? string.Empty).Trim();
         if (version.Length > MaxReportedLength)
         {
             errors["version"] = $"The version is longer than {MaxReportedLength} characters.";
@@ -258,10 +259,17 @@ public sealed class GatewayService
 
         var now = Now;
         var hash = HashCode(normalised);
+        // Only the newest code issued for a gateway can re-key it. Issuing a new
+        // rotation code supersedes the older ones, and using one spends it, so an
+        // older code that was shared and never used cannot re-key the gateway after
+        // a newer one has been issued or used. The subquery is pinned to the same
+        // gateway_id as the code row, so it reads nothing the code does not route to.
         // Category 1 (pre-auth routing): code_hash == hash && used_at == null && expires_at > now routes this anonymous exchange to the one org that issued the code.
         var code = await _db.GatewayRegistrationCodes.IgnoreQueryFilters()
             .Include(c => c.Gateway)
             .Where(c => c.CodeHash == hash && c.UsedAt == null && c.ExpiresAt > now)
+            .Where(c => c.GatewayId == null
+                || !_db.GatewayRegistrationCodes.Any(newer => newer.GatewayId == c.GatewayId && newer.Id > c.Id))
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         if (code is null || (code.GatewayId is not null && (code.Gateway is null || code.Gateway.RevokedAt is not null)))
         {
@@ -327,21 +335,47 @@ public sealed class GatewayService
     // ---------------------------------------------------------------- Admin writes
 
     /// <summary>
-    /// Approves the gateway's current key. The page asks the Admin to compare the
-    /// fingerprint with the one the gateway printed first; this records who did.
+    /// Approves the gateway's key, provided it is still the one whose fingerprint
+    /// the Admin compared: <paramref name="keyFingerprint"/> is what the page showed.
+    /// A gateway that registered again since the list was read carries a different
+    /// key, and approving that one would approve a key nobody looked at, so the
+    /// approval is refused. The check holds at save time too: the fingerprint is the
+    /// row's concurrency token, so a rotation landing between the read and the save
+    /// fails the save rather than being approved.
     /// </summary>
-    public async Task ApproveAsync(int gatewayId, CancellationToken ct = default)
+    /// <exception cref="PlanValidationException">Keyed <c>gateway</c> when the key changed or the gateway is gone.</exception>
+    public async Task ApproveAsync(int gatewayId, string keyFingerprint, CancellationToken ct = default)
     {
         await EnsureAdminAsync(ct).ConfigureAwait(false);
         var gateway = await LoadLiveAsync(gatewayId, ct).ConfigureAwait(false);
+        if (!string.Equals(gateway.KeyFingerprint, keyFingerprint?.Trim(), StringComparison.Ordinal))
+        {
+            _logger.LogWarning("Refused to approve gateway {GatewayId}: the Admin compared {Seen}, the gateway now holds {Current}.",
+                gatewayId, keyFingerprint, gateway.KeyFingerprint);
+            throw KeyChanged();
+        }
         if (gateway.State == GatewayState.Approved) return;
         gateway.State = GatewayState.Approved;
         gateway.ApprovedAt = Now;
         gateway.ApprovedByUserId = _orgContext.CurrentUserId;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            _logger.LogWarning("Refused to approve gateway {GatewayId}: it registered a new key while the approval was being saved.", gatewayId);
+            throw KeyChanged();
+        }
         _logger.LogInformation("Gateway {GatewayId} key {Fingerprint} approved by user {UserId}.",
             gatewayId, gateway.KeyFingerprint, _orgContext.CurrentUserId);
     }
+
+    private static PlanValidationException KeyChanged() => new(new Dictionary<string, string>
+    {
+        ["gateway"] = "This gateway has registered again since the list was loaded, so its check code has changed. "
+            + "Nothing was approved. Compare the new check code in the list with the one the server printed, then approve again.",
+    });
 
     /// <summary>Revokes the gateway: its next request is refused. There is no undo.</summary>
     public async Task RevokeAsync(int gatewayId, CancellationToken ct = default)
@@ -351,7 +385,20 @@ public sealed class GatewayService
             ?? throw new PlanValidationException(new Dictionary<string, string> { ["gateway"] = "That gateway no longer exists." });
         if (gateway.RevokedAt is not null) return;
         gateway.RevokedAt = Now;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // The gateway registered a new key between the read and the save (the
+            // fingerprint is the concurrency token). Revoking does not depend on
+            // which key it holds, so take the current row and revoke that.
+            await _db.Entry(gateway).ReloadAsync(ct).ConfigureAwait(false);
+            if (gateway.RevokedAt is not null) return;
+            gateway.RevokedAt = Now;
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
         _logger.LogInformation("Gateway {GatewayId} revoked by user {UserId}.", gatewayId, _orgContext.CurrentUserId);
     }
 
@@ -371,7 +418,18 @@ public sealed class GatewayService
         var gateway = await LoadLiveAsync(gatewayId, ct).ConfigureAwait(false);
         if (gateway.Name == trimmed) return;
         gateway.Name = trimmed;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // A new key arrived between the read and the save; the name is
+            // independent of it, so apply the rename to the current row.
+            await _db.Entry(gateway).ReloadAsync(ct).ConfigureAwait(false);
+            gateway.Name = trimmed;
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
         _logger.LogInformation("Gateway {GatewayId} renamed to {Name}.", gatewayId, trimmed);
     }
 
@@ -429,8 +487,9 @@ public sealed class GatewayService
         ArgumentNullException.ThrowIfNull(request);
         RequireOrganizationId();
         var errors = new Dictionary<string, string>();
-        var version = request.Version.Trim();
-        var machineName = request.MachineName.Trim();
+        // An explicit JSON null arrives as null despite the contract's defaults.
+        var version = (request.Version ?? string.Empty).Trim();
+        var machineName = (request.MachineName ?? string.Empty).Trim();
         if (version.Length > MaxReportedLength) errors["version"] = $"The version is longer than {MaxReportedLength} characters.";
         if (machineName.Length > MaxReportedLength) errors["machineName"] = $"The computer name is longer than {MaxReportedLength} characters.";
         if (errors.Count > 0) throw new PlanValidationException(errors);
@@ -448,7 +507,9 @@ public sealed class GatewayService
                 .SetProperty(g => g.ReportedVersion, NullIfEmpty(version)), ct).ConfigureAwait(false);
         if (updated == 0) return null;
 
-        var state = await live.AsNoTracking().Select(g => g.State).FirstAsync(ct).ConfigureAwait(false);
+        // Revoked between the update and this read: answer as if the update had missed.
+        var state = await live.AsNoTracking().Select(g => (GatewayState?)g.State).FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        if (state is null) return null;
 
         // The replay table only needs a row until its token could no longer be
         // accepted; each heartbeat clears this gateway's spent ones, and
