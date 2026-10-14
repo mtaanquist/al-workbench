@@ -74,7 +74,64 @@ public sealed class ArtifactsToolsTests : IDisposable
         detail.Apps[0].DownloadPath.Should().StartWith($"/artifacts/build/{buildId}/app/");
         detail.DownloadAllPath.Should().Be($"/artifacts/build/{buildId}/all");
         detail.RawLogPath.Should().Be($"/artifacts/build/{buildId}/log");
+        detail.FailedApps.Should().BeEmpty("a clean build reports no failed extensions");
+        detail.ErrorCount.Should().Be(0);
+        detail.Errors.Should().BeEmpty();
     }
+
+    /// <summary>
+    /// A build goes ready with some extensions missing, so the tool has to say which
+    /// ones and why, or an agent reports a partial build as a clean one (#1330).
+    /// </summary>
+    [Fact]
+    public async Task Get_project_build_reports_the_extensions_and_errors_of_a_partial_build()
+    {
+        int buildId;
+        await using (var ctx = _db.NewContext())
+        {
+            var projectId = await SeedProjectAsync(ctx, "CRONUS A/S");
+            var releaseId = await SeedReleaseAsync(ctx);
+            buildId = await SeedBuildAsync(ctx, projectId, ProjectBuildStatus.Ready, DateTime.UtcNow, bcVersion: "26.0", artifacts: 1, releaseId: releaseId);
+            ctx.OeProjectBuildResults.AddRange(
+                Result(releaseId, "CRONUS Core", ProjectBuildResultStatus.Ingested, null),
+                Result(releaseId, "CRONUS Banking", ProjectBuildResultStatus.Failed, "Compilation failed (see the build report for CRONUS Banking)."));
+            for (var i = 0; i < MaxErrorsPlusTwo; i++)
+            {
+                ctx.OeProjectBuildDiagnostics.Add(Diagnostic(buildId, ProjectBuildDiagnosticSeverity.Error, i));
+            }
+            ctx.OeProjectBuildDiagnostics.Add(Diagnostic(buildId, ProjectBuildDiagnosticSeverity.Warning, MaxErrorsPlusTwo));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var detail = await NewTools(read).GetProjectBuildAsync(buildId);
+
+        detail.Status.Should().Be(ProjectBuildStatus.Ready);
+        var failed = detail.FailedApps.Should().ContainSingle().Subject;
+        failed.AppName.Should().Be("CRONUS Banking");
+        failed.Message.Should().Be("Compilation failed (see the build report for CRONUS Banking).");
+        detail.ErrorCount.Should().Be(MaxErrorsPlusTwo);
+        detail.WarningCount.Should().Be(1);
+        detail.Errors.Should().HaveCount(ArtifactsTools.MaxBuildErrors, "the rest are counted, not listed");
+        detail.Errors![0].Should().Be(new BuildErrorRow(null, "src/Banking0.al", 1, 5, "AL0118", "Error 0"));
+        detail.Errors.Select(e => e.Message).Should().Equal(
+            Enumerable.Range(0, ArtifactsTools.MaxBuildErrors).Select(i => $"Error {i}"), "in the order the compiler reported them");
+
+        static OeProjectBuildResult Result(int releaseId, string app, string status, string? message) => new()
+        {
+            OrganizationId = TestDb.DefaultOrgId, ReleaseId = releaseId, AppName = app, AppId = Guid.NewGuid().ToString(),
+            Status = status, Message = message, CreatedAt = DateTime.UtcNow,
+        };
+
+        static OeProjectBuildDiagnostic Diagnostic(int buildId, string severity, int i) => new()
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = buildId, Path = $"src/Banking{i}.al",
+            Line = i + 1, Column = 5, Severity = severity, Code = "AL0118",
+            Message = severity == ProjectBuildDiagnosticSeverity.Error ? $"Error {i}" : "Unused variable", Ordering = i,
+        };
+    }
+
+    private const int MaxErrorsPlusTwo = ArtifactsTools.MaxBuildErrors + 2;
 
     [Fact]
     public async Task Get_project_build_throws_for_a_missing_build()

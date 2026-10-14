@@ -12,7 +12,9 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 
 /// <summary>
 /// A push or preview build that waited behind another is checked again when its turn
-/// comes, so it does not run once the pipeline no longer asks for it (#1112).
+/// comes, so it does not run once the pipeline no longer asks for it (#1112). A build
+/// started by hand gets the part of that check that is not about automation: it does
+/// not run once its pipeline is deleted or disabled (#1335).
 /// </summary>
 public sealed class AutomatedBuildRecheckTests : IDisposable
 {
@@ -23,6 +25,7 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
     [Theory]
     [InlineData(ProjectBuildTrigger.Push)]
     [InlineData(ProjectBuildTrigger.PreviewCheck)]
+    [InlineData(ProjectBuildTrigger.Manual)]
     public async Task A_build_the_pipeline_still_asks_for_starts(string trigger)
     {
         var alice = await SeedUserAsync("alice@cronus.test");
@@ -38,6 +41,7 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
     [Theory]
     [InlineData(ProjectBuildTrigger.Push)]
     [InlineData(ProjectBuildTrigger.PreviewCheck)]
+    [InlineData(ProjectBuildTrigger.Manual)]
     public async Task A_deleted_pipeline_refuses_its_waiting_builds(string trigger)
     {
         var alice = await SeedUserAsync("alice@cronus.test");
@@ -54,6 +58,7 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
     [Theory]
     [InlineData(ProjectBuildTrigger.Push)]
     [InlineData(ProjectBuildTrigger.PreviewCheck)]
+    [InlineData(ProjectBuildTrigger.Manual)]
     public async Task A_disabled_pipeline_refuses_its_waiting_builds(string trigger)
     {
         var alice = await SeedUserAsync("alice@cronus.test");
@@ -64,6 +69,21 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
         var refusal = await RefusalAsync(projectId, releaseId, alice);
 
         refusal.Should().Be("The pipeline was disabled before this build started.");
+    }
+
+    [Fact]
+    public async Task A_manual_build_is_not_held_to_the_pipelines_automation_settings()
+    {
+        var alice = await SeedUserAsync("alice@cronus.test");
+        var bob = await SeedUserAsync("bob@cronus.test");
+        var (projectId, pipelineId) = await SeedPipelineAsync(alice);
+        var releaseId = await SeedBuildAsync(projectId, pipelineId, ProjectBuildTrigger.Manual, bob);
+        await UpdatePipelineAsync(pipelineId, p => { p.BuildOnPush = false; p.PreviewCheck = false; });
+
+        var refusal = await RefusalAsync(projectId, releaseId, bob);
+
+        refusal.Should().BeNull("a build by hand runs as the person who pressed Build, whatever the automatic builds do");
+        (await StatusAsync(releaseId)).Should().Be(ProjectBuildStatus.Building);
     }
 
     [Fact]
@@ -151,6 +171,34 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
 
         refusal.Should().BeNull("a retry is a person's choice, not the pipeline's automation");
         (await StatusAsync(releaseId)).Should().Be(ProjectBuildStatus.Building);
+    }
+
+    /// <summary>
+    /// A Retry or Recover symbols waits in the queue like any build, and keeps the
+    /// earlier attempt's finish time while it does. Disabling or deleting the pipeline
+    /// after it was queued still stops it when its turn comes (#1335).
+    /// </summary>
+    [Theory]
+    [InlineData(ProjectBuildTrigger.Manual, false)]
+    [InlineData(ProjectBuildTrigger.Manual, true)]
+    [InlineData(ProjectBuildTrigger.Push, false)]
+    public async Task A_rebuild_waiting_in_the_queue_is_refused_once_its_pipeline_is_stopped(string trigger, bool deleted)
+    {
+        var alice = await SeedUserAsync("alice@cronus.test");
+        var (projectId, pipelineId) = await SeedPipelineAsync(alice);
+        var releaseId = await SeedBuildAsync(projectId, pipelineId, trigger, alice, finished: true);
+        await UpdatePipelineAsync(pipelineId, p =>
+        {
+            if (deleted) p.DeletedAt = DateTime.UtcNow;
+            else p.DisabledAt = DateTime.UtcNow;
+        });
+
+        var refusal = await RefusalAsync(projectId, releaseId, alice);
+
+        refusal.Should().Be(deleted
+            ? "The pipeline was deleted before this build started."
+            : "The pipeline was disabled before this build started.");
+        (await StatusAsync(releaseId)).Should().Be(ProjectBuildStatus.Queued, "the worker fails it with the reason");
     }
 
     [Fact]
