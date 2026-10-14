@@ -122,3 +122,19 @@
     display: block;
     margin-top: var(--space-3);
 }
+
+/* The facts in the rail: one to a line beside the content, two or more to a row once
+   the rail drops under it on a narrower screen. Values wrap rather than clip - the
+   rail is narrower than the meta row they came from, and a delivery window with its
+   time zone is the longest of them. */
+.env-detail__facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: var(--space-3) var(--space-5);
+    align-items: start;
+}
+
+.env-detail__facts .meta-item__value {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}

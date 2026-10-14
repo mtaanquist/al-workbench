@@ -301,9 +301,9 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.FindAll(".page-head__crumbs a").Select(a => a.GetAttribute("href")).Should()
             .Equal("/solutions", $"/solutions/{projectId}", "/environments");
 
-        cut.FindAll(".meta-row .meta-item__label").Select(l => l.TextContent).Should()
+        cut.FindAll(".env-detail__facts .meta-item__label").Select(l => l.TextContent).Should()
             .Equal("Type", "BC version", "Country", "Delivery window", "Next update", "Database", "Apps installed");
-        var meta = cut.FindAll(".meta-row .meta-item__value").Select(v => v.TextContent.Trim()).ToList();
+        var meta = cut.FindAll(".env-detail__facts .meta-item__value").Select(v => v.TextContent.Trim()).ToList();
         meta[1].Should().Be("28.2.41125.0");
         meta[2].Should().Be("Denmark (DK)");
         meta[3].Should().Be("22:00-04:00 (Copenhagen)");
@@ -772,7 +772,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
             scheduled.QuerySelector("time")!.TextContent.Should().Be("12 Oct 2026, 11:00");
             scheduled.QuerySelector("time")!.GetAttribute("title").Should().Be("2026-10-12 02:00:00 UTC");
             scheduled.QuerySelector(".env-detail__utc")!.TextContent.Should().Be("Copenhagen time · 12 Oct, 04:00");
-            cut.FindAll(".meta-row .meta-item__value")[3].TextContent.Trim().Should()
+            cut.FindAll(".env-detail__facts .meta-item__value")[3].TextContent.Trim().Should()
                 .Be("22:00-04:00 (Copenhagen)", "a delivery window is a time of day on the customer's clock, never converted");
         });
 
