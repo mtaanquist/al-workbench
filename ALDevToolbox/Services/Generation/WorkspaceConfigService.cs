@@ -17,8 +17,9 @@ namespace ALDevToolbox.Services.Generation;
 /// </summary>
 /// <remarks>
 /// The DB remains the source of truth: parsing validates the referenced template
-/// and module keys against live rows, refusing imports that point at deleted or
-/// missing entities. Publisher is derived from the picked template's defaults
+/// against live rows, refusing a file that points at a deleted or missing one.
+/// Module keys are kept as saved, deleted or not: the list records what the
+/// workspace was generated with (#1328). Publisher is derived from the picked template's defaults
 /// rather than persisted in the config file, so a reused workspace config always
 /// reflects the current template setup.
 /// </remarks>

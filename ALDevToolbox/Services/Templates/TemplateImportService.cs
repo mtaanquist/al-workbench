@@ -213,7 +213,16 @@ public sealed class TemplateImportService
         foreach (var sourceModule in sourceModules)
         {
             var localModule = await EnsureModuleAsync(sourceModule, actingOrgId, now, ct);
-            if (localModule is not null) localModulesByKey[sourceModule.Key] = localModule;
+            if (localModule is not null)
+            {
+                localModulesByKey[sourceModule.Key] = localModule;
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Importing template '{TemplateKey}' into org {OrgId}: left default module '{ModuleKey}' out because the organisation deleted its copy.",
+                    source.Key, actingOrgId, sourceModule.Key);
+            }
         }
 
         var includedFileIds = await MapIncludedFilesAsync(source, actingOrgId, ct);
