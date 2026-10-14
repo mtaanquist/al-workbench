@@ -196,6 +196,22 @@ public sealed class DependencyDriftServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_repository_nobody_confirmed_they_can_read_is_not_scanned()
+    {
+        await ReadyAsync();
+        await SeedCatalogueAsync("28.2.0.0");
+        await SeedSolutionAsync(RepoA, confirmed: false);
+        var releaseId = await SeedReleaseAsync();
+        var api = ScannableApi(RepoA);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.ScanForReleaseAsync(releaseId)).Should().Be(0);
+        api.Calls.Should().NotContain(c => c.Contains($"/repos/{RepoA}/"),
+            "the installation token never reads a repository nobody vouched for");
+    }
+
+    [Fact]
     public async Task A_manifest_already_on_the_new_version_is_not_proposed_anything()
     {
         await ReadyAsync();
@@ -1332,7 +1348,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
     /// </param>
     private async Task<int> SeedSolutionAsync(
         string fullName, ProjectVisibility visibility = ProjectVisibility.Public, string? name = null,
-        bool withProduction = true)
+        bool withProduction = true, bool confirmed = true)
     {
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -1353,6 +1369,7 @@ public sealed class DependencyDriftServiceTests : IDisposable
                     Provider = RepositoryProvider.GitHub,
                     Url = $"https://github.com/{fullName}",
                     DisplayName = fullName.Split('/')[^1],
+                    AccessConfirmedAt = confirmed ? DateTime.UtcNow : null,
                 },
             ],
         };

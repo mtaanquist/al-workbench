@@ -203,6 +203,133 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         _tools.Clones.Should().BeEmpty();
     }
 
+    // ── Repositories nobody has confirmed they can read ─────────────────
+
+    /// <summary>Adds a repository to the seeded solution that nobody has confirmed they can read.</summary>
+    private async Task AddUnconfirmedRepositoryAsync(int projectId, string url = "https://github.com/cronus/payroll")
+    {
+        await using var ctx = _db.NewContext();
+        ctx.OeProjectRepositories.Add(new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            Provider = RepositoryProvider.GitHub,
+            Url = url,
+            DisplayName = "cronus/payroll",
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task<string> RepositoryLogAsync(int buildId, string section)
+    {
+        await using var read = _db.NewContext();
+        return string.Join("\n", await read.OeProjectBuildLogs.AsNoTracking()
+            .Where(l => l.ProjectBuildId == buildId && l.Section == section).Select(l => l.Content).ToListAsync());
+    }
+
+    [Fact]
+    public async Task A_pull_request_build_leaves_out_a_repository_nobody_confirmed_and_says_why()
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        await SetBuildAsync(buildId, branch: "feature/vat", trigger: ProjectBuildTrigger.PullRequest);
+        await AddUnconfirmedRepositoryAsync(projectId);
+
+        var outcome = await BuildAsync(projectId, releaseId);
+
+        _tools.Clones.Should().ContainSingle("the installation token never reaches a repository nobody vouched for")
+            .Which[^2].Should().Be("https://github.com/cronus/extensions");
+        outcome.Results.Should().ContainSingle(r => r.AppName == "cronus/payroll")
+            .Which.Message.Should().Be(ProjectBuildService.UnconfirmedRepositoryMessage);
+        (await RepositoryLogAsync(buildId, "cronus/payroll")).Should().Contain("Confirm access");
+    }
+
+    [Theory]
+    [InlineData("Payroll", "https://github.com/cronus/payroll.git", "Payroll")]
+    [InlineData("", "https://github.com/cronus/payroll.git", "payroll")]
+    [InlineData("  ", "https://dev.azure.com/cronus/BaseApp/_git/base-app/", "base-app")]
+    public void A_left_out_repository_is_named_even_without_a_display_name(string displayName, string url, string expected) =>
+        ProjectBuildService.RepositoryLabel(new OeProjectRepository { DisplayName = displayName, Url = url })
+            .Should().Be(expected);
+
+    [Fact]
+    public async Task A_manual_build_leaves_out_a_repository_nobody_confirmed_whatever_the_builder_can_read()
+    {
+        var (projectId, releaseId, buildId) = await SeedAsync();
+        await SetBuildAsync(buildId, branch: "main", trigger: ProjectBuildTrigger.Manual);
+        await AddUnconfirmedRepositoryAsync(projectId);
+        var credentials = await BuilderWithGitHubTokenAsync();
+
+        var outcome = await BuildAsync(projectId, releaseId, credentials: credentials);
+
+        _tools.Clones.Should().ContainSingle("the builder's own token is not used on a repository nobody vouched for")
+            .Which[^2].Should().Be("https://github.com/cronus/extensions");
+        outcome.Results.Should().ContainSingle(r => r.AppName == "cronus/payroll")
+            .Which.Message.Should().Be(ProjectBuildService.UnconfirmedRepositoryMessage);
+    }
+
+    [Fact]
+    public async Task A_build_whose_only_repository_nobody_confirmed_builds_nothing_and_says_why()
+    {
+        var (projectId, releaseId, _) = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.AccessConfirmedAt, (DateTime?)null));
+        }
+
+        var act = () => BuildAsync(projectId, releaseId);
+
+        (await act.Should().ThrowAsync<InvalidOperationException>()).WithMessage("*nobody has confirmed they can open*");
+        _tools.Clones.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Discovery_leaves_out_a_repository_nobody_confirmed_and_says_why()
+    {
+        var (projectId, _, _) = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId)
+                .ExecuteUpdateAsync(u => u.SetProperty(r => r.AccessConfirmedAt, (DateTime?)null));
+        }
+        var credentials = await BuilderWithGitHubTokenAsync();
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx, credentials: credentials).DiscoverExtensionsForCacheAsync(projectId);
+        }
+
+        _tools.Clones.Should().BeEmpty();
+        await using var read = _db.NewContext();
+        (await read.OeProjects.AsNoTracking().SingleAsync(p => p.Id == projectId)).DiscoveryError
+            .Should().Contain("nobody has confirmed they can open it");
+    }
+
+    /// <summary>A signed-in builder with a stored GitHub build token, and the resolver a manual build clones with.</summary>
+    private async Task<CloneCredentialResolver> BuilderWithGitHubTokenAsync()
+    {
+        await using var ctx = _db.NewContext();
+        var user = new ALDevToolbox.Domain.Entities.User
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Email = "builder@cronus.example",
+            DisplayName = "Builder",
+            PasswordHash = "x",
+            Role = ALDevToolbox.Domain.Entities.UserRole.Admin,
+            Status = ALDevToolbox.Domain.Entities.UserStatus.Active,
+            CreatedAt = DateTime.UtcNow,
+        };
+        ctx.Users.Add(user);
+        await ctx.SaveChangesAsync();
+        _db.OrgContext.CurrentUserId = user.Id;
+        var tokens = new ALDevToolbox.Services.Account.UserRepositoryTokenService(
+            _db.NewContext(), _db.OrgContext, NullLogger<ALDevToolbox.Services.Account.UserRepositoryTokenService>.Instance,
+            _db.DataProtectionProvider);
+        await tokens.SaveTokenAsync(RepositoryProvider.GitHub, "ghp_builder", clear: false);
+        return new CloneCredentialResolver(tokens, _db.NewOfflineGitHubAccessService(_db.NewContext()), _db.OrgContext,
+            NullLogger<CloneCredentialResolver>.Instance);
+    }
+
     // ── Running the same build again (#1110) ───────────────────────────
 
     [Fact]
@@ -1372,9 +1499,17 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
 
     private async Task<ProjectBuildOutcome> BuildAsync(int projectId, int releaseId,
         BcBuildTarget target = BcBuildTarget.Current, AlCompilerProvisioner? compiler = null,
-        TimeProvider? clock = null, CancellationToken ct = default)
+        TimeProvider? clock = null, CancellationToken ct = default, CloneCredentialResolver? credentials = null)
     {
         await using var ctx = _db.NewContext();
+        var service = NewService(ctx, compiler, clock, credentials);
+        return await service.BuildAsync(projectId, releaseId,
+            new ProjectBuildOptions(InstallationToken: credentials is null ? "installation-token" : null, Target: target), ct);
+    }
+
+    private ProjectBuildService NewService(ALDevToolbox.Data.AppDbContext ctx, AlCompilerProvisioner? compiler = null,
+        TimeProvider? clock = null, CloneCredentialResolver? credentials = null)
+    {
         var translations = new TranslationImportService(ctx, _db.OrgContext,
             new ALDevToolbox.Services.Translation.TranslationMemoryService(
                 ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
@@ -1382,7 +1517,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         var importer = new ReleaseImportService(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
             NullLogger<ReleaseImportService>.Instance, ingests: _ingests);
-        var service = new ProjectBuildService(
+        return new ProjectBuildService(
             ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
             new BcArtifactService(_http, ctx, _db.OrgContext, NullLogger<BcArtifactService>.Instance),
             new BcArtifactCache(new BcArtifactCacheOptions { Directory = Path.Combine(_root, "artifact-cache") },
@@ -1396,12 +1531,12 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
                 MicrosoftFeedUrl = FakeSymbolFeeds.MicrosoftIndex,
                 CacheDirectory = Path.Combine(_root, "symbol-cache"),
             }),
-            // Never reached: a build started with an installation token clones as the installation.
-            null!,
+            // Only a manual build (one given credentials) reaches it; one started with an
+            // installation token clones as the installation.
+            credentials!,
             _tools,
             clock ?? TimeProvider.System,
             NullLogger<ProjectBuildService>.Instance);
-        return await service.BuildAsync(projectId, releaseId, new ProjectBuildOptions(InstallationToken: "installation-token", Target: target), ct);
     }
 
     /// <param name="parentStatus">The Microsoft release the build parents onto, or null for none.</param>
@@ -1423,6 +1558,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
             Provider = RepositoryProvider.GitHub,
             Url = "https://github.com/cronus/extensions",
             DisplayName = "cronus/extensions",
+            AccessConfirmedAt = DateTime.UtcNow,
         });
         seed.OeProjects.Add(project);
         // The Microsoft release the build parents onto already exists, so the

@@ -176,6 +176,7 @@ public sealed class TranslationMemoryIngestSchedulerTests : IDisposable
             Provider = RepositoryProvider.GitHub,
             Url = url,
             DisplayName = "customer-app",
+            AccessConfirmedAt = DateTime.UtcNow,
         });
         await ctx.SaveChangesAsync();
     }

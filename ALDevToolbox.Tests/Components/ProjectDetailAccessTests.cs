@@ -53,6 +53,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<ProjectFollowService>();
         // The follow confirmation reads the person's own Solutions choice.
         _ctx.Services.AddScoped<ALDevToolbox.Services.Notifications.NotificationPreferenceService>();
@@ -479,7 +480,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
             var access = new ProjectAccess(ctx, _db.OrgContext);
             var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
                 NullLogger<ProjectDiscoveryService>.Instance);
-            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), NullLogger<ProjectService>.Instance)
+            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance)
                 .SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId });
         }
 
@@ -627,7 +628,7 @@ public sealed class ProjectDetailAccessTests : IDisposable
             var access = new ProjectAccess(ctx, _db.OrgContext);
             var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
                 NullLogger<ProjectDiscoveryService>.Instance);
-            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), NullLogger<ProjectService>.Instance)
+            await new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance)
                 .SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId });
         }
 

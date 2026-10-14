@@ -57,6 +57,7 @@ public sealed class UntrackedRepositoriesPanelTests : IDisposable
         _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _db.AddRepositoryReadProbe(_ctx.Services);
         _db.AddStorageServices(_ctx.Services);
         _ctx.Services.AddSingleton(new IconCatalog(NullLogger<IconCatalog>.Instance));
         _ctx.Services.AddSingleton(NullLoggerFactory.Instance);

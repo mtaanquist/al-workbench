@@ -24,7 +24,7 @@ public sealed class AccountEmailTests : IDisposable
 
     public static TheoryData<string> LinkEmails =>
     [
-        nameof(PasswordResetEmail), nameof(MagicLinkEmail), nameof(EmailChangeConfirmEmail),
+        nameof(PasswordResetEmail), nameof(MagicLinkEmail), nameof(EmailChangeConfirmEmail), nameof(EmailChangeRequestedEmail),
         nameof(SignupVerificationEmail), nameof(InviteEmail), nameof(SignupApprovedEmail), nameof(SignupPendingEmail),
     ];
 
@@ -32,7 +32,8 @@ public sealed class AccountEmailTests : IDisposable
     {
         nameof(PasswordResetEmail) => PasswordResetEmail.RenderAsync(Renderer, Hostile, Link),
         nameof(MagicLinkEmail) => MagicLinkEmail.RenderAsync(Renderer, Hostile, Link),
-        nameof(EmailChangeConfirmEmail) => EmailChangeConfirmEmail.RenderAsync(Renderer, Hostile, Link),
+        nameof(EmailChangeConfirmEmail) => EmailChangeConfirmEmail.RenderAsync(Renderer, Hostile, Link, "15 Oct 2026, 09:00", "17 Oct 2026, 09:00"),
+        nameof(EmailChangeRequestedEmail) => EmailChangeRequestedEmail.RenderAsync(Renderer, Hostile, Hostile, "sam.berg@cronus.example", "new@cronus.example", "15 Oct 2026, 09:00", Link),
         nameof(SignupVerificationEmail) => SignupVerificationEmail.RenderAsync(Renderer, Link, "123456"),
         nameof(InviteEmail) => InviteEmail.RenderAsync(Renderer, Hostile, "CRONUS A/S", "Editor", Hostile, Link),
         nameof(SignupApprovedEmail) => SignupApprovedEmail.RenderAsync(Renderer, Hostile, "CRONUS A/S", Link),

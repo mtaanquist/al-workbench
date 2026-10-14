@@ -108,7 +108,7 @@ public static class AdminPageHelpers
         AuditEntityType.Project => "Solution connection",
         // The multi-word enum names below used to fall through to ToString() and
         // reached the reader as "ApplicationVersion" / "PersonalAccessToken".
-        // Single-word ones (User, Recipe, Invite, Backup) still fall through
+        // Single-word ones (User, Recipe, Invite, Backup, Passkey) still fall through
         // because the enum name already is the word a reader would use.
         AuditEntityType.ApplicationVersion => "Application version",
         AuditEntityType.SignupRequest => "Signup request",

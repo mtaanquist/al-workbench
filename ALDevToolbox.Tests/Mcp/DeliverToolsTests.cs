@@ -65,7 +65,7 @@ public sealed class DeliverToolsTests : IDisposable
         var discovery = new ProjectDiscoveryService(ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
             NullLogger<ProjectDiscoveryService>.Instance);
         return new DeliverTools(
-            new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), NullLogger<ProjectService>.Instance),
+            new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance),
             new ProjectCustomerInfoService(ctx, _db.OrgContext, access, NullLogger<ProjectCustomerInfoService>.Instance),
             connections,
             new UpgradeFleetService(ctx, _db.OrgContext, access, new EnvironmentRefreshQueue(),

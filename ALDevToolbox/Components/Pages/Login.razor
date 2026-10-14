@@ -192,6 +192,15 @@ else
     [SupplyParameterFromQuery(Name = "ok")]
     public string? Ok { get; set; }
 
+    /// <summary>When an email change can be confirmed, as Unix seconds; sent with <c>err=email-change-not-yet</c>.</summary>
+    [SupplyParameterFromQuery(Name = "at")]
+    public long? At { get; set; }
+
+    private DateTime? EmailChangeConfirmableFrom =>
+        At is { } seconds && seconds > 0 && seconds < 253402300799
+            ? DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime
+            : null;
+
     [SupplyParameterFromQuery(Name = "return")]
     public string? ReturnUrl { get; set; }
 
@@ -227,6 +236,16 @@ else
                 <span>
                     Too many failed sign-ins. Try again in 15 minutes, or
                     <a class="auth__link" href="/forgot-password">reset your password</a>.
+                </span>
+            </Alert>
+        }
+        else if (Error == "email-change-not-yet" && EmailChangeConfirmableFrom is { } confirmableFrom)
+        {
+            @* Not used up: the same link works once the wait is over. *@
+            <Alert Tone="AlertTone.Info">
+                <span>
+                    This email change can't be confirmed yet, so the account's owner has time to stop it.
+                    Open the link again after <Timestamp Value="@confirmableFrom" />.
                 </span>
             </Alert>
         }
@@ -273,12 +292,21 @@ else
         "entra-identity-taken" => "That Microsoft account is already connected to a different user here. Sign in with the account it belongs to, or ask your admin to disconnect it.",
         "entra-link-required" => "This account has to connect its Microsoft account itself. Sign in with your password or passkey, then choose \"Connect a Microsoft account\" on your Account page.",
         "entra-failed" => "Microsoft sign-in didn't complete. Try again.",
+        "email-change-invalid" => "That link to confirm a new email address has expired, was already used, or the change was stopped. Ask your administrator to send a new one.",
+        "email-change-not-yet" => "This email change can't be confirmed yet. Open the link again tomorrow.",
+        "email-change-cancel-invalid" => "That link has expired or was already used, or the change already went through. If you didn't ask for this change, contact another administrator in your organisation.",
         _ => null,
     };
 
     private string? OkMessage() => Ok switch
     {
-        "password-reset" => "Password updated. Sign in with your new password.",
+        // A reset leaves passkeys in place, so point the person at them: one
+        // they don't recognise is the thing a reset cannot take away for them.
+        "password-reset" => Passkeys.IsConfigured
+            ? "Password updated. Sign in with your new password, then go to Account → Sign-in & security and remove any passkeys you didn't add yourself."
+            : "Password updated. Sign in with your new password.",
+        "email-change-confirmed" => "Your new email address is confirmed. Sign in with it.",
+        "email-change-cancelled" => "The email change was stopped. Your account keeps its current address.",
         _ => null,
     };
 

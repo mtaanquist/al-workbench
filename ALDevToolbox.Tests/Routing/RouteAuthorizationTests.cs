@@ -46,6 +46,7 @@ public sealed class RouteAuthorizationTests
             ["/signup/details"] = "second step of a signup request, still pre-cookie",
             ["/forgot-password"] = "password-reset request form",
             ["/reset-password"] = "password-reset completion form (token in the URL)",
+            ["/account/email-change/cancel"] = "stops an admin-made email change from the notice sent to the current address (token in the URL)",
             ["/accept-invite"] = "invited user sets a password before they have an account",
             // Public, data-free pages.
             ["/docs/mcp"] = "public connect-an-assistant docs; carries an explicit [AllowAnonymous]",

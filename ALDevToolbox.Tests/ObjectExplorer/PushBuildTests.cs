@@ -498,6 +498,7 @@ public sealed class PushBuildTests : IDisposable
             Url = "https://github.com/cronus-dk/customer-app.git",
             Provider = RepositoryProvider.GitHub,
             DisplayName = "customer-app",
+            AccessConfirmedAt = DateTime.UtcNow,
         };
         ctx.OeProjectRepositories.Add(repository);
         var pipeline = new OePipeline

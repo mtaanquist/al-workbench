@@ -559,9 +559,39 @@ public sealed class TestDb : IDisposable
         var extensionDiscovery = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService(
             ctx, OrgContext, projectAccess, new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
+        var github = gitHubAccess ?? NewOfflineGitHubAccessService(ctx);
         return new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery, gitHubAccess ?? NewOfflineGitHubAccessService(ctx),
+            ctx, OrgContext, projectAccess, extensionDiscovery, github, NewRepositoryReadProbe(ctx, github),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
+    }
+
+    /// <summary>
+    /// Registers <see cref="RepositoryReadProbe"/> for a container that resolves
+    /// <see cref="ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService"/>, over
+    /// <paramref name="git"/> (readable by default) and this fixture's org context.
+    /// </summary>
+    public void AddRepositoryReadProbe(IServiceCollection services, FakeGitRemote? git = null) =>
+        services.AddScoped(sp => NewRepositoryReadProbe(
+            sp.GetRequiredService<AppDbContext>(),
+            sp.GetService<ALDevToolbox.Services.GitHub.GitHubAccessService>(),
+            git));
+
+    /// <summary>
+    /// The read check a <see cref="ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService"/>
+    /// runs on a repository outside the connected GitHub organisation, over
+    /// <paramref name="git"/> (readable by default, see <see cref="FakeGitRemote"/>)
+    /// instead of a real git.
+    /// </summary>
+    public RepositoryReadProbe NewRepositoryReadProbe(
+        AppDbContext ctx,
+        ALDevToolbox.Services.GitHub.GitHubAccessService? gitHubAccess = null,
+        ALDevToolbox.Services.ObjectExplorer.IProcessRunner? git = null)
+    {
+        var tokens = new ALDevToolbox.Services.Account.UserRepositoryTokenService(
+            ctx, OrgContext, NullLogger<ALDevToolbox.Services.Account.UserRepositoryTokenService>.Instance, DataProtectionProvider);
+        var credentials = new CloneCredentialResolver(
+            tokens, gitHubAccess ?? NewOfflineGitHubAccessService(ctx), OrgContext, NullLogger<CloneCredentialResolver>.Instance);
+        return new RepositoryReadProbe(credentials, git ?? new FakeGitRemote(), NullLogger<RepositoryReadProbe>.Instance);
     }
 
     /// <summary>
@@ -580,7 +610,7 @@ public sealed class TestDb : IDisposable
             ctx, OrgContext, projectAccess, new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryQueue(),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectDiscoveryService>.Instance);
         var projects = new ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService(
-            ctx, OrgContext, projectAccess, extensionDiscovery, access,
+            ctx, OrgContext, projectAccess, extensionDiscovery, access, NewRepositoryReadProbe(ctx, access),
             NullLogger<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectService>.Instance);
         return new ALDevToolbox.Services.GitHub.RepositoryDiscoveryService(
             ctx, client, access, NewGitHubConnectionService(ctx, access), NewOrganizationConfigService(ctx),

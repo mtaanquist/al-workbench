@@ -73,11 +73,23 @@ Organization ──┐
                                   ├── (organization_id, name, default_artifact_country?,
                                   │    created_at, updated_at, deleted_at)
                                   └── has many ──> ProjectRepository  (table: oe_project_repositories)
-                                                     └── (project_id, provider, url, display_name)
+                                                     └── (project_id, provider, url, display_name,
+                                                          added_by_user_id?, access_confirmed_at?,
+                                                          access_confirmed_by_user_id?)
 ```
 
 - `oe_projects` — org-scoped, soft-deletable (`deleted_at`, consistent with the rest of the codebase). `name` is the project-facing label used to build the Release label. `default_artifact_country` is the optional per-Project country override described under "Symbol resolution".
 - `oe_project_repositories` — a child table rather than a JSON column, because repos are listed, validated (per-provider URL shape), and managed individually. `provider` is a short enum string (`azure_devops` | `github`). One Project may span both providers.
+
+### Confirmed repositories
+
+A build clones with the access of whoever started it (their connected GitHub account, then their build token), or with the GitHub App's installation token on a pull request, and what it builds is readable by everyone who can see the solution. So a repository is only cloned once someone has confirmed, with their own access, that they can read it. `oe_project_repositories` records `added_by_user_id`, `access_confirmed_at` and `access_confirmed_by_user_id`.
+
+- **Adding a repository, or changing its address, checks it** for the person saving, for every provider: a GitHub repository in the connected GitHub organisation is asked of GitHub with their connected account; anything else (another GitHub owner, Azure DevOps, GitHub with no organisation connected) is read with `git ls-remote` using their own credentials and then no credential, so a public repository passes. A no refuses the save under the row. A passing row is stored confirmed by them. Re-spelling the same address keeps the row and its confirmation.
+- **Builds leave out a row nobody has confirmed**, whatever the trigger, with the reason on the build's results and log; discovery leaves it out with the reason in the pipeline editor. A build by hand with no confirmed repository at all is refused before it exists.
+- **Rows from before this was recorded were confirmed by the migration** that added the columns (`access_confirmed_at` set to the time it ran, nobody recorded as adder or confirmer), so builds kept working on deploy and only repositories added or re-addressed since are checked. Nothing else confirms a row: connecting GitHub later confirms nothing.
+- **A row can still be unconfirmed** (one cleared by hand, or any future path that adds rows without the check). The Repositories tab counts them and offers **Confirm access** on each to anyone who manages the solution, which runs the same check with their access and records them as the confirmer. Like adding a repository, confirming one hands the solution's automatic builds and update pull requests to the confirmer (the "whoever last saved" rule). The translation-memory ingest and the dependency-drift scan, which read repositories with the installation token, also skip unconfirmed rows.
+- Accepted residuals: a person who loses access after confirming is not re-checked, and a repository confirmed while public stays confirmed if it later goes private. The pre-existing rows the migration confirmed carry the same trust they had before it.
 
 The Release itself reuses the existing `oe_releases` schema (per `object-explorer.md`): `Kind = "project"`, `ProjectName` set from the Project's name, and `ParentReleaseId` pointing at the matching Microsoft artifact Release. No new Release columns. The build-result detail (below) is the only release-adjacent new table. Release label: `"{ProjectName} on BC {Major}.{Minor}"` — derived from the `application` version the apps compiled against.
 

@@ -26,6 +26,7 @@ public sealed class ProjectService
     private readonly ProjectAccess _access;
     private readonly ProjectDiscoveryService _discovery;
     private readonly GitHubAccessService _gitHubAccess;
+    private readonly RepositoryReadProbe _readProbe;
     private readonly ILogger<ProjectService> _logger;
 
     public ProjectService(
@@ -34,6 +35,7 @@ public sealed class ProjectService
         ProjectAccess access,
         ProjectDiscoveryService discovery,
         GitHubAccessService gitHubAccess,
+        RepositoryReadProbe readProbe,
         ILogger<ProjectService> logger)
     {
         _db = db;
@@ -41,6 +43,7 @@ public sealed class ProjectService
         _access = access;
         _discovery = discovery;
         _gitHubAccess = gitHubAccess;
+        _readProbe = readProbe;
         _logger = logger;
     }
 
@@ -228,13 +231,7 @@ public sealed class ProjectService
             Visibility = visibility,
             CreatedAt = now,
             UpdatedAt = now,
-            Repositories = repos.Select(r => new OeProjectRepository
-            {
-                OrganizationId = orgId,
-                Provider = r.Provider,
-                Url = r.Url,
-                DisplayName = r.DisplayName,
-            }).ToList(),
+            Repositories = repos.Select(r => NewRepositoryRow(orgId, projectId: 0, r.Provider, r.Url, r.DisplayName, now)).ToList(),
             Teams = teamIds.Select(teamId => new OeProjectTeam
             {
                 OrganizationId = orgId,
@@ -448,15 +445,9 @@ public sealed class ProjectService
             if (unreadable.TryGetValue(0, out var notReadable)) throw Validation("Url", notReadable);
         }
 
-        project.Repositories.Add(new OeProjectRepository
-        {
-            OrganizationId = orgId,
-            ProjectId = project.Id,
-            Provider = repository.Provider,
-            Url = url,
-            DisplayName = display,
-        });
-        project.UpdatedAt = DateTime.UtcNow;
+        var now = DateTime.UtcNow;
+        project.Repositories.Add(NewRepositoryRow(orgId, project.Id, repository.Provider, url, display, now));
+        project.UpdatedAt = now;
         if (repository.Provider == RepositoryProvider.GitHub) await FollowRepositoryChangeAsync(project, ct);
         await FollowRepositoryChangeInPipelinesAsync(project, ct);
         await _db.SaveChangesAsync(ct);
@@ -544,7 +535,7 @@ public sealed class ProjectService
     }
 
     /// <summary>
-    /// Refuses a posted GitHub repository the acting person cannot see themselves,
+    /// Refuses a posted repository the acting person cannot read themselves,
     /// keyed <c>Repositories[i].Url</c> so the editor shows it under the row. See
     /// <see cref="RepositoryAccessErrorsAsync"/>.
     /// </summary>
@@ -560,15 +551,15 @@ public sealed class ProjectService
     }
 
     /// <summary>
-    /// The refusal for each of <paramref name="repos"/> (by index) that is a GitHub
-    /// repository in the organisation's connected GitHub organisation which the acting
-    /// person cannot see with their own GitHub account. A pull-request build clones every
-    /// GitHub repository on the solution with the installation's token, which reaches
-    /// every repository there, so a solution must only gain one the person adding it can
-    /// already read. Only a repository this save adds - new, or its URL changed - is
-    /// checked, the way <see cref="RepositoryClaimErrorsAsync"/> does; a repository
-    /// anywhere else is out of the installation's reach and passes. "Could not ask
-    /// GitHub" is not taken as a yes.
+    /// The refusal for each of <paramref name="repos"/> (by index) that the acting person
+    /// cannot read with their own access. A build clones every confirmed repository on
+    /// the solution with the access of whoever starts it, or with the GitHub App's on a
+    /// pull request, and what it builds is readable by everyone who can see the solution,
+    /// so a solution must only gain a repository the person adding it can already read.
+    /// Every provider is checked (see <see cref="ReadAccessErrorAsync"/>). Only a
+    /// repository this save adds - new, or its URL changed - is checked, the way
+    /// <see cref="RepositoryClaimErrorsAsync"/> does; one already on the solution keeps
+    /// whatever confirmation it has. "Could not ask" is not taken as a yes.
     /// </summary>
     private async Task<Dictionary<int, string>> RepositoryAccessErrorsAsync(
         IReadOnlyList<ProjectRepositoryInput> repos, ICollection<OeProjectRepository>? existing, CancellationToken ct)
@@ -577,42 +568,131 @@ public sealed class ProjectService
         var had = (existing ?? []).Select(r => RepositoryKey(r.Provider, r.Url)).ToHashSet(StringComparer.Ordinal);
         var added = repos
             .Select((r, i) => (Index: i, Repo: r))
-            .Where(a => a.Repo.Provider == RepositoryProvider.GitHub
-                && !had.Contains(RepositoryKey(a.Repo.Provider, a.Repo.Url)))
+            .Where(a => !had.Contains(RepositoryKey(a.Repo.Provider, a.Repo.Url)))
             .ToList();
         if (added.Count == 0) return errors;
 
-        var orgLogin = await _gitHubAccess.GetConnectedOrgLoginAsync(ct);
-        if (orgLogin is null) return errors;
-
-        var userId = _orgContext.CurrentUserId;
-        bool? linked = null;
+        var orgLogin = added.Any(a => a.Repo.Provider == RepositoryProvider.GitHub)
+            ? await _gitHubAccess.GetConnectedOrgLoginAsync(ct)
+            : null;
         foreach (var (index, repo) in added)
         {
-            var fullName = GitHubFullName(repo.Url);
-            if (fullName is null
-                || !string.Equals(fullName.Split('/')[0], orgLogin, StringComparison.OrdinalIgnoreCase))
+            if (await ReadAccessErrorAsync(repo.Provider, repo.Url, orgLogin, ct) is { } error)
             {
-                continue;
-            }
-
-            linked ??= userId is { } id && await HasGitHubAccountAsync(id, ct);
-            if (linked != true)
-            {
-                errors[index] = $"Connect your GitHub account under Account → Repository access first, so the workbench can check that you can see {fullName}. Then save again.";
-            }
-            else if (!await _gitHubAccess.CanAccessRepoAsync(userId!.Value, fullName, ct))
-            {
-                errors[index] = $"Your GitHub account can't see {fullName}, or GitHub couldn't be reached to check. Ask someone who can see it to add it, or try again in a moment.";
+                errors[index] = error;
             }
         }
         if (errors.Count > 0)
         {
             _logger.LogInformation(
-                "Refused {RefusedCount} repositories that user {UserId} could not be confirmed to see.", errors.Count, userId);
+                "Refused {RefusedCount} repositories that user {UserId} could not be confirmed to read.",
+                errors.Count, _orgContext.CurrentUserId);
         }
         return errors;
     }
+
+    /// <summary>
+    /// Why the acting person cannot be confirmed to read <paramref name="url"/>, or null
+    /// when they can. A GitHub repository in the organisation's connected GitHub
+    /// organisation is asked of GitHub with their own connected account, which is what
+    /// a pull-request build's installation token would otherwise stand in for. Anything
+    /// else - another GitHub owner, Azure DevOps, or GitHub with no organisation
+    /// connected - is read with a <c>git ls-remote</c> using their own credentials
+    /// (<see cref="RepositoryReadProbe"/>).
+    /// </summary>
+    private async Task<string?> ReadAccessErrorAsync(
+        RepositoryProvider provider, string url, string? orgLogin, CancellationToken ct)
+    {
+        var userId = _orgContext.CurrentUserId;
+        if (provider == RepositoryProvider.GitHub && orgLogin is not null
+            && GitHubFullName(url) is { } fullName
+            && string.Equals(fullName.Split('/')[0], orgLogin, StringComparison.OrdinalIgnoreCase))
+        {
+            if (userId is not { } id || !await HasGitHubAccountAsync(id, ct))
+            {
+                return $"Connect your GitHub account under Account → Repository access first, so the workbench can check that you can open {fullName}. Then try again.";
+            }
+            return await _gitHubAccess.CanAccessRepoAsync(id, fullName, ct)
+                ? null
+                : $"Your GitHub account can't open {fullName}, or GitHub couldn't be reached. Check you have access on GitHub and try again, or ask a solution manager who can open it to press Confirm access.";
+        }
+
+        var outcome = await _readProbe.CanReadAsync(provider, url, ct);
+        if (outcome.CanRead) return null;
+        return outcome.HadCredential
+            ? $"Your {provider.DisplayName()} account or token can't open this repository, or it couldn't be reached. Check the address, or ask a solution manager who can open it to press Confirm access."
+            : $"Your {provider.DisplayName()} account or token can't open this repository, or it couldn't be reached. Add a personal access token for {provider.DisplayName()} under Account → Repository access and try again, or ask a solution manager who can open it to press Confirm access.";
+    }
+
+    /// <summary>
+    /// Confirms, with the acting person's own access, that they can read one of the
+    /// solution's repositories, so builds include it from now on. For a repository
+    /// nobody has confirmed yet: the Repositories tab offers it on every such row. The same check as adding one
+    /// (<see cref="ReadAccessErrorAsync"/>), and the same hand-over: like adding a
+    /// repository, confirming one puts something new into what the automatic builds
+    /// clone, so those builds and automatic update pull requests run as the person who
+    /// confirmed it from now on.
+    /// </summary>
+    /// <exception cref="PlanValidationException">The repository is gone, or the caller cannot read it (keyed <c>Url</c>).</exception>
+    /// <exception cref="ProjectAccessDeniedException">The caller may not manage this solution.</exception>
+    public async Task ConfirmRepositoryAccessAsync(int projectId, int repositoryId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var userId = _orgContext.CurrentUserId
+            ?? throw new InvalidOperationException("No user in scope; confirming repository access needs a signed-in person.");
+        var project = await _db.OeProjects
+            .Include(c => c.Repositories)
+            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
+            ?? throw Validation("Name", "This solution no longer exists.");
+        await _access.EnsureCanManageAsync(project.Id, project.CreatedByUserId, ct);
+        var repository = project.Repositories.FirstOrDefault(r => r.Id == repositoryId)
+            ?? throw Validation("Url", "This repository is no longer on the solution. Reload the page.");
+        // A row saved before addresses were validated as they are now is not one to
+        // hand to git; the person fixes the address, and saving checks it then.
+        if (!RepositoryLinks.IsValidUrl(repository.Provider, repository.Url))
+        {
+            throw Validation("Url", "This isn't a repository address we recognise. Copy it from the repository's Clone button (e.g. https://github.com/cronus/base-app) and save the solution.");
+        }
+
+        var orgLogin = repository.Provider == RepositoryProvider.GitHub
+            ? await _gitHubAccess.GetConnectedOrgLoginAsync(ct)
+            : null;
+        if (await ReadAccessErrorAsync(repository.Provider, repository.Url, orgLogin, ct) is { } error)
+        {
+            throw Validation("Url", error);
+        }
+
+        var now = DateTime.UtcNow;
+        repository.AccessConfirmedAt = now;
+        repository.AccessConfirmedByUserId = userId;
+        project.UpdatedAt = now;
+        if (repository.Provider == RepositoryProvider.GitHub) await FollowRepositoryChangeAsync(project, ct);
+        await FollowRepositoryChangeInPipelinesAsync(project, ct);
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation(
+            "User {UserId} confirmed read access to repository {RepositoryId} ({Url}) of solution {ProjectId}.",
+            userId, repository.Id, RepositoryReadProbe.Redact(repository.Url), projectId);
+
+        await WarmDiscoveryAsync(project.Id, ct);
+    }
+
+    /// <summary>
+    /// A new repository row, recorded as added and confirmed by the acting person. Every
+    /// caller has already checked they can read it (<see cref="RepositoryAccessErrorsAsync"/>),
+    /// or the GitHub App has just created it for them from their own output.
+    /// </summary>
+    private OeProjectRepository NewRepositoryRow(
+        int orgId, int projectId, RepositoryProvider provider, string url, string displayName, DateTime now) => new()
+    {
+        OrganizationId = orgId,
+        ProjectId = projectId,
+        Provider = provider,
+        Url = url,
+        DisplayName = displayName,
+        AddedByUserId = _orgContext.CurrentUserId,
+        AccessConfirmedAt = now,
+        AccessConfirmedByUserId = _orgContext.CurrentUserId,
+    };
 
     /// <summary>
     /// <c>owner/name</c> from the first two path segments of a GitHub URL, the way GitHub
@@ -795,14 +875,7 @@ public sealed class ProjectService
                 continue;
             }
 
-            var added = new OeProjectRepository
-            {
-                OrganizationId = orgId,
-                ProjectId = project.Id,
-                Provider = repo.Provider,
-                Url = repo.Url,
-                DisplayName = repo.DisplayName,
-            };
+            var added = NewRepositoryRow(orgId, project.Id, repo.Provider, repo.Url, repo.DisplayName, DateTime.UtcNow);
             project.Repositories.Add(added);
             wanted.Add(added);
         }

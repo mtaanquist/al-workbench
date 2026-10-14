@@ -351,6 +351,8 @@ public sealed class TranslationMemoryIngestService
     {
         var rows = await _db.OeProjectRepositories.AsNoTracking()
             .Where(r => r.Provider == RepositoryProvider.GitHub && r.Project!.DeletedAt == null)
+            // A repository nobody confirmed they can read is not read with the installation token.
+            .Where(r => r.AccessConfirmedAt != null)
             .Select(r => new { r.OrganizationId, r.Url })
             .ToListAsync(ct).ConfigureAwait(false);
 

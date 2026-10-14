@@ -5,6 +5,7 @@ using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Email;
+using ALDevToolbox.Services.Organizations;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
@@ -275,19 +276,21 @@ internal static class AdminUserEndpoints
             }
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.AdminRole));
 
-        // Admin-initiated email change. Stamps users.pending_email, issues a
-        // 24h EmailChangeConfirm token, sends a link to the NEW address (or
-        // surfaces it inline via the one-shot cookie when SMTP is off).
+        // Admin-initiated email change. Stamps users.pending_email and issues
+        // two 24h tokens: a confirmation link for the NEW address and a cancel
+        // link for the CURRENT one. Both emails have to go out, or the change
+        // is withdrawn: the notice to the current address is the owner's only
+        // word that their sign-in address is moving, so there is no inline
+        // link to hand the admin instead, and no change at all without email.
         app.MapPost("/admin/users/{id:int}/email", async (
             int id, HttpContext ctx,
             UserAdministrationService userAdmin,
-            AppDbContext db,
             IEmailService email,
             EmailRenderer emailRenderer,
             IOrganizationContext orgCtx,
-            IDataProtectionProvider protection,
             IAntiforgery antiforgery,
             PublicOrigin publicOrigin,
+            DisplayTimeZone displayZone,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
@@ -295,43 +298,70 @@ internal static class AdminUserEndpoints
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
             var newEmail = form["NewEmail"].ToString();
+            var orgId = orgCtx.CurrentOrganizationId!.Value;
+            if (!await email.IsConfiguredAsync(ct))
+            {
+                ctx.Response.Redirect($"{RouteConstants.AdminUsers}?{RouteConstants.ErrQuery}=" + Uri.EscapeDataString(EmailChangeNeedsEmailMessage));
+                return;
+            }
+            EmailChangeRequest request;
             try
             {
-                var token = await userAdmin.RequestEmailChangeAsync(id, newEmail,
-                    orgCtx.CurrentOrganizationId!.Value, orgCtx.CurrentUserId!.Value, ct);
-                var url = $"{publicOrigin.For(ctx)}/auth/account/email-change/confirm?token={Uri.EscapeDataString(token)}";
-                if (await email.IsConfiguredAsync(ct))
-                {
-                    try
-                    {
-                        // Fence category 4 (explicitly scoped user-id lookup): the email-change request above
-                        // already refused any user outside the admin's own org.
-                        var user = await db.Users.IgnoreQueryFilters().AsNoTracking()
-                            .FirstAsync(u => u.Id == id, ct);
-                        var content = await EmailChangeConfirmEmail.RenderAsync(emailRenderer, user.DisplayName, url, ct);
-                        await email.SendAsync(newEmail.Trim().ToLowerInvariant(), content, EmailPurpose.EmailChangeConfirmation, ct);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogWarning(ex, "Email-change confirmation email failed for user {Id}; link surfaced inline.", id);
-                        SetOneShotInviteCookie(ctx, protection, url);
-                    }
-                }
-                else
-                {
-                    SetOneShotInviteCookie(ctx, protection, url);
-                }
-                ctx.Response.Redirect($"{RouteConstants.AdminUsers}?{RouteConstants.OkQuery}=email-pending&userId={id}");
+                request = await userAdmin.RequestEmailChangeAsync(id, newEmail, orgId, orgCtx.CurrentUserId!.Value, ct);
             }
             catch (PlanValidationException ex)
             {
                 var first = ex.Errors.First();
                 ctx.Response.Redirect($"{RouteConstants.AdminUsers}?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Value)}");
+                return;
             }
+
+            var origin = publicOrigin.For(ctx);
+            try
+            {
+                await displayZone.EnsureLoadedAsync(ct);
+                var confirmableFrom = FormatEmailTime(displayZone, request.ConfirmableFrom);
+                var expiresAt = FormatEmailTime(displayZone, request.ExpiresAt);
+                var confirmUrl = $"{origin}/auth/account/email-change/confirm?token={Uri.EscapeDataString(request.ConfirmToken)}";
+                var confirm = await EmailChangeConfirmEmail.RenderAsync(emailRenderer, request.DisplayName, confirmUrl,
+                    confirmableFrom, expiresAt, ct);
+                await email.SendAsync(request.NewEmail, confirm, EmailPurpose.EmailChangeConfirmation, ct);
+
+                var cancelUrl = $"{origin}{RouteConstants.EmailChangeCancel}?token={Uri.EscapeDataString(request.CancelToken)}";
+                var notice = await EmailChangeRequestedEmail.RenderAsync(emailRenderer, request.DisplayName,
+                    request.RequestedByName, request.RequestedByEmail, request.NewEmail, confirmableFrom, cancelUrl, ct);
+                await email.SendAsync(request.CurrentEmail, notice, EmailPurpose.EmailChangeNotice, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Email-change emails for user {Id} could not be sent; the change was withdrawn.", id);
+                // CancellationToken.None: the withdrawal must land even if the
+                // request was aborted part way through the sends.
+                await userAdmin.WithdrawEmailChangeAsync(id, orgId, CancellationToken.None);
+                ctx.Response.Redirect($"{RouteConstants.AdminUsers}?{RouteConstants.ErrQuery}=" + Uri.EscapeDataString(
+                    "The email change was not made because the emails about it couldn't be sent. Try again in a few minutes."));
+                return;
+            }
+            ctx.Response.Redirect($"{RouteConstants.AdminUsers}?{RouteConstants.OkQuery}=email-pending&userId={id}");
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.AdminRole));
 
         return app;
     }
+
+    /// <summary>
+    /// Why an admin can't change someone's email on a site without email: the
+    /// person has to be told at their current address. Shown on the refusal
+    /// and in place of the form on the Users page.
+    /// </summary>
+    internal const string EmailChangeNeedsEmailMessage =
+        "Email isn't set up on this site, so the person can't be told about the change at their current address. Ask a site administrator to set up email, then try again.";
+
+    /// <summary>
+    /// A time for an email body, in the organisation's display zone and labelled
+    /// with it, since an email can't carry a <c>&lt;Timestamp&gt;</c> hover.
+    /// </summary>
+    private static string FormatEmailTime(DisplayTimeZone zone, DateTime utc) =>
+        zone.Format(utc, "d MMM yyyy, HH:mm") + " (" + DisplayTimeZone.Label(zone.Zone, utc) + ")";
 
     /// <summary>Back to the users page with the refusal's first message as the error banner.</summary>
     private static void RedirectWithError(HttpContext ctx, PlanValidationException ex)

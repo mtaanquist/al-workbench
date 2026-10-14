@@ -263,6 +263,17 @@ public sealed class TranslationMemoryIngestServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_repository_nobody_confirmed_they_can_read_is_left_alone()
+    {
+        await ConnectAsync();
+        await TrackAsync($"https://github.com/{Repo}.git", confirmed: false);
+        var api = ApiWith(TreeJson());
+
+        (await IngestAsync(api)).RepositoriesScanned.Should().Be(0);
+        api.Calls.Should().BeEmpty("the installation token never reaches a repository nobody vouched for");
+    }
+
+    [Fact]
     public async Task An_organisation_that_has_connected_nothing_reads_nothing_rather_than_failing()
     {
         await TrackAsync($"https://github.com/{Repo}.git");
@@ -396,7 +407,7 @@ public sealed class TranslationMemoryIngestServiceTests : IDisposable
 
     /// <summary>One solution tracking one repository, which is what puts it in scope.</summary>
     private async Task TrackAsync(
-        string url, RepositoryProvider provider = RepositoryProvider.GitHub, bool deleted = false)
+        string url, RepositoryProvider provider = RepositoryProvider.GitHub, bool deleted = false, bool confirmed = true)
     {
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -419,6 +430,7 @@ public sealed class TranslationMemoryIngestServiceTests : IDisposable
             Provider = provider,
             Url = url,
             DisplayName = "customer-app",
+            AccessConfirmedAt = confirmed ? DateTime.UtcNow : null,
         });
         await ctx.SaveChangesAsync();
     }

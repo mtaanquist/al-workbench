@@ -55,6 +55,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         _ctx.Services.AddScoped<ReleasePipelineService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
         // The Build button's service. Nothing here builds, so only what it keeps
         // for itself is real.
