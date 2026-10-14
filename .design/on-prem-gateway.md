@@ -196,16 +196,20 @@ workbench can show what is allowed. A command the file does not allow is refused
 whatever the server sent.
 
 ```toml
-# Rules for the whole gateway.
-[gateway]
+# Defaults per kind of environment; a tier inherits them unless it sets its own.
+[defaults.production]
+allow = ["inventory", "publish", "restart"]
 change_hours = "20:00-06:00"   # optional: changes only in this local time window (reads any time)
+
+[defaults.test]
+allow = ["inventory", "publish", "unpublish", "restart", "service_control", "licence"]
 
 # Service tiers this gateway may touch. Anything not listed is refused.
 [[instance]]
 machine = "CRONUS-BC01"        # this machine
 name = "BC140"
 environment = "production"     # production (default), test or development
-allow = ["inventory", "publish", "unpublish", "restart", "licence"]
+allow = ["inventory", "publish", "unpublish", "restart", "licence"]   # overrides the production default
 tenants = ["default"]          # multitenant servers: the tenants this gateway may target
 publishers = ["CRONUS Partner"] # optional allow-list of app publishers
 allow_unsigned = true          # Publish-NAVApp -SkipVerification (our builds are unsigned)
@@ -245,8 +249,11 @@ workbench too. Everything that treats production specially follows it: the extra
 deployments and tier actions, the refusal of AI-assistant deployments, and the Solution's version
 and address, which come from its production tier.
 
-**Permissions per service tier.** Each instance lists what the gateway may do there, and anything not
-listed is refused. An instance with no `allow` line gets `["inventory"]`: read-only. The workbench
+**Permissions per service tier.** Each instance's permissions come from its own `allow` and
+`change_hours` if it sets them, otherwise from `[defaults.<environment>]` for its kind, otherwise
+`["inventory"]` with no hours limit: read-only. A tier's own value replaces the default whole, never
+merges with it, so what a tier may do is always one list in one place. Anything not in the effective
+list is refused. The workbench
 shows the effective permissions on the environment page and greys out what a tier does not allow,
 with "Not allowed by the customer's gateway settings".
 
@@ -261,7 +268,7 @@ with "Not allowed by the customer's gateway settings".
 | `licence` | Import a licence file |
 | `scripts` | Run the before and after scripts named for its database |
 
-`change_hours` limits every permission except `inventory` to a local time window, on top of the
+`change_hours` (per kind or per tier) limits every permission except `inventory` to a local time window, on top of the
 delivery window set in AL Workbench, so customer IT can rule out daytime changes whatever the
 workbench asks. A command outside it is refused with "Outside the hours set on the customer's
 gateway".
