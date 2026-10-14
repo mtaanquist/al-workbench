@@ -558,8 +558,10 @@ public sealed class WorkspaceZipBuilder
     /// reference shape is set. Intra-workspace refs lock onto the
     /// freshly-generated GUIDs of the in-this-build extensions so AL's
     /// dependency graph resolves at compile time. Module-key refs work the
-    /// same way when the target module was selected for this workspace,
-    /// otherwise they fall back to the catalogue's stored dep identifiers.
+    /// same way when the target module was selected for this workspace;
+    /// when it was not, the dependency is left out (there is no catalogue
+    /// fallback - .design/generation-engine.md). Template save refuses a
+    /// module key that names no module, so only an unticked one is dropped.
     /// Module-cloned extensions also get an implicit dependency on every
     /// required template extension so a Document Capture clone depends on
     /// Core without the template author having to spell it out.
@@ -613,8 +615,10 @@ public sealed class WorkspaceZipBuilder
                     if (!emitted.Add(target.Id)) continue;
                     array.Add(BuildDepNode(target.Id.ToString(), target.Name, target.Publisher, "0.0.0.1"));
                 }
-                // else: the validator should have caught this; skip silently
-                // to avoid emitting a placeholder GUID that won't compile.
+                // else: the module exists but was not ticked for this
+                // workspace, so there is no app to depend on. Dropped, as
+                // .design/generation-engine.md specifies, rather than emit a
+                // placeholder GUID that won't compile.
             }
             else if (dep.LitId is not null)
             {

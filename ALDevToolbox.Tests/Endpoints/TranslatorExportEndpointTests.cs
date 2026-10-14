@@ -105,19 +105,123 @@ public sealed class TranslatorExportEndpointTests : IDisposable
         learned.Should().Equal("Amount");
     }
 
+    /// <summary>
+    /// #1343: saving in place or exporting sends every edit made since the file
+    /// was opened, so the editor also says which are new since its last save -
+    /// and only those are learned.
+    /// </summary>
+    [Fact]
+    public async Task Export_teaches_the_memory_only_the_edits_the_editor_marks_as_new()
+    {
+        await SeedUserAsync();
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory);
+        var danish = Generated
+            .Replace("target-language=\"en-US\"", "target-language=\"da-DK\"", StringComparison.Ordinal)
+            .Replace("</group>", """
+                    <trans-unit id="Table 1 - Field 3 - Property Caption" size-unit="char">
+                      <source>Posting Date</source>
+                    </trans-unit>
+                  </group>
+                """, StringComparison.Ordinal);
+        const string bothEdited = """
+            {"Table 1 - Field 2 - Property Caption":{"t":"Beloeb","s":"translated"},
+             "Table 1 - Field 3 - Property Caption":{"t":"Bogfoeringsdato","s":"translated"}}
+            """;
+
+        var exported = await ExportAsync(client, danish, "da-DK", bothEdited,
+            learn: """["Table 1 - Field 3 - Property Caption"]""");
+
+        exported.Should().Contain("Beloeb", "the file still carries every edit");
+        List<string> learned = [];
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            await using var ctx = _db.NewContext();
+            learned = ctx.TranslationMemory.Select(e => e.SourceText).ToList();
+            if (learned.Count > 0) break;
+            await Task.Delay(100);
+        }
+        learned.Should().Equal("Posting Date");
+    }
+
+    /// <summary>A caller that sends no list (an older page) still teaches every edit.</summary>
+    [Fact]
+    public async Task Export_without_a_learn_list_teaches_every_edit()
+    {
+        await SeedUserAsync();
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory);
+
+        await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited);
+
+        (await LearnedSourcesAsync(expected: 2)).Should().BeEquivalentTo("Amount", "Posting Date");
+    }
+
+    /// <summary>
+    /// A list that is not a list of ids leaves the download working and teaches
+    /// nothing from it - the memory is a side effect, never a reason to fail.
+    /// </summary>
+    [Fact]
+    public async Task A_malformed_learn_list_still_downloads_and_teaches_nothing()
+    {
+        await SeedUserAsync();
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory);
+
+        var exported = await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited, learn: "{not a list");
+        exported.Should().Contain("Beloeb").And.Contain("Bogfoeringsdato");
+
+        // A second, well-formed export is the marker: once it has been learned,
+        // the first one has long had its chance.
+        await ExportAsync(client, TwoUnitDanish, "da-DK", BothEdited,
+            learn: """["Table 1 - Field 3 - Property Caption"]""");
+        (await LearnedSourcesAsync(expected: 1)).Should().Equal("Posting Date");
+    }
+
+    private static readonly string TwoUnitDanish = Generated
+        .Replace("target-language=\"en-US\"", "target-language=\"da-DK\"", StringComparison.Ordinal)
+        .Replace("</group>", """
+                <trans-unit id="Table 1 - Field 3 - Property Caption" size-unit="char">
+                  <source>Posting Date</source>
+                </trans-unit>
+              </group>
+            """, StringComparison.Ordinal);
+
+    private const string BothEdited = """
+        {"Table 1 - Field 2 - Property Caption":{"t":"Beloeb","s":"translated"},
+         "Table 1 - Field 3 - Property Caption":{"t":"Bogfoeringsdato","s":"translated"}}
+        """;
+
+    /// <summary>Learning runs after the download has been sent, so wait for it.</summary>
+    private async Task<List<string>> LearnedSourcesAsync(int expected)
+    {
+        List<string> learned = [];
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            await using var ctx = _db.NewContext();
+            learned = ctx.TranslationMemory.Select(e => e.SourceText).ToList();
+            if (learned.Count >= expected) break;
+            await Task.Delay(100);
+        }
+        return learned;
+    }
+
     // ---- helpers -----------------------------------------------------------
 
-    private static async Task<string> ExportAsync(HttpClient client, string originalXml, string targetLanguage)
+    private static async Task<string> ExportAsync(
+        HttpClient client, string originalXml, string targetLanguage, string edits = Edits, string? learn = null)
     {
         var token = await TokenFromAsync(client, "/notifications");
-        using var response = await client.PostAsync("/api/translator/export", new FormUrlEncodedContent(
-        [
+        var fields = new List<KeyValuePair<string, string>>
+        {
             new("FileName", "PaymentImport.da-DK.xlf"),
             new("OriginalXml", originalXml),
-            new("Edits", Edits),
+            new("Edits", edits),
             new("TargetLanguage", targetLanguage),
             new("__RequestVerificationToken", token),
-        ]));
+        };
+        if (learn is not null) fields.Add(new("Learn", learn));
+        using var response = await client.PostAsync("/api/translator/export", new FormUrlEncodedContent(fields));
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         return await response.Content.ReadAsStringAsync();
     }

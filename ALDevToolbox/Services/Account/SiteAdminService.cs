@@ -161,6 +161,11 @@ public sealed class SiteAdminService
     public async Task DemoteAsync(int userId, CancellationToken ct = default)
     {
         RequireSiteAdmin();
+        // Guard and save under one deployment-wide lock, so two SiteAdmins
+        // demoting each other at once can't both count the other and leave
+        // nobody able to reach /site-admin (#1337).
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        await LockSiteAdminGuardAsync(_db, ct);
         var user = await LoadUserAsync(userId, ct);
         if (!user.IsSiteAdmin) return;
 
@@ -184,8 +189,30 @@ public sealed class SiteAdminService
 
         user.IsSiteAdmin = false;
         await _db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         _logger.LogInformation("Demoted {Email} (user {UserId}) from SiteAdmin.", user.Email, user.Id);
     }
+
+    /// <summary>
+    /// Advisory-lock key for the last-SiteAdmin guard ("SADM"). Fixed, because
+    /// the guard is deployment-wide: SiteAdmins live in any organisation, so
+    /// there is no one row to lock the way the org-admin guard locks its
+    /// organisation.
+    /// </summary>
+    private const long SiteAdminGuardLockKey = 0x53_41_44_4D;
+
+    /// <summary>
+    /// Takes the transaction-scoped lock every path that can take a SiteAdmin
+    /// away holds while it counts the rest and saves — <see cref="DemoteAsync"/>
+    /// here and the SiteAdmin branch of
+    /// <see cref="UserAdministrationService.DisableUserAsync"/>. The second
+    /// caller waits for the first to commit and then counts what it left.
+    /// Needs an open transaction on <paramref name="db"/>; outside one the
+    /// lock is released as soon as the statement ends.
+    /// </summary>
+    internal static async Task LockSiteAdminGuardAsync(AppDbContext db, CancellationToken ct) =>
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock({SiteAdminGuardLockKey})", ct);
 
     /// <summary>
     /// Cross-organisation audit search, paginated. All filter arguments are

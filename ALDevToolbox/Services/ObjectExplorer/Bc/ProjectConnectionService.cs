@@ -310,9 +310,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     public async Task SaveConnectionAsync(int projectId, BcConnectionInput input, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        var project = await _db.OeProjects
-            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This solution no longer exists.");
+        var project = await LoadProjectForWriteAsync(projectId, ct);
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
         var errors = new Dictionary<string, string>();
@@ -336,9 +334,9 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
         else
         {
-            if (clientId.Length == 0)
+            if (!Guid.TryParse(clientId, out _))
             {
-                errors["BcClientId"] = "Enter the app registration's client ID.";
+                errors["BcClientId"] = "Enter the app registration's Application (client) ID - a GUID like 00000000-0000-0000-0000-000000000000.";
             }
             var hasExistingSecret = project.BcClientSecretEncrypted is not null;
             if (!settingSecret && !hasExistingSecret)
@@ -376,7 +374,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
         else
         {
-            project.BcClientId = clientId;
+            // One spelling, whatever was pasted (braces, no dashes, upper case).
+            project.BcClientId = Guid.Parse(clientId).ToString();
         }
         if (settingSecret)
         {
@@ -412,9 +411,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     private async Task<BcConnectionTestResult> FetchAndUpsertEnvironmentsAsync(int projectId, bool markVerified, CancellationToken ct)
     {
         RequireOrganizationId();
-        var project = await _db.OeProjects
-            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This solution no longer exists.");
+        var project = await LoadProjectForWriteAsync(projectId, ct);
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
         return await RefreshEnvironmentsCoreAsync(project, markVerified, ct);
@@ -435,9 +432,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// </summary>
     public async Task<BcConnectionTestResult> RefreshEnvironmentsUnattendedAsync(int projectId, CancellationToken ct = default)
     {
-        var project = await _db.OeProjects
-            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This solution no longer exists.");
+        var project = await LoadProjectForWriteAsync(projectId, ct);
 
         return await RefreshEnvironmentsCoreAsync(project, markVerified: false, ct);
     }
@@ -2871,6 +2866,24 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             return (defaults.SandboxStart, defaults.SandboxEnd);
         }
         return (null, null);
+    }
+
+    /// <summary>
+    /// The solution, tracked, as it is in the database now. A Blazor circuit keeps one
+    /// context for hours and a tracking query hands back the instance it already holds,
+    /// values and all, so without the reload a page open since before a colleague rotated
+    /// the secret or corrected the tenant would test and refresh with the old ones - and
+    /// stamp "verified" over the re-test their save asked for (same shape as #1236).
+    /// The query's own filter has already read <c>DeletedAt</c> from the database.
+    /// </summary>
+    private async Task<OeProject> LoadProjectForWriteAsync(int projectId, CancellationToken ct)
+    {
+        var alreadyTracked = _db.OeProjects.Local.FindEntry(projectId) is not null;
+        var project = await _db.OeProjects
+            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
+            ?? throw Validation("BcTenantId", "This solution no longer exists.");
+        if (alreadyTracked) await _db.Entry(project).ReloadAsync(ct);
+        return project;
     }
 
     /// <summary>Decrypts the stored credentials, or null when not fully configured / the key ring can't decrypt the secret.</summary>

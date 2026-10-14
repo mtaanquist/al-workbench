@@ -116,6 +116,25 @@ public sealed class StepUpEnforcementTests : IDisposable
             .Response.StatusCode.Should().Be(299, "an anonymous request is authorization's to redirect");
     }
 
+    /// <summary>
+    /// A tool's own /api endpoints close with its switch but never ask for the
+    /// step-up (#1343): they download or save locally, spend no stored credential,
+    /// and the page that calls them already passed the check. Its pages still ask.
+    /// </summary>
+    [Fact]
+    public async Task Gate_leaves_a_tools_api_endpoints_to_the_switch_alone()
+    {
+        (await RunGateAsync(CookieUser(1, 1, "Cookbook", strongAt: Now.AddMinutes(-30)), "/api/cookbook/5/download"))
+            .Response.StatusCode.Should().Be(299);
+        (await RunGateAsync(CookieUser(1, 1, "Translator"), "/api/translator/export", "POST"))
+            .Response.StatusCode.Should().Be(299);
+        (await RunGateAsync(CookieUser(1, 1, "ObjectExplorer"), "/api/object-explorer/files/3/goto"))
+            .Response.StatusCode.Should().Be(299);
+
+        (await RunGateAsync(CookieUser(1, 1, "Cookbook", strongAt: Now.AddMinutes(-30)), "/cookbook/5"))
+            .Response.StatusCode.Should().Be(StatusCodes.Status302Found, "the page itself still asks");
+    }
+
     [Fact]
     public async Task Gate_uses_the_organisations_own_window()
     {

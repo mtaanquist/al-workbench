@@ -929,4 +929,77 @@ public sealed class EntraSignInServiceTests : IDisposable
         (await ctx.SignupRequests.IgnoreQueryFilters().AsNoTracking().AnyAsync(r => r.Email == "new@cronus.com"))
             .Should().BeFalse();
     }
+
+    // IsLinkedAsync is the identity check behind Microsoft step-up: the forced
+    // re-sign-in must come back as an identity linked to the step-up user, in
+    // a tenant their organisation still allows (#1346).
+
+    private async Task<bool> IsLinkedAsync(int userId, string tid, string oid)
+    {
+        await using var ctx = _db.NewContext();
+        return await NewService(ctx).IsLinkedAsync(userId, new EntraTokenIdentity(tid, oid, "mette@cronus.com", "Mette"));
+    }
+
+    [Fact]
+    public async Task IsLinked_accepts_the_users_own_identity_in_an_allowed_tenant()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        await SeedLinkAsync(userId, TenantA, Oid);
+
+        (await IsLinkedAsync(userId, TenantA.ToUpperInvariant(), Oid))
+            .Should().BeTrue("the tenant id is compared case-insensitively, as at sign-in");
+    }
+
+    [Fact]
+    public async Task IsLinked_refuses_an_identity_linked_to_another_user()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        var colleagueId = await SeedUserAsync(TestDb.DefaultOrgId, "jonas@cronus.com");
+        await SeedLinkAsync(colleagueId, TenantA, OidB);
+
+        (await IsLinkedAsync(userId, TenantA, OidB))
+            .Should().BeFalse("a colleague signing in at the prompt must not confirm someone else's step-up");
+    }
+
+    [Fact]
+    public async Task IsLinked_refuses_the_same_object_id_from_another_tenant()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        await SeedLinkAsync(userId, TenantA, Oid);
+
+        (await IsLinkedAsync(userId, TenantB, Oid))
+            .Should().BeFalse("an object id is only unique inside its own tenant");
+    }
+
+    [Fact]
+    public async Task IsLinked_refuses_once_the_tenant_is_removed_from_the_allow_list()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        await SeedLinkAsync(userId, TenantA, Oid);
+        // The admin swaps the allowed tenant out; the link row is left behind.
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantB);
+
+        (await IsLinkedAsync(userId, TenantA, Oid))
+            .Should().BeFalse("the allow-list is the boundary for step-up as it is for sign-in");
+    }
+
+    [Fact]
+    public async Task IsLinked_refuses_once_microsoft_sign_in_is_turned_off()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        await SeedLinkAsync(userId, TenantA, Oid);
+        await using (var ctx = _db.NewContext())
+        {
+            var row = await ctx.OrganizationSettings.SingleAsync(s => s.OrganizationId == TestDb.DefaultOrgId);
+            row.EntraEnabled = false;
+            await ctx.SaveChangesAsync();
+        }
+
+        (await IsLinkedAsync(userId, TenantA, Oid)).Should().BeFalse();
+    }
 }

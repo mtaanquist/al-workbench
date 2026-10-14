@@ -85,6 +85,11 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
             // customer's tenant — see the IsAuditableEnvironmentChange gate below. Every
             // other column on it is fetched cache that a Refresh rewrites wholesale.
             [typeof(OeProjectEnvironment)] = AuditEntityType.ProjectEnvironment,
+            // An organisation row is audited only for its security policy and the
+            // SiteAdmin's quota override — see the IsAuditableOrganizationChange gate
+            // below. Who loosened step-up, or switched MCP back on, has to be
+            // answerable afterwards (#1337).
+            [typeof(Organization)] = AuditEntityType.Organization,
             // Deliberately absent: OeEnvironmentUpgradeAction
             // (oe_environment_upgrade_actions). That table is itself a log — who asked
             // for which platform-update action, when it fired, and what came back — and
@@ -152,6 +157,25 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
     };
 
     /// <summary>
+    /// The columns on <see cref="Organization"/> worth an audit row: the
+    /// organisation's security policy (which tools want a recent second factor,
+    /// and for how long; whether MCP is on; which tools are switched off) and
+    /// the storage quota a SiteAdmin overrides. Each loosens or tightens what
+    /// members can do, so who changed it and when has to be on record, the
+    /// same as the comparable switches on <see cref="OrganizationSettings"/>.
+    /// Renames, the pending flag flipping on approval, and creation (which
+    /// happens before anyone is signed in) stay out of the log.
+    /// </summary>
+    private static readonly HashSet<string> OrganizationPolicyColumns = new()
+    {
+        nameof(Organization.StepUpTools),
+        nameof(Organization.StepUpWindowMinutes),
+        nameof(Organization.McpEnabled),
+        nameof(Organization.DisabledTools),
+        nameof(Organization.StorageQuotaMb),
+    };
+
+    /// <summary>
     /// Sign-in bookkeeping on <see cref="User"/>. A successful login stamps
     /// <c>LastLoginAt</c> and nothing else, and <c>.design/auth-and-audit.md</c>
     /// already puts logins outside the audit log — they belong to
@@ -214,6 +238,12 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
             // Column-scoped, same idea: an environment row churns on every Refresh,
             // and only the settings a person deliberately changed are worth a row.
             if (entry.Entity is OeProjectEnvironment && !IsAuditableEnvironmentChange(entry))
+            {
+                continue;
+            }
+
+            // Column-scoped, same idea: only an organisation's policy and quota.
+            if (entry.Entity is Organization && !IsAuditableOrganizationChange(entry))
             {
                 continue;
             }
@@ -520,6 +550,10 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
         entry.State == EntityState.Modified
         && entry.Properties.Any(p => p.IsModified && EnvironmentSettingColumns.Contains(p.Metadata.Name));
 
+    private static bool IsAuditableOrganizationChange(EntityEntry entry) =>
+        entry.State == EntityState.Modified
+        && entry.Properties.Any(p => p.IsModified && OrganizationPolicyColumns.Contains(p.Metadata.Name));
+
     private static AuditEntityType MapEntityType(Type t) =>
         AuditedTypeMap.TryGetValue(t, out var kind)
             ? kind
@@ -580,10 +614,14 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
     /// home organisation showed the SMTP and off-site storage settings to
     /// that organisation's Admins on their audit page (#1260). Rows with no
     /// organisation are read only by the SiteAdmin audit view.
+    /// An <see cref="Organization"/> row is filed under itself: a SiteAdmin
+    /// changing another organisation's quota is that organisation's history,
+    /// not the SiteAdmin's home organisation's.
     /// </summary>
     private static int? ResolveEntityOrganizationId(EntityEntry entry, int? fallback)
     {
         var values = entry.State == EntityState.Added ? entry.CurrentValues : entry.OriginalValues;
+        if (entry.Entity is Organization) return values["Id"] is int ownId && ownId > 0 ? ownId : fallback;
         if (!values.Properties.Any(p => p.Name == "OrganizationId")) return null;
         var value = values["OrganizationId"];
         if (value is int orgId && orgId > 0) return orgId;

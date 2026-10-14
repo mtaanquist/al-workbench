@@ -58,8 +58,10 @@ internal static class ToolAccessGate
             // requests fall through to authorization's own login redirect, and
             // PATs never reach page routes. GETs go to the step-up page and
             // come back; anything else gets a 403.
+            // A tool's /api endpoints answer to the switch only: they spend no
+            // stored credential, and the page calling them passed the step-up.
             var clock = ctx.RequestServices.GetRequiredService<TimeProvider>();
-            if (NeedsStepUp(tools, ctx.User, clock.GetUtcNow().UtcDateTime))
+            if (!IsSwitchOnly(ctx.Request.Path) && NeedsStepUp(tools, ctx.User, clock.GetUtcNow().UtcDateTime))
             {
                 if (HttpMethods.IsGet(ctx.Request.Method))
                 {
@@ -123,22 +125,34 @@ internal static class ToolAccessGate
     /// deployment pipelines (<c>/pipelines/deployments</c>) under build pipelines
     /// (<c>/pipelines</c>).
     /// </summary>
-    internal static ToolKey? MatchTool(PathString path)
+    internal static ToolKey? MatchTool(PathString path) => Match(path).Tool;
+
+    /// <summary>
+    /// True when the path is one of a tool's switch-only routes
+    /// (<see cref="ToolDescriptor.SwitchOnlyPrefixes"/>): closed with the tool, but
+    /// never sent to the step-up (#1343).
+    /// </summary>
+    internal static bool IsSwitchOnly(PathString path) => Match(path).SwitchOnly;
+
+    private static (ToolKey? Tool, bool SwitchOnly) Match(PathString path)
     {
-        if (!path.HasValue) return null;
+        if (!path.HasValue) return (null, false);
         ToolKey? match = null;
+        var switchOnly = false;
         var matchLength = -1;
         foreach (var tool in ToolCatalog.All)
         {
-            foreach (var prefix in tool.RoutePrefixes)
+            foreach (var (prefix, isSwitchOnly) in tool.RoutePrefixes.Select(p => (p, false))
+                .Concat((tool.SwitchOnlyPrefixes ?? []).Select(p => (p, true))))
             {
                 if (prefix.Length > matchLength && path.StartsWithSegments(prefix))
                 {
                     match = tool.Key;
+                    switchOnly = isSwitchOnly;
                     matchLength = prefix.Length;
                 }
             }
         }
-        return match;
+        return (match, switchOnly);
     }
 }
