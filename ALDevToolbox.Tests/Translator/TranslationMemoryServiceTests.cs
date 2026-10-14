@@ -720,6 +720,43 @@ public sealed class TranslationMemoryServiceTests : IDisposable
             "a solution the reader can see already shows them that repository");
     }
 
+    /// <summary>
+    /// #1324: a Translator save to a repository learns its units on the spot,
+    /// before any ingest reads that repository - and if the pull request is
+    /// never merged, no ingest ever will. The save has to carry the repository
+    /// itself, or the new pairs are nobody's and everybody sees them.
+    /// </summary>
+    [Fact]
+    public async Task A_save_to_a_private_solutions_repository_is_not_suggested_to_people_outside_it()
+    {
+        await SeedPrivateAndPublicSolutionsAsync();
+
+        _db.OrgContext.CurrentUserId = OwnerId;
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewMemory(ctx).LearnFromXliffAsync(
+                Xliff("Customer bonus", "Kundebonus"), "App.da-DK.xlf",
+                sourceRepository: "cronus-dk/Secret-App", sourcePath: "App/Translations/App.da-DK.xlf"))
+                .Should().Be(1);
+        }
+
+        _db.OrgContext.CurrentUserId = OutsiderId;
+        await using (var ctx = _db.NewContext())
+        {
+            var memory = NewMemory(ctx);
+            (await memory.SuggestAsync("Customer bonus", "en-US", "da-DK")).Should().BeEmpty();
+            (await memory.SearchAsync(new MemorySearchQuery(Text: "Customer bonus"))).Items.Should().BeEmpty();
+        }
+
+        _db.OrgContext.CurrentUserId = OwnerId;
+        await using (var ctx = _db.NewContext())
+        {
+            var hit = (await NewMemory(ctx).SuggestAsync("Customer bonus", "en-US", "da-DK")).Single();
+            hit.SourceRepository.Should().Be("cronus-dk/Secret-App");
+            hit.SourcePath.Should().Be("App/Translations/App.da-DK.xlf");
+        }
+    }
+
     private async Task SeedPrivateAndPublicSolutionsAsync()
     {
         await using var ctx = _db.NewContext();

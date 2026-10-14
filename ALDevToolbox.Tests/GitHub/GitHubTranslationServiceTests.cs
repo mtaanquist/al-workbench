@@ -384,7 +384,270 @@ public sealed class GitHubTranslationServiceTests : IDisposable
         save.PullRequest.HeadBranch.Should().Be("aldt/translate-nb-NO");
     }
 
+    // ── The translation branch after its pull request (#1329) ─────────────
+
+    [Fact]
+    public async Task While_the_pull_request_is_open_the_file_is_read_from_its_branch()
+    {
+        await ReadyAsync();
+        var world = new BranchWorld();
+        world.Heads[Branch] = "branch-head";
+        world.OpenPullRequests[Branch] = 12;
+        world.FileShas[Branch] = "branch-blob-sha";
+        var (service, ctx) = NewService(world.Api);
+        await using var _ = ctx;
+
+        var file = await service.OpenOnTranslationBranchAsync(Repo, FilePath, "da-DK");
+
+        file.Should().NotBeNull();
+        file!.Sha.Should().Be("branch-blob-sha");
+    }
+
+    [Fact]
+    public async Task A_branch_kept_after_its_pull_request_was_merged_is_not_read()
+    {
+        // GitHub keeps a merged branch unless the repository deletes it, so the
+        // branch existing says nothing about whether it is current. Reading it
+        // would hide every string added to main since the merge.
+        await ReadyAsync();
+        var world = new BranchWorld();
+        world.Heads[Branch] = "branch-head";
+        world.ClosedPullRequestHeads[Branch] = "branch-head";
+        world.FileShas[Branch] = "branch-blob-sha";
+        var (service, ctx) = NewService(world.Api);
+        await using var _ = ctx;
+
+        (await service.OpenOnTranslationBranchAsync(Repo, FilePath, "da-DK")).Should().BeNull();
+        world.Api.Calls.Should().NotContain(c => c.Contains("/contents/", StringComparison.Ordinal),
+            "with no pull request open the caller reads the default branch instead");
+    }
+
+    [Fact]
+    public async Task A_branch_that_does_not_carry_the_file_comes_back_as_nothing()
+    {
+        await ReadyAsync();
+        var world = new BranchWorld();
+        world.Heads[Branch] = "branch-head";
+        world.OpenPullRequests[Branch] = 12;
+        var (service, ctx) = NewService(world.Api);
+        await using var _ = ctx;
+
+        (await service.OpenOnTranslationBranchAsync(Repo, FilePath, "da-DK")).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Reopening_while_the_pull_request_is_open_and_saving_again_quotes_the_branchs_sha()
+    {
+        // The Translator's second afternoon: the file is opened again, from the
+        // branch, and the save has to quote the sha it was read at - or it is
+        // refused as a conflict with the translator's own first commit.
+        await ReadyAsync();
+        var world = new BranchWorld();
+        world.Heads[Branch] = "branch-head";
+        world.OpenPullRequests[Branch] = 12;
+        world.FileShas[Branch] = "branch-blob-sha";
+        var (service, ctx) = NewService(world.Api);
+        await using var _ = ctx;
+
+        var file = await service.OpenOnTranslationBranchAsync(Repo, FilePath, "da-DK");
+        var save = await service.SaveAsync(Source(baseSha: file!.Sha), "da-DK", Xliff, "done");
+
+        BodyOf(world.Api, "PUT", "/contents/").Should().Contain("\"sha\":\"branch-blob-sha\"");
+        save.IsNewPullRequest.Should().BeFalse();
+        save.PullRequest.Number.Should().Be(12);
+        world.Api.Calls.Should().NotContain(c => c.StartsWith("PATCH", StringComparison.Ordinal),
+            "a branch under review is never moved");
+    }
+
+    [Fact]
+    public async Task A_branch_whose_commits_are_all_on_main_is_fast_forwarded_and_gets_a_new_pull_request()
+    {
+        // Merged with a merge commit: main contains the branch, so moving the
+        // branch onto main loses nothing and is a plain fast-forward.
+        await ReadyAsync();
+        var world = new BranchWorld();
+        world.Heads[Branch] = "branch-head";
+        world.FileShas[Branch] = "stale-branch-sha";
+        world.FastForwardable.Add(Branch);
+        var (service, ctx) = NewService(world.Api);
+        await using var _ = ctx;
+
+        var save = await service.SaveAsync(Source(), "da-DK", Xliff, "done");
+
+        var move = BodyOf(world.Api, "PATCH", "/git/refs/heads/");
+        move.Should().Contain($"\"sha\":\"{BaseSha}\"");
+        move.Should().Contain("\"force\":false");
+        BodyOf(world.Api, "PUT", "/contents/").Should().Contain($"\"sha\":\"{LoadedSha}\"");
+        save.IsNewPullRequest.Should().BeTrue();
+        save.PullRequest.HeadBranch.Should().Be(Branch);
+    }
+
+    [Fact]
+    public async Task A_squash_merged_branch_still_at_its_pull_requests_head_is_reset_to_main()
+    {
+        // The squash commit on main is not the branch's commit, so a
+        // fast-forward is refused; but the branch head is exactly what the
+        // merged pull request carried, and GitHub keeps that for good.
+        await ReadyAsync();
+        var world = new BranchWorld();
+        world.Heads[Branch] = "branch-head";
+        world.ClosedPullRequestHeads[Branch] = "branch-head";
+        world.FileShas[Branch] = "stale-branch-sha";
+        var (service, ctx) = NewService(world.Api);
+        await using var _ = ctx;
+
+        var save = await service.SaveAsync(Source(), "da-DK", Xliff, "done");
+
+        world.Api.Bodies.Where(b => b.Call.StartsWith("PATCH", StringComparison.Ordinal))
+            .Select(b => b.Body.Contains("\"force\":true"))
+            .Should().Equal(false, true);
+        world.Heads[Branch].Should().Be(BaseSha);
+        save.IsNewPullRequest.Should().BeTrue();
+        save.PullRequest.HeadBranch.Should().Be(Branch);
+    }
+
+    [Fact]
+    public async Task Commits_no_pull_request_ever_carried_are_left_alone_and_the_next_name_is_used()
+    {
+        // A save whose pull request was never opened, or commits pushed by hand
+        // after the last one closed: nothing on GitHub keeps those, so the
+        // branch is not moved and the round goes on a -2 branch instead.
+        await ReadyAsync();
+        var world = new BranchWorld();
+        world.Heads[Branch] = "unreviewed-head";
+        world.ClosedPullRequestHeads[Branch] = "older-head";
+        world.FileShas[Branch] = "unreviewed-blob-sha";
+        var (service, ctx) = NewService(world.Api);
+        await using var _ = ctx;
+
+        var save = await service.SaveAsync(Source(), "da-DK", Xliff, "done");
+
+        world.Api.Bodies.Should().NotContain(b => b.Body.Contains("\"force\":true"),
+            "nothing would keep the commits the reset moved away from");
+        world.Heads[Branch].Should().Be("unreviewed-head");
+        world.Heads.Should().ContainKey(Branch + "-2");
+        BodyOf(world.Api, "PUT", "/contents/").Should().Contain($"\"branch\":\"{Branch}-2\"");
+        save.PullRequest.HeadBranch.Should().Be(Branch + "-2");
+        save.IsNewPullRequest.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task An_open_pull_request_on_a_numbered_branch_is_read_and_reused()
+    {
+        await ReadyAsync();
+        var world = new BranchWorld();
+        world.Heads[Branch] = "unreviewed-head";
+        world.Heads[Branch + "-2"] = "second-head";
+        world.OpenPullRequests[Branch + "-2"] = 14;
+        world.FileShas[Branch + "-2"] = "second-blob-sha";
+        var (service, ctx) = NewService(world.Api);
+        await using var _ = ctx;
+
+        var file = await service.OpenOnTranslationBranchAsync(Repo, FilePath, "da-DK");
+        file!.Sha.Should().Be("second-blob-sha");
+
+        var save = await service.SaveAsync(Source(baseSha: file.Sha), "da-DK", Xliff, "done");
+
+        save.IsNewPullRequest.Should().BeFalse();
+        save.PullRequest.Number.Should().Be(14);
+        BodyOf(world.Api, "PUT", "/contents/").Should().Contain($"\"branch\":\"{Branch}-2\"");
+        world.Api.Calls.Should().NotContain(c => c.StartsWith("PATCH", StringComparison.Ordinal));
+        world.Api.Calls.Should().NotContain(c => c.StartsWith("POST", StringComparison.Ordinal) && c.Contains("/git/refs"));
+    }
+
     // --- helpers ------------------------------------------------------------
+
+    /// <summary>
+    /// A small model of one repository's branches and pull requests, answering
+    /// the calls a translation save makes from that state - so a test sets up
+    /// "this branch exists, at this head, with this pull request" and the
+    /// routes follow whatever the service then does to it.
+    /// </summary>
+    private sealed class BranchWorld
+    {
+        public Dictionary<string, string> Heads { get; } = new(StringComparer.Ordinal) { ["main"] = BaseSha };
+        public Dictionary<string, int> OpenPullRequests { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, string> ClosedPullRequestHeads { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The file's blob sha on a branch; a branch at main's head has main's.</summary>
+        public Dictionary<string, string> FileShas { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>Branches whose commits are all on main, so moving them onto it is a fast-forward.</summary>
+        public HashSet<string> FastForwardable { get; } = new(StringComparer.Ordinal);
+
+        public FakeGitHubApi Api { get; }
+
+        public BranchWorld()
+        {
+            Api = WritableApi()
+                .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/", request =>
+                {
+                    var name = After(request, "/git/ref/heads/");
+                    return Heads.TryGetValue(name, out var sha)
+                        ? (HttpStatusCode.OK, $"{{\"ref\":\"refs/heads/{name}\",\"object\":{{\"sha\":\"{sha}\"}}}}")
+                        : (HttpStatusCode.NotFound, null);
+                })
+                .On(HttpMethod.Post, $"/repos/{Repo}/git/refs", request =>
+                {
+                    using var body = System.Text.Json.JsonDocument.Parse(BodyText(request));
+                    var name = body.RootElement.GetProperty("ref").GetString()!["refs/heads/".Length..];
+                    if (Heads.ContainsKey(name))
+                    {
+                        return (HttpStatusCode.UnprocessableEntity, "{\"message\":\"Reference already exists\"}");
+                    }
+                    Heads[name] = body.RootElement.GetProperty("sha").GetString()!;
+                    return (HttpStatusCode.Created, FakeGitHubApi.ShaJson(Heads[name]));
+                })
+                .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/", request =>
+                {
+                    var name = After(request, "/git/refs/heads/");
+                    using var body = System.Text.Json.JsonDocument.Parse(BodyText(request));
+                    var force = body.RootElement.GetProperty("force").GetBoolean();
+                    if (!force && !FastForwardable.Contains(name))
+                    {
+                        return (HttpStatusCode.UnprocessableEntity, "{\"message\":\"Update is not a fast forward\"}");
+                    }
+                    Heads[name] = body.RootElement.GetProperty("sha").GetString()!;
+                    return (HttpStatusCode.OK, FakeGitHubApi.ShaJson(Heads[name]));
+                })
+                .On(HttpMethod.Get, $"/repos/{Repo}/pulls", request =>
+                {
+                    var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query);
+                    var head = query["head"] ?? string.Empty;
+                    var name = head[(head.IndexOf(':') + 1)..];
+                    if (query["state"] == "open" && OpenPullRequests.TryGetValue(name, out var number))
+                    {
+                        return (HttpStatusCode.OK, $"[{{\"number\":{number},\"html_url\":\"https://github.com/{Repo}/pull/{number}\"}}]");
+                    }
+                    if (query["state"] == "closed" && ClosedPullRequestHeads.TryGetValue(name, out var closedHead))
+                    {
+                        return (HttpStatusCode.OK,
+                            $"[{{\"number\":9,\"html_url\":\"https://github.com/{Repo}/pull/9\",\"head\":{{\"sha\":\"{closedHead}\"}}}}]");
+                    }
+                    return (HttpStatusCode.OK, "[]");
+                })
+                .On(HttpMethod.Get, $"/repos/{Repo}/contents/", request =>
+                {
+                    var gitRef = System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query)["ref"];
+                    if (gitRef is null || Heads.GetValueOrDefault(gitRef) == BaseSha)
+                    {
+                        return (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, Xliff, LoadedSha));
+                    }
+                    return FileShas.TryGetValue(gitRef, out var sha)
+                        ? (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, Xliff, sha))
+                        : (HttpStatusCode.NotFound, null);
+                });
+        }
+
+        private static string After(HttpRequestMessage request, string marker)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            return Uri.UnescapeDataString(path[(path.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..]);
+        }
+
+        private static string BodyText(HttpRequestMessage request) =>
+            request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+    }
 
     private static RepositoryTranslationSource Source(string? baseSha = LoadedSha) =>
         new(

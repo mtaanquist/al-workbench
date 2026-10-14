@@ -916,6 +916,22 @@ public sealed partial class GitHubAppClient
     }
 
     /// <summary>
+    /// Points an existing branch at <paramref name="commitSha"/> whether or not
+    /// that is a fast-forward. Only for a branch the workbench owns and has
+    /// established nobody is reviewing: anything on it that the new commit does
+    /// not contain stops being reachable from the branch.
+    /// </summary>
+    public async Task ResetBranchAsync(
+        string credential, string owner, string repo, string branch, string commitSha,
+        CancellationToken ct = default)
+    {
+        using var request = NewJsonRequest(
+            HttpMethod.Patch, $"{RepoPath(owner, repo)}/git/refs/heads/{EscapePath(branch)}", credential,
+            new { sha = commitSha, force = true });
+        using var _ = await SendAsync(request, ct);
+    }
+
+    /// <summary>
     /// Opens a pull request from <paramref name="head"/> into
     /// <paramref name="baseBranch"/>, as <paramref name="credential"/>'s owner.
     /// </summary>
@@ -1005,6 +1021,37 @@ public sealed partial class GitHubAppClient
             if (number > 0 && !string.IsNullOrEmpty(htmlUrl))
             {
                 return new GitHubPullRequest(number, htmlUrl!, headBranch);
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The head commit of the most recently updated closed (or merged) pull
+    /// request from <paramref name="headBranch"/>, or <see langword="null"/>
+    /// when that branch has never had one closed. GitHub keeps that commit
+    /// under the pull request for good, so a branch still pointing at it holds
+    /// nothing that would be lost by moving it.
+    /// </summary>
+    public async Task<string?> GetLatestClosedPullRequestHeadShaAsync(
+        string credential, string owner, string repo, string headBranch, CancellationToken ct = default)
+    {
+        var head = Uri.EscapeDataString($"{owner}:{headBranch}");
+        using var request = NewRequest(
+            HttpMethod.Get,
+            $"{RepoPath(owner, repo)}/pulls?state=closed&head={head}&sort=updated&direction=desc&per_page=1",
+            credential);
+        using var document = await SendOrNotFoundAsync(request, ct);
+        if (document is null || document.RootElement.ValueKind != JsonValueKind.Array) return null;
+
+        foreach (var item in document.RootElement.EnumerateArray())
+        {
+            if (item.TryGetProperty("head", out var h)
+                && h.ValueKind == JsonValueKind.Object
+                && h.TryGetProperty("sha", out var sha)
+                && sha.ValueKind == JsonValueKind.String)
+            {
+                return sha.GetString();
             }
         }
         return null;
