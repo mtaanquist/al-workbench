@@ -607,6 +607,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("gateway_id");
 
+                    b.Property<long>("LastProgressSequence")
+                        .HasColumnType("bigint")
+                        .HasColumnName("last_progress_sequence");
+
                     b.Property<DateTime?>("LastReportedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_reported_at");

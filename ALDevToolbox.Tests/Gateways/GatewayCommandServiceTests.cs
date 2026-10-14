@@ -378,6 +378,28 @@ public sealed class GatewayCommandServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_progress_batch_sent_again_after_a_lost_answer_is_appended_once()
+    {
+        var gateway = await GatewayAsync();
+        var id = await EnqueueAsync(gateway);
+        await ClaimAsync(gateway);
+        await using var ctx = _db.NewContext();
+        var service = Service(ctx);
+
+        (await service.AppendProgressAsync(gateway, id, ["one"], sequence: 1)).Should().BeTrue();
+        (await service.AppendProgressAsync(gateway, id, ["one"], sequence: 1)).Should().BeTrue();
+        (await service.AppendProgressAsync(gateway, id, ["two"], sequence: 2)).Should().BeTrue();
+        (await service.AppendProgressAsync(gateway, id, ["one"], sequence: 1)).Should().BeTrue();
+        (await service.AppendProgressAsync(gateway, id, ["unnumbered"], sequence: 0)).Should().BeTrue();
+
+        var row = await LoadAsync(id);
+        row.Log.Should().Be("2026-10-14 12:00:00Z one\n2026-10-14 12:00:00Z two\n2026-10-14 12:00:00Z unnumbered\n");
+        row.LastProgressSequence.Should().Be(2);
+        var negative = () => service.AppendProgressAsync(gateway, id, ["x"], sequence: -1);
+        (await negative.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("sequence");
+    }
+
+    [Fact]
     public async Task A_result_is_recorded_once_and_later_reports_are_refused()
     {
         var gateway = await GatewayAsync();
