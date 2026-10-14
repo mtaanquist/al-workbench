@@ -131,6 +131,44 @@ public sealed class GatewayCommandServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Revoking_a_gateway_fails_its_unfinished_commands_at_once_and_leaves_finished_ones()
+    {
+        var gateway = await GatewayAsync();
+        var other = await GatewayAsync(machine: "CRONUS-BC02");
+        var done = await EnqueueAsync(gateway);
+        var running = await EnqueueAsync(gateway);
+        var claimed = await EnqueueAsync(gateway);
+        var queued = await EnqueueAsync(gateway);
+        var later = await EnqueueAsync(gateway, due: Now.AddDays(3));
+        var otherGateways = await EnqueueAsync(other);
+        await using (var ctx = _db.NewContext())
+        {
+            var service = Service(ctx);
+            (await service.ClaimNextAsync(gateway)).Command!.Id.Should().Be(done);
+            await service.CompleteAsync(gateway, done, new GatewayCommandResultRequest { Succeeded = true });
+            (await service.ClaimNextAsync(gateway)).Command!.Id.Should().Be(running);
+            await service.AppendProgressAsync(gateway, running, ["Publishing"]);
+            (await service.ClaimNextAsync(gateway)).Command!.Id.Should().Be(claimed);
+        }
+
+        _db.OrgContext.CurrentUserId = _admin.Id;
+        await using (var ctx = _db.NewContext())
+        {
+            await GatewayTestKit.NewService(ctx, _db.OrgContext, _clock).RevokeAsync(gateway);
+        }
+
+        foreach (var id in new[] { running, claimed, queued, later })
+        {
+            var row = await LoadAsync(id);
+            row.Status.Should().Be(GatewayCommandStatus.Failed, $"command {id}");
+            row.FailureMessage.Should().Be("The gateway was revoked.");
+            row.FinishedAt.Should().Be(Now);
+        }
+        (await LoadAsync(done)).Status.Should().Be(GatewayCommandStatus.Succeeded);
+        (await LoadAsync(otherGateways)).Status.Should().Be(GatewayCommandStatus.Queued);
+    }
+
+    [Fact]
     public async Task Another_organisations_gateway_cannot_be_given_a_command()
     {
         var foreign = await GatewayAsync(organizationId: TestDb.OtherOrgId);

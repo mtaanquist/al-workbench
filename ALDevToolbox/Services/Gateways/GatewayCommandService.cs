@@ -109,6 +109,8 @@ public sealed class GatewayCommandService
 
     public const string CommandSilentMessage = "The gateway stopped reporting on this while it was running; check the environment.";
 
+    public const string RevokedMessage = "The gateway was revoked.";
+
     // How often the claim retries after losing a race for a row before saying
     // "nothing": the long-poll asks again after its next wake anyway.
     private const int ClaimAttempts = 5;
@@ -504,6 +506,23 @@ public sealed class GatewayCommandService
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         return file is null ? (GatewayFileOutcome.NotFound, null) : (GatewayFileOutcome.Found, file);
     }
+
+    /// <summary>
+    /// Fails every queued, claimed or running command of one gateway with
+    /// <paramref name="message"/>. Used when the gateway is revoked: nothing it was
+    /// asked to do can be collected or reported any more. Runs under the caller's
+    /// query filter, so it only reaches the caller's organisation.
+    /// </summary>
+    internal static Task<int> FailOpenCommandsAsync(AppDbContext db, int gatewayId, string message, DateTime now, CancellationToken ct) =>
+        db.GatewayCommands
+            .Where(c => c.GatewayId == gatewayId
+                        && (c.Status == GatewayCommandStatus.Queued
+                            || c.Status == GatewayCommandStatus.Claimed
+                            || c.Status == GatewayCommandStatus.Running))
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
+                .SetProperty(c => c.FinishedAt, now)
+                .SetProperty(c => c.FailureMessage, message), ct);
 
     // ---------------------------------------------------------------- the sweep
 
