@@ -8,6 +8,8 @@ using Fido2NetLib.Objects;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.Operations;
+using ALDevToolbox.Components.Email;
+using ALDevToolbox.Services.Email;
 
 namespace ALDevToolbox.Services.Account;
 
@@ -65,6 +67,9 @@ public sealed class PasskeyService
     private readonly TimeProvider _clock;
     private readonly WebAuthnConfig _config;
     private readonly DeploymentIdentity _deployment;
+    private readonly IEmailService _email;
+    private readonly EmailRenderer _emailRenderer;
+    private readonly ILogger<PasskeyService> _logger;
 
     public PasskeyService(
         AppDbContext db,
@@ -72,7 +77,10 @@ public sealed class PasskeyService
         IDataProtectionProvider protection,
         TimeProvider clock,
         WebAuthnConfig config,
-        DeploymentIdentity deployment)
+        DeploymentIdentity deployment,
+        IEmailService email,
+        EmailRenderer emailRenderer,
+        ILogger<PasskeyService> logger)
     {
         _db = db;
         _fido2 = fido2;
@@ -80,6 +88,9 @@ public sealed class PasskeyService
         _clock = clock;
         _config = config;
         _deployment = deployment;
+        _email = email;
+        _emailRenderer = emailRenderer;
+        _logger = logger;
     }
 
     /// <summary>Did the operator configure a WebAuthn RP id? Passkey UI hides itself when this is false.</summary>
@@ -119,21 +130,31 @@ public sealed class PasskeyService
             AttestationPreference = AttestationConveyancePreference.None,
         });
 
-        var envelope = JsonSerializer.Serialize(new ChallengeEnvelope(userId, options.Challenge, _clock.GetUtcNow().UtcDateTime));
+        var envelope = JsonSerializer.Serialize(new ChallengeEnvelope(userId, options.Challenge, _clock.GetUtcNow().UtcDateTime, Kind: ChallengeKind.Registration));
         return (options, _protector.Protect(envelope));
     }
 
-    /// <summary>Validates the attestation response and persists the new credential.</summary>
+    /// <summary>
+    /// Validates the attestation response, persists the new credential, writes
+    /// an audit row and queues a "passkey added" email to the account's own
+    /// address with a link to <paramref name="securityUrl"/>. A passkey is a
+    /// full sign-in, so the owner hears about every one; the endpoint is what
+    /// asks for a fresh step-up before the ceremony starts.
+    /// </summary>
     public async Task<UserPasskey> CompleteRegistrationAsync(
         int userId,
         string nickname,
         AuthenticatorAttestationRawResponse rawResponse,
         string protectedChallenge,
+        string securityUrl,
         CancellationToken ct = default)
     {
         AssertConfigured();
         var envelope = UnprotectEnvelope(protectedChallenge);
-        if (envelope.UserId != userId)
+        // Only an envelope BeginRegistrationAsync minted: a sign-in or step-up
+        // one carries the same user id and the same protector, and taking it
+        // here would skip the check the registration-options leg makes.
+        if (envelope.Kind != ChallengeKind.Registration || envelope.UserId != userId)
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "Passkey registration session expired. Try again." });
         }
@@ -169,9 +190,74 @@ public sealed class PasskeyService
             Nickname = trimmedNickname,
             CreatedAt = now,
         };
-        _db.UserPasskeys.Add(passkey);
-        await _db.SaveChangesAsync(ct);
+        var actor = await ActorAsync(userId, ct);
+        // From here nothing listens to the request token: the passkey and its
+        // audit row commit together or not at all, and once they have, the
+        // owner's email is queued even if the browser has gone away.
+        await using (var tx = await _db.Database.BeginTransactionAsync(CancellationToken.None))
+        {
+            _db.UserPasskeys.Add(passkey);
+            await _db.SaveChangesAsync(CancellationToken.None);
+            AddAuditRow(actor, passkey, AuditAction.Created);
+            await _db.SaveChangesAsync(CancellationToken.None);
+            await tx.CommitAsync(CancellationToken.None);
+        }
+        _logger.LogInformation("Passkey {PasskeyId} added for user {UserId}.", passkey.Id, userId);
+        await NotifyAddedAsync(actor, passkey, securityUrl);
         return passkey;
+    }
+
+    /// <summary>Who is acting, read before any write so the writes need nothing more from the database.</summary>
+    private sealed record Actor(int UserId, int OrganizationId, string Email, string DisplayName, string AuditName);
+
+    private async Task<Actor> ActorAsync(int userId, CancellationToken ct)
+    {
+        // Filtered: the signed-in user's own row, inside their org.
+        var user = await _db.Users.AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => new { u.OrganizationId, u.Email, u.DisplayName })
+            .FirstAsync(ct);
+        return new Actor(userId, user.OrganizationId, user.Email, user.DisplayName,
+            await AuditActor.ResolveAsync(_db, userId, ct));
+    }
+
+    /// <summary>
+    /// Adds the audit row for a passkey added or removed, for the caller to
+    /// save with the change itself. By hand rather than through
+    /// <c>AuditInterceptor</c>: the row's counter and last-used time move on
+    /// every sign-in, and the log wants the two events that matter, not that.
+    /// </summary>
+    private void AddAuditRow(Actor actor, UserPasskey passkey, AuditAction action) =>
+        _db.AuditLog.Add(new AuditLogEntry
+        {
+            Timestamp = _clock.GetUtcNow().UtcDateTime,
+            ChangedBy = actor.AuditName,
+            ChangedByUserId = actor.UserId,
+            OrganizationId = actor.OrganizationId,
+            EntityType = AuditEntityType.Passkey,
+            EntityId = passkey.Id,
+            Action = action,
+            EntityName = passkey.Nickname,
+        });
+
+    /// <summary>
+    /// Queues the "a passkey was added" email. A failure is logged, not thrown:
+    /// the passkey is already saved, and failing the request would only make the
+    /// person add it a second time.
+    /// </summary>
+    private async Task NotifyAddedAsync(Actor actor, UserPasskey passkey, string securityUrl)
+    {
+        try
+        {
+            var addedAt = passkey.CreatedAt.ToString("d MMM yyyy, HH:mm 'UTC'", System.Globalization.CultureInfo.InvariantCulture);
+            var content = await PasskeyAddedEmail.RenderAsync(
+                _emailRenderer, actor.DisplayName, passkey.Nickname, addedAt, securityUrl, CancellationToken.None);
+            await _email.SendAsync(actor.Email, content, EmailPurpose.PasskeyAdded, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not queue the passkey-added email for user {UserId}.", actor.UserId);
+        }
     }
 
     /// <summary>
@@ -254,7 +340,8 @@ public sealed class PasskeyService
                 ? UserVerificationRequirement.Required
                 : UserVerificationRequirement.Preferred,
         });
-        var envelope = JsonSerializer.Serialize(new ChallengeEnvelope(userId, options.Challenge, _clock.GetUtcNow().UtcDateTime, requireUserVerification));
+        var envelope = JsonSerializer.Serialize(new ChallengeEnvelope(userId, options.Challenge, _clock.GetUtcNow().UtcDateTime, requireUserVerification,
+            requireUserVerification ? ChallengeKind.StepUp : ChallengeKind.SignIn));
         return (options, _protector.Protect(envelope));
     }
 
@@ -304,7 +391,7 @@ public sealed class PasskeyService
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "This account isn't active." });
         }
-        if (envelope.RequireUserVerification)
+        if (envelope.Kind != ChallengeKind.SignIn || envelope.RequireUserVerification)
         {
             // A step-up envelope is finished by CompleteStepUpAsync, which
             // stays inside the tenant fence; it must not double as a sign-in.
@@ -351,7 +438,7 @@ public sealed class PasskeyService
     {
         AssertConfigured();
         var envelope = UnprotectEnvelope(protectedChallenge);
-        if (!envelope.RequireUserVerification || envelope.UserId != userId)
+        if (envelope.Kind != ChallengeKind.StepUp || !envelope.RequireUserVerification || envelope.UserId != userId)
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey check wasn't started for this account." });
         }
@@ -401,8 +488,11 @@ public sealed class PasskeyService
         var row = await _db.UserPasskeys.IgnoreQueryFilters()
             .FirstOrDefaultAsync(p => p.Id == passkeyId && p.UserId == userId, ct);
         if (row is null) return;
+        var actor = await ActorAsync(userId, ct);
         _db.UserPasskeys.Remove(row);
+        AddAuditRow(actor, row, AuditAction.Deleted);
         await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Passkey {PasskeyId} removed by user {UserId}.", passkeyId, userId);
     }
 
     public async Task RenameAsync(int userId, int passkeyId, string newName, CancellationToken ct = default)
@@ -490,7 +580,16 @@ public sealed class PasskeyService
         return options;
     }
 
+    /// <summary>
+    /// Which ceremony minted an envelope. All three share one protector and one
+    /// shape, so without this a sign-in envelope (anonymous to mint, and it
+    /// names the user) could be planted in the registration cookie. SignIn is
+    /// zero so an envelope from before this field reads as a sign-in, the
+    /// least it can do.
+    /// </summary>
+    private enum ChallengeKind { SignIn = 0, StepUp = 1, Registration = 2 }
+
     // RequireUserVerification defaults to false so an envelope issued before
     // this field existed still deserialises as an ordinary sign-in.
-    private sealed record ChallengeEnvelope(int? UserId, byte[] Challenge, DateTime IssuedAt, bool RequireUserVerification = false);
+    private sealed record ChallengeEnvelope(int? UserId, byte[] Challenge, DateTime IssuedAt, bool RequireUserVerification = false, ChallengeKind Kind = ChallengeKind.SignIn);
 }

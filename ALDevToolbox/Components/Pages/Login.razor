@@ -300,7 +300,11 @@ else
 
     private string? OkMessage() => Ok switch
     {
-        "password-reset" => "Password updated. Sign in with your new password.",
+        // A reset leaves passkeys in place, so point the person at them: one
+        // they don't recognise is the thing a reset cannot take away for them.
+        "password-reset" => Passkeys.IsConfigured
+            ? "Password updated. Sign in with your new password, then go to Account → Sign-in & security and remove any passkeys you didn't add yourself."
+            : "Password updated. Sign in with your new password.",
         "email-change-confirmed" => "Your new email address is confirmed. Sign in with it.",
         "email-change-cancelled" => "The email change was stopped. Your account keeps its current address.",
         _ => null,

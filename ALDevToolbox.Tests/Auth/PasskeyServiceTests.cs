@@ -13,6 +13,10 @@ using Fido2NetLib;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using ALDevToolbox.Components.Email;
+using ALDevToolbox.Services.Email;
 
 namespace ALDevToolbox.Tests.Auth;
 
@@ -32,11 +36,200 @@ public sealed class PasskeyServiceTests : IDisposable
     private readonly TestDb _db = new();
     private readonly ECDsa _key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
     private readonly byte[] _credentialId = RandomNumberGenerator.GetBytes(16);
+    private readonly CapturingEmailService _transport = new();
+    private readonly ServiceProvider _services = new ServiceCollection().BuildServiceProvider();
 
     public void Dispose()
     {
+        _services.Dispose();
         _key.Dispose();
         _db.Dispose();
+    }
+
+    [Fact]
+    public async Task A_new_passkey_is_saved_audited_and_its_owner_is_emailed()
+    {
+        var userId = await SeedUserAsync("ada@cronus.example");
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginRegistrationAsync(userId);
+
+        var passkey = await svc.CompleteRegistrationAsync(userId, "Work laptop",
+            Attestation(options.Challenge), envelope, "https://workbench.cronus.example/account/security");
+
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().SingleAsync()).Nickname.Should().Be("Work laptop");
+
+        var audit = await read.AuditLog.SingleAsync(a => a.EntityType == AuditEntityType.Passkey);
+        audit.Action.Should().Be(AuditAction.Created);
+        audit.EntityId.Should().Be(passkey.Id);
+        audit.EntityName.Should().Be("Work laptop");
+        audit.ChangedByUserId.Should().Be(userId);
+        audit.OrganizationId.Should().Be(TestDb.DefaultOrgId);
+
+        // Queued through the outbox, not sent inline: it is a notice, not a
+        // code someone is waiting on.
+        var queued = await read.EmailOutboxMessages.AsNoTracking().SingleAsync();
+        queued.Purpose.Should().Be(EmailPurpose.PasskeyAdded);
+        queued.ToEmail.Should().Be("ada@cronus.example");
+        queued.Subject.Should().Be(PasskeyAddedEmail.Subject);
+        _transport.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task The_passkey_added_email_names_the_passkey_and_says_how_to_remove_it()
+    {
+        var content = await PasskeyAddedEmail.RenderAsync(new EmailRenderer(_services, NullLoggerFactory.Instance),
+            "Ada", "Work laptop", "14 Oct 2026, 09:12 UTC", "https://workbench.cronus.example/account/security");
+
+        content.HtmlBody.Should().Contain("Work laptop")
+            .And.Contain("remove that passkey")
+            .And.Contain("https://workbench.cronus.example/account/security");
+    }
+
+    [Fact]
+    public async Task A_registration_started_for_one_account_cannot_be_finished_by_another()
+    {
+        var userId = await SeedUserAsync("ada@cronus.example");
+        var otherId = await SeedUserAsync("bob@cronus.example");
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginRegistrationAsync(userId);
+
+        var act = () => svc.CompleteRegistrationAsync(otherId, "Work laptop",
+            Attestation(options.Challenge), envelope, "https://workbench.cronus.example/account/security");
+
+        await act.Should().ThrowAsync<PlanValidationException>();
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().AnyAsync()).Should().BeFalse();
+        (await read.EmailOutboxMessages.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_sign_in_challenge_cannot_finish_a_registration()
+    {
+        // Same protector, same user id: only the kind tells them apart.
+        var userId = await SeedUserAsync("ada@cronus.example");
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginLoginAsync("ada@cronus.example");
+
+        var act = () => svc.CompleteRegistrationAsync(userId, "Planted",
+            Attestation(options.Challenge), envelope, "https://workbench.cronus.example/account/security");
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Token"].Should().Contain("registration session expired");
+        await NothingWasAddedAsync();
+    }
+
+    [Fact]
+    public async Task A_step_up_challenge_cannot_finish_a_registration()
+    {
+        var userId = await SeedUserAsync("ada@cronus.example");
+        await using (var seed = _db.NewContext())
+        {
+            // Step-up needs a passkey to offer; a different one from the
+            // credential the attestation below would add.
+            seed.UserPasskeys.Add(new UserPasskey
+            {
+                UserId = userId, CredentialId = RandomNumberGenerator.GetBytes(16), PublicKey = [0xA0],
+                Nickname = "Phone", CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginStepUpAsync(userId);
+
+        var act = () => svc.CompleteRegistrationAsync(userId, "Planted",
+            Attestation(options.Challenge), envelope, "https://workbench.cronus.example/account/security");
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Token"].Should().Contain("registration session expired");
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().CountAsync()).Should().Be(1);
+        (await read.AuditLog.AnyAsync(a => a.EntityType == AuditEntityType.Passkey)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_registration_challenge_cannot_sign_in_or_step_up()
+    {
+        var userId = await SeedAsync("ada@cronus.example");
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginRegistrationAsync(userId);
+
+        var signIn = () => svc.CompleteLoginAsync(Assertion(options.Challenge, userId, signCount: 1, userVerified: true), envelope);
+        var stepUp = () => svc.CompleteStepUpAsync(userId, Assertion(options.Challenge, userId, signCount: 1, userVerified: true), envelope);
+
+        (await signIn.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Passkey"].Should().Contain("wasn't started as a sign-in");
+        (await stepUp.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Passkey"].Should().Contain("wasn't started for this account");
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().SingleAsync()).SignCounter.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task The_audit_row_and_email_survive_the_request_going_away_once_the_passkey_is_saved()
+    {
+        var userId = await SeedUserAsync("ada@cronus.example");
+        using var cts = new CancellationTokenSource();
+        await using var ctx = _db.NewContext(new CancelAfterPasskeySaved(cts));
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginRegistrationAsync(userId);
+
+        await svc.CompleteRegistrationAsync(userId, "Work laptop",
+            Attestation(options.Challenge), envelope, "https://workbench.cronus.example/account/security", cts.Token);
+
+        cts.IsCancellationRequested.Should().BeTrue("the browser went away once the passkey was saved");
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().CountAsync()).Should().Be(1);
+        (await read.AuditLog.CountAsync(a => a.EntityType == AuditEntityType.Passkey)).Should().Be(1);
+        (await read.EmailOutboxMessages.CountAsync(m => m.Purpose == EmailPurpose.PasskeyAdded)).Should().Be(1);
+    }
+
+    private async Task NothingWasAddedAsync()
+    {
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().AnyAsync()).Should().BeFalse();
+        (await read.AuditLog.AnyAsync(a => a.EntityType == AuditEntityType.Passkey)).Should().BeFalse();
+        (await read.EmailOutboxMessages.AnyAsync()).Should().BeFalse();
+    }
+
+    /// <summary>Stands in for a browser that disconnects right after the passkey row is written.</summary>
+    private sealed class CancelAfterPasskeySaved(CancellationTokenSource cts) : SaveChangesInterceptor
+    {
+        private bool _addingPasskey;
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            _addingPasskey = eventData.Context!.ChangeTracker.Entries<UserPasskey>().Any(e => e.State == EntityState.Added);
+            return base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
+
+        public override ValueTask<int> SavedChangesAsync(
+            SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
+        {
+            if (_addingPasskey) cts.Cancel();
+            return base.SavedChangesAsync(eventData, result, cancellationToken);
+        }
+    }
+
+    [Fact]
+    public async Task Removing_a_passkey_is_audited()
+    {
+        var userId = await SeedAsync("ada@cronus.example");
+        await using var ctx = _db.NewContext();
+        var id = (await ctx.UserPasskeys.IgnoreQueryFilters().SingleAsync()).Id;
+
+        await NewService(ctx).DeleteAsync(userId, id);
+
+        await using var read = _db.NewContext();
+        var audit = await read.AuditLog.SingleAsync(a => a.EntityType == AuditEntityType.Passkey);
+        audit.Action.Should().Be(AuditAction.Deleted);
+        audit.EntityName.Should().Be("Software key");
     }
 
     [Fact]
@@ -178,7 +371,13 @@ public sealed class PasskeyServiceTests : IDisposable
         var deployment = DeploymentIdentity.LoadOrCreate(
             Path.Combine(Path.GetTempPath(), "aldt-pk-deploy-" + Guid.NewGuid().ToString("N")),
             NullLogger.Instance);
-        return new PasskeyService(ctx, fido2, _db.DataProtectionProvider, TimeProvider.System, config, deployment);
+        // The real outbox in front of a capturing transport, so a test can
+        // tell queued mail (a row) from mail sent inline (the transport).
+        var outbox = new OutboxEmailService(_transport,
+            new EmailOutbox(_db.NewContextFactory(), _db.DataProtectionProvider, TimeProvider.System, NullLogger<EmailOutbox>.Instance),
+            _db.OrgContext);
+        return new PasskeyService(ctx, fido2, _db.DataProtectionProvider, TimeProvider.System, config, deployment,
+            outbox, new EmailRenderer(_services, NullLoggerFactory.Instance), NullLogger<PasskeyService>.Instance);
     }
 
     private async Task<int> SeedUserAsync(string email, UserStatus status = UserStatus.Active)
@@ -222,6 +421,43 @@ public sealed class PasskeyServiceTests : IDisposable
     {
         var p = _key.ExportParameters(includePrivateParameters: false);
         return [0xA5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20, .. p.Q.X!, 0x22, 0x58, 0x20, .. p.Q.Y!];
+    }
+
+    /// <summary>
+    /// What a browser hands back from <c>navigator.credentials.create</c> with
+    /// no attestation: authenticator data carrying this test's credential id
+    /// and public key, CBOR-wrapped as a "none" attestation object.
+    /// </summary>
+    private AuthenticatorAttestationRawResponse Attestation(byte[] challenge)
+    {
+        var cose = CosePublicKey();
+        byte[] authData = [.. SHA256.HashData(Encoding.UTF8.GetBytes(RpId)), 0x45, 0, 0, 0, 0,
+            .. new byte[16], 0, (byte)_credentialId.Length, .. _credentialId, .. cose];
+        byte[] attestationObject = [0xA3,
+            0x63, .. "fmt"u8, 0x64, .. "none"u8,
+            0x67, .. "attStmt"u8, 0xA0,
+            0x68, .. "authData"u8, 0x58, (byte)authData.Length, .. authData];
+        var clientData = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            type = "webauthn.create",
+            challenge = WebEncoders.Base64UrlEncode(challenge),
+            origin = Origin,
+            crossOrigin = false,
+        }));
+        var json = JsonSerializer.Serialize(new
+        {
+            id = WebEncoders.Base64UrlEncode(_credentialId),
+            rawId = WebEncoders.Base64UrlEncode(_credentialId),
+            type = "public-key",
+            response = new
+            {
+                attestationObject = WebEncoders.Base64UrlEncode(attestationObject),
+                clientDataJSON = WebEncoders.Base64UrlEncode(clientData),
+                transports = Array.Empty<string>(),
+            },
+            clientExtensionResults = new { },
+        });
+        return JsonSerializer.Deserialize<AuthenticatorAttestationRawResponse>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
     }
 
     /// <summary>

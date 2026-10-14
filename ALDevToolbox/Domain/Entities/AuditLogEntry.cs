@@ -78,6 +78,14 @@ public enum AuditEntityType
     /// full name and no entity id.
     /// </summary>
     GitHubRepository,
+
+    /// <summary>
+    /// A passkey added to or removed from someone's account. Written by
+    /// <c>PasskeyService</c> rather than the interceptor, because the passkey row
+    /// also changes on every sign-in (its counter and last-used time) and none of
+    /// that belongs in the log. Named by the passkey's nickname.
+    /// </summary>
+    Passkey,
 }
 
 /// <summary>The kind of change captured by an audit row.</summary>
