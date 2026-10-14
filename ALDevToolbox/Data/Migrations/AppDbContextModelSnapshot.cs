@@ -527,6 +527,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("name");
 
+                    b.Property<bool?>("NotifiedOnline")
+                        .HasColumnType("boolean")
+                        .HasColumnName("notified_online");
+
                     b.Property<int>("OrganizationId")
                         .HasColumnType("integer")
                         .HasColumnName("organization_id");
@@ -560,6 +564,150 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("OrganizationId", "RevokedAt");
 
                     b.ToTable("gateways", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayCommand", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime?>("ClaimedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("claimed_at");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTime>("DueAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("due_at");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<string>("FailureMessage")
+                        .HasColumnType("text")
+                        .HasColumnName("failure_message");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("finished_at");
+
+                    b.Property<int>("GatewayId")
+                        .HasColumnType("integer")
+                        .HasColumnName("gateway_id");
+
+                    b.Property<DateTime?>("LastReportedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_reported_at");
+
+                    b.Property<string>("Log")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("text")
+                        .HasDefaultValue("")
+                        .HasColumnName("log");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<string>("ParametersJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("parameters");
+
+                    b.Property<int?>("RequestedByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("requested_by_user_id");
+
+                    b.Property<string>("ResultJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("result");
+
+                    b.Property<DateTime?>("StartedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("started_at");
+
+                    b.Property<bool>("StartedByAgent")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("started_by_agent");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("status");
+
+                    b.Property<string>("Verb")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("verb");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RequestedByUserId");
+
+                    b.HasIndex("OrganizationId", "Status");
+
+                    b.HasIndex("GatewayId", "Status", "DueAt");
+
+                    b.ToTable("gateway_commands", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayCommandFile", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("CommandId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("command_id");
+
+                    b.Property<byte[]>("Content")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("content");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("file_name");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<string>("Sha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("sha256");
+
+                    b.Property<long>("Size")
+                        .HasColumnType("bigint")
+                        .HasColumnName("size");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CommandId");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.ToTable("gateway_command_files", (string)null);
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayRegistrationCode", b =>
@@ -7406,6 +7554,47 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("Organization");
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayCommand", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Gateway", "Gateway")
+                        .WithMany()
+                        .HasForeignKey("GatewayId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "RequestedByUser")
+                        .WithMany()
+                        .HasForeignKey("RequestedByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Gateway");
+
+                    b.Navigation("RequestedByUser");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayCommandFile", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.GatewayCommand", "Command")
+                        .WithMany("Files")
+                        .HasForeignKey("CommandId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Command");
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayRegistrationCode", b =>
                 {
                     b.HasOne("ALDevToolbox.Domain.Entities.User", "CreatedByUser")
@@ -9360,6 +9549,11 @@ namespace ALDevToolbox.Data.Migrations
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.BcQualityArticle", b =>
                 {
                     b.Navigation("Samples");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayCommand", b =>
+                {
+                    b.Navigation("Files");
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.Module", b =>

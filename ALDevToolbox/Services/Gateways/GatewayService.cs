@@ -451,8 +451,8 @@ public sealed class GatewayService
         var state = await live.AsNoTracking().Select(g => g.State).FirstAsync(ct).ConfigureAwait(false);
 
         // The replay table only needs a row until its token could no longer be
-        // accepted; each heartbeat clears this gateway's spent ones. The command
-        // sweep (#1361) will take this over for gateways that stop calling.
+        // accepted; each heartbeat clears this gateway's spent ones, and
+        // GatewayCommandSweep clears those of gateways that stopped calling.
         await _db.GatewaySeenTokens
             .Where(t => t.GatewayId == gatewayId && t.ExpiresAt < now)
             .ExecuteDeleteAsync(ct).ConfigureAwait(false);

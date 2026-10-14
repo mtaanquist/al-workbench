@@ -25,13 +25,16 @@ public static class GatewayEndpoints
     /// <summary>A registration or heartbeat body is a few hundred bytes; this is generous.</summary>
     private const int MaxSmallBodyBytes = 64 * 1024;
 
+    /// <summary>A progress post: up to <see cref="GatewayCommandService.MaxProgressLines"/> lines of text.</summary>
+    private const int MaxProgressBodyBytes = 1024 * 1024;
+
     public static IEndpointRouteBuilder MapGatewayEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup(GatewayProtocol.PathPrefix).DisableAntiforgery();
 
         group.MapPost("/register", async (HttpContext ctx, GatewayService gateways, CancellationToken ct) =>
         {
-            var request = await ReadJsonAsync<GatewayRegistrationRequest>(ctx, ct);
+            var request = await ReadJsonAsync<GatewayRegistrationRequest>(ctx, MaxSmallBodyBytes, ct);
             if (request is null) return Malformed();
             try
             {
@@ -45,17 +48,18 @@ public static class GatewayEndpoints
         .AllowAnonymous()
         .RequireRateLimiting(RegisterRateLimitPolicy);
 
-        group.MapPost("/heartbeat", async (HttpContext ctx, GatewayService gateways, CancellationToken ct) =>
+        group.MapPost("/heartbeat", async (HttpContext ctx, GatewayService gateways, GatewayCommandService commands, CancellationToken ct) =>
         {
-            var gatewayId = int.Parse(ctx.User.FindFirst(GatewayAuthenticationHandler.GatewayIdClaim)!.Value, CultureInfo.InvariantCulture);
-            var request = await ReadJsonAsync<GatewayHeartbeatRequest>(ctx, ct);
+            var gatewayId = GatewayIdOf(ctx);
+            var request = await ReadJsonAsync<GatewayHeartbeatRequest>(ctx, MaxSmallBodyBytes, ct);
             if (request is null) return Malformed();
             try
             {
                 var response = await gateways.HeartbeatAsync(gatewayId, request, ct);
-                return response is null
-                    ? Refused(new Dictionary<string, string> { ["authorization"] = "This gateway has been revoked." }, StatusCodes.Status401Unauthorized)
-                    : Results.Json(response);
+                if (response is null) return RevokedResult();
+                // Keeps the commands it lists alive, and fails the ones a restart cut short.
+                await commands.ApplyHeartbeatAsync(gatewayId, request.RunningCommandIds, request.InterruptedCommandIds, ct);
+                return Results.Json(response);
             }
             catch (PlanValidationException ex)
             {
@@ -64,16 +68,124 @@ public static class GatewayEndpoints
         })
         .RequireAuthorization(GatewayAuthenticationHandler.PolicyName);
 
+        // The long-poll (#1361): held open until a command is queued for this
+        // gateway, or for GatewayCommandSignal.LongPollTimeout, then 204.
+        group.MapGet("/commands/next", async (HttpContext ctx, GatewayCommandService commands, CancellationToken ct) =>
+        {
+            if (!IsApproved(ctx)) return NotApprovedResult();
+            GatewayClaimResult result;
+            try
+            {
+                result = await commands.WaitForNextAsync(GatewayIdOf(ctx), ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // The gateway hung up while waiting.
+                return Results.Empty;
+            }
+            return result.Outcome switch
+            {
+                GatewayClaimOutcome.Claimed => Results.Json(result.Command),
+                GatewayClaimOutcome.NotApproved => NotApprovedResult(),
+                GatewayClaimOutcome.Revoked => RevokedResult(),
+                _ => Results.NoContent(),
+            };
+        })
+        .RequireAuthorization(GatewayAuthenticationHandler.PolicyName);
+
+        group.MapPost("/commands/{id:long}/progress", async (long id, HttpContext ctx, GatewayCommandService commands, CancellationToken ct) =>
+        {
+            var request = await ReadJsonAsync<GatewayCommandProgressRequest>(ctx, MaxProgressBodyBytes, ct);
+            if (request is null) return Malformed();
+            try
+            {
+                return await commands.AppendProgressAsync(GatewayIdOf(ctx), id, request.Lines, ct)
+                    ? Results.NoContent()
+                    : NotRunningResult();
+            }
+            catch (PlanValidationException ex)
+            {
+                return Refused(ex.Errors, StatusCodes.Status400BadRequest);
+            }
+        })
+        .RequireAuthorization(GatewayAuthenticationHandler.PolicyName);
+
+        group.MapPost("/commands/{id:long}/result", async (long id, HttpContext ctx, GatewayCommandService commands, CancellationToken ct) =>
+        {
+            // A result can carry a verb's whole report, so it may use the full body
+            // the authentication handler accepts.
+            var request = await ReadJsonAsync<GatewayCommandResultRequest>(ctx, GatewayProtocol.MaxRequestBodyBytes, ct);
+            if (request is null) return Malformed();
+            try
+            {
+                return await commands.CompleteAsync(GatewayIdOf(ctx), id, request, ct)
+                    ? Results.NoContent()
+                    : NotRunningResult();
+            }
+            catch (PlanValidationException ex)
+            {
+                return Refused(ex.Errors, StatusCodes.Status400BadRequest);
+            }
+        })
+        .RequireAuthorization(GatewayAuthenticationHandler.PolicyName);
+
+        // Checked explicitly beyond the organisation filter: the command is this
+        // gateway's, still claimed or running, and the file is that command's.
+        group.MapGet("/commands/{id:long}/files/{fileId:long}", async (long id, long fileId, HttpContext ctx, GatewayCommandService commands, CancellationToken ct) =>
+        {
+            if (!IsApproved(ctx)) return NotApprovedResult();
+            var (outcome, file) = await commands.OpenFileAsync(GatewayIdOf(ctx), id, fileId, ct);
+            return outcome switch
+            {
+                GatewayFileOutcome.Found => Results.File(file!.Content, "application/octet-stream", file.FileName),
+                GatewayFileOutcome.NotRunning => NotRunningResult(),
+                _ => Refused(
+                    new Dictionary<string, string> { ["file"] = "This gateway has no such file to download." },
+                    StatusCodes.Status404NotFound),
+            };
+        })
+        .RequireAuthorization(GatewayAuthenticationHandler.PolicyName);
+
         return app;
     }
 
+    private static int GatewayIdOf(HttpContext ctx) =>
+        int.Parse(ctx.User.FindFirst(GatewayAuthenticationHandler.GatewayIdClaim)!.Value, CultureInfo.InvariantCulture);
+
     /// <summary>
-    /// Reads a small JSON body ourselves rather than through parameter binding, so a
-    /// malformed one is answered with our error shape instead of a bare 400.
+    /// The authentication handler reads the gateway's state on every request, so the
+    /// claim is as fresh as the request: an Admin replacing the key takes effect on
+    /// the next one.
     /// </summary>
-    private static async Task<T?> ReadJsonAsync<T>(HttpContext ctx, CancellationToken ct) where T : class
+    private static bool IsApproved(HttpContext ctx) =>
+        ctx.User.FindFirst(GatewayAuthenticationHandler.GatewayApprovedClaim)?.Value == "true";
+
+    private static IResult NotApprovedResult() => Refused(
+        new Dictionary<string, string>
+        {
+            ["authorization"] = "This gateway is waiting for an Admin to approve it under Administration → Gateways. It receives no commands or files until then.",
+        },
+        StatusCodes.Status403Forbidden);
+
+    private static IResult RevokedResult() => Refused(
+        new Dictionary<string, string> { ["authorization"] = "This gateway has been revoked." },
+        StatusCodes.Status401Unauthorized);
+
+    private static IResult NotRunningResult() => Refused(
+        new Dictionary<string, string>
+        {
+            ["command"] = "This command is not running on this gateway any more: it finished, expired, or was failed after the gateway went quiet. Stop working on it.",
+        },
+        StatusCodes.Status409Conflict);
+
+    /// <summary>
+    /// Reads a JSON body ourselves rather than through parameter binding, so a
+    /// malformed one - an unknown verb included - is answered with our error shape
+    /// instead of a bare 400.
+    /// </summary>
+    private static async Task<T?> ReadJsonAsync<T>(HttpContext ctx, int maxBytes, CancellationToken ct) where T : class
     {
-        if (ctx.Request.ContentLength > MaxSmallBodyBytes) return null;
+        if (ctx.Request.ContentLength > maxBytes) return null;
         try
         {
             // Bounded by what has arrived, not by the declared length: the register
@@ -84,7 +196,7 @@ public static class GatewayEndpoints
             while ((read = await ctx.Request.Body.ReadAsync(buffer, ct)) > 0)
             {
                 limited.Write(buffer, 0, read);
-                if (limited.Length > MaxSmallBodyBytes) return null;
+                if (limited.Length > maxBytes) return null;
             }
             limited.Position = 0;
             return await JsonSerializer.DeserializeAsync<T>(limited, cancellationToken: ct);
