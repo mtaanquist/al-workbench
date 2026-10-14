@@ -161,11 +161,19 @@ As built (#1361), in `Services/Gateways/GatewayCommandService.cs`:
   the workbench's clock; the first post moves `claimed` to `running`. `POST
   /gateway/commands/{id}/result` records `succeeded` or `failed` with the result object and a reason.
   Both answer 409 once the command is no longer the caller's to report on (finished, expired, or
-  failed by the sweep), so a late report never overwrites the first outcome.
+  failed by the sweep), so a late report never overwrites the first outcome, and 403 to a gateway
+  that is not approved. The log stops at 1,000,000 characters with one "[Log truncated...]" line.
+- A heartbeat's running and interrupted lists are applied only for an approved gateway.
 - Files are stored with the command (`gateway_command_files.content`), not referenced from the
-  artifact row. #1375 decides whether command files reference the build's artifacts instead.
+  artifact row. #1375 decides whether command files reference the build's artifacts instead. A file
+  is at most 128 MB (an .app the BC admin API accepts is at most 50 MB), the download is streamed
+  rather than buffered, and the sweep drops the content once the command is final, keeping its
+  name, hash and size.
 - Revoking a gateway fails its queued, claimed and running commands at once with "The gateway was
-  revoked.", rather than leaving them to wait out a claim deadline that may be days away.
+  revoked.", rather than leaving them to wait out a claim deadline that may be days away. Rotating
+  one does the same with its own message, but from the next sweep (within 30 seconds) rather than
+  in the exchange: the exchange runs before anyone is signed in and cannot reach the organisation's
+  commands.
 - Every route but `/register` shares the per-address limit on the `/gateway` group (600 burst,
   300 a minute). One gateway's steady traffic is a heartbeat a minute and a long-poll every 30
   seconds; the gateway batches progress lines (a post every few seconds at most, up to 200 lines

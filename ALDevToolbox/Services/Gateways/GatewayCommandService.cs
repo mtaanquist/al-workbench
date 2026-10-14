@@ -1,3 +1,4 @@
+using System.Data;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -53,10 +54,11 @@ public enum GatewayFileOutcome
     NotRunning,
 }
 
-public sealed record GatewayCommandFileDownload(string FileName, string Sha256, byte[] Content);
+/// <summary>A file the gateway may download; its content is streamed by <see cref="GatewayCommandService.CopyFileContentAsync"/>.</summary>
+public sealed record GatewayCommandFileDownload(long Id, string FileName, string Sha256, long Size);
 
 /// <summary>What one sweep of one organisation did.</summary>
-public sealed record GatewayCommandSweepResult(int Expired, int FailedSilent, int TokensRemoved);
+public sealed record GatewayCommandSweepResult(int Expired, int FailedRekeyed, int FailedSilent, int TokensRemoved);
 
 /// <summary>
 /// The on-premises gateway command queue: queueing a command, handing it to its
@@ -111,9 +113,20 @@ public sealed class GatewayCommandService
 
     public const string RevokedMessage = "The gateway was revoked.";
 
-    // How often the claim retries after losing a race for a row before saying
-    // "nothing": the long-poll asks again after its next wake anyway.
-    private const int ClaimAttempts = 5;
+    public const string RekeyedMessage =
+        "The gateway was given a new key and is waiting for an Admin to approve it; check the environment before trying again.";
+
+    /// <summary>
+    /// The largest file a command may carry. Business Central online refuses an
+    /// extension over 50 MB (<c>BcAppManagementClient.MaxAppBytes</c>); on-premises has
+    /// no such ceiling, so this allows well over twice that for apps with embedded
+    /// resources, while staying a size the app can hold once in memory when it queues
+    /// the command (the download itself is streamed). A licence is a few kilobytes.
+    /// </summary>
+    public const int MaxFileBytes = 128 * 1024 * 1024;
+
+    /// <summary>Appended once when a command's log reaches <see cref="MaxLogLength"/>; later lines are dropped.</summary>
+    public const string LogTruncatedMarker = "\n[Log truncated: later lines were not kept.]\n";
 
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
@@ -204,6 +217,11 @@ public sealed class GatewayCommandService
                 errors["files"] = $"The file {name} is empty.";
                 break;
             }
+            if (file.Content.Length > MaxFileBytes)
+            {
+                errors["files"] = $"The file {name} is larger than {MaxFileBytes / (1024 * 1024)} MB, the most a gateway is sent.";
+                break;
+            }
         }
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
@@ -268,7 +286,9 @@ public sealed class GatewayCommandService
         if (gateway is null || gateway.RevokedAt is not null) return new(GatewayClaimOutcome.Revoked);
         if (gateway.State != GatewayState.Approved) return new(GatewayClaimOutcome.NotApproved);
 
-        for (var attempt = 0; attempt < ClaimAttempts; attempt++)
+        // Retried for as long as a candidate remains: losing the race for a row means
+        // another poll took it, so the queue only shrinks and this always ends.
+        while (true)
         {
             var now = Now;
             var candidate = await _db.GatewayCommands.AsNoTracking()
@@ -287,12 +307,15 @@ public sealed class GatewayCommandService
                     .SetProperty(c => c.LastReportedAt, now), ct).ConfigureAwait(false);
             if (won == 0) continue;
 
-            var message = await LoadMessageAsync(id, now, ct).ConfigureAwait(false);
+            // The row is ours now: read it whatever happens to the request, so a
+            // gateway that hung up a moment ago does not leave a half-built answer.
+            // If the answer still never arrives, the gateway never lists the command
+            // and the sweep fails it after SilenceLimit; it is never handed out twice.
+            var message = await LoadMessageAsync(id, now, CancellationToken.None).ConfigureAwait(false);
             _logger.LogInformation("Gateway {GatewayId} claimed command {CommandId} ({Verb}).",
                 gatewayId, id, GatewayVerbs.ToWire(message.Verb));
             return new(GatewayClaimOutcome.Claimed, message);
         }
-        return new(GatewayClaimOutcome.Nothing);
     }
 
     /// <summary>
@@ -350,8 +373,9 @@ public sealed class GatewayCommandService
     /// <summary>
     /// Adds progress lines to one of the gateway's commands, each stamped with the
     /// workbench's clock. The first marks a claimed command running. False when the
-    /// command is not this gateway's, or is no longer claimed or running (the sweep
-    /// failed it, say): the gateway should stop reporting on it.
+    /// command is not this gateway's, is no longer claimed or running (the sweep
+    /// failed it, say), or the gateway is not approved (re-keyed and waiting, say):
+    /// the gateway should stop reporting on it.
     /// </summary>
     public async Task<bool> AppendProgressAsync(int gatewayId, long commandId, IReadOnlyList<string> lines, CancellationToken ct = default)
     {
@@ -377,22 +401,30 @@ public sealed class GatewayCommandService
         }
         var append = text.ToString();
 
+        // Bounded in the database itself, so two posts racing cannot overshoot: an
+        // untruncated log is always shorter than MaxLogLength, the post that would
+        // reach it is cut to fit and closed with the marker exactly once, and a log at
+        // or past the cap is never touched again. Each post still rewrites the row
+        // (Postgres has no in-place append), which the cap keeps to at most ~1 MB.
         var updated = await _db.GatewayCommands
-            .Where(c => c.Id == commandId && c.GatewayId == gatewayId
+            .Where(c => c.Id == commandId && c.GatewayId == gatewayId && c.Gateway!.State == GatewayState.Approved
                         && (c.Status == GatewayCommandStatus.Claimed || c.Status == GatewayCommandStatus.Running))
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, GatewayCommandStatus.Running)
                 .SetProperty(c => c.StartedAt, c => c.StartedAt ?? now)
                 .SetProperty(c => c.LastReportedAt, now)
-                .SetProperty(c => c.Log, c => c.Log.Length >= MaxLogLength ? c.Log : c.Log + append), ct)
+                .SetProperty(c => c.Log, c =>
+                    c.Log.Length >= MaxLogLength ? c.Log
+                    : c.Log.Length + append.Length < MaxLogLength ? c.Log + append
+                    : (c.Log + append).Substring(0, MaxLogLength) + LogTruncatedMarker), ct)
             .ConfigureAwait(false);
         return updated == 1;
     }
 
     /// <summary>
     /// Records how one of the gateway's commands ended. False when the command is not
-    /// this gateway's or is no longer claimed or running, so a late or repeated result
-    /// never overwrites the first outcome.
+    /// this gateway's, is no longer claimed or running, or the gateway is not
+    /// approved, so a late or repeated result never overwrites the first outcome.
     /// </summary>
     public async Task<bool> CompleteAsync(int gatewayId, long commandId, GatewayCommandResultRequest result, CancellationToken ct = default)
     {
@@ -416,7 +448,7 @@ public sealed class GatewayCommandService
         var resultJson = result.Result?.ToJsonString();
         var message = result.Succeeded ? null : failure;
         var updated = await _db.GatewayCommands
-            .Where(c => c.Id == commandId && c.GatewayId == gatewayId
+            .Where(c => c.Id == commandId && c.GatewayId == gatewayId && c.Gateway!.State == GatewayState.Approved
                         && (c.Status == GatewayCommandStatus.Claimed || c.Status == GatewayCommandStatus.Running))
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, status)
@@ -437,7 +469,9 @@ public sealed class GatewayCommandService
     /// Applies what a heartbeat says about commands: the ones listed as running are
     /// kept alive, and the ones listed as interrupted are failed with
     /// <see cref="InterruptedMessage"/> and never sent again. Only the calling
-    /// gateway's claimed or running commands are touched.
+    /// gateway's claimed or running commands are touched, and only while it is
+    /// approved: a gateway re-keyed by a rotation code proves nothing yet about the
+    /// commands its predecessor was working on.
     /// </summary>
     /// <returns>How many commands were failed as interrupted.</returns>
     public async Task<int> ApplyHeartbeatAsync(
@@ -457,7 +491,7 @@ public sealed class GatewayCommandService
         {
             var ids = interrupted.Distinct().ToList();
             failed = await _db.GatewayCommands
-                .Where(c => ids.Contains(c.Id) && c.GatewayId == gatewayId
+                .Where(c => ids.Contains(c.Id) && c.GatewayId == gatewayId && c.Gateway!.State == GatewayState.Approved
                             && (c.Status == GatewayCommandStatus.Claimed || c.Status == GatewayCommandStatus.Running))
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
@@ -473,7 +507,7 @@ public sealed class GatewayCommandService
         {
             var ids = running.Distinct().ToList();
             await _db.GatewayCommands
-                .Where(c => ids.Contains(c.Id) && c.GatewayId == gatewayId
+                .Where(c => ids.Contains(c.Id) && c.GatewayId == gatewayId && c.Gateway!.State == GatewayState.Approved
                             && (c.Status == GatewayCommandStatus.Claimed || c.Status == GatewayCommandStatus.Running))
                 .ExecuteUpdateAsync(s => s.SetProperty(c => c.LastReportedAt, now), ct)
                 .ConfigureAwait(false);
@@ -502,9 +536,50 @@ public sealed class GatewayCommandService
 
         var file = await _db.GatewayCommandFiles.AsNoTracking()
             .Where(f => f.Id == fileId && f.CommandId == commandId)
-            .Select(f => new GatewayCommandFileDownload(f.FileName, f.Sha256, f.Content))
+            .Select(f => new GatewayCommandFileDownload(f.Id, f.FileName, f.Sha256, f.Size))
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         return file is null ? (GatewayFileOutcome.NotFound, null) : (GatewayFileOutcome.Found, file);
+    }
+
+    /// <summary>
+    /// Streams one file's content to <paramref name="destination"/> without holding it
+    /// in memory: EF can only materialise a <c>bytea</c> whole, so this reads it with a
+    /// sequential-access reader instead. Call it only for a file
+    /// <see cref="OpenFileAsync"/> has just found. The SQL bypasses the query filter,
+    /// so it names the organisation itself.
+    /// </summary>
+    /// <returns>False when the content is gone (the command became final in between).</returns>
+    public async Task<bool> CopyFileContentAsync(long fileId, Stream destination, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        var orgId = RequireOrganizationId();
+        var connection = _db.Database.GetDbConnection();
+        await _db.Database.OpenConnectionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT content FROM gateway_command_files WHERE id = @id AND organization_id = @org";
+            var id = command.CreateParameter();
+            id.ParameterName = "id";
+            id.Value = fileId;
+            command.Parameters.Add(id);
+            var org = command.CreateParameter();
+            org.ParameterName = "org";
+            org.Value = orgId;
+            command.Parameters.Add(org);
+            await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SequentialAccess, ct).ConfigureAwait(false);
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false) || await reader.IsDBNullAsync(0, ct).ConfigureAwait(false))
+            {
+                return false;
+            }
+            await using var content = reader.GetStream(0);
+            await content.CopyToAsync(destination, ct).ConfigureAwait(false);
+            return true;
+        }
+        finally
+        {
+            await _db.Database.CloseConnectionAsync().ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -528,8 +603,9 @@ public sealed class GatewayCommandService
 
     /// <summary>
     /// One pass over the current organisation: expires queued commands past their
-    /// claim deadline, fails claimed or running ones nobody has reported on for
-    /// <see cref="SilenceLimit"/>, and clears spent replay-protection rows. Called by
+    /// claim deadline, fails the open commands of a re-keyed (pending) gateway and the
+    /// claimed or running ones nobody has reported on for <see cref="SilenceLimit"/>,
+    /// drops the content of final commands' files, and clears spent replay-protection rows. Called by
     /// <see cref="GatewayCommandSweep"/> inside the organisation's ambient scope.
     /// </summary>
     public async Task<GatewayCommandSweepResult> SweepAsync(CancellationToken ct = default)
@@ -543,6 +619,23 @@ public sealed class GatewayCommandService
                 .SetProperty(c => c.Status, GatewayCommandStatus.Expired)
                 .SetProperty(c => c.FinishedAt, now)
                 .SetProperty(c => c.FailureMessage, OfflineMessage), ct)
+            .ConfigureAwait(false);
+
+        // A gateway re-keyed by a rotation code is pending again, and whatever its old
+        // key was working on cannot be collected or reported until an Admin approves
+        // the new one. The rotation exchange itself runs before anyone is signed in, so
+        // it cannot reach the organisation's commands; this pass does it within 30
+        // seconds instead. Enqueueing refuses a pending gateway, so only a rotated one
+        // has open commands here.
+        var rekeyed = await _db.GatewayCommands
+            .Where(c => (c.Status == GatewayCommandStatus.Queued
+                         || c.Status == GatewayCommandStatus.Claimed
+                         || c.Status == GatewayCommandStatus.Running)
+                        && c.Gateway!.State == GatewayState.Pending)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
+                .SetProperty(c => c.FinishedAt, now)
+                .SetProperty(c => c.FailureMessage, RekeyedMessage), ct)
             .ConfigureAwait(false);
 
         var quietSince = now - SilenceLimit;
@@ -567,16 +660,25 @@ public sealed class GatewayCommandService
                 .SetProperty(c => c.FailureMessage, CommandSilentMessage), ct)
             .ConfigureAwait(false);
 
+        // A final command is never downloaded again; keep the record, drop the bytes.
+        await _db.GatewayCommandFiles
+            .Where(f => f.Content != null
+                        && (f.Command!.Status == GatewayCommandStatus.Succeeded
+                            || f.Command.Status == GatewayCommandStatus.Failed
+                            || f.Command.Status == GatewayCommandStatus.Expired))
+            .ExecuteUpdateAsync(s => s.SetProperty(f => f.Content, (byte[]?)null), ct)
+            .ConfigureAwait(false);
+
         var tokens = await _db.GatewaySeenTokens
             .Where(t => t.ExpiresAt < now)
             .ExecuteDeleteAsync(ct).ConfigureAwait(false);
 
-        if (expired + gatewaySilent + commandSilent > 0)
+        if (expired + rekeyed + gatewaySilent + commandSilent > 0)
         {
             _logger.LogWarning(
-                "Gateway command sweep for organisation {OrganizationId}: {Expired} expired uncollected, {Silent} failed after the gateway went quiet.",
-                _orgContext.CurrentOrganizationId, expired, gatewaySilent + commandSilent);
+                "Gateway command sweep for organisation {OrganizationId}: {Expired} expired uncollected, {Rekeyed} failed after a gateway was re-keyed, {Silent} failed after the gateway went quiet.",
+                _orgContext.CurrentOrganizationId, expired, rekeyed, gatewaySilent + commandSilent);
         }
-        return new GatewayCommandSweepResult(expired, gatewaySilent + commandSilent, tokens);
+        return new GatewayCommandSweepResult(expired, rekeyed, gatewaySilent + commandSilent, tokens);
     }
 }

@@ -76,7 +76,7 @@ namespace ALDevToolbox.Data.Migrations
                     file_name = table.Column<string>(type: "text", nullable: false),
                     sha256 = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
                     size = table.Column<long>(type: "bigint", nullable: false),
-                    content = table.Column<byte[]>(type: "bytea", nullable: false)
+                    content = table.Column<byte[]>(type: "bytea", nullable: true)
                 },
                 constraints: table =>
                 {

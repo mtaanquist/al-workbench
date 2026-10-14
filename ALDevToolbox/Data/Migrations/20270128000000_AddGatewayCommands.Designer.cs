@@ -682,7 +682,6 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnName("command_id");
 
                     b.Property<byte[]>("Content")
-                        .IsRequired()
                         .HasColumnType("bytea")
                         .HasColumnName("content");
 
