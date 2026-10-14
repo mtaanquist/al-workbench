@@ -4146,6 +4146,25 @@ public sealed class ProjectConnectionServiceTests : IDisposable
             "a page open since before the colleague's save must not keep using the tenant it first loaded");
     }
 
+    [Theory]
+    [InlineData("{11111111-2222-3333-4444-555555555555}")]
+    [InlineData("11111111222233334444555555555555")]
+    [InlineData("11111111-2222-3333-4444-5555555555AA")]
+    public async Task SaveConnection_stores_the_client_id_in_one_spelling(string typed)
+    {
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id,
+                new BcConnectionInput(Guid.NewGuid(), typed, "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+        }
+
+        await using var read = _db.NewContext();
+        var stored = await read.OeProjects.AsNoTracking().Where(p => p.Id == id).Select(p => p.BcClientId).SingleAsync();
+        stored.Should().Be(Guid.Parse(typed).ToString());
+        stored.Should().MatchRegex("^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$");
+    }
+
     [Fact]
     public async Task SaveConnection_rejects_a_client_id_that_is_not_a_guid()
     {

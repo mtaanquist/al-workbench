@@ -374,7 +374,8 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         }
         else
         {
-            project.BcClientId = clientId;
+            // One spelling, whatever was pasted (braces, no dashes, upper case).
+            project.BcClientId = Guid.Parse(clientId).ToString();
         }
         if (settingSecret)
         {
@@ -2867,6 +2868,24 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         return (null, null);
     }
 
+    /// <summary>
+    /// The solution, tracked, as it is in the database now. A Blazor circuit keeps one
+    /// context for hours and a tracking query hands back the instance it already holds,
+    /// values and all, so without the reload a page open since before a colleague rotated
+    /// the secret or corrected the tenant would test and refresh with the old ones - and
+    /// stamp "verified" over the re-test their save asked for (same shape as #1236).
+    /// The query's own filter has already read <c>DeletedAt</c> from the database.
+    /// </summary>
+    private async Task<OeProject> LoadProjectForWriteAsync(int projectId, CancellationToken ct)
+    {
+        var alreadyTracked = _db.OeProjects.Local.FindEntry(projectId) is not null;
+        var project = await _db.OeProjects
+            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
+            ?? throw Validation("BcTenantId", "This solution no longer exists.");
+        if (alreadyTracked) await _db.Entry(project).ReloadAsync(ct);
+        return project;
+    }
+
     /// <summary>Decrypts the stored credentials, or null when not fully configured / the key ring can't decrypt the secret.</summary>
     /// <summary>The credentials a solution connects with, and where they came from. Never leaves this service.</summary>
     private sealed record ResolvedCredentials(Guid TenantId, string ClientId, string Secret, DateTime? ExpiresAt, bool FromOrganization);
@@ -2879,27 +2898,6 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// fallback there would connect a customer through a registration nobody chose for
     /// them, so it fails and says so instead.
     /// </summary>
-    /// <summary>
-    /// The solution, tracked, as it is in the database now. A Blazor circuit keeps one
-    /// context for hours and a tracking query hands back the instance it already holds,
-    /// values and all, so without the reload a page open since before a colleague rotated
-    /// the secret or corrected the tenant would test and refresh with the old ones - and
-    /// stamp "verified" over the re-test their save asked for (same shape as #1236).
-    /// </summary>
-    private async Task<OeProject> LoadProjectForWriteAsync(int projectId, CancellationToken ct)
-    {
-        var alreadyTracked = _db.OeProjects.Local.Any(p => p.Id == projectId);
-        var project = await _db.OeProjects
-            .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This solution no longer exists.");
-        if (alreadyTracked)
-        {
-            await _db.Entry(project).ReloadAsync(ct);
-            if (project.DeletedAt is not null) throw Validation("BcTenantId", "This solution no longer exists.");
-        }
-        return project;
-    }
-
     private async Task<ResolvedCredentials?> ResolveCredentialsAsync(OeProject project, CancellationToken ct)
     {
         if (project.BcTenantId is null || project.BcTenantId == Guid.Empty) return null;
