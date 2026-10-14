@@ -79,9 +79,10 @@ public static class McpToolCatalog
 
         // ---- Object Explorer ----
         new McpToolDescriptor("list_releases", ObjectExplorer,
-            "Lists the Business Central releases that have been imported.", false, ToolKey.ObjectExplorer),
+            "Lists the Business Central releases you can browse, the same ones the Releases page shows.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("list_release_modules", ObjectExplorer,
-            "Lists the apps and modules inside one release.", false, ToolKey.ObjectExplorer),
+            "Lists the apps and modules inside one release, up to 200 at a time. "
+            + "It can narrow the list by name.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("compare_releases", ObjectExplorer,
             "Reports what changed between two releases.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("compare_release_files", ObjectExplorer,

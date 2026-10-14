@@ -361,8 +361,10 @@
     /// The tools the assistant is actually offered. A tool switched off under
     /// Administration -> Tools (or site-wide) is left out of what the assistant
     /// receives (#1245), so listing it here sent people asking for something the
-    /// assistant could not do (#1344). Starts as the full list so the first render
-    /// has something to count; the filter replaces it before the page settles.
+    /// assistant could not do (#1344). The full list is only what is left when no
+    /// auth state cascades (a test host rendering the page bare). On a real page the
+    /// cascaded task has already completed, so the filter at the top of
+    /// OnInitializedAsync runs before the first render and the full list never shows.
     /// </summary>
     private IReadOnlyList<McpToolDescriptor> _offered = McpToolCatalog.All;
 

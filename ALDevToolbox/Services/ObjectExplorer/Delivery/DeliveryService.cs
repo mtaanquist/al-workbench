@@ -2857,10 +2857,14 @@ public sealed record WaitingDeployment(
     Guid? AppId,
     string? AppVersion);
 
-/// <summary>A delivery for the history list, with its per-app rows resolved for display.</summary>
+/// <summary>
+/// A delivery for the history list, with its per-app rows resolved for display.
+/// <c>list_deployments</c> hands this row to agents as it is, so the build's id carries
+/// the name the other tools use for it on the wire (#1344).
+/// </summary>
 public sealed record DeliveryHistoryRow(
     int Id,
-    int ProjectBuildId,
+    [property: JsonPropertyName("buildId")] int ProjectBuildId,
     string Status,
     string EnvironmentName,
     DateTime ScheduledFor,

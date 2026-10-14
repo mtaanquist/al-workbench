@@ -8,8 +8,8 @@ using AwesomeAssertions;
 namespace ALDevToolbox.Tests.Mcp;
 
 /// <summary>
-/// The rows <c>get_solution_build</c>, <c>list_pipelines</c> and
-/// <c>list_deployment_pipelines</c> hand to an agent say "solution", as every
+/// The rows <c>get_solution_build</c>, <c>list_pipelines</c>,
+/// <c>list_deployment_pipelines</c> and <c>list_deployments</c> hand to an agent say "solution", as every
 /// other tool does (#1344, MCP-6). <c>list_deployment_pipelines</c> used to take a
 /// <c>solutionId</c> and answer with a <c>projectId</c> for the same thing. The C#
 /// members keep the Project name (see CLAUDE.md, "Solutions in the product,
@@ -21,6 +21,7 @@ public sealed class McpSolutionVocabularyTests
     [InlineData(typeof(ProjectBuildDetailResult))]
     [InlineData(typeof(PipelineArtifactsRow))]
     [InlineData(typeof(ReleasePipelineRow))]
+    [InlineData(typeof(DeliveryHistoryRow))]
     public void No_field_an_agent_reads_is_named_after_a_project(Type row)
     {
         var leaking = row.GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -40,6 +41,7 @@ public sealed class McpSolutionVocabularyTests
         WireName<ReleasePipelineRow>(nameof(ReleasePipelineRow.ProjectEnvironmentId)).Should().Be("environmentId");
         WireName<PipelineArtifactsRow>(nameof(PipelineArtifactsRow.ProjectId)).Should().Be("solutionId");
         WireName<PipelineArtifactsRow>(nameof(PipelineArtifactsRow.ProjectName)).Should().Be("solutionName");
+        WireName<DeliveryHistoryRow>(nameof(DeliveryHistoryRow.ProjectBuildId)).Should().Be("buildId");
     }
 
     private static string? WireName<T>(string property) =>

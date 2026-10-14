@@ -77,6 +77,31 @@ public sealed class McpRequestFilterTests : IDisposable
         Refusal(doc).Should().Contain("personal access token cannot do");
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_writing_tool_whose_area_is_not_marked_reaches_the_tool_with_a_personal_access_token(bool anotherAreaMarked)
+    {
+        await EnableMcpAsync();
+        // deploy_build writes, so it gets past the "reads are never gated" check and
+        // reaches the question of whether Deployment pipelines is marked. It is not:
+        // either another area is, or none is.
+        await SetOrganisationAsync(stepUp: anotherAreaMarked ? [ToolKey.Cookbook] : []);
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
+        var pat = await IssuePatAsync();
+
+        using var doc = await RpcAsync(client, pat, "tools/call",
+            new { name = "deploy_build", arguments = new { buildId = 999999, deploymentPipelineId = 999999 } });
+
+        // The tool itself answers (no such build or pipeline); what matters is that
+        // the step-up filter did not refuse it first.
+        var reply = ReplyText(doc);
+        reply.Should().NotBeEmpty(doc.RootElement.GetRawText());
+        reply.Should().NotContain("confirm it's them");
+        reply.Should().NotContain("personal access token");
+    }
+
     [Fact]
     public async Task A_tool_nobody_marked_reaches_the_tool_with_a_personal_access_token()
     {
@@ -132,6 +157,24 @@ public sealed class McpRequestFilterTests : IDisposable
         var result = root.GetProperty("result");
         result.GetProperty("isError").GetBoolean().Should().BeTrue(root.GetRawText());
         return string.Join("\n", result.GetProperty("content").EnumerateArray()
+            .Select(c => c.TryGetProperty("text", out var t) ? t.GetString() : null));
+    }
+
+    /// <summary>
+    /// What the agent reads from any reply, refused or not: the JSON-RPC error
+    /// message, or the text of the tool result's content, decoded (the raw JSON
+    /// may carry an apostrophe as an escape).
+    /// </summary>
+    private static string ReplyText(JsonDocument doc)
+    {
+        var root = doc.RootElement;
+        if (root.TryGetProperty("error", out var error))
+        {
+            return error.GetProperty("message").GetString() ?? string.Empty;
+        }
+        var result = root.GetProperty("result");
+        if (!result.TryGetProperty("content", out var content)) return result.GetRawText();
+        return string.Join("\n", content.EnumerateArray()
             .Select(c => c.TryGetProperty("text", out var t) ? t.GetString() : null));
     }
 
