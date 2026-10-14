@@ -211,7 +211,7 @@ internal sealed class UpgradeActionTestFixture : IDisposable
         {
             var access = new ProjectAccess(ctx, Db.OrgContext);
             await Connections(ctx, access).SaveConnectionAsync(projectId, new BcConnectionInput(
-                Guid.NewGuid(), "client-abc", "s3cr3t", DateTime.UtcNow.AddYears(1), timeZone));
+                Guid.NewGuid(), "11111111-2222-3333-4444-555555555555", "s3cr3t", DateTime.UtcNow.AddYears(1), timeZone));
         }
         Db.OrgContext.CurrentUserId = owner;
 

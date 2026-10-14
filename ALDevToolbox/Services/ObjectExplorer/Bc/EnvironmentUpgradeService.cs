@@ -314,7 +314,7 @@ public sealed class EnvironmentUpgradeService
             UpdatedAt = now,
         };
         _db.OeEnvironmentUpgrades.Add(upgrade);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct).ConfigureAwait(false);
 
         _logger.LogInformation(
             "User {UserId} created planned upgrade {UpgradeId} ({UpgradeName}, target {TargetVersion}).",
@@ -349,7 +349,7 @@ public sealed class EnvironmentUpgradeService
         upgrade.PlannedAt = plannedAt?.UtcDateTime;
         upgrade.Note = details.Note;
         upgrade.UpdatedAt = _clock.GetUtcNow().UtcDateTime;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct).ConfigureAwait(false);
         await transaction.CommitAsync(ct).ConfigureAwait(false);
 
         _logger.LogInformation(
@@ -379,7 +379,7 @@ public sealed class EnvironmentUpgradeService
         upgrade.ClosedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct).ConfigureAwait(false);
         upgrade.UpdatedAt = now;
         foreach (var line in upgrade.Lines) line.IsOpen = false;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct).ConfigureAwait(false);
         // Done means nothing is left to check on it.
         await NotificationSubject.MarkDoneAsync(
             _db, upgrade.Lines.Select(l => NotificationSubject.UpgradeLine(l.Id)).ToList(), now, _logger, ct)
@@ -533,7 +533,7 @@ public sealed class EnvironmentUpgradeService
 
         var lineSubjects = upgrade.Lines.Select(l => NotificationSubject.UpgradeLine(l.Id)).ToList();
         _db.OeEnvironmentUpgrades.Remove(upgrade);
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct).ConfigureAwait(false);
         // Nothing is left to check, and the page the notices link to is gone.
         await NotificationSubject.MarkDoneAsync(_db, lineSubjects, _clock.GetUtcNow().UtcDateTime, _logger, ct)
             .ConfigureAwait(false);
@@ -668,7 +668,7 @@ public sealed class EnvironmentUpgradeService
         var now = _clock.GetUtcNow().UtcDateTime;
         _db.OeEnvironmentUpgradeLines.Remove(line);
         line.Upgrade!.UpdatedAt = now;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct).ConfigureAwait(false);
         await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
             .ConfigureAwait(false);
 
@@ -703,7 +703,7 @@ public sealed class EnvironmentUpgradeService
         }
         line.AssigneeUserId = userId;
         line.Upgrade!.UpdatedAt = now;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct).ConfigureAwait(false);
 
         _logger.LogInformation(
             "User {UserId} assigned environment {EnvironmentId} on planned upgrade {UpgradeId} to user {AssigneeUserId}.",
@@ -745,7 +745,7 @@ public sealed class EnvironmentUpgradeService
         {
             var now = _clock.GetUtcNow().UtcDateTime;
             upgrade.UpdatedAt = now;
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await SaveAsync(ct).ConfigureAwait(false);
             await NotificationSubject.MarkDoneAsync(
                 _db, removed.Select(NotificationSubject.UpgradeLine).ToList(), now, _logger, ct).ConfigureAwait(false);
         }
@@ -796,7 +796,7 @@ public sealed class EnvironmentUpgradeService
                     _db, reassigned.Select(NotificationSubject.UpgradeLine).ToList(), now, _logger, ct).ConfigureAwait(false);
             }
             upgrade.UpdatedAt = now;
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await SaveAsync(ct).ConfigureAwait(false);
         }
 
         _logger.LogInformation(
@@ -840,7 +840,7 @@ public sealed class EnvironmentUpgradeService
         var refused = new Dictionary<string, string>();
         foreach (var missing in wanted.Except(foundIds))
         {
-            refused[Key(missing)] = "That environment is no longer on the upgrade. Reload the upgrade and try again.";
+            refused[Key(missing)] = NoLongerOnUpgrade;
         }
 
         var grant = new Dictionary<int, bool>();
@@ -923,7 +923,7 @@ public sealed class EnvironmentUpgradeService
         }
         if (setNote) line.Note = trimmedNote;
         line.Upgrade!.UpdatedAt = now;
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await SaveAsync(ct).ConfigureAwait(false);
         if (newlyChecked)
         {
             await NotificationSubject.MarkDoneAsync(_db, [NotificationSubject.UpgradeLine(line.Id)], now, _logger, ct)
@@ -1004,7 +1004,8 @@ public sealed class EnvironmentUpgradeService
     /// for hours, and a tracking query hands back the instance it already holds, values and
     /// all: without this, a "marked done" another person undid since would still refuse
     /// every write here, and a close they made would not stop one (#1236). Only unchanged
-    /// rows go; every write here saves before it returns.
+    /// rows go: every write here saves before it returns, and <see cref="SaveAsync"/> lets go of
+    /// whatever it could not save.
     /// </summary>
     private void ForgetTrackedUpgrades()
     {
@@ -1051,7 +1052,7 @@ public sealed class EnvironmentUpgradeService
             .Where(l => _db.OeProjects.Where(visible)
                 .Any(p => p.Id == l.ProjectId && p.DeletedAt == null))
             .FirstOrDefaultAsync(ct).ConfigureAwait(false)
-            ?? throw Refusal("Line", "That environment is no longer on the upgrade. Reload the upgrade and try again.");
+            ?? throw Refusal("Line", NoLongerOnUpgrade);
         if (line.Upgrade!.ClosedAt is not null) throw ClosedRefusal();
         await _access.EnsureCanManageEnvironmentUpdatesAsync(line.ProjectId, ct).ConfigureAwait(false);
         return line;
@@ -1096,7 +1097,7 @@ public sealed class EnvironmentUpgradeService
     {
         try
         {
-            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            await SaveAsync(ct).ConfigureAwait(false);
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {
@@ -1104,6 +1105,37 @@ public sealed class EnvironmentUpgradeService
                 "Another upgrade took one of these environments a moment ago. Reload and try again.");
         }
     }
+
+    /// <summary>
+    /// Saves, and on any failure lets go of every upgrade and line this context tracks,
+    /// pending changes included. The context outlives the call on a Blazor circuit, so an
+    /// insert or change left pending after a refused save would ride along with the next
+    /// write on the page - an add the person was told was refused could land later, under
+    /// an unrelated tick or assignment. Whatever the next call needs it loads afresh.
+    /// </summary>
+    private async Task SaveAsync(CancellationToken ct)
+    {
+        try
+        {
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            var pending = _db.ChangeTracker.Entries()
+                .Where(e => e.Entity is OeEnvironmentUpgrade or OeEnvironmentUpgradeLine)
+                .ToList();
+            foreach (var entry in pending) entry.State = EntityState.Detached;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The refusal for a line that is gone. Public so a page reporting a batch can count
+    /// these into one sentence rather than repeat it per line (the rows may be hidden, so
+    /// it cannot name them).
+    /// </summary>
+    public const string NoLongerOnUpgrade =
+        "That environment is no longer on the upgrade. Reload the upgrade and try again.";
 
     private static PlanValidationException Refusal(string field, string message) =>
         new(new Dictionary<string, string> { [field] = message });

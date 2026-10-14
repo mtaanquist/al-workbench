@@ -352,7 +352,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     }
 
     private BcConnectionInput ValidConnection(string secret = "s3cr3t") =>
-        new(Guid.NewGuid(), "client-abc", secret, DateTime.UtcNow.AddYears(1), "Europe/Copenhagen");
+        new(Guid.NewGuid(), "11111111-2222-3333-4444-555555555555", secret, DateTime.UtcNow.AddYears(1), "Europe/Copenhagen");
 
     // ── Secret handling ───────────────────────────────────────────────────
 
@@ -401,7 +401,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         // Re-save with a blank secret but a changed timezone.
         await using (var ctx = _db.NewContext())
             await Svc(ctx, TokenOk()).SaveConnectionAsync(id,
-                new BcConnectionInput(Guid.NewGuid(), "client-abc", ClientSecret: "", SecretExpiresAt: null, TimeZone: "UTC"));
+                new BcConnectionInput(Guid.NewGuid(), "11111111-2222-3333-4444-555555555555", ClientSecret: "", SecretExpiresAt: null, TimeZone: "UTC"));
 
         await using (var verify = _db.NewContext())
         {
@@ -434,7 +434,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using var ctx = _db.NewContext();
 
         var act = () => Svc(ctx, TokenOk()).SaveConnectionAsync(id,
-            new BcConnectionInput(Guid.NewGuid(), "client-abc", "secret", SecretExpiresAt: null, TimeZone: null));
+            new BcConnectionInput(Guid.NewGuid(), "11111111-2222-3333-4444-555555555555", "secret", SecretExpiresAt: null, TimeZone: null));
 
         (await act.Should().ThrowAsync<PlanValidationException>())
             .Which.Errors.Should().ContainKey("BcClientSecretExpiresAt");
@@ -4080,9 +4080,9 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var oldTenant = Guid.NewGuid();
         var newTenant = Guid.NewGuid();
 
-        (await tokens.GetTokenAsync(7, oldTenant, "client-abc", "s")).Should().Be($"tok-{oldTenant}");
-        (await tokens.GetTokenAsync(7, oldTenant, "client-abc", "s")).Should().Be($"tok-{oldTenant}", "the same credentials reuse the cache");
-        (await tokens.GetTokenAsync(7, newTenant, "client-abc", "s")).Should().Be($"tok-{newTenant}");
+        (await tokens.GetTokenAsync(7, oldTenant, "11111111-2222-3333-4444-555555555555", "s")).Should().Be($"tok-{oldTenant}");
+        (await tokens.GetTokenAsync(7, oldTenant, "11111111-2222-3333-4444-555555555555", "s")).Should().Be($"tok-{oldTenant}", "the same credentials reuse the cache");
+        (await tokens.GetTokenAsync(7, newTenant, "11111111-2222-3333-4444-555555555555", "s")).Should().Be($"tok-{newTenant}");
         (await tokens.GetTokenAsync(7, newTenant, "client-xyz", "s")).Should().Be($"tok-{newTenant}");
 
         handler.Tenants.Should().HaveCount(3, "a tenant or client change is a cache miss");
@@ -4100,7 +4100,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             await Svc(ctx, tokens).SaveConnectionAsync(id,
-                new BcConnectionInput(oldTenant, "client-abc", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+                new BcConnectionInput(oldTenant, "11111111-2222-3333-4444-555555555555", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
         }
         await using (var ctx = _db.NewContext())
             (await Svc(ctx, tokens).AcquireDeliveryContextAsync(id)).AccessToken.Should().Be($"tok-{oldTenant}");
@@ -4108,12 +4108,56 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             await Svc(ctx, tokens).SaveConnectionAsync(id,
-                new BcConnectionInput(newTenant, "client-abc", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+                new BcConnectionInput(newTenant, "11111111-2222-3333-4444-555555555555", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
         }
         await using (var ctx = _db.NewContext())
             (await Svc(ctx, tokens).AcquireDeliveryContextAsync(id)).AccessToken.Should().Be($"tok-{newTenant}");
 
         handler.Tenants.Should().Equal(oldTenant.ToString(), newTenant.ToString());
+    }
+
+    [Fact]
+    public async Task Test_connection_on_a_long_lived_context_uses_the_tenant_a_colleague_saved_since()
+    {
+        var id = await SeedProjectAsync();
+        var handler = new PerTenantTokenHandler();
+        var tokens = new BcTokenService(new StubFactory(handler), NullLogger<BcTokenService>.Instance);
+        var oldTenant = Guid.NewGuid();
+        var newTenant = Guid.NewGuid();
+        await using (var ctx = _db.NewContext())
+        {
+            await Svc(ctx, tokens).SaveConnectionAsync(id,
+                new BcConnectionInput(oldTenant, "11111111-2222-3333-4444-555555555555", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+        }
+
+        // The page's context: it has already loaded (and so tracks) the solution.
+        await using var page = _db.NewContext();
+        await Svc(page, tokens).TestConnectionAsync(id);
+
+        await using (var colleague = _db.NewContext())
+        {
+            await Svc(colleague, tokens).SaveConnectionAsync(id,
+                new BcConnectionInput(newTenant, "11111111-2222-3333-4444-555555555555", "s3cr3t", DateTime.UtcNow.AddYears(1), null));
+        }
+
+        await Svc(page, tokens).RefreshEnvironmentsAsync(id);
+
+        handler.Tenants.Should().Equal([oldTenant.ToString(), newTenant.ToString()],
+            "a page open since before the colleague's save must not keep using the tenant it first loaded");
+    }
+
+    [Fact]
+    public async Task SaveConnection_rejects_a_client_id_that_is_not_a_guid()
+    {
+        var id = await SeedProjectAsync();
+        await using var ctx = _db.NewContext();
+
+        var act = () => Svc(ctx, TokenOk()).SaveConnectionAsync(id,
+            new BcConnectionInput(Guid.NewGuid(), "CRONUS Business Central app", "secret", DateTime.UtcNow.AddYears(1), null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("BcClientId")
+            .WhoseValue.Should().Contain("Application (client) ID");
     }
 
     private const string OrgClientId = "22222222-2222-2222-2222-222222222222";
@@ -4180,7 +4224,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var tokens = new BcTokenService(new StubFactory(handler), NullLogger<BcTokenService>.Instance);
         await using (var ctx = _db.NewContext())
             await Svc(ctx, tokens).TestConnectionAsync(id);
-        handler.ClientIds.Should().Equal("client-abc");
+        handler.ClientIds.Should().Equal("11111111-2222-3333-4444-555555555555");
 
         await using (var ctx = _db.NewContext())
         {
@@ -4215,7 +4259,7 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using (var ctx = _db.NewContext())
         {
             await Svc(ctx, TokenOk()).SaveConnectionAsync(id,
-                new BcConnectionInput(Guid.NewGuid(), "client-abc", "own-secret", DateTime.UtcNow.AddDays(-1), null));
+                new BcConnectionInput(Guid.NewGuid(), "11111111-2222-3333-4444-555555555555", "own-secret", DateTime.UtcNow.AddDays(-1), null));
         }
 
         var handler = new CapturingTokenHandler();
