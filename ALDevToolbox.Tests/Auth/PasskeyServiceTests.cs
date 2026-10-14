@@ -14,6 +14,7 @@ using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using ALDevToolbox.Components.Email;
 using ALDevToolbox.Services.Email;
 
@@ -102,6 +103,118 @@ public sealed class PasskeyServiceTests : IDisposable
         await using var read = _db.NewContext();
         (await read.UserPasskeys.IgnoreQueryFilters().AnyAsync()).Should().BeFalse();
         (await read.EmailOutboxMessages.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_sign_in_challenge_cannot_finish_a_registration()
+    {
+        // Same protector, same user id: only the kind tells them apart.
+        var userId = await SeedUserAsync("ada@cronus.example");
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginLoginAsync("ada@cronus.example");
+
+        var act = () => svc.CompleteRegistrationAsync(userId, "Planted",
+            Attestation(options.Challenge), envelope, "https://workbench.cronus.example/account/security");
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Token"].Should().Contain("registration session expired");
+        await NothingWasAddedAsync();
+    }
+
+    [Fact]
+    public async Task A_step_up_challenge_cannot_finish_a_registration()
+    {
+        var userId = await SeedUserAsync("ada@cronus.example");
+        await using (var seed = _db.NewContext())
+        {
+            // Step-up needs a passkey to offer; a different one from the
+            // credential the attestation below would add.
+            seed.UserPasskeys.Add(new UserPasskey
+            {
+                UserId = userId, CredentialId = RandomNumberGenerator.GetBytes(16), PublicKey = [0xA0],
+                Nickname = "Phone", CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginStepUpAsync(userId);
+
+        var act = () => svc.CompleteRegistrationAsync(userId, "Planted",
+            Attestation(options.Challenge), envelope, "https://workbench.cronus.example/account/security");
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Token"].Should().Contain("registration session expired");
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().CountAsync()).Should().Be(1);
+        (await read.AuditLog.AnyAsync(a => a.EntityType == AuditEntityType.Passkey)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_registration_challenge_cannot_sign_in_or_step_up()
+    {
+        var userId = await SeedAsync("ada@cronus.example");
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginRegistrationAsync(userId);
+
+        var signIn = () => svc.CompleteLoginAsync(Assertion(options.Challenge, userId, signCount: 1, userVerified: true), envelope);
+        var stepUp = () => svc.CompleteStepUpAsync(userId, Assertion(options.Challenge, userId, signCount: 1, userVerified: true), envelope);
+
+        (await signIn.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Passkey"].Should().Contain("wasn't started as a sign-in");
+        (await stepUp.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Passkey"].Should().Contain("wasn't started for this account");
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().SingleAsync()).SignCounter.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task The_audit_row_and_email_survive_the_request_going_away_once_the_passkey_is_saved()
+    {
+        var userId = await SeedUserAsync("ada@cronus.example");
+        using var cts = new CancellationTokenSource();
+        await using var ctx = _db.NewContext(new CancelAfterPasskeySaved(cts));
+        var svc = NewService(ctx);
+        var (options, envelope) = await svc.BeginRegistrationAsync(userId);
+
+        await svc.CompleteRegistrationAsync(userId, "Work laptop",
+            Attestation(options.Challenge), envelope, "https://workbench.cronus.example/account/security", cts.Token);
+
+        cts.IsCancellationRequested.Should().BeTrue("the browser went away once the passkey was saved");
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().CountAsync()).Should().Be(1);
+        (await read.AuditLog.CountAsync(a => a.EntityType == AuditEntityType.Passkey)).Should().Be(1);
+        (await read.EmailOutboxMessages.CountAsync(m => m.Purpose == EmailPurpose.PasskeyAdded)).Should().Be(1);
+    }
+
+    private async Task NothingWasAddedAsync()
+    {
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().AnyAsync()).Should().BeFalse();
+        (await read.AuditLog.AnyAsync(a => a.EntityType == AuditEntityType.Passkey)).Should().BeFalse();
+        (await read.EmailOutboxMessages.AnyAsync()).Should().BeFalse();
+    }
+
+    /// <summary>Stands in for a browser that disconnects right after the passkey row is written.</summary>
+    private sealed class CancelAfterPasskeySaved(CancellationTokenSource cts) : SaveChangesInterceptor
+    {
+        private bool _addingPasskey;
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            _addingPasskey = eventData.Context!.ChangeTracker.Entries<UserPasskey>().Any(e => e.State == EntityState.Added);
+            return base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
+
+        public override ValueTask<int> SavedChangesAsync(
+            SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
+        {
+            if (_addingPasskey) cts.Cancel();
+            return base.SavedChangesAsync(eventData, result, cancellationToken);
+        }
     }
 
     [Fact]

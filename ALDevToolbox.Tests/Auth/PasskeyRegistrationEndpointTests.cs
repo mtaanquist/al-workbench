@@ -24,6 +24,7 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
 {
     private const string Password = "correct horse battery staple";
     private const string NewPassword = "another horse battery staple";
+    private const string ReviewPrompt = "Check the passkeys above and remove any you don";
 
     private readonly TestDb _db = new();
     private readonly EndpointFactory _factory;
@@ -103,7 +104,7 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
 
         response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
         (await response.Content.ReadAsStringAsync()).Should().Contain(
-            System.Text.Json.JsonSerializer.Serialize(AccountPasskeyEndpoints.StepUpFirstMessage)[1..^1]);
+            System.Text.Json.JsonSerializer.Serialize(StepUpService.StepUpFirstMessage)[1..^1]);
     }
 
     [Fact]
@@ -137,7 +138,7 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
         using var client = await SignInWithPasswordAsync("reset@cronus.example", NewPassword);
         using var page = await client.GetAsync("/account/security");
         var html = await page.Content.ReadAsStringAsync();
-        html.Should().Contain("Software key").And.Contain("check you recognise every one");
+        html.Should().Contain("Software key").And.Contain(ReviewPrompt);
 
         await using var read = _db.NewContext();
         (await read.UserPasskeys.IgnoreQueryFilters().CountAsync(p => p.UserId == userId)).Should().Be(1);
@@ -151,7 +152,90 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
 
         using var page = await client.GetAsync("/account/security");
 
-        (await page.Content.ReadAsStringAsync()).Should().NotContain("check you recognise every one");
+        (await page.Content.ReadAsStringAsync()).Should().NotContain(ReviewPrompt);
+    }
+
+    [Fact]
+    public async Task A_sign_in_challenge_planted_as_the_registration_cookie_is_refused()
+    {
+        // Minting a sign-in challenge needs no session and names the user, so
+        // without a kind on the envelope it would skip the options leg's check.
+        var userId = await SeedUserAsync("planted@cronus.example", withPasskey: true);
+        using var client = await SignInWithPasswordAsync("planted@cronus.example");
+        var token = await PageTokenAsync(client);
+
+        using var anonymous = _factory.CreateClient();
+        using var options = await anonymous.PostAsync("/auth/passkey/login/options",
+            Json("""{"email":"planted@cronus.example"}"""));
+        options.StatusCode.Should().Be(HttpStatusCode.OK);
+        var signInEnvelope = CookieValue(options, PasskeyService.LoginCookieName);
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/account/passkeys")
+        {
+            Content = Json("""{"nickname":"Planted","response":{"id":"AAAA","rawId":"AAAA","type":"public-key","response":{"attestationObject":"oA","clientDataJSON":"e30"}}}"""),
+        };
+        request.Headers.Add("RequestVerificationToken", token);
+        request.Headers.Add("Cookie", $"{PasskeyService.RegistrationCookieName}={signInEnvelope}");
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await response.Content.ReadAsStringAsync()).Should().Contain("registration session expired");
+        await using var read = _db.NewContext();
+        (await read.UserPasskeys.IgnoreQueryFilters().CountAsync(p => p.UserId == userId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_magic_link_session_confirms_with_the_password()
+    {
+        // A magic link is not a second step, so it is not fresh; with nothing
+        // to step up with, the password is what is asked for.
+        await SeedUserAsync("magic@cronus.example");
+        using var client = await SignInWithMagicLinkAsync("magic@cronus.example");
+        var token = await PageTokenAsync(client);
+
+        using var none = await StartAsync(client, token, password: null);
+        none.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await none.Content.ReadAsStringAsync()).Should().Contain("Password is incorrect.");
+
+        using var right = await StartAsync(client, token, Password);
+        right.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task An_email_codes_account_signed_in_by_magic_link_falls_back_to_the_password()
+    {
+        // Its only second step is the mailbox the magic link already used, so
+        // the step-up page has nothing to offer it and the password stands in.
+        var userId = await SeedUserAsync("email-codes@cronus.example");
+        await using (var seed = _db.NewContext())
+        {
+            var user = await seed.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId);
+            user.EmailMfaEnabled = true;
+            await seed.SaveChangesAsync();
+        }
+        using var client = await SignInWithMagicLinkAsync("email-codes@cronus.example");
+        var token = await PageTokenAsync(client);
+
+        using var response = await StartAsync(client, token, Password);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task The_confirm_link_on_the_passkey_card_comes_back_saying_a_passkey_can_be_added()
+    {
+        var recoveryCodes = await SeedTotpUserAsync("round-trip@cronus.example");
+        using var client = await SignInWithRecoveryCodeAsync("round-trip@cronus.example", recoveryCodes[0]);
+
+        // Already fresh from the recovery code, so the step-up hands straight back.
+        using var stepUp = await client.GetAsync(
+            "/auth/step-up?return=" + Uri.EscapeDataString("/account/security?ok=confirmed-passkey"));
+        stepUp.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        var back = stepUp.Headers.Location!.OriginalString;
+        back.Should().Be("/account/security?ok=confirmed-passkey");
+
+        using var page = await client.GetAsync(back);
+        (await page.Content.ReadAsStringAsync()).Should().Contain("You can now add a passkey.");
     }
 
     private async Task<int> SeedUserAsync(string email, bool withPasskey = false)
@@ -215,6 +299,27 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
         using var done = await PostFormAsync(client, "/auth/login/challenge/recovery", token, ("Code", recoveryCode));
         done.Headers.Location!.OriginalString.Should().NotContain("err=");
         return client;
+    }
+
+    private async Task<HttpClient> SignInWithMagicLinkAsync(string email)
+    {
+        string raw;
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            raw = (await scope.ServiceProvider.GetRequiredService<PasswordResetService>()
+                .CreateMagicLoginTokenAsync(email, "203.0.113.9"))!;
+        }
+        var client = _factory.CreateClient();
+        using var consume = await client.GetAsync("/auth/login/magic/consume?token=" + Uri.EscapeDataString(raw));
+        consume.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        consume.Headers.Location!.OriginalString.Should().Be("/");
+        return client;
+    }
+
+    private static string CookieValue(HttpResponseMessage response, string name)
+    {
+        var header = response.Headers.GetValues("Set-Cookie").First(c => c.StartsWith(name + "="));
+        return header[(name.Length + 1)..header.IndexOf(';')];
     }
 
     /// <summary>The token the passkey card renders, as the page script reads it.</summary>

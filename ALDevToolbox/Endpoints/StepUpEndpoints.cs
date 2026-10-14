@@ -38,8 +38,8 @@ internal static class StepUpEndpoints
         // Entry: work out which factors this user can confirm with, stash the
         // pending state, and show the challenge page in its step-up dress.
         app.MapGet(Path, async (
-            HttpContext ctx, AppDbContext db, IOrganizationContext org, PasskeyService passkeys,
-            EntraSignInService entra, ALDevToolbox.Services.Tools.ToolEnablement tools,
+            HttpContext ctx, IOrganizationContext org, StepUpService stepUp,
+            ALDevToolbox.Services.Tools.ToolEnablement tools,
             IDataProtectionProvider protection, TimeProvider clock, CancellationToken ct) =>
         {
             var safeReturn = ResolveSafeReturn(ctx.Request.Query["return"].ToString());
@@ -55,7 +55,7 @@ internal static class StepUpEndpoints
                 ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
                 return;
             }
-            var methods = await AvailableMethodsAsync(db, passkeys, entra, userId.Value, StepUpAuth.Method(ctx.User), ct);
+            var methods = await stepUp.AvailableMethodsAsync(userId.Value, StepUpAuth.Method(ctx.User), ct);
             if (methods is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
 
             SetMfaPendingCookie(ctx, protection, new MfaPending(
@@ -198,40 +198,6 @@ internal static class StepUpEndpoints
         ClearMfaPendingCookie(ctx);
         logger.LogInformation("Step-up completed with {Method} for {Email} (org {OrgId}).", method, user.Email, user.OrganizationId);
         if (redirect) ctx.Response.Redirect(ReturnUrlOf(state));
-    }
-
-    /// <summary>The ways a signed-in user can step up right now. <see cref="Any"/> is false for an account with nothing to confirm with.</summary>
-    public sealed record StepUpMethods(bool Totp, bool EmailCode, bool Passkey, bool Entra)
-    {
-        public bool Any => Totp || EmailCode || Passkey || Entra;
-    }
-
-    /// <summary>
-    /// What the step-up page would offer <paramref name="userId"/>, or null
-    /// when the row is gone. Shared by the step-up entry and by passkey
-    /// registration, which asks for a step-up only from an account that can
-    /// give one. Filtered throughout: the caller is that user, signed in.
-    /// </summary>
-    public static async Task<StepUpMethods?> AvailableMethodsAsync(
-        AppDbContext db, PasskeyService passkeys, EntraSignInService entra, int userId,
-        SignInMethod? sessionMethod, CancellationToken ct)
-    {
-        // Filtered: the signed-in user's own row, inside their org.
-        var user = await db.Users.AsNoTracking()
-            .Where(u => u.Id == userId)
-            .Select(u => new { u.TotpEnabled, u.EmailMfaEnabled })
-            .FirstOrDefaultAsync(ct);
-        if (user is null) return null;
-
-        // A session that began with a magic link already rests on the
-        // mailbox, so an emailed code would be the same factor twice.
-        var emailUsable = user.EmailMfaEnabled && sessionMethod != SignInMethod.MagicLink;
-        var passkeyAvailable = passkeys.IsConfigured
-            && await db.UserPasskeys.AnyAsync(p => p.UserId == userId, ct);
-        var entraAvailable = await db.UserExternalLogins.AnyAsync(
-                l => l.UserId == userId && l.Provider == EntraSignInService.ProviderName, ct)
-            && await entra.ResolveChallengeForCurrentOrgAsync(ct) is not null;
-        return new StepUpMethods(user.TotpEnabled, emailUsable, passkeyAvailable, entraAvailable);
     }
 
     /// <summary>The pending state, only when it is a step-up for the user on this request's cookie.</summary>

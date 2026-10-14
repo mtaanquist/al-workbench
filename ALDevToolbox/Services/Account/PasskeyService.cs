@@ -130,7 +130,7 @@ public sealed class PasskeyService
             AttestationPreference = AttestationConveyancePreference.None,
         });
 
-        var envelope = JsonSerializer.Serialize(new ChallengeEnvelope(userId, options.Challenge, _clock.GetUtcNow().UtcDateTime));
+        var envelope = JsonSerializer.Serialize(new ChallengeEnvelope(userId, options.Challenge, _clock.GetUtcNow().UtcDateTime, Kind: ChallengeKind.Registration));
         return (options, _protector.Protect(envelope));
     }
 
@@ -151,7 +151,10 @@ public sealed class PasskeyService
     {
         AssertConfigured();
         var envelope = UnprotectEnvelope(protectedChallenge);
-        if (envelope.UserId != userId)
+        // Only an envelope BeginRegistrationAsync minted: a sign-in or step-up
+        // one carries the same user id and the same protector, and taking it
+        // here would skip the check the registration-options leg makes.
+        if (envelope.Kind != ChallengeKind.Registration || envelope.UserId != userId)
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Token"] = "Passkey registration session expired. Try again." });
         }
@@ -187,61 +190,73 @@ public sealed class PasskeyService
             Nickname = trimmedNickname,
             CreatedAt = now,
         };
-        _db.UserPasskeys.Add(passkey);
-        await _db.SaveChangesAsync(ct);
-        await RecordAsync(userId, passkey, AuditAction.Created, ct);
+        var actor = await ActorAsync(userId, ct);
+        // From here nothing listens to the request token: the passkey and its
+        // audit row commit together or not at all, and once they have, the
+        // owner's email is queued even if the browser has gone away.
+        await using (var tx = await _db.Database.BeginTransactionAsync(CancellationToken.None))
+        {
+            _db.UserPasskeys.Add(passkey);
+            await _db.SaveChangesAsync(CancellationToken.None);
+            AddAuditRow(actor, passkey, AuditAction.Created);
+            await _db.SaveChangesAsync(CancellationToken.None);
+            await tx.CommitAsync(CancellationToken.None);
+        }
         _logger.LogInformation("Passkey {PasskeyId} added for user {UserId}.", passkey.Id, userId);
-        await NotifyAddedAsync(userId, passkey, securityUrl, ct);
+        await NotifyAddedAsync(actor, passkey, securityUrl);
         return passkey;
     }
 
-    /// <summary>
-    /// Writes the audit row for a passkey added or removed. By hand rather than
-    /// through <c>AuditInterceptor</c>: the row's counter and last-used time move
-    /// on every sign-in, and the log wants the two events that matter, not that.
-    /// </summary>
-    private async Task RecordAsync(int userId, UserPasskey passkey, AuditAction action, CancellationToken ct)
+    /// <summary>Who is acting, read before any write so the writes need nothing more from the database.</summary>
+    private sealed record Actor(int UserId, int OrganizationId, string Email, string DisplayName, string AuditName);
+
+    private async Task<Actor> ActorAsync(int userId, CancellationToken ct)
     {
         // Filtered: the signed-in user's own row, inside their org.
-        var organizationId = await _db.Users.AsNoTracking()
+        var user = await _db.Users.AsNoTracking()
             .Where(u => u.Id == userId)
-            .Select(u => u.OrganizationId)
+            .Select(u => new { u.OrganizationId, u.Email, u.DisplayName })
             .FirstAsync(ct);
+        return new Actor(userId, user.OrganizationId, user.Email, user.DisplayName,
+            await AuditActor.ResolveAsync(_db, userId, ct));
+    }
+
+    /// <summary>
+    /// Adds the audit row for a passkey added or removed, for the caller to
+    /// save with the change itself. By hand rather than through
+    /// <c>AuditInterceptor</c>: the row's counter and last-used time move on
+    /// every sign-in, and the log wants the two events that matter, not that.
+    /// </summary>
+    private void AddAuditRow(Actor actor, UserPasskey passkey, AuditAction action) =>
         _db.AuditLog.Add(new AuditLogEntry
         {
             Timestamp = _clock.GetUtcNow().UtcDateTime,
-            ChangedBy = await AuditActor.ResolveAsync(_db, userId, ct),
-            ChangedByUserId = userId,
-            OrganizationId = organizationId,
+            ChangedBy = actor.AuditName,
+            ChangedByUserId = actor.UserId,
+            OrganizationId = actor.OrganizationId,
             EntityType = AuditEntityType.Passkey,
             EntityId = passkey.Id,
             Action = action,
             EntityName = passkey.Nickname,
         });
-        await _db.SaveChangesAsync(ct);
-    }
 
     /// <summary>
     /// Queues the "a passkey was added" email. A failure is logged, not thrown:
     /// the passkey is already saved, and failing the request would only make the
     /// person add it a second time.
     /// </summary>
-    private async Task NotifyAddedAsync(int userId, UserPasskey passkey, string securityUrl, CancellationToken ct)
+    private async Task NotifyAddedAsync(Actor actor, UserPasskey passkey, string securityUrl)
     {
         try
         {
-            var user = await _db.Users.AsNoTracking()
-                .Where(u => u.Id == userId)
-                .Select(u => new { u.Email, u.DisplayName })
-                .FirstAsync(ct);
             var addedAt = passkey.CreatedAt.ToString("d MMM yyyy, HH:mm 'UTC'", System.Globalization.CultureInfo.InvariantCulture);
             var content = await PasskeyAddedEmail.RenderAsync(
-                _emailRenderer, user.DisplayName, passkey.Nickname, addedAt, securityUrl, ct);
-            await _email.SendAsync(user.Email, content, EmailPurpose.PasskeyAdded, ct);
+                _emailRenderer, actor.DisplayName, passkey.Nickname, addedAt, securityUrl, CancellationToken.None);
+            await _email.SendAsync(actor.Email, content, EmailPurpose.PasskeyAdded, CancellationToken.None);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not queue the passkey-added email for user {UserId}.", userId);
+            _logger.LogWarning(ex, "Could not queue the passkey-added email for user {UserId}.", actor.UserId);
         }
     }
 
@@ -325,7 +340,8 @@ public sealed class PasskeyService
                 ? UserVerificationRequirement.Required
                 : UserVerificationRequirement.Preferred,
         });
-        var envelope = JsonSerializer.Serialize(new ChallengeEnvelope(userId, options.Challenge, _clock.GetUtcNow().UtcDateTime, requireUserVerification));
+        var envelope = JsonSerializer.Serialize(new ChallengeEnvelope(userId, options.Challenge, _clock.GetUtcNow().UtcDateTime, requireUserVerification,
+            requireUserVerification ? ChallengeKind.StepUp : ChallengeKind.SignIn));
         return (options, _protector.Protect(envelope));
     }
 
@@ -375,7 +391,7 @@ public sealed class PasskeyService
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "This account isn't active." });
         }
-        if (envelope.RequireUserVerification)
+        if (envelope.Kind != ChallengeKind.SignIn || envelope.RequireUserVerification)
         {
             // A step-up envelope is finished by CompleteStepUpAsync, which
             // stays inside the tenant fence; it must not double as a sign-in.
@@ -422,7 +438,7 @@ public sealed class PasskeyService
     {
         AssertConfigured();
         var envelope = UnprotectEnvelope(protectedChallenge);
-        if (!envelope.RequireUserVerification || envelope.UserId != userId)
+        if (envelope.Kind != ChallengeKind.StepUp || !envelope.RequireUserVerification || envelope.UserId != userId)
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["Passkey"] = "That passkey check wasn't started for this account." });
         }
@@ -472,9 +488,10 @@ public sealed class PasskeyService
         var row = await _db.UserPasskeys.IgnoreQueryFilters()
             .FirstOrDefaultAsync(p => p.Id == passkeyId && p.UserId == userId, ct);
         if (row is null) return;
+        var actor = await ActorAsync(userId, ct);
         _db.UserPasskeys.Remove(row);
+        AddAuditRow(actor, row, AuditAction.Deleted);
         await _db.SaveChangesAsync(ct);
-        await RecordAsync(userId, row, AuditAction.Deleted, ct);
         _logger.LogInformation("Passkey {PasskeyId} removed by user {UserId}.", passkeyId, userId);
     }
 
@@ -563,7 +580,16 @@ public sealed class PasskeyService
         return options;
     }
 
+    /// <summary>
+    /// Which ceremony minted an envelope. All three share one protector and one
+    /// shape, so without this a sign-in envelope (anonymous to mint, and it
+    /// names the user) could be planted in the registration cookie. SignIn is
+    /// zero so an envelope from before this field reads as a sign-in, the
+    /// least it can do.
+    /// </summary>
+    private enum ChallengeKind { SignIn = 0, StepUp = 1, Registration = 2 }
+
     // RequireUserVerification defaults to false so an envelope issued before
     // this field existed still deserialises as an ordinary sign-in.
-    private sealed record ChallengeEnvelope(int? UserId, byte[] Challenge, DateTime IssuedAt, bool RequireUserVerification = false);
+    private sealed record ChallengeEnvelope(int? UserId, byte[] Challenge, DateTime IssuedAt, bool RequireUserVerification = false, ChallengeKind Kind = ChallengeKind.SignIn);
 }

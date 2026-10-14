@@ -25,52 +25,28 @@ internal static class AccountPasskeyEndpoints
     public const string RegistrationOptionsPath = "/account/passkeys/registration-options";
 
     /// <summary>
-    /// Null when this session may add a passkey, else the sentence to show.
-    /// A session that confirmed a second step within the organisation's window
-    /// may. Otherwise an account with a way to step up is sent to do that, and
-    /// an account with none (a password and nothing else, so far) types its
-    /// current password, which is the most it can prove. The password arrives
-    /// as JSON (<c>{"password": "..."}</c>) because the caller is a fetch.
+    /// The current password from the registration-options body
+    /// (<c>{"password": "..."}</c>; JSON because the caller is a fetch), or
+    /// null when there is none. Antiforgery has already been read from the
+    /// header, so the body is still unread here.
     /// </summary>
-    internal static async Task<string?> RegistrationRefusalAsync(
-        HttpContext ctx, AppDbContext db, PasskeyService passkeys, EntraSignInService entra, AuthService auth,
-        Services.Tools.ToolEnablement tools, int userId, CancellationToken ct)
+    private static async Task<string?> ReadPasswordAsync(HttpContext ctx, CancellationToken ct)
     {
-        if (await tools.IsFreshAsync(ctx.User, ct)) return null;
-        var methods = await StepUpEndpoints.AvailableMethodsAsync(db, passkeys, entra, userId, StepUpAuth.Method(ctx.User), ct);
-        if (methods is null) return "Sign in again, then add the passkey.";
-        if (methods.Any) return StepUpFirstMessage;
-
-        string? password = null;
-        if (ctx.Request.ContentLength is > 0 || ctx.Request.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true)
+        try
         {
-            try
-            {
-                using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ct);
-                if (doc.RootElement.ValueKind == JsonValueKind.Object
-                    && doc.RootElement.TryGetProperty("password", out var p)
-                    && p.ValueKind == JsonValueKind.String)
-                {
-                    password = p.GetString();
-                }
-            }
-            catch (JsonException)
-            {
-                // An empty or malformed body is the same as no password.
-            }
+            using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ct);
+            return doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("password", out var p)
+                && p.ValueKind == JsonValueKind.String
+                    ? p.GetString()
+                    : null;
         }
-        // Filtered: the signed-in user's own row, inside their org.
-        var hash = await db.Users.AsNoTracking()
-            .Where(u => u.Id == userId)
-            .Select(u => u.PasswordHash)
-            .FirstAsync(ct);
-        return !string.IsNullOrEmpty(password) && auth.VerifyPassword(password, hash)
-            ? null
-            : "Password is incorrect.";
+        catch (JsonException)
+        {
+            // An empty or malformed body is the same as no password.
+            return null;
+        }
     }
-
-    /// <summary>What a session that has a way to confirm, but has not used it lately, is told.</summary>
-    public const string StepUpFirstMessage = "Confirm it's you first, then add the passkey.";
 
     public static IEndpointRouteBuilder MapAccountPasskeyEndpoints(this IEndpointRouteBuilder app)
     {
@@ -82,15 +58,14 @@ internal static class AccountPasskeyEndpoints
         // nothing else yet. Both legs check antiforgery; the script sends the
         // token from the passkey card's form as a header.
         app.MapPost(RegistrationOptionsPath, async (
-            HttpContext ctx, PasskeyService passkeys, IOrganizationContext org, AppDbContext db,
-            EntraSignInService entra, AuthService auth, Services.Tools.ToolEnablement tools,
+            HttpContext ctx, PasskeyService passkeys, IOrganizationContext org, StepUpService stepUp,
             IAntiforgery antiforgery, CancellationToken ct) =>
         {
             if (org.CurrentUserId is null) { ctx.Response.StatusCode = 401; return; }
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             if (!passkeys.IsConfigured) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsync("Passkeys not configured."); return; }
             var userId = org.CurrentUserId.Value;
-            var refusal = await RegistrationRefusalAsync(ctx, db, passkeys, entra, auth, tools, userId, ct);
+            var refusal = await stepUp.PasskeyRegistrationRefusalAsync(ctx.User, userId, await ReadPasswordAsync(ctx, ct), ct);
             if (refusal is not null)
             {
                 ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -108,9 +83,10 @@ internal static class AccountPasskeyEndpoints
             await ctx.Response.WriteAsync(options.ToJson(), ct);
         }).RequireAuthorization();
 
-        // The second leg needs no fresh check of its own: the envelope it
-        // consumes was only minted after the check above passed, it is bound to
-        // this user, and it lasts five minutes.
+        // The second leg needs no fresh check of its own: the only envelope it
+        // accepts is a registration one (PasskeyService refuses a sign-in or
+        // step-up envelope here), which only the leg above mints, after its
+        // check passed; it is bound to this user and lasts five minutes.
         app.MapPost("/account/passkeys", async (
             HttpContext ctx, PasskeyService passkeys, IOrganizationContext org, PublicOrigin publicOrigin,
             IAntiforgery antiforgery, CancellationToken ct) =>
@@ -136,6 +112,11 @@ internal static class AccountPasskeyEndpoints
                     $"{publicOrigin.For(ctx)}{RouteConstants.AccountSecurity}", ct);
                 ctx.Response.StatusCode = 200;
                 await ctx.Response.WriteAsync("{\"ok\":true}");
+            }
+            catch (PlanValidationException ex)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Errors.First().Value }));
             }
             catch (Exception ex)
             {
