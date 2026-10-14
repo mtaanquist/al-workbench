@@ -36,4 +36,21 @@ public sealed class MaintenanceModeStateTests
         state.IsActive.Should().BeFalse();
         state.Reason.Should().BeNull();
     }
+
+    [Fact]
+    public void A_captured_hold_after_a_failed_restore_comes_back_unchanged()
+    {
+        var state = new MaintenanceModeState();
+        state.HoldAfterFailedRestore("Restoring backup x failed.");
+        var held = state.Capture();
+
+        state.Enter("Restoring backup y");
+        state.IsHeldAfterFailedRestore.Should().BeFalse();
+        state.Restore(held);
+
+        state.IsActive.Should().BeTrue();
+        state.IsHeldAfterFailedRestore.Should().BeTrue();
+        state.Reason.Should().Be("Restoring backup x failed.");
+        state.StartedAtUtc.Should().Be(held.StartedAtUtc);
+    }
 }

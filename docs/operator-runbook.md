@@ -104,23 +104,58 @@ and `/healthz` / `/readyz` keep going.
 Verify: post-restore, `/readyz` is 200 and `/site-admin/audit` shows the
 *Restore* entry. Non-SiteAdmin sign-in works.
 
-A file that can't be read (truncated, not a backup at all, or taken by a newer
-PostgreSQL) is refused before anything changes; the backups page says so and
-the app stays open.
+### Before anything is dropped
 
-If the restore fails part-way, the old database is already gone, so the app
-stays in maintenance mode instead of reopening on an empty or half-loaded
-database. The backups page still lists every backup file and says the restore
-failed: restore the pre-restore backup from step 1 (or another known-good one)
-from there, and maintenance mode lifts when that restore completes. Then
-investigate the failure in the logs.
+The restore first checks the file: it must be the size it was when it was
+taken, and `pg_restore` must be able to read it from start to end. A file that
+is cut short, damaged part-way, not a backup at all, or taken by a newer
+PostgreSQL is refused at this point; the backups page says so, nothing has
+changed and the app stays open. The check costs one extra read of the file.
 
-Maintenance mode lives in the app process, so restarting the container lifts it
-and the app opens on whatever the database holds. Only do that if you have lost
-your SiteAdmin session: sign-in is blocked while maintenance mode is on. On an
-emptied database startup creates the bootstrap admin again from
-`BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD`, if they are set; sign in
-with it and restore from the backups page.
+What it cannot catch is a file that reads cleanly but that the database then
+refuses part-way through loading it. That is the case below.
+
+### If the restore fails after the drop
+
+The old database is already gone, so the app stays in maintenance mode instead
+of reopening on an empty or half-loaded database. The delivery, environment
+refresh and upgrade workers stand down while it is on, so nothing is published
+to a customer environment from that state.
+
+The backups page still lists every backup file and says the restore failed.
+Restore the pre-restore backup from step 1 (or another known-good one) from
+there; maintenance mode lifts when that restore completes. The app remembers
+the backup list from before the failure, including per-tenant snapshots, and
+puts it back with that restore. Then investigate the failure in the logs.
+
+Off-site storage settings live in the database. If the failure left it empty,
+they are gone with everything else, so to pull a backup back from the bucket
+re-enter them at `/site-admin/settings/offsite` first.
+
+### Restarting the container instead
+
+Maintenance mode, and the remembered backup list, live in the app process. A
+restart drops both and the app opens to everyone on whatever the database
+holds. It also restarts the nightly backup and its retention clean-up, which
+will start replacing good backups with copies of the broken database: restore
+a good backup straight away after a restart. Restart only when one of these is
+true:
+
+- You have lost your SiteAdmin session. Sign-in is blocked while maintenance
+  mode is on.
+- Every backup you try fails to restore. Nothing else lifts maintenance mode.
+- The backups page itself errors because the failed restore left no tables to
+  read. Startup recreates them.
+
+After the restart, sign in with:
+
+- an account from the dump, if the restore got far enough to load users; or
+- the bootstrap admin, which startup creates only when the users table is
+  empty and both `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` are
+  set. If you have to add or change them, run `docker compose up -d`, not
+  `docker compose restart`: a restart keeps the old environment.
+
+Then restore from the backups page as above.
 
 ## Off-site (S3-compatible) backups
 

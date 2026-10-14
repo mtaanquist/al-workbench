@@ -55,6 +55,7 @@ public sealed class BackupService
     private readonly string _pgDumpPath;
     private readonly string _pgRestorePath;
     private readonly SystemSettingsService? _systemSettings;
+    private readonly RestoreInventoryHold? _restoreInventory;
 
     public BackupService(
         AppDbContext db,
@@ -68,10 +69,14 @@ public sealed class BackupService
         BackupOptions? options = null,
         // Optional for the same reason; production DI always supplies it, and a
         // restore re-applies the restored settings row through it (#1255).
-        SystemSettingsService? systemSettings = null)
+        SystemSettingsService? systemSettings = null,
+        // Optional for the same reason; production DI always supplies the
+        // singleton, which carries the inventory across a failed restore (#1321).
+        RestoreInventoryHold? restoreInventory = null)
     {
         _db = db;
         _systemSettings = systemSettings;
+        _restoreInventory = restoreInventory;
         _orgContext = orgContext;
         _maintenance = maintenance;
         _logger = logger;
@@ -257,10 +262,13 @@ public sealed class BackupService
     /// </para>
     ///
     /// <para>
-    /// A file <c>pg_restore --list</c> cannot read is refused before anything
-    /// changes. If the restore still fails once the schema has been dropped,
-    /// the schema is migrated and the inventory put back as far as possible,
-    /// maintenance mode stays on with a reason that says so, and
+    /// A file that is not the size it was taken at, or that <c>pg_restore</c>
+    /// cannot read from end to end, is refused before anything changes. If the
+    /// restore still fails once the schema has been dropped, the schema is
+    /// migrated and the inventory put back as far as possible, maintenance mode
+    /// is held on (<see cref="MaintenanceModeState.HoldAfterFailedRestore"/>),
+    /// the inventory read before the failure is kept in
+    /// <see cref="RestoreInventoryHold"/> for the next restore, and
     /// <see cref="BackupRestoreFailedException"/> is thrown: reopening would
     /// hand every user an empty or half-loaded database, while staying closed
     /// leaves the SiteAdmin the backups page to restore another one (#1321).
@@ -293,19 +301,19 @@ public sealed class BackupService
             });
         }
 
-        // Read the dump's table of contents before anything is dropped. This
-        // catches a truncated header, a file that is not a dump at all and a
-        // dump from a newer pg_dump than ours; it cannot vouch for the data
-        // section, which only the restore itself reads (#1321).
-        await EnsureDumpIsReadableAsync(path, ct);
+        // Read the whole dump before anything is dropped (#1321).
+        await EnsureDumpIsReadableAsync(row, path, ct);
 
         // Same advisory lock the backup path takes, so a scheduled pg_dump (or
         // off-site prune) can't run against the schema we're about to drop. See
         // issue #370.
         await using var coordination = await BackupCoordination.AcquireAsync(_connectionString, ct);
 
-        var inventory = await CaptureInventoryAsync(ct);
+        var inventory = await CaptureInventoryForRestoreAsync(ct);
 
+        // A restore can start while an earlier failed one holds the site closed;
+        // if this one fails before the drop, that hold has to come back as it was.
+        var before = _maintenance.Capture();
         _maintenance.Enter($"Restoring backup {row.FileName}");
         var sw = Stopwatch.StartNew();
         // Deliberately not the caller's token from here on; see the remarks above.
@@ -342,6 +350,7 @@ public sealed class BackupService
             await RestoreInventoryAsync(inventory, destructive);
             if (_systemSettings is not null) await _systemSettings.ReloadAfterRestoreAsync(destructive);
             restored = true;
+            _restoreInventory?.Clear();
 
             sw.Stop();
             _logger.LogInformation(
@@ -357,12 +366,17 @@ public sealed class BackupService
             _logger.LogError(ex,
                 "Restore of backup {FileName} failed after the database was dropped; staying in maintenance mode.",
                 row.FileName);
+            // What goes back after a failure is degraded: per-tenant snapshots
+            // whose organisation is gone are left out and missing creators are
+            // cleared. Keep what was read before this restore, so the next one
+            // puts the full list back rather than the degraded one.
+            _restoreInventory?.Hold(inventory);
             await RecoverAfterFailedRestoreAsync(inventory);
-            _maintenance.Enter(
-                $"Restoring backup {row.FileName} failed. The site stays closed until a site administrator restores another backup.");
+            _maintenance.HoldAfterFailedRestore(
+                $"Restoring backup {row.FileName} failed. The database may be empty or only partly loaded.");
             throw new BackupRestoreFailedException(
-                "the site is still in maintenance mode and only site administrators can use it. "
-                    + "Restore another backup to bring it back online.",
+                "The restore failed. The site is still closed to everyone except site administrators. "
+                    + "Restore another backup to reopen it.",
                 ex);
         }
         catch (Exception ex) when (ex is not InvalidOperationException)
@@ -376,20 +390,38 @@ public sealed class BackupService
         }
         finally
         {
-            if (restored || !dropped) _maintenance.Exit();
+            if (restored) _maintenance.Exit();
+            // Nothing was dropped, so put back whatever was there before: open, or
+            // still held closed by an earlier failed restore.
+            else if (!dropped) _maintenance.Restore(before);
         }
     }
 
     /// <summary>
-    /// Refuses a file <c>pg_restore</c> cannot read the table of contents of,
-    /// before maintenance mode or the drop. Only the header and the table of
-    /// contents are read, so this is quick even for a large dump.
+    /// Refuses a backup file before maintenance mode or the drop when it is not
+    /// the size it was when it was taken, or when <c>pg_restore</c> cannot read
+    /// it from end to end. The read decompresses every table into
+    /// <c>/dev/null</c> without touching the database, so it catches a file cut
+    /// short or damaged part-way, which reading only the table of contents does
+    /// not. It costs one extra pass over the file. It cannot catch a dump that
+    /// reads cleanly but that this database will not accept (#1321).
     /// </summary>
-    private async Task EnsureDumpIsReadableAsync(string path, CancellationToken ct)
+    private async Task EnsureDumpIsReadableAsync(Backup row, string path, CancellationToken ct)
     {
+        if (row.FileSizeBytes > 0 && new FileInfo(path).Length != row.FileSizeBytes)
+        {
+            _logger.LogWarning(
+                "Refusing to restore {FileName}: {Actual} bytes on disk, {Expected} recorded when it was taken.",
+                row.FileName, new FileInfo(path).Length, row.FileSizeBytes);
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["BackupId"] = "This backup file is not the size it was when it was taken, so it is probably damaged "
+                    + "or incomplete. Nothing was changed - pick another backup.",
+            });
+        }
         try
         {
-            await RunPgToolAsync(_pgRestorePath, new[] { "--list", path }, ct);
+            await RunPgToolAsync(_pgRestorePath, new[] { "-f", "/dev/null", path }, ct);
         }
         catch (InvalidOperationException)
         {
@@ -399,6 +431,30 @@ public sealed class BackupService
                     + "version of PostgreSQL. Nothing was changed - pick another backup.",
             });
         }
+    }
+
+    /// <summary>
+    /// The <c>backups</c> and <c>per_tenant_backups</c> rows to put back after
+    /// this restore. Normally what the tables hold now. After a failed restore,
+    /// the list kept from before that failure, plus any row added since (an
+    /// off-site download, a new backup), matched by file name (#1321). If the
+    /// failure left no tables to read, the kept list is all there is.
+    /// </summary>
+    private async Task<BackupInventory> CaptureInventoryForRestoreAsync(CancellationToken ct)
+    {
+        var held = _restoreInventory?.Held;
+        if (held is null) return await CaptureInventoryAsync(ct);
+        BackupInventory current;
+        try
+        {
+            current = await CaptureInventoryAsync(ct);
+        }
+        catch (PostgresException ex)
+        {
+            _logger.LogWarning(ex, "Could not read the backup tables; restoring with the list kept from the failed restore.");
+            return held;
+        }
+        return BackupInventory.Merge(held, current);
     }
 
     /// <summary>
@@ -594,9 +650,6 @@ public sealed class BackupService
     }
 
     private void RequireSiteAdmin() => _orgContext.RequireSiteAdmin();
-
-    /// <summary>The <c>backups</c> and <c>per_tenant_backups</c> rows as JSON arrays, read before a restore drops them.</summary>
-    private sealed record BackupInventory(string Backups, string PerTenantBackups);
 
     private async Task<BackupInventory> CaptureInventoryAsync(CancellationToken ct)
     {

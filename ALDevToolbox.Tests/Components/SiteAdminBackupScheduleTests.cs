@@ -212,18 +212,38 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
     /// so, or nothing tells them the site is still closed to everyone else.
     /// </summary>
     [Fact]
-    public void The_backups_page_says_when_the_site_is_in_maintenance_mode()
+    public void After_a_failed_restore_the_backups_page_says_the_site_is_held_closed()
     {
         At(Summer);
-        _maintenance.Enter("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed.");
+        _maintenance.HoldAfterFailedRestore(
+            "Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed. The database may be empty or only partly loaded.");
+
+        var cut = _ctx.Render<SiteAdminBackups>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var alerts = cut.FindAll("[role=alert]");
+            alerts.Should().ContainSingle("one notice, not a failure message beside a maintenance warning");
+            var alert = alerts[0].TextContent;
+            alert.Should().Contain("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed.");
+            alert.Should().Contain("may be empty or only partly loaded");
+            alert.Should().Contain("Restore another backup below to reopen it.");
+        });
+    }
+
+    [Fact]
+    public void While_a_restore_runs_the_backups_page_says_the_site_is_closed_until_it_finishes()
+    {
+        At(Summer);
+        _maintenance.Enter("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump");
 
         var cut = _ctx.Render<SiteAdminBackups>();
 
         cut.WaitForAssertion(() =>
         {
             var alert = cut.Find("[role=alert]").TextContent;
-            alert.Should().Contain("The site is in maintenance mode and only site administrators can use it.");
-            alert.Should().Contain("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed.");
+            alert.Should().Contain("closed to everyone except site administrators until it finishes");
+            alert.Should().NotContain("Restore another backup");
         });
     }
 
@@ -237,7 +257,7 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.Markup.Should().Contain("A complete copy of everything on this site.");
-            cut.Markup.Should().NotContain("maintenance mode");
+            cut.Markup.Should().NotContain("closed to everyone");
         });
     }
 

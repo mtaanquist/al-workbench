@@ -45,7 +45,10 @@ public sealed class DeliveryScheduler : PolledScheduler
         IServiceProvider services,
         TimeProvider clock,
         ILogger<DeliveryScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build the scheduler by hand keep compiling;
+        // production DI always supplies the singleton.
+        Operations.MaintenanceModeState? maintenance = null)
         // Polls every 30s; a sweep only resolves + enqueues (the publish runs on
         // DeliveryWorker), so a 10-minute active ceiling is ample even for many orgs.
         : base(logger, heartbeats, nameof(DeliveryScheduler),
@@ -57,11 +60,20 @@ public sealed class DeliveryScheduler : PolledScheduler
         _services = services;
         _clock = clock;
         _logger = logger;
+        _maintenance = maintenance;
         // Constructed while the host is built, before any worker drains a job.
         _startedAtUtc = clock.GetUtcNow().UtcDateTime;
     }
 
-    protected override Task TickAsync(CancellationToken ct) => SweepAsync(ct);
+    private readonly Operations.MaintenanceModeState? _maintenance;
+
+    /// <summary>
+    /// Skipped while maintenance mode is on: during a restore, or while a failed
+    /// one holds the site closed over a database that may be half-loaded (#1321).
+    /// Due rows stay scheduled and are picked up on the first sweep after.
+    /// </summary>
+    protected override Task TickAsync(CancellationToken ct) =>
+        _maintenance?.IsActive == true ? Task.CompletedTask : SweepAsync(ct);
 
     /// <summary>
     /// One pass over every active org. Internal so a test can drive it directly against a

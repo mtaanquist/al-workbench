@@ -59,6 +59,43 @@ public sealed class MaintenanceModeMiddlewareTests : IDisposable
         await AssertNotGatedAsync(consultant, "/");
     }
 
+    /// <summary>
+    /// The reason names the backup file and is for the SiteAdmin. Everyone else
+    /// gets generic wording, and no promise of a quick return while a failed
+    /// restore holds the site closed (#1321).
+    /// </summary>
+    [Fact]
+    public async Task The_503_page_keeps_the_reason_to_itself_and_does_not_promise_a_quick_return_after_a_failed_restore()
+    {
+        using var factory = new EndpointFactory(_db);
+        using var anonymous = factory.CreateClient();
+        var maintenance = factory.Services.GetRequiredService<MaintenanceModeState>();
+        try
+        {
+            maintenance.Enter("Restoring backup aldevtoolbox-20260701T020000000Z-adhoc.dump");
+            using (var response = await anonymous.GetAsync("/", TestContext.Current.CancellationToken))
+            {
+                var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+                body.Should().NotContain("aldevtoolbox-20260701T020000000Z-adhoc.dump");
+                body.Should().Contain("It will be back shortly.");
+            }
+
+            maintenance.HoldAfterFailedRestore("Restoring backup aldevtoolbox-20260701T020000000Z-adhoc.dump failed.");
+            using (var response = await anonymous.GetAsync("/", TestContext.Current.CancellationToken))
+            {
+                response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+                var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+                body.Should().NotContain("aldevtoolbox-20260701T020000000Z-adhoc.dump");
+                body.Should().NotContain("shortly");
+                body.Should().Contain("closed while a site administrator restores it from a backup");
+            }
+        }
+        finally
+        {
+            maintenance.Exit();
+        }
+    }
+
     private static async Task AssertGatedAsync(HttpClient client, string path)
     {
         using var response = await client.GetAsync(path);

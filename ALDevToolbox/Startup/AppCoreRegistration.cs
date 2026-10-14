@@ -33,6 +33,9 @@ public static class AppCoreRegistration
         // MaintenanceModeState is a process-local flag — singleton lifetime so the
         // middleware and BackupService share the same instance.
         services.AddSingleton<MaintenanceModeState>();
+        // Its partner: the backup inventory kept across a failed full restore,
+        // which has to outlive the request that failed (#1321).
+        services.AddSingleton<ALDevToolbox.Services.Backups.RestoreInventoryHold>();
         // Email shares the AppDbContext lifetime (Scoped) so it can read the
         // hybrid SMTP override from system_settings. Callers get the outbox
         // decorator, not the transport: it writes most messages to email_outbox

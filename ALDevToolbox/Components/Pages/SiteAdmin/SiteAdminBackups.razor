@@ -34,14 +34,23 @@
             each day; pinned copies are never deleted to make room for newer ones.
         </p>
 
-        @if (Maintenance.IsActive)
+        @* Shown to SiteAdmins only; everyone else gets the maintenance page. A failed
+           restore holds the site closed, and the restore endpoint sends no message
+           of its own for it, so this is the one place that says so (#1321). *@
+        @if (Maintenance.IsHeldAfterFailedRestore)
         {
-            @* Shown to SiteAdmins only (everyone else gets the maintenance page), and
-               mainly after a failed restore, which keeps maintenance mode on (#1321). *@
+            <Alert Tone="AlertTone.Danger" Role="alert">
+                <span>
+                    @Maintenance.Reason The site is closed to everyone except site administrators.
+                    Restore another backup below to reopen it.
+                </span>
+            </Alert>
+        }
+        else if (Maintenance.IsActive)
+        {
             <Alert Tone="AlertTone.Warn" Role="alert">
                 <span>
-                    The site is in maintenance mode and only site administrators can use it.
-                    @Maintenance.Reason
+                    @Maintenance.Reason. The site is closed to everyone except site administrators until it finishes.
                 </span>
             </Alert>
         }

@@ -27,6 +27,8 @@ public sealed class BackupServiceTests : IDisposable
     private readonly TestDb _db = new();
     private readonly string _backupsDir;
     private readonly MaintenanceModeState _maintenance = new();
+    // Shared by every service the fixture builds, as the DI singleton is (#1321).
+    private readonly RestoreInventoryHold _restoreInventory = new();
     // Controllable clock so tests give backups distinct created_at values by
     // advancing it, rather than sleeping on the real clock (flaky at coarse
     // resolution / under CI load). See issue #395.
@@ -203,12 +205,169 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     /// <summary>
-    /// A file pg_restore cannot read (here: four bytes of garbage, like a
-    /// truncated download) is refused before maintenance mode or the drop, so
-    /// the database the site is running on is left alone. See issue #1321.
+    /// A file that is no longer the size recorded when it was taken (here cut
+    /// to a few bytes) is refused before maintenance mode or the drop, so the
+    /// database the site is running on is left alone. See issue #1321.
     /// </summary>
     [PgToolFact]
-    public async Task RestoreAsync_refuses_an_unreadable_file_before_dropping_anything()
+    public async Task RestoreAsync_refuses_a_file_whose_size_changed_before_dropping_anything()
+    {
+        var (svc, backup) = await MarkerAndBackupAsync();
+        await File.WriteAllBytesAsync(Path.Combine(_backupsDir, backup.FileName), new byte[] { 0x00, 0x01, 0x02, 0x03 });
+
+        Func<Task> act = () => svc.RestoreAsync(backup.Id);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors["BackupId"].Should().Contain("not the size it was when it was taken");
+        await AssertNothingChangedAsync(backup.Id);
+    }
+
+    /// <summary>
+    /// A dump cut short well past its header, with a row that agrees (an
+    /// off-site copy that was already short when downloaded). Reading only the
+    /// table of contents passes such a file and the restore then loads tables
+    /// with no rows; reading it end to end refuses it before anything is
+    /// dropped. See issue #1321.
+    /// </summary>
+    [PgToolFact]
+    public async Task RestoreAsync_refuses_a_dump_cut_short_past_its_header()
+    {
+        var (svc, backup) = await MarkerAndBackupAsync();
+        var path = Path.Combine(_backupsDir, backup.FileName);
+        var bytes = await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken);
+        var kept = bytes[..(bytes.Length * 7 / 10)];
+        await File.WriteAllBytesAsync(path, kept, TestContext.Current.CancellationToken);
+        await SetRecordedSizeAsync(backup.Id, kept.Length);
+
+        Func<Task> act = () => svc.RestoreAsync(backup.Id);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors["BackupId"].Should().Contain("can't be read");
+        await AssertNothingChangedAsync(backup.Id);
+    }
+
+    /// <summary>
+    /// A dump damaged part-way through its data, with its size unchanged, is
+    /// refused before anything is dropped. See issue #1321.
+    /// </summary>
+    [PgToolFact]
+    public async Task RestoreAsync_refuses_a_dump_damaged_part_way_through()
+    {
+        var (svc, backup) = await MarkerAndBackupAsync();
+        var path = Path.Combine(_backupsDir, backup.FileName);
+        var bytes = await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken);
+        // Overwrite a stretch in the middle, where the compressed table data is.
+        for (var i = bytes.Length * 4 / 10; i < bytes.Length * 6 / 10; i++) bytes[i] = 0xFF;
+        await File.WriteAllBytesAsync(path, bytes, TestContext.Current.CancellationToken);
+
+        Func<Task> act = () => svc.RestoreAsync(backup.Id);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors["BackupId"].Should().Contain("can't be read");
+        await AssertNothingChangedAsync(backup.Id);
+    }
+
+    /// <summary>
+    /// A restore that starts while an earlier failed one holds the site closed,
+    /// and fails before its own drop (here the drop is refused by the server),
+    /// must leave the site held closed, not open the emptied site to everyone.
+    /// See issue #1321.
+    /// </summary>
+    [Fact]
+    public async Task A_restore_that_fails_at_the_drop_keeps_an_earlier_hold_in_place()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var tool = WriteFakeTool("fake-pg-restore", "exit 0");
+        var backupId = await AddBackupRowWithFileAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.Database.ExecuteSqlRawAsync("""
+                CREATE FUNCTION refuse_drop() RETURNS event_trigger LANGUAGE plpgsql AS
+                $$ BEGIN RAISE EXCEPTION 'drop refused for the test'; END $$;
+                CREATE EVENT TRIGGER refuse_drop ON ddl_command_start
+                    WHEN TAG IN ('DROP SCHEMA') EXECUTE FUNCTION refuse_drop();
+                """, TestContext.Current.CancellationToken);
+        }
+        _maintenance.HoldAfterFailedRestore("Restoring backup earlier.dump failed.");
+        var held = _maintenance.Capture();
+        var svc = NewService(_options with { PgRestorePath = tool });
+
+        try
+        {
+            Func<Task> act = () => svc.RestoreAsync(backupId);
+
+            (await act.Should().ThrowAsync<InvalidOperationException>())
+                .Which.Should().NotBeOfType<BackupRestoreFailedException>("nothing was dropped");
+            _maintenance.Capture().Should().Be(held, "the earlier hold comes back exactly as it was");
+        }
+        finally
+        {
+            await using var ctx = _db.NewContext();
+            await ctx.Database.ExecuteSqlRawAsync("DROP EVENT TRIGGER refuse_drop;", TestContext.Current.CancellationToken);
+            _maintenance.Exit();
+        }
+    }
+
+    /// <summary>
+    /// A failure that empties the database can only put back the per-tenant
+    /// snapshots whose organisations exist, which is none of them. The next
+    /// restore that succeeds must put back the full list read before that
+    /// failure, not the degraded one, or those snapshots drop out of the UI
+    /// for good. See issue #1321.
+    /// </summary>
+    [PgToolFact]
+    public async Task A_successful_restore_after_a_failed_one_puts_back_the_inventory_from_before_the_failure()
+    {
+        int userId;
+        await using (var ctx = _db.NewContext())
+        {
+            var user = new User
+            {
+                OrganizationId = TestDb.OtherOrgId, Email = "admin@cronus.example", DisplayName = "CRONUS Admin",
+                PasswordHash = "x", Role = UserRole.Admin, Status = UserStatus.Active, CreatedAt = DateTime.UtcNow,
+            };
+            ctx.Users.Add(user);
+            await ctx.SaveChangesAsync();
+            userId = user.Id;
+            ctx.PerTenantBackups.Add(new PerTenantBackup
+            {
+                OrganizationId = TestDb.OtherOrgId, FileName = "other-20260515T000000Z-adhoc.tenant.zip",
+                FileSizeBytes = 1, CreatedAt = DateTime.UtcNow, Kind = BackupKind.AdHoc, SchemaVersion = 3,
+                CreatedByUserId = userId,
+            });
+            await ctx.SaveChangesAsync();
+        }
+        // A day on, so the real backup's file name differs from the stand-in's.
+        _clock.Advance(TimeSpan.FromDays(1));
+        var good = await NewService().CreateAsync(BackupKind.AdHoc);
+        var brokenId = await AddBackupRowWithFileAsync();
+
+        var failingTool = WriteFakeTool("failing-pg-restore", """
+            [ "$1" = "-f" ] && exit 0
+            exit 1
+            """);
+        Func<Task> fail = () => NewService(_options with { PgRestorePath = failingTool }).RestoreAsync(brokenId);
+        await fail.Should().ThrowAsync<BackupRestoreFailedException>();
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.PerTenantBackups.IgnoreQueryFilters().AsNoTracking().AnyAsync())
+                .Should().BeFalse("its organisation is gone, so the snapshot could not go back after the failure");
+        }
+
+        await NewService().RestoreAsync(good.Id);
+
+        _maintenance.IsActive.Should().BeFalse();
+        await using (var ctx = _db.NewContext())
+        {
+            var snapshot = await ctx.PerTenantBackups.IgnoreQueryFilters().AsNoTracking().SingleAsync();
+            snapshot.FileName.Should().Be("other-20260515T000000Z-adhoc.tenant.zip");
+            snapshot.CreatedByUserId.Should().Be(userId, "its creator is back too");
+            (await ctx.Backups.AsNoTracking().Select(b => b.Id).ToListAsync())
+                .Should().BeEquivalentTo([good.Id, brokenId]);
+        }
+    }
+
+    private async Task<(BackupService Service, Backup Backup)> MarkerAndBackupAsync()
     {
         var svc = NewService();
         await using (var ctx = _db.NewContext())
@@ -220,28 +379,31 @@ public sealed class BackupServiceTests : IDisposable
             });
             await ctx.SaveChangesAsync();
         }
-        var backup = await svc.CreateAsync(BackupKind.AdHoc);
-        var path = Path.Combine(_backupsDir, backup.FileName);
-        await File.WriteAllBytesAsync(path, new byte[] { 0x00, 0x01, 0x02, 0x03 });
+        return (svc, await svc.CreateAsync(BackupKind.AdHoc));
+    }
 
-        Func<Task> act = () => svc.RestoreAsync(backup.Id);
+    private async Task SetRecordedSizeAsync(int backupId, long size)
+    {
+        await using var ctx = _db.NewContext();
+        var row = await ctx.Backups.SingleAsync(b => b.Id == backupId);
+        row.FileSizeBytes = size;
+        await ctx.SaveChangesAsync();
+    }
 
-        var ex = await act.Should().ThrowAsync<PlanValidationException>();
-        ex.Which.Errors["BackupId"].Should().Contain("can't be read");
+    private async Task AssertNothingChangedAsync(int backupId)
+    {
         _maintenance.IsActive.Should().BeFalse("nothing was changed, so the site stays open");
-        await using (var ctx = _db.NewContext())
-        {
-            (await ctx.Organizations.IgnoreQueryFilters()
-                .AnyAsync(o => o.Slug == "marker-before-refused-restore"))
-                .Should().BeTrue("the database was not dropped");
-            (await ctx.Backups.AsNoTracking().Select(b => b.Id).ToListAsync())
-                .Should().Equal([backup.Id]);
-        }
+        await using var ctx = _db.NewContext();
+        (await ctx.Organizations.IgnoreQueryFilters()
+            .AnyAsync(o => o.Slug == "marker-before-refused-restore"))
+            .Should().BeTrue("the database was not dropped");
+        (await ctx.Backups.AsNoTracking().Select(b => b.Id).ToListAsync())
+            .Should().Equal([backupId]);
     }
 
     /// <summary>
-    /// A dump whose table of contents reads fine can still fail during the
-    /// restore itself, after the schema is gone. The site must not reopen on
+    /// A dump that reads cleanly can still fail during the restore itself
+    /// (the server refuses it), after the schema is gone. The site must not reopen on
     /// that, and the backups page must still work so the SiteAdmin can restore
     /// another backup from it; that restore then reopens the site. See #1321.
     /// </summary>
@@ -250,10 +412,10 @@ public sealed class BackupServiceTests : IDisposable
     {
         Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
         var failFlag = Path.Combine(_backupsDir, "fail-restore");
-        // Stand-in pg_restore: the table-of-contents check always passes; the
+        // Stand-in pg_restore: the read-through check always passes; the
         // restore itself fails while the flag file exists, having restored nothing.
         var tool = WriteFakeTool("fake-pg-restore", $"""
-            [ "$1" = "--list" ] && exit 0
+            [ "$1" = "-f" ] && exit 0
             [ -f '{failFlag}' ] && exit 1
             exit 0
             """);
@@ -283,8 +445,9 @@ public sealed class BackupServiceTests : IDisposable
         Func<Task> act = () => svc.RestoreAsync(brokenId);
 
         var ex = await act.Should().ThrowAsync<BackupRestoreFailedException>();
-        ex.Which.Message.Should().Contain("maintenance mode");
+        ex.Which.Message.Should().Contain("Restore another backup");
         _maintenance.IsActive.Should().BeTrue("the database was dropped and nothing usable replaced it");
+        _maintenance.IsHeldAfterFailedRestore.Should().BeTrue();
         _maintenance.Reason.Should().Contain("failed");
 
         // The schema was migrated and the inventory put back, so the page the
@@ -315,7 +478,7 @@ public sealed class BackupServiceTests : IDisposable
         // Stand-in pg_restore: announces itself, then waits until the test lets
         // it finish (or the fixture directory goes away, so it never outlives the test).
         var tool = WriteFakeTool("fake-pg-restore", $"""
-            [ "$1" = "--list" ] && exit 0
+            [ "$1" = "-f" ] && exit 0
             : > '{started}'
             while [ -d '{_backupsDir}' ] && [ ! -f '{release}' ]; do sleep 0.05; done
             exit 0
@@ -519,6 +682,6 @@ public sealed class BackupServiceTests : IDisposable
             ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, _clock,
             mcpAvailability: mcp, toolAvailability: tools);
         return new BackupService(ctx, _db.OrgContext, _maintenance, config,
-            NullLogger<BackupService>.Instance, _clock, options ?? _options, systemSettings);
+            NullLogger<BackupService>.Instance, _clock, options ?? _options, systemSettings, _restoreInventory);
     }
 }
