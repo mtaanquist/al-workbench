@@ -252,6 +252,7 @@ public static class OAuthServerRegistration
                 AllowAutoRedirect = false,
                 ConnectCallback = ALDevToolbox.Services.OAuth.SsrfGuard.ConnectAsync,
             });
+        services.AddSingleton<ALDevToolbox.Services.OAuth.CimdFetchLimiter>();
         services.AddScoped<ALDevToolbox.Services.OAuth.CimdClientResolver>();
         return services;
     }
