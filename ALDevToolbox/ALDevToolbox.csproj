@@ -32,6 +32,11 @@
   <ItemGroup>
     <AssemblyMetadata Include="ReleaseVersion" Value="$(ReleaseVersion)" Condition="'$(ReleaseVersion)' != ''" />
     <AssemblyMetadata Include="ReleaseDate" Value="$(ReleaseDate)" Condition="'$(ReleaseDate)' != ''" />
+    <!-- The gateway released alongside (#1363): release.yml publishes it first and
+         passes its SHA-256 and whether it was signed, so the Gateways page can show
+         the hash beside the download. Read by Services/Gateways/GatewayBuild. -->
+    <AssemblyMetadata Include="GatewaySha256" Value="$(GatewaySha256)" Condition="'$(GatewaySha256)' != ''" />
+    <AssemblyMetadata Include="GatewaySigned" Value="$(GatewaySigned)" Condition="'$(GatewaySigned)' != ''" />
   </ItemGroup>
 
   <ItemGroup>

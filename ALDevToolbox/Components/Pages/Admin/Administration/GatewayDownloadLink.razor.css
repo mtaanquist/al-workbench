@@ -1,0 +1,25 @@
+.gw-download {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    margin-top: var(--space-2);
+}
+
+.gw-download__hash-label {
+    margin: var(--space-3) 0 0;
+}
+
+.code-block {
+    margin-top: var(--space-2);
+}
+
+/* 64 hex characters: break anywhere rather than run out of a narrow card. */
+.gw-download__hash {
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.gw-download__note {
+    margin: var(--space-2) 0 0;
+}

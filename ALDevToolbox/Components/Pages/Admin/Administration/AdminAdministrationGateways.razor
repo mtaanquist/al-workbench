@@ -6,6 +6,7 @@
 @using ALDevToolbox.Endpoints
 @using ALDevToolbox.Services.Gateways
 @inject GatewayService Gateways
+@inject GatewayBuild Build
 @inject PublicOrigin Origin
 @inject NavigationManager Nav
 @inject IServiceScopeFactory ScopeFactory
@@ -22,6 +23,13 @@
     code and the command to run on the server. The second step that matters is
     Approve, after comparing the code the server printed with the one shown here -
     so a pending gateway carries that button on its row, not in the menu.
+
+    The gateway itself is downloaded from the GitHub release that matches this
+    AL Workbench (GatewayDownloadLink), with its SHA-256 for customer IT to check.
+    A row whose gateway is older than this AL Workbench says "Out of date", or
+    "Unsupported" when AL Workbench refuses it; the download card under the list
+    says how to update one. No second primary button: the download is an outline
+    link, Add gateway stays the one primary.
 *@
 
 <PageTitle>Gateways · Administration · AL Workbench</PageTitle>
@@ -59,11 +67,14 @@
                     </div>
                 </div>
                 <div class="card__body">
-                    @* The install step gains a download link once the gateway is published (#1363). *@
                     <ol class="gw-steps">
                         @if (_issuedFor is null)
                         {
-                            <li>Install the AL Workbench Gateway on a Windows server in the customer's network that can reach Business Central.</li>
+                            <li>
+                                Download the AL Workbench Gateway and copy it to a folder on a Windows server in the
+                                customer's network that can reach Business Central.
+                                <GatewayDownloadLink IdPrefix="gw-add" />
+                            </li>
                         }
                         <li>
                             On that server, open a command prompt as an administrator and run this command:
@@ -106,9 +117,12 @@
                             A gateway lets AL Workbench manage Business Central servers in a
                             customer's own network, without opening their firewall.
                             Add one to get a one-time code that connects it to AL Workbench.
-                            @* The install step gains a download link once the gateway is published (#1363). *@
                             <ol class="gw-steps gw-steps--empty">
-                                <li>Install the AL Workbench Gateway on a Windows server in the customer's network that can reach Business Central.</li>
+                                <li>
+                                    Download the AL Workbench Gateway and copy it to a folder on a Windows server in the
+                                    customer's network that can reach Business Central.
+                                    <GatewayDownloadLink IdPrefix="gw-empty" />
+                                </li>
                                 <li>On that server, run the command you get when you add the gateway.</li>
                                 <li>Approve it here.</li>
                             </ol>
@@ -154,7 +168,10 @@
                                 @if (gateway.ReportedVersion is not null)
                                 {
                                     @* Takes the Version column's place on a narrow screen. *@
-                                    <div class="u-muted gw-version-inline">Version @gateway.ReportedVersion</div>
+                                    <div class="u-muted gw-version-inline">
+                                        Version @gateway.ReportedVersion
+                                        @VersionPill(gateway)
+                                    </div>
                                 }
                             </td>
                             <td>
@@ -180,7 +197,10 @@
                                     <Timestamp Value="@gateway.LastSeenAt" Relative="true" Placeholder="@("Never")" />
                                 }
                             </td>
-                            <td class="u-muted gw-col-version">@(gateway.ReportedVersion ?? "-")</td>
+                            <td class="u-muted gw-col-version">
+                                <span class="u-nowrap">@(gateway.ReportedVersion ?? "-")</span>
+                                @VersionPill(gateway)
+                            </td>
                             <td class="data-table__actions">
                                 @if (gateway.Status != GatewayStatus.Revoked)
                                 {
@@ -213,6 +233,30 @@
                     }
                     </tbody>
                 </table>
+                </div>
+            </section>
+
+            <section class="card" id="gateway-download">
+                <div class="card__head">
+                    <div>
+                        <h2 class="card__title">Download the gateway</h2>
+                        @if (Build.Download is not null)
+                        {
+                            <p class="card__sub">For a new server, or to update a gateway that is out of date.</p>
+                        }
+                    </div>
+                </div>
+                <div class="card__body">
+                    <GatewayDownloadLink IdPrefix="gw-card" />
+                    @if (Build.Download is not null)
+                    {
+                        <p class="gw-update-title">To update a gateway, on its server:</p>
+                        <ol class="gw-steps">
+                            <li>Stop the AL Workbench Gateway service.</li>
+                            <li>Replace <span class="code u-nowrap">@GatewayBuild.ExecutableName</span> with the one you downloaded.</li>
+                            <li>Start the service again. Its registration and settings are kept, so there is nothing to approve.</li>
+                        </ol>
+                    }
                 </div>
             </section>
         }
@@ -452,6 +496,23 @@
             _busy = false;
         }
     }
+
+    /// <summary>
+    /// "Out of date" while a newer gateway is offered, "Unsupported" once AL Workbench
+    /// refuses it; nothing for a current, preview or unknown version.
+    /// </summary>
+    private RenderFragment? VersionPill(GatewaySummary gateway) => Build.StateOf(gateway.ReportedVersion) switch
+    {
+        GatewayVersionState.OutOfDate => @<span class="gw-version-state">
+            <StatusPill Tone="warn">Out of date</StatusPill>
+            <a href="#gateway-download">Update to @Build.ExpectedVersion</a>
+        </span>,
+        GatewayVersionState.Unsupported => @<span class="gw-version-state">
+            <StatusPill Tone="danger">Unsupported</StatusPill>
+            <span>AL Workbench refuses this version. <a href="#gateway-download">Update it</a></span>
+        </span>,
+        _ => null,
+    };
 
     private static string ToneOf(GatewayStatus status) => status switch
     {

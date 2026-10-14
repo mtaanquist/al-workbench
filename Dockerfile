@@ -25,8 +25,14 @@ COPY . ./
 # An unstamped image simply shows no version - see Services/BuildInfo.
 ARG RELEASE_VERSION=
 ARG RELEASE_DATE=
+# The on-premises gateway published for the same release (#1363): its SHA-256 and
+# whether it was signed, shown on the Gateways page beside the download link. Empty
+# outside release.yml, like the two above - see Services/Gateways/GatewayBuild.
+ARG GATEWAY_SHA256=
+ARG GATEWAY_SIGNED=
 RUN dotnet publish ALDevToolbox/ALDevToolbox.csproj -c Release -o /app /p:UseAppHost=false \
-    -p:ReleaseVersion="$RELEASE_VERSION" -p:ReleaseDate="$RELEASE_DATE"
+    -p:ReleaseVersion="$RELEASE_VERSION" -p:ReleaseDate="$RELEASE_DATE" \
+    -p:GatewaySha256="$GATEWAY_SHA256" -p:GatewaySigned="$GATEWAY_SIGNED"
 
 # ---- Runtime stage ----
 # mcr.microsoft.com/dotnet/aspnet:10.0

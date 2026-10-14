@@ -91,3 +91,22 @@
     .gw-table tbody td:nth-child(3) { grid-area: seen; margin-top: var(--space-1); }
     .gw-table tbody td:nth-child(5) { grid-area: actions; align-self: start; }
 }
+
+/* The version's state under it: the pill, then what it means. */
+.gw-version-state {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    margin-top: var(--space-1);
+}
+
+.gw-update-title {
+    margin: var(--space-4) 0 var(--space-2);
+}
+
+/* The code card, the list and the download card stack in the tab body, which
+   does not space them itself. */
+.card + .card {
+    margin-top: var(--space-4);
+}
