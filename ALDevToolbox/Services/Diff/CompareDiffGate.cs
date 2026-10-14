@@ -2,7 +2,8 @@ namespace ALDevToolbox.Services.Diff;
 
 /// <summary>
 /// The app-wide cap on how many Diff tool diffs run at once
-/// (<c>Endpoints/CompareEndpoints.cs</c>). The per-IP rate limit meters each
+/// (<c>Endpoints/CompareEndpoints.cs</c>), and, as a separate keyed instance
+/// (<see cref="FileCompareKey"/>), on the Object Explorer's file compare page. The per-IP rate limit meters each
 /// caller, but a diff cannot be cancelled once it starts, so this is what keeps
 /// cores free for everyone's pages and the background workers however many
 /// callers there are. Registered as a singleton.
@@ -18,6 +19,20 @@ public sealed class CompareDiffGate
     /// edit and a late diff has usually been superseded by then.
     /// </summary>
     public static readonly TimeSpan SlotWait = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Service key of the second instance, for the Object Explorer's file
+    /// compare page. Kept apart from the anonymous tool's so a burst of Diff
+    /// tool requests cannot hold every slot a signed-in reader needs (#1339).
+    /// </summary>
+    public const string FileCompareKey = "object-explorer-file-compare";
+
+    /// <summary>
+    /// How long the file compare page waits for a slot. Longer than
+    /// <see cref="SlotWait"/>: that page is one request per click, not one
+    /// per keystroke, so waiting is better than a "busy" page.
+    /// </summary>
+    public static readonly TimeSpan FileCompareSlotWait = TimeSpan.FromSeconds(10);
 
     public CompareDiffGate(int slots)
     {

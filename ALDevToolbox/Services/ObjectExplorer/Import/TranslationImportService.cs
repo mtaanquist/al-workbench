@@ -21,6 +21,7 @@ public class TranslationImportService
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ALDevToolbox.Services.Translation.TranslationMemoryService _memory;
+    private readonly ALDevToolbox.Services.Organizations.StorageQuotaGuard _quotaGuard;
     private readonly ILogger<TranslationImportService> _logger;
 
     /// <summary>
@@ -45,11 +46,13 @@ public class TranslationImportService
         AppDbContext db,
         IOrganizationContext orgContext,
         ALDevToolbox.Services.Translation.TranslationMemoryService memory,
+        ALDevToolbox.Services.Organizations.StorageQuotaGuard quotaGuard,
         ILogger<TranslationImportService> logger)
     {
         _db = db;
         _orgContext = orgContext;
         _memory = memory;
+        _quotaGuard = quotaGuard;
         _logger = logger;
     }
 
@@ -71,6 +74,7 @@ public class TranslationImportService
     {
         ArgumentNullException.ThrowIfNull(xliff);
         var orgId = RequireOrganizationId();
+        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
 
         var module = await _db.OeModules.AsNoTracking()
             .Where(m => m.Id == moduleId && m.ReleaseId == releaseId)
@@ -132,6 +136,7 @@ public class TranslationImportService
     {
         ArgumentNullException.ThrowIfNull(zip);
         var orgId = RequireOrganizationId();
+        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
 
         var release = await _db.OeReleases.AsNoTracking()
             .Where(r => r.Id == releaseId)

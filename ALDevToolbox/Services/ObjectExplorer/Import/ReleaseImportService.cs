@@ -754,6 +754,10 @@ public class ReleaseImportService
     public async Task ReopenForRetryAsync(int releaseId, CancellationToken ct = default)
     {
         RequireOrganizationId();
+        // A retry re-ingests the whole release, so it is a write like Begin/Amend.
+        // Covers the manage page's Retry and the nightly requeue of failed
+        // artifact imports, which both come through here (#1338).
+        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
         var release = await _db.OeReleases
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
             ?? throw RetryError($"Release {releaseId} not found in this organisation.");
@@ -842,14 +846,18 @@ public class ReleaseImportService
     {
         if (string.IsNullOrWhiteSpace(dedupKey)) return;
 
-        var taken = await _db.OeReleases.AsNoTracking()
-            .AnyAsync(r => r.OrganizationId == orgId && r.DeletedAt == null && r.DedupKey == dedupKey, ct)
+        var takenBy = await _db.OeReleases.AsNoTracking()
+            .Where(r => r.OrganizationId == orgId && r.DeletedAt == null && r.DedupKey == dedupKey)
+            .Select(r => r.Label)
+            .FirstOrDefaultAsync(ct)
             .ConfigureAwait(false);
-        if (taken)
+        if (takenBy is not null)
         {
+            // The key is internal; the admin reads this in a banner, so name the
+            // release that already holds it instead (#1338).
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["DedupKey"] = $"A Release with dedup key \"{dedupKey}\" already exists in this organisation.",
+                ["DedupKey"] = $"This version is already in the Object Explorer as \"{takenBy}\". Open that release instead of importing it again.",
             });
         }
     }
@@ -877,7 +885,7 @@ public class ReleaseImportService
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                [$"Uploads.{upload.FileName}"] = ex.Message,
+                [$"Uploads.{upload.FileName}"] = $"{upload.FileName}: {ex.Message}",
             });
         }
 
@@ -906,7 +914,7 @@ public class ReleaseImportService
             throw new PlanValidationException(new Dictionary<string, string>
             {
                 [$"Uploads.{upload.FileName}"] =
-                    $".app with AppId {pkg.Manifest.AppId} version {pkg.Manifest.Version} already exists in this Release with a different content hash. Start a new Release instead of overwriting.",
+                    $"{upload.FileName}: this release already has app {pkg.Manifest.AppId} version {pkg.Manifest.Version}, with different contents. Start a new release instead of overwriting it.",
             });
         }
 

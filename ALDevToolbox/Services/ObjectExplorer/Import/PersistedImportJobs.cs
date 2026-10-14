@@ -287,11 +287,14 @@ public sealed class PersistedImportJobs
     /// <see cref="OeImportJob.DownloadUrl"/> lets a retry re-run without the admin
     /// re-pasting the link, and the kind / DVD flag tell the UI whether a
     /// re-upload is required (the staged-zip / cal-txt temp file is gone).
+    /// Backfill jobs are skipped: they never carry a source (#1338).
     /// </summary>
     public async Task<ImportJobOrigin?> GetLatestForReleaseAsync(int releaseId, CancellationToken ct = default)
     {
         return await _db.OeImportJobs.AsNoTracking()
-            .Where(j => j.ReleaseId == releaseId)
+            // A maintenance backfill re-scans stored source; it is never how the
+            // release got its content, so it can't be the source a retry reuses.
+            .Where(j => j.ReleaseId == releaseId && j.Kind != "backfill_system_references")
             // Newest first; tie-break on the serial id so two jobs created within
             // the clock's resolution still resolve to the genuinely-latest row.
             .OrderByDescending(j => j.CreatedAt)

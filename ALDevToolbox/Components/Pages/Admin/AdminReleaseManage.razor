@@ -119,7 +119,7 @@
                     <Icon Name="book-open" Width="16" Height="16" />
                     <span>Import translations</span>
                 </a>
-                @if (_release.DeletedAt is null)
+                @if (_release.DeletedAt is null && _release.Status == "ready")
                 {
                     <form method="post" action="@($"/admin/object-explorer/{ReleaseId}/backfill-system-references")">
                         <AntiforgeryToken />
@@ -306,12 +306,12 @@
                       enctype="multipart/form-data">
                     <AntiforgeryToken />
                     <section class="form-sec">
-                        @if (_origin is null || _origin.Kind == "url")
+                        @if (_origin is null || _origin.Kind is not ("bc_artifact" or "staged_zip" or "cal_txt"))
                         {
                             <label class="field">
                                 <span class="field__label">Download URL</span>
                                 <input type="url" name="DvdUrl" inputmode="url"
-                                       value="@(_origin?.DownloadUrl)"
+                                       value="@(_origin?.Kind == "url" ? _origin.DownloadUrl : null)"
                                        placeholder="https://download.microsoft.com/.../Dynamics.365.BC....DVD.zip"
                                        class="input" />
                                 <small class="field__hint">
@@ -435,7 +435,7 @@
             var msg = ctx.Request.Query["msg"].ToString();
             if (!string.IsNullOrEmpty(err) && !string.IsNullOrEmpty(msg))
             {
-                Status = ($"{err}: {msg}", true);
+                Status = (msg, true);
             }
             else
             {

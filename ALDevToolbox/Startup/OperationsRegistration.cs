@@ -49,6 +49,10 @@ public static class OperationsRegistration
         // The per-IP limit below meters each caller of the Diff endpoint; this
         // caps how many of its diffs run at once across all of them.
         services.AddSingleton(_ => new CompareDiffGate(CompareDiffGate.DefaultSlots));
+        // The Object Explorer's file compare page gets its own, so Diff tool
+        // traffic can never starve signed-in readers of a slot (#1339).
+        services.AddKeyedSingleton(CompareDiffGate.FileCompareKey,
+            (_, _) => new CompareDiffGate(CompareDiffGate.DefaultSlots));
         services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;

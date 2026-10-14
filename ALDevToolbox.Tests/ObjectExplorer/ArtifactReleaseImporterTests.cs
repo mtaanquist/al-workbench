@@ -52,7 +52,7 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
             ctx, _db.OrgContext,
             new ALDevToolbox.Services.Translation.TranslationMemoryService(
                 ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance),
-            NullLogger<TranslationImportService>.Instance);
+            _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance);
         var importer = new ReleaseImportService(
             ctx, _db.OrgContext, _db.NewQuotaGuard(ctx), translations,
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
@@ -188,6 +188,38 @@ public sealed class ArtifactReleaseImporterTests : IDisposable
         queue.Reader.TryRead(out var job).Should().BeTrue();
         job!.ReleaseId.Should().Be(failed.Id);
         job.Source.Should().BeOfType<ReleaseImportSource.BcArtifact>();
+    }
+
+    [Fact]
+    public async Task ImportAsync_does_not_re_run_a_failed_import_for_an_org_over_its_storage_quota()
+    {
+        // #1338: the re-run re-ingests a whole release, so it is a write and the
+        // quota applies to it just as it does to a first import.
+        await using var ctx = _db.NewContext();
+        var failed = Release("Business Central 28.2 (DK)", "bc-onprem:28.2:dk", status: "failed");
+        failed.StatusMessage = "The download was cut off.";
+        ctx.OeReleases.Add(failed);
+        // A 0 MB default quota puts every org at or over quota.
+        var settings = await ctx.SystemSettings.FirstOrDefaultAsync(s => s.Id == 1);
+        if (settings is null)
+        {
+            settings = new ALDevToolbox.Domain.Entities.SystemSettings { Id = 1 };
+            ctx.SystemSettings.Add(settings);
+        }
+        settings.DefaultStorageQuotaMb = 0;
+        await ctx.SaveChangesAsync();
+
+        var queue = new ReleaseImportQueue();
+        var act = () => NewImporter(ctx, queue).ImportAsync("dk", version: null);
+
+        (await act.Should().ThrowAsync<ALDevToolbox.Domain.ValueObjects.PlanValidationException>())
+            .Which.Errors.Should().ContainKey("storage");
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == failed.Id);
+        release.Status.Should().Be("failed", "the release is left as it was");
+        queue.Reader.TryRead(out _).Should().BeFalse();
+        (await read.OeImportJobs.AnyAsync(j => j.ReleaseId == failed.Id)).Should().BeFalse();
     }
 
     [Fact]

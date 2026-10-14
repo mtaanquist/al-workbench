@@ -7,6 +7,7 @@
 @using ALDevToolbox.Services.ObjectExplorer
 @using ALDevToolbox.Services.ObjectExplorer.Explore
 @using ALDevToolbox.Services.Diff
+@using ALDevToolbox.Endpoints
 @using DiffPlex.DiffBuilder
 @using System.Text.Json
 
@@ -128,7 +129,7 @@ else
         @* Side by side reads the two files; inline reads the change. Which one
            helps depends on the change, so this is a per-reader preference the
            page remembers rather than a mode the page picks. *@
-        <span class="pill-tabs" role="group" aria-label="Diff layout" data-diff-layout>
+        <span class="pill-tabs" role="group" aria-label="Diff layout" data-diff-layout hidden="@(_notDiffed != NotDiffedReason.None)">
             <button class="pill-tab is-active" type="button" data-layout="side">Side by side</button>
             <button class="pill-tab" type="button" data-layout="inline">Inline</button>
         </span>
@@ -242,6 +243,38 @@ else
             }
 
             <div class="cmp__view">
+                @if (_notDiffed != NotDiffedReason.None)
+                {
+                    <div class="empty-state">
+                        <span class="empty-state__icon">
+                            <Icon Name="@(_notDiffed == NotDiffedReason.Busy ? "clock" : "triangle-alert")" Width="21" Height="21" />
+                        </span>
+                        <span class="empty-state__title">
+                            @(_notDiffed == NotDiffedReason.Busy
+                                ? "The server is busy comparing other files"
+                                : "These files are too long to compare here")
+                        </span>
+                        <span class="empty-state__text">
+                            @if (_notDiffed == NotDiffedReason.Busy)
+                            {
+                                <text>Reload the page in a moment to try again, or open each file on its own.</text>
+                            }
+                            else
+                            {
+                                <text>
+                                    One of them has more than @CompareEndpoints.MaxLines.ToString("N0") lines or
+                                    @CompareEndpoints.MaxInputLength.ToString("N0") characters. Open each file on its own to read it.
+                                </text>
+                            }
+                        </span>
+                        <span class="u-row">
+                            <a class="btn btn--sm" href="@Links.SourceFile(_leftHeader.Id)">Open left file</a>
+                            <a class="btn btn--sm" href="@Links.SourceFile(_rightHeader.Id)">Open right file</a>
+                        </span>
+                    </div>
+                }
+                else
+                {
                 <div class="cmp__vbar">
                     @* Driven off the diff we just ran, not hard-coded: two
                        files can pair up and turn out identical, and an M
@@ -367,6 +400,7 @@ else
                         </div>
                     </div>
                 </div>
+                }
             </div>
         </div>
     </div>
@@ -402,6 +436,13 @@ else
 }
 
 @code {
+    [Inject(Key = CompareDiffGate.FileCompareKey)] private CompareDiffGate FileCompareGate { get; set; } = default!;
+
+    /// <summary>Why the two files were not diffed, when they were not.</summary>
+    private enum NotDiffedReason { None, TooLarge, Busy }
+
+    private NotDiffedReason _notDiffed;
+
     private SourceFileDetail? _left;
     private SourceFileDetail? _right;
     private SourceFileHeader? _leftHeader;
@@ -505,10 +546,52 @@ else
         _right = await SourceViewer.GetFileAsync(rightId);
         if (_left is null || _right is null) return;
 
-        var model = SideBySideDiffBuilder.Diff(_left.Content, _right.Content, _ignoreWhitespace);
         // Byte equality, which is what the change rail's content_hash compares.
         // Only interesting when it disagrees with the diff — see WhitespaceOnly.
         _bytewiseIdentical = string.Equals(_left.Content, _right.Content, StringComparison.Ordinal);
+
+        // A diff cannot be cancelled once it starts, so it is bounded up front
+        // the way the Diff tool's is (#1339): the same size caps, the same
+        // word-diff budget, and a slot on a gate of this page's own.
+        if (CompareEndpoints.CheckSize(_left.Content) is not null
+            || CompareEndpoints.CheckSize(_right.Content) is not null)
+        {
+            _notDiffed = NotDiffedReason.TooLarge;
+            await LoadRailAsync();
+            return;
+        }
+
+        var leftOutline = await SourceViewer.GetFileOutlineAsync(leftId);
+        var rightOutline = await SourceViewer.GetFileOutlineAsync(rightId);
+
+        var ct = ctx.RequestAborted;
+        if (!await FileCompareGate.Semaphore.WaitAsync(CompareDiffGate.FileCompareSlotWait, ct))
+        {
+            _notDiffed = NotDiffedReason.Busy;
+            await LoadRailAsync();
+            return;
+        }
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            BuildDiff(leftOutline, rightOutline);
+        }
+        finally
+        {
+            FileCompareGate.Semaphore.Release();
+        }
+
+        await LoadRailAsync();
+    }
+
+    /// <summary>
+    /// Runs the diff and every serialisation of it. Held inside a gate slot by
+    /// the caller, so the whole cost is counted, not only the diff.
+    /// </summary>
+    private void BuildDiff(List<SourceFileOutlineItem> leftOutline, List<SourceFileOutlineItem> rightOutline)
+    {
+        var model = new BudgetedWordDiffer(CompareEndpoints.WordDiffCostBudget, CompareEndpoints.WordDiffWordBudget)
+            .Diff(_left!.Content, _right!.Content, _ignoreWhitespace);
         _leftDiffJson = SideBySideDiffSerializer.SerializeSide(model.OldText);
         _rightDiffJson = SideBySideDiffSerializer.SerializeSide(model.NewText);
         _leftFillersJson = SideBySideDiffSerializer.SerializeFillers(model.OldText);
@@ -521,8 +604,6 @@ else
         _removed = summary.Removed;
         _modified = summary.Modified;
 
-        var leftOutline = await SourceViewer.GetFileOutlineAsync(leftId);
-        var rightOutline = await SourceViewer.GetFileOutlineAsync(rightId);
         _leftProceduresJson = SerializeProcedures(leftOutline);
         _rightProceduresJson = SerializeProcedures(rightOutline);
 
@@ -538,8 +619,6 @@ else
         _unifiedGuttersJson = unified.Gutters;
         _unifiedCollapseJson = unified.Collapse;
         _unifiedWordDiffJson = unified.WordDiff;
-
-        await LoadRailAsync();
     }
 
     /// <summary>
@@ -681,7 +760,9 @@ else
             : "These two files are identical";
 
     private string FootSummary =>
-        TotalChanges == 0
+        _notDiffed == NotDiffedReason.TooLarge ? "Not compared - too long"
+        : _notDiffed == NotDiffedReason.Busy ? "Not compared - server busy"
+        : TotalChanges == 0
             ? IdenticalNote
             : $"{TotalChanges:N0} change{(TotalChanges == 1 ? "" : "s")} - {_added:N0} added, {_removed:N0} removed, {_modified:N0} modified";
 

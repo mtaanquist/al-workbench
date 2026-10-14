@@ -183,7 +183,7 @@
             var msg = ctx.Request.Query["msg"].ToString();
             if (!string.IsNullOrEmpty(err) && !string.IsNullOrEmpty(msg))
             {
-                Status = ($"{err}: {msg}", true);
+                Status = (msg, true);
             }
             else
             {

@@ -364,25 +364,29 @@ public sealed class ExplorerTreeService
         long moduleId, string grouping, long? activeFileId = null, CancellationToken ct = default)
     {
         if (!await _visibility.ModuleVisibleAsync(moduleId, ct)) return [];
-        var files = await ListModuleFilesAsync(moduleId, ct);
         var mark = (OeTreeNode n) => n with { IsActive = n.FileId != null && n.FileId == activeFileId };
 
         if (TreeGrouping.Parse(grouping) != TreeGrouping.Kind)
         {
-            return files.Select(mark).ToList();
+            var flat = await ListModuleFilesAsync(moduleId, ct);
+            return flat.Select(mark).ToList();
         }
+
+        // Grouped from every file, not from the capped flat list: that list is
+        // the alphabetically first few hundred, so on a large app each badge
+        // counted a subset and whole kinds went missing (#1339). Each section
+        // is capped on its own instead, with its own overflow row.
+        var rows = await LoadModuleFileRowsAsync(moduleId, ct);
 
         // Sections in a fixed reading order rather than alphabetical: an AL
         // developer looks for tables and pages far more often than for a
-        // permission set, and the overflow row (if the app was capped) belongs
-        // at the end whatever happens.
-        var nodes = new List<OeTreeNode>(files.Count + 12);
-        var groups = files
-            .Where(f => f.Kind == "file")
-            .GroupBy(f => KindSectionTitle(f.ObjectKind))
+        // permission set.
+        var groups = rows
+            .GroupBy(f => KindSectionTitle(f.Kind))
             .OrderBy(g => KindSectionRank(g.Key))
             .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
 
+        var nodes = new List<OeTreeNode>();
         foreach (var group in groups)
         {
             nodes.Add(new OeTreeNode(
@@ -395,10 +399,8 @@ public sealed class ExplorerTreeService
                 IsOpen: true,
                 IsActive: false,
                 Badge: group.Count().ToString("N0")));
-            nodes.AddRange(group.Select(f => mark(f with { Depth = 1 })));
+            nodes.AddRange(BuildFileNodes(moduleId, group, depth: 1).Select(mark));
         }
-
-        nodes.AddRange(files.Where(f => f.Kind == "overflow"));
         return nodes;
     }
 
@@ -462,6 +464,16 @@ public sealed class ExplorerTreeService
         long moduleId, CancellationToken ct = default)
     {
         if (!await _visibility.ModuleVisibleAsync(moduleId, ct)) return [];
+        return BuildFileNodes(moduleId, await LoadModuleFileRowsAsync(moduleId, ct));
+    }
+
+    /// <summary>
+    /// Every file of one module with its primary object, uncapped. The caller
+    /// has already checked the module is visible.
+    /// </summary>
+    private async Task<List<(long Id, string Tail, string Path, string? Kind, string? Name, int? ObjectId)>> LoadModuleFileRowsAsync(
+        long moduleId, CancellationToken ct)
+    {
         var files = await _db.OeModuleFiles.AsNoTracking()
             .Where(f => f.ModuleId == moduleId)
             .Select(f => new { f.Id, f.Path })
@@ -469,11 +481,11 @@ public sealed class ExplorerTreeService
 
         var objects = await LoadPrimaryObjectsForModuleAsync(moduleId, ct);
 
-        return BuildFileNodes(moduleId, files.Select(f =>
+        return files.Select(f =>
         {
             var obj = objects.GetValueOrDefault(f.Id);
             return (f.Id, Tail: FileNameOf(f.Path), f.Path, obj?.Kind, obj?.Name, obj?.ObjectId);
-        }), ct: ct);
+        }).ToList();
     }
 
     /// <summary>
@@ -623,7 +635,7 @@ public sealed class ExplorerTreeService
     private static List<OeTreeNode> BuildFileNodes(
         long moduleId,
         IEnumerable<(long Id, string Tail, string Path, string? Kind, string? Name, int? ObjectId)> files,
-        CancellationToken ct = default)
+        int depth = 0)
     {
         var ordered = files
             .Select(f => (f.Id, f.Tail, f.Path, f.Kind, f.ObjectId, Display: DisplayName(f.Name, f.Tail)))
@@ -638,7 +650,7 @@ public sealed class ExplorerTreeService
                 Name: f.Display,
                 Path: f.Path,
                 ModuleId: moduleId,
-                Depth: 0,
+                Depth: depth,
                 HasChildren: false,
                 IsOpen: false,
                 IsActive: false,
@@ -656,7 +668,7 @@ public sealed class ExplorerTreeService
                 Name: $"{hidden:N0} more - search to find them",
                 Path: string.Empty,
                 ModuleId: moduleId,
-                Depth: 0,
+                Depth: depth,
                 HasChildren: false,
                 IsOpen: false,
                 IsActive: false));
