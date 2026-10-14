@@ -28,7 +28,19 @@ namespace ALDevToolbox.Services.Account;
 /// </remarks>
 public sealed class UserAdministrationService
 {
-    public static readonly TimeSpan EmailChangeTokenLifetime = TimeSpan.FromHours(24);
+    /// <summary>
+    /// How long an email change waits after it is asked for before it can be
+    /// confirmed, so the person at the current address has time to read the
+    /// notice and stop it.
+    /// </summary>
+    public static readonly TimeSpan EmailChangeConfirmDelay = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// How long both email-change links work, counted from the request: two
+    /// days to confirm once <see cref="EmailChangeConfirmDelay"/> is over,
+    /// and the cancel link for the whole time the change can still be made.
+    /// </summary>
+    public static readonly TimeSpan EmailChangeTokenLifetime = TimeSpan.FromHours(72);
 
     private readonly AppDbContext _db;
     private readonly TimeProvider _clock;
@@ -340,20 +352,21 @@ public sealed class UserAdministrationService
 
     /// <summary>
     /// Stamps a pending email change on the user row and issues two tokens,
-    /// both with the 24-hour <see cref="EmailChangeTokenLifetime"/>: a
-    /// confirmation (purpose <see cref="TokenPurpose.EmailChangeConfirm"/>)
-    /// for the <em>new</em> address, and a cancel token
+    /// both with the <see cref="EmailChangeTokenLifetime"/>: a confirmation
+    /// (purpose <see cref="TokenPurpose.EmailChangeConfirm"/>) for the
+    /// <em>new</em> address, and a cancel token
     /// (<see cref="TokenPurpose.EmailChangeCancel"/>) for the <em>current</em>
     /// one. The endpoint emails both; the swap happens in
-    /// <see cref="ConfirmEmailChangeAsync"/> once the new mailbox responds, and
+    /// <see cref="ConfirmEmailChangeAsync"/> once the new mailbox responds, no
+    /// sooner than <see cref="EmailChangeConfirmDelay"/> after the request, and
     /// <see cref="CancelEmailChangeAsync"/> lets the current owner stop it.
     /// </summary>
     /// <remarks>
-    /// The notice to the current address is what keeps an admin from moving an
-    /// account to an address its owner never hears about (a confirmed address
-    /// can then ask for a sign-in link), so the endpoint refuses the change
-    /// when that notice cannot be sent and calls
-    /// <see cref="WithdrawEmailChangeAsync"/>.
+    /// Once confirmed, the new address is how the account signs in, so the
+    /// owner has to hear about the change and have time to stop it. The
+    /// endpoint refuses the change when the notice to the current address
+    /// cannot be sent (calling <see cref="WithdrawEmailChangeAsync"/>), and the
+    /// confirmation waits out <see cref="EmailChangeConfirmDelay"/>.
     /// </remarks>
     public async Task<EmailChangeRequest> RequestEmailChangeAsync(int targetUserId, string newEmail, int actingOrgId, int actingUserId, CancellationToken ct = default)
     {
@@ -420,11 +433,13 @@ public sealed class UserAdministrationService
             TokenHash = cancelHash,
             Purpose = TokenPurpose.EmailChangeCancel,
             CreatedAt = now,
+            // As long as the confirmation link: the change can be stopped for
+            // as long as it can still be made.
             ExpiresAt = now + EmailChangeTokenLifetime,
         });
         await _db.SaveChangesAsync(ct);
         return new EmailChangeRequest(confirmRaw, cancelRaw, user.Email, normalised, user.DisplayName,
-            actor.DisplayName, actor.Email);
+            actor.DisplayName, actor.Email, now + EmailChangeConfirmDelay, now + EmailChangeTokenLifetime);
     }
 
     /// <summary>
@@ -446,26 +461,51 @@ public sealed class UserAdministrationService
     /// Consumes an <see cref="TokenPurpose.EmailChangeConfirm"/> token: swaps
     /// <see cref="User.Email"/> for <see cref="User.PendingEmail"/>, clears the
     /// pending fields, and returns the user with the address it had before.
-    /// Returns <c>null</c> for an invalid / expired / consumed token without
-    /// revealing which.
+    /// A token opened before <see cref="EmailChangeConfirmDelay"/> has passed
+    /// is left unused and answered with when it can be used. Any other refusal
+    /// (invalid, expired, used, change stopped) is one outcome, without saying
+    /// which.
     /// </summary>
     /// <remarks>
-    /// The swap is a credential change: the new address can ask for a sign-in
-    /// link. So it stamps <see cref="User.CredentialsChangedAt"/> and revokes
+    /// <para>
+    /// The swap is a credential change, since the address is part of how the
+    /// account signs in. So it stamps <see cref="User.CredentialsChangedAt"/> and revokes
     /// the user's personal access tokens and OAuth tokens through the same
     /// <see cref="AccountService.CommitCredentialChangeAsync"/> a password
     /// reset uses, and every existing session has to sign in again.
+    /// </para>
+    /// <para>
+    /// The token is claimed with a conditional update, so of two clicks one
+    /// wins, and the user row is locked first, so a cancel arriving at the same
+    /// moment either lands before the swap (and the swap sees no pending
+    /// address) or after it (and finds nothing left to stop).
+    /// </para>
     /// </remarks>
-    public async Task<ConfirmedEmailChange?> ConfirmEmailChangeAsync(string rawToken, CancellationToken ct = default)
+    public async Task<EmailChangeConfirmResult> ConfirmEmailChangeAsync(string rawToken, CancellationToken ct = default)
     {
+        var invalid = new EmailChangeConfirmResult(EmailChangeConfirmOutcome.Invalid);
+        if (string.IsNullOrWhiteSpace(rawToken)) return invalid;
         var now = _clock.GetUtcNow().UtcDateTime;
-        var row = await FindEmailChangeTokenAsync(rawToken,
-            [TokenPurpose.EmailChangeConfirm, TokenPurpose.SiteAdminEmailChangeConfirm], ct);
-        if (row is null || row.ConsumedAt is not null || row.ExpiresAt <= now || row.User is null)
+        var tokens = EmailChangeTokens(rawToken,
+            [TokenPurpose.EmailChangeConfirm, TokenPurpose.SiteAdminEmailChangeConfirm]);
+        var row = await tokens.AsNoTracking().Include(t => t.User).FirstOrDefaultAsync(ct);
+        // A stopped or withdrawn change answers as invalid even inside the
+        // wait, rather than promising a link that will never work.
+        if (row is null || row.ConsumedAt is not null || row.ExpiresAt <= now
+            || row.User is null || string.IsNullOrEmpty(row.User.PendingEmail))
         {
-            return null;
+            return invalid;
         }
-        var user = row.User;
+        var confirmableFrom = row.CreatedAt + EmailChangeConfirmDelay;
+        if (now < confirmableFrom)
+        {
+            // Not consumed: the same link works once the wait is over.
+            return new EmailChangeConfirmResult(EmailChangeConfirmOutcome.NotYet, ConfirmableFrom: confirmableFrom);
+        }
+
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        var user = await ClaimEmailChangeTokenAsync(tokens, row, now, ct);
+        if (user is null) return invalid;
         if (user.IsSiteAdmin && row.Purpose != TokenPurpose.SiteAdminEmailChangeConfirm)
         {
             // Issued without a SiteAdmin asking for it (before such requests
@@ -473,18 +513,17 @@ public sealed class UserAdministrationService
             // drop the pending address rather than swap a SiteAdmin's email.
             user.PendingEmail = null;
             user.PendingEmailAt = null;
-            row.ConsumedAt = now;
             await _db.SaveChangesAsync(ct);
-            return null;
+            await tx.CommitAsync(ct);
+            return invalid;
         }
         if (string.IsNullOrEmpty(user.PendingEmail))
         {
             // Pending email was cleared (stopped from the current address,
-            // withdrawn, account modified): burn the token but don't change
-            // anything.
-            row.ConsumedAt = now;
-            await _db.SaveChangesAsync(ct);
-            return null;
+            // withdrawn, account modified): the token is burned, nothing else
+            // changes.
+            await tx.CommitAsync(ct);
+            return invalid;
         }
         // Race: another account may have grabbed the address since the token
         // was issued.
@@ -494,60 +533,90 @@ public sealed class UserAdministrationService
         {
             user.PendingEmail = null;
             user.PendingEmailAt = null;
-            row.ConsumedAt = now;
             await _db.SaveChangesAsync(ct);
-            return null;
+            await tx.CommitAsync(ct);
+            return invalid;
         }
         var previousEmail = user.Email;
         user.Email = user.PendingEmail;
         user.PendingEmail = null;
         user.PendingEmailAt = null;
-        row.ConsumedAt = now;
         user.CredentialsChangedAt = now;
+        // Joins the transaction above, so the swap and the revocations land together.
         await AccountService.CommitCredentialChangeAsync(_db, _oauthTokens, user.Id, now, ct);
-        return new ConfirmedEmailChange(user, previousEmail);
+        await tx.CommitAsync(ct);
+        return new EmailChangeConfirmResult(EmailChangeConfirmOutcome.Confirmed, user, previousEmail);
     }
 
     /// <summary>
     /// Consumes an <see cref="TokenPurpose.EmailChangeCancel"/> token, the link
     /// in the notice sent to the current address: drops the pending change so
     /// its confirmation link stops working. Needs no sign-in, since the person
-    /// it protects may not be able to get in. Returns <c>false</c> for an
-    /// invalid / expired / used token, or when there was nothing left to stop.
+    /// it protects may not be able to get in. Returns the user's id when a
+    /// pending change was stopped, and <c>null</c> for an invalid / expired /
+    /// used token or when there was nothing left to stop. Claims the token and
+    /// locks the user row the same way <see cref="ConfirmEmailChangeAsync"/>
+    /// does, so the two can't both win.
     /// </summary>
-    public async Task<bool> CancelEmailChangeAsync(string rawToken, CancellationToken ct = default)
+    public async Task<int?> CancelEmailChangeAsync(string rawToken, CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(rawToken)) return null;
         var now = _clock.GetUtcNow().UtcDateTime;
-        var row = await FindEmailChangeTokenAsync(rawToken, [TokenPurpose.EmailChangeCancel], ct);
-        if (row is null || row.ConsumedAt is not null || row.ExpiresAt <= now || row.User is null)
+        var tokens = EmailChangeTokens(rawToken, [TokenPurpose.EmailChangeCancel]);
+        var row = await tokens.AsNoTracking().FirstOrDefaultAsync(ct);
+        if (row is null || row.ConsumedAt is not null || row.ExpiresAt <= now)
         {
-            return false;
+            return null;
         }
-        row.ConsumedAt = now;
-        var user = row.User;
+
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+        var user = await ClaimEmailChangeTokenAsync(tokens, row, now, ct);
+        if (user is null) return null;
         var hadPending = !string.IsNullOrEmpty(user.PendingEmail);
         // The confirmation link from the stopped change finds no pending
         // address and is burned when opened; the next request burns it too.
         user.PendingEmail = null;
         user.PendingEmailAt = null;
         await _db.SaveChangesAsync(ct);
-        return hadPending;
+        await tx.CommitAsync(ct);
+        return hadPending ? user.Id : null;
     }
 
     /// <summary>
-    /// Finds an email-change token by the hash of its raw value. Shared by the
-    /// confirm and cancel links, both opened from an email by someone who may
-    /// be signed out.
+    /// Email-change tokens matching the hash of <paramref name="rawToken"/>.
+    /// Shared by the confirm and cancel links, both opened from an email by
+    /// someone who may be signed out, for the first read and for the claim.
     /// </summary>
-    private async Task<PasswordResetToken?> FindEmailChangeTokenAsync(string rawToken, TokenPurpose[] purposes, CancellationToken ct)
+    private IQueryable<PasswordResetToken> EmailChangeTokens(string rawToken, TokenPurpose[] purposes)
     {
-        if (string.IsNullOrWhiteSpace(rawToken)) return null;
         var hash = TokenIssuer.Sha256Hex(rawToken);
         // Fence category 1 (pre-auth routing): the confirm and cancel links are opened from
         // an email, possibly signed out; pinned to the token hash.
-        return await _db.PasswordResetTokens.IgnoreQueryFilters()
-            .Include(t => t.User)
-            .FirstOrDefaultAsync(t => t.TokenHash == hash && purposes.Contains(t.Purpose), ct);
+        return _db.PasswordResetTokens.IgnoreQueryFilters()
+            .Where(t => t.TokenHash == hash && purposes.Contains(t.Purpose));
+    }
+
+    /// <summary>
+    /// Inside the caller's transaction: locks the token's user row, claims the
+    /// token with a conditional update (0 rows means someone else used it
+    /// first), and loads the user as it is now, tracked. Returns <c>null</c>
+    /// when the claim lost. The lock comes first so a confirm and a cancel on
+    /// the same user run one after the other, and the user is read after it so
+    /// the second sees what the first saved.
+    /// </summary>
+    private async Task<User?> ClaimEmailChangeTokenAsync(
+        IQueryable<PasswordResetToken> tokens, PasswordResetToken row, DateTime now, CancellationToken ct)
+    {
+        // Raw SQL, like LockAdminGuardAsync: a row lock pinned to the id the
+        // token row names, with no query filter to bypass.
+        await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT 1 FROM users WHERE id = {row.UserId} FOR UPDATE", ct);
+        var claimed = await tokens
+            .Where(t => t.Id == row.Id && t.ConsumedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.ConsumedAt, now), ct);
+        if (claimed == 0) return null;
+        var fresh = await tokens.Where(t => t.Id == row.Id).Include(t => t.User).FirstAsync(ct);
+        return fresh.User;
     }
 
     /// <summary>Marks every still-valid email-change link for <paramref name="userId"/> as used.</summary>
@@ -678,7 +747,31 @@ public sealed record EmailChangeRequest(
     string NewEmail,
     string DisplayName,
     string RequestedByName,
-    string RequestedByEmail);
+    string RequestedByEmail,
+    DateTime ConfirmableFrom,
+    DateTime ExpiresAt);
 
-/// <summary>A completed email change: the user as it is now, and the address it replaced.</summary>
-public sealed record ConfirmedEmailChange(User User, string PreviousEmail);
+/// <summary>How a click on an email-change confirmation link went.</summary>
+public enum EmailChangeConfirmOutcome
+{
+    /// <summary>The address was swapped.</summary>
+    Confirmed,
+
+    /// <summary>Opened before the waiting period was over; the link still works later.</summary>
+    NotYet,
+
+    /// <summary>Invalid, expired, used, or the change was stopped. Deliberately one outcome.</summary>
+    Invalid,
+}
+
+/// <summary>
+/// The result of <see cref="UserAdministrationService.ConfirmEmailChangeAsync"/>:
+/// for <see cref="EmailChangeConfirmOutcome.Confirmed"/> the user as it is now
+/// and the address it replaced; for <see cref="EmailChangeConfirmOutcome.NotYet"/>
+/// when the link can be used.
+/// </summary>
+public sealed record EmailChangeConfirmResult(
+    EmailChangeConfirmOutcome Outcome,
+    User? User = null,
+    string? PreviousEmail = null,
+    DateTime? ConfirmableFrom = null);

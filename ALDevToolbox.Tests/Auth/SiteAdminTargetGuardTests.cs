@@ -106,10 +106,11 @@ public sealed class SiteAdminTargetGuardTests : IDisposable
             token = (await NewUserAdmin(ctx).RequestEmailChangeAsync(targetId, "elsewhere@example.com", OrgId, orgAdminId)).ConfirmToken;
         }
         await SetSiteAdminAsync(targetId, true);
+        _clock.Advance(UserAdministrationService.EmailChangeConfirmDelay);
 
         await using (var ctx = _db.NewContext())
         {
-            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token)).Should().BeNull();
+            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token)).Outcome.Should().Be(EmailChangeConfirmOutcome.Invalid);
         }
 
         var user = await ReadUserAsync(targetId);
@@ -131,9 +132,10 @@ public sealed class SiteAdminTargetGuardTests : IDisposable
             token = (await NewUserAdmin(ctx).RequestEmailChangeAsync(otherId, "renamed@example.com", OrgId, actorId)).ConfirmToken;
         }
 
+        _clock.Advance(UserAdministrationService.EmailChangeConfirmDelay);
         await using (var ctx = _db.NewContext())
         {
-            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token)).Should().NotBeNull();
+            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token)).Outcome.Should().Be(EmailChangeConfirmOutcome.Confirmed);
         }
 
         (await ReadUserAsync(otherId)).Email.Should().Be("renamed@example.com");

@@ -5,6 +5,7 @@ using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Email;
+using ALDevToolbox.Services.Organizations;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
@@ -289,6 +290,7 @@ internal static class AdminUserEndpoints
             IOrganizationContext orgCtx,
             IAntiforgery antiforgery,
             PublicOrigin publicOrigin,
+            DisplayTimeZone displayZone,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
@@ -317,13 +319,17 @@ internal static class AdminUserEndpoints
             var origin = publicOrigin.For(ctx);
             try
             {
+                await displayZone.EnsureLoadedAsync(ct);
+                var confirmableFrom = FormatEmailTime(displayZone, request.ConfirmableFrom);
+                var expiresAt = FormatEmailTime(displayZone, request.ExpiresAt);
                 var confirmUrl = $"{origin}/auth/account/email-change/confirm?token={Uri.EscapeDataString(request.ConfirmToken)}";
-                var confirm = await EmailChangeConfirmEmail.RenderAsync(emailRenderer, request.DisplayName, confirmUrl, ct);
+                var confirm = await EmailChangeConfirmEmail.RenderAsync(emailRenderer, request.DisplayName, confirmUrl,
+                    confirmableFrom, expiresAt, ct);
                 await email.SendAsync(request.NewEmail, confirm, EmailPurpose.EmailChangeConfirmation, ct);
 
                 var cancelUrl = $"{origin}{RouteConstants.EmailChangeCancel}?token={Uri.EscapeDataString(request.CancelToken)}";
                 var notice = await EmailChangeRequestedEmail.RenderAsync(emailRenderer, request.DisplayName,
-                    request.RequestedByName, request.RequestedByEmail, request.NewEmail, cancelUrl, ct);
+                    request.RequestedByName, request.RequestedByEmail, request.NewEmail, confirmableFrom, cancelUrl, ct);
                 await email.SendAsync(request.CurrentEmail, notice, EmailPurpose.EmailChangeNotice, ct);
             }
             catch (Exception ex)
@@ -349,6 +355,13 @@ internal static class AdminUserEndpoints
     /// </summary>
     internal const string EmailChangeNeedsEmailMessage =
         "Email isn't set up on this site, so the person can't be told about the change at their current address. Ask a site administrator to set up email, then try again.";
+
+    /// <summary>
+    /// A time for an email body, in the organisation's display zone and labelled
+    /// with it, since an email can't carry a <c>&lt;Timestamp&gt;</c> hover.
+    /// </summary>
+    private static string FormatEmailTime(DisplayTimeZone zone, DateTime utc) =>
+        zone.Format(utc, "d MMM yyyy, HH:mm") + " (" + DisplayTimeZone.Label(zone.Zone, utc) + ")";
 
     /// <summary>Back to the users page with the refusal's first message as the error banner.</summary>
     private static void RedirectWithError(HttpContext ctx, PlanValidationException ex)

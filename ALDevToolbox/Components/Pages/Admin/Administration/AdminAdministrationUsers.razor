@@ -51,7 +51,8 @@
         <Alert Tone="AlertTone.Success">
             <span>
                 Email change requested. We sent a confirmation link to the new address, and told the current
-                address with a link to stop the change. Both links expire in 24 hours.
+                address with a link to stop the change. The change can't be confirmed until 24 hours from now,
+                so the person has time to stop it.
             </span>
         </Alert>
     }
@@ -328,7 +329,10 @@
                                 @if (!string.IsNullOrEmpty(u.PendingEmail))
                                 {
                                     <p class="field__hint">
-                                        Pending change to <strong>@u.PendingEmail</strong> (requested <Timestamp Value="@u.PendingEmailAt" />).
+                                        Pending change to <strong>@u.PendingEmail</strong> (requested <Timestamp Value="@u.PendingEmailAt" />@if (u.PendingEmailAt is { } requestedAt)
+                                        {
+                                            <span>, can be confirmed from <Timestamp Value="@(requestedAt + ALDevToolbox.Services.Account.UserAdministrationService.EmailChangeConfirmDelay)" /></span>
+                                        }).
                                     </p>
                                 }
                                 @if (!_emailConfigured)
@@ -348,7 +352,7 @@
                                         <button type="button" class="btn btn--sm" @onclick="() => ToggleEmailRow(0)">Cancel</button>
                                     </form>
                                     <p class="field__hint">
-                                        The new address gets a link to confirm. The current address is told who asked, with a link to stop the change.
+                                        The new address gets a link to confirm, which works after 24 hours. The current address is told who asked, with a link to stop the change.
                                     </p>
                                 }
                             </td>

@@ -6,6 +6,7 @@ using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Email;
+using ALDevToolbox.Services.Organizations;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -561,12 +562,20 @@ internal static class AccountAuthEndpoints
             var logger = loggerFactory.CreateLogger("EmailChange");
             var token = ctx.Request.Query["token"].ToString();
             var change = await users.ConfirmEmailChangeAsync(token, ct);
-            if (change is null)
+            if (change.Outcome == EmailChangeConfirmOutcome.NotYet)
+            {
+                // The link is still good; say when it will work. Unix seconds
+                // keep the query free of a formatted date.
+                var at = new DateTimeOffset(DisplayTimeZone.AsUtc(change.ConfirmableFrom!.Value)).ToUnixTimeSeconds();
+                ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}=email-change-not-yet&at={at}");
+                return;
+            }
+            if (change.Outcome != EmailChangeConfirmOutcome.Confirmed)
             {
                 ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}=email-change-invalid");
                 return;
             }
-            var user = change.User;
+            var user = change.User!;
             // The swap stamped credentials_changed_at, which ends every other
             // session; sign this browser out too so the next sign-in carries
             // the new address.
@@ -578,7 +587,7 @@ internal static class AccountAuthEndpoints
                 // tells it the change went through. The swap has already
                 // happened, so a failed send is logged, not shown.
                 var content = await EmailChangedEmail.RenderAsync(emailRenderer, user.DisplayName, user.Email, ct);
-                await email.SendAsync(change.PreviousEmail, content, EmailPurpose.EmailChangeNotice, ct);
+                await email.SendAsync(change.PreviousEmail!, content, EmailPurpose.EmailChangeNotice, ct);
             }
             catch (Exception ex)
             {
@@ -597,13 +606,14 @@ internal static class AccountAuthEndpoints
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             var form = await ctx.Request.ReadFormAsync(ct);
-            var stopped = await users.CancelEmailChangeAsync(form["Token"].ToString(), ct);
-            if (!stopped)
+            var stoppedFor = await users.CancelEmailChangeAsync(form["Token"].ToString(), ct);
+            if (stoppedFor is null)
             {
                 ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}=email-change-cancel-invalid");
                 return;
             }
-            loggerFactory.CreateLogger("EmailChange").LogInformation("A pending email change was stopped from the current address.");
+            loggerFactory.CreateLogger("EmailChange").LogInformation(
+                "Pending email change for user {UserId} was stopped from the current address.", stoppedFor.Value);
             ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.OkQuery}=email-change-cancelled");
         });
 

@@ -47,6 +47,8 @@ public sealed class AdminEmailChangeNoticeTests : IDisposable
         notice.To.Should().Be(MemberEmail);
         notice.HtmlBody.Should().Contain("Sam Berg").And.Contain(AdminEmail).And.Contain(NewEmail);
         notice.HtmlBody.Should().Contain("/account/email-change/cancel?token=");
+        notice.HtmlBody.Should().Contain("will not take effect before");
+        confirm.HtmlBody.Should().Contain("be confirmed before");
         notice.HtmlBody.Should().NotContain("/auth/account/email-change/confirm",
             "the current address gets the way to stop the change, not the way to make it");
         response.Headers.TryGetValues("Set-Cookie", out var cookies);
@@ -105,9 +107,21 @@ public sealed class AdminEmailChangeNoticeTests : IDisposable
         var confirm = email.Sent.Single(m => m.Purpose == EmailPurpose.EmailChangeConfirmation);
         var token = ExtractToken(confirm.HtmlBody, "/auth/account/email-change/confirm?token=");
         email.Sent.Clear();
-
         using var anonymous = factory.CreateClient();
-        using var response = await anonymous.GetAsync($"/auth/account/email-change/confirm?token={Uri.EscapeDataString(token)}");
+        var confirmUrl = $"/auth/account/email-change/confirm?token={Uri.EscapeDataString(token)}";
+
+        // Straight away, the link answers with when it will work and changes nothing.
+        using (var early = await anonymous.GetAsync(confirmUrl))
+        {
+            early.Headers.Location!.OriginalString.Should().StartWith("/login?err=email-change-not-yet&at=");
+            using var page = await anonymous.GetAsync(early.Headers.Location!.OriginalString);
+            (await page.Content.ReadAsStringAsync()).Should().Contain("be confirmed yet");
+        }
+        (await ReadMemberAsync(memberId)).Email.Should().Be(MemberEmail);
+        email.Sent.Should().BeEmpty();
+
+        await BackdateEmailChangeAsync(memberId);
+        using var response = await anonymous.GetAsync(confirmUrl);
 
         response.Headers.Location!.OriginalString.Should().Be("/login?ok=email-change-confirmed");
         var notice = email.Sent.Should().ContainSingle().Subject;
@@ -140,6 +154,15 @@ public sealed class AdminEmailChangeNoticeTests : IDisposable
 
         using var again = await PostCancelAsync(anonymous, token, antiforgery);
         again.Headers.Location!.OriginalString.Should().Be("/login?err=email-change-cancel-invalid");
+    }
+
+    /// <summary>Moves the change's tokens back past the waiting period, as if a day had gone by.</summary>
+    private async Task BackdateEmailChangeAsync(int memberId)
+    {
+        await using var db = _db.NewContext();
+        var by = ALDevToolbox.Services.Account.UserAdministrationService.EmailChangeConfirmDelay + TimeSpan.FromMinutes(1);
+        await db.PasswordResetTokens.IgnoreQueryFilters().Where(t => t.UserId == memberId)
+            .ExecuteUpdateAsync(u => u.SetProperty(t => t.CreatedAt, t => t.CreatedAt - by));
     }
 
     private EndpointFactory NewFactory(FakeEmail email) =>

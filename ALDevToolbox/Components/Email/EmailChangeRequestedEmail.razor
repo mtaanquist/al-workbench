@@ -2,8 +2,8 @@
 <EmailLayout Preheader="@($"{RequestedByName} asked to change the email address on your account.")" Reason="You received this because an administrator asked to change the email address on the AL Workbench account that uses this address.">
     <EmailParagraph>Hi @DisplayName,</EmailParagraph>
     <EmailParagraph><strong>@RequestedByName</strong> (@RequestedByEmail), an administrator in your organisation, asked to change the email address on your AL Workbench account to <strong>@NewEmail</strong>.</EmailParagraph>
-    <EmailParagraph>Once that address confirms the change, you sign in with it instead of this one, and you are signed out everywhere.</EmailParagraph>
-    <EmailParagraph>If you did not expect this, stop the change now. The link works once, for the next 24 hours.</EmailParagraph>
+    <EmailParagraph>The change will not take effect before <strong>@ConfirmableFrom</strong>. Once it is confirmed from that address, this address will no longer sign you in, and you will be signed out everywhere.</EmailParagraph>
+    <EmailParagraph>If you did not expect this, stop it here. The link works once.</EmailParagraph>
     <EmailButton Href="@CancelUrl">Stop this change</EmailButton>
     <EmailParagraph>If you expected it, you don't need to do anything.</EmailParagraph>
 </EmailLayout>
@@ -15,17 +15,22 @@
     [Parameter, EditorRequired] public string RequestedByName { get; set; } = string.Empty;
     [Parameter, EditorRequired] public string RequestedByEmail { get; set; } = string.Empty;
     [Parameter, EditorRequired] public string NewEmail { get; set; } = string.Empty;
+
+    /// <summary>When the change can first be confirmed, already formatted for the organisation's time zone.</summary>
+    [Parameter, EditorRequired] public string ConfirmableFrom { get; set; } = string.Empty;
+
     [Parameter, EditorRequired] public string CancelUrl { get; set; } = string.Empty;
 
     public static Task<EmailContent> RenderAsync(
         EmailRenderer renderer, string displayName, string requestedByName, string requestedByEmail, string newEmail,
-        string cancelUrl, CancellationToken ct = default)
+        string confirmableFrom, string cancelUrl, CancellationToken ct = default)
         => renderer.RenderAsync<EmailChangeRequestedEmail>(Subject, new Dictionary<string, object?>
         {
             [nameof(DisplayName)] = displayName,
             [nameof(RequestedByName)] = requestedByName,
             [nameof(RequestedByEmail)] = requestedByEmail,
             [nameof(NewEmail)] = newEmail,
+            [nameof(ConfirmableFrom)] = confirmableFrom,
             [nameof(CancelUrl)] = cancelUrl,
         }, ct);
 }
