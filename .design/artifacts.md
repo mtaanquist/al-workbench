@@ -144,8 +144,10 @@ Build **trigger** (the **New build** action with its extension picker) is a Pipe
 - **Pipelines are disabled, not deleted** (#1131). Anyone who manages the solution can disable or
   enable a build pipeline or a deployment pipeline (`disabled_at`); only an org Admin or a
   SiteAdmin can delete one. A disabled build pipeline refuses a Build and is skipped by building on
-  push and the nightly preview check, and a push or preview build that was already waiting fails
-  with the reason when the worker reaches it; a manual build already queued still runs. A disabled
+  push and the nightly preview check, and any build that was already waiting - a manual one
+  included (#1335) - fails with the reason when the worker reaches it, so it neither publishes a
+  release nor deploys. Retry and Recover symbols refuse a build of a disabled or deleted pipeline.
+  A build that had already started compiling is left to finish. A disabled
   deployment pipeline refuses Deploy and the agent's deploy tool, prepares nothing from new builds,
   and disabling it cancels its scheduled deployments and dismisses its prepared ones, as a delete
   does. Enabling puts it back as it was; nothing that was cancelled comes back.

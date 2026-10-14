@@ -31,6 +31,9 @@ public sealed class ArtifactsTools
     /// <summary>Row cap on <c>compare_solution_builds</c>: the 200 the Object Explorer compare tools use (#1228).</summary>
     private const int MaxCompareRows = 200;
 
+    /// <summary>How many compiler errors <c>get_solution_build</c> spells out; the rest are counted in <c>ErrorCount</c>.</summary>
+    internal const int MaxBuildErrors = 10;
+
     private readonly ArtifactService _artifacts;
     private readonly ReleaseComparisonService _comparison;
     private readonly ProjectService _projects;
@@ -91,7 +94,7 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "get_solution_build", ReadOnly = true)]
-    [Description("Returns one build's full detail: the per-repository commit it was built from, the changelog since the solution's last successful build (grouped by repository), and the downloadable deliverables. Each deliverable and the whole-build zip and raw log carry a DownloadPath the user appends to the app's base URL to fetch (the bytes are not returned inline). When the build is ready it also returns the Object Explorer release id so its objects can be searched/compared. bcTarget says which Business Central version it compiled against ('current', 'next_minor' or 'next_major') and bcArtifactVersion the exact build; a build with isPreview true is check-only and can't be deployed.")]
+    [Description("Returns one build's full detail: the per-repository commit it was built from, the changelog since the solution's last successful build (grouped by repository), and the downloadable deliverables. Each deliverable and the whole-build zip and raw log carry a DownloadPath the user appends to the app's base URL to fetch (the bytes are not returned inline). When the build is ready it also returns the Object Explorer release id so its objects can be searched/compared. bcTarget says which Business Central version it compiled against ('current', 'next_minor' or 'next_major') and bcArtifactVersion the exact build; a build with isPreview true is check-only and can't be deployed. A build can be 'ready' with some extensions missing: failedApps lists each extension that did not build and why (needsSymbols is true when the reason is a dependency the solution has to supply on its Symbols tab), so a ready build is only clean when failedApps is empty. errorCount and warningCount are the compiler's totals, and errors holds the first 10 compiler errors with their repository, file, line, code and message.")]
     public async Task<ProjectBuildDetailResult> GetProjectBuildAsync(
         [Description("Build id (from list_solution_builds).")] int buildId,
         CancellationToken ct = default)
@@ -107,6 +110,12 @@ public sealed class ArtifactsTools
             detail = null;
         }
         if (detail is null) throw NotFound($"Build {buildId} was not found in this organisation.");
+
+        // A build goes ready even when some extensions failed (#1330), so the agent
+        // needs the failures and the errors behind them, not just the status.
+        var errors = detail.ErrorCount > 0
+            ? await _artifacts.ListBuildErrorsAsync(buildId, MaxBuildErrors, ct)
+            : [];
 
         var apps = detail.Artifacts
             .Select(a => new BuildAppDownload(
@@ -134,7 +143,11 @@ public sealed class ArtifactsTools
             DownloadAllPath: apps.Count > 0 ? $"/artifacts/build/{buildId}/all" : null,
             RawLogPath: detail.Logs.Count > 0 ? $"/artifacts/build/{buildId}/log" : null,
             BcTarget: detail.BcTarget,
-            BcArtifactVersion: detail.BcArtifactVersion);
+            BcArtifactVersion: detail.BcArtifactVersion,
+            ErrorCount: detail.ErrorCount,
+            WarningCount: detail.WarningCount,
+            FailedApps: detail.FailedApps ?? [],
+            Errors: errors);
     }
 
     [McpServerTool(Name = "compare_solution_builds", ReadOnly = true)]
@@ -192,7 +205,11 @@ public sealed record ProjectBuildDetailResult(
     string? DownloadAllPath,
     string? RawLogPath,
     string BcTarget = ProjectBuildTarget.Current,
-    string? BcArtifactVersion = null)
+    string? BcArtifactVersion = null,
+    int ErrorCount = 0,
+    int WarningCount = 0,
+    IReadOnlyList<FailedAppRow>? FailedApps = null,
+    IReadOnlyList<BuildErrorRow>? Errors = null)
 {
     /// <summary>True for a build against a preview version: check-only, never deployable or published.</summary>
     public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);

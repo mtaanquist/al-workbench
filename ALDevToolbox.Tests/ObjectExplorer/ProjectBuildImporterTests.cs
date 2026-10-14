@@ -552,6 +552,27 @@ public sealed class ProjectBuildImporterTests : IDisposable
             .Should().Be(ProjectBuildImporter.DisabledRefusal);
     }
 
+    /// <summary>
+    /// Deleting a pipeline is how its automatic builds stop for good, so Retry and
+    /// Recover symbols on one of its old builds must not run it again (#1335).
+    /// </summary>
+    [Fact]
+    public async Task A_build_of_a_deleted_pipeline_is_not_built_again()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await ctx.OePipelines.Where(p => p.Id == pipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+
+        var act = async () => { await using var _ = await NewImporter(_db.NewContext(), new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Symbols"); };
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Symbols"]
+            .Should().Be(ProjectBuildImporter.DeletedPipelineRefusal);
+    }
+
     [Fact]
     public async Task A_build_is_not_built_again_while_another_build_of_its_pipeline_runs()
     {

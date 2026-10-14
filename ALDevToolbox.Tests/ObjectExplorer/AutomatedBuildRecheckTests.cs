@@ -12,7 +12,9 @@ namespace ALDevToolbox.Tests.ObjectExplorer;
 
 /// <summary>
 /// A push or preview build that waited behind another is checked again when its turn
-/// comes, so it does not run once the pipeline no longer asks for it (#1112).
+/// comes, so it does not run once the pipeline no longer asks for it (#1112). A build
+/// started by hand gets the part of that check that is not about automation: it does
+/// not run once its pipeline is deleted or disabled (#1335).
 /// </summary>
 public sealed class AutomatedBuildRecheckTests : IDisposable
 {
@@ -23,6 +25,7 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
     [Theory]
     [InlineData(ProjectBuildTrigger.Push)]
     [InlineData(ProjectBuildTrigger.PreviewCheck)]
+    [InlineData(ProjectBuildTrigger.Manual)]
     public async Task A_build_the_pipeline_still_asks_for_starts(string trigger)
     {
         var alice = await SeedUserAsync("alice@cronus.test");
@@ -38,6 +41,7 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
     [Theory]
     [InlineData(ProjectBuildTrigger.Push)]
     [InlineData(ProjectBuildTrigger.PreviewCheck)]
+    [InlineData(ProjectBuildTrigger.Manual)]
     public async Task A_deleted_pipeline_refuses_its_waiting_builds(string trigger)
     {
         var alice = await SeedUserAsync("alice@cronus.test");
@@ -54,6 +58,7 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
     [Theory]
     [InlineData(ProjectBuildTrigger.Push)]
     [InlineData(ProjectBuildTrigger.PreviewCheck)]
+    [InlineData(ProjectBuildTrigger.Manual)]
     public async Task A_disabled_pipeline_refuses_its_waiting_builds(string trigger)
     {
         var alice = await SeedUserAsync("alice@cronus.test");
@@ -64,6 +69,21 @@ public sealed class AutomatedBuildRecheckTests : IDisposable
         var refusal = await RefusalAsync(projectId, releaseId, alice);
 
         refusal.Should().Be("The pipeline was disabled before this build started.");
+    }
+
+    [Fact]
+    public async Task A_manual_build_is_not_held_to_the_pipelines_automation_settings()
+    {
+        var alice = await SeedUserAsync("alice@cronus.test");
+        var bob = await SeedUserAsync("bob@cronus.test");
+        var (projectId, pipelineId) = await SeedPipelineAsync(alice);
+        var releaseId = await SeedBuildAsync(projectId, pipelineId, ProjectBuildTrigger.Manual, bob);
+        await UpdatePipelineAsync(pipelineId, p => { p.BuildOnPush = false; p.PreviewCheck = false; });
+
+        var refusal = await RefusalAsync(projectId, releaseId, bob);
+
+        refusal.Should().BeNull("a build by hand runs as the person who pressed Build, whatever the automatic builds do");
+        (await StatusAsync(releaseId)).Should().Be(ProjectBuildStatus.Building);
     }
 
     [Fact]

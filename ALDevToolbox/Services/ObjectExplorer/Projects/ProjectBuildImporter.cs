@@ -28,6 +28,9 @@ public sealed class ProjectBuildImporter
     /// <summary>Why a build of a disabled pipeline is refused (#1131).</summary>
     public const string DisabledRefusal = "This pipeline is disabled. Enable it to build.";
 
+    /// <summary>Why a build of a deleted pipeline cannot be run again.</summary>
+    public const string DeletedPipelineRefusal = "This build's pipeline was deleted, so it can't be run again.";
+
     private readonly ReleaseImportService _importer;
     private readonly ReleaseManagementService _management;
     private readonly ProjectBuildQueue _queue;
@@ -193,12 +196,16 @@ public sealed class ProjectBuildImporter
         }
         if (missing.Count > 0) throw Refuse(string.Join(" ", missing));
 
-        // A rebuild is a build by hand, so a disabled pipeline refuses it like Build does (#1131).
-        if (build is { PipelineId: { } disabledCheckId }
-            && await _db.OePipelines.AsNoTracking()
-                .AnyAsync(p => p.Id == disabledCheckId && p.DisabledAt != null, ct).ConfigureAwait(false))
+        // A rebuild is a build by hand, so a disabled or deleted pipeline refuses it like
+        // Build does (#1131, #1335).
+        if (build is { PipelineId: { } stateCheckId })
         {
-            throw Refuse(DisabledRefusal);
+            var pipeline = await _db.OePipelines.AsNoTracking()
+                .Where(p => p.Id == stateCheckId && p.DeletedAt == null)
+                .Select(p => new { Disabled = p.DisabledAt != null })
+                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            if (pipeline is null) throw Refuse(DeletedPipelineRefusal);
+            if (pipeline.Disabled) throw Refuse(DisabledRefusal);
         }
 
         var tx = build is { PipelineId: { } lockedPipelineId }

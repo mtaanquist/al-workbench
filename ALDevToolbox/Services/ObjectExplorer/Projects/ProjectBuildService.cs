@@ -153,10 +153,17 @@ public sealed class ProjectBuildService
         var build = await _db.OeProjectBuilds
             .FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
         // Only on the first run: a Retry or Recover symbols is a person's own choice, made
-        // and run as them, so it is not the pipeline's automation to check.
+        // and run as them, and BeginRebuildAsync has already checked the pipeline for it.
         if (build is { Trigger: ProjectBuildTrigger.Push or ProjectBuildTrigger.PreviewCheck, FinishedAt: null })
         {
             await EnsureAutomationStillOnAsync(build, project.CreatedByUserId, ct).ConfigureAwait(false);
+        }
+        else if (build is { PipelineId: not null, FinishedAt: null })
+        {
+            // A build by hand can wait in the queue too, and disabling or deleting the
+            // pipeline in the meantime has to stop it before it clones, publishes a
+            // release or deploys - the page promises a disabled pipeline won't build (#1335).
+            await EnsurePipelineStillBuildsAsync(build, ct).ConfigureAwait(false);
         }
         if (build is not null)
         {
@@ -1095,6 +1102,27 @@ public sealed class ProjectBuildService
     /// None of those should still clone with that person's credentials, publish a
     /// release or prepare a deployment. The worker fails the build with the reason.
     /// </summary>
+    /// <summary>
+    /// Refuses a pipeline build whose pipeline was deleted or disabled while it waited
+    /// in the queue: the part of <see cref="EnsureAutomationStillOnAsync"/> that holds
+    /// for a build started by hand as well (#1335). The worker fails the build with
+    /// the reason.
+    /// </summary>
+    private async Task EnsurePipelineStillBuildsAsync(OeProjectBuild build, CancellationToken ct)
+    {
+        var pipeline = await _db.OePipelines.AsNoTracking()
+            .Where(p => p.Id == build.PipelineId && p.DeletedAt == null)
+            .Select(p => new { Disabled = p.DisabledAt != null })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        var reason = pipeline is null ? PipelineDeletedRefusal
+            : pipeline.Disabled ? PipelineDisabledRefusal
+            : null;
+        if (reason is not null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Build"] = reason });
+        }
+    }
+
     private async Task EnsureAutomationStillOnAsync(OeProjectBuild build, int? projectOwnerId, CancellationToken ct)
     {
         var push = build.Trigger == ProjectBuildTrigger.Push;
