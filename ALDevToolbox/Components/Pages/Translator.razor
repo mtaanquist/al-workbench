@@ -14,6 +14,7 @@
 @using ALDevToolbox.Services.Translation.Providers
 @using ALDevToolbox.Services.GitHub
 @using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Endpoints
 @implements IAsyncDisposable
 @inject IJSRuntime JS
 @inject NavigationManager Navigation
@@ -22,6 +23,7 @@
 @inject GitHubTranslationService RepoFiles
 @inject ILogger<Translator> Log
 @inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
 
 <PageTitle>Translator · AL Workbench</PageTitle>
 
@@ -766,6 +768,7 @@ else
             <input type="hidden" name="FileName" id="tr-export-filename" />
             <input type="hidden" name="OriginalXml" id="tr-export-original" />
             <input type="hidden" name="Edits" id="tr-export-edits" />
+            <input type="hidden" name="Learn" id="tr-export-learn" />
             <input type="hidden" name="TargetLanguage" id="tr-export-target-language" />
         </form>
     </div>
@@ -877,7 +880,15 @@ else
     private string? _original;
     private bool _editingName;
 
+    [CascadingParameter] private Task<AuthenticationState>? AuthStateTask { get; set; }
+
     private List<UnitVm> _units = new();
+
+    // The target each unit last taught the translation memory, by unit id, for
+    // this file. Saving in place and exporting leave units marked as edited, so
+    // without this every save re-taught - and added a hit to - every unit
+    // touched since the file was opened (#1343).
+    private readonly Dictionary<string, string> _learnedTargets = new(StringComparer.Ordinal);
     private List<UnitVm> _filtered = new();
     private string _filter = "todo";
     private string _kind = "All kinds";
@@ -1235,6 +1246,7 @@ else
         _targetLang = string.IsNullOrEmpty(parsed.TargetLanguage) ? _targetLang : parsed.TargetLanguage;
         _original = parsed.OriginalName;
         _units = parsed.Units.Select(ToVm).ToList();
+        _learnedTargets.Clear();
         _hasFile = true;
         // Default to download-only; the picker/drop/restore paths flip this on
         // when they carry a writable handle, and the repository path sets its
@@ -1379,6 +1391,7 @@ else
         _fromGeneratedFile = false;
         _hasFile = false;
         _units = new();
+        _learnedTargets.Clear();
         _filtered = new();
         _sel = null;
         _selId = null;
@@ -1620,9 +1633,10 @@ else
             // Private solution's team may see that repository (#1324).
             try
             {
-                await Coordinator.LearnGatedAsync(xml, _repoSource.FileName,
-                    committed.Where(e => !string.IsNullOrEmpty(e.Value.Target)).Select(e => e.Key).ToList(),
+                var learn = UnitsToLearn(committed, _learnedTargets);
+                await Coordinator.LearnGatedAsync(xml, _repoSource.FileName, learn.Keys.ToList(),
                     _repoSource.Repository.FullName, _repoSource.Path);
+                RememberLearned(learn);
             }
             catch (Exception ex)
             {
@@ -2225,13 +2239,17 @@ else
     // File System Access flow in Translator.razor.js.
     private async Task SaveInPlaceAsync(string editsJson)
     {
+        if (await StepUpIsStaleAsync()) return;
+        var learn = PendingLearning(editsJson);
         _busy = true;
         try
         {
-            var status = await _module!.InvokeAsync<string>("saveInPlace", _fileName, editsJson);
+            var status = await _module!.InvokeAsync<string>("saveInPlace", _fileName, editsJson,
+                JsonSerializer.Serialize(learn.Keys));
             switch (status)
             {
                 case "saved":
+                    RememberLearned(learn);
                     // Edits typed while the save was in flight are not in the
                     // file, so the unsaved guard stays up for them and they go
                     // back into the overlay a refresh restores from (#1268, L44).
@@ -2256,6 +2274,9 @@ else
                 case "empty":
                     Flash("Nothing to save yet", ToastKind.Warn);
                     break;
+                case "step-up":
+                    ShowStepUpNeeded();
+                    break;
                 default:
                     Flash("Could not save the file - try Export a copy", ToastKind.Danger);
                     break;
@@ -2269,6 +2290,10 @@ else
 
     private async Task DownloadExportAsync(string editsJson)
     {
+        // Checked before the guard comes down: the download is a form post,
+        // and a refused one would navigate away from the editor (#1343).
+        if (await StepUpIsStaleAsync()) return;
+        var learn = PendingLearning(editsJson);
         // Exporting *is* saving: the user now has a copy on disk. Drop the
         // unsaved-changes guard *before* the submit so the form POST (which the
         // browser treats as a navigation) doesn't trip the leave-confirm modal
@@ -2276,11 +2301,73 @@ else
         // LocationChanging handler stays quiet; the JS side detaches the
         // beforeunload listener synchronously right before `form.submit()`.
         SetUnsaved(false);
-        var ok = await _module!.InvokeAsync<bool>("exportNow", _fileName, editsJson);
-        if (!ok)
+        var ok = await _module!.InvokeAsync<bool>("exportNow", _fileName, editsJson,
+            JsonSerializer.Serialize(learn.Keys));
+        if (ok)
+        {
+            RememberLearned(learn);
+        }
+        else
         {
             Flash("Nothing to export yet", ToastKind.Warn);
         }
+    }
+
+    /// <summary>
+    /// True, after telling the user what to do, when the organisation wants a
+    /// recent "confirm it's you" for the Translator and this session's is out of
+    /// date. The export endpoint sits behind the same check as the page
+    /// (<see cref="ToolAccessGate"/>), so asking here first keeps a refused save
+    /// from looking like a broken one. Read from the claims the page was opened
+    /// with, which is why the remedy includes a reload.
+    /// </summary>
+    private async Task<bool> StepUpIsStaleAsync()
+    {
+        if (AuthStateTask is null) return false;
+        var user = (await AuthStateTask).User;
+        if (!ToolAccessGate.NeedsStepUp([ALDevToolbox.Domain.Tools.ToolKey.Translator], user, Clock.GetUtcNow().UtcDateTime))
+        {
+            return false;
+        }
+        ShowStepUpNeeded();
+        return true;
+    }
+
+    private void ShowStepUpNeeded() =>
+        _toast?.Show(
+            "Confirm it's you before saving",
+            "Your organisation asks for this every so often. Reload the page to confirm - your edits are kept - then save again.",
+            ToastKind.Warn);
+
+    /// <summary>The units in <paramref name="editsJson"/> the translation memory has not yet learned with their current text.</summary>
+    private Dictionary<string, string> PendingLearning(string editsJson)
+    {
+        var posted = JsonSerializer.Deserialize<Dictionary<string, EditDto>>(editsJson) ?? new();
+        return UnitsToLearn(posted.ToDictionary(e => e.Key, e => new TargetEdit(e.Value.T, e.Value.S)), _learnedTargets);
+    }
+
+    private void RememberLearned(IReadOnlyDictionary<string, string> learned)
+    {
+        foreach (var (id, target) in learned) _learnedTargets[id] = target;
+    }
+
+    /// <summary>
+    /// The edits worth teaching the translation memory, by unit id with the
+    /// target they carry: those with text that differs from what the unit last
+    /// taught it (#1343). A save that changed nothing about a unit since the
+    /// last one adds no further hit to it.
+    /// </summary>
+    internal static Dictionary<string, string> UnitsToLearn(
+        IReadOnlyDictionary<string, TargetEdit> edits, IReadOnlyDictionary<string, string> learned)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (id, edit) in edits)
+        {
+            if (string.IsNullOrEmpty(edit.Target)) continue;
+            if (learned.TryGetValue(id, out var last) && string.Equals(last, edit.Target, StringComparison.Ordinal)) continue;
+            result[id] = edit.Target;
+        }
+        return result;
     }
 
     // ── Keyboard (from Translator.razor.js) ───────────────────────────────

@@ -116,6 +116,25 @@ public sealed class StepUpEnforcementTests : IDisposable
             .Response.StatusCode.Should().Be(299, "an anonymous request is authorization's to redirect");
     }
 
+    /// <summary>
+    /// The recipe download and the Translator export take the step-up their tools
+    /// take (#1343): a stale download goes to confirm and comes back, a stale
+    /// export (a POST) is refused.
+    /// </summary>
+    [Fact]
+    public async Task Gate_covers_the_cookbook_download_and_the_translator_export()
+    {
+        var download = await RunGateAsync(CookieUser(1, 1, "Cookbook", strongAt: Now.AddMinutes(-30)), "/api/cookbook/5/download");
+        download.Response.StatusCode.Should().Be(StatusCodes.Status302Found);
+        download.Response.Headers.Location.ToString()
+            .Should().Be("/auth/step-up?return=" + Uri.EscapeDataString("/api/cookbook/5/download?tab=history"));
+
+        (await RunGateAsync(CookieUser(1, 1, "Translator"), "/api/translator/export", "POST"))
+            .Response.StatusCode.Should().Be(StatusCodes.Status403Forbidden);
+        (await RunGateAsync(CookieUser(1, 1, "Translator", strongAt: Now.AddMinutes(-1)), "/api/translator/export", "POST"))
+            .Response.StatusCode.Should().Be(299, "a fresh session passes");
+    }
+
     [Fact]
     public async Task Gate_uses_the_organisations_own_window()
     {

@@ -67,9 +67,15 @@ public static class ToolCatalog
         new ToolDescriptor(ToolKey.Templates, "Templates",
             "Browse templates and generate AL workspaces and extensions.",
             new[] { "/templates" }),
+        // A tool's own /api endpoints sit behind its switch and its step-up like its
+        // pages (#1343): the recipe download and the Translator's export are what the
+        // pages exist to hand out. /api/compare is not listed: it is anonymous and
+        // shared with Object Explorer's diff views. /api/object-explorer is not listed
+        // yet either: the code viewer fetches it from script mid-session, and the
+        // gate's step-up answer (a redirect to a page) is not one a fetch can act on.
         new ToolDescriptor(ToolKey.Cookbook, "Cookbook",
             "Browse reusable AL code recipes.",
-            new[] { "/cookbook" }),
+            new[] { "/cookbook", "/api/cookbook" }),
         new ToolDescriptor(ToolKey.ObjectExplorer, "Object Explorer",
             "Explore Business Central objects, fields and references.",
             new[] { "/object-explorer" }),
@@ -92,7 +98,7 @@ public static class ToolCatalog
             new[] { "/pipelines/deployments", "/releases" }),
         new ToolDescriptor(ToolKey.Translator, "Translator",
             "Translate AL apps and manage XLIFF files.",
-            new[] { "/translator" }),
+            new[] { "/translator", "/api/translator" }),
         new ToolDescriptor(ToolKey.Mcp, "MCP",
             "Let AI coding assistants connect to your tools.",
             new[] { "/tools/mcp" }),

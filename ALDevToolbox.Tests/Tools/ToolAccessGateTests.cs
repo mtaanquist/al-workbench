@@ -202,6 +202,40 @@ public sealed class ToolAccessGateTests : IDisposable
         (await client.GetAsync("/object-explorer")).StatusCode.Should().Be(HttpStatusCode.Redirect);
     }
 
+    /// <summary>
+    /// The recipe download and the Translator's export are what those tools hand
+    /// out, so switching a tool off closes them too, not only its pages (#1343).
+    /// </summary>
+    [Fact]
+    public async Task A_disabled_tools_own_api_endpoints_404()
+    {
+        await DisableToolsAsync(ToolKey.Cookbook, ToolKey.Translator);
+
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
+
+        (await client.GetAsync("/api/cookbook/1/download")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await client.GetAsync("/api/snippets/1/download")).StatusCode.Should().Be(HttpStatusCode.MovedPermanently,
+            "the old address only redirects, to the gated one");
+        using var export = await client.PostAsync("/api/translator/export", new FormUrlEncodedContent([]));
+        // The gate's 404 re-executes /not-found with the same POST, which the page
+        // endpoint refuses as a 400; either way it is not the login redirect an
+        // enabled tool's endpoint gives a signed-out caller.
+        export.StatusCode.Should().BeOneOf(HttpStatusCode.NotFound, HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task An_enabled_tools_api_endpoints_are_not_404d()
+    {
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
+
+        (await client.GetAsync("/api/cookbook/1/download")).StatusCode.Should().NotBe(HttpStatusCode.NotFound,
+            "signed out, the download sends you to sign in");
+        using var export = await client.PostAsync("/api/translator/export", new FormUrlEncodedContent([]));
+        export.StatusCode.Should().Be(HttpStatusCode.Redirect, "signed out, the export sends you to sign in");
+    }
+
     [Fact]
     public async Task Disabling_a_tool_does_not_404_its_admin_pages()
     {
