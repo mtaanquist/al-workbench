@@ -84,6 +84,7 @@ When you add a new file, match the folder. Resist creating top-level folders —
 - `auth-and-audit.md` — how the password gate and audit interceptor work.
 - `teams-and-visibility.md` — teams, their managers, and the per-project visibility model they grant.
 - `saas-delivery.md` — publishing a build to a Business Central SaaS environment: the BC connection, deployment pipelines (the `OeReleasePipeline` entity), deployments (`OeProjectDelivery`), and the two update windows.
+- `on-prem-gateway.md` — the on-premises gateway: the Windows service that lets AL Workbench manage on-premises service tiers (connection, registration, commands, the local policy file, on-premises environments and deployments, licences).
 - `environment-updates.md` — the Upgrades fleet page: the team-scoped grant, the mirrored next platform update, the two date writes, and the actions-and-history table behind them.
 - `ui-design.md` — page layout, copy, components to factor out.
 - `bcquality.md` — the mirrored BCQuality knowledge base: ingest, schema, refresh policy, and the two MCP tools over it.
@@ -106,6 +107,7 @@ subsystem, start here rather than in `domain-model.md`:
 | Projects, repos, pipeline builds (`oe_project_*`)                      | `object-explorer-project-builds.md`                         |
 | Deployments and deployment pipelines                                   | `saas-delivery.md`                                          |
 | BC environments, upgrade actions, the fleet page                       | `environment-updates.md`                                    |
+| On-premises gateways, their commands and inventory (`gateway*`)       | `on-prem-gateway.md`                                        |
 | Translations and the translation memory (`oe_module_translations`, memory tables) | `object-explorer.md` (the translations section)  |
 | Cookbook recipes                                                       | `cookbook.md`                                               |
 | BCQuality mirror                                                       | `bcquality.md`                                              |

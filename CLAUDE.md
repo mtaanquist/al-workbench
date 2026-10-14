@@ -102,6 +102,7 @@ The line runs exactly here:
 | The GitHub check-run name and the repository-standards ruleset name | In-container paths `/var/lib/aldevtoolbox/{dp-keys,backups,altool}` |
 | The seeded ruleset description and README body in `PlatformOrganizationFiles` | `POSTGRES_USER` / `POSTGRES_DB` defaults. (`ALDEVTOOLBOX_TAG` is now `ALWORKBENCH_TAG`; the old name stays as a fallback in `compose.yaml` and must not be removed) |
 | The app-owned stylesheets' header comments (`app.css`, `code-editor.css`, `source-viewer.css`) | `workspace.aldt.toml`, the `aldt` JS namespace, and the `ALDT` MCP server name |
+| The on-premises gateway's projects, namespaces, exe and Windows service (`ALWorkbench.Gateway`, `.Core`, `.Contracts`): new code with no identifiers to protect, and customer IT reads them; see `.design/on-prem-gateway.md` | |
 | | Every Data Protection purpose string (`ALDevToolbox.UserTotpSecret`, `ALDevToolbox.EmailOutbox.Body`, the SMTP / off-site / Entra / GitHub secrets) |
 | | The `aldevtoolbox-` backup filename prefix and the `aldevtoolbox/` off-site key prefix |
 | | The byte-locked stylesheets' header comments, which must stay identical to `.design/handoff/` |
