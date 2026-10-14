@@ -33,6 +33,19 @@ public sealed record GatewayCommandMessage
     [JsonPropertyName("secondsLeft")]
     public int SecondsLeft { get; init; }
 
+    /// <summary>
+    /// The display name of the person who asked for the command, for the gateway's own
+    /// log, so customer IT can see who started each change. Null for a command nobody
+    /// asked for (a scheduled one, or one whose requester was since deleted). Added
+    /// after protocol version 1 shipped to no one; an older gateway ignores it.
+    /// </summary>
+    [JsonPropertyName("requestedBy")]
+    public string? RequestedBy { get; init; }
+
+    /// <summary>True when the person asked through an AI assistant rather than the web UI.</summary>
+    [JsonPropertyName("startedByAgent")]
+    public bool StartedByAgent { get; init; }
+
     /// <summary>The files this command needs, to fetch from <see cref="GatewayProtocol.CommandFilePath"/>.</summary>
     [JsonPropertyName("files")]
     public IReadOnlyList<GatewayCommandFileMessage> Files { get; init; } = [];
