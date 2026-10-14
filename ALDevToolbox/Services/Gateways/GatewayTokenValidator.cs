@@ -7,27 +7,41 @@ using ALWorkbench.Gateway.Contracts;
 
 namespace ALDevToolbox.Services.Gateways;
 
-/// <summary>What the request a token arrived on actually was, to compare the token's binding against.</summary>
+/// <summary>
+/// What the request a token arrived on actually was, to compare the token's binding
+/// against. The body is not part of it: it is checked afterwards with
+/// <see cref="GatewayTokenValidator.CheckBody"/>, once the signature has said who
+/// is calling, so a stranger cannot make the workbench read a body.
+/// </summary>
 /// <param name="Method">The HTTP method.</param>
 /// <param name="Path">The request path, without query string.</param>
 /// <param name="Audience">The audience this workbench expects: <see cref="GatewayProtocol.AudienceFor"/> of its public origin.</param>
-/// <param name="BodyHash">Base64url SHA-256 of the body as received (of no bytes when there was none).</param>
-/// <param name="HasBody">True when the request carried at least one byte of body.</param>
 /// <param name="Now">The workbench's clock.</param>
-public sealed record GatewayTokenRequest(
-    string Method, string Path, string Audience, string BodyHash, bool HasBody, DateTimeOffset Now);
+public sealed record GatewayTokenRequest(string Method, string Path, string Audience, DateTimeOffset Now);
 
-/// <summary>A token that passed every check but the replay check, which needs the database.</summary>
+/// <summary>A token that passed every check but the body and the replay check.</summary>
 /// <param name="TokenId">The <c>jti</c>, to remember.</param>
 /// <param name="ExpiresAt">The token's <c>exp</c>.</param>
-public sealed record ValidatedGatewayToken(string TokenId, DateTimeOffset ExpiresAt);
+/// <param name="BodyHash">The token's <c>bh</c>, or null when it carries none; see <see cref="GatewayTokenValidator.CheckBody"/>.</param>
+public sealed record ValidatedGatewayToken(string TokenId, DateTimeOffset ExpiresAt, string? BodyHash);
+
+/// <summary>Why <see cref="GatewayTokenValidator.Validate"/> refused a token.</summary>
+/// <param name="Reason">Worded for the person reading the gateway's log.</param>
+/// <param name="BeforeSignature">
+/// True when the token was refused before its signature was verified (its format, or
+/// its algorithm). The handler answers those with the same words as an unknown
+/// gateway, so the refusal does not tell a stranger whether a gateway id exists.
+/// </param>
+public sealed record GatewayTokenRefusal(string Reason, bool BeforeSignature);
 
 /// <summary>
 /// Checks a gateway's per-request token (<see cref="GatewayRequestToken"/>) against
 /// the gateway's stored public key and the request it arrived on. Pure: no database,
-/// no clock of its own, so every refusal has a unit test. The replay check (the
+/// no clock of its own, so every refusal has a unit test. Two steps: <see cref="Validate"/>
+/// checks the signature and every claim but the body hash, and only then does the
+/// handler read the body and call <see cref="CheckBody"/>. The replay check (the
 /// <c>jti</c>) is the one thing it cannot do, and <see cref="GatewayService"/> does
-/// it after this passes. See <c>.design/on-prem-gateway.md</c>, "Registration and
+/// it after both pass. See <c>.design/on-prem-gateway.md</c>, "Registration and
 /// authentication".
 ///
 /// <para>Hand-rolled over <c>System.Security.Cryptography</c> rather than a JWT
@@ -66,15 +80,15 @@ public static class GatewayTokenValidator
     }
 
     /// <summary>
-    /// Verifies the signature and every claim. Returns the token on success, or the
-    /// reason it was refused - worded for the person reading the gateway's log, since
-    /// the commonest real cause is a server clock that has drifted.
+    /// Verifies the signature and every claim except the body hash. Returns the token
+    /// on success, or why it was refused - worded for the person reading the
+    /// gateway's log, since the commonest real cause is a server clock that has drifted.
     /// </summary>
-    public static (ValidatedGatewayToken? Token, string? Error) Validate(
+    public static (ValidatedGatewayToken? Token, GatewayTokenRefusal? Error) Validate(
         string token, byte[] publicKey, int gatewayId, GatewayTokenRequest request)
     {
         var parts = token.Split('.');
-        if (parts.Length != 3) return Refuse("The token is not in the expected format.");
+        if (parts.Length != 3) return RefuseUnverified("The token is not in the expected format.");
 
         JsonElement header, payload;
         byte[] signature;
@@ -86,11 +100,11 @@ public static class GatewayTokenValidator
         }
         catch (Exception ex) when (ex is FormatException or JsonException)
         {
-            return Refuse("The token is not in the expected format.");
+            return RefuseUnverified("The token is not in the expected format.");
         }
         if (header.ValueKind != JsonValueKind.Object || payload.ValueKind != JsonValueKind.Object)
         {
-            return Refuse("The token is not in the expected format.");
+            return RefuseUnverified("The token is not in the expected format.");
         }
 
         // One algorithm, named exactly. "none", HS256 against the public key and
@@ -98,12 +112,12 @@ public static class GatewayTokenValidator
         if (!header.TryGetProperty("alg", out var alg) || alg.ValueKind != JsonValueKind.String
             || !string.Equals(alg.GetString(), GatewayTokenClaims.Algorithm, StringComparison.Ordinal))
         {
-            return Refuse("The token must be signed with " + GatewayTokenClaims.Algorithm + ".");
+            return RefuseUnverified("The token must be signed with " + GatewayTokenClaims.Algorithm + ".");
         }
 
         if (!VerifySignature(parts[0] + "." + parts[1], signature, publicKey))
         {
-            return Refuse("The token's signature does not match this gateway's registered key.");
+            return RefuseUnverified("The token's signature does not match this gateway's registered key.");
         }
 
         // From here on the claims are the gateway's own words.
@@ -149,15 +163,23 @@ public static class GatewayTokenValidator
             return Refuse("The token was made for a different request.");
         }
 
-        // A body must be vouched for; a request without one may omit the claim, and
-        // if it carries one anyway it must be the hash of nothing.
-        var bh = ReadString(payload, GatewayTokenClaims.BodyHash);
-        if (bh is null ? request.HasBody : !string.Equals(bh, request.BodyHash, StringComparison.Ordinal))
-        {
-            return Refuse("The token does not match the request body.");
-        }
+        return (new ValidatedGatewayToken(jti, DateTimeOffset.FromUnixTimeSeconds(exp), ReadString(payload, GatewayTokenClaims.BodyHash)), null);
+    }
 
-        return (new ValidatedGatewayToken(jti, DateTimeOffset.FromUnixTimeSeconds(exp)), null);
+    /// <summary>
+    /// The second step, once <see cref="Validate"/> passed and the body has been read:
+    /// a body must be vouched for, and a request without one may omit the claim - if
+    /// it carries one anyway it must be the hash of nothing. Null when it matches.
+    /// </summary>
+    /// <param name="token">What <see cref="Validate"/> returned.</param>
+    /// <param name="bodyHash">Base64url SHA-256 of the body as received (of no bytes when there was none).</param>
+    /// <param name="hasBody">True when the request carried at least one byte of body.</param>
+    public static string? CheckBody(ValidatedGatewayToken token, string bodyHash, bool hasBody)
+    {
+        ArgumentNullException.ThrowIfNull(token);
+        return (token.BodyHash is null ? hasBody : !string.Equals(token.BodyHash, bodyHash, StringComparison.Ordinal))
+            ? "The token does not match the request body."
+            : null;
     }
 
     private static bool VerifySignature(string signingInput, byte[] signature, byte[] publicKey)
@@ -194,5 +216,7 @@ public static class GatewayTokenValidator
             ? n
             : null;
 
-    private static (ValidatedGatewayToken?, string?) Refuse(string reason) => (null, reason);
+    private static (ValidatedGatewayToken?, GatewayTokenRefusal?) Refuse(string reason) => (null, new GatewayTokenRefusal(reason, BeforeSignature: false));
+
+    private static (ValidatedGatewayToken?, GatewayTokenRefusal?) RefuseUnverified(string reason) => (null, new GatewayTokenRefusal(reason, BeforeSignature: true));
 }

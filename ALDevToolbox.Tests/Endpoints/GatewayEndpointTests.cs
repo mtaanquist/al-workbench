@@ -2,12 +2,17 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Endpoints;
 using ALDevToolbox.Services.Gateways;
 using ALDevToolbox.Tests.Auth;
 using ALDevToolbox.Tests.Infrastructure;
 using ALWorkbench.Gateway.Contracts;
 using AwesomeAssertions;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace ALDevToolbox.Tests.Endpoints;
 
@@ -112,6 +117,43 @@ public sealed class GatewayEndpointTests : IDisposable
 
         response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         (await ErrorsOf(response)).Should().ContainKey("body");
+    }
+
+    [Fact]
+    public async Task Explicit_null_fields_in_a_registration_are_a_400_with_the_field_named()
+    {
+        using var client = _factory.CreateClient();
+        using var key = GatewayTestKit.NewKey();
+        var code = await NewCodeAsync();
+        var json = $$"""
+            {"code":"{{code}}","publicKey":"{{Convert.ToBase64String(key.ExportSubjectPublicKeyInfo())}}",
+             "machineName":null,"version":null,"protocolVersion":{{GatewayProtocol.Version}}}
+            """;
+
+        using var response = await client.PostAsync(GatewayProtocol.RegisterPath,
+            new StringContent(json, System.Text.Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest, await response.Content.ReadAsStringAsync());
+        (await ErrorsOf(response)).Should().ContainKey("machineName");
+    }
+
+    [Fact]
+    public void Every_gateway_route_is_rate_limited_and_register_keeps_its_stricter_policy()
+    {
+        var endpoints = _factory.Services.GetRequiredService<EndpointDataSource>().Endpoints
+            .OfType<RouteEndpoint>()
+            .Where(e => e.RoutePattern.RawText?.StartsWith(GatewayProtocol.PathPrefix, StringComparison.Ordinal) == true)
+            .ToList();
+
+        endpoints.Should().NotBeEmpty();
+        foreach (var endpoint in endpoints)
+        {
+            var expected = endpoint.RoutePattern.RawText == GatewayProtocol.RegisterPath
+                ? GatewayEndpoints.RegisterRateLimitPolicy
+                : GatewayEndpoints.GatewayRateLimitPolicy;
+            endpoint.Metadata.GetMetadata<EnableRateLimitingAttribute>()?.PolicyName
+                .Should().Be(expected, endpoint.RoutePattern.RawText);
+        }
     }
 
     [Fact]

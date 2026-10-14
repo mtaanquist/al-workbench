@@ -40,6 +40,14 @@ public sealed class GatewayAuthenticationHandler : AuthenticationHandler<Authent
     /// </summary>
     public const string GatewayApprovedClaim = "gateway_approved";
 
+    /// <summary>
+    /// What an unknown or revoked gateway and a token whose signature does not verify
+    /// are both told. One message for all of them on purpose: telling them apart would
+    /// let a stranger learn which gateway ids exist. The log says which it was.
+    /// </summary>
+    internal const string UnrecognisedMessage =
+        "AL Workbench does not recognise this gateway or its key. It may have been revoked or registered again; check Administration → Gateways.";
+
     private readonly GatewayService _gateways;
     private readonly PublicOrigin _origin;
 
@@ -73,27 +81,35 @@ public sealed class GatewayAuthenticationHandler : AuthenticationHandler<Authent
         if (credential is null)
         {
             Logger.LogInformation("Refused a gateway request for unknown or revoked gateway {GatewayId}.", gatewayId);
-            return AuthenticateResult.Fail("This gateway is not registered, or it has been revoked.");
+            return AuthenticateResult.Fail(UnrecognisedMessage);
+        }
+
+        // Signature and every claim but the body hash first, so nothing is read from
+        // the body until the caller has proved it holds this gateway's key.
+        var request = new GatewayTokenRequest(
+            Method: Request.Method.ToUpperInvariant(),
+            Path: (Request.PathBase + Request.Path).Value ?? string.Empty,
+            Audience: GatewayProtocol.AudienceFor(_origin.For(Context)),
+            Now: TimeProvider.GetUtcNow());
+        var (validated, refusal) = GatewayTokenValidator.Validate(token, credential.PublicKey, credential.GatewayId, request);
+        if (validated is null)
+        {
+            Logger.LogWarning("Refused a request from gateway {GatewayId}: {Reason}", gatewayId, refusal!.Reason);
+            // Before the signature is verified, the caller is a stranger: answer as for a
+            // gateway that does not exist, so the refusal says nothing about which ids do.
+            return AuthenticateResult.Fail(refusal.BeforeSignature ? UnrecognisedMessage : refusal.Reason);
         }
 
         var body = await ReadBodyAsync(ct);
         if (body is null)
         {
+            Logger.LogWarning("Refused a request from gateway {GatewayId}: the body is over {Limit} bytes.", gatewayId, GatewayProtocol.MaxRequestBodyBytes);
             return AuthenticateResult.Fail($"The request body is larger than {GatewayProtocol.MaxRequestBodyBytes} bytes.");
         }
-
-        var request = new GatewayTokenRequest(
-            Method: Request.Method.ToUpperInvariant(),
-            Path: (Request.PathBase + Request.Path).Value ?? string.Empty,
-            Audience: GatewayProtocol.AudienceFor(_origin.For(Context)),
-            BodyHash: GatewayRequestToken.HashBody(body),
-            HasBody: body.Length > 0,
-            Now: TimeProvider.GetUtcNow());
-        var (validated, error) = GatewayTokenValidator.Validate(token, credential.PublicKey, credential.GatewayId, request);
-        if (validated is null)
+        if (GatewayTokenValidator.CheckBody(validated, GatewayRequestToken.HashBody(body), body.Length > 0) is { } bodyError)
         {
-            Logger.LogWarning("Refused a request from gateway {GatewayId}: {Reason}", gatewayId, error);
-            return AuthenticateResult.Fail(error!);
+            Logger.LogWarning("Refused a request from gateway {GatewayId}: {Reason}", gatewayId, bodyError);
+            return AuthenticateResult.Fail(bodyError);
         }
 
         // The jti is kept until the token could not pass the time check anyway.
@@ -117,7 +133,8 @@ public sealed class GatewayAuthenticationHandler : AuthenticationHandler<Authent
 
     /// <summary>
     /// Reads the whole body so its hash can be checked, then rewinds it for the
-    /// endpoint. Null when it is over <see cref="GatewayProtocol.MaxRequestBodyBytes"/>.
+    /// endpoint. Only called once the token's signature has verified. Null when it is
+    /// over <see cref="GatewayProtocol.MaxRequestBodyBytes"/>.
     /// </summary>
     private async Task<byte[]?> ReadBodyAsync(CancellationToken ct)
     {
