@@ -150,8 +150,8 @@ Build **trigger** (the **New build** action with its extension picker) is a Pipe
   the reason before it clones (#1335). Retry and Recover symbols also refuse up front. A build that
   had already started compiling is left to finish and stays ready, but it is checked once more at
   the end: it publishes no GitHub release (the reason is recorded on the build as its release
-  outcome) and deploys through no deployment pipeline without approval (each one prepares it for
-  approval instead, with the reason in that deployment's log). A disabled
+  outcome) and is neither deployed without approval nor prepared for approval: a stopped pipeline
+  means stop, so no deployment pipeline offers that build (the skip is logged). A disabled
   deployment pipeline refuses Deploy and the agent's deploy tool, prepares nothing from new builds,
   and disabling it cancels its scheduled deployments and dismisses its prepared ones, as a delete
   does. Enabling puts it back as it was; nothing that was cancelled comes back.

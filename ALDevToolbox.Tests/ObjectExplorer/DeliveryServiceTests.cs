@@ -3342,6 +3342,35 @@ public sealed class DeliveryServiceTests : IDisposable
             .Should().BeFalse("nothing is deployed");
     }
 
+    /// <summary>
+    /// A disabled or deleted build pipeline means stop, so its build is not offered for
+    /// approval either, though the same deployment pipeline would prepare it otherwise (#1335).
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_build_whose_build_pipeline_was_stopped_is_not_prepared_for_approval(bool deleted)
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        if (deleted)
+            await ctx.OePipelines.Where(p => p.Id == seed.BuildPipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, DateTime.UtcNow));
+        else
+            await ctx.OePipelines.Where(p => p.Id == seed.BuildPipelineId)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+
+        (await NewService(_db.NewContext()).ProposeReleasesForBuildAsync(seed.BuildId)).Should().BeEmpty();
+        (await _db.NewContext().OeProjectDeliveries.AnyAsync(d => d.ProjectBuildId == seed.BuildId))
+            .Should().BeFalse("nothing waits for approval");
+
+        // The control: with the build pipeline on, the same build is prepared.
+        await ctx.OePipelines.Where(p => p.Id == seed.BuildPipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DeletedAt, (DateTime?)null).SetProperty(p => p.DisabledAt, (DateTime?)null));
+        (await NewService(_db.NewContext()).ProposeReleasesForBuildAsync(seed.BuildId)).Should().ContainSingle();
+    }
+
     [Fact]
     public async Task ListDeploymentsWithoutApprovalAsync_ignores_preview_builds()
     {

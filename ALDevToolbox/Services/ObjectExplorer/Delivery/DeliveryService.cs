@@ -649,6 +649,15 @@ public sealed class DeliveryService
         {
             return [];
         }
+        // A pipeline disabled or deleted while this build compiled means stop: the build
+        // stays ready, but nothing is offered for approval either (#1335).
+        if (await BuildPipelineStoppedAsync(projectBuildId, ct))
+        {
+            _logger.LogInformation(
+                "Not preparing deployments of build {BuildId}: build pipeline {PipelineId} was disabled or deleted while it ran.",
+                projectBuildId, buildPipelineId);
+            return [];
+        }
 
         var pipelineIds = await _db.OeReleasePipelines.AsNoTracking()
             .Where(r => r.DeletedAt == null
@@ -706,6 +715,12 @@ public sealed class DeliveryService
     /// new-build deployment follows: a successful build of a build pipeline, not a
     /// pull-request or preview build. Null otherwise.
     /// </summary>
+    /// <summary>True when the pipeline that built <paramref name="projectBuildId"/> is now disabled or deleted (#1335).</summary>
+    private Task<bool> BuildPipelineStoppedAsync(int projectBuildId, CancellationToken ct) =>
+        _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.Id == projectBuildId)
+            .AnyAsync(b => b.Pipeline == null || b.Pipeline.DeletedAt != null || b.Pipeline.DisabledAt != null, ct);
+
     private async Task<int?> PreparableBuildPipelineAsync(int projectBuildId, CancellationToken ct)
     {
         var build = await _db.OeProjectBuilds.AsNoTracking()
@@ -863,12 +878,9 @@ public sealed class DeliveryService
             throw Validation("ReleasePipeline", DisabledRefusal);
         }
         // The build pipeline too: disabling it is how a person stops a bad build going
-        // out, and it may have happened while this build compiled (#1335). The caller
-        // prepares the build for approval instead, with this reason in its log.
-        var buildPipelineStopped = await _db.OeProjectBuilds.AsNoTracking()
-            .Where(b => b.Id == projectBuildId)
-            .AnyAsync(b => b.Pipeline == null || b.Pipeline.DeletedAt != null || b.Pipeline.DisabledAt != null, ct);
-        if (buildPipelineStopped)
+        // out, and it may have happened while this build compiled (#1335). Nor is it
+        // prepared for approval: ProposeReleasesForBuildAsync skips it for the same reason.
+        if (await BuildPipelineStoppedAsync(projectBuildId, ct))
         {
             throw Validation("Build", BuildPipelineStoppedRefusal);
         }
