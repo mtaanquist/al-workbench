@@ -3898,6 +3898,18 @@ namespace ALDevToolbox.Data.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
+                    b.Property<DateTime?>("AccessConfirmedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("access_confirmed_at");
+
+                    b.Property<int?>("AccessConfirmedByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("access_confirmed_by_user_id");
+
+                    b.Property<int?>("AddedByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("added_by_user_id");
+
                     b.Property<string>("DisplayName")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -3925,6 +3937,12 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnName("url");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("AccessConfirmedByUserId")
+                        .HasDatabaseName("ix_oe_project_repositories_access_confirmed_by_user");
+
+                    b.HasIndex("AddedByUserId")
+                        .HasDatabaseName("ix_oe_project_repositories_added_by_user");
 
                     b.HasIndex("OrganizationId");
 
@@ -8275,6 +8293,16 @@ namespace ALDevToolbox.Data.Migrations
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectRepository", b =>
                 {
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "AccessConfirmedByUser")
+                        .WithMany()
+                        .HasForeignKey("AccessConfirmedByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "AddedByUser")
+                        .WithMany()
+                        .HasForeignKey("AddedByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
                         .WithMany()
                         .HasForeignKey("OrganizationId")
@@ -8286,6 +8314,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("AccessConfirmedByUser");
+
+                    b.Navigation("AddedByUser");
 
                     b.Navigation("Organization");
 

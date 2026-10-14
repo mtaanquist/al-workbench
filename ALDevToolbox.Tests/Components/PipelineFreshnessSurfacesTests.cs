@@ -49,6 +49,7 @@ public sealed class PipelineFreshnessSurfacesTests : IDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<PipelineService>();
         _ctx.Services.AddScoped<BuildFreshnessService>();
         _ctx.Services.AddScoped<ReleasePipelineService>();

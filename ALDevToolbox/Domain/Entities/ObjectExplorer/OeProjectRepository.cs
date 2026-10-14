@@ -30,4 +30,27 @@ public class OeProjectRepository
 
     /// <summary>Short admin-facing label for the repo (e.g. the repo name).</summary>
     public string DisplayName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Who added this repository to the solution, or changed its address. Null for a
+    /// row added before this was recorded, or whose person has since been deleted.
+    /// </summary>
+    public int? AddedByUserId { get; set; }
+    public User? AddedByUser { get; set; }
+
+    /// <summary>
+    /// When someone confirmed, with their own access, that they can read this
+    /// repository. Null means nobody has, and no build clones it until someone does:
+    /// a build clones with the access of whoever started it, or of the GitHub App on a
+    /// pull request, and a repository nobody vouched for must not reach anyone's
+    /// Object Explorer through that. See <c>.design/object-explorer-project-builds.md</c>.
+    /// </summary>
+    public DateTime? AccessConfirmedAt { get; set; }
+
+    /// <summary>Who confirmed <see cref="AccessConfirmedAt"/>: the person who added it, or someone who pressed Confirm access later.</summary>
+    public int? AccessConfirmedByUserId { get; set; }
+    public User? AccessConfirmedByUser { get; set; }
+
+    /// <summary>Whether a build may clone this repository. See <see cref="AccessConfirmedAt"/>.</summary>
+    public bool IsAccessConfirmed => AccessConfirmedAt is not null;
 }

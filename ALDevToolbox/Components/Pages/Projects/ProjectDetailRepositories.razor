@@ -44,6 +44,20 @@
                 }
             </div>
         }
+        @* A saved repository nobody has confirmed they can read is left out of
+           every build. Say so above the list, with what to do, rather than letting
+           the next build be the first place anyone finds out. *@
+        @if (UnconfirmedCount > 0)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>
+                    @(UnconfirmedCount == 1 ? "1 repository is" : $"{UnconfirmedCount} repositories are") left out of builds until someone confirms they can read it.
+                    @(CanManage
+                        ? "If you can open it on GitHub or Azure DevOps, press Confirm access next to it."
+                        : "Ask someone who manages this solution, and can open the repository, to confirm access.")
+                </span>
+            </Alert>
+        }
         @if (Edit.Repos.Count == 0)
         {
             <div class="empty-state empty-state--quiet">
@@ -127,6 +141,14 @@
                                     @if (repo.Url == repo.SavedUrl && RepositoryLinks.WebUrl(repo.Provider, repo.Url) is { } webUrl)
                                     {
                                         <div class="pd-repo-links">
+                                            @if (!repo.AccessConfirmed && CanManage)
+                                            {
+                                                <button type="button" class="btn btn--sm" @onclick="() => ConfirmAsync(repo)"
+                                                        disabled="@(Saving || _confirming is not null)">
+                                                    <Icon Name="check" Width="14" Height="14" />
+                                                    <span>@(_confirming == repo ? "Checking..." : "Confirm access")</span>
+                                                </button>
+                                            }
                                             <a class="btn btn--sm" href="@webUrl" target="_blank" rel="noopener noreferrer">
                                                 <Icon Name="external-link" Width="14" Height="14" />
                                                 <span>Open in @repo.Provider.DisplayName()</span>
@@ -141,6 +163,10 @@
                                     else if (!string.IsNullOrWhiteSpace(repo.Url) && repo.Url != repo.SavedUrl)
                                     {
                                         <span class="field__hint pd-repo-links__pending">Save the solution to open or clone this repository.</span>
+                                    }
+                                    @if (repo.Url == repo.SavedUrl && !repo.AccessConfirmed)
+                                    {
+                                        <span class="field__hint pd-repo-links__pending">Not in builds yet.</span>
                                     }
                                 </td>
                                 @if (CanManage)
@@ -251,7 +277,29 @@
     /// <summary>"Resume with my GitHub account": the page makes this person the one update pull requests are opened as.</summary>
     [Parameter] public EventCallback OnResumeAutoUpdates { get; set; }
 
+    /// <summary>"Confirm access" on a saved row: the page checks this person can read it, and puts it into builds if so.</summary>
+    [Parameter] public EventCallback<ProjectDetail.RepoRow> OnConfirmAccess { get; set; }
+
     private bool _resuming;
+
+    /// <summary>The row whose access is being checked, so its button says so and the others wait.</summary>
+    private ProjectDetail.RepoRow? _confirming;
+
+    /// <summary>Saved repositories that builds leave out until someone confirms they can read them.</summary>
+    private int UnconfirmedCount => Edit.Repos.Count(r => r.SavedUrl is not null && !r.AccessConfirmed);
+
+    private async Task ConfirmAsync(ProjectDetail.RepoRow row)
+    {
+        _confirming = row;
+        try
+        {
+            await OnConfirmAccess.InvokeAsync(row);
+        }
+        finally
+        {
+            _confirming = null;
+        }
+    }
 
     /// <summary>Whose GitHub account the pull requests go out as, said the way the person will see it on GitHub.</summary>
     private string OwnerHint

@@ -59,11 +59,14 @@ public sealed class ProjectServiceTests : IDisposable
         var discovery = new ProjectDiscoveryService(
             ctx, _db.OrgContext, access, _discoveryQueue, NullLogger<ProjectDiscoveryService>.Instance);
         var gitHubAccess = _db.NewGitHubAccessService(ctx, _db.NewGitHubAppClient(ctx, _gitHub));
-        return new ProjectService(ctx, _db.OrgContext, access, discovery, gitHubAccess, NullLogger<ProjectService>.Instance);
+        return new ProjectService(ctx, _db.OrgContext, access, discovery, gitHubAccess, _db.NewRepositoryReadProbe(ctx, gitHubAccess, _gitRemote), NullLogger<ProjectService>.Instance);
     }
 
     /// <summary>What GitHub answers. Nothing is registered until a test says so.</summary>
     private readonly FakeGitHubApi _gitHub = new();
+
+    /// <summary>What git answers when a repository outside the connected GitHub organisation is checked. Readable until a test says not.</summary>
+    private readonly FakeGitRemote _gitRemote = new();
 
     private static ProjectInput NewInput(
         string name = "Acme",
@@ -560,18 +563,166 @@ public sealed class ProjectServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task A_repository_outside_the_connected_organisation_is_not_asked_about()
+    public async Task A_repository_outside_the_connected_organisation_is_read_with_the_persons_own_access()
     {
         await ConnectGitHubOrganisationAsync();
         var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
-        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: false);
+        var colleagueId = await SeedColleagueAsync(gitHubLinked: false);
+        _db.OrgContext.CurrentUserId = colleagueId;
 
         await Svc(_db.NewContext()).AddRepositoryAsync(id,
             new ProjectRepositoryInput(RepositoryProvider.GitHub, "https://github.com/fabrikam/shared", "Shared"));
         await Svc(_db.NewContext()).AddRepositoryAsync(id, AzureExtensions);
 
         (await RepositoryUrlsAsync(id)).Should().HaveCount(3);
-        _gitHub.Calls.Should().BeEmpty();
+        _gitHub.Calls.Should().BeEmpty("the App only answers for its own organisation");
+        _gitRemote.Calls.Select(c => c.Arguments[1]).Should()
+            .Equal("https://github.com/acme/core", "https://github.com/fabrikam/shared", AzureExtensions.Url);
+        var added = await RepositoryRowAsync(id, AzureExtensions.Url);
+        added.AddedByUserId.Should().Be(colleagueId);
+        added.AccessConfirmedByUserId.Should().Be(colleagueId);
+        added.AccessConfirmedAt.Should().NotBeNull();
+    }
+
+    public static TheoryData<bool, RepositoryProvider, string> UnreadableElsewhere => new()
+    {
+        // A customer's own GitHub organisation, with the workbench's connected.
+        { true, RepositoryProvider.GitHub, "https://github.com/fabrikam/payroll" },
+        // GitHub with no organisation connected at all, even one that would be the workbench's.
+        { false, RepositoryProvider.GitHub, "https://github.com/cronus-dk/payroll" },
+        { true, RepositoryProvider.AzureDevOps, "https://dev.azure.com/fabrikam/bc/_git/payroll" },
+    };
+
+    [Theory]
+    [MemberData(nameof(UnreadableElsewhere))]
+    public async Task Adding_a_repository_the_persons_own_access_cannot_read_is_refused(
+        bool connected, RepositoryProvider provider, string url)
+    {
+        if (connected) await ConnectGitHubOrganisationAsync();
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: false);
+        _gitRemote.Readable = false;
+
+        var act = () => Svc(_db.NewContext()).AddRepositoryAsync(id, new ProjectRepositoryInput(provider, url, "Payroll"));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Url"].Should().Contain("Account → Repository access");
+        (await RepositoryUrlsAsync(id)).Should().Equal(Core.Url);
+    }
+
+    [Fact]
+    public async Task The_check_tries_the_persons_build_token_before_no_credential()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        await using (var ctx = _db.NewContext())
+        {
+            await new ALDevToolbox.Services.Account.UserRepositoryTokenService(
+                ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Account.UserRepositoryTokenService>.Instance,
+                _db.DataProtectionProvider).SaveTokenAsync(RepositoryProvider.AzureDevOps, "ado-pat", clear: false);
+        }
+        _gitRemote.Calls.Clear();
+        _gitRemote.Readable = false;
+
+        var act = () => Svc(_db.NewContext()).AddRepositoryAsync(id, AzureExtensions);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Url"].Should().Contain("can't read this repository");
+        _gitRemote.Calls.Should().HaveCount(2);
+        _gitRemote.Calls[0].Environment!.Values.Should().Contain(v => v.StartsWith("Authorization: Basic"));
+        _gitRemote.Calls[1].Environment!.Values.Should().NotContain(v => v.StartsWith("Authorization"));
+    }
+
+    // --- Confirming a repository nobody has confirmed --------------------------
+
+    /// <summary>A repository row as it was before confirmations were recorded: nobody added it, nobody confirmed it.</summary>
+    private async Task<int> SeedUnconfirmedRepositoryAsync(int projectId, ProjectRepositoryInput repo)
+    {
+        await using var ctx = _db.NewContext();
+        var row = new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            Provider = repo.Provider,
+            Url = repo.Url,
+            DisplayName = repo.DisplayName,
+        };
+        ctx.OeProjectRepositories.Add(row);
+        await ctx.SaveChangesAsync();
+        return row.Id;
+    }
+
+    private async Task<OeProjectRepository> RepositoryRowAsync(int projectId, string url) =>
+        await _db.NewContext().OeProjectRepositories.AsNoTracking()
+            .SingleAsync(r => r.ProjectId == projectId && r.Url == url);
+
+    [Fact]
+    public async Task Confirming_access_puts_the_repository_into_builds_as_the_person_who_confirmed_it()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var repoId = await SeedUnconfirmedRepositoryAsync(id, AzureExtensions);
+        var pipelineId = await SeedAutomaticPipelineAsync(id);
+        var colleagueId = await SeedColleagueAsync(gitHubLinked: false);
+        _db.OrgContext.CurrentUserId = colleagueId;
+
+        await Svc(_db.NewContext()).ConfirmRepositoryAccessAsync(id, repoId);
+
+        var row = await RepositoryRowAsync(id, AzureExtensions.Url);
+        row.AccessConfirmedAt.Should().NotBeNull();
+        row.AccessConfirmedByUserId.Should().Be(colleagueId);
+        row.AddedByUserId.Should().BeNull("confirming is not adding");
+        var pipeline = await PipelineAsync(pipelineId);
+        pipeline.PreviewCheckByUserId.Should().Be(colleagueId, "the automatic builds now clone it, so they run as whoever vouched for it");
+        pipeline.BuildOnPushByUserId.Should().Be(colleagueId);
+    }
+
+    [Fact]
+    public async Task Confirming_access_to_a_repository_the_person_cannot_read_is_refused()
+    {
+        await ConnectGitHubOrganisationAsync();
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var repoId = await SeedUnconfirmedRepositoryAsync(id, Payments);
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: true);
+        GitHubSays("cronus-dk/payment-import", HttpStatusCode.NotFound);
+
+        var act = () => Svc(_db.NewContext()).ConfirmRepositoryAccessAsync(id, repoId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Url"].Should().Contain("can't see cronus-dk/payment-import");
+        (await RepositoryRowAsync(id, Payments.Url)).AccessConfirmedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Saving_the_solution_does_not_confirm_a_repository_already_on_it()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        await SeedUnconfirmedRepositoryAsync(id, AzureExtensions);
+
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S Denmark", "dk", null, Core, AzureExtensions));
+
+        (await RepositoryRowAsync(id, AzureExtensions.Url)).AccessConfirmedAt.Should().BeNull();
+        (await RepositoryRowAsync(id, Core.Url)).AccessConfirmedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Changing_a_repository_address_confirms_the_new_one_for_the_person_who_changed_it()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        await SeedUnconfirmedRepositoryAsync(id, AzureExtensions);
+        var colleagueId = await SeedColleagueAsync(gitHubLinked: false);
+        _db.OrgContext.CurrentUserId = colleagueId;
+        var moved = AzureExtensions with { Url = "https://dev.azure.com/cronus/bc/_git/extensions-v2" };
+
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core, moved));
+
+        var row = await RepositoryRowAsync(id, moved.Url);
+        row.AddedByUserId.Should().Be(colleagueId);
+        row.AccessConfirmedByUserId.Should().Be(colleagueId);
+        _gitRemote.Calls.Select(c => c.Arguments[1]).Should().EndWith(moved.Url);
+
+        _gitRemote.Readable = false;
+        var act = () => Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core,
+            moved with { Url = "https://dev.azure.com/fabrikam/bc/_git/payroll" }));
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Repositories[1].Url");
     }
 
     [Fact]

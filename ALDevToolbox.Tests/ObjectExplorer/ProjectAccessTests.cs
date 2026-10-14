@@ -74,7 +74,7 @@ public sealed class ProjectAccessTests : IDisposable
         var access = Access(ctx);
         var discovery = new ProjectDiscoveryService(
             ctx, _db.OrgContext, access, _discoveryQueue, NullLogger<ProjectDiscoveryService>.Instance);
-        return new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), NullLogger<ProjectService>.Instance);
+        return new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance);
     }
 
     private TeamService Teams(AppDbContext ctx) => new(ctx, _db.OrgContext, NullLogger<TeamService>.Instance);

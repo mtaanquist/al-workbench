@@ -61,6 +61,7 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ArtifactService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<ProjectFollowService>();
         // The follow confirmation reads the person's own Solutions choice.
         _ctx.Services.AddScoped<ALDevToolbox.Services.Notifications.NotificationPreferenceService>();
@@ -266,6 +267,27 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_repository_nobody_confirmed_says_so_and_confirm_access_puts_it_into_builds()
+    {
+        var projectId = await SeedProjectAsync("https://github.com/cronus-dk/base-app", confirmed: false);
+        _db.AddGitHubServices(_ctx.Services);
+
+        var cut = RenderOnSettings(projectId);
+        await OpenReposTabAsync(cut);
+
+        cut.Markup.Should().Contain("1 repository is left out of builds until someone confirms they can read it.");
+        cut.Markup.Should().Contain("Not in builds yet.");
+        await ClickAsync(cut, "Confirm access");
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Confirmed. Builds include base-app from now on."));
+        cut.Markup.Should().NotContain("left out of builds");
+        ButtonLabels(cut).Should().NotContain("Confirm access");
+        await using var read = _db.NewContext();
+        (await read.OeProjectRepositories.AsNoTracking().SingleAsync(r => r.ProjectId == projectId))
+            .AccessConfirmedByUserId.Should().Be(OwnerUserId);
+    }
+
+    [Fact]
     public async Task An_unconnected_organisation_gets_the_tab_it_had_before_rather_than_a_blocker()
     {
         var projectId = await SeedProjectAsync();
@@ -349,7 +371,7 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
 
     // --- helpers ------------------------------------------------------------
 
-    private async Task<int> SeedProjectAsync(string? existingRepoUrl = null)
+    private async Task<int> SeedProjectAsync(string? existingRepoUrl = null, bool confirmed = true)
     {
         await using var ctx = _db.NewContext();
         var project = new OeProject
@@ -373,6 +395,7 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
                 Provider = RepositoryProvider.GitHub,
                 Url = existingRepoUrl,
                 DisplayName = "base-app",
+                AccessConfirmedAt = confirmed ? DateTime.UtcNow : null,
             });
             await ctx.SaveChangesAsync();
         }

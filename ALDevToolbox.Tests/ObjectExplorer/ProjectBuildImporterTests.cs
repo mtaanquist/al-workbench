@@ -305,6 +305,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
             Provider = RepositoryProvider.AzureDevOps,
             Url = "https://dev.azure.com/cronus/core/_git/reports",
             DisplayName = "reports",
+            AccessConfirmedAt = DateTime.UtcNow,
         });
         await ctx.SaveChangesAsync();
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
@@ -328,6 +329,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
             Provider = RepositoryProvider.AzureDevOps,
             Url = "https://dev.azure.com/cronus/core/_git/reports",
             DisplayName = "reports",
+            AccessConfirmedAt = DateTime.UtcNow,
         });
         await ctx.SaveChangesAsync();
         var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
@@ -915,6 +917,71 @@ public sealed class ProjectBuildImporterTests : IDisposable
         (await read.OeProjectBuilds.AnyAsync()).Should().BeFalse();
     }
 
+    // --- Repositories nobody has confirmed they can read -----------------------
+
+    /// <summary>Marks every repository of <paramref name="projectId"/> as nobody having confirmed it, as a row from before confirmations were recorded is.</summary>
+    private async Task UnconfirmAsync(int projectId)
+    {
+        await using var ctx = _db.NewContext();
+        await ctx.OeProjectRepositories.Where(r => r.ProjectId == projectId)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.AccessConfirmedAt, (DateTime?)null));
+    }
+
+    [Fact]
+    public async Task A_manual_build_with_no_confirmed_repository_is_refused_before_a_build_exists()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        await UnconfirmAsync(projectId);
+
+        var act = () => NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Pipeline"]
+            .Should().Be(ProjectBuildImporter.NoConfirmedRepositoryRefusal);
+        await using var read = _db.NewContext();
+        (await read.OeProjectBuilds.AnyAsync()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_build_is_not_built_again_when_none_of_its_repositories_is_confirmed()
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+        var first = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+        await FinishAsync(first);
+        await UnconfirmAsync(projectId);
+
+        var act = async () => { await using var _ = await NewImporter(ctx, new ProjectBuildQueue()).BeginRebuildAsync(first, projectId, "Retry"); };
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Retry"]
+            .Should().Be(ProjectBuildImporter.NoConfirmedRepositoryRefusal);
+    }
+
+    [Fact]
+    public async Task An_unconfirmed_repository_needs_no_credential_for_a_manual_build()
+    {
+        // The Azure DevOps repository is left out of the build, so having no Azure
+        // DevOps token is no reason to refuse it.
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectWithRepoAsync(ctx);
+        ctx.OeProjectRepositories.Add(new OeProjectRepository
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            ProjectId = projectId,
+            Provider = RepositoryProvider.AzureDevOps,
+            Url = "https://dev.azure.com/cronus/core/_git/reports",
+            DisplayName = "reports",
+        });
+        await ctx.SaveChangesAsync();
+        var pipelineId = await SeedPipelineAsync(ctx, projectId, "Production", requestedAppIdsJson: null);
+
+        var releaseId = await NewImporter(ctx, new ProjectBuildQueue()).StartBuildAsync(pipelineId);
+
+        releaseId.Should().BePositive();
+    }
+
     private ProjectBuildImporter NewImporter(Data.AppDbContext ctx, ProjectBuildQueue queue)
     {
         var translations = new TranslationImportService(
@@ -965,6 +1032,7 @@ public sealed class ProjectBuildImporterTests : IDisposable
             Provider = RepositoryProvider.GitHub,
             Url = "https://github.com/cronus/core",
             DisplayName = "core",
+            AccessConfirmedAt = DateTime.UtcNow,
         });
         await ctx.SaveChangesAsync();
         return projectId;

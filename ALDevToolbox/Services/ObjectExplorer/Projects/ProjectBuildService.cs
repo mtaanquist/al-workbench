@@ -919,6 +919,11 @@ public sealed class ProjectBuildService
             {
                 ct.ThrowIfCancellationRequested();
                 var dest = Path.Combine(root, $"repo-{index++}");
+                if (!repo.IsAccessConfirmed)
+                {
+                    failures.Add($"Left out \"{repo.DisplayName}\": nobody has confirmed they can read it. Someone who can should press Confirm access on the solution's Repositories tab.");
+                    continue;
+                }
                 var credentials = await _credentials.ResolveAsync(repo.Provider, ct).ConfigureAwait(false);
                 if (credentials.Count == 0)
                 {
@@ -1466,6 +1471,16 @@ public sealed class ProjectBuildService
         foreach (var repo in project.Repositories)
         {
             var dest = Path.Combine(buildRoot, $"repo-{index++}");
+            // Nobody has confirmed they can read this repository, so it is not cloned
+            // with anyone's access - the person who started the build, or the App's on
+            // a pull request. See OeProjectRepository.AccessConfirmedAt.
+            if (!repo.IsAccessConfirmed)
+            {
+                results.Add(new BuildAppResult(repo.DisplayName, string.Empty, ProjectBuildResultStatus.Failed,
+                    UnconfirmedRepositoryMessage, RepoUrl: repo.Url));
+                logs.Add(new PendingLog(repo.Id, repo.DisplayName, $"Skipped: {UnconfirmedRepositoryMessage}"));
+                continue;
+            }
             // A pull-request build has no user, so there is nothing personal to
             // clone with: it clones as the app's installation instead, in the same
             // http.extraHeader shape a token travels in (#627). A manual build
@@ -1591,6 +1606,13 @@ public sealed class ProjectBuildService
         }
         return (result, used, DescribeCloneFailures(attempts, credentials));
     }
+
+    /// <summary>
+    /// Why a build or a discovery left a repository out: nobody has confirmed they can
+    /// read it. Shown on the build's results and log, and on the pipeline editor.
+    /// </summary>
+    internal const string UnconfirmedRepositoryMessage =
+        "Left out of this build because nobody has confirmed they can read this repository. Someone who can read it should open the solution's Repositories tab and press Confirm access, then build again.";
 
     /// <summary>The build log's note for extensions left out as test apps (#1130).</summary>
     internal static string DescribeSkippedTestApps(IReadOnlyList<string> names)

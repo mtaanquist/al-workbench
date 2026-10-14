@@ -51,6 +51,7 @@ public sealed class PipelineEditPagesTests : IDisposable
         _ctx.Services.AddScoped<ReleasePipelineService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<OrganizationConfigService>();
         _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
         _ctx.Services.AddHttpClient();

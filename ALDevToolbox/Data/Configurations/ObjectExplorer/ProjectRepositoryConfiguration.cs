@@ -25,11 +25,31 @@ internal sealed class ProjectRepositoryConfiguration : IEntityTypeConfiguration<
                 s => RepositoryProviders.FromDiscriminatorStrict(s));
         entity.Property(e => e.Url).HasColumnName("url").HasMaxLength(2000).IsRequired();
         entity.Property(e => e.DisplayName).HasColumnName("display_name").HasMaxLength(200).IsRequired();
+        entity.Property(e => e.AddedByUserId).HasColumnName("added_by_user_id");
+        entity.Property(e => e.AccessConfirmedAt).HasColumnName("access_confirmed_at");
+        entity.Property(e => e.AccessConfirmedByUserId).HasColumnName("access_confirmed_by_user_id");
+        entity.Ignore(e => e.IsAccessConfirmed);
 
         entity.HasOne(e => e.Organization)
             .WithMany()
             .HasForeignKey(e => e.OrganizationId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        // Who added the row and who confirmed they can read it. SET NULL on delete:
+        // the confirmation stands as a record of when, and the row stays buildable.
+        // Each FK has its own index so deleting a user does not scan the table.
+        entity.HasOne(e => e.AddedByUser)
+            .WithMany()
+            .HasForeignKey(e => e.AddedByUserId)
+            .OnDelete(DeleteBehavior.SetNull);
+        entity.HasIndex(e => e.AddedByUserId)
+            .HasDatabaseName("ix_oe_project_repositories_added_by_user");
+        entity.HasOne(e => e.AccessConfirmedByUser)
+            .WithMany()
+            .HasForeignKey(e => e.AccessConfirmedByUserId)
+            .OnDelete(DeleteBehavior.SetNull);
+        entity.HasIndex(e => e.AccessConfirmedByUserId)
+            .HasDatabaseName("ix_oe_project_repositories_access_confirmed_by_user");
 
         // The Project -> Repositories relationship (FK project_id, cascade) is
         // configured on the Project side; here we just index the FK for the
