@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: designed, not built.** Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361) and the Windows service frame (#1362) exist; the policy file, the runner and the verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -585,11 +585,101 @@ source are read by customer IT. The app keeps `ALDevToolbox`. CLAUDE.md's naming
 and the `PROJECT.md` folder map list the gateway projects next to the app and its tests once they
 exist (#1361, #1362).
 
-The Dockerfile's restore layer copies the contracts csproj alongside `ALDevToolbox.csproj`. The
+The Dockerfile's restore layer copies the contracts csproj alongside `ALDevToolbox.csproj`;
+`.dockerignore` leaves the other two gateway projects out of the image's build context. The
 release workflow gains a Windows job that publishes the gateway self-contained single-file for
 `win-x64`, signs it and attaches it to the release; the Gateways page links the build matching the
 running version with its SHA-256. The contracts carry a minimum supported gateway version; an older
 gateway is refused with a message saying to update.
+
+### The Windows service, as built (#1362)
+
+The frame: it registers, keeps its key, heartbeats, polls, downloads and checks files, and reports.
+It runs no verb yet; every command fails with "This version of the gateway cannot run '<verb>'
+commands yet" until #1365 onward plug executors in behind `ICommandExecutor`.
+
+**Commands customer IT runs** (from an administrator prompt), in either order:
+
+- `install [--account DOMAIN\name$]` creates the service `ALWorkbenchGateway` ("AL Workbench
+  Gateway"), delayed automatic start, restarted by Windows after a crash but not after a clean stop.
+  It runs as its own **virtual account** `NT SERVICE\ALWorkbenchGateway` by default: no password,
+  not an administrator, the computer account on the network. A **group managed service account**
+  can be named instead, for when the gateway must act on other machines as a domain identity
+  (#1373); it must be installed on the computer and hold "Log on as a service". An ordinary user
+  account is refused, because the gateway never stores a password. Which Business Central rights
+  the account needs is the setup guide's (#1376). `install` uses `sc.exe`, so `sc qc
+  ALWorkbenchGateway` shows exactly what it did.
+- `register --url <address> --code <code>` makes a key, exchanges the code, checks that the
+  fingerprint AL Workbench stored is the one of the key it made (a mismatch means something on the
+  path changed the request, and it says not to approve), prints the fingerprint for the Admin to
+  compare, and restarts the service if it is installed. A rotation code is registered the same way:
+  the new key is made beside the old one, which is deleted only once AL Workbench has accepted the
+  new one. The address must be `https://` (plain `http` only for the computer itself) and is the
+  workbench's `PUBLIC_BASE_URL`, path included, because the token audience is built from it.
+- `uninstall` stops and removes the service, deletes the key, the settings and the state, removes
+  the event log source, keeps the log files, and reminds them to have an Admin revoke the gateway.
+
+**The key.** A CNG machine key, ECDSA P-256, non-exportable, created in the Microsoft Platform
+Crypto Provider (the TPM) and, if that fails, in the Microsoft Software Key Storage Provider;
+`register` prints which. Its access list is Administrators and SYSTEM full control and the service
+account read (enough to sign). The virtual account's SID is computed from the service name, so
+`register` can grant the key before the service exists; `install` re-grants it when the account
+changes.
+
+**Files**, in `%ProgramData%\AL Workbench Gateway` (`GatewayDataFolder`), which does not inherit
+`%ProgramData%`'s rights: `gateway.json` (address, gateway id, key name and fingerprint, service
+account; nothing secret) writable by administrators only; `state\started-commands.json` (the
+run-once list), `work\<command id>\` (a command's downloaded files, removed when it ends) and
+`logs\` writable by the service account too.
+
+**The loop** (`GatewayRunner`) is one loop, so the order is plain:
+
+- The first heartbeat goes before any poll, and carries the ids the run-once file lists as started
+  but never finished: the interrupted ones. Once AL Workbench has them they are marked finished
+  locally and never reported or run again.
+- Heartbeats every 60 seconds, also while a command runs, listing it as running.
+- While the gateway is not approved (the heartbeat says so, or a poll answers 403) it does not poll
+  at all; it heartbeats each minute and polls after the first heartbeat that says it is approved.
+- One command at a time. An empty poll that comes back in under two seconds is followed by a wait,
+  so a proxy that answers at once cannot turn the loop into a stream of requests.
+- AL Workbench unreachable (no connection, a timeout, 407, 408, 429, a 5xx) or answering 400: back
+  off 2, 4, 8 ... seconds up to five minutes, each wait drawn from the upper half of its step.
+- **401 stops the gateway** with the workbench's reason in the log, and the service stops cleanly,
+  so Windows does not restart it. Revoked and "this computer's clock is far off" both answer 401;
+  the log line says what to do for each.
+
+**A command**, once claimed:
+
+1. Refused if the run-once file already has it ("already started this command once").
+2. Refused if its seconds left are 0, or have run out by the gateway's monotonic clock since the
+   answer arrived. It is recorded as started-and-finished, so it is never considered again.
+3. Recorded as started, on disk, before anything else happens.
+4. Files downloaded into its work folder, each stopped as soon as it exceeds its announced size,
+   then checked by size and SHA-256. Any mismatch fails the command; the verb never sees the file.
+5. The executor runs. Its progress lines are batched: at most one post every 3 seconds, at most 200
+   lines a post, lines over 2,000 characters cut, at most 10,000 lines held (more are counted and
+   reported as left out). A 409 on progress stops the verb.
+6. The result is posted, retried with back-off until it arrives (a 409 means AL Workbench already
+   closed it, and is accepted), then the command is marked finished.
+
+A stop in the middle leaves the command started-not-finished, which the next start reports as
+interrupted.
+
+**The local log**: the Windows event log (Application, source "AL Workbench Gateway", created by
+`install`) and a file per day in `logs\`, kept 30 days. Each command gets a line when it starts and
+when it ends, naming the verb, who asked for it, and the outcome, with fixed event ids (1000
+started, 1001 succeeded, 1002 failed, 1003 refused, 1004 interrupted) so customer IT can filter on
+them. "Who asked" travels with the command: `GatewayCommandMessage.requestedBy` (the requester's
+display name) and `startedByAgent`, added for this; an older gateway ignores them.
+
+**Proxy and certificates.** One `HttpClient` with the system proxy (WinHTTP / Internet Options, or
+`HTTPS_PROXY`), the service account's own credentials for a proxy that asks, and Windows' certificate
+validation, so TLS inspection with the company's root certificate works.
+
+Tests: the core library's in `ALDevToolbox.Tests/Gateways/` against a fake workbench and a clock
+whose waits return at once, and one end-to-end test in `Endpoints/GatewayServiceFrameEndpointTests`
+that drives the gateway's own code against the real `/gateway` routes. The Windows host has no
+automated tests: the key store, `sc.exe` and the event log need Windows.
 
 ## Phasing
 
