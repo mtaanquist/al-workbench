@@ -196,11 +196,15 @@ workbench can show what is allowed. A command the file does not allow is refused
 whatever the server sent.
 
 ```toml
+# Rules for the whole gateway.
+[gateway]
+change_hours = "20:00-06:00"   # optional: changes only in this local time window (reads any time)
+
 # Service tiers this gateway may touch. Anything not listed is refused.
 [[instance]]
 machine = "CRONUS-BC01"        # this machine
 name = "BC140"
-install = true                 # may publish and install
+allow = ["inventory", "publish", "unpublish", "restart", "licence"]
 tenants = ["default"]          # multitenant servers: the tenants this gateway may target
 publishers = ["CRONUS Partner"] # optional allow-list of app publishers
 allow_unsigned = true          # Publish-NAVApp -SkipVerification (our builds are unsigned)
@@ -209,7 +213,7 @@ scope = "tenant"               # tenant (default) or global
 [[instance]]
 machine = "CRONUS-BC02"
 name = "BC140"
-install = false                # restarted with the group, never published to
+allow = ["inventory", "restart"] # restarted with the group, never published to
 
 # Tiers that share a database: one publishes, all restart after an install.
 [[database]]
@@ -230,6 +234,27 @@ after = 'C:\ALWorkbench\after-restart.ps1'
 name = "CRONUS-BC02"
 method = "service-manager"     # or "powershell-remoting"
 ```
+
+**Permissions per service tier.** Each instance lists what the gateway may do there, and anything not
+listed is refused. An instance with no `allow` line gets `["inventory"]`: read-only. The workbench
+shows the effective permissions on the environment page and greys out what a tier does not allow,
+with "Not allowed by the customer's gateway settings".
+
+| Permission | Lets the gateway |
+| --- | --- |
+| `inventory` | Read state, versions, tenants, apps, session counts and licence information |
+| `session_users` | Also report *who* is signed in, not only how many (personal data, so off unless listed) |
+| `publish` | Publish, sync, install and upgrade apps (`Publish-NAVApp`, `Sync-NAVApp`, `Install-NAVApp`, `Start-NAVAppDataUpgrade`) |
+| `unpublish` | Remove an app's previous version after an upgrade |
+| `restart` | Restart the tier as part of a deployment or licence import (the restart group) |
+| `service_control` | Stop, start and restart the tier on demand from the environment page |
+| `licence` | Import a licence file |
+| `scripts` | Run the before and after scripts named for its database |
+
+`change_hours` limits every permission except `inventory` to a local time window, on top of the
+delivery window set in AL Workbench, so customer IT can rule out daytime changes whatever the
+workbench asks. A command outside it is refused with "Outside the hours set on the customer's
+gateway".
 
 **File permissions are part of the policy.** At start, and before each command, the gateway checks
 that the program folder, the policy file and every script it names are writable only by
@@ -460,7 +485,7 @@ server configuration (`Set-NAVServerConfiguration`) is out of scope.
 **What it does not protect against, stated plainly:** a **compromised AL Workbench** can still
 install any app on any tier the policy allows. The hash is chosen by the server, and the publisher
 allow-list checks what the app says about itself. The real limits are the policy file (which tiers,
-install yes or no) and the customer's choice to install a gateway at all. If that is not enough for a
+what each tier allows, the hours changes may run) and the customer's choice to install a gateway at all. If that is not enough for a
 customer, two later options exist: local approval on the gateway before an install, or apps signed
 with a certificate the customer trusts and `allow_unsigned = false`. The setup guide says this to
 customer IT in plain words.
