@@ -138,3 +138,14 @@
     white-space: normal;
     overflow-wrap: anywhere;
 }
+
+/* Quick actions: one button a line, the full width of the rail, labels to the left
+   so the three read as a list rather than as a toolbar. */
+.env-detail__actions {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.env-detail__actions .btn {
+    justify-content: flex-start;
+}

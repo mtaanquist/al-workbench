@@ -88,36 +88,6 @@
         <StatusPill Tone="@StatusTone()">@StatusWord(Row)</StatusPill>
         <span class="tag">@Row.EnvironmentType</span>
     </TitleRow>
-    <SubtitleContent>@SubtitleText()</SubtitleContent>
-    <Actions>
-        @if (Row.BusinessCentralUrl is { } bcUrl)
-        {
-            <a class="btn" href="@bcUrl" target="_blank" rel="noopener">
-                <Icon Name="external-link" Width="15" Height="15" />
-                <span>Open in Business Central</span>
-            </a>
-        }
-        @if (AdminCentreUrl is { } adminUrl)
-        {
-            <a class="btn" href="@adminUrl" target="_blank" rel="noopener">
-                <Icon Name="external-link" Width="15" Height="15" />
-                <span>Open the admin centre</span>
-            </a>
-        }
-        @* The most common thing this page's reader would otherwise open the admin
-           centre for. An outline button like its neighbours: it writes to the
-           customer's tenant, and nothing on this page is the primary action. A
-           deleted environment has nothing to copy - the alert below offers the one
-           thing left to do to it. *@
-        @if (_canManage && !Row.IsSoftDeleted)
-        {
-            <button type="button" class="btn @(_settingBusy == "copy" ? "btn--loading" : "")"
-                    @onclick="CopyAsync" disabled="@_settingSaving">
-                <Icon Name="copy" Width="15" Height="15" />
-                <span class="btn__label">@(_settingBusy == "copy" ? "Starting the copy" : "Copy this environment...")</span>
-            </button>
-        }
-    </Actions>
     <ChildContent>
         @* Directly under the head, where a reader looks for a page's menu: with the
            facts above them, people did not see there were tabs at all. Real links, so a
@@ -991,11 +961,51 @@
                the tabs stay next to what they switch. The Overview's Updates card
                repeats the version, the next update and the window for that reader. *@
             <aside class="detail-body__aside">
+                @* The ways out to Business Central and the copy, in a card of their own
+                   rather than in the head: three buttons beside the name pushed the tabs
+                   down, and on a phone they stacked above them. Outline buttons, as they
+                   were - Copy writes to the customer's tenant, and nothing on this page is
+                   the primary action. A deleted environment has nothing to copy; the
+                   alert under the tabs offers the one thing left to do to it. *@
+                @if (Row.BusinessCentralUrl is not null || AdminCentreUrl is not null || (_canManage && !Row.IsSoftDeleted))
+                {
+                    <section class="card">
+                        <div class="card__head"><h2 class="card__title">Quick actions</h2></div>
+                        <div class="card__body env-detail__actions">
+                            @if (Row.BusinessCentralUrl is { } bcUrl)
+                            {
+                                <a class="btn" href="@bcUrl" target="_blank" rel="noopener">
+                                    <Icon Name="external-link" Width="15" Height="15" />
+                                    <span>Open in Business Central</span>
+                                </a>
+                            }
+                            @if (AdminCentreUrl is { } adminUrl)
+                            {
+                                <a class="btn" href="@adminUrl" target="_blank" rel="noopener">
+                                    <Icon Name="external-link" Width="15" Height="15" />
+                                    <span>Open the admin centre</span>
+                                </a>
+                            }
+                            @if (_canManage && !Row.IsSoftDeleted)
+                            {
+                                <button type="button" class="btn @(_settingBusy == "copy" ? "btn--loading" : "")"
+                                        @onclick="CopyAsync" disabled="@_settingSaving">
+                                    <Icon Name="copy" Width="15" Height="15" />
+                                    <span class="btn__label">@(_settingBusy == "copy" ? "Starting the copy" : "Copy this environment...")</span>
+                                </button>
+                            }
+                        </div>
+                    </section>
+                }
                 <section class="card">
                     <div class="card__head"><h2 class="card__title">At a glance</h2></div>
                     <div class="card__body env-detail__facts">
+                        @* The solution and the region were the subtitle under the name; here
+                           they sit with the other facts, and the name stands on its own. *@
+                        <span class="meta-item"><span class="meta-item__label">Solution</span><span class="meta-item__value"><a href="@Row.SolutionHref">@Row.ProjectName</a></span></span>
                         <span class="meta-item"><span class="meta-item__label">Type</span><span class="meta-item__value">@Row.EnvironmentType</span></span>
                         <span class="meta-item"><span class="meta-item__label">BC version</span><span class="meta-item__value meta-item__value--mono">@(Row.Version ?? "—")</span></span>
+                        <span class="meta-item"><span class="meta-item__label">Region</span><span class="meta-item__value">@(string.IsNullOrWhiteSpace(_env!.LocationName) ? "—" : _env.LocationName)</span></span>
                         <span class="meta-item"><span class="meta-item__label">Country</span><span class="meta-item__value">@CountryText()</span></span>
                         <span class="meta-item"><span class="meta-item__label">Delivery window</span><span class="meta-item__value">@DeliveryWindowText()</span></span>
                         <span class="meta-item"><span class="meta-item__label">Next update</span><span class="meta-item__value"><Timestamp Value="@Row.NextUpdateDate" Format="dd MMM yyyy" Placeholder="—" /></span></span>
@@ -1762,14 +1772,6 @@
         BcEnvironmentReadiness.Deleting or BcEnvironmentReadiness.Failed => "danger",
         _ => "muted",
     };
-
-    private string SubtitleText()
-    {
-        var parts = new List<string> { $"Business Central environment in {Row.ProjectName}" };
-        if (CurrentVersionShort() is { Length: > 0 } version && version != "—") parts.Add($"BC version {version}");
-        if (!string.IsNullOrWhiteSpace(_env!.LocationName)) parts.Add(_env.LocationName!);
-        return string.Join(" - ", parts);
-    }
 
     /// <summary>The admin centre for the customer's tenant. Microsoft has no deep link to one environment.</summary>
     private string? AdminCentreUrl => Row.AdminCentreUrl;

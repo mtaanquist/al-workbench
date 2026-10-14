@@ -357,14 +357,10 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
    screen, and its seven tabs ran past the edge with the last ones unreachable. The
    head wraps like the upgrade page's, and the tab row scrolls sideways inside the
    page instead of widening it - a label never breaks onto two lines. An environment's
-   page ("env-detail") had both problems too - three head buttons and five tabs - and
-   takes the same rules. */
-.page.sol .detail-head,
-.page.env-detail .detail-head { flex-wrap: wrap; gap: var(--space-3); }
-.page.sol .detail-head > div:first-child,
-.page.env-detail .detail-head > div:first-child { flex: 1 1 260px; min-width: 0; }
-.page.sol .detail-head > .page-head__actions,
-.page.env-detail .detail-head > .page-head__actions { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+   page ("env-detail") has five tabs and takes the tab row's rules. */
+.page.sol .detail-head { flex-wrap: wrap; gap: var(--space-3); }
+.page.sol .detail-head > div:first-child { flex: 1 1 260px; min-width: 0; }
+.page.sol .detail-head > .page-head__actions { flex-wrap: wrap; min-width: 0; max-width: 100%; }
 .page.sol .settings > * { min-width: 0; }
 .page.sol .settings__tabs,
 .page.env-detail .settings__tabs { min-width: 0; }
