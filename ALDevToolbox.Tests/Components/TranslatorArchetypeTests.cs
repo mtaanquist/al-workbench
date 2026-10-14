@@ -350,6 +350,29 @@ public sealed class TranslatorArchetypeTests
             "the in-place path writes to the handle, not to the name the rename box holds");
     }
 
+    /// <summary>
+    /// #1268 (L44): saveInPlace used to write back the session record it read
+    /// before the request, overwriting edits persisted while the save was in
+    /// flight, and the page then dropped the unsaved guard for them too. The
+    /// record is read again before the write, and the guard only drops when the
+    /// overlay that was saved is still the current one.
+    /// </summary>
+    [Fact]
+    public void An_in_place_save_does_not_overwrite_edits_made_while_it_ran()
+    {
+        var js = Js();
+        var save = js[js.IndexOf("export async function saveInPlace(", StringComparison.Ordinal)..];
+        save = save[..save.IndexOf("\n}\n", StringComparison.Ordinal)];
+        var write = save.IndexOf("handle.createWritable()", StringComparison.Ordinal);
+        var reread = save.IndexOf("await getRec()", write, StringComparison.Ordinal);
+        reread.Should().BeGreaterThan(write, "the record is read again after the file is written");
+        save.Should().NotContain("putRec(rec)", "the record read before the save is stale by the time it ends");
+
+        Body(Razor(), "private async Task SaveInPlaceAsync(")
+            .Should().Contain("SerializeEdits() == editsJson",
+                "the unsaved guard drops only when nothing changed during the save");
+    }
+
     [Fact]
     public void The_focus_helper_still_points_at_the_target_box()
     {

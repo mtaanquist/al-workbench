@@ -70,6 +70,41 @@ public sealed class TranslatorExportEndpointTests : IDisposable
             "a file that already says which language it is in is left byte for byte as it was");
     }
 
+    /// <summary>
+    /// #1268 (L48): the memory learns what the user changed, not the whole
+    /// file again - a unit already translated in the file gains no hit from a
+    /// save that did not touch it.
+    /// </summary>
+    [Fact]
+    public async Task Export_teaches_the_memory_only_the_units_that_were_edited()
+    {
+        await SeedUserAsync();
+        using var factory = new EndpointFactory(_db);
+        using var client = await SignInAsync(factory);
+        var danish = Generated
+            .Replace("target-language=\"en-US\"", "target-language=\"da-DK\"", StringComparison.Ordinal)
+            .Replace("</group>", """
+                    <trans-unit id="Table 1 - Field 3 - Property Caption" size-unit="char">
+                      <source>Posting Date</source>
+                      <target state="translated">Bogfoeringsdato</target>
+                    </trans-unit>
+                  </group>
+                """, StringComparison.Ordinal);
+
+        await ExportAsync(client, danish, "da-DK");
+
+        // Learning runs after the download has been sent, so give it a moment.
+        List<string> learned = [];
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            await using var ctx = _db.NewContext();
+            learned = ctx.TranslationMemory.Select(e => e.SourceText).ToList();
+            if (learned.Count > 0) break;
+            await Task.Delay(100);
+        }
+        learned.Should().Equal("Amount");
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private static async Task<string> ExportAsync(HttpClient client, string originalXml, string targetLanguage)

@@ -61,6 +61,20 @@ public sealed class AuthenticationRequiredTests : IDisposable
         AssertRedirectsToLogin(response, expectedReturn: "/admin/configuration/logo/preview");
     }
 
+    /// <summary>The build downloads: a compiled app, the zip of all of them, and the raw log (#1274).</summary>
+    [Theory]
+    [InlineData("/artifacts/build/1/app/1")]
+    [InlineData("/artifacts/build/1/all")]
+    [InlineData("/artifacts/build/1/log")]
+    public async Task Anonymous_get_to_a_build_download_redirects_to_login(string path)
+    {
+        using var client = _factory.CreateClient();
+        using var response = await client.GetAsync(path);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        AssertRedirectsToLogin(response, expectedReturn: path);
+    }
+
     [Fact]
     public async Task Anonymous_get_to_a_site_admin_route_returns_not_found_not_redirect()
     {

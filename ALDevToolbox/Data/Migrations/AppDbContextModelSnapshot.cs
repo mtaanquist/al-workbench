@@ -7147,6 +7147,9 @@ namespace ALDevToolbox.Data.Migrations
                     b.HasIndex("ReferenceId")
                         .IsUnique();
 
+                    b.HasIndex("Subject")
+                        .HasDatabaseName("ix_oauth_tokens_subject");
+
                     b.HasIndex("ApplicationId", "Status", "Subject", "Type");
 
                     b.ToTable("oauth_tokens", (string)null);

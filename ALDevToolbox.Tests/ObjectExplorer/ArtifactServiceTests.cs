@@ -162,7 +162,13 @@ public sealed class ArtifactServiceTests : IDisposable
         detail.RepoCommits.Should().ContainSingle().Which.CommitHash.Should().Be("abc1234");
         detail.Changelog.Should().ContainSingle().Which.RepoName.Should().Be("core");
         detail.Changelog[0].Commits.Should().ContainSingle().Which.Message.Should().Be("Fix posting");
-        detail.Logs.Should().ContainSingle();
+        detail.Logs.Should().ContainSingle().Which.Content.Should().Be("Cloned.");
+
+        // get_solution_build only says whether there is a log (#1267, L39): the
+        // sections are still listed, their text is not read.
+        var light = await Svc(read).GetBuildDetailAsync(buildId, includeLogText: false);
+        light!.Logs.Should().ContainSingle().Which.Section.Should().Be("core");
+        light.Logs[0].Content.Should().BeEmpty();
     }
 
     /// <summary>
@@ -350,7 +356,7 @@ public sealed class ArtifactServiceTests : IDisposable
         var svc = Svc(read);
 
         (await svc.GetArtifactBytesAsync(buildId, artifactId))!.Content.Should().Equal(1, 2, 3);
-        (await svc.GetAllArtifactBytesAsync(buildId)).Should().ContainSingle();
+        (await svc.ListArtifactRowsAsync(buildId)).Should().ContainSingle();
         var raw = await svc.GetRawLogAsync(buildId);
         raw.Should().NotBeNull();
         raw!.Content.Should().Contain("alc ok");

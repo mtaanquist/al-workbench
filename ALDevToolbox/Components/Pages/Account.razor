@@ -28,6 +28,7 @@
 @inject UserRepositoryTokenService RepoTokens
 @inject GitHubAccessService GitHubAccess
 @inject SystemSettingsService Settings
+@inject ALDevToolbox.Services.Tools.ToolEnablement Tools
 @inject ILogger<Account> Logger
 
 @*
@@ -233,7 +234,7 @@ else
                     <div class="card__head">
                         <div>
                             <h2 class="card__title">Two-step verification</h2>
-                            <p class="card__sub">A second check at sign-in, after your password.</p>
+                            <p class="card__sub">A second check at sign-in, after your password or Microsoft sign-in.</p>
                         </div>
                         @if (_twoStepOn)
                         {
@@ -281,15 +282,26 @@ else
                                 <form method="post" class="u-row"
                                       action="@(_totpAction == "disable" ? "/auth/account/2fa/totp/disable" : "/auth/account/2fa/recovery/regenerate")">
                                     <AntiforgeryToken />
-                                    <input class="input" type="password" name="Password" required
-                                           autocomplete="current-password"
-                                           aria-label="Confirm with your current password"
-                                           placeholder="Confirm with your current password" />
+                                    @if (!_confirmedRecently)
+                                    {
+                                        @if (_canConfirmWithoutPassword)
+                                        {
+                                            <a class="btn btn--sm" href="@ConfirmWithMicrosoftUrl">Confirm with Microsoft</a>
+                                        }
+                                        <input class="input" type="password" name="Password" required="@(!_canConfirmWithoutPassword)"
+                                               autocomplete="current-password"
+                                               aria-label="Confirm with your current password"
+                                               placeholder="@(_canConfirmWithoutPassword ? "Or enter your password" : "Confirm with your current password")" />
+                                    }
                                     <button type="submit" class="btn btn--sm @(_totpAction == "disable" ? "btn--danger" : "")">
                                         @(_totpAction == "disable" ? "Turn off" : "Generate codes")
                                     </button>
                                     <button type="button" class="btn btn--sm" @onclick="() => _totpAction = null">Cancel</button>
                                 </form>
+                                @if (_totpAction == "regenerate")
+                                {
+                                    <span class="form-actions__note">Your old recovery codes will stop working.</span>
+                                }
                             }
                         </SettingRow>
 
@@ -306,9 +318,16 @@ else
                                 <form method="post" action="/auth/account/2fa/email/disable" class="u-row">
                                     <AntiforgeryToken />
                                     <StatusPill Tone="success">On</StatusPill>
-                                    <input class="input" type="password" name="Password" required
-                                           autocomplete="current-password" aria-label="Current password"
-                                           placeholder="Current password" />
+                                    @if (!_confirmedRecently)
+                                    {
+                                        @if (_canConfirmWithoutPassword)
+                                        {
+                                            <a class="btn btn--sm" href="@ConfirmWithMicrosoftUrl">Confirm with Microsoft</a>
+                                        }
+                                        <input class="input" type="password" name="Password" required="@(!_canConfirmWithoutPassword)"
+                                               autocomplete="current-password" aria-label="Current password"
+                                               placeholder="@(_canConfirmWithoutPassword ? "Or enter your password" : "Current password")" />
+                                    }
                                     <button type="submit" class="btn btn--sm btn--danger">Turn off email codes</button>
                                 </form>
                             }
@@ -1149,6 +1168,15 @@ else
     private bool _pendingEmailMfa;
     private int _recoveryRemaining;
     private string? _totpAction; // null, "regenerate" or "disable" — drives the inline password confirm
+    // A Microsoft-linked account may have no password it knows (#1259), so it can
+    // confirm two-step changes with a fresh step-up instead. _confirmedRecently
+    // means that step-up has happened and the password box is not needed.
+    private bool _canConfirmWithoutPassword;
+    private bool _confirmedRecently;
+    // Comes back to this tab with ?ok=confirmed, so the page says the step-up worked.
+    private static readonly string ConfirmWithMicrosoftUrl = ALDevToolbox.Endpoints.StepUpEndpoints.Url(
+        $"{ALDevToolbox.Endpoints.RouteConstants.AccountSecurity}?{ALDevToolbox.Endpoints.RouteConstants.OkQuery}=confirmed");
+    [CascadingParameter] private Task<AuthenticationState>? AuthStateTask { get; set; }
     private bool _busy;
     private string? _passkeyError;
     private IReadOnlyList<UserPasskey> _passkeys = Array.Empty<UserPasskey>();
@@ -1212,6 +1240,11 @@ else
             _passkeys = await Passkeys.ListForUserAsync(_user.Id);
         }
         _entraLinks = await Entra.ListLinksAsync(_user.Id);
+        _canConfirmWithoutPassword = _entraLinks.Count > 0;
+        if (_canConfirmWithoutPassword && AuthStateTask is not null)
+        {
+            _confirmedRecently = await Tools.IsFreshAsync((await AuthStateTask).User);
+        }
         _tokens = await Pats.ListForUserAsync(_user.Id);
         _clients = await OAuthClients.ListForUserAsync(_user.Id);
 
@@ -1429,7 +1462,7 @@ else
         return code switch
         {
             "display-name" => Section.Profile,
-            "password" or "totp-disabled" or "email-mfa-sent" or "email-mfa-enabled"
+            "password" or "confirmed" or "totp-disabled" or "email-mfa-sent" or "email-mfa-enabled"
                 or "email-mfa-disabled" or "passkey-added" or "passkey-deleted" or "passkey-renamed"
                 or "ms-linked" or "ms-unlinked"
                 or "Totp" or "Email" or "Code" or "Password" or "CurrentPassword" or "NewPassword"
@@ -1444,6 +1477,7 @@ else
     {
         "password" => "Password updated.",
         "display-name" => "Full name updated.",
+        "confirmed" => "You're confirmed for the next few minutes. You can now get new recovery codes or turn off two-step verification.",
         "totp-disabled" => "Authenticator app turned off.",
         "email-mfa-sent" => "We sent you a verification code. Enter it below to turn on email codes.",
         "email-mfa-enabled" => "Email codes turned on.",

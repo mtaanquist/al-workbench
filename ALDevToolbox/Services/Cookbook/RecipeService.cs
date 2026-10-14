@@ -4,6 +4,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.Organizations;
+using ALDevToolbox.Services.ObjectExplorer.Explore;
 
 namespace ALDevToolbox.Services.Cookbook;
 
@@ -88,11 +89,14 @@ public sealed class RecipeService
 
         if (trimmed.Length > 0)
         {
-            var pattern = "%" + trimmed + "%";
+            // Escaped so a literal % or _ in the search is a character, not a
+            // wildcard: "_" used to match every recipe. Same as the palette's
+            // recipe source.
+            var pattern = "%" + ObjectSearchService.EscapeLike(trimmed) + "%";
             rows = rows.Where(s =>
-                EF.Functions.ILike(s.Title, pattern)
-                || EF.Functions.ILike(s.Description, pattern)
-                || EF.Functions.ILike(s.Keywords, pattern));
+                EF.Functions.ILike(s.Title, pattern, "\\")
+                || EF.Functions.ILike(s.Description, pattern, "\\")
+                || EF.Functions.ILike(s.Keywords, pattern, "\\"));
         }
 
         return await rows

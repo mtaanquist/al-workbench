@@ -286,7 +286,7 @@ public sealed class ProjectService
         var project = await _db.OeProjects
             .Include(c => c.Repositories)
             .FirstOrDefaultAsync(c => c.Id == id && c.DeletedAt == null, ct)
-            ?? throw Validation("Name", "This project no longer exists.");
+            ?? throw Validation("Name", "This solution no longer exists.");
 
         // Only the owner, an org Admin, or an assigned team may edit settings /
         // change the repo set.
@@ -882,7 +882,7 @@ public sealed class ProjectService
 
         var project = await _db.OeProjects
             .FirstOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
-            ?? throw Validation("Visibility", "This project no longer exists.");
+            ?? throw Validation("Visibility", "This solution no longer exists.");
 
         // Changing who may see a solution is governance, not work on it: the same set
         // as deleting it, and for the same reason a team grant never included delete.
@@ -943,11 +943,11 @@ public sealed class ProjectService
         if (visibility == ProjectVisibility.Public && wanted.Count > 0)
         {
             throw Validation("Teams",
-                "A public project is open to everyone, so it can't have teams. Remove the teams, or pick a different visibility.");
+                "A public solution is open to everyone, so it can't have teams. Remove the teams, or pick a different visibility.");
         }
         if (visibility != ProjectVisibility.Public && wanted.Count == 0)
         {
-            throw Validation("Teams", "Pick at least one team that keeps access to this project.");
+            throw Validation("Teams", "Pick at least one team that keeps access to this solution.");
         }
 
         if (wanted.Count > 0)
@@ -999,7 +999,7 @@ public sealed class ProjectService
 
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw new PlanValidationException(new Dictionary<string, string> { ["Symbols"] = "This project no longer exists." });
+            ?? throw new PlanValidationException(new Dictionary<string, string> { ["Symbols"] = "This solution no longer exists." });
 
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
@@ -1034,10 +1034,12 @@ public sealed class ProjectService
             staged[name] = u.Content;
         }
 
-        // Replace same-named rows so a re-upload overwrites in place.
-        var names = staged.Keys.ToList();
+        // Replace same-named rows so a re-upload overwrites in place. Case-insensitive,
+        // like the batch above: "Foo.app" after "foo.app" is the same package, and two
+        // rows would hand builds the same app twice (#1263).
+        var names = staged.Keys.Select(n => n.ToLowerInvariant()).ToList();
         var existing = await _db.OeProjectSymbols
-            .Where(s => s.ProjectId == projectId && names.Contains(s.FileName))
+            .Where(s => s.ProjectId == projectId && names.Contains(s.FileName.ToLower()))
             .ToListAsync(ct);
         if (existing.Count > 0) _db.OeProjectSymbols.RemoveRange(existing);
 
@@ -1089,7 +1091,7 @@ public sealed class ProjectService
         RequireOrganizationId();
         var project = await _db.OeProjects
             .FirstOrDefaultAsync(c => c.Id == id && c.DeletedAt == null, ct)
-            ?? throw Validation("Name", "This project no longer exists.");
+            ?? throw Validation("Name", "This solution no longer exists.");
 
         // Deleting is stricter than managing: an assigned team does the work on a
         // project, it doesn't get to end it. See .design/teams-and-visibility.md.
@@ -1148,7 +1150,7 @@ public sealed class ProjectService
         var name = (input.Name ?? string.Empty).Trim();
         if (name.Length == 0)
         {
-            errors["Name"] = "Give the project a name.";
+            errors["Name"] = "Give the solution a name.";
         }
         else if (name.Length > 200)
         {

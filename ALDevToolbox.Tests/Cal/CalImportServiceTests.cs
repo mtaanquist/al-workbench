@@ -1,4 +1,5 @@
 using System.Text;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.ObjectExplorer.Import;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
@@ -538,5 +539,45 @@ public sealed class CalImportServiceTests : IDisposable
         var baseApp = await read.OeModules.AsNoTracking().Where(m => m.ReleaseId == baseId).Select(m => m.AppId).SingleAsync();
         var custApp = await read.OeModules.AsNoTracking().Where(m => m.ReleaseId == custId).Select(m => m.AppId).SingleAsync();
         baseApp.Should().NotBe(custApp);
+    }
+
+    [Fact]
+    public async Task Over_quota_refusal_marks_the_release_failed_with_a_readable_message()
+    {
+        // #1261: the quota check ran before the try that stamps "failed", so a
+        // refusal left the release "ingesting", where Retry cannot reach it.
+        int releaseId;
+        await using (var ctx = _db.NewContext())
+        {
+            releaseId = await NewImporter(ctx).BeginReleaseAsync(
+                new ReleaseImportMetadata("Over quota", "first_party", null, null));
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            // A 0 MB default quota puts every org at or over quota.
+            var settings = await ctx.SystemSettings.FirstOrDefaultAsync(s => s.Id == 1);
+            if (settings is null)
+            {
+                settings = new ALDevToolbox.Domain.Entities.SystemSettings { Id = 1 };
+                ctx.SystemSettings.Add(settings);
+            }
+            settings.DefaultStorageQuotaMb = 0;
+            await ctx.SaveChangesAsync();
+            // BeginReleaseAsync cached an under-quota decision; drop it.
+            _db.NewQuotaGuard(ctx).Invalidate(TestDb.DefaultOrgId);
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewCalImporter(ctx).ProcessReleaseAsync(
+                releaseId, CalObjectSplitterTests.FixturePath(), "850");
+            await act.Should().ThrowAsync<PlanValidationException>();
+        }
+
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId);
+        release.Status.Should().Be("failed");
+        release.StatusMessage.Should().Contain("storage quota");
     }
 }

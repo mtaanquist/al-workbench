@@ -31,11 +31,12 @@ public sealed class NewExtensionTests : IDisposable
 
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly BunitAuthorizationContext _auth;
 
     public NewExtensionTests()
     {
-        var auth = _ctx.AddAuthorization();
-        auth.SetAuthorized("tester@example.com");
+        _auth = _ctx.AddAuthorization();
+        _auth.SetAuthorized("tester@example.com");
 
         _ctx.Services.AddSingleton<IOrganizationContext>(_db.OrgContext);
         _ctx.Services.AddDbContext<ALDevToolbox.Data.AppDbContext>(opts =>
@@ -107,8 +108,23 @@ public sealed class NewExtensionTests : IDisposable
     }
 
     [Fact]
+    public void Empty_template_set_tells_a_member_who_to_ask_rather_than_linking_to_admin()
+    {
+        // A User cannot open the importer (#1266, L35).
+        var cut = _ctx.Render<NewExtension>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".empty-state__title").TextContent.Trim().Should().Be("No workspace templates yet");
+            cut.FindAll("a[href^='/admin/']").Should().BeEmpty();
+            cut.Find(".empty-state__text").TextContent.Should().Contain("Ask one of your administrators");
+        });
+    }
+
+    [Fact]
     public void Empty_template_set_renders_the_recovery_copy_pointing_at_admin()
     {
+        _auth.SetRoles("Editor");
         var cut = _ctx.Render<NewExtension>();
 
         cut.WaitForAssertion(() =>

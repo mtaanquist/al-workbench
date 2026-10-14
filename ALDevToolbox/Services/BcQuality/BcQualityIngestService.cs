@@ -250,8 +250,13 @@ public sealed class BcQualityIngestService
         {
             var layerRoot = Path.Combine(root, layer, "knowledge");
             if (!Directory.Exists(layerRoot)) continue;
+            if (IsLink(Path.Combine(root, layer)) || IsLink(layerRoot))
+            {
+                skipped.Add(new BcQualitySkippedFile(ToArticleKey(root, layerRoot), "a link, not a folder in the repository"));
+                continue;
+            }
 
-            foreach (var path in Directory.EnumerateFiles(layerRoot, "*.md", SearchOption.AllDirectories).Order())
+            foreach (var path in Directory.EnumerateFiles(layerRoot, "*.md", WithoutLinks(recurse: true)).Order())
             {
                 ct.ThrowIfCancellationRequested();
                 var key = ToArticleKey(root, path);
@@ -292,7 +297,7 @@ public sealed class BcQualityIngestService
         var slug = Path.GetFileNameWithoutExtension(articlePath);
         var samples = new List<BcQualityParsedSample>();
 
-        foreach (var path in Directory.EnumerateFiles(directory, slug + ".*").Order())
+        foreach (var path in Directory.EnumerateFiles(directory, slug + ".*", WithoutLinks(recurse: false)).Order())
         {
             ct.ThrowIfCancellationRequested();
             var fileName = Path.GetFileName(path);
@@ -320,6 +325,26 @@ public sealed class BcQualityIngestService
         }
         return samples;
     }
+
+    /// <summary>
+    /// How the upstream checkout is walked: links are skipped, files and folders
+    /// alike. A symlinked sample would otherwise be read through to whatever it
+    /// points at (<c>/proc/self/environ</c> reports a length of 0, so the size
+    /// check passes) and stored in rows every organisation can read. The clone
+    /// is also made with <c>core.symlinks=false</c>; this covers a cache cloned
+    /// before that, and a directory handed to <see cref="IngestFromDirectoryAsync"/>.
+    /// Otherwise the same as the default enumeration: hidden files included,
+    /// Windows-style wildcard matching.
+    /// </summary>
+    private static EnumerationOptions WithoutLinks(bool recurse) => new()
+    {
+        RecurseSubdirectories = recurse,
+        AttributesToSkip = FileAttributes.ReparsePoint,
+        MatchType = MatchType.Win32,
+        IgnoreInaccessible = false,
+    };
+
+    private static bool IsLink(string path) => new DirectoryInfo(path).LinkTarget is not null;
 
     /// <summary>Repo-relative path with forward slashes — the citation key, stable across platforms.</summary>
     private static string ToArticleKey(string root, string path) =>
@@ -459,7 +484,10 @@ public sealed class BcQualityIngestService
                 .ConfigureAwait(false);
             if (fetch.Succeeded)
             {
-                var reset = await RunGitAsync(gitPath, ["-C", dir, "reset", "--hard", "FETCH_HEAD"], ct)
+                // Links checked out as plain files holding their target, here as
+                // well as at clone: a cache cloned before the setting existed
+                // does not carry it in its own config.
+                var reset = await RunGitAsync(gitPath, ["-c", "core.symlinks=false", "-C", dir, "reset", "--hard", "FETCH_HEAD"], ct)
                     .ConfigureAwait(false);
                 if (reset.Succeeded) return await DescribeAsync(gitPath, dir, ct).ConfigureAwait(false);
             }
@@ -480,7 +508,11 @@ public sealed class BcQualityIngestService
 
         var parent = Path.GetDirectoryName(dir);
         if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
-        var clone = await RunGitAsync(gitPath, ["clone", "--depth", "1", RepositoryUrl, dir], ct).ConfigureAwait(false);
+        // core.symlinks=false: a link in the upstream repository is checked out
+        // as a small text file naming its target, never as a link the ingest
+        // could read through. See WithoutLinks.
+        var clone = await RunGitAsync(
+            gitPath, ["clone", "-c", "core.symlinks=false", "--depth", "1", RepositoryUrl, dir], ct).ConfigureAwait(false);
         if (!clone.Succeeded)
         {
             throw new InvalidOperationException(

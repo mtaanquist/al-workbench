@@ -54,6 +54,24 @@ public sealed class PiperTransformTests
         result.Output.Should().Be("<>1001&<>1002&<>1003");
     }
 
+    /// <summary>
+    /// #1268 (L46): a value with a filter operator in it is quoted, so Business
+    /// Central reads it as one value rather than as "Smith" and "Sons", or a
+    /// group. Embedded quotes are doubled; plain values stay unquoted.
+    /// </summary>
+    [Theory]
+    [InlineData(PiperOutputFormat.BcOr, "'Smith & Sons'|'Fabrikam (EU)'|'O''Brien'|10000")]
+    [InlineData(PiperOutputFormat.BcAnd, "<>'Smith & Sons'&<>'Fabrikam (EU)'&<>'O''Brien'&<>10000")]
+    public void Bc_filters_quote_values_that_contain_operator_characters(PiperOutputFormat format, string expected)
+    {
+        var result = PiperTransform.RunOnItems(
+            ["Smith & Sons", "Fabrikam (EU)", "O'Brien", "10000"],
+            new PiperOptions { Format = format },
+            "test");
+        result.Output.Should().Be(expected);
+        result.ItemCount.Should().Be(4);
+    }
+
     [Fact]
     public void Sql_format_wraps_each_item_in_single_quotes_joined_with_comma()
     {

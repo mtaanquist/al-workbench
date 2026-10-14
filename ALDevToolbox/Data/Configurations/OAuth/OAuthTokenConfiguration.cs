@@ -32,5 +32,11 @@ internal sealed class OAuthTokenConfiguration : IEntityTypeConfiguration<OpenIdd
         // HasForeignKey clauses would create duplicate shadow columns.
         entity.Property<string>("ApplicationId").HasColumnName("application_id");
         entity.Property<string>("AuthorizationId").HasColumnName("authorization_id");
+
+        // Disabling a user revokes every token for that subject (#1259).
+        // OpenIddict's own index leads with application_id, so a lookup by
+        // subject alone would scan the table.
+        entity.HasIndex(e => e.Subject)
+            .HasDatabaseName("ix_oauth_tokens_subject");
     }
 }

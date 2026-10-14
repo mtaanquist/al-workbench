@@ -312,7 +312,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         RequireOrganizationId();
         var project = await _db.OeProjects
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This project no longer exists.");
+            ?? throw Validation("BcTenantId", "This solution no longer exists.");
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
         var errors = new Dictionary<string, string>();
@@ -414,7 +414,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         RequireOrganizationId();
         var project = await _db.OeProjects
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This project no longer exists.");
+            ?? throw Validation("BcTenantId", "This solution no longer exists.");
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
         return await RefreshEnvironmentsCoreAsync(project, markVerified, ct);
@@ -437,7 +437,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     {
         var project = await _db.OeProjects
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("BcTenantId", "This project no longer exists.");
+            ?? throw Validation("BcTenantId", "This solution no longer exists.");
 
         return await RefreshEnvironmentsCoreAsync(project, markVerified: false, ct);
     }
@@ -574,7 +574,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         RequireOrganizationId();
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("Environment", "This project no longer exists.");
+            ?? throw Validation("Environment", "This solution no longer exists.");
         // Looking is the view axis; making the customer's tenant answer again is not.
         await EnsureGateAsync(
             forceRefresh ? EnvironmentGate.Manage : EnvironmentGate.View,
@@ -659,6 +659,16 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             catch (DbUpdateException ex)
             {
                 _logger.LogWarning(ex, "Couldn't mirror the installed apps of environment {EnvironmentId}.", environmentId);
+            }
+            finally
+            {
+                // The page's context outlives this read. A failed mirror would otherwise
+                // leave its Added/Deleted rows tracked and replay them, and fail, on every
+                // later save on the page; a successful one has no further use for them (#1265).
+                foreach (var entry in _db.ChangeTracker.Entries<OeEnvironmentApp>().ToList())
+                {
+                    entry.State = EntityState.Detached;
+                }
             }
         }
         return panel;
@@ -786,7 +796,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         RequireOrganizationId();
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("Environment", "This project no longer exists.");
+            ?? throw Validation("Environment", "This solution no longer exists.");
         await EnsureGateAsync(gate, projectId, project.CreatedByUserId, ct);
 
         var env = await _db.OeProjectEnvironments.AsNoTracking()
@@ -835,7 +845,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 if (await _access.CanManageAsync(projectId, createdByUserId, ct)) break;
                 if (await _access.CanManageEnvironmentUpdatesAsync(projectId, ct)) break;
                 throw new ProjectAccessDeniedException(
-                    "You need to manage this project, or hold permission to manage environment updates for one of its teams.");
+                    "You need to manage this solution, or hold permission to manage environment updates for one of its teams.");
         }
     }
 
@@ -1707,7 +1717,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         RequireOrganizationId();
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == projectId && c.DeletedAt == null, ct)
-            ?? throw Validation("Environment", "This project no longer exists.");
+            ?? throw Validation("Environment", "This solution no longer exists.");
         await _access.EnsureCanManageAsync(projectId, project.CreatedByUserId, ct);
 
         var env = await _db.OeProjectEnvironments.AsNoTracking()
@@ -1994,9 +2004,10 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
         var requestedBy = await AuditActor.ResolveAsync(_db, _orgContext.CurrentUserId, ct);
         var batchId = cleaned.Count > 1 ? Guid.NewGuid() : (Guid?)null;
+        var booked = new List<OeEnvironmentUpgradeAction>(cleaned.Count);
         for (var i = 0; i < cleaned.Count; i++)
         {
-            _db.OeEnvironmentUpgradeActions.Add(new OeEnvironmentUpgradeAction
+            booked.Add(new OeEnvironmentUpgradeAction
             {
                 OrganizationId = RequireOrganizationId(),
                 ProjectId = projectId,
@@ -2013,7 +2024,21 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 BatchOrder = batchId is null ? null : i,
             });
         }
-        await _db.SaveChangesAsync(ct);
+        _db.OeEnvironmentUpgradeActions.AddRange(booked);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        finally
+        {
+            // Up to ten 50 MB packages: once written they are the worker's, and the page's
+            // context would otherwise pin them, and compare them on every later save, for
+            // the life of the circuit (#1265).
+            foreach (var action in booked)
+            {
+                _db.Entry(action).State = EntityState.Detached;
+            }
+        }
 
         _logger.LogInformation(
             "User {UserId} booked {Count} app(s) ({Files}) for {Environment} (project {ProjectId}) at {ExecuteAfter} ({Timing}).",
@@ -2416,7 +2441,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     {
         var project = await _db.OeProjects.AsNoTracking()
             .FirstOrDefaultAsync(p => p.Id == projectId && p.DeletedAt == null, ct)
-            ?? throw new BcApiException(null, "This project no longer exists.");
+            ?? throw new BcApiException(null, "This solution no longer exists.");
 
         var creds = await ResolveCredentialsAsync(project, ct)
             ?? throw new BcApiException(null,

@@ -72,6 +72,39 @@ public sealed class BcQualityIngestServiceTests : IDisposable
         article.Samples.Single(s => s.Kind == "bad").Language.Should().Be("al");
     }
 
+    /// <summary>
+    /// #1268 (L47): a link in the upstream checkout is never read through. A
+    /// sample linked to a secret outside the clone would otherwise land in
+    /// rows every organisation can read.
+    /// </summary>
+    [Fact]
+    public async Task Ingest_does_not_follow_links_out_of_the_checkout()
+    {
+        var outside = Path.Combine(Path.GetTempPath(), "aldt-bcq-secret-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(outside, "SECRET=hunter2");
+        var outsideArticle = outside + ".md";
+        File.WriteAllText(outsideArticle, File.ReadAllText(_repo.WriteArticle(UiArticle)));
+        try
+        {
+            var folder = Path.Combine(_repo.Root, "microsoft", "knowledge", "ui");
+            File.CreateSymbolicLink(Path.Combine(folder, "no-nested-grids.bad.al"), outside);
+            File.CreateSymbolicLink(Path.Combine(folder, "linked-article.md"), outsideArticle);
+
+            var result = await IngestAsync();
+
+            result.Total.Should().Be(1, "the linked article is not one of the repository's own");
+            await using var ctx = _db.NewContext();
+            (await ctx.BcQualityArticleSamples.AsNoTracking().CountAsync()).Should().Be(0);
+            (await ctx.BcQualityArticles.AsNoTracking().Select(a => a.ArticleKey).ToListAsync())
+                .Should().Equal(UiArticle);
+        }
+        finally
+        {
+            File.Delete(outside);
+            File.Delete(outsideArticle);
+        }
+    }
+
     [Fact]
     public async Task Ingest_records_the_commit_it_read_for_provenance()
     {

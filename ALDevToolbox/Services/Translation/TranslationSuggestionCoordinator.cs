@@ -26,13 +26,20 @@ public sealed class TranslationSuggestionCoordinator : IDisposable
 {
     private readonly TranslationMemoryService _memory;
 
-    // Keyed by exact source text; holds DB hits only — in-file matches (#302)
-    // are merged in fresh on every render since session edits change them.
-    private readonly Dictionary<string, List<TranslationSuggestion>> _suggCache = new(StringComparer.Ordinal);
+    // Keyed by language pair and exact source text; holds DB hits only —
+    // in-file matches (#302) are merged in fresh on every render since session
+    // edits change them. The languages are part of the key because a lookup
+    // still in flight when the user switches language lands after the cache
+    // was cleared, and keyed by source alone it refilled the cache with the
+    // old language's matches - whose exact hits then also held back machine
+    // translation (#1268, L45).
+    private readonly Dictionary<CacheKey, List<TranslationSuggestion>> _suggCache = new();
     private const int SuggCacheMax = 128;
 
     // Per-source cache of provider results, mirroring _suggCache.
-    private readonly Dictionary<string, TranslationSuggestion> _mtCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<CacheKey, TranslationSuggestion> _mtCache = new();
+
+    private readonly record struct CacheKey(string SourceLanguage, string TargetLanguage, string Source);
 
     // Serialises every TranslationMemoryService call so background prefetch
     // (#300) can never run concurrently with an on-demand lookup.
@@ -54,12 +61,13 @@ public sealed class TranslationSuggestionCoordinator : IDisposable
 
     /// <summary>True (with the cached hits) when <paramref name="source"/> was
     /// warmed by a previous visit or a prefetch — no spinner, no DB hit needed.</summary>
-    public bool TryGetCached(string source, out List<TranslationSuggestion> memory)
-        => _suggCache.TryGetValue(source, out memory!);
+    public bool TryGetCached(string source, string sourceLanguage, string targetLanguage, out List<TranslationSuggestion> memory)
+        => _suggCache.TryGetValue(new(sourceLanguage, targetLanguage, source), out memory!);
 
     /// <summary>True once <paramref name="source"/> has been looked up (so a
     /// prefetch can skip work already done).</summary>
-    public bool IsCached(string source) => _suggCache.ContainsKey(source);
+    public bool IsCached(string source, string sourceLanguage, string targetLanguage)
+        => _suggCache.ContainsKey(new(sourceLanguage, targetLanguage, source));
 
     /// <summary>
     /// Looks up the shared translation memory for <paramref name="source"/>
@@ -71,7 +79,7 @@ public sealed class TranslationSuggestionCoordinator : IDisposable
         string source, string sourceLanguage, string targetLanguage, CancellationToken ct = default)
     {
         var memory = await LookupGatedAsync(source, sourceLanguage, targetLanguage, ct);
-        Cache(source, memory);
+        Cache(source, sourceLanguage, targetLanguage, memory);
         return memory;
     }
 
@@ -156,24 +164,45 @@ public sealed class TranslationSuggestionCoordinator : IDisposable
     /// Writes a memory lookup into the per-source cache. Must be called on the
     /// circuit thread — the dictionary is not synchronised.
     /// </summary>
-    public void Cache(string source, List<TranslationSuggestion> memory)
+    public void Cache(string source, string sourceLanguage, string targetLanguage, List<TranslationSuggestion> memory)
     {
         // Cheap bound: a single file rarely has more distinct sources than this,
         // and clearing wholesale is fine — it just costs a re-lookup.
         if (_suggCache.Count >= SuggCacheMax) _suggCache.Clear();
-        _suggCache[source] = memory;
+        _suggCache[new(sourceLanguage, targetLanguage, source)] = memory;
+    }
+
+    /// <summary>
+    /// Learns a saved file's edited units behind the same gate as the lookups:
+    /// the save runs on the circuit's context while a prefetch or an on-demand
+    /// lookup may be using it, and overlapping the two failed one of them -
+    /// leaving the panel empty or the learning abandoned (#1268, L43).
+    /// </summary>
+    public async Task<int> LearnGatedAsync(
+        string xml, string? origin, IReadOnlyCollection<string>? unitIds, CancellationToken ct = default)
+    {
+        await _memoryGate.WaitAsync(ct);
+        try
+        {
+            return await _memory.LearnFromXliffAsync(xml, origin, ct, unitIds);
+        }
+        finally
+        {
+            _memoryGate.Release();
+        }
     }
 
     // ── Machine-translation cache ─────────────────────────────────────────
 
     /// <summary>True (with the cached chip) when a provider result for
     /// <paramref name="source"/> is already warm.</summary>
-    public bool TryGetCachedMt(string source, out TranslationSuggestion mt)
-        => _mtCache.TryGetValue(source, out mt!);
+    public bool TryGetCachedMt(string source, string sourceLanguage, string targetLanguage, out TranslationSuggestion mt)
+        => _mtCache.TryGetValue(new(sourceLanguage, targetLanguage, source), out mt!);
 
     /// <summary>Remembers a provider result so re-selecting the unit — or an auto
     /// mode firing on every selection — never re-bills the provider.</summary>
-    public void CacheMt(string source, TranslationSuggestion mt) => _mtCache[source] = mt;
+    public void CacheMt(string source, string sourceLanguage, string targetLanguage, TranslationSuggestion mt)
+        => _mtCache[new(sourceLanguage, targetLanguage, source)] = mt;
 
     // ── Pure helpers ──────────────────────────────────────────────────────
 

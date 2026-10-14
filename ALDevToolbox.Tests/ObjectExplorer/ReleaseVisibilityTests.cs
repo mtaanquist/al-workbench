@@ -606,7 +606,7 @@ public sealed class ReleaseVisibilityTests : IDisposable
             var artifacts = new ArtifactService(ctx, Access(ctx));
             await ((Func<Task>)(() => artifacts.GetArtifactBytesAsync(buildId, artifactId)))
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
-            await ((Func<Task>)(() => artifacts.GetAllArtifactBytesAsync(buildId)))
+            await ((Func<Task>)(() => artifacts.ListArtifactRowsAsync(buildId)))
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
             await ((Func<Task>)(() => artifacts.GetRawLogAsync(buildId)))
                 .Should().ThrowAsync<ProjectAccessDeniedException>();
@@ -618,6 +618,168 @@ public sealed class ReleaseVisibilityTests : IDisposable
             var artifacts = new ArtifactService(ctx, Access(ctx));
             (await artifacts.GetArtifactBytesAsync(buildId, artifactId)).Should().NotBeNull();
         }
+    }
+
+    // ── Source viewer, tree, compare picker, sessions (#1273) ───────────
+
+    /// <summary>
+    /// The source viewer's per-file reads (outline, declarations, go to
+    /// definition, underlined tokens, hover card, find in file, dependencies)
+    /// each check visibility on their own. A non-member gets the empty answer
+    /// from every one of them; a member of the assigned team gets the data.
+    /// </summary>
+    [Fact]
+    public async Task Source_viewer_reads_hide_a_private_projects_file_from_a_non_member()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var seeded = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, seeded.ReleaseId);
+        long symbolId;
+        await using (var ctx = _db.NewContext())
+        {
+            var symbol = new OeModuleSymbol
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ModuleId = seeded.ModuleId,
+                ObjectId = seeded.ObjectId,
+                Kind = "procedure",
+                Name = "GrantPoints",
+                Signature = "(Points: Integer)",
+                LineNumber = 2,
+            };
+            ctx.OeModuleSymbols.Add(symbol);
+            // The header names its own table, so the line carries one
+            // underlined token for the resolvables read to return.
+            ctx.OeModuleReferences.Add(new OeModuleReference
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ModuleId = seeded.ModuleId,
+                SourceObjectId = seeded.ObjectId,
+                TargetObjectKind = "table",
+                TargetObjectId = 50100,
+                TargetObjectName = "Loyalty Card",
+                ReferenceKind = "property_object",
+                LineNumber = 1,
+            });
+            await ctx.SaveChangesAsync();
+            symbolId = symbol.Id;
+        }
+
+        // Line 1 is `table 50100 "Loyalty Card"`; column 14 is the L.
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var viewer = Viewer(ctx);
+            (await viewer.GetFileOutlineAsync(seeded.FileId)).Should().BeEmpty();
+            (await viewer.ListDeclarationsInFileAsync(seeded.FileId)).Should().BeEmpty();
+            (await viewer.GoToDefinitionAsync(seeded.FileId, 1, 14)).Should().BeNull();
+            (await viewer.ListResolvablesInFileAsync(seeded.FileId)).Should().BeEmpty();
+            (await viewer.DescribeSymbolAsync(symbolId)).Should().BeNull();
+            (await viewer.FindInFileAsync(seeded.FileId, 1, 1)).Should().BeNull();
+            (await References(ctx).GetFileDependenciesAsync(seeded.FileId)).Should().BeNull();
+        }
+
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            var viewer = Viewer(ctx);
+            (await viewer.GetFileOutlineAsync(seeded.FileId)).Should().NotBeEmpty();
+            (await viewer.ListDeclarationsInFileAsync(seeded.FileId)).Should().NotBeEmpty();
+            (await viewer.GoToDefinitionAsync(seeded.FileId, 1, 14)).Should().NotBeNull();
+            (await viewer.ListResolvablesInFileAsync(seeded.FileId)).Should().NotBeEmpty();
+            (await viewer.DescribeSymbolAsync(symbolId)).Should().NotBeNull();
+            (await viewer.FindInFileAsync(seeded.FileId, 1, 1)).Should().NotBeNull();
+            (await References(ctx).GetFileDependenciesAsync(seeded.FileId)).Should().NotBeNull();
+        }
+    }
+
+    /// <summary>
+    /// The explorer tree's module-keyed reads: expanding a folder and arranging
+    /// one app's files. Both are reachable with a module id off the URL.
+    /// </summary>
+    [Fact]
+    public async Task Explorer_tree_reads_hide_a_private_projects_module_from_a_non_member()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var seeded = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, seeded.ReleaseId);
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Tree(ctx).GetTreeChildrenAsync(seeded.ModuleId, "src/")).Should().BeEmpty();
+            (await Tree(ctx).ListModuleTreeAsync(seeded.ModuleId, ExplorerTreeService.TreeGrouping.Folder))
+                .Should().BeEmpty();
+            (await Tree(ctx).ListModuleTreeAsync(seeded.ModuleId, ExplorerTreeService.TreeGrouping.Kind))
+                .Should().BeEmpty();
+        }
+
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Tree(ctx).GetTreeChildrenAsync(seeded.ModuleId, "src/"))
+                .Should().Contain(n => n.FileId == seeded.FileId);
+            (await Tree(ctx).ListModuleTreeAsync(seeded.ModuleId, ExplorerTreeService.TreeGrouping.Folder))
+                .Should().Contain(n => n.FileId == seeded.FileId);
+            (await Tree(ctx).ListModuleTreeAsync(seeded.ModuleId, ExplorerTreeService.TreeGrouping.Kind))
+                .Should().Contain(n => n.FileId == seeded.FileId);
+        }
+    }
+
+    /// <summary>
+    /// The "Compare with release" picker lists every other release holding the
+    /// same file. Without its visibility filter it would name a Private
+    /// project's release, and hand out its file id, to anyone viewing the same
+    /// file in a public release.
+    /// </summary>
+    [Fact]
+    public async Task The_compare_target_picker_offers_a_private_release_only_to_its_teams_members()
+    {
+        var (projectId, _) = await SeedProjectAsync(ProjectVisibility.Private);
+        var open = await SeedReleaseAsync("BC 26.0", kind: "first_party");
+        var hidden = await SeedReleaseAsync("CRONUS on BC 26.0");
+        await LinkByBuildAsync(projectId, hidden.ReleaseId);
+        await using (var ctx = _db.NewContext())
+        {
+            // Same app and path in both releases: the shape the picker matches on.
+            var appId = await ctx.OeModules.Where(m => m.Id == open.ModuleId).Select(m => m.AppId).SingleAsync();
+            await ctx.OeModules.Where(m => m.Id == hidden.ModuleId)
+                .ExecuteUpdateAsync(s => s.SetProperty(m => m.AppId, appId));
+        }
+
+        ActAs(OutsiderUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Comparison(ctx).GetCompareTargetsAsync(open.FileId))
+                .Should().NotContain(t => t.ReleaseId == hidden.ReleaseId);
+        }
+
+        ActAs(MemberUserId);
+        await using (var ctx = _db.NewContext())
+        {
+            (await Comparison(ctx).GetCompareTargetsAsync(open.FileId))
+                .Should().ContainSingle(t => t.ReleaseId == hidden.ReleaseId);
+        }
+    }
+
+    /// <summary>
+    /// A reference session lives in a shared cache keyed by a token that
+    /// travels in the URL. Only the user who minted it may read it back, or a
+    /// shared link would show one person's results to another.
+    /// </summary>
+    [Fact]
+    public async Task A_reference_session_is_returned_only_to_the_user_who_minted_it()
+    {
+        var seeded = await SeedReleaseAsync("BC 26.0", kind: "first_party");
+        ActAs(MemberUserId);
+        await using var ctx = _db.NewContext();
+        var sessions = Sessions(ctx);
+
+        var session = await sessions.CreateFromSymbolAsync(seeded.ObjectId, "user-a");
+
+        session.Should().NotBeNull();
+        sessions.Get(session!.Token, "user-b").Should().BeNull();
+        sessions.Get(session.Token, "user-a").Should().NotBeNull();
     }
 
     private ReferenceSessionService Sessions(AppDbContext ctx) =>

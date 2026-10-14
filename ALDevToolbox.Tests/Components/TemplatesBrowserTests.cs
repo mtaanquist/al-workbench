@@ -25,14 +25,15 @@ public sealed class TemplatesBrowserTests : IDisposable
 {
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly BunitAuthorizationContext _auth;
 
     public TemplatesBrowserTests()
     {
         // Authorize attribute: bUnit's BunitAuthorizationContext stubs the
         // authentication state. We render as a generic authenticated user;
         // the page doesn't branch on role, only on data.
-        var auth = _ctx.AddAuthorization();
-        auth.SetAuthorized("tester@example.com");
+        _auth = _ctx.AddAuthorization();
+        _auth.SetAuthorized("tester@example.com");
 
         // Real services against the per-fixture Postgres. Resolving via DI
         // mirrors production wiring rather than mocking a single method
@@ -61,8 +62,23 @@ public sealed class TemplatesBrowserTests : IDisposable
     }
 
     [Fact]
+    public void Empty_template_set_tells_a_member_who_to_ask_rather_than_linking_to_admin()
+    {
+        // A User cannot open the importer (#1266, L35).
+        var cut = _ctx.Render<TemplatesBrowser>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("No templates yet");
+            cut.FindAll("a[href='/admin/templates']").Should().BeEmpty();
+            cut.Markup.Should().Contain("Ask one of your administrators");
+        });
+    }
+
+    [Fact]
     public void Empty_template_set_renders_a_useful_empty_state_with_a_link_to_the_admin_importer()
     {
+        _auth.SetRoles("Editor");
         var cut = _ctx.Render<TemplatesBrowser>();
 
         // Tick the dispatcher so OnInitializedAsync's await on the DB

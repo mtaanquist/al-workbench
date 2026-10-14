@@ -3,6 +3,7 @@ using System.Security.Claims;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Operations;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
@@ -48,6 +49,16 @@ internal static class CookieSessionRevalidation
         if (context.Properties.Items.TryGetValue(LastValidatedKey, out var lastRaw)
             && DateTime.TryParse(lastRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var last)
             && now - last < ValidationInterval)
+        {
+            return;
+        }
+
+        // A restore empties or drops the users table while it runs, and this runs
+        // inside UseAuthentication, ahead of the maintenance 503. Re-checking now would
+        // sign the person out (no row) or fail the request (no table) instead of letting
+        // the gate answer it, so the cookie is left as it is until the restore is over
+        // (#1269). A demotion still bites on the first request after it.
+        if (context.HttpContext.RequestServices.GetService<MaintenanceModeState>()?.IsActive == true)
         {
             return;
         }

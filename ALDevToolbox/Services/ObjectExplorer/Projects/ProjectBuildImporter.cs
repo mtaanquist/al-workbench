@@ -308,7 +308,7 @@ public sealed class ProjectBuildImporter
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["Pipeline"] = "Add at least one repository to this project before building.",
+                ["Pipeline"] = "Add at least one repository to this solution before building.",
             });
         }
 

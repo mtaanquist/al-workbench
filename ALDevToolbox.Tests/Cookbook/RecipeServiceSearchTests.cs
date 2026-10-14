@@ -54,6 +54,28 @@ public sealed class RecipeServiceSearchTests : IDisposable
         rows.Should().ContainSingle(r => r.Title == "Doc Attachment Factbox");
     }
 
+    /// <summary>
+    /// #1267 (L41): "_" and "%" are characters to search for, not wildcards.
+    /// An unescaped "_" matched every recipe.
+    /// </summary>
+    [Theory]
+    [InlineData("_", "Stock_Level Probe")]
+    [InlineData("%", "100% Coverage Check")]
+    public async Task Like_wildcards_in_the_query_match_only_themselves(string query, string expected)
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.Recipes.Add(RecipeBuilder.Default("Stock_Level Probe").WithFile("a.al", "// a"));
+            ctx.Recipes.Add(RecipeBuilder.Default("100% Coverage Check").WithFile("b.al", "// b"));
+            ctx.Recipes.Add(RecipeBuilder.Default("Item Lookup Helper").WithFile("c.al", "// c"));
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var rows = await NewService(ctx2).SearchAsync(query);
+        rows.Select(r => r.Title).Should().Equal(expected);
+    }
+
     [Fact]
     public async Task Query_matches_description_substring()
     {

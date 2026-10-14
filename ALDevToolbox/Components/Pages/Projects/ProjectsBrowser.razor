@@ -234,7 +234,8 @@
         _search = Http.HttpContext?.Request.Query["q"].ToString().Trim() ?? string.Empty;
         var all = await Artifacts.ListProjectsAsync();
         _totalCount = all.Count;
-        _rows = string.IsNullOrEmpty(_search) ? all : await Artifacts.ListProjectsAsync(_search);
+        // One read for both the total and the rows: the search narrows in memory (#1263).
+        _rows = string.IsNullOrEmpty(_search) ? all : all.Where(r => ArtifactService.MatchesSearch(r, _search)).ToList();
 
         _modules = await CustomerModules.ListCatalogAsync();
         if (int.TryParse(Http.HttpContext?.Request.Query["module"], out var moduleId) && _modules.Any(m => m.Id == moduleId))

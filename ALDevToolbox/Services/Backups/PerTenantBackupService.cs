@@ -209,80 +209,101 @@ public sealed class PerTenantBackupService
         var label = kind == BackupKind.Scheduled ? "scheduled" : "adhoc";
         var fileName = $"{org.Slug}-{timestamp:yyyyMMddTHHmmssZ}-{label}{FileSuffix}";
         var targetPath = Path.Combine(dir, fileName);
+        // Written under a staging name and renamed once complete, so a failed or
+        // cancelled snapshot never leaves a file retention cannot see (#1269).
+        var stagingPath = targetPath + ".partial";
+        if (File.Exists(targetPath))
+        {
+            throw new IOException($"A per-tenant snapshot named '{fileName}' already exists.");
+        }
 
         var sw = Stopwatch.StartNew();
         long size;
-        await using (var stream = new FileStream(targetPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true))
-        await using (var connection = new NpgsqlConnection(_connectionString))
+        var promoted = false;
+        PerTenantBackup row;
+        try
         {
-            await connection.OpenAsync(ct);
-            // Every table is read from one snapshot (#1217). On autocommit
-            // reads each SELECT sees the database as of its own moment, so a
-            // parent and child committed between two reads land in the ZIP as
-            // an orphan child, and the restore - which inserts in FK order
-            // with immediate constraints - rolls back on it. REPEATABLE READ
-            // fixes the snapshot at the first query; READ ONLY because this
-            // transaction must never write.
-            await using var readTx = await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
-            await using (var readOnly = connection.CreateCommand())
+            await using (var stream = new FileStream(stagingPath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true))
+            await using (var connection = new NpgsqlConnection(_connectionString))
             {
-                readOnly.Transaction = readTx;
-                readOnly.CommandText = "SET TRANSACTION READ ONLY";
-                await readOnly.ExecuteNonQueryAsync(ct);
-            }
-            using var zip = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true);
+                await connection.OpenAsync(ct);
+                // Every table is read from one snapshot (#1217). On autocommit
+                // reads each SELECT sees the database as of its own moment, so a
+                // parent and child committed between two reads land in the ZIP as
+                // an orphan child, and the restore - which inserts in FK order
+                // with immediate constraints - rolls back on it. REPEATABLE READ
+                // fixes the snapshot at the first query; READ ONLY because this
+                // transaction must never write.
+                await using var readTx = await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
+                await using (var readOnly = connection.CreateCommand())
+                {
+                    readOnly.Transaction = readTx;
+                    readOnly.CommandText = "SET TRANSACTION READ ONLY";
+                    await readOnly.ExecuteNonQueryAsync(ct);
+                }
+                using var zip = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true);
 
-            var includedTables = new List<string>();
-            foreach (var table in TenantTableCatalog.ContentTables)
-            {
-                if (!TenantTableCatalog.TablesWithDirectOrgColumn.Contains(table)) continue;
-                var entry = zip.CreateEntry(table + ".json", CompressionLevel.Optimal);
-                await using var entryStream = entry.Open();
-                await WriteTableAsJsonAsync(connection, table, organizationId, entryStream, ct);
-                includedTables.Add(table);
-            }
+                var includedTables = new List<string>();
+                foreach (var table in TenantTableCatalog.ContentTables)
+                {
+                    if (!TenantTableCatalog.TablesWithDirectOrgColumn.Contains(table)) continue;
+                    var entry = zip.CreateEntry(table + ".json", CompressionLevel.Optimal);
+                    await using var entryStream = entry.Open();
+                    await WriteTableAsJsonAsync(connection, table, organizationId, entryStream, ct);
+                    includedTables.Add(table);
+                }
 
-            // The shared, content-addressed source-blob store. Captured as the
-            // subset this org's files reference so the snapshot stays
-            // self-contained (oe_file_contents has no organization_id column).
-            {
-                var entry = zip.CreateEntry(FileContentsEntryTable + ".json", CompressionLevel.Optimal);
-                await using var entryStream = entry.Open();
-                await WriteFileContentsAsJsonAsync(connection, organizationId, entryStream, ct);
-                includedTables.Add(FileContentsEntryTable);
-            }
+                // The shared, content-addressed source-blob store. Captured as the
+                // subset this org's files reference so the snapshot stays
+                // self-contained (oe_file_contents has no organization_id column).
+                {
+                    var entry = zip.CreateEntry(FileContentsEntryTable + ".json", CompressionLevel.Optimal);
+                    await using var entryStream = entry.Open();
+                    await WriteFileContentsAsJsonAsync(connection, organizationId, entryStream, ct);
+                    includedTables.Add(FileContentsEntryTable);
+                }
 
-            var manifest = new
+                var manifest = new
+                {
+                    schema_version = CurrentSchemaVersion,
+                    organization_id = organizationId,
+                    organization_slug = org.Slug,
+                    organization_name = org.Name,
+                    created_at = timestamp,
+                    tables = includedTables,
+                    deployment_id = _deployment?.Id,
+                };
+                var manifestEntry = zip.CreateEntry(ManifestEntryName, CompressionLevel.Optimal);
+                await using var manifestStream = manifestEntry.Open();
+                await JsonSerializer.SerializeAsync(manifestStream, manifest, ManifestJson, ct);
+                await readTx.CommitAsync(ct);
+            }
+            File.Move(stagingPath, targetPath);
+            promoted = true;
+            size = new FileInfo(targetPath).Length;
+            sw.Stop();
+
+            row = new PerTenantBackup
             {
-                schema_version = CurrentSchemaVersion,
-                organization_id = organizationId,
-                organization_slug = org.Slug,
-                organization_name = org.Name,
-                created_at = timestamp,
-                tables = includedTables,
-                deployment_id = _deployment?.Id,
+                OrganizationId = organizationId,
+                FileName = fileName,
+                FileSizeBytes = size,
+                CreatedAt = timestamp,
+                CreatedByUserId = kind == BackupKind.AdHoc ? _orgContext.CurrentUserId : null,
+                Kind = kind,
+                SchemaVersion = CurrentSchemaVersion,
+                IsPinned = false,
             };
-            var manifestEntry = zip.CreateEntry(ManifestEntryName, CompressionLevel.Optimal);
-            await using var manifestStream = manifestEntry.Open();
-            await JsonSerializer.SerializeAsync(manifestStream, manifest, ManifestJson, ct);
-            await readTx.CommitAsync(ct);
+            _db.PerTenantBackups.Add(row);
+            await _db.SaveChangesAsync(ct);
         }
-        size = new FileInfo(targetPath).Length;
-        sw.Stop();
-
-        var row = new PerTenantBackup
+        catch
         {
-            OrganizationId = organizationId,
-            FileName = fileName,
-            FileSizeBytes = size,
-            CreatedAt = timestamp,
-            CreatedByUserId = kind == BackupKind.AdHoc ? _orgContext.CurrentUserId : null,
-            Kind = kind,
-            SchemaVersion = CurrentSchemaVersion,
-            IsPinned = false,
-        };
-        _db.PerTenantBackups.Add(row);
-        await _db.SaveChangesAsync(ct);
+            TryDelete(stagingPath);
+            // Only a file this call put there: never an earlier snapshot of the same name.
+            if (promoted) TryDelete(targetPath);
+            throw;
+        }
 
         _logger.LogInformation(
             "Per-tenant snapshot {FileName} written for org {OrgSlug} in {ElapsedMs} ms ({SizeBytes} bytes, kind={Kind}).",
@@ -601,6 +622,18 @@ public sealed class PerTenantBackupService
             throw new InvalidOperationException($"Refusing to handle suspicious snapshot file name: {fileName}");
         }
         return Path.Combine(DirectoryFor(slug), fileName);
+    }
+
+    private void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex, "Could not remove {Path} after a failed snapshot.", path);
+        }
     }
 
     private void TryDeleteFile(string slug, string fileName)

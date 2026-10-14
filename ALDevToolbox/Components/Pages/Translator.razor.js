@@ -236,6 +236,9 @@ export async function saveInPlace(fileName, editsJson) {
     if (!rec || !rec.originalXml) return "empty";
     if (!rec.handle) return "no-handle";
     const handle = rec.handle;
+    // What the session record held when the save began, to tell afterwards
+    // whether newer edits were persisted while the request was in flight.
+    const editsAtStart = JSON.stringify(rec.edits || {});
 
     if (await ensureWritePermission(handle) !== true) return "denied";
 
@@ -267,8 +270,18 @@ export async function saveInPlace(fileName, editsJson) {
         return "error";
     }
 
-    // Persist the just-saved overlay so a later refresh restores the saved state.
-    try { rec.edits = JSON.parse(editsJson); await putRec(rec); } catch { /* best effort */ }
+    // Persist the just-saved overlay so a later refresh restores the saved
+    // state - but from a fresh read, and only when nothing newer arrived while
+    // the save was in flight. Writing back the record read at the start used
+    // to overwrite edits typed during the save (#1268, L44); a newer overlay
+    // already holds everything this one does, so it is left as it is.
+    try {
+        const latest = await getRec();
+        if (latest && JSON.stringify(latest.edits || {}) === editsAtStart) {
+            latest.edits = JSON.parse(editsJson);
+            await putRec(latest);
+        }
+    } catch { /* best effort */ }
     return "saved";
 }
 

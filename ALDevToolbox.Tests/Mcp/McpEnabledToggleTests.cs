@@ -3,6 +3,7 @@ using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using ALDevToolbox.Services.Operations;
 
@@ -95,6 +96,45 @@ public sealed class McpEnabledToggleTests : IDisposable
             "with the toggle on, the route should respond — auth/validation may still fail with 400/415 but not 404");
         response.StatusCode.Should().NotBe(HttpStatusCode.Unauthorized,
             "a valid PAT should authenticate against the bearer scheme");
+    }
+
+    /// <summary>
+    /// #1277 (T24): with MCP on for the deployment, an organisation that has
+    /// switched it off still gets a 404 naming the organisation - read from the
+    /// live row, not the claim on the token - and one that has it on does not.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Mcp_endpoint_follows_the_organisations_own_switch(bool orgEnabled)
+    {
+        await EnableMcpAsync();
+        using var factory = new EndpointFactory(_db);
+        using var client = factory.CreateClient();
+        var pat = await IssuePatAsync(factory.Services);
+        // Switched after the token is issued, so a stale claim cannot be what decides.
+        await using (var ctx = _db.NewContext())
+        {
+            var org = await ctx.Organizations.SingleAsync(o => o.Id == TestDb.DefaultOrgId);
+            org.McpEnabled = orgEnabled;
+            await ctx.SaveChangesAsync();
+        }
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/mcp");
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", pat);
+        using var response = await client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        if (orgEnabled)
+        {
+            response.StatusCode.Should().NotBe(HttpStatusCode.NotFound, body);
+            body.Should().NotContain("disabled for this organisation");
+        }
+        else
+        {
+            response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+            body.Should().Be("MCP is disabled for this organisation.");
+        }
     }
 
     [Fact]

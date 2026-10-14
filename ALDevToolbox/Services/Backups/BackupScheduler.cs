@@ -29,6 +29,15 @@ public sealed class BackupScheduler : PolledScheduler
     private readonly MaintenanceModeState _maintenance;
     private readonly ILogger<BackupScheduler> _logger;
 
+    /// <summary>How long a failed scheduled backup waits before the next attempt.</summary>
+    internal static readonly TimeSpan FailedRunBackoff = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Set when today's scheduled backup failed: no new attempt before this
+    /// instant. In memory only, so a restart tries again straight away.
+    /// </summary>
+    private DateTime? _retryNotBeforeUtc;
+
     public BackupScheduler(IServiceProvider services, TimeProvider clock, ISingleTenantMode singleTenant, MaintenanceModeState maintenance, ILogger<BackupScheduler> logger, WorkerHeartbeatRegistry heartbeats)
         // Poll every minute; flag stale if no tick has landed in 5 (~3x the poll
         // interval). Active-duration ceiling matches the longest legitimate backup run
@@ -98,6 +107,10 @@ public sealed class BackupScheduler : PolledScheduler
             .FirstOrDefaultAsync(ct);
         if (lastScheduled is not null && lastScheduled >= todayWindow) return;
 
+        // A failed run is tried again after a pause, not on every one-minute
+        // poll for the rest of the day (#1269).
+        if (_retryNotBeforeUtc is { } retryAt && nowUtc < retryAt) return;
+
         _logger.LogInformation(
             "BackupScheduler triggering scheduled backup (scheduled-for={Scheduled:o}, now={Now:o}).",
             todayWindow, nowUtc);
@@ -105,10 +118,12 @@ public sealed class BackupScheduler : PolledScheduler
         try
         {
             created = await backups.CreateAsync(BackupKind.Scheduled, ct);
+            _retryNotBeforeUtc = null;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Scheduled backup failed.");
+            _retryNotBeforeUtc = nowUtc + FailedRunBackoff;
+            _logger.LogError(ex, "Scheduled backup failed; trying again after {RetryAt:o}.", _retryNotBeforeUtc);
         }
 
         if (created is not null)

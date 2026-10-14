@@ -24,6 +24,53 @@ internal static class StartupTasks
     /// </summary>
     internal static readonly TimeSpan MigrationCommandTimeout = TimeSpan.FromMinutes(30);
 
+    /// <summary>
+    /// Creates the bootstrap SiteAdmin from <c>BOOTSTRAP_ADMIN_EMAIL</c> /
+    /// <c>BOOTSTRAP_ADMIN_PASSWORD</c>, only when the database has no users at all.
+    /// After that the values are ignored with a warning: a variable left set must
+    /// never add or reset an admin on a later restart.
+    /// </summary>
+    /// <returns>Whether the database already had users before this ran.</returns>
+    internal static async Task<bool> EnsureBootstrapAdminAsync(
+        AppDbContext db,
+        ALDevToolbox.Services.Account.AuthService auth,
+        int defaultOrgId,
+        string? bootstrapEmail,
+        string? bootstrapPassword,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        // Fence category 3 (startup, no request org): existence-only probe for the
+        // bootstrap-admin first-run check.
+        var anyUsers = await db.Users.IgnoreQueryFilters().AnyAsync(ct);
+        if (!anyUsers && !string.IsNullOrWhiteSpace(bootstrapEmail) && !string.IsNullOrWhiteSpace(bootstrapPassword))
+        {
+            var hash = auth.HashPassword(bootstrapPassword);
+            db.Users.Add(new User
+            {
+                OrganizationId = defaultOrgId,
+                Email = bootstrapEmail.Trim().ToLowerInvariant(),
+                DisplayName = "Administrator",
+                PasswordHash = hash,
+                Role = UserRole.Admin,
+                Status = UserStatus.Active,
+                // The bootstrap admin is the first hosting operator;
+                // subsequent SiteAdmins are promoted from /site-admin/users.
+                IsSiteAdmin = true,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync(ct);
+            logger.LogInformation("Bootstrap SiteAdmin {Email} created in Default organisation.", bootstrapEmail);
+        }
+        else if (anyUsers && (!string.IsNullOrWhiteSpace(bootstrapEmail) || !string.IsNullOrWhiteSpace(bootstrapPassword)))
+        {
+            logger.LogWarning(
+                "BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD are set but at least one user already exists. "
+                + "These environment variables only take effect on a fresh database; remove them once the bootstrap account is in place.");
+        }
+        return anyUsers;
+    }
+
     public static async Task RunAsync(WebApplication app)
     {
         using var scope = app.Services.CreateScope();
@@ -98,38 +145,11 @@ internal static class StartupTasks
                 "Platform org-file seed raced with a concurrent startup; the other writer won. Continuing.");
         }
 
-        // Bootstrap admin: only runs once, when there are no users in the
-        // database. After that the env vars are read but ignored (logged).
-        var bootstrapEmail = Environment.GetEnvironmentVariable("BOOTSTRAP_ADMIN_EMAIL");
-        var bootstrapPassword = Environment.GetEnvironmentVariable("BOOTSTRAP_ADMIN_PASSWORD");
-        // Fence category 3 (startup, no request org): existence-only probe for the
-        // bootstrap-admin first-run check.
-        var anyUsers = await db.Users.IgnoreQueryFilters().AnyAsync(stopping);
-        if (!anyUsers && !string.IsNullOrWhiteSpace(bootstrapEmail) && !string.IsNullOrWhiteSpace(bootstrapPassword))
-        {
-            var hash = auth.HashPassword(bootstrapPassword);
-            db.Users.Add(new User
-            {
-                OrganizationId = defaultOrg.Id,
-                Email = bootstrapEmail.Trim().ToLowerInvariant(),
-                DisplayName = "Administrator",
-                PasswordHash = hash,
-                Role = UserRole.Admin,
-                Status = UserStatus.Active,
-                // The bootstrap admin is the first hosting operator;
-                // subsequent SiteAdmins are promoted from /site-admin/users.
-                IsSiteAdmin = true,
-                CreatedAt = DateTime.UtcNow,
-            });
-            await db.SaveChangesAsync(stopping);
-            logger.LogInformation("Bootstrap SiteAdmin {Email} created in Default organisation.", bootstrapEmail);
-        }
-        else if (anyUsers && (!string.IsNullOrWhiteSpace(bootstrapEmail) || !string.IsNullOrWhiteSpace(bootstrapPassword)))
-        {
-            logger.LogWarning(
-                "BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD are set but at least one user already exists. "
-                + "These environment variables only take effect on a fresh database; remove them once the bootstrap account is in place.");
-        }
+        var anyUsers = await EnsureBootstrapAdminAsync(
+            db, auth, defaultOrg.Id,
+            Environment.GetEnvironmentVariable("BOOTSTRAP_ADMIN_EMAIL"),
+            Environment.GetEnvironmentVariable("BOOTSTRAP_ADMIN_PASSWORD"),
+            logger, stopping);
 
         // Single-tenant first-run seeding: name the Default (system) org and
         // claim its email domain(s) from env vars so the one organisation comes

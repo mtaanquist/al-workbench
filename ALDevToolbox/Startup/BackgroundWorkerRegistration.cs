@@ -64,6 +64,9 @@ public static class BackgroundWorkerRegistration
         // Periodic prune of old login_attempts rows so the table doesn't grow
         // unbounded (the rate-limiter only reads a ~15-minute window). See issue #403.
         services.AddHostedService<ALDevToolbox.Services.Account.LoginAttemptPruneScheduler>();
+        // Removes expired, revoked and redeemed OAuth tokens and the dead
+        // authorizations behind them, which nothing else deletes. See #1259.
+        services.AddHostedService<ALDevToolbox.Services.OAuth.OAuthTokenPruneScheduler>();
         // Sends the queued transactional email, retries what fails, and prunes
         // what it no longer needs to keep. See issue #790.
         services.AddHostedService<ALDevToolbox.Services.EmailOutboxScheduler>();

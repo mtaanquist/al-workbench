@@ -11,6 +11,7 @@ using ALDevToolbox.Services.ObjectExplorer.Delivery;
 using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
@@ -448,6 +449,43 @@ public sealed class DeliverToolsTests : IDisposable
 
         var denmark = await tools.ListCustomerModulesAsync(solution: "CRONUS Denmark");
         denmark.Should().ContainSingle(m => m.Module == "CRONUS Payroll" && m.EnvironmentName == "Production");
+    }
+
+    /// <summary>
+    /// The by-module answer is read in one batch since #1267 (L38); it still
+    /// gives an on-premises solution its typed version and note, beside the
+    /// online one read from Business Central.
+    /// </summary>
+    [Fact]
+    public async Task List_customer_modules_by_module_reads_typed_and_installed_holders_together()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            var norway = NewProject("CRONUS Norway", ProjectVisibility.Public, null, 1_000_000);
+            norway.HostingType = ProjectHostingType.OurCloud;
+            seed.OeProjects.Add(norway);
+            await seed.SaveChangesAsync();
+            var payroll = await seed.CustomerModules.SingleAsync(m => m.Name == "CRONUS Payroll");
+            seed.OeProjectModules.Add(new OeProjectModule
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = norway.Id, ModuleId = payroll.Id,
+                Version = "1.5", Note = "Licensed to 2027", CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var holders = await NewTools(ctx).ListCustomerModulesAsync(module: "CRONUS Payroll");
+
+        holders.Should().HaveCount(2);
+        var norwayRow = holders.Single(h => h.SolutionName == "CRONUS Norway");
+        norwayRow.Version.Should().Be("1.5");
+        norwayRow.Source.Should().Be("typed");
+        norwayRow.Note.Should().Be("Licensed to 2027");
+        norwayRow.EnvironmentName.Should().BeNull();
+        var denmarkRow = holders.Single(h => h.SolutionName == "CRONUS Denmark");
+        denmarkRow.Version.Should().Be("3.1.0.0");
+        denmarkRow.EnvironmentName.Should().Be("Production");
     }
 
     // ── The Private solution is absent everywhere ───────────────────────

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Cal;
 using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
@@ -60,7 +61,6 @@ public sealed class CalImportService
         int releaseId, string txtPath, string encodingName, CancellationToken ct = default)
     {
         var orgId = RequireOrganizationId();
-        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
         var release = await _db.OeReleases.FindAsync(new object?[] { releaseId }, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Release {releaseId} not found for C/AL processing.");
 
@@ -74,6 +74,11 @@ public sealed class CalImportService
 
         try
         {
+            // The quota check sits inside the try for the same reason as the
+            // encoding below: a refusal outside it left the release stuck in
+            // `ingesting`, where Retry cannot reach it (#1261).
+            await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
+
             // Resolve the encoding *inside* the try: the codepage string comes
             // from the import form and an unknown value makes ResolveEncoding
             // throw. Outside the try that throw stranded the release in
@@ -178,7 +183,11 @@ public sealed class CalImportService
             if (failed is not null)
             {
                 failed.Status = "failed";
-                failed.StatusMessage = ex.Message;
+                // A refusal carries its reason in the field error; the
+                // exception's own message is a generic count.
+                failed.StatusMessage = ex is PlanValidationException { Errors.Count: > 0 } pve
+                    ? pve.Errors.First().Value
+                    : ex.Message;
                 failed.UpdatedAt = DateTime.UtcNow;
                 await _db.SaveChangesAsync(ct).ConfigureAwait(false);
             }

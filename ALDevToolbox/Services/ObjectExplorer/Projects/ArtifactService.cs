@@ -171,16 +171,24 @@ public sealed class ArtifactService
 
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var term = search.Trim();
-            rows = rows.Where(r =>
-                    r.Name.Contains(term, StringComparison.OrdinalIgnoreCase)
-                    || (r.ShortName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
-                    || (r.OwnerName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
-                    || r.RepoNames.Any(n => n.Contains(term, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
+            rows = rows.Where(r => MatchesSearch(r, search)).ToList();
         }
 
         return rows.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>
+    /// Whether a project row matches a search the way <see cref="ListProjectsAsync"/>
+    /// filters: by name, short name, owner or repository name. For a page that already
+    /// holds the whole list and would otherwise read it twice.
+    /// </summary>
+    public static bool MatchesSearch(ProjectArtifactsRow r, string search)
+    {
+        var term = search.Trim();
+        return r.Name.Contains(term, StringComparison.OrdinalIgnoreCase)
+               || (r.ShortName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+               || (r.OwnerName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+               || r.RepoNames.Any(n => n.Contains(term, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>The project header (name + owner) for the Artifacts builds page, or null when not found / deleted.</summary>
@@ -641,7 +649,14 @@ public sealed class ArtifactService
     /// repo, the deliverables (metadata only — no bytes), and the log sections.
     /// Null when the build isn't in the acting org.
     /// </summary>
-    public async Task<BuildDetail?> GetBuildDetailAsync(int buildId, CancellationToken ct = default)
+    /// <param name="buildId">The build.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <param name="includeLogText">
+    /// False when the caller only needs to know which log sections exist: the
+    /// sections come back with empty content instead of every line the build
+    /// wrote, which can run to megabytes.
+    /// </param>
+    public async Task<BuildDetail?> GetBuildDetailAsync(int buildId, CancellationToken ct = default, bool includeLogText = true)
     {
         var build = await _db.OeProjectBuilds.AsNoTracking()
             .Where(b => b.Id == buildId)
@@ -691,11 +706,12 @@ public sealed class ArtifactService
 
         var artifacts = await ListArtifactRowsAsync(buildId, ct);
 
-        var logSections = await _db.OeProjectBuildLogs.AsNoTracking()
+        var logs = _db.OeProjectBuildLogs.AsNoTracking()
             .Where(l => l.ProjectBuildId == buildId)
-            .OrderBy(l => l.Ordering)
-            .Select(l => new LogSectionRow(l.Section, l.Content))
-            .ToListAsync(ct);
+            .OrderBy(l => l.Ordering);
+        var logSections = includeLogText
+            ? await logs.Select(l => new LogSectionRow(l.Section, l.Content)).ToListAsync(ct)
+            : await logs.Select(l => new LogSectionRow(l.Section, string.Empty)).ToListAsync(ct);
 
         // Compiler diagnostics are parsed into rows for every build (#627), so the
         // card can say "3 errors, 12 warnings" instead of leaving the reader to
@@ -782,17 +798,6 @@ public sealed class ArtifactService
             .Where(a => a.Id == artifactId && a.ProjectBuildId == buildId)
             .Select(a => new DownloadFile(a.FileName, a.Content))
             .FirstOrDefaultAsync(ct);
-    }
-
-    /// <summary>Every deliverable's bytes for a build's "Download all" zip. Empty when the build has none.</summary>
-    public async Task<List<DownloadFile>> GetAllArtifactBytesAsync(int buildId, CancellationToken ct = default)
-    {
-        await EnsureCanViewBuildAsync(buildId, ct);
-        return await _db.OeProjectBuildArtifacts.AsNoTracking()
-            .Where(a => a.ProjectBuildId == buildId)
-            .OrderBy(a => a.FileName)
-            .Select(a => new DownloadFile(a.FileName, a.Content))
-            .ToListAsync(ct);
     }
 
     /// <summary>The build's concatenated raw log for the <c>Raw log</c> download, or null when the build has none.</summary>

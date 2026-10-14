@@ -105,6 +105,47 @@ public sealed class TemplateImportServiceTests : IDisposable
         ex.Which.Errors.Should().ContainKey("Key");
     }
 
+    /// <summary>
+    /// #1277 (T23): the source read escapes the tenant filter, so the predicate
+    /// pinning it to the system org is the only thing stopping one tenant from
+    /// copying another tenant's template by id. A third org's template is
+    /// refused as if it did not exist, and nothing is written.
+    /// </summary>
+    [Fact]
+    public async Task Import_refuses_a_template_that_belongs_to_another_tenant_and_writes_nothing()
+    {
+        const int ThirdOrgId = 9301;
+        await SeedSystemCatalogueAsync();
+        int foreignTemplateId;
+        await using (var seed = _db.NewContext())
+        {
+            seed.Organizations.Add(new Organization
+            {
+                Id = ThirdOrgId, Name = "CRONUS Third", Slug = "cronus-third", CreatedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+            var foreign = TemplateBuilder.Default("third-orgs-template", organizationId: ThirdOrgId);
+            seed.RuntimeTemplates.Add(foreign);
+            await seed.SaveChangesAsync();
+            foreignTemplateId = foreign.Id;
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+
+        await using (var ctx = _db.NewContext())
+        {
+            var act = () => NewService(ctx).ImportTemplateAsync(foreignTemplateId);
+            var ex = await act.Should().ThrowAsync<PlanValidationException>();
+            ex.Which.Errors.Should().ContainKey("Import");
+            ex.Which.Errors["Import"].Should().Contain("no longer exists in the system catalogue");
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.RuntimeTemplates.IgnoreQueryFilters().CountAsync(t => t.OrganizationId == TestDb.OtherOrgId))
+            .Should().Be(0);
+        (await verify.Modules.IgnoreQueryFilters().CountAsync(m => m.OrganizationId == TestDb.OtherOrgId))
+            .Should().Be(0);
+    }
+
     [Fact]
     public async Task Import_refuses_when_acting_org_is_the_system_org()
     {

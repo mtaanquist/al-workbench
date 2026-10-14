@@ -348,6 +348,27 @@ public sealed class GitHubToolsTests : IDisposable
             "an edit that could not land is refused before anything is committed");
     }
 
+    /// <summary>
+    /// #1267 (L37): a language file passed with another language used to be
+    /// rewritten in place and relabelled, turning the Danish file into a German
+    /// one in the pull request.
+    /// </summary>
+    [Fact]
+    public async Task A_language_file_given_another_language_is_refused_and_nothing_is_written()
+    {
+        await ReadyAsync();
+        var api = WritableApi();
+        var (tools, ctx) = NewTools(api);
+        await using var _ = ctx;
+
+        var act = () => tools.OpenTranslationPullRequestAsync(
+            Repo, FilePath, "de-DE", [new TranslationUnitEditInput(AmountId, "Betrag")]);
+
+        (await act.Should().ThrowAsync<McpException>())
+            .Which.Message.Should().Contain("da-DK").And.Contain("de-DE");
+        api.Calls.Should().NotContain(c => c.StartsWith("PUT", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task The_same_string_edited_twice_is_refused_by_name()
     {

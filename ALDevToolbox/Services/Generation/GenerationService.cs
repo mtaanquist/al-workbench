@@ -94,7 +94,7 @@ public class GenerationService
     public async Task<GeneratedArchive> GenerateWorkspaceAsync(ProjectPlan plan, CancellationToken ct = default)
     {
         var stopwatch = Stopwatch.StartNew();
-        var (resolvedPlan, template, extensions, orgConfig) = await PrepareWorkspaceAsync(plan, ct);
+        var (resolvedPlan, template, extensions, orgConfig) = await PrepareWorkspaceAsync(plan, pathsOnly: false, ct);
 
         var (stream, fileCount) = await _zipBuilder.BuildWorkspaceAsync(resolvedPlan, template, extensions, orgConfig, ct);
         var folderName = CustomerNaming.Apply(resolvedPlan.WorkspaceName, orgConfig.Settings.NamingFolderStyle);
@@ -201,16 +201,22 @@ public class GenerationService
     /// plan the endpoint then rejects — landing the user on the error page this
     /// was built to avoid. One code path is the only way to keep that honest.
     /// </remarks>
+    /// <param name="plan">The plan to check and resolve.</param>
+    /// <param name="pathsOnly">
+    /// True when nothing will be written: the folder trees are loaded without
+    /// their file bodies, which no rule reads. Never true on the generate path.
+    /// </param>
+    /// <param name="ct">Cancellation token.</param>
     private async Task<(ProjectPlan Plan, RuntimeTemplate Template, List<EmittableExtension> Extensions, OrganizationConfig OrgConfig)>
-        PrepareWorkspaceAsync(ProjectPlan plan, CancellationToken ct)
+        PrepareWorkspaceAsync(ProjectPlan plan, bool pathsOnly, CancellationToken ct)
     {
         ValidateWorkspacePlan(plan);
         var (application, runtime) = await ResolveLatestVersionAsync(plan.ApplicationVersion, plan.RuntimeVersion, ct);
         plan = plan with { ApplicationVersion = application, RuntimeVersion = runtime };
 
-        var template = await LoadTemplateAsync(plan.TemplateKey, ct);
+        var template = await LoadTemplateAsync(plan.TemplateKey, ct, pathsOnly);
         ValidateCoreRangeAgainstTemplate(plan, template);
-        var modules = await LoadSelectedModulesAsync(plan.SelectedModuleKeys, ct);
+        var modules = await LoadSelectedModulesAsync(plan.SelectedModuleKeys, ct, pathsOnly);
         var orgConfig = await GetOrgConfigAsync(ct);
 
         // The prefix is the organisation's policy, not the caller's, so it is
@@ -228,6 +234,7 @@ public class GenerationService
 
         var extensions = BuildExtensionList(template, plan, modules, publisher, orgConfig.Settings.NamingFolderStyle);
         ValidateExtensionFolders(extensions);
+        ValidateExtensionReferences(extensions);
         ValidateIdRanges(extensions);
         ValidateExtensionNames(extensions);
 
@@ -245,7 +252,7 @@ public class GenerationService
     {
         try
         {
-            await PrepareWorkspaceAsync(plan, ct);
+            await PrepareWorkspaceAsync(plan, pathsOnly: true, ct);
             return NoErrors;
         }
         catch (PlanValidationException ex)
@@ -267,7 +274,13 @@ public class GenerationService
         {
             ValidateExtensionPlan(plan);
             await ResolveLatestVersionAsync(plan, ct);
-            await LoadTemplateAsync(plan.TemplateKey, ct);
+            // Only whether the template is still there matters here, so ask
+            // that rather than loading its folder tree and every file body.
+            if (!await _db.RuntimeTemplates.AsNoTracking()
+                    .AnyAsync(t => t.DeletedAt == null && t.Key == plan.TemplateKey, ct))
+            {
+                throw TemplateNotFound(plan.TemplateKey);
+            }
             if (sibling is not null)
             {
                 ValidateAgainstSibling(plan, ResolveSibling(sibling, await GetOrgConfigAsync(ct)));
@@ -389,7 +402,13 @@ public class GenerationService
 
     // ===== Loading =====
 
-    private async Task<RuntimeTemplate> LoadTemplateAsync(string key, CancellationToken ct)
+    private static PlanValidationException TemplateNotFound(string key) =>
+        new(new Dictionary<string, string>
+        {
+            ["TemplateKey"] = $"Template '{key}' was not found.",
+        });
+
+    private async Task<RuntimeTemplate> LoadTemplateAsync(string key, CancellationToken ct, bool pathsOnly = false)
     {
         // EF doesn't support a recursive Include on the folder tree, so the
         // top-level Folders + Files come through here and any nested levels
@@ -402,19 +421,16 @@ public class GenerationService
             .Include(t => t.IncludedFiles.OrderBy(j => j.Ordering))
             .Include(t => t.RootFolders.OrderBy(f => f.Ordering))
             .FirstOrDefaultAsync(ct)
-            ?? throw new PlanValidationException(new Dictionary<string, string>
-            {
-                ["TemplateKey"] = $"Template '{key}' was not found.",
-            });
+            ?? throw TemplateNotFound(key);
 
         // Folder tree hydration is delegated to FolderTreeHydrator so workspace
         // generation, template authoring loads, and cross-org imports share
         // one implementation (#77).
-        await _folderTree.HydrateExtensionFolderTreeAsync(new[] { template }, ct);
+        await _folderTree.HydrateExtensionFolderTreeAsync(new[] { template }, ct, pathsOnly: pathsOnly);
         return template;
     }
 
-    private async Task<List<Module>> LoadSelectedModulesAsync(IReadOnlyList<string> moduleKeys, CancellationToken ct)
+    private async Task<List<Module>> LoadSelectedModulesAsync(IReadOnlyList<string> moduleKeys, CancellationToken ct, bool pathsOnly = false)
     {
         if (moduleKeys.Count == 0) return new();
 
@@ -424,7 +440,7 @@ public class GenerationService
             .Include(m => m.Dependencies.OrderBy(d => d.Ordering))
             .ToListAsync(ct);
 
-        await _folderTree.HydrateModuleExtensionFolderTreeAsync(modules, ct);
+        await _folderTree.HydrateModuleExtensionFolderTreeAsync(modules, ct, pathsOnly: pathsOnly);
 
         // Preserve user-selected ordering — EF returns them in whatever
         // order the IN-clause matched.
@@ -697,6 +713,31 @@ public class GenerationService
 
         static string Describe(EmittableExtension e) =>
             e.IsModuleClone ? $"the {e.ModuleName} module ({e.ModuleKey})" : $"the template's {e.Path} extension";
+    }
+
+    /// <summary>
+    /// Rejects a plan where an extension depends on a template extension that
+    /// is not part of this workspace - typically an optional one left unticked.
+    /// The emit step refuses the same thing, but only once the form has posted,
+    /// which lands the user on the error page instead of next to the checkbox
+    /// (#546).
+    /// </summary>
+    private static void ValidateExtensionReferences(IReadOnlyList<EmittableExtension> extensions)
+    {
+        var present = new HashSet<string>(extensions.Select(e => e.Path), StringComparer.Ordinal);
+        var missing = extensions
+            .SelectMany(e => e.Dependencies
+                .Where(d => d.RefExtensionPath is not null && !present.Contains(d.RefExtensionPath))
+                .Select(d => $"{e.Path} needs {d.RefExtensionPath}"))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (missing.Count == 0) return;
+
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["SelectedExtensionPaths"] =
+                $"{string.Join("; ", missing)}. Tick the extension it needs as well, or untick the one that needs it.",
+        });
     }
 
     /// <summary>
