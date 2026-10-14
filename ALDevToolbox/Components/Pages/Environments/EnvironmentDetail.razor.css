@@ -139,13 +139,33 @@
     overflow-wrap: anywhere;
 }
 
-/* Quick actions: one button a line, the full width of the rail, labels to the left
-   so the three read as a list rather than as a toolbar. */
-.env-detail__actions {
-    display: grid;
-    gap: var(--space-2);
+/* The tab row with the page's actions at its end, GitHub's shape: one rule under
+   both, which the row draws instead of the tab strip so it runs the full width. The
+   active tab's underline still lands on it, since the strip sits on the row's bottom
+   edge. On a narrow page the actions take their own line above the tabs, so the tabs
+   keep the rule their underline belongs to. */
+.env-detail__tabs {
+    flex-wrap: wrap;
+    align-items: flex-end;
+    column-gap: var(--space-4);
+    row-gap: var(--space-2);
+    border-bottom: 1px solid var(--border);
 }
 
-.env-detail__actions .btn {
-    justify-content: flex-start;
+.env-detail__tabs ::deep .header-tabs {
+    border-bottom: 0;
+}
+
+.env-detail__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding-bottom: var(--space-1);
+}
+
+@container (max-width: 720px) {
+    .env-detail__actions {
+        order: -1;
+        flex-basis: 100%;
+    }
 }

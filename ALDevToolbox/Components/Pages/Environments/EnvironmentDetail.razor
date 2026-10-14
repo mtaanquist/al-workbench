@@ -93,8 +93,38 @@
            facts above them, people did not see there were tabs at all. Real links, so a
            tab can be bookmarked and Back works; the page reads the environment once and
            a change of tab only reads what that tab needs. *@
-        <div class="settings__tabs">
+        <div class="settings__tabs env-detail__tabs">
             <HeaderTabs Items="@SectionTabs" AriaLabel="Environment sections" />
+            @* The page's actions, at the end of the tab row as a repository's are on
+               GitHub, under one rule with the tabs. Short names: the icon says the first
+               two leave for Business Central, and the hover text says where to. Outline
+               buttons - Copy writes to the customer's tenant, and nothing on this page is
+               the primary action. A deleted environment has nothing to copy; the alert
+               below offers the one thing left to do to it. *@
+            <div class="env-detail__actions">
+                @if (Row.BusinessCentralUrl is { } bcUrl)
+                {
+                    <a class="btn btn--sm" href="@bcUrl" target="_blank" rel="noopener" title="Open this environment in Business Central">
+                        <Icon Name="external-link" Width="14" Height="14" />
+                        <span>Business Central</span>
+                    </a>
+                }
+                @if (AdminCentreUrl is { } adminUrl)
+                {
+                    <a class="btn btn--sm" href="@adminUrl" target="_blank" rel="noopener" title="Open the customer's Business Central admin centre">
+                        <Icon Name="external-link" Width="14" Height="14" />
+                        <span>Admin centre</span>
+                    </a>
+                }
+                @if (_canManage && !Row.IsSoftDeleted)
+                {
+                    <button type="button" class="btn btn--sm @(_settingBusy == "copy" ? "btn--loading" : "")"
+                            @onclick="CopyAsync" disabled="@_settingSaving">
+                        <Icon Name="copy" Width="14" Height="14" />
+                        <span class="btn__label">@(_settingBusy == "copy" ? "Starting the copy" : "Copy environment...")</span>
+                    </button>
+                }
+            </div>
         </div>
 
         <div class="freshness @FreshnessClass()">
@@ -961,42 +991,6 @@
                the tabs stay next to what they switch. The Overview's Updates card
                repeats the version, the next update and the window for that reader. *@
             <aside class="detail-body__aside">
-                @* The ways out to Business Central and the copy, in a card of their own
-                   rather than in the head: three buttons beside the name pushed the tabs
-                   down, and on a phone they stacked above them. Outline buttons, as they
-                   were - Copy writes to the customer's tenant, and nothing on this page is
-                   the primary action. A deleted environment has nothing to copy; the
-                   alert under the tabs offers the one thing left to do to it. *@
-                @if (Row.BusinessCentralUrl is not null || AdminCentreUrl is not null || (_canManage && !Row.IsSoftDeleted))
-                {
-                    <section class="card">
-                        <div class="card__head"><h2 class="card__title">Quick actions</h2></div>
-                        <div class="card__body env-detail__actions">
-                            @if (Row.BusinessCentralUrl is { } bcUrl)
-                            {
-                                <a class="btn" href="@bcUrl" target="_blank" rel="noopener">
-                                    <Icon Name="external-link" Width="15" Height="15" />
-                                    <span>Open in Business Central</span>
-                                </a>
-                            }
-                            @if (AdminCentreUrl is { } adminUrl)
-                            {
-                                <a class="btn" href="@adminUrl" target="_blank" rel="noopener">
-                                    <Icon Name="external-link" Width="15" Height="15" />
-                                    <span>Open the admin centre</span>
-                                </a>
-                            }
-                            @if (_canManage && !Row.IsSoftDeleted)
-                            {
-                                <button type="button" class="btn @(_settingBusy == "copy" ? "btn--loading" : "")"
-                                        @onclick="CopyAsync" disabled="@_settingSaving">
-                                    <Icon Name="copy" Width="15" Height="15" />
-                                    <span class="btn__label">@(_settingBusy == "copy" ? "Starting the copy" : "Copy this environment...")</span>
-                                </button>
-                            }
-                        </div>
-                    </section>
-                }
                 <section class="card">
                     <div class="card__head"><h2 class="card__title">At a glance</h2></div>
                     <div class="card__body env-detail__facts">

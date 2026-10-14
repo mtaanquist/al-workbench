@@ -314,7 +314,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         meta[8].Should().Be("3");
 
         cut.FindAll(".env-detail__actions .btn").Select(b => b.TextContent.Trim()).Should()
-            .Contain("Copy this environment...", "the head's buttons moved into Quick actions");
+            .Contain("Copy environment...", "the head's buttons moved to the end of the tab row");
         cut.FindAll(".page-head__actions").Should().BeEmpty();
 
         cut.FindAll(".kv-grid .meta-item__label").Select(l => l.TextContent).Should().Equal(
@@ -409,11 +409,11 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
     /// <summary>
     /// The commonest thing this page's reader would otherwise open the admin centre for,
-    /// so it sits in Quick actions beside the other two. An outline button: it writes to the
+    /// so it sits at the end of the tab row beside the other two. An outline button: it writes to the
     /// customer's tenant, and nothing on this page is the one thing to do.
     /// </summary>
     [Fact]
-    public async Task Someone_who_manages_the_solution_is_offered_a_copy_in_quick_actions()
+    public async Task Someone_who_manages_the_solution_is_offered_a_copy_beside_the_tabs()
     {
         var (projectId, envId) = await SeedAsync();
         _panels.Set(projectId, envId, Panel());
@@ -421,7 +421,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         var cut = Render(envId);
 
         var copy = cut.FindAll(".env-detail__actions button")
-            .Should().ContainSingle(b => b.TextContent.Contains("Copy this environment...")).Subject;
+            .Should().ContainSingle(b => b.TextContent.Contains("Copy environment...")).Subject;
         copy.ClassList.Should().NotContain("btn--primary");
     }
 
@@ -433,7 +433,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         var cut = Render(envId);
 
-        cut.Markup.Should().NotContain("Copy this environment...");
+        cut.Markup.Should().NotContain("Copy environment...");
     }
 
     /// <summary>A deleted environment has nothing to copy; the alert offers the one thing left to do.</summary>
@@ -446,7 +446,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         var cut = Render(envId);
 
-        cut.Markup.Should().NotContain("Copy this environment...");
+        cut.Markup.Should().NotContain("Copy environment...");
         cut.Find(".alert--danger button").TextContent.Should().Contain("Recover this environment");
     }
 
@@ -460,7 +460,7 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
 
         cut.WaitForAssertion(() =>
             cut.FindAll(".env-detail__actions button")
-                .Single(b => b.TextContent.Contains("Copy this environment...")).Click());
+                .Single(b => b.TextContent.Contains("Copy environment...")).Click());
 
         cut.WaitForAssertion(() =>
         {
