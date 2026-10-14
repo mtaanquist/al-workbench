@@ -28,19 +28,32 @@ public sealed class CompareDiffGate
     public const string FileCompareKey = "object-explorer-file-compare";
 
     /// <summary>
+    /// Slots for the file compare page's gate: a quarter of the cores, at
+    /// least one. Kept small so this page and the Diff tool together leave
+    /// most cores for every other page and the background workers.
+    /// </summary>
+    public static readonly int FileCompareSlots = Math.Max(1, Environment.ProcessorCount / 4);
+
+    /// <summary>
     /// How long the file compare page waits for a slot. Longer than
     /// <see cref="SlotWait"/>: that page is one request per click, not one
     /// per keystroke, so waiting is better than a "busy" page.
     /// </summary>
     public static readonly TimeSpan FileCompareSlotWait = TimeSpan.FromSeconds(10);
 
-    public CompareDiffGate(int slots)
+    /// <param name="slots">How many diffs may run at once.</param>
+    /// <param name="slotWait">How long a caller waits for a slot; <see cref="SlotWait"/> when omitted.</param>
+    public CompareDiffGate(int slots, TimeSpan? slotWait = null)
     {
         Slots = slots;
+        Wait = slotWait ?? SlotWait;
         Semaphore = new SemaphoreSlim(slots, slots);
     }
 
     public int Slots { get; }
+
+    /// <summary>How long a caller of this gate waits for a slot before giving up.</summary>
+    public TimeSpan Wait { get; }
 
     /// <summary>The slots themselves; public so a test can hold them.</summary>
     public SemaphoreSlim Semaphore { get; }

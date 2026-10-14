@@ -315,8 +315,22 @@
                                        placeholder="https://download.microsoft.com/.../Dynamics.365.BC....DVD.zip"
                                        class="input" />
                                 <small class="field__hint">
-                                    Leave the original URL to re-run it, or paste a corrected one (some older
-                                    DVDs moved). The host must be on the SiteAdmin download allow-list.
+                                    @if (_origin?.Kind == "url")
+                                    {
+                                        <text>
+                                            Leave the original URL to re-run it, or paste a corrected one (some older
+                                            DVDs moved). The site must be on the list of download sites your site
+                                            administrator allows.
+                                        </text>
+                                    }
+                                    else
+                                    {
+                                        <text>
+                                            We don't have the original download address for this release. Paste the
+                                            DVD's download URL to retry. The site must be on the list of download
+                                            sites your site administrator allows.
+                                        </text>
+                                    }
                                 </small>
                             </label>
                         }

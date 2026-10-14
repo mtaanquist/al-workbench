@@ -754,10 +754,6 @@ public class ReleaseImportService
     public async Task ReopenForRetryAsync(int releaseId, CancellationToken ct = default)
     {
         RequireOrganizationId();
-        // A retry re-ingests the whole release, so it is a write like Begin/Amend.
-        // Covers the manage page's Retry and the nightly requeue of failed
-        // artifact imports, which both come through here (#1338).
-        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
         var release = await _db.OeReleases
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct).ConfigureAwait(false)
             ?? throw RetryError($"Release {releaseId} not found in this organisation.");
@@ -770,6 +766,12 @@ public class ReleaseImportService
         {
             throw RetryError($"Only a failed import can be retried (status = {release.Status}).");
         }
+
+        // A retry re-ingests the whole release, so it is a write like Begin/Amend.
+        // Covers the manage page's Retry and the nightly requeue of failed
+        // artifact imports, which both come through here (#1338). After the
+        // state checks, so a release that can't be retried says why first.
+        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
 
         release.Status = "ingesting";
         release.StatusMessage = null;

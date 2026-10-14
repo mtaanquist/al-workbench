@@ -125,11 +125,15 @@ else
             </span>
         </div>
 
+        @* Nothing to lay out and nothing to re-diff when the files were not
+           compared, so the layout tabs and the whitespace switch go too. *@
+        @if (_notDiffed == NotDiffedReason.None)
+        {
         <span class="pw__sep"></span>
         @* Side by side reads the two files; inline reads the change. Which one
            helps depends on the change, so this is a per-reader preference the
            page remembers rather than a mode the page picks. *@
-        <span class="pill-tabs" role="group" aria-label="Diff layout" data-diff-layout hidden="@(_notDiffed != NotDiffedReason.None)">
+        <span class="pill-tabs" role="group" aria-label="Diff layout" data-diff-layout>
             <button class="pill-tab is-active" type="button" data-layout="side">Side by side</button>
             <button class="pill-tab" type="button" data-layout="inline">Inline</button>
         </span>
@@ -146,6 +150,7 @@ else
                     : "Currently counting every whitespace change. Turn on to hide reindents and line-ending changes.")">
             <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>Ignore whitespace
         </a>
+        }
 
         <span class="pw__spacer"></span>
     </div>
@@ -407,6 +412,10 @@ else
 
     <div class="pw__foot">
         <span>@FootSummary</span>
+        @* The keys walk changes and the panes scroll together; with no diff on
+           the page, neither is true, so the hints go with it. *@
+        @if (_notDiffed == NotDiffedReason.None)
+        {
         <span class="pw__sep"></span>
         <span class="kbd-hint">
             <span class="kbd" data-mod-key>Ctrl</span><span class="kbd">Down</span><span class="kbd-hint__label">next change</span>
@@ -418,6 +427,7 @@ else
            to keep in step with. *@
         <span data-layout-only="side">Scrolling either side moves the other</span>
         <span data-layout-only="inline" hidden>Old text above new; click a band to show the unchanged code</span>
+        }
         @if (_railTotal > 0)
         {
             @* The handoff parks a context read-out on the right of the foot.
@@ -565,7 +575,7 @@ else
         var rightOutline = await SourceViewer.GetFileOutlineAsync(rightId);
 
         var ct = ctx.RequestAborted;
-        if (!await FileCompareGate.Semaphore.WaitAsync(CompareDiffGate.FileCompareSlotWait, ct))
+        if (!await FileCompareGate.Semaphore.WaitAsync(FileCompareGate.Wait, ct))
         {
             _notDiffed = NotDiffedReason.Busy;
             await LoadRailAsync();

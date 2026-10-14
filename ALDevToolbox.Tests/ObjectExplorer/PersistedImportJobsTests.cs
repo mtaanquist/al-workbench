@@ -104,6 +104,41 @@ public sealed class PersistedImportJobsTests : IDisposable
         origin.StoreSymbolReference.Should().BeTrue();
     }
 
+    /// <summary>
+    /// #1338: a maintenance backfill carries no source. When it was the newest
+    /// row it hid the import's own, and Retry had nothing to re-run.
+    /// </summary>
+    [Fact]
+    public async Task GetLatestForReleaseAsync_skips_a_later_backfill_job()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var release = await SeedReleaseAsync(ctx);
+
+        await svc.CreateAsync(release.Id, Identity,
+            new ReleaseImportSource.Url("https://download.microsoft.com/dvd.zip"), storeSymbolReference: false);
+        await svc.CreateAsync(release.Id, Identity,
+            new ReleaseImportSource.Backfill(), storeSymbolReference: false);
+
+        var origin = await svc.GetLatestForReleaseAsync(release.Id);
+        origin.Should().NotBeNull();
+        origin!.Kind.Should().Be("url");
+        origin.DownloadUrl.Should().Be("https://download.microsoft.com/dvd.zip");
+    }
+
+    [Fact]
+    public async Task GetLatestForReleaseAsync_is_null_when_the_only_job_is_a_backfill()
+    {
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        var release = await SeedReleaseAsync(ctx);
+        await svc.CreateAsync(release.Id, Identity,
+            new ReleaseImportSource.Backfill(), storeSymbolReference: false);
+
+        (await svc.GetLatestForReleaseAsync(release.Id)).Should().BeNull(
+            because: "the manage page then offers the URL field, so the release can still be retried");
+    }
+
     [Fact]
     public async Task GetLatestForReleaseAsync_returns_null_when_no_job_exists()
     {

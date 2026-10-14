@@ -152,6 +152,44 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
             .Which.ApplicationUrl.Should().Be(artifactUrl);
     }
 
+    /// <summary>
+    /// #1338: Retry re-ingests a whole release, so an org at its storage quota
+    /// is refused before anything is wiped or queued.
+    /// </summary>
+    [Fact]
+    public async Task Retrying_is_refused_for_an_org_over_its_storage_quota_and_leaves_the_release_failed()
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "Business Central 27.1 (DK)", Kind = "first_party", Status = "failed",
+            DedupKey = "bc-onprem:27.1:dk", ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        var settings = await ctx.SystemSettings.FirstOrDefaultAsync(x => x.Id == 1);
+        if (settings is null)
+        {
+            settings = new Domain.Entities.SystemSettings { Id = 1 };
+            ctx.SystemSettings.Add(settings);
+        }
+        // A 0 MB default quota puts every org at or over quota.
+        settings.DefaultStorageQuotaMb = 0;
+        await ctx.SaveChangesAsync();
+        await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new ReleaseImportSource.BcArtifact("https://bcartifacts-exdbf9fwegejdqak.b02.azurefd.net/onprem/27.1.0.0/dk"),
+            storeSymbolReference: false);
+        var queue = new ReleaseImportQueue();
+
+        var act = () => NewService(ctx, queue).RetryAsync(release.Id, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null, CalTxtFile: null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("storage");
+        (await StatusAsync(release.Id)).Should().Be("failed");
+        queue.Reader.TryRead(out _).Should().BeFalse();
+    }
+
     private async Task<string?> StatusAsync(int releaseId)
     {
         await using var read = _db.NewContext();

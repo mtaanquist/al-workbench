@@ -256,6 +256,13 @@ public sealed class ExplorerTreeService
     private const int MaxFilesPerFolder = 400;
 
     /// <summary>
+    /// How many files one section of the kind grouping draws before its own
+    /// "N more" row. Smaller than a folder's cap: every section arrives with
+    /// its rows, so a large app pays for all of them on the first paint.
+    /// </summary>
+    private const int MaxFilesPerKindSection = 100;
+
+    /// <summary>
     /// The AL object a file row reads as: the first object declared in the
     /// file, by line number. AL enforces one object per file in practice, so
     /// "first" is unambiguous for everything except a hand-bundled .al.
@@ -386,9 +393,13 @@ public sealed class ExplorerTreeService
             .OrderBy(g => KindSectionRank(g.Key))
             .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
 
+        // Only the section holding the open file starts open; the rest arrive
+        // folded, their rows already in the list but hidden, so opening one
+        // never asks the server again.
         var nodes = new List<OeTreeNode>();
         foreach (var group in groups)
         {
+            var open = activeFileId is { } active && group.Any(f => f.Id == active);
             nodes.Add(new OeTreeNode(
                 Kind: "section",
                 Name: group.Key,
@@ -396,10 +407,11 @@ public sealed class ExplorerTreeService
                 ModuleId: moduleId,
                 Depth: 0,
                 HasChildren: true,
-                IsOpen: true,
+                IsOpen: open,
                 IsActive: false,
                 Badge: group.Count().ToString("N0")));
-            nodes.AddRange(BuildFileNodes(moduleId, group, depth: 1).Select(mark));
+            nodes.AddRange(BuildFileNodes(moduleId, group, depth: 1, cap: MaxFilesPerKindSection)
+                .Select(n => mark(n) with { IsHidden = !open }));
         }
         return nodes;
     }
@@ -635,15 +647,16 @@ public sealed class ExplorerTreeService
     private static List<OeTreeNode> BuildFileNodes(
         long moduleId,
         IEnumerable<(long Id, string Tail, string Path, string? Kind, string? Name, int? ObjectId)> files,
-        int depth = 0)
+        int depth = 0,
+        int cap = MaxFilesPerFolder)
     {
         var ordered = files
             .Select(f => (f.Id, f.Tail, f.Path, f.Kind, f.ObjectId, Display: DisplayName(f.Name, f.Tail)))
             .OrderBy(f => f.Display, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var nodes = new List<OeTreeNode>(Math.Min(ordered.Count, MaxFilesPerFolder) + 1);
-        foreach (var f in ordered.Take(MaxFilesPerFolder))
+        var nodes = new List<OeTreeNode>(Math.Min(ordered.Count, cap) + 1);
+        foreach (var f in ordered.Take(cap))
         {
             nodes.Add(new OeTreeNode(
                 Kind: "file",
@@ -660,7 +673,7 @@ public sealed class ExplorerTreeService
                 Badge: f.ObjectId?.ToString()));
         }
 
-        var hidden = ordered.Count - MaxFilesPerFolder;
+        var hidden = ordered.Count - cap;
         if (hidden > 0)
         {
             nodes.Add(new OeTreeNode(

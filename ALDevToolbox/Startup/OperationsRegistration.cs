@@ -52,7 +52,7 @@ public static class OperationsRegistration
         // The Object Explorer's file compare page gets its own, so Diff tool
         // traffic can never starve signed-in readers of a slot (#1339).
         services.AddKeyedSingleton(CompareDiffGate.FileCompareKey,
-            (_, _) => new CompareDiffGate(CompareDiffGate.DefaultSlots));
+            (_, _) => new CompareDiffGate(CompareDiffGate.FileCompareSlots, CompareDiffGate.FileCompareSlotWait));
         services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
