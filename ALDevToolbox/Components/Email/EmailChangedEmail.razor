@@ -1,0 +1,20 @@
+@* Sent to the old address once an administrator's email change has been confirmed. *@
+<EmailLayout Preheader="The email address on your account has changed." Reason="You received this because the AL Workbench account that used this address now uses a different one.">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>The email address on your AL Workbench account is now <strong>@NewEmail</strong>. You sign in with that address from now on, and you have been signed out everywhere.</EmailParagraph>
+    <EmailParagraph>If you did not expect this, contact another administrator in your organisation straight away.</EmailParagraph>
+</EmailLayout>
+
+@code {
+    public const string Subject = "Your AL Workbench email has changed";
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string NewEmail { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(EmailRenderer renderer, string displayName, string newEmail, CancellationToken ct = default)
+        => renderer.RenderAsync<EmailChangedEmail>(Subject, new Dictionary<string, object?>
+        {
+            [nameof(DisplayName)] = displayName,
+            [nameof(NewEmail)] = newEmail,
+        }, ct);
+}

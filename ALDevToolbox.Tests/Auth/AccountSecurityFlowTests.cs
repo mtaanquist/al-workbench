@@ -261,7 +261,7 @@ public sealed class AccountSecurityFlowTests : IDisposable
         string token;
         await using (var ctx = _db.NewContext())
         {
-            token = await NewUserAdmin(ctx).RequestEmailChangeAsync(5401, "new@example.com", orgId, 5400);
+            token = (await NewUserAdmin(ctx).RequestEmailChangeAsync(5401, "new@example.com", orgId, 5400)).ConfirmToken;
         }
         await using (var read = _db.NewContext())
         {
@@ -300,11 +300,11 @@ public sealed class AccountSecurityFlowTests : IDisposable
         string firstToken, secondToken;
         await using (var ctx = _db.NewContext())
         {
-            firstToken = await NewUserAdmin(ctx).RequestEmailChangeAsync(5451, "first@example.com", orgId, 5450);
+            firstToken = (await NewUserAdmin(ctx).RequestEmailChangeAsync(5451, "first@example.com", orgId, 5450)).ConfirmToken;
         }
         await using (var ctx = _db.NewContext())
         {
-            secondToken = await NewUserAdmin(ctx).RequestEmailChangeAsync(5451, "second@example.com", orgId, 5450);
+            secondToken = (await NewUserAdmin(ctx).RequestEmailChangeAsync(5451, "second@example.com", orgId, 5450)).ConfirmToken;
         }
         await using (var ctx = _db.NewContext())
         {

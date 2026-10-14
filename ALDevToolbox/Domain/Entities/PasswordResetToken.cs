@@ -30,6 +30,13 @@ public enum TokenPurpose
     /// as its name in the string <c>purpose</c> column, so no schema change.
     /// </summary>
     SiteAdminEmailChangeConfirm,
+    /// <summary>
+    /// The link in the notice sent to the <em>current</em> address when an
+    /// administrator asks to change it: clears <see cref="User.PendingEmail"/>
+    /// so the change can't be confirmed. Issued alongside the confirm token,
+    /// same 24-hour lifetime. Stored as its name, so no schema change.
+    /// </summary>
+    EmailChangeCancel,
 }
 
 /// <summary>

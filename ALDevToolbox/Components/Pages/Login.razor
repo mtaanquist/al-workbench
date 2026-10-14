@@ -273,12 +273,16 @@ else
         "entra-identity-taken" => "That Microsoft account is already connected to a different user here. Sign in with the account it belongs to, or ask your admin to disconnect it.",
         "entra-link-required" => "This account has to connect its Microsoft account itself. Sign in with your password or passkey, then choose \"Connect a Microsoft account\" on your Account page.",
         "entra-failed" => "Microsoft sign-in didn't complete. Try again.",
+        "email-change-invalid" => "That link to confirm a new email address has expired, was already used, or the change was stopped. Ask your administrator to send a new one.",
+        "email-change-cancel-invalid" => "That link has expired or was already used, or the change already went through. If your email was changed without your say, contact another administrator in your organisation.",
         _ => null,
     };
 
     private string? OkMessage() => Ok switch
     {
         "password-reset" => "Password updated. Sign in with your new password.",
+        "email-change-confirmed" => "Your new email address is confirmed. Sign in with it.",
+        "email-change-cancelled" => "The email change was stopped. Your account keeps its current address.",
         _ => null,
     };
 
