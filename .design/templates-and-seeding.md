@@ -41,7 +41,8 @@ TemplateImportService.ImportTemplateAsync(systemTemplateId):
         query and reassembled client-side — EF's Include doesn't recurse)
       - workspace_extension_files attached to each folder at its depth
       - workspace_extension_dependencies per extension
-      - default modules + their dependencies
+      - default modules + their dependencies (soft-deleted modules are
+        skipped: the catalogue retired them)
       - default application version
       - included organisation files (the join plus each file's path)
     refuse if the local org already has a template with the same key
@@ -49,7 +50,9 @@ TemplateImportService.ImportTemplateAsync(systemTemplateId):
         reuse the local module that shares the key, otherwise clone it
         (with its module_dependencies AND its recursive
         module_extension_folders / module_extension_files tree) into the
-        local org
+        local org; if the local module with that key is soft-deleted, the
+        org retired it, so leave it out of the template's defaults rather
+        than restoring it
     for the default application version:
         reuse the local row that shares the key, otherwise clone it
     for each included organisation file:

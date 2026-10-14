@@ -166,9 +166,13 @@ public static class TemplateTomlMapper
                 DefaultApplicationVersion = template.DefaultApplicationVersionLatest
                     ? ApplicationVersionService.LatestSentinel
                     : template.DefaultApplicationVersion?.Key,
+                // Deleted modules are left out: their links are kept for a
+                // restore (#1326), but the TOML editor refuses a key that
+                // names no live module, so writing one here would make the
+                // exported file impossible to paste back in.
                 DefaultModules = template.DefaultModules
                     .OrderBy(d => d.Ordering)
-                    .Where(d => d.Module is not null)
+                    .Where(d => d.Module is not null && d.Module.DeletedAt == null)
                     .Select(d => new TemplateDefaultModuleSeed { Key = d.Module!.Key })
                     .ToList(),
                 IncludedFiles = template.IncludedFiles
