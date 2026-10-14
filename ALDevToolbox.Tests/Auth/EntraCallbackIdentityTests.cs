@@ -56,6 +56,25 @@ public sealed class EntraCallbackIdentityTests : IDisposable
     }
 
     [Fact]
+    public async Task Step_up_goes_ahead_for_the_cookie_user_with_their_own_linked_identity()
+    {
+        // The control for the two refusals: the same harness with the matching
+        // cookie and the user's own identity completes the step-up, so the
+        // refusals are the identity checks and not a gap in the harness.
+        await SeedEntraAsync();
+        var stepUpUser = await SeedUserAsync("mette@cronus.com");
+        await SeedLinkAsync(stepUpUser, Oid);
+
+        var (http, auth) = await RunCallbackAsync(
+            cookieUserId: stepUpUser,
+            oid: Oid,
+            items: StepUpItems(stepUpUser));
+
+        http.Response.Headers.Location.ToString().Should().Be("/");
+        auth.SignIns.Should().Be(1, "a completed step-up re-issues the cookie with the fresh stamp");
+    }
+
+    [Fact]
     public async Task Step_up_refuses_an_identity_linked_to_someone_else()
     {
         await SeedEntraAsync();
@@ -133,8 +152,19 @@ public sealed class EntraCallbackIdentityTests : IDisposable
             new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System),
             _db.OrgContext, _db.DataProtectionProvider, TimeProvider.System,
             NullLogger<EntraSignInService>.Instance);
+        // Everything a completed step-up needs too, so a refusal below fails by
+        // its assertion rather than by a service the success path would miss.
         var services = new ServiceCollection()
             .AddSingleton(entra)
+            .AddSingleton(ctx)
+            .AddSingleton(new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System))
+            .AddSingleton<IOrganizationContext>(new AmbientOrganizationContext
+            {
+                CurrentUserId = cookieUserId,
+                CurrentOrganizationId = TestDb.DefaultOrgId,
+            })
+            .AddSingleton(TimeProvider.System)
+            .AddSingleton(_db.DataProtectionProvider)
             .AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance)
             .AddSingleton<IAuthenticationService>(auth)
             .BuildServiceProvider();

@@ -178,9 +178,29 @@ public sealed class SiteAdminServiceTests : IDisposable
 
     private async Task<bool> AttemptAsync(Func<ALDevToolbox.Data.AppDbContext, Task> op)
     {
-        await using var ctx = _db.NewContext();
+        // Audited, as in production: the audit row's foreign key to the
+        // organisation takes a lock of its own, and an unaudited context once
+        // hid a deadlock between the org guard and the SiteAdmin guard (#1337).
+        await using var ctx = _db.NewContextWithAudit(NewAuditInterceptor());
         try { await op(ctx); return true; }
         catch (PlanValidationException ex) when (ex.Errors.ContainsKey("LastSiteAdmin")) { return false; }
+    }
+
+    private static ALDevToolbox.Data.AuditInterceptor NewAuditInterceptor()
+    {
+        var http = new Microsoft.AspNetCore.Http.HttpContextAccessor
+        {
+            HttpContext = new Microsoft.AspNetCore.Http.DefaultHttpContext
+            {
+                User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                [
+                    new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Name, "root"),
+                    new System.Security.Claims.Claim(HttpOrganizationContext.OrganizationIdClaim,
+                        TestDb.DefaultOrgId.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                ], "test")),
+            },
+        };
+        return new ALDevToolbox.Data.AuditInterceptor(http);
     }
 
     private async Task<int> ActiveSiteAdminCountAsync()
