@@ -177,6 +177,8 @@ Disabling a user (`UserAdministrationService.DisableUserAsync`) is the "this per
 
 Every mutation to a template, template_folder, template_file, template_module_folder, template_module_file, runtime_template_default_module, module, module_dependency, well_known_dependency, application_version, user or signup_request writes a row through `AuditInterceptor`.
 
+An `organizations` row is audited only for its security policy and quota: the step-up tools and window, the MCP opt-out, the switched-off tools, and the SiteAdmin's storage quota override (`AuditEntityType.Organization`). Each changes what members can do, so who changed it and when has to be answerable afterwards, as it already was for the comparable switches on `organization_settings` (#1337). The row is filed under the organisation itself, so a SiteAdmin's quota change on another organisation shows on that organisation's audit page. Renames, the pending flag flipping on approval, and creation leave no row.
+
 `audit_log.changed_by` is now `"display_name <email>"` of the acting user (or `"unknown"` for seed-time inserts that pre-date a signed-in user). `changed_by_user_id` and `organization_id` are stored as separate columns for queryability — `(organization_id, timestamp)` is the index that powers `/admin/audit`.
 
 Snapshot rules unchanged from the original implementation:

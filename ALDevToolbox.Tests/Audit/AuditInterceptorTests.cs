@@ -788,6 +788,73 @@ public sealed class AuditInterceptorTests : IDisposable
             .Should().Be(TestDb.DefaultOrgId, "the row's own organisation wins over the request's");
     }
 
+    [Fact]
+    public async Task Changing_an_organisations_step_up_policy_writes_an_updated_row_filed_under_it()
+    {
+        // Loosening step-up has to leave a trace of who did it and when
+        // (#1337). The acting SiteAdmin's home org differs from the subject so
+        // the test also pins that the row is filed under the organisation
+        // itself, not the request's.
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor("root", TestDb.DefaultOrgId)))
+        {
+            var org = await ctx.Organizations.SingleAsync(o => o.Id == TestDb.OtherOrgId);
+            org.StepUpTools = ["Deliveries"];
+            org.StepUpWindowMinutes = 30;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        var row = await read.AuditLog.IgnoreQueryFilters()
+            .SingleAsync(r => r.EntityType == AuditEntityType.Organization);
+        row.Action.Should().Be(AuditAction.Updated);
+        row.EntityId.Should().Be(TestDb.OtherOrgId);
+        row.OrganizationId.Should().Be(TestDb.OtherOrgId);
+        row.ChangedBy.Should().Be("root");
+        using var snapshot = JsonDocument.Parse(row.SnapshotJson!);
+        snapshot.RootElement.GetProperty(nameof(Organization.StepUpWindowMinutes)).GetInt32()
+            .Should().Be(15, "the snapshot is the policy before the change");
+    }
+
+    [Theory]
+    [InlineData(nameof(Organization.McpEnabled))]
+    [InlineData(nameof(Organization.DisabledTools))]
+    [InlineData(nameof(Organization.StorageQuotaMb))]
+    public async Task Changing_an_organisations_mcp_tools_or_quota_is_audited(string property)
+    {
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor("alice")))
+        {
+            var org = await ctx.Organizations.SingleAsync(o => o.Id == TestDb.DefaultOrgId);
+            switch (property)
+            {
+                case nameof(Organization.McpEnabled): org.McpEnabled = !org.McpEnabled; break;
+                case nameof(Organization.DisabledTools): org.DisabledTools = ["Translator"]; break;
+                case nameof(Organization.StorageQuotaMb): org.StorageQuotaMb = 512; break;
+            }
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        (await read.AuditLog.IgnoreQueryFilters()
+                .CountAsync(r => r.EntityType == AuditEntityType.Organization && r.EntityId == TestDb.DefaultOrgId))
+            .Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Renaming_an_organisation_is_not_audited()
+    {
+        await using (var ctx = _db.NewContextWithAudit(NewInterceptor("alice")))
+        {
+            var org = await ctx.Organizations.SingleAsync(o => o.Id == TestDb.OtherOrgId);
+            org.Name = "CRONUS International";
+            org.IsPending = !org.IsPending;
+            await ctx.SaveChangesAsync();
+        }
+
+        await using var read = _db.NewContext();
+        (await read.AuditLog.IgnoreQueryFilters().AnyAsync(r => r.EntityType == AuditEntityType.Organization))
+            .Should().BeFalse("only the policy and quota columns are worth a row");
+    }
+
     [Theory]
     [InlineData(nameof(OrganizationSettings.MachineTranslationApiKeyEncrypted))]
     [InlineData(nameof(OrganizationSettings.EntraClientSecretEncrypted))]
