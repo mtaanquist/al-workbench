@@ -170,10 +170,27 @@ public sealed class EntraSignInServiceTests : IDisposable
         await using var ctx = _db.NewContext();
 
         var result = await NewService(ctx).CompleteAsync(
-            new EntraTokenIdentity(TenantA, Oid, "jonas@other.example", "Jonas"), Ip);
+            new EntraTokenIdentity(TenantA, Oid, "jonas@other.example", "Jonas", EmailVerified: true), Ip);
 
         result.Outcome.Should().Be(EntraCompletionOutcome.Success, "auto-join org claimed the domain");
         result.User!.OrganizationId.Should().Be(TestDb.OtherOrgId);
+    }
+
+    [Fact]
+    public async Task Complete_routes_an_unverified_email_by_domain_but_leaves_it_pending()
+    {
+        // Routing on the claimed domain is fine without xms_edov; joining is not.
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        await SeedOrgEntraAsync(TestDb.OtherOrgId, TenantA, autoJoin: true, domain: "other.example");
+        await using var ctx = _db.NewContext();
+
+        var result = await NewService(ctx).CompleteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "jonas@other.example", "Jonas"), Ip);
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.PendingApproval);
+        var user = await ctx.Users.IgnoreQueryFilters().AsNoTracking().SingleAsync(u => u.Email == "jonas@other.example");
+        user.OrganizationId.Should().Be(TestDb.OtherOrgId);
+        user.Status.Should().Be(UserStatus.Pending);
     }
 
     [Fact]
@@ -213,17 +230,41 @@ public sealed class EntraSignInServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Complete_jit_auto_joins_when_the_domain_is_claimed_and_the_org_opted_in()
+    public async Task Complete_jit_auto_joins_when_the_domain_is_claimed_the_org_opted_in_and_the_email_is_verified()
     {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA, autoJoin: true, domain: "cronus.com");
+        await using var ctx = _db.NewContext();
+
+        var result = await NewService(ctx).CompleteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "new@cronus.com", "New Person", EmailVerified: true), Ip);
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.Success);
+        result.User!.Status.Should().Be(UserStatus.Active);
+        result.User.Organization.Should().NotBeNull();
+        (await ctx.SignupRequests.IgnoreQueryFilters()
+            .AnyAsync(r => r.UserId == result.User.Id && r.Decision == SignupDecision.Approved))
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Complete_jit_does_not_auto_join_on_an_unverified_email_even_on_a_claimed_domain()
+    {
+        // Issue #1323: an admin in an allow-listed tenant can set the email
+        // claim to anything, so without xms_edov the claimed domain proves
+        // nothing and the account waits for an Admin.
         await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA, autoJoin: true, domain: "cronus.com");
         await using var ctx = _db.NewContext();
 
         var result = await NewService(ctx).CompleteAsync(
             new EntraTokenIdentity(TenantA, Oid, "new@cronus.com", "New Person"), Ip);
 
-        result.Outcome.Should().Be(EntraCompletionOutcome.Success);
-        result.User!.Status.Should().Be(UserStatus.Active);
-        result.User.Organization.Should().NotBeNull();
+        result.Outcome.Should().Be(EntraCompletionOutcome.PendingApproval);
+        var user = await ctx.Users.IgnoreQueryFilters().AsNoTracking().SingleAsync(u => u.Email == "new@cronus.com");
+        user.Status.Should().Be(UserStatus.Pending);
+        user.LastLoginAt.Should().BeNull();
+        (await ctx.SignupRequests.IgnoreQueryFilters()
+            .AnyAsync(r => r.UserId == user.Id && r.Decision == SignupDecision.Pending))
+            .Should().BeTrue("an Admin still has to approve it");
     }
 
     [Fact]

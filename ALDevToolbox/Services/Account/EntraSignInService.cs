@@ -399,9 +399,20 @@ public sealed class EntraSignInService
         }
 
         // 4. JIT provisioning, through the same approval machinery as the
-        // verified signup flow (auto-join only when the email domain is
-        // claimed by the resolved org and it opted in).
-        var autoActive = resolved.OrganizationId == domainOrgId && resolved.AutoJoinVerifiedDomainUsers;
+        // verified signup flow. Auto-join needs three things: the email domain
+        // is claimed by the resolved org, the org opted in, and the tenant
+        // proved it owns the address (xms_edov). Without that proof the email
+        // is whatever an admin in an allow-listed tenant typed, so it may
+        // still route the request but only to a Pending account an Admin has
+        // to approve — the same evidence step 3 demands before binding (#1323).
+        var domainAutoJoin = resolved.OrganizationId == domainOrgId && resolved.AutoJoinVerifiedDomainUsers;
+        var autoActive = domainAutoJoin && token.EmailVerified;
+        if (domainAutoJoin && !token.EmailVerified)
+        {
+            _logger.LogWarning(
+                "Entra sign-in from tenant {Tid} for domain {Domain} in org {OrgId} did not prove email ownership (no xms_edov); provisioning as Pending instead of auto-joining.",
+                tid, domain ?? "(none)", resolved.OrganizationId);
+        }
         user = new User
         {
             OrganizationId = resolved.OrganizationId,
