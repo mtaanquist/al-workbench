@@ -889,6 +889,51 @@ public sealed class EnvironmentUpgradeServiceTests : IDisposable
         (await _f.Upgrades(read).CountArchivedAsync()).Should().Be(0);
     }
 
+    [Fact]
+    public async Task An_add_refused_by_a_race_does_not_come_back_on_the_pages_next_write()
+    {
+        var (projectId, raced) = await _f.SeedCustomerAsync();
+        var other = await SeedEnvironmentAsync(projectId, "UAT");
+        var mine = await CreateAsync("Mine");
+        var theirs = await CreateAsync("Theirs");
+        await AddAsync(mine, other);
+        var otherLine = await LineIdAsync(mine, other);
+
+        // Ann's page keeps one context for the whole visit. Bob puts the environment on his
+        // upgrade between her check and her save, so the open-upgrade index refuses it.
+        await using var ann = _f.Db.NewContext();
+        var raceRun = false;
+        ann.SavingChanges += (_, _) =>
+        {
+            if (raceRun) return;
+            raceRun = true;
+            using var bob = _f.Db.NewContext();
+            bob.OeEnvironmentUpgradeLines.Add(new OeEnvironmentUpgradeLine
+            {
+                OrganizationId = TestDb.DefaultOrgId, UpgradeId = theirs, EnvironmentId = raced,
+                ProjectId = projectId, IsOpen = true, AddedAt = DateTime.UtcNow,
+            });
+            bob.SaveChanges();
+        };
+        var add = () => _f.Upgrades(ann).AddLinesAsync(mine, [raced]);
+        (await add.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Environments");
+
+        // An unrelated write straight after does not replay the refused insert.
+        await _f.Upgrades(ann).SetCheckedAsync(otherLine, true);
+
+        // Bob takes it off his upgrade; Ann's next write still must not add it to hers.
+        await using (var bob = _f.Db.NewContext())
+        {
+            await _f.Upgrades(bob).RemoveLineAsync(await LineIdAsync(theirs, raced));
+        }
+        await _f.Upgrades(ann).AssignAsync(otherLine, UpgradeActionTestFixture.PlainTeamUserId);
+
+        await using var verify = _f.Db.NewContext();
+        (await verify.OeEnvironmentUpgradeLines.AsNoTracking().Where(l => l.UpgradeId == mine)
+            .Select(l => l.EnvironmentId).ToListAsync())
+            .Should().Equal([other], "Ann was told the add was refused");
+    }
+
     // ── Several lines at once (#1265) ───────────────────────────────────
 
     [Fact]
