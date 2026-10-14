@@ -952,6 +952,12 @@
       },
       "alworkbench.gateway.contracts": {
         "type": "Project"
+      },
+      "alworkbench.gateway.core": {
+        "type": "Project",
+        "dependencies": {
+          "ALWorkbench.Gateway.Contracts": "[1.0.0, )"
+        }
       }
     }
   }

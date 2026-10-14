@@ -9,6 +9,10 @@
 .github/
 .design/
 ALDevToolbox.Tests/
+# The on-premises gateway's own projects: Windows-side, never part of the app image.
+# (The contracts project stays: the app references it.)
+ALWorkbench.Gateway/
+ALWorkbench.Gateway.Core/
 
 # Local-only artefacts; the image creates its own under /data.
 data/

@@ -2,4 +2,6 @@
   <Project Path="ALDevToolbox/ALDevToolbox.csproj" />
   <Project Path="ALDevToolbox.Tests/ALDevToolbox.Tests.csproj" />
   <Project Path="ALWorkbench.Gateway.Contracts/ALWorkbench.Gateway.Contracts.csproj" />
+  <Project Path="ALWorkbench.Gateway.Core/ALWorkbench.Gateway.Core.csproj" />
+  <Project Path="ALWorkbench.Gateway/ALWorkbench.Gateway.csproj" />
 </Solution>
