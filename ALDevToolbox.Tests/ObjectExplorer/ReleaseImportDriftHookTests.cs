@@ -209,6 +209,8 @@ public sealed class ReleaseImportDriftHookTests : IDisposable
                     Provider = RepositoryProvider.GitHub,
                     Url = $"https://github.com/{RepoA}.git",
                     DisplayName = "payment-import",
+                    // The drift scan only compares repositories someone has confirmed access to.
+                    AccessConfirmedAt = now,
                 },
             ],
         };

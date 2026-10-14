@@ -258,6 +258,7 @@
                                                LoadedProject="_loadedProject"
                                                ViewerUserId="OrgContext.CurrentUserId"
                                                OnResumeAutoUpdates="ResumeAutoUpdatesAsync"
+                                               OnConfirmAccess="ConfirmRepositoryAccessAsync"
                                                OnDirty="MarkDirty" />
                 }
                 else if (_section == Section.Customer && Id is not null)
@@ -909,7 +910,15 @@
             Slug = _loadedProject.Slug ?? string.Empty,
             Country = _loadedProject.DefaultArtifactCountry ?? string.Empty,
             Repos = _loadedProject.Repositories
-                .Select(r => new RepoRow { Provider = r.Provider, Url = r.Url, SavedUrl = r.Url, DisplayName = r.DisplayName })
+                .Select(r => new RepoRow
+                {
+                    Provider = r.Provider,
+                    Url = r.Url,
+                    SavedUrl = r.Url,
+                    DisplayName = r.DisplayName,
+                    SavedId = r.Id,
+                    AccessConfirmed = r.IsAccessConfirmed,
+                })
                 .ToList(),
             AutoUpdatePullRequests = _loadedProject.AutoUpdatePullRequests,
         };
@@ -1049,6 +1058,39 @@
         }
     }
 
+    /// <summary>
+    /// "Confirm access" on the Repositories tab: checks this person can read the
+    /// repository with their own access, and puts it into builds if so. Only the row
+    /// changes, so anything else being edited on the page is kept.
+    /// </summary>
+    private async Task ConfirmRepositoryAccessAsync(RepoRow row)
+    {
+        if (Id is not { } id || row.SavedId is not { } repositoryId) return;
+        _errors = new();
+        _message = null;
+        _repoErrors.Remove(row);
+        try
+        {
+            await Projects.ConfirmRepositoryAccessAsync(id, repositoryId);
+            row.AccessConfirmed = true;
+            _loadedProject = await Projects.GetProjectAsync(id) ?? _loadedProject;
+            _message = $"Confirmed. Builds now include {(string.IsNullOrWhiteSpace(row.DisplayName) ? "this repository" : row.DisplayName)}.";
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException)
+        {
+            // Removed by someone else between the read and the save.
+            _repoErrors[row] = new Dictionary<string, string> { ["Url"] = "This repository is no longer on the solution. Reload the page." };
+        }
+        catch (ProjectAccessDeniedException)
+        {
+            _errors = new() { ["_"] = "Only the solution owner or an admin can change this solution." };
+        }
+        catch (PlanValidationException ex)
+        {
+            _repoErrors[row] = new Dictionary<string, string>(ex.Errors);
+        }
+    }
+
     private async Task ConfirmDeleteAsync()
     {
         try
@@ -1090,6 +1132,10 @@
         public string DisplayName { get; set; } = string.Empty;
         /// <summary>The URL as last loaded from the solution, or null for a row added since. The tab only links a row whose URL still matches it.</summary>
         public string? SavedUrl { get; init; }
+        /// <summary>The saved repository's id, or null for a row added since.</summary>
+        public int? SavedId { get; init; }
+        /// <summary>Whether someone has confirmed they can read the saved repository, which is what puts it into builds.</summary>
+        public bool AccessConfirmed { get; set; }
         public bool IsBlank() => string.IsNullOrWhiteSpace(Url) && string.IsNullOrWhiteSpace(DisplayName);
     }
 }

@@ -631,6 +631,7 @@ public sealed class PreviewCheckTests : IDisposable
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectId = project.Id, Provider = RepositoryProvider.GitHub,
             Url = "https://github.com/cronus/core", DisplayName = "core",
+            AccessConfirmedAt = DateTime.UtcNow,
         });
         var pipeline = new OePipeline
         {

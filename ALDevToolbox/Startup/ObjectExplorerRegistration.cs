@@ -115,6 +115,8 @@ public static class ObjectExplorerRegistration
         // and the (stateless) external-process seam for git + alc.
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectBuildService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.CloneCredentialResolver>();
+        // Whether the person adding or confirming a solution repository can read it.
+        services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.RepositoryReadProbe>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.ProjectBuildImporter>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.PreviewCheckService>();
         services.AddScoped<ALDevToolbox.Services.ObjectExplorer.Projects.PushBuildService>();

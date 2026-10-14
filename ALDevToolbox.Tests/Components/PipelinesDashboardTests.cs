@@ -50,6 +50,7 @@ public sealed class PipelinesDashboardTests : IDisposable
             opts.UseNpgsql(_db.ConnectionString).AddInterceptors(_db.CommandTracker));
         _ctx.Services.AddScoped<ProjectAccess>();
         _ctx.Services.AddScoped<ProjectService>();
+        _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
         _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
         _ctx.Services.AddScoped<PipelineService>();

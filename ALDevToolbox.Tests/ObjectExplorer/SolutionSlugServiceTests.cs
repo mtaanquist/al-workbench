@@ -49,7 +49,7 @@ public sealed class SolutionSlugServiceTests : IDisposable
         var access = new ProjectAccess(ctx, _db.OrgContext);
         var discovery = new ProjectDiscoveryService(
             ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(), NullLogger<ProjectDiscoveryService>.Instance);
-        return new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), NullLogger<ProjectService>.Instance);
+        return new ProjectService(ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance);
     }
 
     private static ProjectInput Input(string name, string? slug = null, string? shortName = null) =>

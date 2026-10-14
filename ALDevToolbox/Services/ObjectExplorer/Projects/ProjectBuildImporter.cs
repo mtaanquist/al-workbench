@@ -167,7 +167,9 @@ public sealed class ProjectBuildImporter
             .Select(p => new
             {
                 p.CreatedByUserId,
-                Providers = p.Repositories.Select(r => r.Provider).Distinct().ToList(),
+                RepoCount = p.Repositories.Count,
+                // Only a confirmed repository is cloned, so only its host needs a credential.
+                Providers = p.Repositories.Where(r => r.AccessConfirmedAt != null).Select(r => r.Provider).Distinct().ToList(),
             })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         await _access.EnsureCanManageAsync(solutionId, solution?.CreatedByUserId, ct).ConfigureAwait(false);
@@ -176,7 +178,9 @@ public sealed class ProjectBuildImporter
         {
             throw Refuse(solution is null
                 ? "This solution no longer exists."
-                : "Add at least one repository to this solution before building.");
+                : solution.RepoCount == 0
+                    ? "Add at least one repository to this solution before building."
+                    : NoConfirmedRepositoryRefusal);
         }
 
         var missing = new List<string>();
@@ -242,6 +246,13 @@ public sealed class ProjectBuildImporter
             new(new Dictionary<string, string> { [errorKey] = message });
     }
 
+    /// <summary>
+    /// Why a build by hand is refused when none of the solution's repositories has been
+    /// confirmed by someone who can read it. See <c>OeProjectRepository.AccessConfirmedAt</c>.
+    /// </summary>
+    internal const string NoConfirmedRepositoryRefusal =
+        "Nobody has confirmed they can open this solution's repositories yet, so there is nothing to build. Someone who can open them should press Confirm access on each one on the Repositories tab.";
+
     /// <summary>The advisory-lock namespace for manual builds, keyed per pipeline id ("PBLD").</summary>
     private const int ManualBuildLockClass = 0x50_42_4C_44;
 
@@ -284,7 +295,9 @@ public sealed class ProjectBuildImporter
                 ProjectName = p.Project!.Name,
                 OwnerId = p.Project.CreatedByUserId,
                 RepoCount = p.Project.Repositories.Count,
-                Providers = p.Project.Repositories.Select(r => r.Provider).Distinct().ToList(),
+                ConfirmedCount = p.Project.Repositories.Count(r => r.AccessConfirmedAt != null),
+                // Only a confirmed repository is cloned, so only its host needs a credential.
+                Providers = p.Project.Repositories.Where(r => r.AccessConfirmedAt != null).Select(r => r.Provider).Distinct().ToList(),
             })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false)
             ?? throw new PlanValidationException(new Dictionary<string, string>
@@ -309,6 +322,17 @@ public sealed class ProjectBuildImporter
             throw new PlanValidationException(new Dictionary<string, string>
             {
                 ["Pipeline"] = "Add at least one repository to this solution before building.",
+            });
+        }
+
+        // A build by hand with nothing it may clone would only fail; say why and what
+        // to do instead. The automatic triggers are left to fail their build with the
+        // same reason on it, the way a missing credential is for the preview check.
+        if (trigger == ProjectBuildTrigger.Manual && pipeline.ConfirmedCount == 0)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Pipeline"] = NoConfirmedRepositoryRefusal,
             });
         }
 

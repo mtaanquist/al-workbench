@@ -162,6 +162,41 @@ public sealed class GitHubConnectionServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Connecting_does_not_confirm_a_repository_nobody_has_confirmed()
+    {
+        // A repository added before the organisation connected GitHub was never asked
+        // about; connecting must not make it one a pull-request build clones.
+        int repositoryId;
+        await using (var ctx = _db.NewContext())
+        {
+            var project = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Name = "CRONUS",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            };
+            var repository = new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProjectRepository
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                Provider = RepositoryProvider.GitHub,
+                Url = "https://github.com/cronus-dk/payroll",
+                DisplayName = "payroll",
+            };
+            project.Repositories.Add(repository);
+            ctx.OeProjects.Add(project);
+            await ctx.SaveChangesAsync();
+            repositoryId = repository.Id;
+        }
+
+        await NewService().ConnectAsync(Installation());
+
+        await using var read = _db.NewContext();
+        (await read.OeProjectRepositories.AsNoTracking().SingleAsync(r => r.Id == repositoryId))
+            .AccessConfirmedAt.Should().BeNull();
+    }
+
+    [Fact]
     public async Task Connect_without_repository_creation_rights_is_stored_but_flagged()
     {
         await NewService().ConnectAsync(Installation(permissions: [("metadata", "read"), ("contents", "write")]));

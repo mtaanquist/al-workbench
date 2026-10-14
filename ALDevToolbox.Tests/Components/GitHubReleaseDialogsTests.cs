@@ -60,6 +60,7 @@ public sealed class GitHubReleaseDialogsTests : IDisposable
         _ctx.Services.AddScoped<ReleasePipelineService>();
         _ctx.Services.AddScoped<ProjectDiscoveryService>();
         _ctx.Services.AddScoped<ProjectService>();
+        _db.AddRepositoryReadProbe(_ctx.Services);
         _ctx.Services.AddScoped<OrganizationConfigService>();
         _ctx.Services.AddSingleton(new ProjectDiscoveryQueue());
         // The release editor lists the solution's Business Central environments; the

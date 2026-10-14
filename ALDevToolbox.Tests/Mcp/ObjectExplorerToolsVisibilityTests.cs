@@ -290,7 +290,7 @@ public sealed class ObjectExplorerToolsVisibilityTests : IDisposable
                 ctx, _db.OrgContext, access, new ProjectDiscoveryQueue(),
                 NullLogger<ProjectDiscoveryService>.Instance);
             var projects = new ProjectService(
-                ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), NullLogger<ProjectService>.Instance);
+                ctx, _db.OrgContext, access, discovery, _db.NewOfflineGitHubAccessService(ctx), _db.NewRepositoryReadProbe(ctx), NullLogger<ProjectService>.Instance);
             await projects.SetAccessAsync(projectId, ProjectVisibility.Private, new[] { teamId });
         }
 
