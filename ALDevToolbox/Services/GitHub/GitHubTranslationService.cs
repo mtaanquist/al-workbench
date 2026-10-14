@@ -161,9 +161,9 @@ public sealed class GitHubTranslationService
     }
 
     /// <summary>
-    /// Reads a file from the language's translation branch, or
-    /// <see langword="null"/> when that branch does not exist yet or does not
-    /// carry the file.
+    /// Reads a file from the language's translation branch while a pull
+    /// request is open for it, or <see langword="null"/> when none is open or
+    /// the branch does not carry the file.
     ///
     /// <para>While a translation's pull request is open, its branch is ahead of
     /// the default branch: the file there carries the earlier translations and
@@ -171,6 +171,13 @@ public sealed class GitHubTranslationService
     /// from the generated source file exists only there. A second round of
     /// translations has to start from that version, not the default branch's,
     /// or <see cref="SaveAsync"/> refuses it as a conflict every time.</para>
+    ///
+    /// <para>Once that pull request is merged or closed the branch is history,
+    /// not work in progress. GitHub keeps it unless the repository deletes
+    /// merged branches, so "the branch exists" says nothing about whether it is
+    /// current: reading it then would hide every string added to the default
+    /// branch since (#1329). The next save moves the branch on instead - see
+    /// <see cref="PrepareBranchAsync"/>.</para>
     /// </summary>
     /// <exception cref="PlanValidationException">The repository cannot be reached or is not one this user may open.</exception>
     public async Task<GitHubFileContent?> OpenOnTranslationBranchAsync(
@@ -178,7 +185,7 @@ public sealed class GitHubTranslationService
     {
         var (repo, token) = await ResolveAsync(repoFullName, ct);
         var branch = BranchPrefix + Slug(targetLanguage);
-        if (await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct) is null) return null;
+        if (await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, branch, ct) is null) return null;
         return await _github.GetFileAsync(token, repo.Owner, repo.Name, path, branch, ct);
     }
 
@@ -208,7 +215,7 @@ public sealed class GitHubTranslationService
         var (repo, token) = await ResolveAsync(source.Repository.FullName, ct);
         var branch = BranchPrefix + Slug(targetLanguage);
 
-        await EnsureBranchAsync(token, repo, branch, ct);
+        var open = await PrepareBranchAsync(token, repo, branch, ct);
 
         // What is on the branch right now is what a write would replace. If it
         // is not the version this editor started from, somebody else got there
@@ -244,7 +251,7 @@ public sealed class GitHubTranslationService
         // Find before create: a pull request that is still open takes the new
         // commit, so a second afternoon's work joins the first one's review
         // instead of opening a second pull request beside it.
-        var existing = await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, branch, ct);
+        var existing = open ?? await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, branch, ct);
         var pullRequest = existing ?? await _github.CreatePullRequestAsync(
             token, repo.Owner, repo.Name,
             title: $"Translate {source.FileName} into {targetLanguage}",
@@ -265,25 +272,59 @@ public sealed class GitHubTranslationService
     }
 
     /// <summary>
-    /// Makes sure the translation branch exists, cutting it from the default
-    /// branch the first time. A branch someone else created in the meantime is
-    /// left where it is - the sha the write quotes is what keeps that safe, not
-    /// this check.
+    /// Makes sure the translation branch is ready to take this save, and
+    /// returns its open pull request when it has one.
+    ///
+    /// <list type="bullet">
+    /// <item>No branch yet: cut it from the default branch. One someone else
+    /// created in the meantime is left where it is - the sha the write quotes
+    /// is what keeps that safe.</item>
+    /// <item>A branch with an open pull request: left exactly where it is.
+    /// That is the review in progress, and the quoted sha keeps adding to it
+    /// safe.</item>
+    /// <item>A branch with no open pull request: the previous round was merged
+    /// or closed and the branch kept. Building on it would miss everything the
+    /// default branch gained since and open a pull request that conflicts with
+    /// it (#1329), so it is moved to the default branch's head first - a
+    /// fast-forward when the last round was merged with a merge commit, a reset
+    /// otherwise. A squash-merged round is in the default branch already, and a
+    /// closed one stays on GitHub under its pull request.</item>
+    /// </list>
     /// </summary>
-    private async Task EnsureBranchAsync(
+    private async Task<GitHubPullRequest?> PrepareBranchAsync(
         string token, GitHubRepositorySummary repo, string branch, CancellationToken ct)
     {
-        if (await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct) is not null) return;
+        var head = await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, branch, ct);
+        if (head is not null)
+        {
+            var open = await _github.FindOpenPullRequestAsync(token, repo.Owner, repo.Name, branch, ct);
+            if (open is not null) return open;
+        }
 
         var baseHead = await _github.GetBranchHeadShaAsync(token, repo.Owner, repo.Name, repo.DefaultBranch, ct)
             ?? throw Refuse(
                 $"'{repo.FullName}' has no commits on {repo.DefaultBranch} yet, so there is nothing to open a "
                 + "pull request against. Push something to it first, then try again.");
 
-        await _github.CreateBranchAsync(token, repo.Owner, repo.Name, branch, baseHead, ct);
+        if (head is null)
+        {
+            await _github.CreateBranchAsync(token, repo.Owner, repo.Name, branch, baseHead, ct);
+            _logger.LogInformation(
+                "Started branch {Branch} on {RepoFullName} from {DefaultBranch}.",
+                branch, repo.FullName, repo.DefaultBranch);
+            return null;
+        }
+
+        if (string.Equals(head, baseHead, StringComparison.Ordinal)) return null;
+
+        if (!await _github.UpdateBranchAsync(token, repo.Owner, repo.Name, branch, baseHead, ct))
+        {
+            await _github.ResetBranchAsync(token, repo.Owner, repo.Name, branch, baseHead, ct);
+        }
         _logger.LogInformation(
-            "Started branch {Branch} on {RepoFullName} from {DefaultBranch}.",
-            branch, repo.FullName, repo.DefaultBranch);
+            "Moved {Branch} on {RepoFullName} from {OldHead} to the head of {DefaultBranch}: no pull request was open for it.",
+            branch, repo.FullName, head, repo.DefaultBranch);
+        return null;
     }
 
     /// <summary>

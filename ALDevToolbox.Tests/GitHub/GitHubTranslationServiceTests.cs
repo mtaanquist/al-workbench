@@ -384,7 +384,155 @@ public sealed class GitHubTranslationServiceTests : IDisposable
         save.PullRequest.HeadBranch.Should().Be("aldt/translate-nb-NO");
     }
 
+    // ── The translation branch after its pull request (#1329) ─────────────
+
+    [Fact]
+    public async Task While_the_pull_request_is_open_the_file_is_read_from_its_branch()
+    {
+        await ReadyAsync();
+        var api = BranchApi(openPullRequest: true)
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{FilePath}", BranchOrMain("branch-blob-sha"));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var file = await service.OpenOnTranslationBranchAsync(Repo, FilePath, "da-DK");
+
+        file.Should().NotBeNull();
+        file!.Sha.Should().Be("branch-blob-sha");
+    }
+
+    [Fact]
+    public async Task A_branch_kept_after_its_pull_request_was_merged_is_not_read()
+    {
+        // GitHub keeps a merged branch unless the repository deletes it, so the
+        // branch existing says nothing about whether it is current. Reading it
+        // would hide every string added to main since the merge.
+        await ReadyAsync();
+        var api = BranchApi(openPullRequest: false)
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{FilePath}", BranchOrMain("branch-blob-sha"));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenOnTranslationBranchAsync(Repo, FilePath, "da-DK")).Should().BeNull();
+        api.Calls.Should().NotContain(c => c.Contains("/contents/", StringComparison.Ordinal),
+            "with no pull request open the caller reads the default branch instead");
+    }
+
+    [Fact]
+    public async Task A_branch_that_does_not_carry_the_file_comes_back_as_nothing()
+    {
+        await ReadyAsync();
+        var api = BranchApi(openPullRequest: true)
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{FilePath}", HttpStatusCode.NotFound);
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        (await service.OpenOnTranslationBranchAsync(Repo, FilePath, "da-DK")).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Reopening_while_the_pull_request_is_open_and_saving_again_quotes_the_branchs_sha()
+    {
+        // The Translator's second afternoon: the file is opened again, from the
+        // branch, and the save has to quote the sha it was read at - or it is
+        // refused as a conflict with the translator's own first commit.
+        await ReadyAsync();
+        var api = BranchApi(openPullRequest: true)
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{FilePath}", BranchOrMain("branch-blob-sha"));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var file = await service.OpenOnTranslationBranchAsync(Repo, FilePath, "da-DK");
+        var save = await service.SaveAsync(Source(baseSha: file!.Sha), "da-DK", Xliff, "done");
+
+        BodyOf(api, "PUT", "/contents/").Should().Contain("\"sha\":\"branch-blob-sha\"");
+        save.IsNewPullRequest.Should().BeFalse();
+        save.PullRequest.Number.Should().Be(12);
+        api.Calls.Should().NotContain(c => c.StartsWith("PATCH", StringComparison.Ordinal),
+            "a branch under review is never moved");
+    }
+
+    [Fact]
+    public async Task Saving_after_the_pull_request_was_merged_moves_the_branch_to_main_and_opens_a_new_one()
+    {
+        // Opened from main (no pull request open), so the edit is based on
+        // main's copy. The kept branch is moved onto main first, so the write
+        // lands on top of everything main has and the new pull request does not
+        // conflict with it.
+        await ReadyAsync();
+        var api = StaleBranchApi()
+            .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/", HttpStatusCode.OK, FakeGitHubApi.ShaJson(BaseSha));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var save = await service.SaveAsync(Source(), "da-DK", Xliff, "done");
+
+        var move = BodyOf(api, "PATCH", $"/git/refs/heads/");
+        move.Should().Contain($"\"sha\":\"{BaseSha}\"");
+        move.Should().Contain("\"force\":false", "a fast-forward is tried first");
+        BodyOf(api, "PUT", "/contents/").Should().Contain($"\"sha\":\"{LoadedSha}\"");
+        save.IsNewPullRequest.Should().BeTrue();
+        api.Calls.Should().NotContain(c => c.StartsWith("POST", StringComparison.Ordinal) && c.Contains("/git/refs"),
+            "the branch already exists, so it is moved rather than created");
+    }
+
+    [Fact]
+    public async Task A_squash_merged_branch_that_cannot_fast_forward_is_reset_to_main()
+    {
+        await ReadyAsync();
+        var api = StaleBranchApi()
+            .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/", request =>
+                request.Content!.ReadAsStringAsync().GetAwaiter().GetResult().Contains("\"force\":true")
+                    ? (HttpStatusCode.OK, FakeGitHubApi.ShaJson(BaseSha))
+                    : (HttpStatusCode.UnprocessableEntity, "{\"message\":\"Update is not a fast forward\"}"));
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+
+        var save = await service.SaveAsync(Source(), "da-DK", Xliff, "done");
+
+        api.Bodies.Where(b => b.Call.StartsWith("PATCH", StringComparison.Ordinal))
+            .Select(b => b.Body.Contains("\"force\":true"))
+            .Should().Equal(false, true);
+        save.IsNewPullRequest.Should().BeTrue();
+    }
+
     // --- helpers ------------------------------------------------------------
+
+    /// <summary>
+    /// A repository whose da-DK branch exists and sits apart from main, with
+    /// its pull request still open or already merged (GitHub lists only open
+    /// ones for <c>state=open</c>).
+    /// </summary>
+    private static FakeGitHubApi BranchApi(bool openPullRequest) =>
+        WritableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/{Branch}", HttpStatusCode.OK,
+                $"{{\"ref\":\"refs/heads/{Branch}\",\"object\":{{\"sha\":\"branch-head\"}}}}")
+            .On(HttpMethod.Get, $"/repos/{Repo}/pulls", HttpStatusCode.OK, openPullRequest
+                ? $"[{{\"number\":12,\"html_url\":\"https://github.com/{Repo}/pull/12\"}}]"
+                : "[]");
+
+    /// <summary>
+    /// A merged round's kept branch: its copy of the file is stale until the
+    /// branch is moved, after which it is main's. The save reads the file only
+    /// once every move has been made, so "any PATCH of the ref" is enough.
+    /// </summary>
+    private static FakeGitHubApi StaleBranchApi()
+    {
+        FakeGitHubApi api = null!;
+        api = BranchApi(openPullRequest: false)
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{FilePath}", request =>
+                request.RequestUri!.Query.Contains("ref=aldt", StringComparison.Ordinal)
+                    && !api.Calls.Any(c => c.StartsWith("PATCH", StringComparison.Ordinal))
+                    ?(HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, Xliff, "stale-branch-sha"))
+                    : (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, Xliff, LoadedSha)));
+        return api;
+    }
+
+    /// <summary>The file as the translation branch has it, or as main does.</summary>
+    private static Func<HttpRequestMessage, (HttpStatusCode, string?)> BranchOrMain(string branchSha) =>
+        request => request.RequestUri!.Query.Contains("ref=aldt", StringComparison.Ordinal)
+            ? (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, Xliff, branchSha))
+            : (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, Xliff, LoadedSha));
 
     private static RepositoryTranslationSource Source(string? baseSha = LoadedSha) =>
         new(

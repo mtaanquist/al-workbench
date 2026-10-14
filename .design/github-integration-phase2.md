@@ -997,7 +997,10 @@ suggestions without anyone uploading anything.
   translations; suggestions, pre-translate and the memory search leave out any pair
   attributed to a repository that only solutions the reader cannot see track (deleted
   ones included). A repository a visible solution also tracks is not hidden - the reader
-  can already see it, and the pair is the same whichever file taught it last.
+  can already see it, and the pair is the same whichever file taught it last. A
+  Translator save to a repository records that repository too (#1324), so a pull
+  request that is never merged - and so never read by the ingest - does not leave its
+  pairs visible to everyone.
 - **The ingest runs daily** (`TranslationMemoryIngestScheduler : PolledScheduler`,
   `DISABLE_TRANSLATION_MEMORY_INGEST_SCHEDULER=1`), per org through the ambient loop,
   and **on demand** from the admin Translation memory page ("Refresh from

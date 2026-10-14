@@ -916,6 +916,22 @@ public sealed partial class GitHubAppClient
     }
 
     /// <summary>
+    /// Points an existing branch at <paramref name="commitSha"/> whether or not
+    /// that is a fast-forward. Only for a branch the workbench owns and has
+    /// established nobody is reviewing: anything on it that the new commit does
+    /// not contain stops being reachable from the branch.
+    /// </summary>
+    public async Task ResetBranchAsync(
+        string credential, string owner, string repo, string branch, string commitSha,
+        CancellationToken ct = default)
+    {
+        using var request = NewJsonRequest(
+            HttpMethod.Patch, $"{RepoPath(owner, repo)}/git/refs/heads/{EscapePath(branch)}", credential,
+            new { sha = commitSha, force = true });
+        using var _ = await SendAsync(request, ct);
+    }
+
+    /// <summary>
     /// Opens a pull request from <paramref name="head"/> into
     /// <paramref name="baseBranch"/>, as <paramref name="credential"/>'s owner.
     /// </summary>

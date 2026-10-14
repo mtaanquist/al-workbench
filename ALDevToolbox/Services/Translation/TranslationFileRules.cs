@@ -71,6 +71,45 @@ public static class TranslationFileRules
     }
 
     /// <summary>
+    /// True for a file that holds no translation yet: it names no target
+    /// language, or names the source language as its target. That is how the
+    /// AL compiler writes the generated <c>.g.xlf</c>, and it is the only test
+    /// a file opened from disk gives us - its name is whatever the user's
+    /// copy is called.
+    ///
+    /// <para>Such a file is the build's, not the translator's: the next build
+    /// writes it again and anything saved into it is gone (#1325). A
+    /// translation started from it belongs in a language file beside it - see
+    /// <see cref="LanguageFileName"/>.</para>
+    /// </summary>
+    public static bool IsUntranslatedSource(string? sourceLanguage, string? targetLanguage) =>
+        string.IsNullOrWhiteSpace(targetLanguage)
+        || string.Equals(sourceLanguage?.Trim(), targetLanguage.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The name of the language file a translation started from
+    /// <paramref name="fileName"/> is saved as: <c>App.g.xlf</c> becomes
+    /// <c>App.da-DK.xlf</c>, the same name the repository path gives it. A name
+    /// that already carries a language tag has it replaced, so changing the
+    /// language twice does not stack two tags.
+    /// </summary>
+    public static string LanguageFileName(string fileName, string language)
+    {
+        var dot = fileName.LastIndexOf('.');
+        var stem = dot > 0 ? fileName[..dot] : fileName;
+        if (stem.EndsWith(".g", StringComparison.OrdinalIgnoreCase))
+        {
+            stem = stem[..^2];
+        }
+        // Language tags start lower case (da-DK, fr); "My.App.xlf" has no tag.
+        else if (dot > 0 && ReadLanguage(fileName) is { } tag && char.IsAsciiLetterLower(tag[0]))
+        {
+            stem = stem[..^(tag.Length + 1)];
+        }
+        return $"{stem}.{language}.xlf";
+    }
+
+    /// <summary>
     /// The language tag out of an AL translation file name - the <c>da-DK</c>
     /// in <c>Base Application.da-DK.xlf</c>. Null when the name does not carry
     /// one, which is not a problem: the list falls back to the file name and
