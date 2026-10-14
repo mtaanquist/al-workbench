@@ -5,6 +5,7 @@
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Endpoints
 @using ALDevToolbox.Services.Gateways
+@using ALWorkbench.Gateway.Contracts
 @inject GatewayService Gateways
 @inject GatewayBuild Build
 @inject PublicOrigin Origin
@@ -83,7 +84,7 @@
                                 <CopyButton Target="#gateway-register-command" />
                             </div>
                         </li>
-                        <li>Approve it here, once the check code the server prints matches the one in the list below.</li>
+                        <li>Approve it here, once the check code the server prints matches the check code that will appear below.</li>
                     </ol>
                     @if (_registered is null)
                     {
@@ -97,7 +98,7 @@
                 <div class="card__foot">
                     <button type="button" class="btn" @onclick="CloseCode">
                         <Icon Name="check" Width="16" Height="16" />
-                        <span>Done</span>
+                        <span>Close</span>
                     </button>
                 </div>
             </section>
@@ -118,11 +119,7 @@
                             customer's own network, without opening their firewall.
                             Add one to get a one-time code that connects it to AL Workbench.
                             <ol class="gw-steps gw-steps--empty">
-                                <li>
-                                    Download the AL Workbench Gateway and copy it to a folder on a Windows server in the
-                                    customer's network that can reach Business Central.
-                                    <GatewayDownloadLink IdPrefix="gw-empty" />
-                                </li>
+                                <li>Download the AL Workbench Gateway onto a Windows server in the customer's network that can reach Business Central.</li>
                                 <li>On that server, run the command you get when you add the gateway.</li>
                                 <li>Approve it here.</li>
                             </ol>
@@ -165,16 +162,10 @@
                                 {
                                     <div class="u-muted">on <span class="u-nowrap">@gateway.MachineName</span></div>
                                 }
-                                @if (gateway.ReportedVersion is not null)
-                                {
-                                    @* Takes the Version column's place on a narrow screen. *@
-                                    <div class="u-muted gw-version-inline">
-                                        Version @gateway.ReportedVersion
-                                        @VersionPill(gateway)
-                                    </div>
-                                }
                             </td>
                             <td>
+                                @* On a phone the column headers are hidden, so the cell says what the pill is. *@
+                                <span class="gw-label-narrow">Status: </span>
                                 <StatusPill Tone="@ToneOf(gateway.Status)">@LabelOf(gateway.Status)</StatusPill>
                                 @if (gateway.Status == GatewayStatus.WaitingForApproval)
                                 {
@@ -183,6 +174,14 @@
                                 else if (gateway.Status == GatewayStatus.NotConnectedYet)
                                 {
                                     <div class="u-muted">Start the AL Workbench Gateway service on the server</div>
+                                }
+                                @if (gateway.ReportedVersion is not null)
+                                {
+                                    @* Takes the Version column's place on a phone, after the status. *@
+                                    <div class="u-muted gw-version-inline">
+                                        Version @gateway.ReportedVersion
+                                        @VersionPill(gateway)
+                                    </div>
                                 }
                             </td>
                             <td class="u-muted">
@@ -507,9 +506,14 @@
             <StatusPill Tone="warn">Out of date</StatusPill>
             <a href="#gateway-download">Update to @Build.ExpectedVersion</a>
         </span>,
-        GatewayVersionState.Unsupported => @<span class="gw-version-state">
+        GatewayVersionState.Unsupported when Build.Download is not null => @<span class="gw-version-state">
             <StatusPill Tone="danger">Unsupported</StatusPill>
             <span>AL Workbench refuses this version. <a href="#gateway-download">Update it</a></span>
+        </span>,
+        // A local or staging AL Workbench has nothing to download, so nothing to link to.
+        GatewayVersionState.Unsupported => @<span class="gw-version-state">
+            <StatusPill Tone="danger">Unsupported</StatusPill>
+            <span>AL Workbench refuses this version. Ask whoever runs AL Workbench for gateway version @GatewayProtocol.MinimumGatewayVersion or later.</span>
         </span>,
         _ => null,
     };

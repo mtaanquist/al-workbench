@@ -728,7 +728,8 @@ Nothing else on the gateway path crosses the fence: the expiry sweep uses `Ambie
 per organisation, and the gateway endpoints run under the organisation claim from the credential.
 
 **Signed binaries.** Releases are signed through Azure's managed code signing service (Trusted
-Signing, now Artifact Signing). Until it is set up, builds ship unsigned and marked preview only.
+Signing, now Artifact Signing). Until it is set up, builds ship unsigned and are marked "not code-signed
+yet" (the decision in #1359 said "preview only"; "preview" is now reserved for `0.0.0-*` builds).
 The gateway does not update itself; the workbench shows "Out of date" and customer IT updates it.
 "Versions and updates" below has how, as built (#1363).
 
@@ -928,16 +929,17 @@ signed file. The image build receives the hash and whether it was signed (`GATEW
 `GATEWAY_SIGNED`, stamped as assembly metadata like the release version), and the GitHub release
 gets three assets: the program, `ALWorkbench.Gateway.exe.sha256` (`sha256sum` format) and
 `gateway.example.toml`, plus a note above the generated release notes with the hash and, while
-unsigned, "Preview build: not digitally signed". The asset name never changes, so the service's
+unsigned, "Not code-signed yet". The asset name never changes, so the service's
 path keeps pointing at the right file after an update.
 
 The Gateways page (`GatewayDownloadLink`) links that asset on the release matching the running
 version, shows the SHA-256 in upper case with the `Get-FileHash` command to check it, and says
-plainly when the build is an unsigned preview. A local or staging AL Workbench has no release to
+plainly when the build is not code-signed yet. A local or staging AL Workbench has no release to
 link to and says "There is no gateway download for this AL Workbench, because it is not a
-released version" instead of a broken link. The link is in the first install step when adding a
-gateway, in the empty state, and in a "Download the gateway" card under the list, which also
-carries the update steps. It is an outline button: Add gateway stays the page's one primary.
+released version" instead of a broken link, and an unsupported row there says which version to
+ask for instead of linking to a download that does not exist. The link is in the first install
+step when adding a gateway and in a "Download the gateway" card under the list, which also
+carries the update steps; the empty state stays short (three one-line steps and Add gateway). It is an outline button: Add gateway stays the page's one primary.
 
 **Updating is manual.** No self-update (supply-chain risk; an MSI and auto-update are out of
 scope). On the gateway's server, as an administrator:

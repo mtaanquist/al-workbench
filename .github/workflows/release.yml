@@ -80,7 +80,7 @@ jobs:
   #
   # Signed through Azure Artifact Signing (formerly Trusted Signing) when the
   # repository variables for it exist; until they do, the build goes out
-  # unsigned and the release notes and the Gateways page call it a preview.
+  # unsigned and the release notes and the Gateways page say it is not code-signed yet.
   # The variables, and the federated credential the sign-in needs, are listed
   # in PROJECT.md. Whether it was signed is read back from the file itself,
   # never assumed from the variables.
@@ -240,7 +240,7 @@ jobs:
           #
           # GATEWAY_SHA256 / GATEWAY_SIGNED: the gateway published above, so the
           # Gateways page can show the hash customer IT checks the download
-          # against, and say when the build is an unsigned preview (#1363).
+          # against, and say when the build is not code-signed yet (#1363).
           build-args: |
             RELEASE_VERSION=${{ steps.meta.outputs.version }}
             RELEASE_DATE=${{ steps.stamp.outputs.date }}
@@ -262,7 +262,7 @@ jobs:
       # The gateway goes on as three assets: the program, its SHA-256 and the
       # example policy file customer IT copies to gateway.toml. The notes above
       # the generated ones say what it is, its hash, and - while signing is not
-      # set up - that it is an unsigned preview.
+      # set up - that it is not code-signed yet.
       - name: Write the gateway's release notes
         env:
           GATEWAY_SHA256: ${{ needs.gateway.outputs.sha256 }}
@@ -275,7 +275,7 @@ jobs:
             echo "Its SHA-256 is \`${GATEWAY_SHA256}\` (also in \`ALWorkbench.Gateway.exe.sha256\`)."
             echo
             if [ "$GATEWAY_SIGNED" != "true" ]; then
-              echo "> **Preview build: not digitally signed.** Windows may say the publisher is unknown. Check the SHA-256 before running it."
+              echo "> **Not code-signed yet.** Windows may say the publisher is unknown. Check the SHA-256 before running it."
               echo
             fi
             echo "To update an installed gateway: stop the AL Workbench Gateway service, replace \`ALWorkbench.Gateway.exe\` with this one, and start the service again."

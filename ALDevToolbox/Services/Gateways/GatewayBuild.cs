@@ -27,7 +27,7 @@ public enum GatewayVersionState
 /// <param name="Url">The program itself.</param>
 /// <param name="ChecksumUrl">A <c>sha256sum</c>-style file beside it.</param>
 /// <param name="Sha256">The program's SHA-256 in upper-case hex, as PowerShell's <c>Get-FileHash</c> prints it; null when the image was not stamped with one.</param>
-/// <param name="Signed">Whether the release job signed it. An unsigned build is a preview, and the page says so.</param>
+/// <param name="Signed">Whether the release job signed it. The page says when a release is not code-signed yet.</param>
 public sealed record GatewayDownload(string Version, string Url, string ChecksumUrl, string? Sha256, bool Signed);
 
 /// <summary>

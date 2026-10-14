@@ -43,15 +43,15 @@ public sealed class GatewayDownloadLinkTests : IDisposable
         cut.Markup.Should().Contain("Version 12.1.0");
         cut.Find("#gw-test-sha256").TextContent.Should().Be(Hash.ToUpperInvariant());
         cut.Find("[data-copy-target]").GetAttribute("data-copy-target").Should().Be("#gw-test-sha256");
-        cut.Markup.Should().Contain("Get-FileHash").And.NotContain("preview build");
+        cut.Markup.Should().Contain("Get-FileHash").And.NotContain("not code-signed");
     }
 
     [Fact]
-    public void An_unsigned_release_says_it_is_a_preview()
+    public void An_unsigned_release_says_it_is_not_code_signed_without_calling_it_a_preview()
     {
         var cut = Render(new GatewayBuild("12.1.0", Hash, signed: false));
 
-        cut.Find(".gw-download__note").TextContent.Should().Contain("preview build").And.Contain("not digitally signed");
+        cut.Find(".gw-download__note").TextContent.Should().Contain("not code-signed yet").And.NotContain("preview");
         cut.Find("#gw-test-sha256").TextContent.Should().Be(Hash.ToUpperInvariant());
     }
 
