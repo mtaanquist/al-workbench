@@ -193,6 +193,8 @@ public sealed class GitHubReleaseService
                 RepositoryUrl = b.Pipeline.GithubReleaseRepository!.Url,
                 RepositoryProvider = (RepositoryProvider?)b.Pipeline.GithubReleaseRepository.Provider,
                 PipelineName = b.Pipeline.Name,
+                PipelineDeleted = b.Pipeline.DeletedAt != null,
+                PipelineDisabled = b.Pipeline.DisabledAt != null,
                 b.BcTarget,
                 b.StartedByUserId,
             })
@@ -205,6 +207,16 @@ public sealed class GitHubReleaseService
         if (build is null || build.RepositoryId is null || ProjectBuildTarget.IsPreview(build.BcTarget))
         {
             return GitHubReleasePublishResult.NotRequested;
+        }
+
+        // Disabling a pipeline is how a person stops a bad release going out, and a
+        // build can take minutes to compile after it started: the release is checked
+        // again here, at the last moment before anything reaches GitHub (#1335).
+        if (build.PipelineDeleted || build.PipelineDisabled)
+        {
+            var stopped = NotPublished(build.PipelineDeleted ? PipelineDeletedNotPublished : PipelineDisabledNotPublished);
+            await RecordOutcomeAsync(projectBuildId, stopped, ct);
+            return stopped;
         }
 
         GitHubReleasePublishResult result;
@@ -239,6 +251,14 @@ public sealed class GitHubReleaseService
         await RecordOutcomeAsync(projectBuildId, result, ct);
         return result;
     }
+
+    /// <summary>Why a build whose pipeline was disabled while it ran was not published.</summary>
+    public const string PipelineDisabledNotPublished =
+        "The pipeline was disabled while this build ran, so no GitHub release was made.";
+
+    /// <summary>Why a build whose pipeline was deleted while it ran was not published.</summary>
+    public const string PipelineDeletedNotPublished =
+        "The pipeline was deleted while this build ran, so no GitHub release was made.";
 
     /// <summary>One publish per GitHub repository at a time, keyed by its repository id. Internal for tests.</summary>
     internal static readonly ALDevToolbox.Services.Workers.KeyedGate<int> PublishGate = new();

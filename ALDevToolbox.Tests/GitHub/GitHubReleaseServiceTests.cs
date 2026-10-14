@@ -171,6 +171,42 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         api.Calls.Should().NotContain(c => c.Contains("/releases"));
     }
 
+    /// <summary>
+    /// Disabling a pipeline is how a person stops a bad release going out, and it can
+    /// happen while the build compiles. The build stays ready; only the release is held
+    /// back, with the reason on the build (#1335).
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_build_whose_pipeline_was_stopped_while_it_ran_is_not_published(bool deleted)
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        await using (var stop = _db.NewContext())
+        {
+            await stop.OePipelines.Where(p => p.Id == seed.PipelineId)
+                .ExecuteUpdateAsync(u =>
+                {
+                    if (deleted) u.SetProperty(p => p.DeletedAt, DateTime.UtcNow);
+                    else u.SetProperty(p => p.DisabledAt, DateTime.UtcNow);
+                });
+        }
+        var api = PublishableApi(existingRelease: false);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+            result.Published.Should().BeFalse();
+            result.Error.Should().Be(deleted
+                ? GitHubReleaseService.PipelineDeletedNotPublished
+                : GitHubReleaseService.PipelineDisabledNotPublished);
+        }
+
+        api.Calls.Should().BeEmpty("nothing reaches GitHub once the pipeline is stopped");
+        await AssertBuildStillReadyAsync(seed.BuildId, "while this build ran");
+    }
+
     [Fact]
     public async Task A_build_with_nobody_recorded_as_starting_it_is_not_published()
     {

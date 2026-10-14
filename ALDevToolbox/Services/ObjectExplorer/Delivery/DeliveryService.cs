@@ -29,6 +29,10 @@ public sealed class DeliveryService
     /// <summary>Why a deployment through a disabled deployment pipeline is refused (#1131).</summary>
     public const string DisabledRefusal = "This deployment pipeline is disabled. Enable it to deploy.";
 
+    /// <summary>Why a build is not deployed without approval once the pipeline that built it is disabled or deleted (#1335).</summary>
+    public const string BuildPipelineStoppedRefusal =
+        "The pipeline that built it was disabled or deleted while it ran.";
+
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
     private readonly ProjectAccess _access;
@@ -857,6 +861,16 @@ public sealed class DeliveryService
         if (rp.DisabledAt is not null)
         {
             throw Validation("ReleasePipeline", DisabledRefusal);
+        }
+        // The build pipeline too: disabling it is how a person stops a bad build going
+        // out, and it may have happened while this build compiled (#1335). The caller
+        // prepares the build for approval instead, with this reason in its log.
+        var buildPipelineStopped = await _db.OeProjectBuilds.AsNoTracking()
+            .Where(b => b.Id == projectBuildId)
+            .AnyAsync(b => b.Pipeline == null || b.Pipeline.DeletedAt != null || b.Pipeline.DisabledAt != null, ct);
+        if (buildPipelineStopped)
+        {
+            throw Validation("Build", BuildPipelineStoppedRefusal);
         }
         if (!rp.PrepareReleaseOnNewBuild || !rp.DeployWithoutApproval)
         {

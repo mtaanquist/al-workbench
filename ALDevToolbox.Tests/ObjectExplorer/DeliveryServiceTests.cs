@@ -3319,6 +3319,29 @@ public sealed class DeliveryServiceTests : IDisposable
             .Should().Be(DeliveryService.DisabledRefusal);
     }
 
+    /// <summary>
+    /// Disabling the build pipeline while a build compiles stops that build deploying
+    /// on its own: it is refused with a reason, which the worker writes on the
+    /// deployment it prepares for approval instead (#1335).
+    /// </summary>
+    [Fact]
+    public async Task A_build_whose_build_pipeline_was_disabled_is_not_deployed_without_approval()
+    {
+        await using var ctx = _db.NewContext();
+        var seed = await SeedAsync(ctx, appNames: new[] { "CRONUS Core" });
+        await PrepareOnNewBuildAsync(ctx, seed.ReleasePipelineId);
+        await DeployWithoutApprovalAsSandboxAsync(ctx, seed);
+        await ctx.OePipelines.Where(p => p.Id == seed.BuildPipelineId)
+            .ExecuteUpdateAsync(u => u.SetProperty(p => p.DisabledAt, DateTime.UtcNow));
+
+        var act = () => NewService(_db.NewContext()).DeployWithoutApprovalAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Build"]
+            .Should().Be(DeliveryService.BuildPipelineStoppedRefusal);
+        (await _db.NewContext().OeProjectDeliveries.AnyAsync(d => d.ProjectBuildId == seed.BuildId))
+            .Should().BeFalse("nothing is deployed");
+    }
+
     [Fact]
     public async Task ListDeploymentsWithoutApprovalAsync_ignores_preview_builds()
     {
