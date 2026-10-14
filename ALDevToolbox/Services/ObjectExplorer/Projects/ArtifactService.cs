@@ -941,12 +941,16 @@ public sealed record BuildSummary(int BuildId, string Status, string? BcVersion,
 /// <summary>A project's header for the Artifacts builds page.</summary>
 public sealed record ProjectHeader(int Id, string Name, string? OwnerName, int? OwnerUserId);
 
-/// <summary>A pipeline row for the Pipelines landing: identity, its project, owner, and its newest build.</summary>
+/// <summary>
+/// A pipeline row for the Pipelines landing: identity, its project, owner, and its newest build.
+/// <c>list_pipelines</c> hands this row to agents as it is, so the solution's fields carry the
+/// product's word on the wire (#1344).
+/// </summary>
 public sealed record PipelineArtifactsRow(
     int Id,
     string Name,
-    int ProjectId,
-    string ProjectName,
+    [property: JsonPropertyName("solutionId")] int ProjectId,
+    [property: JsonPropertyName("solutionName")] string ProjectName,
     string? OwnerName,
     BuildSummary? Latest,
     int? LatestSuccessfulBuildId,

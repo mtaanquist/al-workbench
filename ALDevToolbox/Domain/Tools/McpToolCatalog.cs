@@ -79,9 +79,10 @@ public static class McpToolCatalog
 
         // ---- Object Explorer ----
         new McpToolDescriptor("list_releases", ObjectExplorer,
-            "Lists the Business Central releases that have been imported.", false, ToolKey.ObjectExplorer),
+            "Lists the Business Central releases you can browse, the same ones the Releases page shows.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("list_release_modules", ObjectExplorer,
-            "Lists the apps and modules inside one release.", false, ToolKey.ObjectExplorer),
+            "Lists the apps and modules inside one release, up to 200 at a time. "
+            + "It can narrow the list by name.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("compare_releases", ObjectExplorer,
             "Reports what changed between two releases.", false, ToolKey.ObjectExplorer),
         new McpToolDescriptor("compare_release_files", ObjectExplorer,
@@ -141,11 +142,11 @@ public static class McpToolCatalog
         new McpToolDescriptor("list_solutions", Projects,
             "Lists the customer solutions you can see.", false, ToolKey.Projects),
         new McpToolDescriptor("list_solution_builds", Projects,
-            "Lists the builds recorded against one solution.", false, ToolKey.Projects),
+            "Lists the builds recorded against one solution.", false, ToolKey.Pipelines),
         new McpToolDescriptor("get_solution_build", Projects,
-            "Returns one build with its apps and their versions.", false, ToolKey.Projects),
+            "Returns one build with its apps and their versions.", false, ToolKey.Pipelines),
         new McpToolDescriptor("compare_solution_builds", Projects,
-            "Reports what changed between two builds of the same solution.", false, ToolKey.Projects),
+            "Reports what changed between two builds of the same solution.", false, ToolKey.Pipelines),
         new McpToolDescriptor("list_pipelines", Projects,
             "Lists the build pipelines set up for a solution.", false, ToolKey.Pipelines),
         new McpToolDescriptor("list_pipeline_builds", Projects,

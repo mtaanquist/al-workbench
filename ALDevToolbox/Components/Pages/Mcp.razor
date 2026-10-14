@@ -16,6 +16,7 @@
 @inject IOrganizationContext OrgContext
 @inject PersonalAccessTokenService Pats
 @inject ALDevToolbox.Services.OAuth.OAuthConsentService Consents
+@inject ALDevToolbox.Services.Tools.ToolEnablement Tools
 
 <PageTitle>MCP · AL Workbench</PageTitle>
 
@@ -240,7 +241,7 @@
             <summary>
                 <span class="u-row">
                     <Icon Name="chevron-right" Width="15" Height="15" Css="mcp-tools__caret" />
-                    <span>What your assistant can do - @McpToolCatalog.All.Count tools across @McpToolCatalog.Groups.Count areas</span>
+                    <span>What your assistant can do - @_offered.Count tools across @OfferedGroups.Count areas</span>
                 </span>
             </summary>
             <div class="mcp-tools__body">
@@ -249,7 +250,7 @@
                     tool for what you asked. Tools marked <strong>Changes something</strong>
                     can create or update data here; everything else only looks things up.
                 </p>
-                @foreach (var group in McpToolCatalog.Groups)
+                @foreach (var group in OfferedGroups)
                 {
                     <h3 class="mcp-tools__group">@group</h3>
                     <table class="data-table">
@@ -257,7 +258,7 @@
                             <tr><th>What it does</th><th>Tool</th></tr>
                         </thead>
                         <tbody>
-                            @foreach (var tool in McpToolCatalog.InGroup(group))
+                            @foreach (var tool in _offered.Where(t => t.Group == group))
                             {
                                 <tr>
                                     <td>
@@ -352,8 +353,34 @@
     /// </summary>
     private const string TokenPlaceholder = "aldt_pat_...";
 
+    // Cascaded by CascadingAuthenticationState. The signed-in principal carries
+    // the organisation's switched-off tools, so the filter below costs no query.
+    [CascadingParameter] private Task<AuthenticationState>? AuthStateTask { get; set; }
+
+    /// <summary>
+    /// The tools the assistant is actually offered. A tool switched off under
+    /// Administration -> Tools (or site-wide) is left out of what the assistant
+    /// receives (#1245), so listing it here sent people asking for something the
+    /// assistant could not do (#1344). The full list is only what is left when no
+    /// auth state cascades (a test host rendering the page bare). On a real page the
+    /// cascaded task has already completed, so the filter at the top of
+    /// OnInitializedAsync runs before the first render and the full list never shows.
+    /// </summary>
+    private IReadOnlyList<McpToolDescriptor> _offered = McpToolCatalog.All;
+
+    private List<string> OfferedGroups =>
+        McpToolCatalog.Groups.Where(g => _offered.Any(t => t.Group == g)).ToList();
+
     protected override async Task OnInitializedAsync()
     {
+        if (AuthStateTask is not null)
+        {
+            var user = (await AuthStateTask).User;
+            _offered = McpToolCatalog.All
+                .Where(t => t.Tool is not { } key || Tools.IsEnabled(key, user))
+                .ToList();
+        }
+
         var userId = OrgContext.CurrentUserId;
         if (userId is null) return;
 
