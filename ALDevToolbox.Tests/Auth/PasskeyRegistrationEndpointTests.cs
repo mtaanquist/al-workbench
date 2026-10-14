@@ -24,7 +24,7 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
 {
     private const string Password = "correct horse battery staple";
     private const string NewPassword = "another horse battery staple";
-    private const string ReviewPrompt = "Check the passkeys above and remove any you don";
+    private const string ReviewPrompt = "Look at when each passkey above was added";
 
     private readonly TestDb _db = new();
     private readonly EndpointFactory _factory;
@@ -133,7 +133,7 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
 
         using var anonymous = _factory.CreateClient();
         using var login = await anonymous.GetAsync("/login?ok=password-reset");
-        (await login.Content.ReadAsStringAsync()).Should().Contain("remove any you don");
+        (await login.Content.ReadAsStringAsync()).Should().Contain("remove any passkeys you didn");
 
         using var client = await SignInWithPasswordAsync("reset@cronus.example", NewPassword);
         using var page = await client.GetAsync("/account/security");
@@ -229,13 +229,13 @@ public sealed class PasskeyRegistrationEndpointTests : IDisposable
 
         // Already fresh from the recovery code, so the step-up hands straight back.
         using var stepUp = await client.GetAsync(
-            "/auth/step-up?return=" + Uri.EscapeDataString("/account/security?ok=confirmed-passkey"));
+            "/auth/step-up?return=" + Uri.EscapeDataString("/account/security?ok=confirmed-passkey#passkeys"));
         stepUp.StatusCode.Should().Be(HttpStatusCode.Redirect);
         var back = stepUp.Headers.Location!.OriginalString;
-        back.Should().Be("/account/security?ok=confirmed-passkey");
+        back.Should().Be("/account/security?ok=confirmed-passkey#passkeys");
 
         using var page = await client.GetAsync(back);
-        (await page.Content.ReadAsStringAsync()).Should().Contain("You can now add a passkey.");
+        (await page.Content.ReadAsStringAsync()).Should().Contain("Now choose Add a passkey below to finish.");
     }
 
     private async Task<int> SeedUserAsync(string email, bool withPasskey = false)

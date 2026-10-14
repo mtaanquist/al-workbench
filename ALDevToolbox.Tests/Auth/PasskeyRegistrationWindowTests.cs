@@ -64,7 +64,7 @@ public sealed class PasskeyRegistrationWindowTests : IDisposable
         _clock.Advance(TimeSpan.FromMinutes(10));
         using var outside = await StartAsync(client, token);
         outside.StatusCode.Should().Be(HttpStatusCode.Forbidden, "twenty minutes is inside the hour but past the cap");
-        (await outside.Content.ReadAsStringAsync()).Should().Contain("Confirm it");
+        (await outside.Content.ReadAsStringAsync()).Should().Contain("confirmation ran out");
     }
 
     private async Task<IReadOnlyList<string>> SeedTotpUserAsync(string email)

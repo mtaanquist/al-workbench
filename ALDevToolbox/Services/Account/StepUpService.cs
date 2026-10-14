@@ -27,8 +27,13 @@ public sealed class StepUpService
     /// </summary>
     public static readonly TimeSpan PasskeyWindowCap = TimeSpan.FromMinutes(15);
 
-    /// <summary>What a session that has a way to confirm, but has not used it lately, is told.</summary>
-    public const string StepUpFirstMessage = "Confirm it's you first, then add the passkey.";
+    /// <summary>
+    /// What a session that has a way to confirm, but has not used it lately, is
+    /// told. The page only reaches this when a confirmation ran out while it was
+    /// open (otherwise it shows the confirm link instead of the button), so it
+    /// says that, and the page swaps the confirm link back in beside it.
+    /// </summary>
+    public const string StepUpFirstMessage = "Your confirmation ran out. Choose Add a passkey again to confirm it's you, then finish adding it.";
 
     public const string WrongPasswordMessage = "Password is incorrect.";
 

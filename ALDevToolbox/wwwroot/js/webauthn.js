@@ -59,7 +59,7 @@ window.aldtPasskey = {
         });
         if (optionsRes.status === 403) {
             const refusal = await optionsRes.json().catch(() => ({}));
-            return refusal.error || 'Confirm it\'s you first, then add the passkey.';
+            return refusal.error || 'Your confirmation ran out. Choose Add a passkey again to confirm it\'s you, then finish adding it.';
         }
         if (!optionsRes.ok) throw new Error('Failed to start passkey registration.');
         const opts = decodeCreateOptions(await optionsRes.json());
