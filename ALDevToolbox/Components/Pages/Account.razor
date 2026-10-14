@@ -426,35 +426,39 @@ else
                             </div>
                         }
                         <div class="card__foot">
-                            @if (!_passkeyFresh && _passkeyCanStepUp)
-                            {
-                                @* Adding a passkey adds a way in, so it asks for a recent second step first. *@
-                                <a class="btn" href="@ConfirmForPasskeyUrl">
-                                    <Icon Name="plus" Width="16" Height="16" />
-                                    <span>Add a passkey</span>
-                                </a>
-                                <span class="form-actions__note">We'll ask you to confirm it's you first.</span>
-                            }
-                            else
-                            {
-                                <form id="passkey-add" class="u-row" @onsubmit="RegisterPasskeyAsync" @onsubmit:preventDefault>
-                                    <AntiforgeryToken />
-                                    @if (!_passkeyFresh)
-                                    {
-                                        <label class="field__label" for="passkey-add-password">Current password</label>
-                                        <input class="input" id="passkey-add-password" type="password" name="Password" required
-                                               autocomplete="current-password" />
-                                    }
-                                    <button type="submit" class="btn" disabled="@_busy">
+                            @* The note sits under the controls, right-aligned with them,
+                               rather than squeezing in beside a password box. *@
+                            <div class="u-stack" style="gap: var(--space-2); justify-items: end;">
+                                @if (!_passkeyFresh && _passkeyCanStepUp)
+                                {
+                                    @* Adding a passkey adds a way in, so it asks for a recent second step first. *@
+                                    <a class="btn" href="@ConfirmForPasskeyUrl">
                                         <Icon Name="plus" Width="16" Height="16" />
                                         <span>Add a passkey</span>
-                                    </button>
-                                </form>
-                                @if (!_passkeyFresh)
-                                {
-                                    <span class="form-actions__note">Enter your password to confirm it's you before adding a new way to sign in.</span>
+                                    </a>
+                                    <span class="form-actions__note">We'll ask you to confirm it's you first.</span>
                                 }
-                            }
+                                else
+                                {
+                                    <form id="passkey-add" class="u-row" @onsubmit="RegisterPasskeyAsync" @onsubmit:preventDefault>
+                                        <AntiforgeryToken />
+                                        @if (!_passkeyFresh)
+                                        {
+                                            <label class="field__label u-nowrap" for="passkey-add-password">Current password</label>
+                                            <input class="input" id="passkey-add-password" type="password" name="Password" required
+                                                   autocomplete="current-password" />
+                                        }
+                                        <button type="submit" class="btn" disabled="@_busy">
+                                            <Icon Name="plus" Width="16" Height="16" />
+                                            <span>Add a passkey</span>
+                                        </button>
+                                    </form>
+                                    @if (!_passkeyFresh)
+                                    {
+                                        <span class="form-actions__note">Enter your password to confirm it's you before adding a new way to sign in.</span>
+                                    }
+                                }
+                            </div>
                         </div>
                     </section>
                 }
