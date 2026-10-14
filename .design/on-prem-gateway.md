@@ -204,6 +204,7 @@ change_hours = "20:00-06:00"   # optional: changes only in this local time windo
 [[instance]]
 machine = "CRONUS-BC01"        # this machine
 name = "BC140"
+environment = "production"     # production (default), test or development
 allow = ["inventory", "publish", "unpublish", "restart", "licence"]
 tenants = ["default"]          # multitenant servers: the tenants this gateway may target
 publishers = ["CRONUS Partner"] # optional allow-list of app publishers
@@ -213,6 +214,7 @@ scope = "tenant"               # tenant (default) or global
 [[instance]]
 machine = "CRONUS-BC02"
 name = "BC140"
+environment = "production"
 allow = ["inventory", "restart"] # restarted with the group, never published to
 
 # Tiers that share a database: one publishes, all restart after an install.
@@ -234,6 +236,14 @@ after = 'C:\ALWorkbench\after-restart.ps1'
 name = "CRONUS-BC02"
 method = "service-manager"     # or "powershell-remoting"
 ```
+
+**Production, test or development is customer IT's call.** Each instance says what it is with
+`environment`; one that does not say is treated as `production`, the safe default. AL Workbench
+takes this from the gateway and does not let anyone override it: the Admin linking a tier sees the
+type but cannot change it, and if customer IT changes it, the next inventory changes it in the
+workbench too. Everything that treats production specially follows it: the extra confirmation on
+deployments and tier actions, the refusal of AI-assistant deployments, and the Solution's version
+and address, which come from its production tier.
 
 **Permissions per service tier.** Each instance lists what the gateway may do there, and anything not
 listed is refused. An instance with no `allow` line gets `["inventory"]`: read-only. The workbench
@@ -290,7 +300,7 @@ New tables, all org-scoped with the usual query filter:
 | `gateway_seen_tokens` | Gateway, `jti`, expires at (replay protection; swept with the commands) |
 | `gateway_commands` | As in "Commands" above |
 | `gateway_command_files` | Id, command id, file name, SHA-256, bytes (or a reference to the artifact row it came from) |
-| `gateway_instances` | Gateway, machine, instance name, version, state, database server and name, multitenant, open sessions, licence (licensee, expiry, ranges as JSON with object types), read at, missing since |
+| `gateway_instances` | Gateway, machine, instance name, environment (production, test, development, from the policy file), version, state, database server and name, multitenant, open sessions, licence (licensee, expiry, ranges as JSON with object types), read at, missing since |
 | `gateway_instance_tenants` | Instance, tenant id, state |
 | `gateway_instance_apps` | Instance, tenant, app id, name, publisher, version, data version, scope, installed, sync state |
 | `oe_project_licenses` | Solution, file name, bytes (at most 1 MB), SHA-256, uploaded by and at (code spells it `License`, as `OeProject.LicenseType` does; copy says licence) |
@@ -314,10 +324,13 @@ everywhere.
   than null so the index cannot be dodged. One service tier and tenant belongs to one Solution. Only an **org Admin** links and unlinks (audited), so the managers of
   one Solution can never deploy to, restart or relicense another customer's tier on a shared
   hosting gateway.
-- Name and type are chosen when linking. The name is unique per Solution, because the existing
-  unique index on `(project_id, name)` covers both kinds. The type is stored as `Production` or
-  `Sandbox`, the values the existing checks compare against (`BcContracts`, `ArtifactService`,
-  `CustomerModuleService`, `DependencyDriftService`); on-premises copy labels `Sandbox` "Test".
+- The name is chosen when linking and is unique per Solution, because the existing unique index on
+  `(project_id, name)` covers both kinds. The type is **not** chosen: it comes from the instance's
+  `environment` in the policy file (`gateway_instances.environment`), rewritten by every inventory.
+  It is stored as `Production` or `Sandbox`, the values the existing checks compare against
+  (`BcContracts`, `ArtifactService`, `CustomerModuleService`, `DependencyDriftService`): `production`
+  maps to `Production`, `test` and `development` to `Sandbox`. On-premises copy shows the policy's
+  own word, "Test" or "Development".
   `Version`, `Status` and `WebClientLoginUrl` are written from the inventory, so pages that read
   them need no branching.
 - **Unlinking does not delete the row.** A deployment pipeline's foreign key to the environment is
