@@ -30,6 +30,12 @@ public enum EmailPurpose
     /// <summary>Confirm-your-new-address link, sent to the new address.</summary>
     EmailChangeConfirmation,
 
+    /// <summary>
+    /// To the current address when an administrator asks to change it (with a
+    /// link to stop the change), and again once the change is confirmed.
+    /// </summary>
+    EmailChangeNotice,
+
     /// <summary>Six-digit two-factor code. Sent inline — someone is waiting on it.</summary>
     MfaCode,
 
@@ -49,6 +55,9 @@ public enum EmailPurpose
     UpgradeNotification,
     /// <summary>A solution notification: an update was scheduled or moved on a solution the person follows.</summary>
     SolutionNotification,
+
+    /// <summary>"A passkey was added to your account", to the account's own address. Queued, like every security notice.</summary>
+    PasskeyAdded,
 }
 
 /// <summary>Where an outbox row is in its life.</summary>

@@ -1,0 +1,28 @@
+@* Sent to the account's own address whenever a passkey is added to it. *@
+<EmailLayout Preheader="If this wasn't you, remove the passkey and change your password." Reason="You received this because a passkey was added to the AL Workbench account for this address.">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>A passkey called "@PasskeyName" was added to your AL Workbench account on @AddedAt. It can be used to sign in without your password.</EmailParagraph>
+    <EmailParagraph>If this was you, there is nothing else to do.</EmailParagraph>
+    <EmailParagraph>If it wasn't you, open Sign-in &amp; security on your Account page, remove that passkey, then change your password.</EmailParagraph>
+    <EmailButton Href="@SecurityUrl">Open Sign-in &amp; security</EmailButton>
+</EmailLayout>
+
+@code {
+    public const string Subject = "A passkey was added to your AL Workbench account";
+
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string PasskeyName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string AddedAt { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SecurityUrl { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer, string displayName, string passkeyName, string addedAt, string securityUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<PasskeyAddedEmail>(Subject, new Dictionary<string, object?>
+        {
+            [nameof(DisplayName)] = displayName,
+            [nameof(PasskeyName)] = passkeyName,
+            [nameof(AddedAt)] = addedAt,
+            [nameof(SecurityUrl)] = securityUrl,
+        }, ct);
+}

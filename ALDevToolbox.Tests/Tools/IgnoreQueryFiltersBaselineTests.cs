@@ -38,7 +38,7 @@ public sealed class IgnoreQueryFiltersBaselineTests
         ["ALDevToolbox/Endpoints/AccountAuthEndpoints.cs"] = 2,
         ["ALDevToolbox/Endpoints/AccountEndpoints.cs"] = 2,
         ["ALDevToolbox/Endpoints/AccountMfaEndpoints.cs"] = 2,
-        ["ALDevToolbox/Endpoints/AdminUserEndpoints.cs"] = 5,
+        ["ALDevToolbox/Endpoints/AdminUserEndpoints.cs"] = 4,
         ["ALDevToolbox/Endpoints/CookieSessionRevalidation.cs"] = 1,
         ["ALDevToolbox/Endpoints/OAuthEndpoints.cs"] = 1,
         ["ALDevToolbox/Endpoints/StartupTasks.cs"] = 4,

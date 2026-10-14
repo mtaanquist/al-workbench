@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using System.Text.Json;
+using ALDevToolbox.Data;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
@@ -8,6 +9,7 @@ using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.EntityFrameworkCore;
 using static ALDevToolbox.Endpoints.EndpointHelpers;
 
 namespace ALDevToolbox.Endpoints;
@@ -19,16 +21,59 @@ namespace ALDevToolbox.Endpoints;
 /// </summary>
 internal static class AccountPasskeyEndpoints
 {
+    /// <summary>Where the passkey card's script fetches the registration options from.</summary>
+    public const string RegistrationOptionsPath = "/account/passkeys/registration-options";
+
+    /// <summary>
+    /// The current password from the registration-options body
+    /// (<c>{"password": "..."}</c>; JSON because the caller is a fetch), or
+    /// null when there is none. Antiforgery has already been read from the
+    /// header, so the body is still unread here.
+    /// </summary>
+    private static async Task<string?> ReadPasswordAsync(HttpContext ctx, CancellationToken ct)
+    {
+        try
+        {
+            using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ct);
+            return doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("password", out var p)
+                && p.ValueKind == JsonValueKind.String
+                    ? p.GetString()
+                    : null;
+        }
+        catch (JsonException)
+        {
+            // An empty or malformed body is the same as no password.
+            return null;
+        }
+    }
+
     public static IEndpointRouteBuilder MapAccountPasskeyEndpoints(this IEndpointRouteBuilder app)
     {
         // --- Passkey self-service + login ------------------------------------
 
-        app.MapGet("/account/passkeys/registration-options", async (
-            HttpContext ctx, PasskeyService passkeys, IOrganizationContext org, CancellationToken ct) =>
+        // Adding a passkey adds a full sign-in, so it asks for the same proof as
+        // turning off two-step: a fresh step-up from an account that has
+        // something to step up with, or the current password from one that has
+        // nothing else yet. Both legs check antiforgery; the script sends the
+        // token from the passkey card's form as a header.
+        app.MapPost(RegistrationOptionsPath, async (
+            HttpContext ctx, PasskeyService passkeys, IOrganizationContext org, StepUpService stepUp,
+            IAntiforgery antiforgery, CancellationToken ct) =>
         {
             if (org.CurrentUserId is null) { ctx.Response.StatusCode = 401; return; }
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             if (!passkeys.IsConfigured) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsync("Passkeys not configured."); return; }
-            var (options, envelope) = await passkeys.BeginRegistrationAsync(org.CurrentUserId.Value, ct);
+            var userId = org.CurrentUserId.Value;
+            var refusal = await stepUp.PasskeyRegistrationRefusalAsync(ctx.User, userId, await ReadPasswordAsync(ctx, ct), ct);
+            if (refusal is not null)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { error = refusal }), ct);
+                return;
+            }
+            var (options, envelope) = await passkeys.BeginRegistrationAsync(userId, ct);
             ctx.Response.Cookies.Append(PasskeyService.RegistrationCookieName, envelope, new CookieOptions
             {
                 HttpOnly = true, SameSite = SameSiteMode.Lax, Secure = ctx.Request.IsHttps, Path = "/",
@@ -38,10 +83,16 @@ internal static class AccountPasskeyEndpoints
             await ctx.Response.WriteAsync(options.ToJson(), ct);
         }).RequireAuthorization();
 
+        // The second leg needs no fresh check of its own: the only envelope it
+        // accepts is a registration one (PasskeyService refuses a sign-in or
+        // step-up envelope here), which only the leg above mints, after its
+        // check passed; it is bound to this user and lasts five minutes.
         app.MapPost("/account/passkeys", async (
-            HttpContext ctx, PasskeyService passkeys, IOrganizationContext org, CancellationToken ct) =>
+            HttpContext ctx, PasskeyService passkeys, IOrganizationContext org, PublicOrigin publicOrigin,
+            IAntiforgery antiforgery, CancellationToken ct) =>
         {
             if (org.CurrentUserId is null) { ctx.Response.StatusCode = 401; return; }
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
             using var reader = new StreamReader(ctx.Request.Body);
             var body = await reader.ReadToEndAsync(ct);
             using var doc = JsonDocument.Parse(body);
@@ -57,9 +108,15 @@ internal static class AccountPasskeyEndpoints
             ctx.Response.Cookies.Delete(PasskeyService.RegistrationCookieName);
             try
             {
-                await passkeys.CompleteRegistrationAsync(org.CurrentUserId.Value, nickname, rawResponse, envelope, ct);
+                await passkeys.CompleteRegistrationAsync(org.CurrentUserId.Value, nickname, rawResponse, envelope,
+                    $"{publicOrigin.For(ctx)}{RouteConstants.AccountSecurity}", ct);
                 ctx.Response.StatusCode = 200;
                 await ctx.Response.WriteAsync("{\"ok\":true}");
+            }
+            catch (PlanValidationException ex)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Errors.First().Value }));
             }
             catch (Exception ex)
             {

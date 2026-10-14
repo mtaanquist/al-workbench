@@ -191,8 +191,24 @@ internal static class EndpointHelpers
         return props;
     }
 
-    /// <summary>Open-redirect guard: only allow same-site relative paths.</summary>
-    public static string ResolveSafeReturn(string requestedReturn) =>
+    /// <summary>
+    /// Open-redirect guard: only allow same-site relative paths. A trailing
+    /// fragment naming an element id (<c>#passkeys</c>) is kept, so a step-up
+    /// can land back on the card it left from; the path before it gets the
+    /// full check, and anything else after a <c>#</c> fails it.
+    /// </summary>
+    public static string ResolveSafeReturn(string requestedReturn)
+    {
+        var hash = requestedReturn?.IndexOf('#') ?? -1;
+        if (hash < 0) return ResolveSafePath(requestedReturn!);
+        var fragment = requestedReturn![(hash + 1)..];
+        var path = ResolveSafePath(requestedReturn[..hash]);
+        return path != "/" && System.Text.RegularExpressions.Regex.IsMatch(fragment, "^[A-Za-z0-9_-]{1,64}$")
+            ? $"{path}#{fragment}"
+            : path;
+    }
+
+    private static string ResolveSafePath(string requestedReturn) =>
         !string.IsNullOrEmpty(requestedReturn)
             && Uri.IsWellFormedUriString(requestedReturn, UriKind.Relative)
             && requestedReturn.StartsWith('/')

@@ -38,8 +38,8 @@ internal static class StepUpEndpoints
         // Entry: work out which factors this user can confirm with, stash the
         // pending state, and show the challenge page in its step-up dress.
         app.MapGet(Path, async (
-            HttpContext ctx, AppDbContext db, IOrganizationContext org, PasskeyService passkeys,
-            EntraSignInService entra, ALDevToolbox.Services.Tools.ToolEnablement tools,
+            HttpContext ctx, IOrganizationContext org, StepUpService stepUp,
+            ALDevToolbox.Services.Tools.ToolEnablement tools,
             IDataProtectionProvider protection, TimeProvider clock, CancellationToken ct) =>
         {
             var safeReturn = ResolveSafeReturn(ctx.Request.Query["return"].ToString());
@@ -55,25 +55,12 @@ internal static class StepUpEndpoints
                 ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
                 return;
             }
-            // Filtered: the signed-in user's own row, inside their org.
-            var user = await db.Users.AsNoTracking()
-                .Where(u => u.Id == userId.Value)
-                .Select(u => new { u.TotpEnabled, u.EmailMfaEnabled })
-                .FirstOrDefaultAsync(ct);
-            if (user is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
-
-            // A session that began with a magic link already rests on the
-            // mailbox, so an emailed code would be the same factor twice.
-            var emailUsable = user.EmailMfaEnabled && StepUpAuth.Method(ctx.User) != SignInMethod.MagicLink;
-            var passkeyAvailable = passkeys.IsConfigured
-                && await db.UserPasskeys.AnyAsync(p => p.UserId == userId.Value, ct);
-            var entraAvailable = await db.UserExternalLogins.AnyAsync(
-                    l => l.UserId == userId.Value && l.Provider == EntraSignInService.ProviderName, ct)
-                && await entra.ResolveChallengeForCurrentOrgAsync(ct) is not null;
+            var methods = await stepUp.AvailableMethodsAsync(userId.Value, StepUpAuth.Method(ctx.User), ct);
+            if (methods is null) { ctx.Response.Redirect(RouteConstants.Login); return; }
 
             SetMfaPendingCookie(ctx, protection, new MfaPending(
-                userId.Value, user.TotpEnabled, emailUsable, now, safeReturn,
-                StepUp: true, PasskeyAvailable: passkeyAvailable, EntraAvailable: entraAvailable));
+                userId.Value, methods.Totp, methods.EmailCode, now, safeReturn,
+                StepUp: true, PasskeyAvailable: methods.Passkey, EntraAvailable: methods.Entra));
             ctx.Response.Redirect("/login/challenge");
         }).RequireAuthorization();
 
