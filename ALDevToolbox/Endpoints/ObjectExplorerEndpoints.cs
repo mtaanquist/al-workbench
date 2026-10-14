@@ -414,11 +414,31 @@ internal static class ObjectExplorerEndpoints
         app.MapPost("/admin/object-explorer/{id:int}/backfill-system-references", async (
             int id,
             HttpContext ctx,
+            AppDbContext db,
             ReleaseImportRequestService imports,
             IAntiforgery antiforgery,
             CancellationToken ct) =>
         {
             if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            // Query-filtered to the caller's org, so another org's id reads as
+            // missing. Only a ready, live release has stored source to re-scan;
+            // queueing one anyway would add a job row the worker refuses, and
+            // that row would then shadow the real source on the Retry card.
+            var release = await db.OeReleases.AsNoTracking()
+                .Where(r => r.Id == id)
+                .Select(r => new { r.Status, r.DeletedAt })
+                .FirstOrDefaultAsync(ct);
+            if (release is null)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+            if (release.Status != "ready" || release.DeletedAt is not null)
+            {
+                RedirectManage(ctx, id, "Backfill",
+                    "Only a release that finished importing and isn't deleted can have its system references backfilled.");
+                return;
+            }
             var source = new ReleaseImportSource.Backfill();
             await imports.EnqueueImportAsync(id, source, storeSymbolReference: false, ct);
             ctx.Response.Redirect($"/admin/object-explorer/release/{id}/manage?ok=backfill-queued");

@@ -173,6 +173,19 @@ internal static class CompareEndpoints
             return $"One of the texts is too large ({text.Length:N0} characters). Trim it under {MaxInputLength:N0} and try again.";
         }
 
+        var lines = CountLines(text);
+        return lines > MaxLines
+            ? $"One of the texts has too many lines ({lines:N0}). Trim it under {MaxLines:N0} lines and try again."
+            : null;
+    }
+
+    /// <summary>
+    /// Lines as DiffPlex's line chunker splits them (<c>\r\n</c>, <c>\r</c>
+    /// or <c>\n</c>). Shared with the Object Explorer's file compare page,
+    /// which names the side and its size when it refuses (#1339).
+    /// </summary>
+    internal static int CountLines(string text)
+    {
         var lines = 1;
         for (var i = 0; i < text.Length; i++)
         {
@@ -182,10 +195,7 @@ internal static class CompareEndpoints
             if (c == '\r' && i + 1 < text.Length && text[i + 1] == '\n') i++;
             lines++;
         }
-
-        return lines > MaxLines
-            ? $"One of the texts has too many lines ({lines:N0}). Trim it under {MaxLines:N0} lines and try again."
-            : null;
+        return lines;
     }
 
     private static object BuildResponse(string left, string right, bool ignoreWhitespace, CancellationToken cancellationToken)

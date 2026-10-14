@@ -256,6 +256,13 @@ public sealed class ExplorerTreeService
     private const int MaxFilesPerFolder = 400;
 
     /// <summary>
+    /// How many files one section of the kind grouping draws before its own
+    /// "N more" row. Smaller than a folder's cap: every section arrives with
+    /// its rows, so a large app pays for all of them on the first paint.
+    /// </summary>
+    private const int MaxFilesPerKindSection = 100;
+
+    /// <summary>
     /// The AL object a file row reads as: the first object declared in the
     /// file, by line number. AL enforces one object per file in practice, so
     /// "first" is unambiguous for everything except a hand-bundled .al.
@@ -364,27 +371,35 @@ public sealed class ExplorerTreeService
         long moduleId, string grouping, long? activeFileId = null, CancellationToken ct = default)
     {
         if (!await _visibility.ModuleVisibleAsync(moduleId, ct)) return [];
-        var files = await ListModuleFilesAsync(moduleId, ct);
         var mark = (OeTreeNode n) => n with { IsActive = n.FileId != null && n.FileId == activeFileId };
 
         if (TreeGrouping.Parse(grouping) != TreeGrouping.Kind)
         {
-            return files.Select(mark).ToList();
+            var flat = await ListModuleFilesAsync(moduleId, ct);
+            return flat.Select(mark).ToList();
         }
+
+        // Grouped from every file, not from the capped flat list: that list is
+        // the alphabetically first few hundred, so on a large app each badge
+        // counted a subset and whole kinds went missing (#1339). Each section
+        // is capped on its own instead, with its own overflow row.
+        var rows = await LoadModuleFileRowsAsync(moduleId, ct);
 
         // Sections in a fixed reading order rather than alphabetical: an AL
         // developer looks for tables and pages far more often than for a
-        // permission set, and the overflow row (if the app was capped) belongs
-        // at the end whatever happens.
-        var nodes = new List<OeTreeNode>(files.Count + 12);
-        var groups = files
-            .Where(f => f.Kind == "file")
-            .GroupBy(f => KindSectionTitle(f.ObjectKind))
+        // permission set.
+        var groups = rows
+            .GroupBy(f => KindSectionTitle(f.Kind))
             .OrderBy(g => KindSectionRank(g.Key))
             .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
 
+        // Only the section holding the open file starts open; the rest arrive
+        // folded, their rows already in the list but hidden, so opening one
+        // never asks the server again.
+        var nodes = new List<OeTreeNode>();
         foreach (var group in groups)
         {
+            var open = activeFileId is { } active && group.Any(f => f.Id == active);
             nodes.Add(new OeTreeNode(
                 Kind: "section",
                 Name: group.Key,
@@ -392,13 +407,13 @@ public sealed class ExplorerTreeService
                 ModuleId: moduleId,
                 Depth: 0,
                 HasChildren: true,
-                IsOpen: true,
+                IsOpen: open,
                 IsActive: false,
                 Badge: group.Count().ToString("N0")));
-            nodes.AddRange(group.Select(f => mark(f with { Depth = 1 })));
+            nodes.AddRange(BuildFileNodes(moduleId, group, depth: 1, cap: MaxFilesPerKindSection,
+                    overflowNoun: hidden => SectionNoun(group.Key, hidden))
+                .Select(n => mark(n) with { IsHidden = !open }));
         }
-
-        nodes.AddRange(files.Where(f => f.Kind == "overflow"));
         return nodes;
     }
 
@@ -429,6 +444,22 @@ public sealed class ExplorerTreeService
         "" => "Other files",
         var other => char.ToUpperInvariant(other[0]) + other[1..] + "s",
     };
+
+    /// <summary>
+    /// What a section's overflow row calls its files: the heading in running
+    /// text ("tables", "table extensions"), singular for one, and plain
+    /// "files" for "Other files". An all-caps prefix such as XMLports keeps
+    /// its case.
+    /// </summary>
+    private static string SectionNoun(string title, int count)
+    {
+        var plural = title == "Other files"
+            ? "files"
+            : title.Length > 1 && char.IsUpper(title[1]) ? title : char.ToLowerInvariant(title[0]) + title[1..];
+        if (count != 1) return plural;
+        if (plural.EndsWith("ies", StringComparison.Ordinal)) return plural[..^3] + "y";
+        return plural.EndsWith('s') ? plural[..^1] : plural;
+    }
 
     private static int KindSectionRank(string title) => title switch
     {
@@ -462,6 +493,16 @@ public sealed class ExplorerTreeService
         long moduleId, CancellationToken ct = default)
     {
         if (!await _visibility.ModuleVisibleAsync(moduleId, ct)) return [];
+        return BuildFileNodes(moduleId, await LoadModuleFileRowsAsync(moduleId, ct));
+    }
+
+    /// <summary>
+    /// Every file of one module with its primary object, uncapped. The caller
+    /// has already checked the module is visible.
+    /// </summary>
+    private async Task<List<(long Id, string Tail, string Path, string? Kind, string? Name, int? ObjectId)>> LoadModuleFileRowsAsync(
+        long moduleId, CancellationToken ct)
+    {
         var files = await _db.OeModuleFiles.AsNoTracking()
             .Where(f => f.ModuleId == moduleId)
             .Select(f => new { f.Id, f.Path })
@@ -469,11 +510,11 @@ public sealed class ExplorerTreeService
 
         var objects = await LoadPrimaryObjectsForModuleAsync(moduleId, ct);
 
-        return BuildFileNodes(moduleId, files.Select(f =>
+        return files.Select(f =>
         {
             var obj = objects.GetValueOrDefault(f.Id);
             return (f.Id, Tail: FileNameOf(f.Path), f.Path, obj?.Kind, obj?.Name, obj?.ObjectId);
-        }), ct: ct);
+        }).ToList();
     }
 
     /// <summary>
@@ -623,22 +664,24 @@ public sealed class ExplorerTreeService
     private static List<OeTreeNode> BuildFileNodes(
         long moduleId,
         IEnumerable<(long Id, string Tail, string Path, string? Kind, string? Name, int? ObjectId)> files,
-        CancellationToken ct = default)
+        int depth = 0,
+        int cap = MaxFilesPerFolder,
+        Func<int, string>? overflowNoun = null)
     {
         var ordered = files
             .Select(f => (f.Id, f.Tail, f.Path, f.Kind, f.ObjectId, Display: DisplayName(f.Name, f.Tail)))
             .OrderBy(f => f.Display, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var nodes = new List<OeTreeNode>(Math.Min(ordered.Count, MaxFilesPerFolder) + 1);
-        foreach (var f in ordered.Take(MaxFilesPerFolder))
+        var nodes = new List<OeTreeNode>(Math.Min(ordered.Count, cap) + 1);
+        foreach (var f in ordered.Take(cap))
         {
             nodes.Add(new OeTreeNode(
                 Kind: "file",
                 Name: f.Display,
                 Path: f.Path,
                 ModuleId: moduleId,
-                Depth: 0,
+                Depth: depth,
                 HasChildren: false,
                 IsOpen: false,
                 IsActive: false,
@@ -648,15 +691,17 @@ public sealed class ExplorerTreeService
                 Badge: f.ObjectId?.ToString()));
         }
 
-        var hidden = ordered.Count - MaxFilesPerFolder;
+        var hidden = ordered.Count - cap;
         if (hidden > 0)
         {
             nodes.Add(new OeTreeNode(
                 Kind: "overflow",
-                Name: $"{hidden:N0} more - search to find them",
+                Name: overflowNoun is null
+                    ? $"{hidden:N0} more - search to find them"
+                    : $"{hidden:N0} more {overflowNoun(hidden)} - type a name in the search box above",
                 Path: string.Empty,
                 ModuleId: moduleId,
-                Depth: 0,
+                Depth: depth,
                 HasChildren: false,
                 IsOpen: false,
                 IsActive: false));

@@ -626,6 +626,8 @@ public sealed record TranslationMatch(
 /// do (we only emit folders that have descendants); modules always do.</param>
 /// <param name="Badge">The right-aligned mono label: a module's version, or
 /// an object's AL id.</param>
+/// <param name="IsHidden">Drawn hidden: a row under a section that starts
+/// folded. It is in the list so the section opens without a fetch.</param>
 public sealed record OeTreeNode(
     string Kind,
     string Name,
@@ -638,7 +640,8 @@ public sealed record OeTreeNode(
     long? FileId = null,
     string? ObjectKind = null,
     string? FileName = null,
-    string? Badge = null);
+    string? Badge = null,
+    bool IsHidden = false);
 
 /// <summary>
 /// One declaration the viewer should make clickable. Coordinates are 1-based

@@ -98,7 +98,7 @@
             var msg = ctx.Request.Query["msg"].ToString();
             if (!string.IsNullOrEmpty(err) && !string.IsNullOrEmpty(msg))
             {
-                _errorMessage = $"{err}: {msg}";
+                _errorMessage = msg;
             }
         }
         return Task.CompletedTask;

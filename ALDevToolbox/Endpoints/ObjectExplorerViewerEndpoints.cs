@@ -153,8 +153,7 @@ internal static class ObjectExplorerViewerEndpoints
             if (match.Hash is null || match.Content is null) return Results.NotFound();
 
             var safe = SanitiseFileName(match.Label) + "-" + SanitiseFileName(match.Name) + ".SymbolReference.json";
-            ctx.Response.ContentType = "application/json; charset=utf-8";
-            ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"{safe}\"";
+            WriteAttachmentHeaders(ctx, safe, "application/json; charset=utf-8");
             await using var writer = new StreamWriter(ctx.Response.Body, System.Text.Encoding.UTF8, bufferSize: 64 * 1024, leaveOpen: true);
             await writer.WriteAsync(match.Content.AsMemory(), ct).ConfigureAwait(false);
             await writer.FlushAsync(ct).ConfigureAwait(false);
