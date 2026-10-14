@@ -45,6 +45,31 @@ public sealed class McpToolGateTests : IDisposable
     }
 
     [Fact]
+    public async Task Build_reads_follow_the_build_pipelines_switch_whose_pages_show_them()
+    {
+        // The builds' only pages are /pipelines and /artifacts, so switching Build
+        // pipelines off has to take the build tools with it (#1344, MCP-2), while
+        // the Solutions switch alone leaves them be.
+        await DisableForOrgAsync(ToolKey.Pipelines);
+        await using (var ctx = _db.NewContext())
+        {
+            var gate = new McpToolGate(_db.NewToolEnablement(ctx));
+            (await gate.IsAvailableAsync("list_solution_builds")).Should().BeFalse();
+            (await gate.IsAvailableAsync("get_solution_build")).Should().BeFalse();
+            (await gate.IsAvailableAsync("compare_solution_builds")).Should().BeFalse();
+            (await gate.IsAvailableAsync("list_solutions")).Should().BeTrue();
+        }
+
+        await DisableForOrgAsync(ToolKey.Projects);
+        await using (var ctx = _db.NewContext())
+        {
+            var gate = new McpToolGate(_db.NewToolEnablement(ctx));
+            (await gate.IsAvailableAsync("get_solution_build")).Should().BeTrue();
+            (await gate.IsAvailableAsync("list_solutions")).Should().BeFalse();
+        }
+    }
+
+    [Fact]
     public async Task A_tool_switched_off_site_wide_is_refused_even_where_the_organisation_left_it_on()
     {
         var site = TestDb.EverythingEnabled();
