@@ -12,10 +12,10 @@ using OpenIddict.Abstractions;
 namespace ALDevToolbox.Tests.OAuth;
 
 /// <summary>
-/// <see cref="OAuthClientAdminService.RevokeConsentAsync"/> reads the consent
-/// table with <c>IgnoreQueryFilters()</c> and re-imposes scope by hand in
-/// three modes — self-service, org admin, SiteAdmin — refusing silently in the
-/// first two. A broken guard means a user revoking someone else's consent just
+/// <see cref="OAuthClientAdminService.RevokeConsentAsync"/> has three modes —
+/// self-service, org admin, SiteAdmin — and only the last reads the consent
+/// table with <c>IgnoreQueryFilters()</c> (#1337); the first two stay inside
+/// the tenant filter, re-check scope by hand, and refuse silently. A broken guard means a user revoking someone else's consent just
 /// works, with nothing but a log line to show for it. See issue #667.
 /// </summary>
 public sealed class OAuthClientAdminServiceTests : IDisposable

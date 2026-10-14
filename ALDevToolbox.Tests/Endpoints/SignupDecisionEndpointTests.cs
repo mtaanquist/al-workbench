@@ -52,7 +52,30 @@ public sealed class SignupDecisionEndpointTests : IDisposable
             .And.Contain(Uri.EscapeDataString("This request has already been decided."));
     }
 
-    private async Task<int> SeedAsync()
+    [Theory]
+    [InlineData("approve")]
+    [InlineData("reject")]
+    public async Task A_decision_on_another_organisations_request_is_refused_and_changes_nothing(string action)
+    {
+        // The endpoint reads the request inside the tenant filter (#1337), so
+        // another org's id finds nothing and the service's refusal is what
+        // the admin sees.
+        var requestId = await SeedAsync(requestOrgId: TestDb.OtherOrgId);
+        var (client, token) = await SignInAsAdminAsync();
+
+        using var response = await PostAsync(client, $"/admin/users/{requestId}/{action}", token);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        response.Headers.Location!.OriginalString.Should().Contain("err=")
+            .And.Contain(Uri.EscapeDataString("Request not found in this organisation."));
+        await using var read = _db.NewContext();
+        (await read.SignupRequests.IgnoreQueryFilters().SingleAsync(r => r.Id == requestId)).Decision
+            .Should().Be(SignupDecision.Pending);
+        (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == "newcomer@cronus.example"))
+            .Should().BeTrue("a refused rejection must not delete the other org's pending user");
+    }
+
+    private async Task<int> SeedAsync(int requestOrgId = TestDb.DefaultOrgId)
     {
         await using var seed = _db.NewContext();
         var hash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password);
@@ -68,7 +91,7 @@ public sealed class SignupDecisionEndpointTests : IDisposable
         });
         var pending = new User
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = requestOrgId,
             Email = "newcomer@cronus.example",
             DisplayName = "Nina Newcomer",
             PasswordHash = hash,
@@ -80,7 +103,7 @@ public sealed class SignupDecisionEndpointTests : IDisposable
         await seed.SaveChangesAsync();
         var request = new SignupRequest
         {
-            OrganizationId = TestDb.DefaultOrgId,
+            OrganizationId = requestOrgId,
             UserId = pending.Id,
             Email = pending.Email,
             RequestedAt = DateTime.UtcNow,

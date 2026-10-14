@@ -135,6 +135,18 @@ public sealed class UserAdministrationService
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["LastAdmin"] = "You can't disable the last active admin in this organisation." });
         }
+        // A SiteAdmin's last-one guard is deployment-wide, so the org lock above
+        // doesn't cover it: a demote on /site-admin never takes that row. Take
+        // the SiteAdmin guard's own lock too, after the org one, so both paths
+        // queue on it (#1337). Taken only for a SiteAdmin, so ordinary disables
+        // never serialise across organisations.
+        if (user.IsSiteAdmin)
+        {
+            await SiteAdminService.LockSiteAdminGuardAsync(_db, ct);
+            // Re-read under the lock: a demote that committed while we waited
+            // has already taken the flag away.
+            await _db.Entry(user).ReloadAsync(ct);
+        }
         // The acting SiteAdmin is an active SiteAdmin in this org, so this only
         // bites when they disable themselves with nobody else to fall back on.
         // Counted inside the query filter (the request's own org): a SiteAdmin

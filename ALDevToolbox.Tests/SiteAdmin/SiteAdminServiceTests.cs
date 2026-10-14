@@ -121,6 +121,82 @@ public sealed class SiteAdminServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_site_admins_demoting_each_other_at_once_leave_one_standing()
+    {
+        // Count-then-save without a lock let both demotes count the other and
+        // both go ahead, leaving nobody able to reach /site-admin (#1337). A
+        // race is not certain to interleave on any one try, so run several.
+        for (var round = 1; round <= 8; round++)
+        {
+            var (first, second) = await SeedSiteAdminPairAsync(round);
+
+            var outcomes = await Task.WhenAll(
+                AttemptAsync(ctx => NewSiteAdminService(ctx).DemoteAsync(first)),
+                AttemptAsync(ctx => NewSiteAdminService(ctx).DemoteAsync(second)));
+
+            outcomes.Count(ok => ok).Should().Be(1, $"exactly one of the two may go ahead (round {round})");
+            (await ActiveSiteAdminCountAsync()).Should().Be(1, $"the deployment keeps a SiteAdmin (round {round})");
+        }
+    }
+
+    [Fact]
+    public async Task A_demote_racing_a_disable_leaves_one_site_admin_standing()
+    {
+        // The org Admin page's disable locks only the organisation row, which a
+        // demote never takes, so the two paths share the SiteAdmin guard's own
+        // lock (#1337).
+        for (var round = 1; round <= 8; round++)
+        {
+            var (first, second) = await SeedSiteAdminPairAsync(round);
+            var demoteFirst = round % 2 == 0;
+
+            var outcomes = await Task.WhenAll(
+                AttemptAsync(ctx => NewSiteAdminService(ctx).DemoteAsync(demoteFirst ? first : second)),
+                AttemptAsync(ctx => NewUserAdministrationService(ctx)
+                    .DisableUserAsync(demoteFirst ? second : first, TestDb.DefaultOrgId)));
+
+            outcomes.Count(ok => ok).Should().Be(1, $"exactly one of the two may go ahead (round {round})");
+            (await ActiveSiteAdminCountAsync()).Should().Be(1, $"the deployment keeps a SiteAdmin (round {round})");
+        }
+    }
+
+    /// <summary>
+    /// Clears every SiteAdmin flag left by earlier rounds and seeds two fresh
+    /// active SiteAdmins in the default organisation.
+    /// </summary>
+    private async Task<(int First, int Second)> SeedSiteAdminPairAsync(int round)
+    {
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.Users.IgnoreQueryFilters()
+                .ExecuteUpdateAsync(s => s.SetProperty(u => u.IsSiteAdmin, false));
+        }
+        var first = await SeedSingleUser(email: $"race-{round}-a@example.com", siteAdmin: true);
+        var second = await SeedSingleUser(email: $"race-{round}-b@example.com", siteAdmin: true);
+        return (first, second);
+    }
+
+    private async Task<bool> AttemptAsync(Func<ALDevToolbox.Data.AppDbContext, Task> op)
+    {
+        await using var ctx = _db.NewContext();
+        try { await op(ctx); return true; }
+        catch (PlanValidationException ex) when (ex.Errors.ContainsKey("LastSiteAdmin")) { return false; }
+    }
+
+    private async Task<int> ActiveSiteAdminCountAsync()
+    {
+        await using var read = _db.NewContext();
+        return await read.Users.IgnoreQueryFilters()
+            .CountAsync(u => u.IsSiteAdmin && u.Status == UserStatus.Active);
+    }
+
+    private static SiteAdminService NewSiteAdminService(ALDevToolbox.Data.AppDbContext ctx) =>
+        new(ctx, NewSiteAdminContext(), NullLogger<SiteAdminService>.Instance);
+
+    private UserAdministrationService NewUserAdministrationService(ALDevToolbox.Data.AppDbContext ctx) =>
+        new(ctx, TimeProvider.System, _db.OpenIddictTokens, NewSiteAdminContext());
+
+    [Fact]
     public async Task Promote_without_site_admin_context_throws()
     {
         var userId = await SeedSingleUser();

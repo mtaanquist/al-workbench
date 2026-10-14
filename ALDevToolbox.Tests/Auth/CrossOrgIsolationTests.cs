@@ -134,6 +134,55 @@ public sealed class CrossOrgIsolationTests : IDisposable
             .Should().NotBe(TestDb.OtherOrgId);
     }
 
+    /// <summary>
+    /// Since #1260, <c>SystemSettings</c> and <c>Backup</c> audit rows carry no
+    /// organisation (they belong to the whole deployment, and their snapshots
+    /// hold the SMTP host and the off-site bucket). The query filter admits
+    /// null-org rows to every tenant, so <c>AuditService</c>'s own
+    /// <c>organization_id</c> predicates are the only thing keeping them off an
+    /// ordinary organisation's audit page. Pin every read (#1346).
+    /// </summary>
+    [Fact]
+    public async Task Deployment_wide_audit_rows_never_reach_an_organisations_audit_reads()
+    {
+        int deploymentRowId;
+        AuditLogEntry mineEarlier;
+        await using (var seed = _db.NewContext())
+        {
+            // An org-owned row about the same subject, earlier, so "what came
+            // next" for it would be the deployment-wide row if the predicate went.
+            mineEarlier = NewAuditEntry(TestDb.DefaultOrgId, "mine-earlier");
+            mineEarlier.EntityType = AuditEntityType.SystemSettings;
+            mineEarlier.EntityId = 1;
+            mineEarlier.Timestamp = DateTime.UtcNow.AddMinutes(-5);
+            var deploymentRow = NewAuditEntry(null, "root");
+            deploymentRow.EntityType = AuditEntityType.SystemSettings;
+            deploymentRow.EntityId = 1;
+            deploymentRow.SnapshotJson = """{"SmtpHost":"smtp.cronus.example"}""";
+            seed.AuditLog.AddRange(mineEarlier, deploymentRow);
+            await seed.SaveChangesAsync();
+            deploymentRowId = deploymentRow.Id;
+        }
+
+        _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.AuditLog.AnyAsync(e => e.Id == deploymentRowId))
+                .Should().BeTrue("the filter admits null-org rows, which is why the service predicates matter");
+        }
+
+        var svc = new AuditService(_db.NewContextFactory(), _db.OrgContext);
+        (await svc.GetRecentAsync()).Should().NotContain(e => e.Id == deploymentRowId);
+        var (paged, total) = await svc.GetPagedAsync(
+            new AuditFilter(AuditEntityType.SystemSettings, null, null, null, null, null), 0, 100);
+        paged.Should().NotContain(e => e.Id == deploymentRowId);
+        total.Should().Be(1, "only the organisation's own row counts");
+        (await svc.GetForEntityAsync(AuditEntityType.SystemSettings, 1))
+            .Should().NotContain(e => e.Id == deploymentRowId);
+        (await svc.GetByIdAsync(deploymentRowId)).Should().BeNull();
+        (await svc.GetNextForEntityAsync(mineEarlier)).Should().BeNull();
+    }
+
     [Fact]
     public async Task IgnoreQueryFilters_lets_pre_login_paths_read_across_orgs()
     {

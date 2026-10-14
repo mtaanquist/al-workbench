@@ -86,6 +86,13 @@ public enum AuditEntityType
     /// that belongs in the log. Named by the passkey's nickname.
     /// </summary>
     Passkey,
+
+    /// <summary>
+    /// An organisation, audited only for its security policy (step-up tools and
+    /// window, MCP opt-out, switched-off tools) and the SiteAdmin's storage quota
+    /// override. Filed under the organisation itself. See <c>.design/auth-and-audit.md</c>.
+    /// </summary>
+    Organization,
 }
 
 /// <summary>The kind of change captured by an audit row.</summary>
