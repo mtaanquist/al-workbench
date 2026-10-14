@@ -33,6 +33,12 @@ public static class GatewayEndpoints
     /// <summary>A registration or heartbeat body is a few hundred bytes; this is generous.</summary>
     private const int MaxSmallBodyBytes = 64 * 1024;
 
+    /// <summary>
+    /// A heartbeat that carries the gateway's policy report: up to
+    /// <see cref="GatewayService.MaxPolicyJsonChars"/> of policy, plus the rest.
+    /// </summary>
+    private const int MaxHeartbeatBodyBytes = GatewayService.MaxPolicyJsonChars + MaxSmallBodyBytes;
+
     /// <summary>A progress post: up to <see cref="GatewayCommandService.MaxProgressLines"/> lines of text.</summary>
     private const int MaxProgressBodyBytes = 1024 * 1024;
 
@@ -61,7 +67,7 @@ public static class GatewayEndpoints
         group.MapPost("/heartbeat", async (HttpContext ctx, GatewayService gateways, GatewayCommandService commands, CancellationToken ct) =>
         {
             var gatewayId = GatewayIdOf(ctx);
-            var request = await ReadJsonAsync<GatewayHeartbeatRequest>(ctx, MaxSmallBodyBytes, ct);
+            var request = await ReadJsonAsync<GatewayHeartbeatRequest>(ctx, MaxHeartbeatBodyBytes, ct);
             if (request is null) return Malformed();
             try
             {

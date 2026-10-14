@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
@@ -79,6 +80,13 @@ public sealed class GatewayService
 
     /// <summary>Longest machine name or version string a gateway may report.</summary>
     public const int MaxReportedLength = 255;
+
+    /// <summary>
+    /// The largest policy report stored, as JSON characters. A gateway's own limits
+    /// (200 tiers) keep a real one far below it; a larger one is not stored and the
+    /// last one is kept, rather than failing the heartbeat that carried it.
+    /// </summary>
+    public const int MaxPolicyJsonChars = 256 * 1024;
 
     /// <summary>How long a registration code works.</summary>
     public static readonly TimeSpan CodeLifetime = TimeSpan.FromHours(1);
@@ -499,17 +507,34 @@ public sealed class GatewayService
         if (machineName.Length > MaxReportedLength) errors["machineName"] = $"The computer name is longer than {MaxReportedLength} characters.";
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
+        // The policy report comes with some heartbeats only (after the gateway starts,
+        // after its file changed, every 15 minutes); the others keep the stored one.
+        string? policyJson = null;
+        if (request.Policy is not null)
+        {
+            policyJson = JsonSerializer.Serialize(request.Policy);
+            if (policyJson.Length > MaxPolicyJsonChars)
+            {
+                _logger.LogWarning("Gateway {GatewayId} reported a policy of {Length} characters; keeping the one stored before.", gatewayId, policyJson.Length);
+                policyJson = null;
+            }
+        }
+
         var now = Now;
+        var reportedVersion = NullIfEmpty(version);
         // ExecuteUpdate on purpose: a heartbeat a minute is not an audit row a minute.
         var live = _db.Gateways.Where(g => g.Id == gatewayId && g.RevokedAt == null);
-        var updated = machineName.Length > 0
-            ? await live.ExecuteUpdateAsync(s => s
-                .SetProperty(g => g.LastSeenAt, now)
-                .SetProperty(g => g.ReportedVersion, NullIfEmpty(version))
-                .SetProperty(g => g.MachineName, machineName), ct).ConfigureAwait(false)
-            : await live.ExecuteUpdateAsync(s => s
-                .SetProperty(g => g.LastSeenAt, now)
-                .SetProperty(g => g.ReportedVersion, NullIfEmpty(version)), ct).ConfigureAwait(false);
+        var updated = await live.ExecuteUpdateAsync(s =>
+        {
+            s.SetProperty(g => g.LastSeenAt, now);
+            s.SetProperty(g => g.ReportedVersion, reportedVersion);
+            if (machineName.Length > 0) s.SetProperty(g => g.MachineName, machineName);
+            if (policyJson is not null)
+            {
+                s.SetProperty(g => g.EffectivePolicyJson, policyJson);
+                s.SetProperty(g => g.PolicyReportedAt, now);
+            }
+        }, ct).ConfigureAwait(false);
         if (updated == 0) return null;
 
         // Revoked between the update and this read: answer as if the update had missed.

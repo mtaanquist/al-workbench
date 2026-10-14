@@ -515,6 +515,52 @@ public sealed class GatewayServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Heartbeat_stores_the_policy_report_when_it_carries_one_and_keeps_it_when_it_does_not()
+    {
+        await SeedAsync();
+        using var key = GatewayTestKit.NewKey();
+        var registered = await GatewayTestKit.RegisterAsync(_db, _clock, TestDb.DefaultOrgId, _admin.Id, key);
+        var asGateway = new AmbientOrganizationContext { CurrentOrganizationId = TestDb.DefaultOrgId };
+        var report = new GatewayPolicyReport
+        {
+            State = GatewayPolicyStates.Valid,
+            Instances =
+            [
+                new GatewayPolicyInstance
+                {
+                    Machine = "CRONUS-BC01",
+                    Name = "BC140",
+                    Environment = "production",
+                    Allow = ["inventory", "publish"],
+                    ChangeHours = "20:00-06:00",
+                    Tenants = ["default"],
+                },
+            ],
+        };
+
+        await using (var ctx = _db.NewContext(asGateway))
+        {
+            await GatewayTestKit.NewService(ctx, asGateway, _clock).HeartbeatAsync(
+                registered.GatewayId, new GatewayHeartbeatRequest { Version = "1.3.0", Policy = report });
+        }
+        var reportedAt = _clock.GetUtcNow().UtcDateTime;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await using (var ctx = _db.NewContext(asGateway))
+        {
+            await GatewayTestKit.NewService(ctx, asGateway, _clock).HeartbeatAsync(
+                registered.GatewayId, new GatewayHeartbeatRequest { Version = "1.3.0" });
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var gateway = await ctx.Gateways.AsNoTracking().SingleAsync();
+            gateway.PolicyReportedAt.Should().Be(reportedAt, "a heartbeat without a report keeps the stored one");
+            var stored = System.Text.Json.JsonSerializer.Deserialize<GatewayPolicyReport>(gateway.EffectivePolicyJson!)!;
+            stored.Should().BeEquivalentTo(report);
+        }
+    }
+
+    [Fact]
     public async Task Heartbeat_is_not_audited_but_an_approval_is()
     {
         await SeedAsync();
