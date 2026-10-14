@@ -410,7 +410,8 @@ public sealed class ExplorerTreeService
                 IsOpen: open,
                 IsActive: false,
                 Badge: group.Count().ToString("N0")));
-            nodes.AddRange(BuildFileNodes(moduleId, group, depth: 1, cap: MaxFilesPerKindSection)
+            nodes.AddRange(BuildFileNodes(moduleId, group, depth: 1, cap: MaxFilesPerKindSection,
+                    overflowNoun: hidden => SectionNoun(group.Key, hidden))
                 .Select(n => mark(n) with { IsHidden = !open }));
         }
         return nodes;
@@ -443,6 +444,22 @@ public sealed class ExplorerTreeService
         "" => "Other files",
         var other => char.ToUpperInvariant(other[0]) + other[1..] + "s",
     };
+
+    /// <summary>
+    /// What a section's overflow row calls its files: the heading in running
+    /// text ("tables", "table extensions"), singular for one, and plain
+    /// "files" for "Other files". An all-caps prefix such as XMLports keeps
+    /// its case.
+    /// </summary>
+    private static string SectionNoun(string title, int count)
+    {
+        var plural = title == "Other files"
+            ? "files"
+            : title.Length > 1 && char.IsUpper(title[1]) ? title : char.ToLowerInvariant(title[0]) + title[1..];
+        if (count != 1) return plural;
+        if (plural.EndsWith("ies", StringComparison.Ordinal)) return plural[..^3] + "y";
+        return plural.EndsWith('s') ? plural[..^1] : plural;
+    }
 
     private static int KindSectionRank(string title) => title switch
     {
@@ -648,7 +665,8 @@ public sealed class ExplorerTreeService
         long moduleId,
         IEnumerable<(long Id, string Tail, string Path, string? Kind, string? Name, int? ObjectId)> files,
         int depth = 0,
-        int cap = MaxFilesPerFolder)
+        int cap = MaxFilesPerFolder,
+        Func<int, string>? overflowNoun = null)
     {
         var ordered = files
             .Select(f => (f.Id, f.Tail, f.Path, f.Kind, f.ObjectId, Display: DisplayName(f.Name, f.Tail)))
@@ -678,7 +696,9 @@ public sealed class ExplorerTreeService
         {
             nodes.Add(new OeTreeNode(
                 Kind: "overflow",
-                Name: $"{hidden:N0} more - search to find them",
+                Name: overflowNoun is null
+                    ? $"{hidden:N0} more - search to find them"
+                    : $"{hidden:N0} more {overflowNoun(hidden)} - type a name in the search box above",
                 Path: string.Empty,
                 ModuleId: moduleId,
                 Depth: depth,

@@ -108,9 +108,17 @@ public sealed class ObjectExplorerLowsEndpointTests : IDisposable
         var html = await client.GetStringAsync($"/object-explorer/compare/file?left={left}&right={right}");
 
         html.Should().Contain("These files are too long to compare here");
+        html.Should().Contain("The left file has 15,001 lines - more than the 15,000 this view can compare.",
+            because: "the reader is told which side is over, and by how much");
         html.Should().Contain($"/object-explorer/file/{left}").And.Contain($"/object-explorer/file/{right}");
         html.Should().NotContain("data-diff=", because: "no diff was run");
         html.Should().NotContain("Ignore whitespace", because: "there is nothing to re-diff");
+        html.Should().NotContain("next change", because: "the keyboard hints walk a diff that is not there");
+
+        // Swap sides keeps the state, and the sentence follows the file.
+        html.Should().Contain($"compare/file?left={right}&amp;right={left}");
+        var swapped = await client.GetStringAsync($"/object-explorer/compare/file?left={right}&right={left}");
+        swapped.Should().Contain("The right file has 15,001 lines").And.NotContain("data-diff=");
     }
 
     [Fact]
@@ -130,7 +138,11 @@ public sealed class ObjectExplorerLowsEndpointTests : IDisposable
         var html = await client.GetStringAsync($"/object-explorer/compare/file?left={left}&right={right}");
 
         html.Should().Contain("The server is busy comparing other files");
+        html.Should().Contain("Try again in a moment, or open each file on its own.");
+        html.Should().MatchRegex($@"href=""[^""]*compare/file\?left={left}&amp;right={right}[^""]*""[^>]*>Try again</a>",
+            because: "the busy state offers a button that reruns the same comparison");
         html.Should().NotContain("data-diff=");
+        html.Should().NotContain("next change");
 
         // And the same pair diffs once a slot is free.
         gate.Semaphore.Release();

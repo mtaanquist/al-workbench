@@ -190,6 +190,37 @@ public sealed class ReleaseImportRequestServiceTests : IDisposable
         queue.Reader.TryRead(out _).Should().BeFalse();
     }
 
+    /// <summary>
+    /// #1338: a release whose only job is a backfill has no saved source. The
+    /// manage page shows only the URL field then, so an empty Retry asks for
+    /// exactly that.
+    /// </summary>
+    [Fact]
+    public async Task Retrying_with_no_saved_source_and_no_url_asks_for_the_dvd_url()
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var release = new Domain.Entities.ObjectExplorer.OeRelease
+        {
+            OrganizationId = TestDb.DefaultOrgId, Label = "CRONUS 25.4 (DK)", Kind = "first_party", Status = "failed",
+            ImportedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        ctx.OeReleases.Add(release);
+        await ctx.SaveChangesAsync();
+        await new PersistedImportJobs(ctx, TimeProvider.System).CreateAsync(release.Id,
+            new AmbientOrganizationScope.OrganizationIdentity(TestDb.DefaultOrgId, null, false, true),
+            new ReleaseImportSource.Backfill(), storeSymbolReference: false);
+        var queue = new ReleaseImportQueue();
+
+        var act = () => NewService(ctx, queue).RetryAsync(release.Id, new ReleaseRetrySubmission(
+            DvdUrl: string.Empty, CalEncoding: "850", StoreSymbolReference: false, FolderZip: null, CalTxtFile: null));
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("Retry")
+            .WhoseValue.Should().Be("Paste the DVD's download URL to retry.");
+        (await StatusAsync(release.Id)).Should().Be("failed");
+    }
+
     private async Task<string?> StatusAsync(int releaseId)
     {
         await using var read = _db.NewContext();

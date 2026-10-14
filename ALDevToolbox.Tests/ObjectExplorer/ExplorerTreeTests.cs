@@ -602,7 +602,8 @@ public sealed class ExplorerTreeTests : IDisposable
         var under = tree.Skip(tree.IndexOf(other) + 1).TakeWhile(n => n.Depth == 1).ToList();
         under.Count(n => n.Kind == "file").Should().Be(100);
         under[^1].Kind.Should().Be("overflow", because: "the cut section says what it left out, at its own end");
-        under[^1].Name.Should().Contain($"{otherTotal - 100:N0} more");
+        under[^1].Name.Should().Be($"{otherTotal - 100:N0} more files - type a name in the search box above",
+            because: "the row names what it left out and where to find it");
         other.IsOpen.Should().BeFalse(because: "the open file is not in it");
         under.Should().OnlyContain(n => n.IsHidden, because: "a folded section's rows, overflow row included, start hidden");
 

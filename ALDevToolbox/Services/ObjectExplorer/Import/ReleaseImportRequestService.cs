@@ -361,6 +361,12 @@ public sealed class ReleaseImportRequestService
                 // was queued with, the same one a restart resumes from (#1222).
                 artifactUrl = originalArtifactUrl;
             }
+            else if (origin is null || origin.Kind is not ("url" or "bc_artifact" or "staged_zip" or "cal_txt"))
+            {
+                // No saved source at all (#1338): the manage page offers only
+                // the URL field here, so ask for exactly that.
+                throw RetryValidation("Paste the DVD's download URL to retry.");
+            }
             else
             {
                 throw RetryValidation(

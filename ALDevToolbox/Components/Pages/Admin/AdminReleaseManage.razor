@@ -313,6 +313,7 @@
                                 <input type="url" name="DvdUrl" inputmode="url"
                                        value="@(_origin?.Kind == "url" ? _origin.DownloadUrl : null)"
                                        placeholder="https://download.microsoft.com/.../Dynamics.365.BC....DVD.zip"
+                                       required="@(_origin?.Kind != "url")"
                                        class="input" />
                                 <small class="field__hint">
                                     @if (_origin?.Kind == "url")
@@ -326,9 +327,8 @@
                                     else
                                     {
                                         <text>
-                                            We don't have the original download address for this release. Paste the
-                                            DVD's download URL to retry. The site must be on the list of download
-                                            sites your site administrator allows.
+                                            The original download address wasn't saved. Paste the DVD's download
+                                            URL to retry.
                                         </text>
                                     }
                                 </small>
