@@ -333,16 +333,20 @@ public sealed class OffsiteBackupService
                 parsed.Add(new OffsitePerTenantObjectInfo(
                     obj.Key, slug, fileName, obj.Size, obj.LastModifiedUtc));
             }
-            var results = parsed
+            var groups = parsed
                 .GroupBy(r => r.Slug, StringComparer.Ordinal)
                 .OrderBy(g => g.Key, StringComparer.Ordinal)
-                .SelectMany(g => g.OrderByDescending(r => r.LastModified).Take(maxPerOrganization))
+                .ToList();
+            var perOrganization = PerOrganizationLimit(maxPerOrganization, groups.Count);
+            var results = groups
+                .SelectMany(g => g.OrderByDescending(r => r.LastModified).Take(perOrganization))
                 .ToList();
 
             // Flag a neighbour deployment's snapshots, so the catalogue can say
             // so instead of offering a download that will be refused (#1257).
-            // One small request per object, so only the rows shown are read and
-            // only the page that shows the flag asks for it.
+            // One small request per object, so only the rows shown are read,
+            // the rows shown are capped through PerOrganizationLimit, and only
+            // the page that shows the flag asks for it.
             if (flagOtherDeployments && _deployment.IsPersistent)
             {
                 var owners = await ReadOwnersAsync(provider, results.Select(r => r.Key), ct);
@@ -361,6 +365,21 @@ public sealed class OffsiteBackupService
             DisposeProvider(provider);
         }
     }
+
+    /// <summary>
+    /// Most stamps one tenant-catalogue load reads. Each is a request to the
+    /// store; 200 was the old overall listing cap (#1333).
+    /// </summary>
+    public const int MaxStampReadsPerListing = 200;
+
+    /// <summary>
+    /// How many snapshots per organisation the tenant catalogue shows:
+    /// <paramref name="requested"/>, lowered so the rows shown (and so the
+    /// stamps read) stay within <see cref="MaxStampReadsPerListing"/>, but
+    /// never below one per organisation.
+    /// </summary>
+    public static int PerOrganizationLimit(int requested, int organizations) =>
+        Math.Max(1, Math.Min(requested, MaxStampReadsPerListing / Math.Max(1, organizations)));
 
     /// <summary>
     /// The file name of the whole-database dump at <paramref name="objectKey"/>,
@@ -401,18 +420,12 @@ public sealed class OffsiteBackupService
 
     private async Task<bool> ExistsAsync(ResolvedOffsiteSettings settings, string objectKey, CancellationToken ct)
     {
+        // Only a not-found answer means missing; an auth or network failure
+        // surfaces as itself rather than as "no longer in the bucket".
         var provider = _providerFactory.Create(settings);
         try
         {
-            await provider.GetMetadataAsync(objectKey, ct);
-            return true;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Neither SDK has a cheaper "does it exist" than a metadata read, and
-            // both report a missing object by throwing.
-            _logger.LogInformation(ex, "Off-site object {Key} could not be read; treating it as missing.", objectKey);
-            return false;
+            return await provider.ExistsAsync(objectKey, ct);
         }
         finally
         {
@@ -421,29 +434,15 @@ public sealed class OffsiteBackupService
     }
 
     /// <summary>
-    /// True while this installation is fresh enough to take over another
-    /// installation's off-site backups in a disaster recovery (#1322): it holds
-    /// no organisation besides the system one, and at most one user (the
-    /// bootstrap admin). Past that point a dump stamped by another
-    /// installation is refused, because restoring it would overwrite real data
-    /// with a neighbour's.
-    ///
-    /// <para>
-    /// The user count is read through the normal query filter, so it counts the
-    /// caller's own organisation. That is enough: when no other organisation
-    /// exists, every user belongs to the system org, which is the SiteAdmin
-    /// caller's. A single-tenant installation has only the system org, so the
-    /// user count is what tells a used one from a fresh one. Off a request (the
-    /// download worker) the filter matches no org and only the organisation
-    /// check bites; the endpoint has already run the full check by then.
-    /// </para>
+    /// Whether this installation is still fresh enough to recover another
+    /// one's backup; see <see cref="BackupService.CanRecoverAnotherInstallationAsync"/>.
+    /// Only meaningful in a SiteAdmin request.
     /// </summary>
-    public async Task<bool> CanRecoverAnotherInstallationAsync(CancellationToken ct)
-    {
-        if (!_deployment.IsPersistent) return false;
-        if (await _db.Organizations.AsNoTracking().AnyAsync(o => !o.IsSystem, ct)) return false;
-        return await _db.Users.AsNoTracking().CountAsync(ct) <= 1;
-    }
+    public Task<bool> CanRecoverAnotherInstallationAsync(CancellationToken ct) =>
+        _backups.CanRecoverAnotherInstallationAsync(ct);
+
+    /// <summary>The reason behind <see cref="CanRecoverAnotherInstallationAsync"/>; see <see cref="BackupService.RecoveryBlockerAsync"/>.</summary>
+    public Task<string?> RecoveryBlockerAsync(CancellationToken ct) => _backups.RecoveryBlockerAsync(ct);
 
     /// <summary>
     /// Downloads a single object from the store into the local backups
@@ -463,12 +462,14 @@ public sealed class OffsiteBackupService
     ///
     /// <para>
     /// A dump stamped by another installation is refused, unless
-    /// <paramref name="recoverFromAnotherInstallation"/> is set and this
-    /// installation is still fresh (<see cref="CanRecoverAnotherInstallationAsync"/>):
-    /// that is a host rebuilt after losing the one that made the dump. Its id
-    /// is then recorded as a former id of this installation
-    /// (<see cref="DeploymentIdentity.Trust"/>), so its per-tenant snapshots
-    /// can be pulled after the restore and retention prunes its objects (#1322).
+    /// <paramref name="recoverFromAnotherInstallation"/> is set: the SiteAdmin
+    /// is rebuilding the installation that made it (#1322). The download then
+    /// only marks the row with that installation's id
+    /// (<see cref="Backup.RecoveredFromDeploymentId"/>); nothing is trusted
+    /// here. Whether the host is fresh enough, and the takeover of the other
+    /// installation's backups, are decided by
+    /// <see cref="BackupService.RestoreAsync"/> in the SiteAdmin's request,
+    /// since this runs on the download worker with no request to check against.
     /// </para>
     /// </summary>
     /// <returns>The id of the inserted <c>backups</c> row.</returns>
@@ -481,7 +482,12 @@ public sealed class OffsiteBackupService
         var settings = await _systemSettings.ResolveOffsiteAsync(ct)
             ?? throw new InvalidOperationException("Off-site backup is not configured.");
 
-        var fileName = StripPrefix(objectKey, settings.Prefix ?? string.Empty);
+        var dumpPrefix = settings.Prefix ?? string.Empty;
+        if (dumpPrefix.Length > 0 && !objectKey.StartsWith(EnsureTrailingSlash(dumpPrefix), StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Refusing to download object outside the configured prefix: {objectKey}");
+        }
+        var fileName = StripPrefix(objectKey, dumpPrefix);
         if (string.IsNullOrEmpty(fileName)
             || fileName.Contains('/') || fileName.Contains('\\') || fileName.Contains("..", StringComparison.Ordinal))
         {
@@ -508,6 +514,7 @@ public sealed class OffsiteBackupService
             File.Delete(stagingPath);
         }
 
+        string? recoveredFrom = null;
         var provider = _providerFactory.Create(settings);
         try
         {
@@ -527,18 +534,13 @@ public sealed class OffsiteBackupService
                         "(deployment-id mismatch). Restoring it would overwrite this database with " +
                         "another deployment's data.");
                 }
-                if (!await CanRecoverAnotherInstallationAsync(ct))
+                if (!DeploymentIdentity.IsWellFormed(stampedDeployment))
                 {
-                    throw new InvalidOperationException(
-                        $"Refusing to recover from '{fileName}': it was made by another installation, and " +
-                        "this one already has organisations or users of its own. Recovery is only offered " +
-                        "on a fresh installation.");
+                    throw new InvalidOperationException($"Refusing to recover from '{fileName}': its installation stamp is malformed.");
                 }
-                // Recorded before the body is fetched: a download that fails part
-                // way is retried, and the retry should not need the override again.
-                _deployment.Trust(stampedDeployment!);
+                recoveredFrom = stampedDeployment;
                 _logger.LogWarning(
-                    "Recovering from off-site object {Key}, made by another deployment; that deployment's off-site backups are now treated as this one's.",
+                    "Downloading off-site object {Key}, made by another deployment, for recovery. Nothing is taken over until it is restored.",
                     objectKey);
             }
             if (string.IsNullOrEmpty(stampedDeployment))
@@ -576,6 +578,7 @@ public sealed class OffsiteBackupService
             IsPinned = true,
             OffsiteObjectKey = objectKey,
             OffsiteUploadedAt = _clock.GetUtcNow().UtcDateTime,
+            RecoveredFromDeploymentId = recoveredFrom,
         };
         _db.Backups.Add(row);
         try
@@ -621,7 +624,11 @@ public sealed class OffsiteBackupService
 
         var prefix = settings.Prefix ?? string.Empty;
         var tenantPrefix = (prefix.Length == 0 ? string.Empty : EnsureTrailingSlash(prefix)) + PerTenantKeyPrefix;
-        var remainder = StripPrefix(objectKey, tenantPrefix);
+        if (!objectKey.StartsWith(tenantPrefix, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Refusing to download per-tenant object outside the configured prefix: {objectKey}");
+        }
+        var remainder = objectKey[tenantPrefix.Length..];
         var slash = remainder.IndexOf('/');
         if (slash <= 0 || slash == remainder.Length - 1)
         {
@@ -750,7 +757,8 @@ public sealed class OffsiteBackupService
     /// The bucket and prefix may be shared with another deployment (#1258).
     /// Ownership is read from the deployment stamp on each object, since a key
     /// says nothing about who wrote it: another deployment's objects are never
-    /// deleted and never count towards the newest kept. Objects with no stamp
+    /// deleted and never count towards the newest kept, and neither are the
+    /// objects of the installation this one was rebuilt from (#1322). Objects with no stamp
     /// were uploaded before stamping existed; they are treated as this
     /// deployment's only while no whole-database dump under the prefix carries
     /// another deployment's stamp, and otherwise left alone with a warning.
@@ -775,7 +783,9 @@ public sealed class OffsiteBackupService
             // Every dump's stamp is read: there are few of them, and whether any
             // belongs to a neighbour decides how unstamped objects are treated.
             var owners = await ReadOwnersAsync(provider, dumps.Select(o => o.Key), ct);
-            var shared = owners.Values.Any(o => o == OffsiteOwner.Foreign);
+            // The former installation's dumps make the prefix shared too: an
+            // unstamped object there may well be one of its own.
+            var shared = owners.Values.Any(o => o is OffsiteOwner.Foreign or OffsiteOwner.Former);
 
             var tally = new PruneTally();
             var staleDumps = await SelectStaleAsync(provider, dumps, owners, shared, cutoff, tally, ct);
@@ -829,6 +839,12 @@ public sealed class OffsiteBackupService
         Ours,
         /// <summary>Stamped with another deployment's id.</summary>
         Foreign,
+        /// <summary>
+        /// Stamped by the installation this one was rebuilt from (#1322). It can
+        /// be restored here, but retention leaves it alone: whether those
+        /// backups are still wanted is the SiteAdmin's call, not ours.
+        /// </summary>
+        Former,
         /// <summary>No stamp: uploaded before stamping existed.</summary>
         Unstamped,
         /// <summary>The stamp could not be read (the object went away, or the read failed).</summary>
@@ -906,9 +922,10 @@ public sealed class OffsiteBackupService
             var metadata = await provider.GetMetadataAsync(key, ct);
             metadata.TryGetValue(DeploymentMetadataKey, out var stamp);
             if (string.IsNullOrEmpty(stamp)) return OffsiteOwner.Unstamped;
-            // A former id this installation was recovered from counts as ours
-            // (#1322): its objects are pruned and offered like our own.
-            return _deployment.IsOwn(stamp) ? OffsiteOwner.Ours : OffsiteOwner.Foreign;
+            if (string.Equals(stamp, _deployment.Id, StringComparison.Ordinal)) return OffsiteOwner.Ours;
+            // The installation this one was rebuilt from (#1322): offered for
+            // restore, but never ours to delete.
+            return _deployment.IsFormer(stamp) ? OffsiteOwner.Former : OffsiteOwner.Foreign;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

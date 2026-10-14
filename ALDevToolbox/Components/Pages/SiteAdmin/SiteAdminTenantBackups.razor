@@ -1,5 +1,6 @@
 @page "/site-admin/backup-storage/snapshots"
 @attribute [Authorize(Roles = HttpOrganizationContext.SiteAdminRole)]
+@using ALDevToolbox.Domain.Entities
 @using ALDevToolbox.Services
 @using ALDevToolbox.Services.SingleTenant
 @using ALDevToolbox.Services.Backups
@@ -12,7 +13,7 @@
 @inject NavigationManager Nav
 @inject ILogger<SiteAdminTenantBackups> Log
 
-<PageTitle>Tenant snapshots · Site administration · AL Workbench</PageTitle>
+<PageTitle>Organisation snapshots · Site administration · AL Workbench</PageTitle>
 
 <SiteAdminBackupStorageHeader ActiveTab="SiteAdminBackupStorageHeader.Tab.Snapshots">
     <p class="page-head__sub">
@@ -48,18 +49,17 @@
     }
     else if (Ok == "uploaded")
     {
-        <Alert Tone="AlertTone.Success"><span>Snapshot uploaded to off-site bucket.</span></Alert>
+        <Alert Tone="AlertTone.Success"><span>Snapshot copied to off-site storage.</span></Alert>
     }
 
     @if (_activeJobs is { Count: > 0 })
     {
         <section class="card" aria-label="Off-site downloads in progress"><div class="card__body">
-            <h2>Off-site downloads</h2>
+            <h2>Downloading from off-site storage</h2>
             <p class="u-muted">
-                Streaming per-tenant snapshots from the bucket to the local
-                backups volume. The page refreshes automatically once a
-                download finishes - the new row appears below pinned and
-                you can pick Restore from there.
+                Copying from off-site storage to this server. The page refreshes when it's done;
+                the snapshot then appears under "Snapshots kept on this server", already pinned,
+                with a Restore button.
             </p>
             <ul class="job-list">
                 @foreach (var job in _activeJobs)
@@ -98,21 +98,18 @@
     {
         <section class="card" aria-label="Off-site catalogue"><div class="card__body">
             <header class="u-row">
-                <h2>Off-site catalogue</h2>
+                <h2>Snapshots kept off-site</h2>
                 <form method="get" action="/site-admin/backup-storage/snapshots">
-                    <button type="submit" class="btn btn--sm" title="Re-list the bucket">
+                    <button type="submit" class="btn btn--sm" title="Check off-site storage again">
                         <Icon Name="refresh-cw" Width="14" Height="14" />
                         <span>Refresh</span>
                     </button>
                 </form>
             </header>
             <p class="u-muted">
-                Per-tenant snapshots uploaded to the off-site bucket under
-                <code>tenants/&lt;slug&gt;/</code>. Pick one to stream into
-                the local backups volume; the row that appears below can
-                then be restored with the usual button. The download runs
-                in the background and survives this page being closed.
-                The newest @OffsiteSnapshotsPerOrganization snapshots of each organisation are listed.
+                Organisation snapshots kept in off-site storage. The newest @_perOrganization for each
+                organisation are listed. Download one to this server, then restore it from the list
+                below. The download keeps going if you close this page.
             </p>
             @if (_offsiteError is not null)
             {
@@ -124,46 +121,78 @@
             }
             else if (_offsite.Count == 0)
             {
-                <p class="u-muted">No per-tenant snapshots in the bucket yet. They appear after the next scheduled run uploads.</p>
+                <p class="u-muted">No organisation snapshots in off-site storage yet. One is copied there for every organisation each night.</p>
             }
             else
             {
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>Org</th>
                             <th>Snapshot</th>
                             <th>Last modified</th>
                             <th class="data-table__num">Size</th>
-                            <th>Already local?</th>
+                            <th>On this server?</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        @foreach (var obj in _offsite)
+                        @foreach (var group in _offsite.GroupBy(o => o.Slug, StringComparer.Ordinal))
                         {
-                            var alreadyLocal = _localFiles.Contains((obj.Slug, obj.FileName));
-                            var orgKnown = _localSlugs.Contains(obj.Slug);
-                            var foreign = obj.FromAnotherDeployment;
-                            <tr>
-                                <td>@obj.Slug @(orgKnown ? "" : " (unknown)")@(foreign ? " (another installation)" : "")</td>
-                                <td><code>@obj.FileName</code></td>
-                                <td class="u-muted"><Timestamp Value="@obj.LastModified" Format="yyyy-MM-dd HH:mm:ss" /></td>
-                                <td class="data-table__num">@FormatBytes(obj.Size)</td>
-                                <td>@(alreadyLocal ? "Yes" : "No")</td>
-                                <td class="data-table__actions">
-                                    <form method="post" action="/site-admin/tenant-backups/offsite/download">
-                                        <AntiforgeryToken />
-                                        <input type="hidden" name="ObjectKey" value="@obj.Key" />
-                                        <button type="submit" class="btn btn--sm btn--icon"
-                                                title="@(foreign ? "Taken by another AL Workbench installation that shares this storage - it can't be restored here" : alreadyLocal ? "A local snapshot with this name already exists" : (orgKnown ? "Download to local for restore" : "No local org with this slug - create or restore it first"))"
-                                                aria-label="Download to local"
-                                                disabled="@(foreign || alreadyLocal || !orgKnown)">
-                                            <Icon Name="archive-restore" Width="14" Height="14" />
-                                        </button>
-                                    </form>
-                                </td>
+                            var orgKnown = _orgNames.TryGetValue(group.Key, out var orgName);
+                            var count = group.Count();
+                            <tr class="data-table__group">
+                                <th colspan="5" scope="rowgroup">
+                                    @(orgKnown ? orgName : group.Key)
+                                    <span class="u-muted">— @count @(count == 1 ? "snapshot" : "snapshots")</span>
+                                    @if (!orgKnown)
+                                    {
+                                        <span class="tag" title="This organisation isn't on this site. Restore the full database backup on the Whole site tab first, which brings it back.">Not on this site</span>
+                                    }
+                                </th>
                             </tr>
+                            @foreach (var obj in group)
+                            {
+                                var alreadyLocal = _localFiles.Contains((obj.Slug, obj.FileName));
+                                var foreign = obj.FromAnotherDeployment;
+                                <tr>
+                                    <td>
+                                        <code>@obj.FileName</code>
+                                        @if (foreign)
+                                        {
+                                            <span class="tag">Another installation</span>
+                                        }
+                                    </td>
+                                    <td class="u-muted"><Timestamp Value="@obj.LastModified" Format="yyyy-MM-dd HH:mm:ss" /></td>
+                                    <td class="data-table__num">@FormatBytes(obj.Size)</td>
+                                    <td>@(alreadyLocal ? "Yes" : "No")</td>
+                                    <td class="data-table__actions">
+                                        @if (alreadyLocal)
+                                        {
+                                            <span class="u-muted">Already on this server</span>
+                                        }
+                                        else if (foreign)
+                                        {
+                                            <span class="u-muted" title="Taken by another AL Workbench installation. If this installation replaces it, recover that installation's database backup on the Whole site tab first.">Recover its database first</span>
+                                        }
+                                        else if (!orgKnown)
+                                        {
+                                            <span class="u-muted" title="This organisation isn't on this site. Restore the full database backup on the Whole site tab first, which brings it back.">Restore the database first</span>
+                                        }
+                                        else
+                                        {
+                                            <form method="post" action="/site-admin/tenant-backups/offsite/download">
+                                                <AntiforgeryToken />
+                                                <input type="hidden" name="ObjectKey" value="@obj.Key" />
+                                                <button type="submit" class="btn btn--sm"
+                                                        title="Copy this snapshot to this server so it can be restored">
+                                                    <Icon Name="archive-restore" Width="14" Height="14" />
+                                                    <span>Download</span>
+                                                </button>
+                                            </form>
+                                        }
+                                    </td>
+                                </tr>
+                            }
                         }
                     </tbody>
                 </table>
@@ -172,6 +201,7 @@
         </section>
     }
 
+    <h2>Snapshots kept on this server</h2>
     @if (_rows is null)
     {
         <p class="u-muted">Loading...</p>
@@ -179,8 +209,7 @@
     else if (_rows.Count == 0)
     {
         <p class="u-muted">
-            No per-tenant snapshots yet. The next scheduled run will create
-            one per non-system organisation.
+            No snapshots on this server yet. One is taken for every organisation each night.
         </p>
     }
     else
@@ -193,7 +222,7 @@
                     <th>Created</th>
                     <th class="data-table__num">Size</th>
                     <th>Kind</th>
-                    <th>Schema</th>
+                    <th>Format</th>
                     <th>Status</th>
                     <th>By</th>
                     <th></th>
@@ -207,8 +236,17 @@
                     <td><code>@r.FileName</code></td>
                     <td class="u-muted"><Timestamp Value="@r.CreatedAt" /></td>
                     <td class="data-table__num">@FormatBytes(r.FileSizeBytes)</td>
-                    <td>@r.Kind</td>
-                    <td>@(r.SchemaVersion == PerTenantBackupService.CurrentSchemaVersion ? "v" + r.SchemaVersion : $"v{r.SchemaVersion} (stale)")</td>
+                    <td>@(r.Kind == BackupKind.Scheduled ? "Automatic" : "Manual")</td>
+                    <td>
+                        @if (r.SchemaVersion == PerTenantBackupService.CurrentSchemaVersion)
+                        {
+                            <text>Current</text>
+                        }
+                        else
+                        {
+                            <span title="Made by an earlier version of AL Workbench. It can't be restored on this version.">Older</span>
+                        }
+                    </td>
                     <td>
                         @if (r.IsPinned)
                         {
@@ -223,7 +261,7 @@
                             <text>—</text>
                         }
                     </td>
-                    <td class="u-muted">@(r.CreatedByEmail ?? "scheduled")</td>
+                    <td class="u-muted">@(r.CreatedByEmail ?? "Automatic")</td>
                     <td class="data-table__actions">
                         <a class="btn btn--sm btn--icon" title="Download" aria-label="Download"
                            href="@($"/site-admin/tenant-backups/{r.Id}/download")">
@@ -353,7 +391,8 @@
 
     /// <summary>
     /// Two weeks of nightly snapshots per organisation. The catalogue is for
-    /// pulling back a recent one; each row shown costs a stamp read.
+    /// pulling back a recent one; each row shown costs a stamp read, so the
+    /// service lowers this when there are many organisations.
     /// </summary>
     private const int OffsiteSnapshotsPerOrganization = 14;
 
@@ -361,8 +400,9 @@
     private IReadOnlyList<OffsitePerTenantObjectInfo>? _offsite;
     private string? _offsiteError;
     private bool _offsiteEnabled;
+    private int _perOrganization = OffsiteSnapshotsPerOrganization;
     private HashSet<(string Slug, string FileName)> _localFiles = new();
-    private HashSet<string> _localSlugs = new(StringComparer.Ordinal);
+    private Dictionary<string, string> _orgNames = new(StringComparer.Ordinal);
     private List<OffsiteRestoreJob> _activeJobs = new();
 
     protected override async Task OnInitializedAsync()
@@ -379,7 +419,7 @@
         // Known organisations come from the organisations themselves, not from
         // local snapshot rows: a whole-database restore brings organisations
         // back with no snapshots, and the download only needs the org (#1334).
-        _localSlugs = await Backups.ListOrganizationSlugsAsync(CancellationToken.None);
+        _orgNames = await Backups.ListOrganizationNamesAsync(CancellationToken.None);
 
         var offsiteView = await Settings.GetOffsiteViewAsync();
         _offsiteEnabled = offsiteView.Enabled && !string.IsNullOrWhiteSpace(offsiteView.Bucket);
@@ -388,11 +428,13 @@
             try
             {
                 _offsite = await Offsite.ListPerTenantAsync(maxPerOrganization: OffsiteSnapshotsPerOrganization, flagOtherDeployments: true, CancellationToken.None);
+                _perOrganization = OffsiteBackupService.PerOrganizationLimit(
+                    OffsiteSnapshotsPerOrganization, _offsite.Select(o => o.Slug).Distinct(StringComparer.Ordinal).Count());
             }
             catch (Exception ex)
             {
                 Log.LogWarning(ex, "Failed to list off-site per-tenant catalogue for /site-admin/tenant-backups.");
-                _offsiteError = $"Could not list the off-site bucket: {ex.Message}";
+                _offsiteError = $"Could not read off-site storage: {ex.Message}";
             }
         }
 

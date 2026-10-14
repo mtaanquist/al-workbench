@@ -25,7 +25,8 @@ public sealed record BackupRow(
     BackupKind Kind,
     bool IsPinned,
     DateTime? OffsiteUploadedAt,
-    string? OffsiteObjectKey);
+    string? OffsiteObjectKey,
+    string? RecoveredFromDeploymentId = null);
 
 /// <summary>
 /// Shells out to <c>pg_dump</c> / <c>pg_restore</c> against the application
@@ -54,6 +55,7 @@ public sealed class BackupService
     private readonly string _pgDumpPath;
     private readonly string _pgRestorePath;
     private readonly SystemSettingsService? _systemSettings;
+    private readonly DeploymentIdentity? _deployment;
 
     public BackupService(
         AppDbContext db,
@@ -67,9 +69,13 @@ public sealed class BackupService
         BackupOptions? options = null,
         // Optional for the same reason; production DI always supplies it, and a
         // restore re-applies the restored settings row through it (#1255).
-        SystemSettingsService? systemSettings = null)
+        SystemSettingsService? systemSettings = null,
+        // Optional for the same reason; production DI always supplies it. Only
+        // the restore of a recovered dump needs it (#1322).
+        DeploymentIdentity? deployment = null)
     {
         _db = db;
+        _deployment = deployment;
         _systemSettings = systemSettings;
         _orgContext = orgContext;
         _maintenance = maintenance;
@@ -107,7 +113,8 @@ public sealed class BackupService
                 b.Kind,
                 b.IsPinned,
                 b.OffsiteUploadedAt,
-                b.OffsiteObjectKey))
+                b.OffsiteObjectKey,
+                b.RecoveredFromDeploymentId))
             .ToListAsync(ct);
     }
 
@@ -273,6 +280,25 @@ public sealed class BackupService
         {
             throw new PlanValidationException(new Dictionary<string, string> { ["BackupId"] = "Backup not found." });
         }
+
+        // A dump downloaded with Recover was made by another installation. It
+        // may only replace a fresh one, checked here in the SiteAdmin's request
+        // rather than on the download worker; and it is this restore, not the
+        // download, that makes this installation take over the other one's
+        // backups (#1322). Once that has happened its dumps are no longer
+        // foreign, so restoring one again is an ordinary restore.
+        var takeOver = row.RecoveredFromDeploymentId is { } recoveredFrom
+            && _deployment?.IsFormer(recoveredFrom) != true
+            ? recoveredFrom
+            : null;
+        if (takeOver is not null)
+        {
+            var blocker = await RecoveryBlockerAsync(ct);
+            if (blocker is not null)
+            {
+                throw new PlanValidationException(new Dictionary<string, string> { ["BackupId"] = blocker });
+            }
+        }
         var path = ResolveFilePath(row.FileName);
         if (!File.Exists(path))
         {
@@ -333,6 +359,24 @@ public sealed class BackupService
             await RestoreInventoryAsync(inventory, destructive);
             if (_systemSettings is not null) await _systemSettings.ReloadAfterRestoreAsync(destructive);
 
+            if (takeOver is not null)
+            {
+                // After the restore, so a failed one takes nothing over. Kept on
+                // the key volume, which the restore does not touch.
+                try
+                {
+                    _deployment!.RecordFormer(takeOver, _clock.GetUtcNow().UtcDateTime);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    throw new InvalidOperationException(
+                        "The backup was restored, but this server could not record that it replaces the installation that made it: " + ex.Message, ex);
+                }
+                _logger.LogWarning(
+                    "Restored backup {FileName}, made by another installation; this installation now treats that installation's off-site backups as restorable here.",
+                    row.FileName);
+            }
+
             sw.Stop();
             _logger.LogInformation(
                 "Restored backup {FileName} in {ElapsedMs} ms.", row.FileName, sw.ElapsedMilliseconds);
@@ -341,6 +385,72 @@ public sealed class BackupService
         {
             _maintenance.Exit();
         }
+    }
+
+    /// <summary>
+    /// Why this installation can't take over another installation's backups
+    /// (#1322), as a sentence for the SiteAdmin; <see langword="null"/> when it
+    /// can. It has to be fresh: no organisation besides the system one, no
+    /// user besides the bootstrap admin, no solutions, no releases, and no
+    /// backups of its own (only ones downloaded with Recover). Restoring
+    /// another installation's dump over anything more would replace real data
+    /// with a neighbour's, which the deployment stamp exists to stop.
+    ///
+    /// <para>
+    /// Only the organisation and backup checks read tables without a query
+    /// filter. Users, solutions and releases are counted through the normal
+    /// filter, so they count the SiteAdmin caller's own organisation. That is
+    /// enough, and needs no <c>IgnoreQueryFilters()</c>: the organisation check
+    /// runs first, and when no other organisation exists every row belongs to
+    /// the system org, which is then the caller's. It is also why this only
+    /// means anything in a SiteAdmin request, never on a background worker.
+    /// </para>
+    /// </summary>
+    public async Task<string?> RecoveryBlockerAsync(CancellationToken ct = default)
+    {
+        RequireSiteAdmin();
+        if (_deployment is null || !_deployment.IsPersistent)
+        {
+            return "This server can't record which installation it replaces, because its key storage isn't writable.";
+        }
+        if (_deployment.Former is not null)
+        {
+            return "This installation has already taken over another installation's backups. Remove that on the Whole site tab of Backup & storage first.";
+        }
+        if (await _db.Organizations.AsNoTracking().AnyAsync(o => !o.IsSystem, ct))
+        {
+            return "This installation already has organisations of its own, so another installation's backup can't be restored over it.";
+        }
+        if (await _db.Users.AsNoTracking().CountAsync(ct) > 1)
+        {
+            return "This installation already has users besides the first administrator, so another installation's backup can't be restored over it.";
+        }
+        if (await _db.OeProjects.AsNoTracking().AnyAsync(ct) || await _db.OeReleases.AsNoTracking().AnyAsync(ct))
+        {
+            return "This installation already has solutions or releases of its own, so another installation's backup can't be restored over it.";
+        }
+        if (await _db.Backups.AsNoTracking().AnyAsync(b => b.RecoveredFromDeploymentId == null, ct))
+        {
+            return "This server already has backups of its own. Delete them first if this installation really is new.";
+        }
+        return null;
+    }
+
+    /// <summary>True when <see cref="RecoveryBlockerAsync"/> finds nothing in the way.</summary>
+    public async Task<bool> CanRecoverAnotherInstallationAsync(CancellationToken ct = default) =>
+        await RecoveryBlockerAsync(ct) is null;
+
+    /// <summary>
+    /// Forgets the installation this one was rebuilt from (#1322). Its off-site
+    /// backups read as another installation's again: they can no longer be
+    /// restored here, and retention still leaves them alone.
+    /// </summary>
+    public void ForgetFormerInstallation()
+    {
+        RequireSiteAdmin();
+        if (_deployment?.Former is null) return;
+        _deployment.ForgetFormer();
+        _logger.LogInformation("SiteAdmin {UserId} removed the record of the installation this one was rebuilt from.", _orgContext.CurrentUserId);
     }
 
     /// <summary>

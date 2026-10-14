@@ -105,6 +105,10 @@ public sealed class AzureBlobProvider : IOffsiteStorageProvider
         return MapMetadataFromAzure(properties.Value.Metadata);
     }
 
+    public async Task<bool> ExistsAsync(string key, CancellationToken ct) =>
+        // The SDK maps a 404 to false and throws for anything else.
+        (await _container.GetBlobClient(key).ExistsAsync(ct)).Value;
+
     public async Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, bool topLevelOnly, CancellationToken ct)
     {
         var results = new List<OffsiteStorageObject>();

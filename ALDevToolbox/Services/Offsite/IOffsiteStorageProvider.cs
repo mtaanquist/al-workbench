@@ -71,6 +71,14 @@ public interface IOffsiteStorageProvider
     Task<IReadOnlyDictionary<string, string>> GetMetadataAsync(string key, CancellationToken ct);
 
     /// <summary>
+    /// True when an object exists at <paramref name="key"/>; false only when
+    /// the backend answers "not found". Any other failure (credentials,
+    /// network) is thrown, so a caller never reports a reachable-but-refused
+    /// object as gone.
+    /// </summary>
+    Task<bool> ExistsAsync(string key, CancellationToken ct);
+
+    /// <summary>
     /// Lists every object whose key starts with <paramref name="prefix"/>,
     /// paging through the backend until the listing is exhausted. The order is
     /// the backend's (key order), so the service sorts by date before it cuts

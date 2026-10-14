@@ -103,140 +103,133 @@ Manual ad-hoc backups are uploaded only on click.
 - **Prune** (`OffsiteBackupService.PruneAsync`): lists objects under the
   configured prefix and deletes ones whose `LastModified` is older than
   `RetentionDays`. Idempotent — safe to re-run. Runs after every
-  scheduled backup tick.
+  scheduled backup tick. It only ever deletes this installation's own
+  backups: another installation's, and those of an installation this one
+  took over (see *Taking over another installation's backups*), are left
+  alone.
 
 Off-site retention is *independent* from local retention. The local
 `BackupRetentionCount` keeps the N most recent unpinned files on disk;
 off-site `RetentionDays` keeps objects for a calendar window in the
 bucket. Tune them separately.
 
-## Restoring from an off-site copy (whole-DB)
+## Restoring the whole site from off-site storage
 
-`/site-admin/backups` lists every dump-shaped object under the configured
-prefix in an **Off-site catalogue** section. The flow is fully UI-driven
-— no shelling into the container, no SQL by hand.
+Everything below happens in the app as a SiteAdmin, under **Site
+administration → Backup & storage**. No shelling into the container, no
+SQL by hand.
 
-1. Open `/site-admin/backups` as a SiteAdmin. Below the local backups
-   table you'll see **Off-site catalogue** with each remote object's file
-   name, last-modified timestamp, size, and whether a local row with the
-   same file name already exists. If the catalogue is empty, take a
-   scheduled or ad-hoc backup first and upload it.
+1. Open the **Whole site** tab. **Copies kept off-site** lists the newest
+   backups in off-site storage, with their size and whether a copy is
+   already on this server. If the list is empty, take a backup and upload
+   it, or wait for the nightly one.
+2. Click **Download** on the backup you want. The download runs in the
+   background: a **Downloading from off-site storage** panel shows its
+   progress, and it keeps going if you close the page.
+3. When it finishes the page reloads, and the backup appears under
+   **Copies kept on this server**, pinned so it is not cleaned up before
+   you restore it.
+4. Click **Restore** on it and confirm. The site goes into maintenance
+   mode until the restore is done. Restoring replaces everything,
+   including user accounts.
 
-2. Pick the row you want and click its **Download** icon
-   (archive-restore). The button posts to
-   `/site-admin/backups/offsite/download`, which enqueues a job on the
-   background worker and redirects you straight back to the page.
+### Rebuilding after losing the server
 
-3. An **Off-site downloads** panel appears at the top of the page with a
-   live progress bar — bytes downloaded over total size, refreshed every
-   second by a small in-page script polling
-   `/site-admin/backups/offsite/jobs/{id}`. The download runs in a
-   `BackgroundService`, so the bar keeps moving even if you close the
-   browser tab. The status flips to **Completed** when the dump lands
-   on the `app-backups` volume.
+If the server is gone (lost host, lost `pg-data`, lost `app-backups`):
 
-4. When every active job is terminal the page reloads. The downloaded
-   file appears in the local backups table with an `Off-site` badge,
-   pinned automatically so retention can't prune it before you've
-   restored.
+0. **Before the first start on the new server, put the old `app-keys`
+   volume back if you still have it** (or at least its `deployment-id`
+   file). That keeps the stored secrets readable after the restore, and
+   the new server is then the same installation as far as its backups
+   are concerned, so the rest of this section is the ordinary restore
+   above.
+1. Start the stack on the new server, pointed at the same storage. Set
+   `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD` so you can sign in
+   to the empty site.
+2. Sign in as that admin. Under **Site administration → Settings →
+   Off-site**, enter the same storage, bucket, prefix and credentials the
+   old server used.
+3. Open **Backup & storage → Whole site**. Without the old `app-keys`,
+   the old server's backups are marked **Another installation**. While
+   this installation is still new, each of them has a **Recover** button.
+   Click **Recover** on the one you want and confirm. That only downloads
+   it.
+4. When the download finishes, click **Restore** on it under **Copies
+   kept on this server** and confirm. This replaces everything on the
+   new server with the backup, and from now on this installation accepts
+   the old one's backups as restorable here (see *Taking over another
+   installation's backups* below).
+5. Sign in again with an account from the backup. The bootstrap admin
+   you used in step 2 is gone.
+6. **Without the old `app-keys`, re-enter the stored secrets.** They are
+   encrypted with the key ring on that volume, so the restored copies
+   cannot be read on the new server. Off-site storage in particular reads
+   as not configured until you re-enter its access key and secret under
+   **Settings → Off-site**. Re-enter the SMTP password, Microsoft sign-in
+   secret and GitHub App credentials too, if you use them.
+7. To bring back one organisation from a later snapshot, carry on with
+   the next section.
 
-5. Click **Restore** on the new row and confirm. The app enters
-   maintenance mode for the duration; non-SiteAdmin requests get a
-   static maintenance page until `pg_restore` finishes.
+**When Recover is not offered.** Recover only appears, and Restore of a
+recovered backup only works, on an installation that is still new: only
+the default organisation, no user besides the first administrator, no
+solutions, no releases, and no backups of its own. If the new server has
+already taken its first nightly backup, delete that backup first. The
+reason for the rule: a backup from another installation replaces
+everything, and the stamp on each backup exists to stop a neighbour's
+backup in the same storage being restored over real data.
 
-If the deployment is completely gone (lost host, lost `pg-data`, lost
-`app-backups`), the recovery path is just as short:
+### Taking over another installation's backups
 
-1. Stand up the compose stack on a fresh host pointed at the same
-   bucket. Set `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD` so
-   you can sign in against the empty database; migrations run against an
-   empty `pg-data` and the bucket is untouched.
-2. Sign in as the bootstrap admin. Configure off-site under
-   `/site-admin/settings` with the same bucket, prefix, and credentials.
-3. Open `/site-admin/backups`. The catalogue lists the newest objects
-   that survived the loss. Every dump is stamped with the id of the
-   installation that uploaded it (the `deployment-id` file on the
-   `app-keys` volume), and the new host has a new id, so the lost
-   installation's dumps are tagged **Another installation**. While this
-   installation is still fresh (no organisation besides the default one,
-   and no user besides the bootstrap admin) each of them carries a
-   **Recover** button instead of the plain download. Click **Recover** on
-   the dump you want and confirm, wait for the progress bar to finish,
-   click **Restore**, confirm.
-4. The bootstrap user's identity will be replaced by whatever the dump
-   carried — sign in again with the original credentials.
+Restoring a recovered backup records the old installation in the file
+`deployment-id.former`, next to `deployment-id` on the `app-keys`
+volume. From then on:
 
-**What Recover changes.** It records the lost installation's id in
-`deployment-id.trusted`, next to `deployment-id` on the `app-keys`
-volume. From then on this installation treats every off-site object
-stamped with that id as its own: the per-tenant snapshots can be pulled
-back and restored after the whole-database restore, and retention prunes
-the lost installation's objects as they age out. This installation's own
-id does not change, and its new uploads carry it. Recover is refused
-once the installation holds organisations or users of its own, because
-restoring another installation's dump over real data is exactly what the
-stamp is there to stop.
+- its backups and organisation snapshots in off-site storage can be
+  downloaded and restored here, and are no longer marked "Another
+  installation";
+- automatic clean-up never deletes them - only this installation's own
+  backups are cleaned up. Delete the old ones in your storage provider
+  when you no longer need them;
+- the **Whole site** tab shows **Recovered from another installation**
+  with a **Remove** button. Removing it makes the old installation's
+  backups "Another installation" again. Don't delete
+  `deployment-id.former` by hand while you still need those snapshots.
 
-**If you still have the old `app-keys` volume** (or a copy of its
-`deployment-id` file), put it back before the first start on the new
-host. The new host then has the old id, its dumps are not "another
-installation" at all, and Recover is not needed. Carrying `app-keys`
-over also keeps the Data Protection key ring, which is what keeps the
-stored SMTP, off-site, Microsoft sign-in and GitHub secrets readable
-after the restore.
+An installation takes over at most one other installation this way.
 
-## Restoring a per-tenant snapshot from off-site
+## Restoring one organisation from off-site storage
 
-`/site-admin/tenant-backups` carries an identical **Off-site catalogue**
-section, populated from objects under `<prefix>tenants/<slug>/`. The flow
-mirrors the whole-DB one:
+The **Per organisation** tab works the same way for organisation
+snapshots.
 
-1. Pick a row in the catalogue. The page shows the slug, the snapshot
-   filename, last-modified time, size, and whether a local snapshot
-   with the same name already exists.
+1. **Snapshots kept off-site** lists the newest snapshots of each
+   organisation, grouped by organisation.
+2. Click **Download** on the one you want and wait for the download to
+   finish.
+3. It appears under **Snapshots kept on this server**, pinned. Click
+   **Restore** on it and confirm. That organisation's data is replaced
+   with the snapshot; nothing else on the site changes.
 
-2. Click the **Download** icon. The page posts to
-   `/site-admin/tenant-backups/offsite/download`, enqueues a job, and
-   redirects with the same in-page progress bar as the whole-DB flow.
+The organisation has to exist on the site already. On a rebuilt server,
+restore the whole-site backup first; that brings the organisation back.
+A snapshot whose organisation is missing is marked **Not on this site**.
 
-3. On completion, a new row appears under the tenant's section of the
-   local snapshots table — auto-pinned and stamped with `Off-site`. The
-   row's `SchemaVersion`, `CreatedAt`, and `OrganizationId` come from
-   the snapshot's `manifest.json`, not from the object key — so the
-   download refuses if the manifest's slug or org id doesn't match
-   what's locally known.
+### How it works
 
-4. Click **Restore** on the row and confirm. The org's rows are wiped
-   and replayed from the snapshot, exactly as if the snapshot had been
-   created locally.
-
-**Pre-requisite for per-tenant DR.** The local deployment must already
-know about the org (by slug). If you've just stood up a fresh stack
-after losing `pg-data`, restore the whole-DB dump first — that brings
-the `organizations` row back. Then come here and pull the per-tenant
-ZIP. The download button is disabled with a tooltip when no local
-organisation has that slug. If the whole-DB dump was restored with
-**Recover**, the lost installation's per-tenant snapshots are accepted
-as this installation's own.
-
-### Job lifetime and host restarts
-
-Restore jobs (whole-DB and per-tenant alike) live in memory on the
-running container. If the host crashes or you redeploy mid-download,
-the job is lost — but the download writes to `<filename>.partial` and
-is only renamed to the final name on success, so a half-finished file
-never gets registered as a restorable row. Just re-queue the download
-from the catalogue.
-
-Terminal jobs (Completed, Failed) linger on the page for an hour so a
-SiteAdmin who refreshed at the wrong moment can still see the outcome,
-then evict themselves on the next page render.
-
-Jobs are kept on the page they were enqueued from — whole-DB downloads
-on `/site-admin/backups`, per-tenant downloads on
-`/site-admin/tenant-backups`. They share the same in-memory tracker and
-the same JSON status endpoint, but the UI filters by job kind so each
-page only shows the work that landed there.
+- Downloads run on a background worker, one at a time, and are written
+  to `<name>.partial` and renamed only when complete, so a crash
+  mid-download never leaves a half-written backup that looks restorable.
+  Download jobs are kept in memory: after a restart, start the download
+  again. A finished or failed job stays on the page for an hour.
+- An organisation snapshot carries a manifest naming its organisation
+  and the installation that took it. The download refuses one whose
+  manifest names a different organisation than its location in storage,
+  or another installation.
+- Each backup is stamped with the uploading installation's id (the
+  `deployment-id` file on `app-keys`). Backups without a stamp predate
+  stamping and are treated as this installation's unless another
+  installation's backups share the prefix.
 
 ## Disabling or rotating credentials
 
@@ -293,32 +286,35 @@ Symptoms → things to check.
   Either delete or rename the local row (unpin first if needed), or
   rename the off-site object out of the way. The service refuses to
   overwrite a row that may already be on disk.
-- **Catalogue says "Already local: Yes" but the Download button is
-  disabled.** That's the same collision-prevention guard. The local row
-  is already there — restore from it directly.
-- **Per-tenant catalogue says "(unknown)" next to the slug and the
-  Download button is disabled.** The deployment doesn't have an
-  organisation with that slug. Restore the whole-DB dump first so the
-  `organizations` row exists, then come back to pull the per-tenant
-  snapshot. An organisation counts as known as soon as it exists; it
-  does not need a local snapshot of its own.
-- **Download fails with "created by a different deployment" or the
-  catalogue tags a dump "Another installation".** The object carries
-  another installation's `deployment-id` stamp. If another installation
-  shares the bucket and prefix, that is the guard working: give each
-  installation its own prefix. If it is the installation you are
-  rebuilding, use **Recover** on a fresh installation (see the
-  disaster-recovery steps above). If `app-keys` was lost while `pg-data`
-  survived, the installation is not fresh and Recover is not offered:
-  read the lost id from the object's metadata in your storage console
-  (`x-amz-meta-deployment-id` on S3, `deploymentid` on Azure), add it on
-  a line of its own to `deployment-id.trusted` in the `app-keys` volume,
-  and restart the app.
-- **The catalogue does not show every object.** The database catalogue
-  shows the newest 100 dumps, and the per-tenant catalogue the newest 14
-  snapshots of each organisation. Both list the whole prefix and sort by
-  date before cutting, so the most recent are always there; older ones
-  are in the bucket and can be fetched with your storage tool.
+- **The off-site list says "Already on this server" instead of offering
+  Download.** That's the same collision guard. The copy is already
+  there: restore it from **Copies kept on this server**.
+- **A snapshot on the Per organisation tab is marked "Not on this
+  site".** This site has no organisation with that name in storage.
+  Restore the whole-site backup first so the organisation exists, then
+  come back for the snapshot. An organisation counts as present as soon
+  as it exists; it does not need a local snapshot of its own.
+- **A backup is marked "Another installation", or a download fails with
+  "created by a different deployment".** The backup carries another
+  installation's stamp. If another installation shares the bucket and
+  prefix, that is the guard working: give each installation its own
+  prefix. If it is the installation you are rebuilding, use **Recover**
+  on a new installation (see *Rebuilding after losing the server*).
+- **`app-keys` was lost but the database survived.** The installation
+  is not new, so Recover is not offered, and its own earlier backups now
+  read as another installation's. Put the old `deployment-id` file back
+  if you have a copy. If not, read the old id from any earlier object's
+  metadata in your storage console (`x-amz-meta-deployment-id` on S3,
+  `deploymentid` on Azure), write it as the only line of
+  `deployment-id.former` next to `deployment-id` on the `app-keys`
+  volume, and restart the app. That file holds one id; if it already
+  holds another, remove that one on the **Whole site** tab first.
+- **Not every object is listed.** The **Whole site** tab lists the newest
+  100 backups, and the **Per organisation** tab the newest 14 snapshots
+  of each organisation (fewer each when there are many organisations).
+  Both look at the whole prefix and sort by date before cutting, so the
+  most recent are always there; older ones are still in storage and can
+  be fetched with your storage provider's tools.
 - **Per-tenant download fails with "Snapshot manifest names org … but
   the object key is under …".** The object's key path and the
   snapshot's manifest don't agree on which org it belongs to.
@@ -342,7 +338,7 @@ After setup, all five of the following should be true:
 - An external listing (`aws s3 ls --recursive`, `mc ls --recursive`,
   AWS console) shows the whole-DB dump at `<prefix><filename>.dump` and
   per-tenant ZIPs at `<prefix>tenants/<slug>/<filename>.tenant.zip`.
-- Each catalogue (whole-DB on `/site-admin/backups`, per-tenant on
-  `/site-admin/tenant-backups`) lists its corresponding objects;
-  clicking **Download** in either runs a progress bar to completion
-  and produces a new local row carrying the `Off-site` badge.
+- Under **Site administration → Backup & storage**, the off-site list on
+  the **Whole site** tab and on the **Per organisation** tab shows the
+  matching objects; clicking **Download** in either runs a progress bar
+  to completion and produces a new copy on this server.

@@ -303,7 +303,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     // ---- #1322: rebuilding a lost installation on a fresh one ----------------
 
     [Fact]
-    public async Task A_fresh_installation_recovers_a_lost_installations_dump_and_takes_over_its_backups()
+    public async Task Recover_only_downloads_the_dump_and_marks_it_trusting_nothing()
     {
         await ConfigureOffsiteAsync();
         await MakeFreshAsync();
@@ -311,72 +311,161 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
 
         var id = await NewOffsite(_us).DownloadAsync(DumpKey("lost"), progress: null, recoverFromAnotherInstallation: true, default);
 
-        await using (var ctx = _db.NewContext())
-        {
-            (await ctx.Backups.AsNoTracking().SingleAsync(b => b.Id == id)).OffsiteObjectKey.Should().Be(DumpKey("lost"));
-        }
-        _us.IsForeign(_neighbour.Id).Should().BeFalse("the lost installation's other backups are this one's now");
-        DeploymentIdentity.LoadOrCreate(Path.Combine(_root, "us"), NullLogger.Instance).IsOwn(_neighbour.Id)
-            .Should().BeTrue("the takeover outlives a restart, and the restore that replaces every table");
+        await using var ctx = _db.NewContext();
+        (await ctx.Backups.AsNoTracking().SingleAsync(b => b.Id == id)).RecoveredFromDeploymentId.Should().Be(_neighbour.Id);
+        _us.Former.Should().BeNull("downloading is not restoring");
+        _us.IsForeign(_neighbour.Id).Should().BeTrue();
     }
 
     [Fact]
-    public async Task After_a_recovery_the_lost_installations_snapshots_are_offered_and_pruned_as_ours()
+    public async Task A_cancelled_recovery_download_trusts_nothing_and_leaves_no_row()
     {
         await ConfigureOffsiteAsync();
         await MakeFreshAsync();
         PutDump("lost", _neighbour, Now.AddDays(-1));
-        await NewOffsite(_us).DownloadAsync(DumpKey("lost"), progress: null, recoverFromAnotherInstallation: true, default);
-        PutSnapshot("default", "lost-1", _neighbour, Now.AddDays(-1));
-        PutSnapshot("default", "lost-2", _neighbour, Now.AddDays(-2));
-        PutSnapshot("default", "lost-3", _neighbour, Now.AddDays(-3));
-        PutSnapshot("default", "lost-30", _neighbour, Now.AddDays(-30));
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
 
-        var listed = await NewOffsite(_us).ListPerTenantAsync(maxPerOrganization: 10, flagOtherDeployments: true, default);
-        listed.Should().OnlyContain(o => !o.FromAnotherDeployment);
+        var act = () => NewOffsite(_us).DownloadAsync(DumpKey("lost"), progress: null, recoverFromAnotherInstallation: true, cts.Token);
 
-        await PruneAsync();
-        _store.Keys.Should().NotContain(SnapshotKey("default", "lost-30"), "it is past retention and now ours to prune");
-    }
-
-    [Fact]
-    public async Task Recovering_another_installations_dump_is_refused_once_this_one_has_organisations()
-    {
-        await ConfigureOffsiteAsync();
-        PutDump("theirs", _neighbour, Now.AddDays(-1));
-
-        var act = () => NewOffsite(_us).DownloadAsync(DumpKey("theirs"), progress: null, recoverFromAnotherInstallation: true, default);
-
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*fresh installation*");
-        _us.IsForeign(_neighbour.Id).Should().BeTrue("a refused recovery takes nothing over");
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        _us.Former.Should().BeNull();
         await using var ctx = _db.NewContext();
         (await ctx.Backups.CountAsync()).Should().Be(0);
     }
 
     [Fact]
-    public async Task Recovering_another_installations_dump_is_refused_once_this_one_has_users()
+    public async Task Restoring_a_recovered_dump_on_a_fresh_installation_takes_over_the_other_installations_backups()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        await ConfigureOffsiteAsync();
+        await MakeFreshAsync();
+        var rowId = await AddRecoveredDumpAsync(_neighbour);
+
+        await NewBackups(FakePgRestore()).RestoreAsync(rowId);
+
+        _us.Former!.Id.Should().Be(_neighbour.Id);
+        _us.Former.RecordedAtUtc.Should().Be(Now);
+        _us.IsForeign(_neighbour.Id).Should().BeFalse("its backups can be restored here now");
+        DeploymentIdentity.LoadOrCreate(Path.Combine(_root, "us"), NullLogger.Instance).IsFormer(_neighbour.Id)
+            .Should().BeTrue("the takeover is kept beside the id, which the restore does not touch");
+    }
+
+    [Fact]
+    public async Task Restoring_a_recovered_dump_is_refused_once_this_installation_has_organisations()
+    {
+        await ConfigureOffsiteAsync();
+        var rowId = await AddRecoveredDumpAsync(_neighbour);
+
+        var act = () => NewBackups(FakePgRestore()).RestoreAsync(rowId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["BackupId"].Should().Contain("organisations");
+        _us.Former.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_single_organisation_installation_with_a_solution_is_not_fresh()
     {
         await ConfigureOffsiteAsync();
         await MakeFreshAsync();
         await using (var ctx = _db.NewContext())
         {
-            foreach (var name in new[] { "admin", "colleague" })
+            var user = NewUser("admin");
+            ctx.Users.Add(user);
+            await ctx.SaveChangesAsync();
+            ctx.OeProjects.Add(new ALDevToolbox.Domain.Entities.ObjectExplorer.OeProject
             {
-                ctx.Users.Add(new User
-                {
-                    OrganizationId = TestDb.DefaultOrgId, Email = $"{name}@cronus.example", DisplayName = name,
-                    Role = UserRole.Admin, Status = UserStatus.Active, CreatedAt = Now,
-                });
-            }
+                OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS", CreatedByUserId = user.Id,
+                CreatedAt = Now, UpdatedAt = Now,
+            });
             await ctx.SaveChangesAsync();
         }
-        PutDump("theirs", _neighbour, Now.AddDays(-1));
+        var rowId = await AddRecoveredDumpAsync(_neighbour);
 
-        await using var offsiteCtx = _db.NewContext();
-        var offsite = NewOffsite(_us, offsiteCtx);
-        (await offsite.CanRecoverAnotherInstallationAsync(default)).Should().BeFalse();
-        var act = () => offsite.DownloadAsync(DumpKey("theirs"), progress: null, recoverFromAnotherInstallation: true, default);
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*fresh installation*");
+        await using var checkCtx = _db.NewContext();
+        (await NewBackups(FakePgRestore(), checkCtx).RecoveryBlockerAsync()).Should().Contain("solutions");
+        var act = () => NewBackups(FakePgRestore()).RestoreAsync(rowId);
+        await act.Should().ThrowAsync<PlanValidationException>();
+        _us.Former.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task An_installation_with_users_or_backups_of_its_own_is_not_fresh()
+    {
+        await MakeFreshAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.Users.AddRange(NewUser("admin"), NewUser("colleague"));
+            await ctx.SaveChangesAsync();
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewBackups(FakePgRestore(), ctx).RecoveryBlockerAsync()).Should().Contain("users");
+            await ctx.Users.Where(u => u.Email.StartsWith("colleague")).ExecuteDeleteAsync();
+            (await NewBackups(FakePgRestore(), ctx).RecoveryBlockerAsync()).Should().BeNull();
+
+            ctx.Backups.Add(new Backup { FileName = "own.dump", CreatedAt = Now, Kind = BackupKind.Scheduled });
+            await ctx.SaveChangesAsync();
+            (await NewBackups(FakePgRestore(), ctx).RecoveryBlockerAsync()).Should().Contain("backups of its own");
+        }
+    }
+
+    [Fact]
+    public async Task A_second_former_installation_is_refused()
+    {
+        await ConfigureOffsiteAsync();
+        await MakeFreshAsync();
+        var third = DeploymentIdentity.LoadOrCreate(Path.Combine(_root, "third"), NullLogger.Instance);
+        _us.RecordFormer(_neighbour.Id, Now);
+        var rowId = await AddRecoveredDumpAsync(third);
+
+        var act = () => NewBackups(FakePgRestore()).RestoreAsync(rowId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["BackupId"].Should().Contain("already taken over");
+        _us.Former!.Id.Should().Be(_neighbour.Id);
+        var direct = () => _us.RecordFormer(third.Id, Now);
+        direct.Should().Throw<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task Retention_never_deletes_the_former_installations_backups()
+    {
+        await ConfigureOffsiteAsync();
+        _us.RecordFormer(_neighbour.Id, Now);
+        PutDump("former-1", _neighbour, Now.AddDays(-1));
+        PutDump("former-40", _neighbour, Now.AddDays(-40));
+        PutSnapshot("default", "former-40", _neighbour, Now.AddDays(-40));
+        PutDump("ours-1", _us, Now.AddDays(-1));
+
+        await PruneAsync();
+
+        _store.Keys.Should().Contain([DumpKey("former-40"), SnapshotKey("default", "former-40")]);
+        var listed = await NewOffsite(_us).ListPerTenantAsync(maxPerOrganization: 10, flagOtherDeployments: true, default);
+        listed.Should().OnlyContain(o => !o.FromAnotherDeployment, "the former installation's snapshots can be restored here");
+    }
+
+    [Fact]
+    public async Task Forgetting_the_former_installation_makes_its_backups_foreign_again()
+    {
+        _us.RecordFormer(_neighbour.Id, Now);
+        await using var ctx = _db.NewContext();
+
+        NewBackups(FakePgRestore(), ctx).ForgetFormerInstallation();
+
+        _us.Former.Should().BeNull();
+        _us.IsForeign(_neighbour.Id).Should().BeTrue();
+        DeploymentIdentity.LoadOrCreate(Path.Combine(_root, "us"), NullLogger.Instance).Former.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Dump_download_refuses_a_key_outside_the_configured_prefix()
+    {
+        await ConfigureOffsiteAsync(prefix: "cronus");
+        PutDump("stray", _us, Now);
+
+        var act = () => NewOffsite(_us).DownloadAsync(DumpKey("stray"), progress: null, recoverFromAnotherInstallation: false, default);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*outside the configured prefix*");
     }
 
     [Fact]
@@ -393,12 +482,12 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     }
 
     [Fact]
-    public void A_trusted_id_must_look_like_a_deployment_id()
+    public void A_former_id_must_look_like_a_deployment_id()
     {
-        var act = () => _us.Trust("../../etc\npasswd");
+        var act = () => _us.RecordFormer("../../etc\npasswd", Now);
 
         act.Should().Throw<ArgumentException>();
-        _us.TrustedFormerIds.Should().BeEmpty();
+        _us.Former.Should().BeNull();
     }
 
     // ---- #1333: the catalogues cut after sorting, not before -----------------
@@ -471,13 +560,22 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     // ---- #1334: the tenant catalogue knows organisations, not snapshot rows --
 
     [Fact]
-    public async Task Organisation_slugs_include_organisations_with_no_local_snapshot()
+    public async Task Organisation_names_include_organisations_with_no_local_snapshot()
     {
         await using var ctx = _db.NewContext();
 
-        var slugs = await NewPerTenant(ctx, _us).ListOrganizationSlugsAsync(default);
+        var names = await NewPerTenant(ctx, _us).ListOrganizationNamesAsync(default);
 
-        slugs.Should().Contain("other", "it has no snapshot here, as after a whole-database restore");
+        names.Should().ContainKey("other", "it has no snapshot here, as after a whole-database restore");
+        names["other"].Should().Be("Other");
+    }
+
+    [Fact]
+    public void The_tenant_catalogue_shows_fewer_per_organisation_rather_than_read_more_than_its_cap()
+    {
+        OffsiteBackupService.PerOrganizationLimit(14, 5).Should().Be(14);
+        OffsiteBackupService.PerOrganizationLimit(14, 40).Should().Be(5);
+        OffsiteBackupService.PerOrganizationLimit(14, 500).Should().Be(1, "every organisation keeps its newest");
     }
 
     // ---- plumbing -----------------------------------------------------------
@@ -526,14 +624,56 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
         return JsonSerializer.Deserialize<PerTenantBackupManifest>(stream)!;
     }
 
-    private async Task ConfigureOffsiteAsync()
+    private async Task ConfigureOffsiteAsync(string? prefix = null)
     {
         await using var ctx = _db.NewContext();
         await NewSystemSettings(ctx).SaveOffsiteAsync(new OffsiteSettingsInput(
             Enabled: true, Provider: null, Endpoint: null, Region: "eu-west-1", Bucket: "cronus-backups",
-            Prefix: null, AccessKey: "access", ClearAccessKey: false, SecretKey: "secret", ClearSecretKey: false,
+            Prefix: prefix, AccessKey: "access", ClearAccessKey: false, SecretKey: "secret", ClearSecretKey: false,
             ForcePathStyle: false, RetentionDays: RetentionDays));
     }
+
+    private User NewUser(string name) => new()
+    {
+        OrganizationId = TestDb.DefaultOrgId, Email = $"{name}@cronus.example", DisplayName = name,
+        PasswordHash = "x", Role = UserRole.Admin, Status = UserStatus.Active, CreatedAt = Now,
+    };
+
+    /// <summary>A dump downloaded with Recover: the file on disk and its row.</summary>
+    private async Task<int> AddRecoveredDumpAsync(DeploymentIdentity madeBy)
+    {
+        const string fileName = "aldevtoolbox-20260830T020000000Z-scheduled" + BackupService.BackupFileSuffix;
+        await File.WriteAllTextAsync(Path.Combine(_options.Directory, fileName), "not a real dump");
+        await using var ctx = _db.NewContext();
+        var row = new Backup
+        {
+            FileName = fileName, FileSizeBytes = 15, CreatedAt = Now, Kind = BackupKind.AdHoc, IsPinned = true,
+            RecoveredFromDeploymentId = madeBy.Id,
+        };
+        ctx.Backups.Add(row);
+        await ctx.SaveChangesAsync();
+        return row.Id;
+    }
+
+    /// <summary>
+    /// A pg_restore that restores nothing: the restore still drops the schema
+    /// and migrates it back, which is all these tests need from it.
+    /// </summary>
+    private string FakePgRestore()
+    {
+        var path = Path.Combine(_root, "fake-pg-restore");
+        if (!File.Exists(path))
+        {
+            File.WriteAllText(path, "#!/bin/sh\nexit 0\n");
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        return path;
+    }
+
+    private BackupService NewBackups(string pgRestore, AppDbContext? ctx = null) =>
+        new(ctx ?? _db.NewContext(), _db.OrgContext, new MaintenanceModeState(), Config(),
+            NullLogger<BackupService>.Instance, _clock, _options with { PgRestorePath = pgRestore },
+            systemSettings: null, deployment: _us);
 
     private SystemSettingsService NewSystemSettings(AppDbContext ctx) =>
         new(ctx, _db.DataProtectionProvider, NullLogger<SystemSettingsService>.Instance, _clock);
@@ -554,7 +694,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
         ctx ??= _db.NewContext();
         var backups = new BackupService(
             ctx, _db.OrgContext, new MaintenanceModeState(), Config(),
-            NullLogger<BackupService>.Instance, _clock, _options);
+            NullLogger<BackupService>.Instance, _clock, _options, systemSettings: null, deployment: deployment);
         return new OffsiteBackupService(
             ctx, NewSystemSettings(ctx), backups, NewPerTenant(ctx, deployment),
             new Factory(_store), NullLogger<OffsiteBackupService>.Instance, _clock, deployment);
@@ -608,6 +748,8 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
             // Both SDKs throw for a missing object; KeyNotFoundException stands in.
             return Task.FromResult(_objects[key].Metadata);
         }
+
+        public Task<bool> ExistsAsync(string key, CancellationToken ct) => Task.FromResult(_objects.ContainsKey(key));
 
         public Task<IReadOnlyList<OffsiteStorageObject>> ListAsync(string prefix, bool topLevelOnly, CancellationToken ct)
         {

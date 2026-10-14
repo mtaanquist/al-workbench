@@ -275,26 +275,45 @@ internal static class SiteAdminEndpoints
             // download an arbitrary object. Checking it against a listing, as
             // this once did, refused any dump the listing's cap cut off (#1333).
             // The download service enforces the shape again.
-            var fileName = await offsite.FindDumpAsync(key, ct);
+            string? fileName;
+            try
+            {
+                fileName = await offsite.FindDumpAsync(key, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString("Could not reach off-site storage: " + ex.Message));
+                return;
+            }
             if (fileName is null)
             {
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}="
-                    + Uri.EscapeDataString("That object is no longer in the bucket or doesn't look like one of our backups."));
+                    + Uri.EscapeDataString("That backup is no longer in off-site storage, or isn't one of ours."));
                 return;
             }
-            // Recovering another installation's dump is only offered on a fresh
-            // installation (#1322). The worker checks again before it trusts the
-            // dump, but off a request it cannot count users, so the full check is
-            // here.
+            // Recover only downloads, marked as another installation's; the
+            // restore decides, in its own request, whether this installation is
+            // still fresh enough to take it (#1322). Checked here as well so the
+            // SiteAdmin hears about it before a long download, not after.
             var recover = string.Equals(form["RecoverFromAnotherInstallation"].ToString(), "true", StringComparison.OrdinalIgnoreCase);
-            if (recover && !await offsite.CanRecoverAnotherInstallationAsync(ct))
+            if (recover && await offsite.RecoveryBlockerAsync(ct) is { } blocker)
             {
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.MsgQuery}="
-                    + Uri.EscapeDataString("Recovering another installation's backup is only possible on a fresh installation, before any organisations or other users are added."));
+                    + Uri.EscapeDataString(blocker));
                 return;
             }
             var id = jobs.Enqueue(OffsiteRestoreJobKind.WholeDb, key, fileName, recover);
             ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?job={Uri.EscapeDataString(id.ToString())}");
+        }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
+
+        // Forgets the installation this one was rebuilt from (#1322).
+        app.MapPost("/site-admin/backups/former-installation/remove", async (
+            HttpContext ctx, BackupService backups, IAntiforgery antiforgery, CancellationToken ct) =>
+        {
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            backups.ForgetFormerInstallation();
+            ctx.Response.Redirect($"{RouteConstants.SiteAdminBackups}?{RouteConstants.OkQuery}=former-removed");
         }).RequireAuthorization(policy => policy.RequireRole(HttpOrganizationContext.SiteAdminRole));
 
         app.MapGet("/site-admin/backups/offsite/jobs/{id:guid}", (
@@ -614,11 +633,21 @@ internal static class SiteAdminEndpoints
             // download an arbitrary key. A listing, as this once used, was
             // capped and refused every snapshot past the cap (#1333). The
             // download method enforces the same shape rules again.
-            var fileName = await offsite.FindPerTenantSnapshotAsync(key, ct);
+            string? fileName;
+            try
+            {
+                fileName = await offsite.FindPerTenantSnapshotAsync(key, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?{RouteConstants.MsgQuery}="
+                    + Uri.EscapeDataString("Could not reach off-site storage: " + ex.Message));
+                return;
+            }
             if (fileName is null)
             {
                 ctx.Response.Redirect($"{RouteConstants.SiteAdminTenantBackups}?{RouteConstants.MsgQuery}="
-                    + Uri.EscapeDataString("That per-tenant object is no longer in the bucket or doesn't look like one of our snapshots."));
+                    + Uri.EscapeDataString("That snapshot is no longer in off-site storage, or isn't one of ours."));
                 return;
             }
             var id = jobs.Enqueue(OffsiteRestoreJobKind.PerTenant, key, fileName);

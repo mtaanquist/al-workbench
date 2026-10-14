@@ -11,6 +11,7 @@
 @inject TimeProvider Clock
 @inject OffsiteBackupService Offsite
 @inject OffsiteRestoreJobs RestoreJobs
+@inject DeploymentIdentity Deployment
 @inject ILogger<SiteAdminBackups> Log
 
 <PageTitle>Database backups · Site administration · AL Workbench</PageTitle>
@@ -55,7 +56,58 @@
         }
         else if (Ok == "restored")
         {
-            <Alert Tone="AlertTone.Success"><span>Restore complete - the application is back online.</span></Alert>
+            <Alert Tone="AlertTone.Success"><span>Restore complete — the application is back online. If you are asked to sign in, use an account from the backup.</span></Alert>
+        }
+        else if (Ok == "former-removed")
+        {
+            <Alert Tone="AlertTone.Success"><span>Done. The replaced installation's backups count as another installation's again.</span></Alert>
+        }
+
+        @if (!_offsiteEnabled && _canRecover)
+        {
+            <Alert Tone="AlertTone.Info">
+                <span>
+                    Rebuilding after losing a server? Connect the off-site storage the old server used
+                    (same bucket, prefix and credentials) under <a href="/site-admin/settings/offsite">Settings → Off-site</a>,
+                    then come back here to recover it.
+                </span>
+            </Alert>
+        }
+
+        @if (_former is not null)
+        {
+            <section class="card" aria-label="Replaced installation">
+                <div class="card__head">
+                    <div>
+                        <h2 class="card__title">Recovered from another installation</h2>
+                        <p class="card__sub">
+                            @if (_former.RecordedAtUtc is DateTime at)
+                            {
+                                <text>Since <Timestamp Value="@at" Format="yyyy-MM-dd HH:mm" />, this</text>
+                            }
+                            else
+                            {
+                                <text>This</text>
+                            }
+                            installation replaces the one that made the backup restored here
+                            (installation <code>@ShortId(_former.Id)</code>).
+                        </p>
+                    </div>
+                    <form method="post" action="/site-admin/backups/former-installation/remove"
+                          onsubmit="return confirm('Stop treating the replaced installation\'s backups as restorable here? They stay in off-site storage, but can no longer be restored on this server.');">
+                        <AntiforgeryToken />
+                        <button type="submit" class="btn btn--sm">
+                            <Icon Name="x" Width="14" Height="14" />
+                            <span>Remove</span>
+                        </button>
+                    </form>
+                </div>
+                <p class="card__body u-muted">
+                    That installation's backups and organisation snapshots in off-site storage can be
+                    restored on this server. They are never deleted automatically — delete them in your
+                    storage provider once you no longer need them, then remove this.
+                </p>
+            </section>
         }
 
         @if (_activeJobs is { Count: > 0 })
@@ -64,9 +116,8 @@
                 <div class="card__head"><div><h2 class="card__title">Downloading from off-site storage</h2></div></div>
                 <div class="card__body">
                 <p class="u-muted">
-                    Streaming objects from the bucket to the local backups volume.
-                    The page refreshes automatically once a download finishes - the
-                    new row appears below and you can pick Restore from there.
+                    Copying from off-site storage to this server. The page refreshes when it's done;
+                    the backup then appears under "Copies kept on this server" with a Restore button.
                 </p>
                 <ul class="job-list">
                     @foreach (var job in _activeJobs)
@@ -107,18 +158,15 @@
                 <div class="card__head">
                     <div><h2 class="card__title">Copies kept off-site</h2></div>
                     <form method="get" action="/site-admin/backup-storage/database">
-                        <button type="submit" class="btn btn--sm" title="Re-list the bucket">
+                        <button type="submit" class="btn btn--sm" title="Check off-site storage again">
                             <Icon Name="refresh-cw" Width="14" Height="14" />
                             <span>Refresh</span>
                         </button>
                     </form>
                 </div>
                 <p class="card__body u-muted">
-                    Backups sitting in your off-site storage.
-                    Pick one to stream into the local backups volume; the row that
-                    appears in the table below can then be restored with the usual
-                    button. The download runs in the background and survives this
-                    page being closed.
+                    Download one to this server, then restore it from "Copies kept on this server".
+                    The download keeps going if you close this page. The newest @OffsiteListLimit are listed.
                 </p>
                 @if (_offsiteError is not null)
                 {
@@ -132,7 +180,11 @@
                 }
                 else if (_offsite.Count == 0)
                 {
-                    <p class="card__body u-muted">No backups in off-site storage yet. They appear after the next scheduled backup uploads.</p>
+                    <p class="card__body u-muted">
+                        No backups found in off-site storage. If you're rebuilding, check that the bucket and
+                        prefix under <a href="/site-admin/settings/offsite">Settings → Off-site</a> match the old server's.
+                        Otherwise they appear after the next nightly backup is uploaded.
+                    </p>
                 }
                 else
                 {
@@ -141,11 +193,9 @@
                         <div class="card__body">
                             <Alert Tone="AlertTone.Info">
                                 <span>
-                                    This installation is new. If it is replacing an installation that was lost,
-                                    that installation's backups are the ones marked "Another installation".
-                                    Pick Recover on the one you want, then restore it from the table below.
-                                    From then on this installation treats that installation's off-site backups,
-                                    including its organisation snapshots, as its own.
+                                    This is a new installation. If it replaces one that was lost, that installation's
+                                    backups are marked "Another installation". Click Recover on the one you want, wait
+                                    for the download to finish, then click Restore on it under "Copies kept on this server".
                                 </span>
                             </Alert>
                         </div>
@@ -153,10 +203,10 @@
                     <table class="data-table">
                         <thead>
                             <tr>
-                                <th>Object</th>
+                                <th>Backup file</th>
                                 <th>Last modified</th>
                                 <th>Size</th>
-                                <th>Already local?</th>
+                                <th>On this server?</th>
                                 <th>Actions</th>
                             </tr>
                         </thead>
@@ -177,10 +227,14 @@
                                     <td>@FormatSize(obj.Size)</td>
                                     <td>@(alreadyLocal ? "Yes" : "No")</td>
                                     <td class="data-table__actions">
-                                        @if (foreign && _canRecover && !alreadyLocal)
+                                        @if (alreadyLocal)
+                                        {
+                                            <span class="u-muted">Already on this server</span>
+                                        }
+                                        else if (foreign && _canRecover)
                                         {
                                             <form method="post" action="/site-admin/backups/offsite/download"
-                                                  onsubmit="return confirm('Only continue if this installation is replacing the one that made this backup. Restoring it will replace everything here, and the other backups that installation left off-site will be treated as this installation\'s own.');">
+                                                  onsubmit="return confirm('Only continue if this installation replaces the one that made this backup. This downloads it to this server. You then restore it from Copies kept on this server, which replaces everything here.');">
                                                 <AntiforgeryToken />
                                                 <input type="hidden" name="ObjectKey" value="@obj.Key" />
                                                 <input type="hidden" name="RecoverFromAnotherInstallation" value="true" />
@@ -191,16 +245,19 @@
                                                 </button>
                                             </form>
                                         }
+                                        else if (foreign)
+                                        {
+                                            <span class="u-muted" title="@(_recoveryBlocker ?? "")">Only on a new installation</span>
+                                        }
                                         else
                                         {
                                             <form method="post" action="/site-admin/backups/offsite/download">
                                                 <AntiforgeryToken />
                                                 <input type="hidden" name="ObjectKey" value="@obj.Key" />
-                                                <button type="submit" class="btn btn--sm btn--icon"
-                                                        title="@(foreign ? "Made by another AL Workbench installation that shares this storage - it can't be restored here" : alreadyLocal ? "A local backup with this name already exists" : "Download to local for restore")"
-                                                        aria-label="Download to local"
-                                                        disabled="@(foreign || alreadyLocal)">
+                                                <button type="submit" class="btn btn--sm"
+                                                        title="Copy this backup to this server so it can be restored">
                                                     <Icon Name="archive-restore" Width="14" Height="14" />
+                                                    <span>Download</span>
                                                 </button>
                                             </form>
                                         }
@@ -250,7 +307,7 @@
                 <span class="empty-state__icon"><Icon Name="database-backup" Width="21" Height="21" /></span>
                 <span class="empty-state__title">No copies yet</span>
                 <span class="empty-state__text">
-                    Take one with the button at the top of the page, or wait for tonight's.
+                    One is taken automatically every night.
                 </span>
             </div>
         }
@@ -271,12 +328,19 @@
                 <tbody>
                     @foreach (var row in _rows)
                     {
+                        var recovery = row.RecoveredFromDeploymentId is not null && _former?.Id != row.RecoveredFromDeploymentId;
                         <tr>
-                            <td><code>@row.FileName</code></td>
+                            <td>
+                                <code>@row.FileName</code>
+                                @if (recovery)
+                                {
+                                    <span class="tag">Another installation</span>
+                                }
+                            </td>
                             <td><Timestamp Value="@row.CreatedAt" Format="yyyy-MM-dd HH:mm:ss" /></td>
-                            <td>@row.Kind</td>
+                            <td>@(row.Kind == BackupKind.Scheduled ? "Automatic" : "Manual")</td>
                             <td>@FormatSize(row.FileSizeBytes)</td>
-                            <td>@(row.CreatedByEmail ?? "scheduler")</td>
+                            <td>@(row.CreatedByEmail ?? "Automatic")</td>
                             <td>
                                 @if (row.IsPinned)
                                 {
@@ -317,14 +381,22 @@
                                         </button>
                                     </form>
                                 }
-                                <form method="post" action="@($"/site-admin/backups/{row.Id}/restore")"
-                                      onsubmit="return confirm('Restoring will overwrite the entire database with this backup. Continue?');">
-                                    <AntiforgeryToken />
-                                    <input type="hidden" name="Confirm" value="true" />
-                                    <button type="submit" class="btn btn--sm btn--icon btn--danger" title="Restore from this backup" aria-label="Restore">
-                                        <Icon Name="rotate-ccw" Width="14" Height="14" />
-                                    </button>
-                                </form>
+                                @if (recovery && !_canRecover)
+                                {
+                                    <span class="u-muted" title="@(_recoveryBlocker ?? "")">Can only be restored onto a new installation</span>
+                                }
+                                else
+                                {
+                                    <form method="post" action="@($"/site-admin/backups/{row.Id}/restore")"
+                                          onsubmit="@(recovery ? RecoveryRestoreConfirm : RestoreConfirm)">
+                                        <AntiforgeryToken />
+                                        <input type="hidden" name="Confirm" value="true" />
+                                        <button type="submit" class="btn btn--sm btn--danger" title="Replace everything on this site with this backup">
+                                            <Icon Name="rotate-ccw" Width="14" Height="14" />
+                                            <span>Restore</span>
+                                        </button>
+                                    </form>
+                                }
                                 @if (!row.IsPinned)
                                 {
                                     <form method="post" action="@($"/site-admin/backups/{row.Id}/delete")"
@@ -424,6 +496,8 @@
     private string? _offsiteError;
     private bool _offsiteEnabled;
     private bool _canRecover;
+    private string? _recoveryBlocker;
+    private FormerInstallation? _former;
     private HashSet<string> _localFileNames = new(StringComparer.Ordinal);
     private List<OffsiteRestoreJob> _activeJobs = new();
 
@@ -434,19 +508,22 @@
         _rows = await Backups.ListAsync();
         _localFileNames = _rows.Select(r => r.FileName).ToHashSet(StringComparer.Ordinal);
 
+        _former = Deployment.Former;
+        _recoveryBlocker = await Backups.RecoveryBlockerAsync();
+        _canRecover = _recoveryBlocker is null;
+
         var offsiteView = await Settings.GetOffsiteViewAsync();
         _offsiteEnabled = offsiteView.Enabled && !string.IsNullOrWhiteSpace(offsiteView.Bucket);
         if (_offsiteEnabled)
         {
             try
             {
-                _offsite = await Offsite.ListAsync(maxObjects: 100, flagOtherDeployments: true, CancellationToken.None);
-                _canRecover = await Offsite.CanRecoverAnotherInstallationAsync(CancellationToken.None);
+                _offsite = await Offsite.ListAsync(maxObjects: OffsiteListLimit, flagOtherDeployments: true, CancellationToken.None);
             }
             catch (Exception ex)
             {
                 Log.LogWarning(ex, "Failed to list off-site catalogue for /site-admin/backups.");
-                _offsiteError = $"Could not list the off-site bucket: {ex.Message}";
+                _offsiteError = $"Could not read off-site storage: {ex.Message}";
             }
         }
 
@@ -468,6 +545,18 @@
     private string ScheduleText() =>
         DisplayTimeZone.FormatTimeOfDay(DisplayTimeZone.TimeOfDayToDisplay(
             _view!.BackupScheduleTimeUtc, Zone.OffsetAt(Clock.GetUtcNow().UtcDateTime)));
+
+    /// <summary>How many off-site dumps are listed: the newest, after sorting the whole prefix by date (#1333).</summary>
+    private const int OffsiteListLimit = 100;
+
+    private const string RestoreConfirm =
+        "return confirm('Restoring replaces everything on this site with this backup, including user accounts. Afterwards, sign in with an account from the backup. Continue?');";
+
+    private const string RecoveryRestoreConfirm =
+        "return confirm('This backup was made by another installation. Restoring it replaces everything on this site, including user accounts — afterwards, sign in with an account from the backup. This installation also takes over that installation\\'s backups: they can be restored here, and are never deleted automatically. Only continue if this installation replaces the one that made it.');";
+
+    /// <summary>Enough of an installation id to tell two apart, not the whole thing.</summary>
+    private static string ShortId(string id) => id.Length <= 8 ? id : id[..8];
 
     private static string FormatSize(long bytes)
     {

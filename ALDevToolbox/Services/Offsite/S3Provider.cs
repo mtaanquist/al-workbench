@@ -105,6 +105,23 @@ public sealed class S3Provider : IOffsiteStorageProvider, IDisposable
         return CanonicalMetadata(response.Metadata);
     }
 
+    public async Task<bool> ExistsAsync(string key, CancellationToken ct)
+    {
+        try
+        {
+            await _client.GetObjectMetadataAsync(new GetObjectMetadataRequest
+            {
+                BucketName = _settings.Bucket,
+                Key = key,
+            }, ct);
+            return true;
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+    }
+
     private static Dictionary<string, string> CanonicalMetadata(MetadataCollection source)
     {
         var metadata = new Dictionary<string, string>(StringComparer.Ordinal);

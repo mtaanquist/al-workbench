@@ -160,7 +160,7 @@ public sealed class PerTenantBackupService
     }
 
     /// <summary>
-    /// The slugs of every organisation on this installation: the ones an
+    /// Every organisation on this installation, slug to name: the ones an
     /// off-site snapshot can be pulled back for, by the same rule
     /// <see cref="OffsiteBackupService.DownloadPerTenantAsync"/> applies. The
     /// off-site catalogue once derived this from local snapshot rows, which a
@@ -168,14 +168,14 @@ public sealed class PerTenantBackupService
     /// had just brought back unknown (#1334). SiteAdmin-only; the
     /// <c>organizations</c> table has no query filter, so nothing is bypassed.
     /// </summary>
-    public async Task<HashSet<string>> ListOrganizationSlugsAsync(CancellationToken ct = default)
+    public async Task<Dictionary<string, string>> ListOrganizationNamesAsync(CancellationToken ct = default)
     {
         _orgContext.RequireSiteAdmin();
-        var slugs = await _db.Organizations
+        var orgs = await _db.Organizations
             .AsNoTracking()
-            .Select(o => o.Slug)
+            .Select(o => new { o.Slug, o.Name })
             .ToListAsync(ct);
-        return slugs.ToHashSet(StringComparer.Ordinal);
+        return orgs.ToDictionary(o => o.Slug, o => o.Name, StringComparer.Ordinal);
     }
 
     /// <summary>
