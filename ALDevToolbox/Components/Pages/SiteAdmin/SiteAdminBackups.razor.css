@@ -1,0 +1,10 @@
+/* Each row action posts its own form; keep them on one line instead of
+   stacking one per line, which made the Actions column a tall column of
+   buttons. */
+.data-table__actions form { display: inline-block; }
+.data-table__actions form + form,
+.data-table__actions a + form,
+.data-table__actions form + .u-muted { margin-left: var(--space-2); }
+/* Captions set as a card body paragraph keep the card padding only, not the
+   paragraph margin on top of it. */
+p.card__body { margin: 0; }

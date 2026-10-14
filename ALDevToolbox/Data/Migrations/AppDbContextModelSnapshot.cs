@@ -194,6 +194,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("offsite_uploaded_at");
 
+                    b.Property<string>("RecoveredFromDeploymentId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("recovered_from_deployment_id");
+
                     b.HasKey("Id");
 
                     b.HasIndex("CreatedAt");

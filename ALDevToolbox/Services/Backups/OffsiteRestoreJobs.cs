@@ -47,7 +47,8 @@ public sealed record OffsiteRestoreJob(
     long? TotalBytes,
     OffsiteRestoreJobStatus Status,
     string? Error,
-    int? BackupId);
+    int? BackupId,
+    bool RecoverFromAnotherInstallation = false);
 
 /// <summary>
 /// Process-local job tracker for off-site restore downloads. Holds the
@@ -86,9 +87,12 @@ public sealed class OffsiteRestoreJobs
     /// <summary>
     /// Registers a new job and enqueues it for the worker. Returns the
     /// freshly-minted id so the endpoint can redirect to a page that
-    /// knows which job to poll.
+    /// knows which job to poll. <paramref name="recoverFromAnotherInstallation"/>
+    /// carries the SiteAdmin's confirmation that a whole-database dump made by
+    /// another installation is being restored to rebuild it (#1322); the
+    /// download re-checks that this installation is still fresh.
     /// </summary>
-    public Guid Enqueue(OffsiteRestoreJobKind kind, string objectKey, string fileName)
+    public Guid Enqueue(OffsiteRestoreJobKind kind, string objectKey, string fileName, bool recoverFromAnotherInstallation = false)
     {
         EvictOldTerminal();
 
@@ -116,7 +120,8 @@ public sealed class OffsiteRestoreJobs
             TotalBytes: null,
             Status: OffsiteRestoreJobStatus.Pending,
             Error: null,
-            BackupId: null);
+            BackupId: null,
+            RecoverFromAnotherInstallation: recoverFromAnotherInstallation);
         _jobs[id] = job;
         if (!_queue.Writer.TryWrite(id))
         {
@@ -279,7 +284,7 @@ public sealed class OffsiteRestoreWorker : BackgroundService
                 _jobs.ReportProgress(jobId, tuple.BytesDownloaded, tuple.TotalBytes));
             var backupId = job.Kind switch
             {
-                OffsiteRestoreJobKind.WholeDb => await offsite.DownloadAsync(job.ObjectKey, progress, stoppingToken),
+                OffsiteRestoreJobKind.WholeDb => await offsite.DownloadAsync(job.ObjectKey, progress, job.RecoverFromAnotherInstallation, stoppingToken),
                 OffsiteRestoreJobKind.PerTenant => await offsite.DownloadPerTenantAsync(job.ObjectKey, progress, stoppingToken),
                 _ => throw new InvalidOperationException($"Unknown off-site restore job kind: {job.Kind}"),
             };
