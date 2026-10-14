@@ -280,6 +280,93 @@ public sealed class EntraSignInServiceTests : IDisposable
             "auto-join requires ownership of a claimed domain, mirroring the verified signup flow");
     }
 
+    private const string OidB = "bbbbbbbb-0000-0000-0000-000000000001";
+
+    private async Task SetUserStateAsync(string email, UserStatus status, DateTime? lastLoginAt = null)
+    {
+        await using var ctx = _db.NewContext();
+        var user = await ctx.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == email);
+        user.Status = status;
+        user.LastLoginAt = lastLoginAt;
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task SeedLinkAsync(int userId, string tid, string oid)
+    {
+        await using var ctx = _db.NewContext();
+        ctx.UserExternalLogins.Add(new UserExternalLogin
+        {
+            UserId = userId,
+            Provider = EntraSignInService.ProviderName,
+            Issuer = tid,
+            Subject = oid,
+            DisplayIdentity = "seeded",
+            CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync();
+    }
+
+    private async Task<List<string>> LinkedSubjectsAsync(string email)
+    {
+        await using var ctx = _db.NewContext();
+        return await ctx.UserExternalLogins.IgnoreQueryFilters().AsNoTracking()
+            .Where(l => l.User!.Email == email)
+            .Select(l => l.Subject)
+            .ToListAsync();
+    }
+
+    private async Task<EntraCompletionOutcome> SignInAsync(EntraTokenIdentity token)
+    {
+        await using var ctx = _db.NewContext();
+        return (await NewService(ctx).CompleteAsync(token, Ip)).Outcome;
+    }
+
+    [Fact]
+    public async Task Complete_verified_bind_replaces_an_unverified_link_on_a_never_used_pending_account()
+    {
+        // Issue #1323: A claims new@cronus.com without proof and gets a Pending
+        // account; B, who proves the address, must end up the only way in.
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA, autoJoin: true, domain: "cronus.com");
+        var claimant = new EntraTokenIdentity(TenantA, Oid, "new@cronus.com", "Claimant");
+        var owner = new EntraTokenIdentity(TenantA, OidB, "new@cronus.com", "Owner", EmailVerified: true);
+
+        (await SignInAsync(claimant)).Should().Be(EntraCompletionOutcome.PendingApproval);
+        (await SignInAsync(owner)).Should().Be(EntraCompletionOutcome.AccountPending);
+        (await LinkedSubjectsAsync("new@cronus.com")).Should().BeEquivalentTo(new[] { OidB });
+
+        await SetUserStateAsync("new@cronus.com", UserStatus.Active);
+
+        (await SignInAsync(claimant)).Should().NotBe(EntraCompletionOutcome.Success);
+        (await SignInAsync(owner)).Should().Be(EntraCompletionOutcome.Success);
+    }
+
+    [Fact]
+    public async Task Complete_verified_bind_keeps_other_links_on_an_active_account()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA, domain: "cronus.com");
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com");
+        await SeedLinkAsync(userId, TenantB, Oid);
+
+        (await SignInAsync(new EntraTokenIdentity(TenantA, OidB, "mette@cronus.com", "Mette", EmailVerified: true)))
+            .Should().Be(EntraCompletionOutcome.Success);
+
+        (await LinkedSubjectsAsync("mette@cronus.com")).Should().BeEquivalentTo(new[] { Oid, OidB });
+    }
+
+    [Fact]
+    public async Task Complete_verified_bind_keeps_other_links_on_a_pending_account_that_has_signed_in()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA, domain: "cronus.com");
+        var userId = await SeedUserAsync(TestDb.DefaultOrgId, "mette@cronus.com", UserStatus.Pending);
+        await SetUserStateAsync("mette@cronus.com", UserStatus.Pending, DateTime.UtcNow.AddDays(-1));
+        await SeedLinkAsync(userId, TenantB, Oid);
+
+        (await SignInAsync(new EntraTokenIdentity(TenantA, OidB, "mette@cronus.com", "Mette", EmailVerified: true)))
+            .Should().Be(EntraCompletionOutcome.AccountPending);
+
+        (await LinkedSubjectsAsync("mette@cronus.com")).Should().BeEquivalentTo(new[] { Oid, OidB });
+    }
+
     [Fact]
     public async Task Complete_refuses_a_returning_identity_whose_account_is_still_pending()
     {

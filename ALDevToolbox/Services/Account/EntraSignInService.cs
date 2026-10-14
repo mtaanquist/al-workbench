@@ -378,6 +378,28 @@ public sealed class EntraSignInService
                 return await RefuseAsync(EntraCompletionOutcome.LinkFromAccountRequired, email, ip, now,
                     $"email matches a SiteAdmin account with no Microsoft link; tenant {tid}", ct);
             }
+            // An account that has never been used may carry a link from an
+            // unverified JIT sign-in that claimed this address (#1323). A
+            // verified address beats an unverified claim, so drop those links
+            // in the same save as the new one; otherwise the claimant could
+            // sign in once an Admin approves the real owner's account.
+            var superseded = new List<UserExternalLogin>();
+            if (user.Status == UserStatus.Pending && user.LastLoginAt is null)
+            {
+                // Fence category 1 (pre-auth routing): pinned to l.UserId == user.Id, the
+                // account just matched by the verified email inside the routed org.
+                superseded = await _db.UserExternalLogins.IgnoreQueryFilters()
+                    .Where(l => l.UserId == user.Id && l.Provider == ProviderName
+                        && !(l.Issuer == tid && l.Subject == token.ObjectId))
+                    .ToListAsync(ct);
+                if (superseded.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "Verified Entra sign-in from tenant {Tid} replaced {Count} unverified link(s) from tenant(s) {OldTids} on never-used account {UserId}.",
+                        tid, superseded.Count, string.Join(",", superseded.Select(l => l.Issuer).Distinct()), user.Id);
+                    _db.UserExternalLogins.RemoveRange(superseded);
+                }
+            }
             // Saved on its own, ahead of FinishStatusCheckedAsync's bookkeeping,
             // so a lost race is settled while the link insert is the only thing
             // pending — otherwise the failed save takes the login attempt with it
@@ -386,6 +408,11 @@ public sealed class EntraSignInService
             var settled = await SaveLinkSettlingRaceAsync(inserted, user.Id, tid, token.ObjectId, ct);
             if (settled is null)
             {
+                // The bind lost; this sign-in proved nothing, so keep the old links.
+                foreach (var kept in superseded)
+                {
+                    _db.Entry(kept).State = EntityState.Unchanged;
+                }
                 return await RefuseAsync(EntraCompletionOutcome.IdentityTakenElsewhere, email, ip, now,
                     $"identity {tid}/{token.ObjectId} was claimed by another account mid-sign-in", ct);
             }
