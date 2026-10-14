@@ -482,7 +482,12 @@ public sealed class AccountService
     internal static async Task CommitCredentialChangeAsync(
         AppDbContext db, IOpenIddictTokenManager oauthTokens, int userId, DateTime now, CancellationToken ct)
     {
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // Joins the caller's transaction when there is one (the email-change
+        // confirmation holds a lock on the user row across the whole swap), and
+        // opens its own otherwise.
+        await using var tx = db.Database.CurrentTransaction is null
+            ? await db.Database.BeginTransactionAsync(ct)
+            : null;
         // Fence category 4 (own-user lookup): pinned to p.UserId == userId, the
         // signed-in user or the user a reset token was issued to.
         var tokens = await db.PersonalAccessTokens.IgnoreQueryFilters()
@@ -494,7 +499,7 @@ public sealed class AccountService
         {
             await oauthTokens.TryRevokeAsync(token, ct);
         }
-        await tx.CommitAsync(ct);
+        if (tx is not null) await tx.CommitAsync(ct);
     }
 
     /// <summary>Self-service display-name change.</summary>

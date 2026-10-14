@@ -261,7 +261,7 @@ public sealed class AccountSecurityFlowTests : IDisposable
         string token;
         await using (var ctx = _db.NewContext())
         {
-            token = await NewUserAdmin(ctx).RequestEmailChangeAsync(5401, "new@example.com", orgId, 5400);
+            token = (await NewUserAdmin(ctx).RequestEmailChangeAsync(5401, "new@example.com", orgId, 5400)).ConfirmToken;
         }
         await using (var read = _db.NewContext())
         {
@@ -269,10 +269,11 @@ public sealed class AccountSecurityFlowTests : IDisposable
             user.PendingEmail.Should().Be("new@example.com");
             user.Email.Should().Be("old@example.com", "until the token is consumed");
         }
+        _clock.Advance(UserAdministrationService.EmailChangeConfirmDelay);
         await using (var ctx = _db.NewContext())
         {
             var result = await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token);
-            result.Should().NotBeNull();
+            result.Outcome.Should().Be(EmailChangeConfirmOutcome.Confirmed);
         }
         await using (var read = _db.NewContext())
         {
@@ -300,16 +301,17 @@ public sealed class AccountSecurityFlowTests : IDisposable
         string firstToken, secondToken;
         await using (var ctx = _db.NewContext())
         {
-            firstToken = await NewUserAdmin(ctx).RequestEmailChangeAsync(5451, "first@example.com", orgId, 5450);
+            firstToken = (await NewUserAdmin(ctx).RequestEmailChangeAsync(5451, "first@example.com", orgId, 5450)).ConfirmToken;
         }
         await using (var ctx = _db.NewContext())
         {
-            secondToken = await NewUserAdmin(ctx).RequestEmailChangeAsync(5451, "second@example.com", orgId, 5450);
+            secondToken = (await NewUserAdmin(ctx).RequestEmailChangeAsync(5451, "second@example.com", orgId, 5450)).ConfirmToken;
         }
+        _clock.Advance(UserAdministrationService.EmailChangeConfirmDelay);
         await using (var ctx = _db.NewContext())
         {
             var result = await NewUserAdmin(ctx).ConfirmEmailChangeAsync(firstToken);
-            result.Should().BeNull("old token must be invalidated when a newer change is requested");
+            result.Outcome.Should().Be(EmailChangeConfirmOutcome.Invalid, "old token must be invalidated when a newer change is requested");
         }
         await using var read = _db.NewContext();
         var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == 5451);
@@ -317,7 +319,7 @@ public sealed class AccountSecurityFlowTests : IDisposable
         // Second token still works against the current pending value.
         await using (var ctx = _db.NewContext())
         {
-            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(secondToken)).Should().NotBeNull();
+            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(secondToken)).Outcome.Should().Be(EmailChangeConfirmOutcome.Confirmed);
         }
     }
 

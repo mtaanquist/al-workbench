@@ -6,6 +6,7 @@ using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
 using ALDevToolbox.Services.Email;
+using ALDevToolbox.Services.Organizations;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -555,21 +556,65 @@ internal static class AccountAuthEndpoints
         // --- Admin-initiated email change: user-side confirmation -----------
 
         app.MapGet("/auth/account/email-change/confirm", async (
-            HttpContext ctx, UserAdministrationService users, ILoggerFactory loggerFactory, CancellationToken ct) =>
+            HttpContext ctx, UserAdministrationService users, IEmailService email, EmailRenderer emailRenderer,
+            ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("EmailChange");
             var token = ctx.Request.Query["token"].ToString();
-            var user = await users.ConfirmEmailChangeAsync(token, ct);
-            if (user is null)
+            var change = await users.ConfirmEmailChangeAsync(token, ct);
+            if (change.Outcome == EmailChangeConfirmOutcome.NotYet)
+            {
+                // The link is still good; say when it will work. Unix seconds
+                // keep the query free of a formatted date.
+                var at = new DateTimeOffset(DisplayTimeZone.AsUtc(change.ConfirmableFrom!.Value)).ToUnixTimeSeconds();
+                ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}=email-change-not-yet&at={at}");
+                return;
+            }
+            if (change.Outcome != EmailChangeConfirmOutcome.Confirmed)
             {
                 ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}=email-change-invalid");
                 return;
             }
-            // Force the user to re-login from the new address so the cookie's
-            // email claim is correct.
+            var user = change.User!;
+            // The swap stamped credentials_changed_at, which ends every other
+            // session; sign this browser out too so the next sign-in carries
+            // the new address.
             await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
             logger.LogInformation("Email change confirmed for user {UserId}; new email {Email}.", user.Id, user.Email);
+            try
+            {
+                // The old address was told when the change was asked for; this
+                // tells it the change went through. The swap has already
+                // happened, so a failed send is logged, not shown.
+                var content = await EmailChangedEmail.RenderAsync(emailRenderer, user.DisplayName, user.Email, ct);
+                await email.SendAsync(change.PreviousEmail!, content, EmailPurpose.EmailChangeNotice, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Email-changed notice to the previous address of user {UserId} could not be sent.", user.Id);
+            }
             ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.OkQuery}=email-change-confirmed");
+        });
+
+        // The "stop this change" link in the notice to the current address
+        // lands on a page with a button (so a mail scanner that opens links
+        // can't stop changes by itself), which posts here. No sign-in: the
+        // token is the proof.
+        app.MapPost("/auth/account/email-change/cancel", async (
+            HttpContext ctx, UserAdministrationService users, IAntiforgery antiforgery,
+            ILoggerFactory loggerFactory, CancellationToken ct) =>
+        {
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            var form = await ctx.Request.ReadFormAsync(ct);
+            var stoppedFor = await users.CancelEmailChangeAsync(form["Token"].ToString(), ct);
+            if (stoppedFor is null)
+            {
+                ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}=email-change-cancel-invalid");
+                return;
+            }
+            loggerFactory.CreateLogger("EmailChange").LogInformation(
+                "Pending email change for user {UserId} was stopped from the current address.", stoppedFor.Value);
+            ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.OkQuery}=email-change-cancelled");
         });
 
         return app;

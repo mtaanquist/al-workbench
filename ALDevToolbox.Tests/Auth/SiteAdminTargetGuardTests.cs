@@ -103,20 +103,21 @@ public sealed class SiteAdminTargetGuardTests : IDisposable
         string token;
         await using (var ctx = _db.NewContext())
         {
-            token = await NewUserAdmin(ctx).RequestEmailChangeAsync(targetId, "elsewhere@example.com", OrgId, orgAdminId);
+            token = (await NewUserAdmin(ctx).RequestEmailChangeAsync(targetId, "elsewhere@example.com", OrgId, orgAdminId)).ConfirmToken;
         }
         await SetSiteAdminAsync(targetId, true);
+        _clock.Advance(UserAdministrationService.EmailChangeConfirmDelay);
 
         await using (var ctx = _db.NewContext())
         {
-            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token)).Should().BeNull();
+            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token)).Outcome.Should().Be(EmailChangeConfirmOutcome.Invalid);
         }
 
         var user = await ReadUserAsync(targetId);
         user.Email.Should().Be("operator@example.com");
         user.PendingEmail.Should().BeNull("the refused change is dropped, not left waiting");
         await using var read = _db.NewContext();
-        (await read.PasswordResetTokens.SingleAsync(t => t.UserId == targetId)).ConsumedAt.Should().NotBeNull();
+        (await read.PasswordResetTokens.SingleAsync(t => t.UserId == targetId && t.Purpose == TokenPurpose.EmailChangeConfirm)).ConsumedAt.Should().NotBeNull();
     }
 
     [Fact]
@@ -128,12 +129,13 @@ public sealed class SiteAdminTargetGuardTests : IDisposable
         string token;
         await using (var ctx = _db.NewContext())
         {
-            token = await NewUserAdmin(ctx).RequestEmailChangeAsync(otherId, "renamed@example.com", OrgId, actorId);
+            token = (await NewUserAdmin(ctx).RequestEmailChangeAsync(otherId, "renamed@example.com", OrgId, actorId)).ConfirmToken;
         }
 
+        _clock.Advance(UserAdministrationService.EmailChangeConfirmDelay);
         await using (var ctx = _db.NewContext())
         {
-            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token)).Should().NotBeNull();
+            (await NewUserAdmin(ctx).ConfirmEmailChangeAsync(token)).Outcome.Should().Be(EmailChangeConfirmOutcome.Confirmed);
         }
 
         (await ReadUserAsync(otherId)).Email.Should().Be("renamed@example.com");
