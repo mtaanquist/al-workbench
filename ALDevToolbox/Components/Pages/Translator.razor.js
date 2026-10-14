@@ -74,11 +74,16 @@ export async function putBaseStream(fileName, sourceLang, targetLang, streamRef)
     await putRec({ fileName, originalXml, sourceLang, targetLang, edits: {} });
 }
 
-// Debounced incremental edit save (for resume). `editsJson` is the full overlay.
-export async function putEdits(editsJson) {
+// Debounced incremental edit save (for resume). `editsJson` is the full overlay;
+// `learnedJson` is what each unit last taught the translation memory, kept
+// beside it so a reload does not teach the same units again (#1343).
+export async function putEdits(editsJson, learnedJson) {
     const rec = await getRec();
     if (!rec) return;
-    try { rec.edits = JSON.parse(editsJson); } catch { return; }
+    try {
+        rec.edits = JSON.parse(editsJson);
+        if (learnedJson) rec.learned = JSON.parse(learnedJson);
+    } catch { return; }
     await putRec(rec);
 }
 
@@ -107,6 +112,7 @@ export async function loadMeta() {
         sourceLang: rec.sourceLang || null,
         targetLang: rec.targetLang || null,
         edits: rec.edits || {},
+        learned: rec.learned || null,
     };
 }
 
@@ -234,8 +240,7 @@ async function ensureWritePermission(handle) {
 // still runs server-side (the same /api/translator/export endpoint the download
 // path posts to) so XliffTargetWriter stays the single source of truth — we
 // just fetch the result instead of navigating to it, then write the bytes to
-// the handle. Returns a status: "saved" | "empty" | "no-handle" | "denied" |
-// "step-up" (the organisation wants a fresh "confirm it's you") | "error".
+// the handle. Returns a status: "saved" | "empty" | "no-handle" | "denied" | "error".
 export async function saveInPlace(fileName, editsJson, learnJson) {
     const rec = await getRec();
     if (!rec || !rec.originalXml) return "empty";
@@ -262,7 +267,6 @@ export async function saveInPlace(fileName, editsJson, learnJson) {
     let bytes;
     try {
         const res = await fetch("/api/translator/export", { method: "POST", body });
-        if (res.status === 403) return "step-up";
         if (!res.ok) return "error";
         bytes = await res.arrayBuffer();
     } catch {

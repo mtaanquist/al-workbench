@@ -203,18 +203,19 @@ public sealed class ToolAccessGateTests : IDisposable
     }
 
     /// <summary>
-    /// The recipe download and the Translator's export are what those tools hand
-    /// out, so switching a tool off closes them too, not only its pages (#1343).
+    /// A tool's own /api endpoints - the recipe download, the Translator's export,
+    /// the Object Explorer's file reads - close with it, not only its pages (#1343).
     /// </summary>
     [Fact]
     public async Task A_disabled_tools_own_api_endpoints_404()
     {
-        await DisableToolsAsync(ToolKey.Cookbook, ToolKey.Translator);
+        await DisableToolsAsync(ToolKey.Cookbook, ToolKey.Translator, ToolKey.ObjectExplorer);
 
         using var factory = new EndpointFactory(_db);
         using var client = factory.CreateClient();
 
         (await client.GetAsync("/api/cookbook/1/download")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await client.GetAsync("/api/object-explorer/files/1/download")).StatusCode.Should().Be(HttpStatusCode.NotFound);
         (await client.GetAsync("/api/snippets/1/download")).StatusCode.Should().Be(HttpStatusCode.MovedPermanently,
             "the old address only redirects, to the gated one");
         using var export = await client.PostAsync("/api/translator/export", new FormUrlEncodedContent([]));
