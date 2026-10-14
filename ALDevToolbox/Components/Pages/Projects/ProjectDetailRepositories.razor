@@ -52,11 +52,11 @@
             <Alert Tone="AlertTone.Warn">
                 <span>
                     @(UnconfirmedCount == 1
-                        ? "1 repository is left out of builds until someone confirms they can read it."
-                        : $"{UnconfirmedCount} repositories are left out of builds until someone confirms they can read them.")
+                        ? "1 repository is left out of builds until someone confirms they can open it."
+                        : $"{UnconfirmedCount} repositories are left out of builds until someone confirms they can open them: {string.Join(", ", UnconfirmedNames)}.")
                     @(CanManage
-                        ? "If you can open it on GitHub or Azure DevOps, press Confirm access next to it."
-                        : "Ask someone who manages this solution, and can open the repository, to confirm access.")
+                        ? "If you can open it on GitHub or Azure DevOps, press Confirm access next to it. Automatic builds will then use your access."
+                        : "Ask a solution manager who can open it to confirm access.")
                 </span>
             </Alert>
         }
@@ -118,7 +118,7 @@
                                     @if (CanManage)
                                     {
                                         <input type="text" class="input input--sm" @bind="repo.Url" @bind:event="oninput" @bind:after="MarkDirty"
-                                               disabled="@Saving" placeholder="https://github.com/org/repo" aria-label="Repository URL" />
+                                               disabled="@Saving" placeholder="@UrlPlaceholder(repo.Provider)" aria-label="Repository URL" />
                                         <FieldError Field="Url" Errors="RepoErrorsFor(repo)" />
                                     }
                                     else
@@ -146,7 +146,8 @@
                                             @if (!repo.AccessConfirmed && CanManage)
                                             {
                                                 <button type="button" class="btn btn--sm" @onclick="() => ConfirmAsync(repo)"
-                                                        disabled="@(Saving || _confirming is not null)">
+                                                        disabled="@(Saving || _confirming is not null)"
+                                                        title="Checks you can open this repository, then includes it in builds. Automatic builds will then use your access.">
                                                     <Icon Name="check" Width="14" Height="14" />
                                                     <span>@(_confirming == repo ? "Checking..." : "Confirm access")</span>
                                                 </button>
@@ -168,7 +169,7 @@
                                     }
                                     @if (repo.Url == repo.SavedUrl && !repo.AccessConfirmed)
                                     {
-                                        <span class="field__hint pd-repo-links__pending">Not in builds yet.</span>
+                                        <span class="field__hint pd-repo-links__pending">@NotInBuildsHint(repo)</span>
                                     }
                                 </td>
                                 @if (CanManage)
@@ -287,8 +288,26 @@
     /// <summary>The row whose access is being checked, so its button says so and the others wait.</summary>
     private ProjectDetail.RepoRow? _confirming;
 
-    /// <summary>Saved repositories that builds leave out until someone confirms they can read them.</summary>
-    private int UnconfirmedCount => Edit.Repos.Count(r => r.SavedUrl is not null && !r.AccessConfirmed);
+    /// <summary>Saved repositories that builds leave out until someone confirms they can open them.</summary>
+    private IEnumerable<ProjectDetail.RepoRow> Unconfirmed => Edit.Repos.Where(r => r.SavedUrl is not null && !r.AccessConfirmed);
+
+    private int UnconfirmedCount => Unconfirmed.Count();
+
+    /// <summary>The unconfirmed repositories by name, for the warning when there is more than one.</summary>
+    private IEnumerable<string> UnconfirmedNames => Unconfirmed.Select(r =>
+        string.IsNullOrWhiteSpace(r.DisplayName) ? r.Url.TrimEnd('/').Split('/').Last() : r.DisplayName);
+
+    /// <summary>Why a saved row is not in builds, and what the person looking can do about it.</summary>
+    private string NotInBuildsHint(ProjectDetail.RepoRow row) =>
+        RepositoryLinks.WebUrl(row.Provider, row.Url) is null
+            ? "Fix the repository address and save the solution to include it in builds."
+            : CanManage
+                ? "Not in builds: nobody has confirmed access."
+                : "Not in builds: ask a solution manager who can open it to confirm access.";
+
+    private static string UrlPlaceholder(RepositoryProvider provider) => provider == RepositoryProvider.AzureDevOps
+        ? "e.g. https://dev.azure.com/cronus/BaseApp/_git/base-app"
+        : "e.g. https://github.com/cronus/base-app";
 
     private async Task ConfirmAsync(ProjectDetail.RepoRow row)
     {

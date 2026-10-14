@@ -1074,7 +1074,7 @@
             await Projects.ConfirmRepositoryAccessAsync(id, repositoryId);
             row.AccessConfirmed = true;
             _loadedProject = await Projects.GetProjectAsync(id) ?? _loadedProject;
-            _message = $"Confirmed. Builds include {(string.IsNullOrWhiteSpace(row.DisplayName) ? "this repository" : row.DisplayName)} from now on. Automatic builds now run with your access.";
+            _message = $"Confirmed. Builds now include {(string.IsNullOrWhiteSpace(row.DisplayName) ? "this repository" : row.DisplayName)}.";
         }
         catch (Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException)
         {

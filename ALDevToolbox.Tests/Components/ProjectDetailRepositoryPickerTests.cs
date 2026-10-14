@@ -275,11 +275,12 @@ public sealed class ProjectDetailRepositoryPickerTests : IDisposable
         var cut = RenderOnSettings(projectId);
         await OpenReposTabAsync(cut);
 
-        cut.Markup.Should().Contain("1 repository is left out of builds until someone confirms they can read it.");
-        cut.Markup.Should().Contain("Not in builds yet.");
+        cut.Markup.Should().Contain("1 repository is left out of builds until someone confirms they can open it.");
+        cut.Markup.Should().Contain("Not in builds: nobody has confirmed access.");
+        cut.Markup.Should().Contain("Automatic builds will then use your access.");
         await ClickAsync(cut, "Confirm access");
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Confirmed. Builds include base-app from now on."));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Confirmed. Builds now include base-app."));
         cut.Markup.Should().NotContain("left out of builds");
         ButtonLabels(cut).Should().NotContain("Confirm access");
         await using var read = _db.NewContext();

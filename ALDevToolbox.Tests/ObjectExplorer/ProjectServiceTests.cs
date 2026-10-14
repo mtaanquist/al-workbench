@@ -502,7 +502,7 @@ public sealed class ProjectServiceTests : IDisposable
         var act = () => Svc(_db.NewContext()).AddRepositoryAsync(id, Payments);
 
         (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors["Url"].Should().Contain("can't see cronus-dk/payment-import");
+            .Which.Errors["Url"].Should().Contain("can't open cronus-dk/payment-import");
         (await RepositoryUrlsAsync(id)).Should().Equal(Core.Url);
     }
 
@@ -626,7 +626,7 @@ public sealed class ProjectServiceTests : IDisposable
         var act = () => Svc(_db.NewContext()).AddRepositoryAsync(id, AzureExtensions);
 
         (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors["Url"].Should().Contain("can't read this repository");
+            .Which.Errors["Url"].Should().Contain("Check the address");
         _gitRemote.Calls.Should().HaveCount(2);
         _gitRemote.Calls[0].Environment!.Values.Should().Contain(v => v.StartsWith("Authorization: Basic"));
         _gitRemote.Calls[1].Environment!.Values.Should().NotContain(v => v.StartsWith("Authorization"));
@@ -687,7 +687,7 @@ public sealed class ProjectServiceTests : IDisposable
         var act = () => Svc(_db.NewContext()).ConfirmRepositoryAccessAsync(id, repoId);
 
         (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors["Url"].Should().Contain("can't see cronus-dk/payment-import");
+            .Which.Errors["Url"].Should().Contain("can't open cronus-dk/payment-import");
         (await RepositoryRowAsync(id, Payments.Url)).AccessConfirmedAt.Should().BeNull();
     }
 
@@ -722,7 +722,7 @@ public sealed class ProjectServiceTests : IDisposable
         var act = () => Svc(_db.NewContext()).ConfirmRepositoryAccessAsync(id, repoId);
 
         (await act.Should().ThrowAsync<PlanValidationException>())
-            .Which.Errors["Url"].Should().Contain("Correct it and save the solution");
+            .Which.Errors["Url"].Should().Contain("isn't a repository address we recognise");
         _gitRemote.Calls.Should().BeEmpty("an address that is not the host's never reaches git");
     }
 

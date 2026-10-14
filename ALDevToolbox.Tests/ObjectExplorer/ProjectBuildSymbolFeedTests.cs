@@ -243,6 +243,14 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         (await RepositoryLogAsync(buildId, "cronus/payroll")).Should().Contain("Confirm access");
     }
 
+    [Theory]
+    [InlineData("Payroll", "https://github.com/cronus/payroll.git", "Payroll")]
+    [InlineData("", "https://github.com/cronus/payroll.git", "payroll")]
+    [InlineData("  ", "https://dev.azure.com/cronus/BaseApp/_git/base-app/", "base-app")]
+    public void A_left_out_repository_is_named_even_without_a_display_name(string displayName, string url, string expected) =>
+        ProjectBuildService.RepositoryLabel(new OeProjectRepository { DisplayName = displayName, Url = url })
+            .Should().Be(expected);
+
     [Fact]
     public async Task A_manual_build_leaves_out_a_repository_nobody_confirmed_whatever_the_builder_can_read()
     {
@@ -271,7 +279,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
 
         var act = () => BuildAsync(projectId, releaseId);
 
-        (await act.Should().ThrowAsync<InvalidOperationException>()).WithMessage("*nobody has confirmed they can read*");
+        (await act.Should().ThrowAsync<InvalidOperationException>()).WithMessage("*nobody has confirmed they can open*");
         _tools.Clones.Should().BeEmpty();
     }
 
@@ -294,7 +302,7 @@ public sealed class ProjectBuildSymbolFeedTests : IDisposable
         _tools.Clones.Should().BeEmpty();
         await using var read = _db.NewContext();
         (await read.OeProjects.AsNoTracking().SingleAsync(p => p.Id == projectId)).DiscoveryError
-            .Should().Contain("nobody has confirmed they can read it");
+            .Should().Contain("nobody has confirmed they can open it");
     }
 
     /// <summary>A signed-in builder with a stored GitHub build token, and the resolver a manual build clones with.</summary>

@@ -251,7 +251,7 @@ public sealed class ProjectBuildImporter
     /// confirmed by someone who can read it. See <c>OeProjectRepository.AccessConfirmedAt</c>.
     /// </summary>
     internal const string NoConfirmedRepositoryRefusal =
-        "Nobody has confirmed they can read this solution's repositories yet, so there is nothing to build. Someone who can read them should open the Repositories tab and press Confirm access on each one.";
+        "Nobody has confirmed they can open this solution's repositories yet, so there is nothing to build. Someone who can open them should press Confirm access on each one on the Repositories tab.";
 
     /// <summary>The advisory-lock namespace for manual builds, keyed per pipeline id ("PBLD").</summary>
     private const int ManualBuildLockClass = 0x50_42_4C_44;

@@ -610,18 +610,18 @@ public sealed class ProjectService
         {
             if (userId is not { } id || !await HasGitHubAccountAsync(id, ct))
             {
-                return $"Connect your GitHub account under Account → Repository access first, so the workbench can check that you can see {fullName}. Then try again.";
+                return $"Connect your GitHub account under Account → Repository access first, so the workbench can check that you can open {fullName}. Then try again.";
             }
             return await _gitHubAccess.CanAccessRepoAsync(id, fullName, ct)
                 ? null
-                : $"Your GitHub account can't see {fullName}, or GitHub couldn't be reached to check. Ask someone who can see it to add or confirm it, or try again in a moment.";
+                : $"Your GitHub account can't open {fullName}, or GitHub couldn't be reached. Check you have access on GitHub and try again, or ask a solution manager who can open it to press Confirm access.";
         }
 
         var outcome = await _readProbe.CanReadAsync(provider, url, ct);
         if (outcome.CanRead) return null;
         return outcome.HadCredential
-            ? $"Your {provider.DisplayName()} access can't read this repository, or it couldn't be reached. Check the address, or ask someone who can read it to add or confirm it."
-            : $"The workbench couldn't read this repository, and you have nothing set up to read private {provider.DisplayName()} repositories with. Add a build token under Account → Repository access, then try again.";
+            ? $"Your {provider.DisplayName()} account or token can't open this repository, or it couldn't be reached. Check the address, or ask a solution manager who can open it to press Confirm access."
+            : $"Your {provider.DisplayName()} account or token can't open this repository, or it couldn't be reached. Add a personal access token for {provider.DisplayName()} under Account → Repository access and try again, or ask a solution manager who can open it to press Confirm access.";
     }
 
     /// <summary>
@@ -651,7 +651,7 @@ public sealed class ProjectService
         // hand to git; the person fixes the address, and saving checks it then.
         if (!RepositoryLinks.IsValidUrl(repository.Provider, repository.Url))
         {
-            throw Validation("Url", "This address isn't one the workbench can check. Correct it and save the solution, which checks it for you.");
+            throw Validation("Url", "This isn't a repository address we recognise. Copy it from the repository's Clone button (e.g. https://github.com/cronus/base-app) and save the solution.");
         }
 
         var orgLogin = repository.Provider == RepositoryProvider.GitHub

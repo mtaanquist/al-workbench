@@ -921,7 +921,7 @@ public sealed class ProjectBuildService
                 var dest = Path.Combine(root, $"repo-{index++}");
                 if (!repo.IsAccessConfirmed)
                 {
-                    failures.Add($"Left out \"{repo.DisplayName}\": nobody has confirmed they can read it. Someone who can should press Confirm access on the solution's Repositories tab.");
+                    failures.Add($"Left out \"{RepositoryLabel(repo)}\": nobody has confirmed they can open it. Someone who can should press Confirm access on the solution's Repositories tab.");
                     continue;
                 }
                 var credentials = await _credentials.ResolveAsync(repo.Provider, ct).ConfigureAwait(false);
@@ -1476,9 +1476,10 @@ public sealed class ProjectBuildService
             // a pull request. See OeProjectRepository.AccessConfirmedAt.
             if (!repo.IsAccessConfirmed)
             {
-                results.Add(new BuildAppResult(repo.DisplayName, string.Empty, ProjectBuildResultStatus.Failed,
+                // Failed, for want of a "skipped" result status: the message says why.
+                results.Add(new BuildAppResult(RepositoryLabel(repo), string.Empty, ProjectBuildResultStatus.Failed,
                     UnconfirmedRepositoryMessage, RepoUrl: repo.Url));
-                logs.Add(new PendingLog(repo.Id, repo.DisplayName, $"Skipped: {UnconfirmedRepositoryMessage}"));
+                logs.Add(new PendingLog(repo.Id, RepositoryLabel(repo), UnconfirmedRepositoryMessage));
                 continue;
             }
             // A pull-request build has no user, so there is nothing personal to
@@ -1612,7 +1613,19 @@ public sealed class ProjectBuildService
     /// read it. Shown on the build's results and log, and on the pipeline editor.
     /// </summary>
     internal const string UnconfirmedRepositoryMessage =
-        "Left out of this build because nobody has confirmed they can read this repository. Someone who can read it should open the solution's Repositories tab and press Confirm access, then build again.";
+        "Left out of this build because nobody has confirmed they can open this repository. Someone who can open it should press Confirm access on the solution's Repositories tab, then build again.";
+
+    /// <summary>
+    /// What to call a repository in a build's results and log: its display name, which
+    /// is optional, else the last part of its address, else the address.
+    /// </summary>
+    internal static string RepositoryLabel(OeProjectRepository repo)
+    {
+        if (!string.IsNullOrWhiteSpace(repo.DisplayName)) return repo.DisplayName;
+        var last = repo.Url.TrimEnd('/').Split('/').LastOrDefault();
+        if (last is { Length: > 0 } && last.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) last = last[..^4];
+        return string.IsNullOrWhiteSpace(last) ? repo.Url : last;
+    }
 
     /// <summary>The build log's note for extensions left out as test apps (#1130).</summary>
     internal static string DescribeSkippedTestApps(IReadOnlyList<string> names)
