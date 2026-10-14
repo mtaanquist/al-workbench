@@ -7,8 +7,8 @@ namespace ALWorkbench.Gateway;
 
 /// <summary>
 /// The service itself: runs <see cref="GatewayRunner"/> until Windows stops the
-/// service. When the runner ends on its own (not registered, or AL Workbench refused
-/// the credentials) the service stops cleanly, which Windows does not treat as a
+/// service. When the runner ends on its own (the gateway is not registered) the
+/// service stops cleanly, which Windows does not treat as a
 /// crash and so does not restart it every minute.
 /// </summary>
 [SupportedOSPlatform("windows")]

@@ -230,16 +230,69 @@ public sealed class GatewayRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task A_401_stops_the_gateway_with_the_workbench_reason_in_the_log()
+    public async Task A_401_does_not_stop_the_gateway_it_logs_each_attempt_backs_off_and_recovers()
     {
-        _workbench.Respond = _ => FakeWorkbench.Refused(HttpStatusCode.Unauthorized, "This gateway has been revoked.");
+        // A drifted clock answers 401 like a revoked gateway does; once the clock is
+        // corrected the gateway must carry on by itself.
+        var attempts = 0;
+        _workbench.Respond = request =>
+        {
+            if (++attempts <= 3) return FakeWorkbench.Refused(HttpStatusCode.Unauthorized, "The token was issued in the future; check the gateway computer's clock.");
+            if (request.Path == GatewayProtocol.NextCommandPath) _stop.Cancel();
+            return request.Path == GatewayProtocol.HeartbeatPath ? FakeWorkbench.Heartbeat(approved: true) : FakeWorkbench.NoContent();
+        };
 
         var outcome = await RunAsync();
 
-        outcome.Should().Be(GatewayRunOutcome.CredentialRefused);
-        _workbench.Requests.Should().ContainSingle();
-        _log.Messages(GatewayLog.CredentialRefusedId).Should().ContainSingle()
-            .Which.Should().Contain("This gateway has been revoked.").And.Contain("has stopped");
+        outcome.Should().Be(GatewayRunOutcome.Stopped);
+        var refusals = _log.Lines.Where(l => l.EventId == GatewayLog.CredentialRefusedId).ToList();
+        refusals.Should().HaveCount(3).And.OnlyContain(l => l.Level == Microsoft.Extensions.Logging.LogLevel.Error);
+        refusals[0].Message.Should().Contain("check the gateway computer's clock").And.Contain("correct this computer's clock").And.Contain("register");
+        var waits = _clock.Delays.Take(3).ToList();
+        for (var i = 0; i < 3; i++)
+        {
+            waits[i].Should().BeGreaterThanOrEqualTo(Backoff.Ceiling(i + 1) / 2).And.BeLessThanOrEqualTo(Backoff.Ceiling(i + 1));
+        }
+        _workbench.Requests.Skip(3).Select(r => r.Path).Should().Equal(GatewayProtocol.HeartbeatPath, GatewayProtocol.NextCommandPath);
+    }
+
+    [Fact]
+    public async Task A_gateway_refused_for_a_long_time_retries_every_five_minutes_with_one_error_per_attempt()
+    {
+        var attempts = 0;
+        _workbench.Respond = _ =>
+        {
+            if (++attempts == 30) _stop.Cancel();
+            return FakeWorkbench.Refused(HttpStatusCode.Unauthorized, "This gateway has been revoked.");
+        };
+
+        var outcome = await RunAsync();
+
+        outcome.Should().Be(GatewayRunOutcome.Stopped);
+        _log.Messages(GatewayLog.CredentialRefusedId).Should().HaveCount(_clock.Delays.Count + 1);
+        _clock.Delays.Should().OnlyContain(d => d <= Backoff.Maximum);
+        _clock.Delays.Skip(10).Should().OnlyContain(d => d >= Backoff.Maximum / 2);
+    }
+
+    [Fact]
+    public async Task A_result_refused_with_401_is_kept_and_retried_until_it_arrives()
+    {
+        Serve([Command(92)]);
+        var inner = _workbench.Respond;
+        var resultAttempts = 0;
+        _workbench.Respond = request =>
+        {
+            if (request.Path == GatewayProtocol.CommandResultPath(92) && ++resultAttempts < 3)
+            {
+                return FakeWorkbench.Refused(HttpStatusCode.Unauthorized, "The token was issued in the future.");
+            }
+            return inner(request);
+        };
+
+        await RunAsync();
+
+        resultAttempts.Should().Be(3);
+        _runOnce.Unfinished().Should().BeEmpty();
     }
 
     [Fact]

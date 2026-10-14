@@ -122,6 +122,7 @@ public sealed class ProgressBatcher : IDisposable
             return true;
         }
         catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException or GatewayNotApprovedException
+                                   or GatewayCredentialRefusedException
                                    || (ex is OperationCanceledException && !ct.IsCancellationRequested))
         {
             _logger.LogDebug("Progress lines not sent yet: {Reason}", ex.Message);

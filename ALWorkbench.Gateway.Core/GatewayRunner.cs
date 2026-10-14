@@ -11,8 +11,6 @@ public enum GatewayRunOutcome
     Stopped,
     /// <summary>There are no registration settings; nothing to run.</summary>
     NotRegistered,
-    /// <summary>AL Workbench refused the credentials (401): revoked, or a clock far off. The gateway stops rather than keep knocking.</summary>
-    CredentialRefused,
 }
 
 /// <summary>Where the runner keeps per-command files and how it describes itself.</summary>
@@ -32,8 +30,10 @@ public sealed record GatewayRunnerOptions(string WorkDirectory, string MachineNa
 ///
 /// <para>When AL Workbench cannot be reached it backs off (<see cref="Backoff"/>).
 /// While the gateway waits for approval it does not poll at all, only heartbeats,
-/// and polls again after the first heartbeat that says it is approved. A 401 stops
-/// the loop.</para>
+/// and polls again after the first heartbeat that says it is approved. A 401 (revoked,
+/// or this computer's clock far off) does not stop it: it logs an error with what to
+/// check and keeps trying on the same back-off, so a drifted clock never leaves the
+/// customer with a dead service.</para>
 /// </summary>
 public sealed class GatewayRunner
 {
@@ -81,7 +81,7 @@ public sealed class GatewayRunner
         _random = random;
     }
 
-    /// <summary>Runs until <paramref name="ct"/> is cancelled, the credentials are refused, or there is nothing registered.</summary>
+    /// <summary>Runs until <paramref name="ct"/> is cancelled, or returns at once when there is nothing registered.</summary>
     public async Task<GatewayRunOutcome> RunAsync(CancellationToken ct)
     {
         var settings = _settings.Load();
@@ -133,7 +133,7 @@ public sealed class GatewayRunner
                             {
                                 await finished.ConfigureAwait(false);
                             }
-                            catch (Exception ex) when (ex is not (GatewayCredentialRefusedException or OperationCanceledException))
+                            catch (Exception ex) when (ex is not OperationCanceledException)
                             {
                                 // The command stays "started, not finished": AL Workbench fails it
                                 // once heartbeats stop listing it, and it is never run again.
@@ -171,6 +171,14 @@ public sealed class GatewayRunner
                 {
                     SetApproved(false, settings);
                 }
+                catch (GatewayCredentialRefusedException ex)
+                {
+                    // One error line per attempt, and the attempts follow the back-off, so a
+                    // gateway left refused for days writes a line every five minutes, not a flood.
+                    var wait = backoff.Next();
+                    _logger.CredentialRefused(ex.Message, (int)Math.Ceiling(wait.TotalSeconds));
+                    await _clock.Delay(wait, ct).ConfigureAwait(false);
+                }
                 catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException)
                 {
                     var wait = backoff.Next();
@@ -178,11 +186,6 @@ public sealed class GatewayRunner
                     await _clock.Delay(wait, ct).ConfigureAwait(false);
                 }
             }
-        }
-        catch (GatewayCredentialRefusedException ex)
-        {
-            _logger.CredentialRefused(ex.Message);
-            return GatewayRunOutcome.CredentialRefused;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -199,7 +202,7 @@ public sealed class GatewayRunner
                 {
                     await running.ConfigureAwait(false);
                 }
-                catch (Exception ex) when (ex is OperationCanceledException or GatewayCredentialRefusedException)
+                catch (OperationCanceledException)
                 {
                     // Expected while stopping.
                 }
@@ -410,12 +413,13 @@ public sealed class GatewayRunner
                 }
                 return null;
             }
-            catch (WorkbenchUnreachableException ex) when (attempt < DownloadAttempts)
+            catch (Exception ex) when ((ex is WorkbenchUnreachableException or GatewayCredentialRefusedException) && attempt < DownloadAttempts)
             {
                 _logger.LogWarning("Downloading '{File}' for command {CommandId} failed ({Reason}); trying again.", file.Name, commandId, ex.Message);
                 await _clock.Delay(backoff.Next(), ct).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException or GatewayNotApprovedException)
+            catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException or GatewayNotApprovedException
+                                       or GatewayCredentialRefusedException)
             {
                 return GatewayCommandOutcome.Failure($"Could not download '{file.Name}': {ex.Message} Nothing was run.");
             }
@@ -453,7 +457,7 @@ public sealed class GatewayRunner
                 _logger.LogError("AL Workbench refused the result of command {CommandId}: {Reason}", commandId, ex.Message);
                 return;
             }
-            catch (WorkbenchUnreachableException ex)
+            catch (Exception ex) when (ex is WorkbenchUnreachableException or GatewayCredentialRefusedException)
             {
                 var wait = backoff.Next();
                 _logger.LogWarning("Could not report the result of command {CommandId} ({Reason}); trying again in {Seconds} seconds.",

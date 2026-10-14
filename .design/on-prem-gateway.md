@@ -644,9 +644,11 @@ run-once list), `work\<command id>\` (a command's downloaded files, removed when
   so a proxy that answers at once cannot turn the loop into a stream of requests.
 - AL Workbench unreachable (no connection, a timeout, 407, 408, 429, a 5xx) or answering 400: back
   off 2, 4, 8 ... seconds up to five minutes, each wait drawn from the upper half of its step.
-- **401 stops the gateway** with the workbench's reason in the log, and the service stops cleanly,
-  so Windows does not restart it. Revoked and "this computer's clock is far off" both answer 401;
-  the log line says what to do for each.
+- **401 does not stop the gateway.** Revoked and "this computer's clock is far off" both answer
+  401, and a drifted clock must not leave the customer with a dead service. Each refused attempt
+  logs one error (the workbench's reason, and what to do for a clock or a revocation) and the loop
+  retries on the same back-off, so a gateway left refused writes a line every five minutes. A 401
+  on a progress or result post is retried the same way; the result is kept until it arrives.
 
 **A command**, once claimed:
 

@@ -64,8 +64,8 @@ public static partial class GatewayLog
     public static partial void Reconnected(this ILogger logger, int failures);
 
     [LoggerMessage(EventId = CredentialRefusedId, Level = LogLevel.Error,
-        Message = "AL Workbench refused this gateway's credentials: {Reason} The gateway has stopped. If the gateway was revoked, ask an Admin for a new registration code and run 'register' again. If the reason mentions the time, correct this computer's clock and start the service again.")]
-    public static partial void CredentialRefused(this ILogger logger, string reason);
+        Message = "AL Workbench refused this gateway's credentials: {Reason} Trying again in {Seconds} seconds. If the reason mentions the time, correct this computer's clock; the gateway carries on by itself once it is right. If the gateway was revoked, ask an Admin for a new registration code and run 'register' again.")]
+    public static partial void CredentialRefused(this ILogger logger, string reason, int seconds);
 
     [LoggerMessage(EventId = NotRegisteredId, Level = LogLevel.Error,
         Message = "This gateway is not registered yet. Run 'ALWorkbench.Gateway register --url <address> --code <code>' as an administrator, then start the service.")]

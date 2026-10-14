@@ -15,7 +15,8 @@ public sealed class WorkbenchUnreachableException : Exception
 /// <summary>
 /// 401: AL Workbench did not accept this gateway's credentials. The commonest reasons
 /// are that the gateway was revoked, or that this computer's clock is far off. The
-/// gateway stops rather than keep knocking; <see cref="Exception.Message"/> carries
+/// loop logs it and keeps trying on its back-off, because a clock can be corrected
+/// without anyone restarting the service; <see cref="Exception.Message"/> carries
 /// the workbench's own reason.
 /// </summary>
 public sealed class GatewayCredentialRefusedException : Exception
