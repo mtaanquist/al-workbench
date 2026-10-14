@@ -9,9 +9,12 @@ namespace ALWorkbench.Gateway.Core;
 /// stays far inside the workbench's per-address rate limit. See
 /// <c>.design/on-prem-gateway.md</c>, "Commands" (the rate-limit paragraph).
 ///
-/// <para>A post that does not get through keeps its lines for the next one. When AL
-/// Workbench answers that the command is no longer this gateway's (409),
-/// <see cref="Closed"/> is cancelled so the verb can stop, and the rest is dropped.</para>
+/// <para>Each batch carries a number (1, 2, ...). A post that does not get through is
+/// sent again unchanged, same lines and same number, before anything newer, so when
+/// only the answer was lost the workbench recognises the number and does not append
+/// the lines twice. When AL Workbench answers that the command is no longer this
+/// gateway's (409), <see cref="Closed"/> is cancelled so the verb can stop, and the
+/// rest is dropped.</para>
 /// </summary>
 public sealed class ProgressBatcher : IDisposable
 {
@@ -26,15 +29,18 @@ public sealed class ProgressBatcher : IDisposable
 
     public static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(3);
 
-    private readonly Func<IReadOnlyList<string>, CancellationToken, Task> _post;
+    private readonly Func<IReadOnlyList<string>, long, CancellationToken, Task> _post;
     private readonly IGatewayClock _clock;
     private readonly ILogger _logger;
     private readonly Lock _lock = new();
     private readonly LinkedList<string> _pending = new();
     private readonly CancellationTokenSource _closed = new();
     private int _leftOut;
+    private long _sequence;
+    private Batch? _unsent;
 
-    public ProgressBatcher(Func<IReadOnlyList<string>, CancellationToken, Task> post, IGatewayClock clock, ILogger logger)
+    /// <param name="post">Sends one batch: its lines and its number.</param>
+    public ProgressBatcher(Func<IReadOnlyList<string>, long, CancellationToken, Task> post, IGatewayClock clock, ILogger logger)
     {
         _post = post;
         _clock = clock;
@@ -44,10 +50,13 @@ public sealed class ProgressBatcher : IDisposable
     /// <summary>Cancelled once AL Workbench says the command is no longer this gateway's.</summary>
     public CancellationToken Closed => _closed.Token;
 
-    /// <summary>Lines waiting to be sent.</summary>
+    /// <summary>Lines waiting to be sent, including a batch that did not get through.</summary>
     public int Pending
     {
-        get { lock (_lock) return _pending.Count; }
+        get
+        {
+            lock (_lock) return _pending.Count + (_unsent?.Lines.Count ?? 0);
+        }
     }
 
     public void Add(string line)
@@ -104,20 +113,25 @@ public sealed class ProgressBatcher : IDisposable
         }
     }
 
-    /// <summary>Sends one batch. False when it did not get through and the lines were kept.</summary>
+    /// <summary>Sends one batch. False when it did not get through and is kept, unchanged, for the next attempt.</summary>
     public async Task<bool> FlushOnceAsync(CancellationToken ct)
     {
-        var (batch, leftOut) = Take();
-        if (batch.Count == 0) return true;
+        var batch = Next();
+        if (batch is null) return true;
         try
         {
-            await _post(batch, ct).ConfigureAwait(false);
+            await _post(batch.Lines, batch.Sequence, ct).ConfigureAwait(false);
+            lock (_lock) _unsent = null;
             return true;
         }
         catch (CommandClosedException ex)
         {
             _logger.LogWarning("AL Workbench is no longer expecting progress on this command: {Reason}", ex.Message);
-            lock (_lock) _pending.Clear();
+            lock (_lock)
+            {
+                _pending.Clear();
+                _unsent = null;
+            }
             _closed.Cancel();
             return true;
         }
@@ -125,8 +139,9 @@ public sealed class ProgressBatcher : IDisposable
                                    or GatewayCredentialRefusedException
                                    || (ex is OperationCanceledException && !ct.IsCancellationRequested))
         {
-            _logger.LogDebug("Progress lines not sent yet: {Reason}", ex.Message);
-            PutBack(batch, leftOut);
+            // Kept as _unsent: it may have arrived with only the answer lost, so it goes
+            // again exactly as it was, under the same number.
+            _logger.LogDebug("Progress batch {Sequence} not confirmed yet: {Reason}", batch.Sequence, ex.Message);
             return false;
         }
     }
@@ -135,42 +150,31 @@ public sealed class ProgressBatcher : IDisposable
 
     private bool HasWork()
     {
-        lock (_lock) return _pending.Count > 0 || _leftOut > 0;
+        lock (_lock) return _unsent is not null || _pending.Count > 0 || _leftOut > 0;
     }
 
-    /// <summary>The next batch, and how many left-out lines its closing note counts (0 when it has none).</summary>
-    private (List<string> Batch, int LeftOut) Take()
+    /// <summary>The batch that did not get through last time, else a new one from the waiting lines.</summary>
+    private Batch? Next()
     {
         lock (_lock)
         {
-            var batch = new List<string>(Math.Min(_pending.Count + 1, MaxLinesPerPost));
-            while (batch.Count < MaxLinesPerPost && _pending.First is { } node)
+            if (_unsent is not null) return _unsent;
+            var lines = new List<string>(Math.Min(_pending.Count + 1, MaxLinesPerPost));
+            while (lines.Count < MaxLinesPerPost && _pending.First is { } node)
             {
-                batch.Add(node.Value);
+                lines.Add(node.Value);
                 _pending.RemoveFirst();
             }
-            var leftOut = 0;
-            if (_leftOut > 0 && batch.Count < MaxLinesPerPost && _pending.Count == 0)
+            if (_leftOut > 0 && lines.Count < MaxLinesPerPost && _pending.Count == 0)
             {
-                leftOut = _leftOut;
-                batch.Add($"... {leftOut} more lines were left out because they came faster than they could be sent.");
+                lines.Add($"... {_leftOut} more lines were left out because they came faster than they could be sent.");
                 _leftOut = 0;
             }
-            return (batch, leftOut);
+            if (lines.Count == 0) return null;
+            _unsent = new Batch(++_sequence, lines);
+            return _unsent;
         }
     }
 
-    private void PutBack(List<string> batch, int leftOut)
-    {
-        lock (_lock)
-        {
-            // The closing note is written afresh next time, with the count it then has.
-            var lines = leftOut > 0 ? batch.Count - 1 : batch.Count;
-            for (var i = lines - 1; i >= 0; i--)
-            {
-                _pending.AddFirst(batch[i]);
-            }
-            _leftOut += leftOut;
-        }
-    }
+    private sealed record Batch(long Sequence, IReadOnlyList<string> Lines);
 }

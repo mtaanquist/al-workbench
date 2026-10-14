@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using ALWorkbench.Gateway.Contracts;
 
 namespace ALWorkbench.Gateway.Core;
 
@@ -17,10 +18,23 @@ public interface IRunOnceStore
     /// <summary>Records the start. On disk when this returns.</summary>
     void MarkStarted(long commandId);
 
-    /// <summary>Records that the command needs nothing more from this gateway.</summary>
+    /// <summary>Records that the command needs nothing more from this gateway. Forgets a saved result.</summary>
     void MarkFinished(long commandId);
 
-    /// <summary>Commands started and never finished: read at start-up, these are the ones a stop cut short.</summary>
+    /// <summary>
+    /// Keeps the command's result until <see cref="MarkFinished"/>, so a stop between
+    /// the verb finishing and the result arriving is reported with the real result on
+    /// the next start, not as interrupted. On disk when this returns.
+    /// </summary>
+    void SaveResult(long commandId, GatewayCommandResultRequest result);
+
+    /// <summary>Results saved and not yet confirmed as reported, by command id.</summary>
+    IReadOnlyDictionary<long, GatewayCommandResultRequest> PendingResults();
+
+    /// <summary>
+    /// Commands started and never finished, without a saved result: read at start-up,
+    /// these are the ones a stop cut short.
+    /// </summary>
     IReadOnlyList<long> Unfinished();
 }
 
@@ -66,14 +80,34 @@ public sealed class FileRunOnceStore : IRunOnceStore
         lock (_lock)
         {
             var entry = _entries.GetValueOrDefault(commandId) ?? new Entry { StartedAt = _clock.UtcNow };
-            _entries[commandId] = entry with { FinishedAt = _clock.UtcNow };
+            _entries[commandId] = entry with { FinishedAt = _clock.UtcNow, Result = null };
             Save();
+        }
+    }
+
+    public void SaveResult(long commandId, GatewayCommandResultRequest result)
+    {
+        lock (_lock)
+        {
+            var entry = _entries.GetValueOrDefault(commandId) ?? new Entry { StartedAt = _clock.UtcNow };
+            _entries[commandId] = entry with { Result = result };
+            Save();
+        }
+    }
+
+    public IReadOnlyDictionary<long, GatewayCommandResultRequest> PendingResults()
+    {
+        lock (_lock)
+        {
+            return _entries.Where(e => e.Value is { FinishedAt: null, Result: not null })
+                .OrderBy(e => e.Key)
+                .ToDictionary(e => e.Key, e => e.Value.Result!);
         }
     }
 
     public IReadOnlyList<long> Unfinished()
     {
-        lock (_lock) return _entries.Where(e => e.Value.FinishedAt is null).Select(e => e.Key).Order().ToList();
+        lock (_lock) return _entries.Where(e => e.Value is { FinishedAt: null, Result: null }).Select(e => e.Key).Order().ToList();
     }
 
     private void Save()
@@ -116,5 +150,10 @@ public sealed class FileRunOnceStore : IRunOnceStore
 
         [JsonPropertyName("finishedAt")]
         public DateTimeOffset? FinishedAt { get; init; }
+
+        /// <summary>The result, kept from when the verb finished until AL Workbench has it.</summary>
+        [JsonPropertyName("result")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public GatewayCommandResultRequest? Result { get; init; }
     }
 }

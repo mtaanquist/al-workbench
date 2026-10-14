@@ -56,8 +56,12 @@ internal static class ServiceInstaller
         Sc(["sidtype", ServiceName, "unrestricted"]);
         // Restart after a crash: after one minute, twice, then after five minutes; the
         // count resets after a day. A clean stop - including the gateway stopping
-        // itself because it is not registered - is not a crash.
+        // itself because it is not registered - is not a crash. With the flag set,
+        // stopping with a non-zero exit code (an unexpected error, a loosened data
+        // folder) counts as a crash too; without it Windows only acts when the process
+        // dies outright.
         Sc(["failure", ServiceName, "reset=", "86400", "actions=", "restart/60000/restart/60000/restart/300000"]);
+        Sc(["failureflag", ServiceName, "1"]);
     }
 
     public static void Delete()

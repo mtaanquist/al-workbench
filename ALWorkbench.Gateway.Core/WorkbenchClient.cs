@@ -21,8 +21,18 @@ public sealed class WorkbenchClient : IDisposable
     /// <summary>The long-poll is held up to 30 seconds by the workbench; this leaves room for a slow network.</summary>
     public static readonly TimeSpan LongPollRequestTimeout = GatewayProtocol.LongPollTimeout + TimeSpan.FromSeconds(30);
 
-    /// <summary>A command's file may be tens of megabytes over a slow line.</summary>
-    public static readonly TimeSpan DownloadTimeout = TimeSpan.FromMinutes(30);
+    /// <summary>
+    /// How long one file's download may take in all, headers and body: a command's file
+    /// may be tens of megabytes over a slow line.
+    /// </summary>
+    public TimeSpan DownloadTimeout { get; init; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// How long a download may go without a single byte arriving. A connection a
+    /// firewall dropped without a word would otherwise hold the gateway until the
+    /// overall limit.
+    /// </summary>
+    public TimeSpan DownloadIdleTimeout { get; init; } = TimeSpan.FromMinutes(2);
 
     private readonly HttpClient _http;
     private readonly GatewaySettings _settings;
@@ -60,10 +70,10 @@ public sealed class WorkbenchClient : IDisposable
         return await ReadJsonAsync<GatewayCommandMessage>(response, ct).ConfigureAwait(false);
     }
 
-    public async Task PostProgressAsync(long commandId, IReadOnlyList<string> lines, CancellationToken ct)
+    public async Task PostProgressAsync(long commandId, IReadOnlyList<string> lines, long sequence, CancellationToken ct)
     {
         using var response = await SendAsync(HttpMethod.Post, GatewayProtocol.CommandProgressPath(commandId),
-            Json(new GatewayCommandProgressRequest { Lines = lines }), RequestTimeout, ct).ConfigureAwait(false);
+            Json(new GatewayCommandProgressRequest { Lines = lines, Sequence = sequence }), RequestTimeout, ct).ConfigureAwait(false);
     }
 
     public async Task PostResultAsync(long commandId, GatewayCommandResultRequest result, CancellationToken ct)
@@ -78,27 +88,57 @@ public sealed class WorkbenchClient : IDisposable
     /// fill the disk.
     /// </summary>
     /// <returns>The number of bytes written, or -1 when there were more than <paramref name="maxBytes"/>.</returns>
+    /// <remarks>
+    /// <see cref="DownloadTimeout"/> covers the whole download, the body included, and
+    /// each read must bring something within <see cref="DownloadIdleTimeout"/>. Either
+    /// running out is <see cref="WorkbenchUnreachableException"/>, so the caller's
+    /// retries apply. The response is disposed on either, which also ends a read that
+    /// does not watch its token.
+    /// </remarks>
     public async Task<long> DownloadFileAsync(long commandId, long fileId, Stream destination, long maxBytes, CancellationToken ct)
     {
-        using var response = await SendAsync(HttpMethod.Get, GatewayProtocol.CommandFilePath(commandId, fileId), null,
-            DownloadTimeout, ct, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+        using var overall = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        overall.CancelAfter(DownloadTimeout);
+        using var idle = CancellationTokenSource.CreateLinkedTokenSource(overall.Token);
+        HttpResponseMessage? response = null;
         try
         {
-            await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            response = await SendAsync(HttpMethod.Get, GatewayProtocol.CommandFilePath(commandId, fileId), null,
+                DownloadTimeout, overall.Token, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+            var held = response;
+            using var dispose = idle.Token.Register(() => held.Dispose());
+            idle.CancelAfter(DownloadIdleTimeout);
+            await using var body = await response.Content.ReadAsStreamAsync(idle.Token).ConfigureAwait(false);
             var buffer = new byte[81920];
             long total = 0;
-            int read;
-            while ((read = await body.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+            while (true)
             {
+                idle.CancelAfter(DownloadIdleTimeout);
+                var read = await body.ReadAsync(buffer, idle.Token).ConfigureAwait(false);
+                if (read == 0) return total;
                 total += read;
                 if (total > maxBytes) return -1;
-                await destination.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                await destination.WriteAsync(buffer.AsMemory(0, read), overall.Token).ConfigureAwait(false);
             }
-            return total;
         }
-        catch (Exception ex) when (ex is HttpRequestException or IOException && !ct.IsCancellationRequested)
+        catch (Exception ex) when (!ct.IsCancellationRequested
+                                   && ex is OperationCanceledException or ObjectDisposedException or HttpRequestException or IOException)
         {
+            if (overall.IsCancellationRequested)
+            {
+                throw new WorkbenchUnreachableException(
+                    $"The download did not finish within {DownloadTimeout.TotalMinutes:0.#} minutes.", ex);
+            }
+            if (idle.IsCancellationRequested)
+            {
+                throw new WorkbenchUnreachableException(
+                    $"The download stalled: nothing arrived for {DownloadIdleTimeout.TotalSeconds:0.#} seconds.", ex);
+            }
             throw new WorkbenchUnreachableException($"The download was cut off: {ex.Message}", ex);
+        }
+        finally
+        {
+            response?.Dispose();
         }
     }
 
@@ -110,7 +150,7 @@ public sealed class WorkbenchClient : IDisposable
         var path = WorkbenchAddress.PathFor(_settings.WorkbenchUrl, route);
         var token = GatewayRequestToken.Create(_key, _settings.GatewayId, _audience, method.Method, path,
             body ?? [], hasBody: body is not null, _clock.UtcNow);
-        using var request = new HttpRequestMessage(method, new Uri(new Uri(_settings.WorkbenchUrl), path));
+        using var request = new HttpRequestMessage(method, WorkbenchAddress.RequestUriFor(_settings.WorkbenchUrl, route));
         request.Headers.Authorization = new AuthenticationHeaderValue(GatewayRequestToken.AuthorizationScheme, token);
         if (body is not null)
         {

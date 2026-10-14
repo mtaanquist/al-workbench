@@ -52,8 +52,13 @@ public sealed class GatewayRunnerTests : IDisposable
         _scratch.Dispose();
     }
 
-    private GatewayRunner Runner() => new(_workbench.Client(), _settings, _keys, _runOnce, _executor, _clock, _log,
-        new GatewayRunnerOptions(_folder.WorkFolder, "CRONUS-BC01", "1.0.0"), new Random(1362));
+    private GatewayRunner Runner(TimeSpan? resultGrace = null, IGatewaySettingsStore? settings = null) =>
+        new(_workbench.Client(), settings ?? _settings, _keys, _runOnce, _executor, _clock, _log,
+            new GatewayRunnerOptions(_folder.WorkFolder, "CRONUS-BC01", "1.0.0")
+            {
+                ResultGrace = resultGrace ?? GatewayRunnerOptions.DefaultResultGrace,
+            },
+            new Random(1362));
 
     private async Task<GatewayRunOutcome> RunAsync()
     {
@@ -579,5 +584,164 @@ public sealed class GatewayRunnerTests : IDisposable
 
         resultAttempts.Should().Be(3);
         _runOnce.Unfinished().Should().BeEmpty();
+    }
+
+    // ---------------------------------------------------------------- review fixes
+
+    [Fact]
+    public async Task A_downloaded_file_is_held_open_against_writes_from_its_hash_check_until_the_verb_ends()
+    {
+        var app = "CRONUS Coffee 1.5"u8.ToArray();
+        var file = new GatewayCommandFileMessage { Id = 9, Name = "CRONUS_Coffee.app", Sha256 = Convert.ToHexStringLower(SHA256.HashData(app)), Size = app.Length };
+        string? path = null;
+        Exception? write = null;
+        var heldOpen = false;
+        _executor.Run = (context, _) =>
+        {
+            path = context.Files[9];
+            if (OperatingSystem.IsWindows())
+            {
+                // Windows enforces the share mode: nobody may write or delete it now.
+                write = Record.Exception(() => File.WriteAllBytes(path, "swapped"u8.ToArray()));
+                heldOpen = Record.Exception(() => File.Delete(path)) is IOException or UnauthorizedAccessException;
+            }
+            else
+            {
+                // Linux does not enforce share modes; check the handle the gateway holds instead.
+                heldOpen = OpenedByThisProcess(path);
+            }
+            return Task.FromResult(GatewayCommandOutcome.Success());
+        };
+        Serve([Command(42, files: file)], new Dictionary<long, byte[]> { [9] = app });
+
+        await RunAsync();
+
+        heldOpen.Should().BeTrue();
+        if (OperatingSystem.IsWindows()) write.Should().BeOfType<IOException>();
+        _executor.FileContents[9].Should().Equal(app);
+        Results().Single().Result.Succeeded.Should().BeTrue();
+        // Released once the verb is done: the working folder could be removed.
+        Directory.Exists(Path.GetDirectoryName(path)).Should().BeFalse();
+    }
+
+    private static bool OpenedByThisProcess(string path)
+    {
+        var full = Path.GetFullPath(path);
+        foreach (var fd in Directory.EnumerateFileSystemEntries("/proc/self/fd"))
+        {
+            try
+            {
+                if (new FileInfo(fd).LinkTarget == full) return true;
+            }
+            catch (IOException)
+            {
+                // A descriptor closed while listing.
+            }
+        }
+        return false;
+    }
+
+    [Fact]
+    public async Task A_result_ready_as_the_service_stops_is_still_posted_within_the_grace_period()
+    {
+        _executor.Run = async (_, _) =>
+        {
+            // The stop arrives just as the verb finishes successfully.
+            await _stop.CancelAsync();
+            return GatewayCommandOutcome.Success(new JsonObject { ["upgraded"] = 3 });
+        };
+        Serve([Command(83)]);
+
+        var outcome = await Runner(resultGrace: TimeSpan.FromSeconds(20)).RunAsync(_stop.Token).WaitAsync(TimeSpan.FromSeconds(30));
+
+        outcome.Should().Be(GatewayRunOutcome.Stopped);
+        var (id, result) = Results().Single();
+        id.Should().Be(83);
+        result.Succeeded.Should().BeTrue();
+        var reopened = new FileRunOnceStore(_folder.RunOnceFile, _clock);
+        reopened.PendingResults().Should().BeEmpty();
+        reopened.Unfinished().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_result_that_misses_the_grace_period_is_kept_and_sent_on_the_next_start_not_reported_interrupted()
+    {
+        _executor.Run = async (_, _) =>
+        {
+            await _stop.CancelAsync();
+            return GatewayCommandOutcome.Success(new JsonObject { ["upgraded"] = 3 });
+        };
+        Serve([Command(84)]);
+        var inner = _workbench.Respond;
+        _workbench.Respond = request => request.Path == GatewayProtocol.CommandResultPath(84)
+            ? throw new HttpRequestException("The connection was reset.")
+            : inner(request);
+
+        var first = await Runner(resultGrace: TimeSpan.FromMilliseconds(300)).RunAsync(_stop.Token).WaitAsync(TimeSpan.FromSeconds(30));
+
+        first.Should().Be(GatewayRunOutcome.Stopped);
+        _runOnce = new FileRunOnceStore(_folder.RunOnceFile, _clock);
+        _runOnce.PendingResults().Keys.Should().Equal(84);
+        _runOnce.Unfinished().Should().BeEmpty();
+
+        // The next start: AL Workbench is reachable again.
+        _workbench.Requests.Clear();
+        using var secondStop = new CancellationTokenSource();
+        _workbench.Respond = request =>
+        {
+            if (request.Path == GatewayProtocol.HeartbeatPath) return FakeWorkbench.Heartbeat(approved: true);
+            if (request.Path == GatewayProtocol.NextCommandPath) secondStop.Cancel();
+            return FakeWorkbench.NoContent();
+        };
+
+        var second = await Runner().RunAsync(secondStop.Token).WaitAsync(TimeSpan.FromSeconds(30));
+
+        second.Should().Be(GatewayRunOutcome.Stopped);
+        var beat = _workbench.To(GatewayProtocol.HeartbeatPath).First().Json<GatewayHeartbeatRequest>();
+        beat.RunningCommandIds.Should().Equal(84);
+        beat.InterruptedCommandIds.Should().BeEmpty();
+        var (id, result) = Results().Single();
+        id.Should().Be(84);
+        result.Succeeded.Should().BeTrue();
+        result.Result!["upgraded"]!.GetValue<int>().Should().Be(3);
+        // Sent before the gateway took anything new.
+        _workbench.Requests.Select(r => r.Path).Should().ContainInOrder(GatewayProtocol.CommandResultPath(84), GatewayProtocol.NextCommandPath);
+        var reopened = new FileRunOnceStore(_folder.RunOnceFile, _clock);
+        reopened.PendingResults().Should().BeEmpty();
+        reopened.Unfinished().Should().BeEmpty();
+        _log.Messages(GatewayLog.ResultReportedLateId).Should().ContainSingle().Which.Should().Contain("84");
+        _log.Messages(GatewayLog.CommandInterruptedId).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_damaged_settings_file_ends_the_loop_as_failed_with_a_logged_reason()
+    {
+        var outcome = await Runner(settings: new ThrowingSettingsStore()).RunAsync(_stop.Token).WaitAsync(TimeSpan.FromSeconds(30));
+
+        outcome.Should().Be(GatewayRunOutcome.Failed);
+        var line = _log.Lines.Single(l => l.EventId == GatewayLog.FailedId);
+        line.Level.Should().Be(Microsoft.Extensions.Logging.LogLevel.Critical);
+        line.Message.Should().Contain("gateway.json is damaged");
+        _workbench.Requests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_key_that_cannot_be_opened_ends_the_loop_as_failed()
+    {
+        _settings.Value = _settings.Value! with { KeyName = "gone" };
+
+        var outcome = await RunAsync();
+
+        outcome.Should().Be(GatewayRunOutcome.Failed);
+        _log.Messages(GatewayLog.FailedId).Should().ContainSingle();
+    }
+
+    private sealed class ThrowingSettingsStore : IGatewaySettingsStore
+    {
+        public GatewaySettings? Load() => throw new InvalidOperationException("gateway.json is damaged.");
+
+        public void Save(GatewaySettings settings) => throw new InvalidOperationException("Not expected.");
+
+        public void Delete() => throw new InvalidOperationException("Not expected.");
     }
 }

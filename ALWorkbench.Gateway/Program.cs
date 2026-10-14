@@ -53,6 +53,11 @@ internal static class GatewayProgram
             Console.Error.WriteLine(ex.Message);
             return 2;
         }
+        catch (DataFolderAccessException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 1;
+        }
     }
 
     private static int Usage(string? command)
@@ -117,6 +122,9 @@ internal static class GatewayProgram
             Console.Error.WriteLine(ex.Message);
             return 1;
         }
+        // Again, now the settings file and the first log file exist: they are owned by
+        // Administrators and inherit the folder's rights like everything else in it.
+        DataFolderAccess.Apply(Folder, settings.ServiceAccount ?? account);
 
         Console.WriteLine($"""
 
@@ -169,6 +177,9 @@ internal static class GatewayProgram
         }
         var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot tell where this program is.");
 
+        // The rights go on before anything is read from or written to the folder, and
+        // again after, so the settings file is covered too.
+        DataFolderAccess.Apply(Folder, account);
         var settingsStore = new JsonFileGatewaySettingsStore(Folder.SettingsFile);
         var settings = (settingsStore.Load() ?? new GatewaySettings()) with { ServiceAccount = account };
         settingsStore.Save(settings);
@@ -228,10 +239,17 @@ internal static class GatewayProgram
         return 0;
     }
 
+    /// <summary>How long stopping may take: the result grace plus room for the rest.</summary>
+    internal static readonly TimeSpan ShutdownTimeout = GatewayRunnerOptions.DefaultResultGrace + TimeSpan.FromSeconds(15);
+
     private static async Task<int> RunAsync(string[] args)
     {
         var builder = Host.CreateApplicationBuilder(args);
         builder.Services.AddWindowsService(options => options.ServiceName = ServiceInstaller.ServiceName);
+        // Room for a finished command's result to reach AL Workbench while stopping
+        // (GatewayRunnerOptions.ResultGrace), well inside the time Windows waits for a
+        // service to stop.
+        builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = ShutdownTimeout);
         builder.Services.AddSingleton(Folder);
         builder.Services.AddHostedService<GatewayWorker>();
 
@@ -255,7 +273,9 @@ internal static class GatewayProgram
         }
 
         await builder.Build().RunAsync();
-        return 0;
+        // GatewayWorker sets 1 when the gateway stopped on an error, so Windows'
+        // recovery options restart it.
+        return Environment.ExitCode;
     }
 
     private static void RequireAdministrator()

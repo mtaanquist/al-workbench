@@ -123,8 +123,7 @@ public sealed class GatewayRegistration
 
     private async Task<GatewayRegistrationResponse> ExchangeAsync(string workbenchUrl, GatewayRegistrationRequest body, CancellationToken ct)
     {
-        var path = WorkbenchAddress.PathFor(workbenchUrl, GatewayProtocol.RegisterPath);
-        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(new Uri(workbenchUrl), path))
+        using var request = new HttpRequestMessage(HttpMethod.Post, WorkbenchAddress.RequestUriFor(workbenchUrl, GatewayProtocol.RegisterPath))
         {
             Content = new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(body)),
         };

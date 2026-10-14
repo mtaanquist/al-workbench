@@ -163,6 +163,9 @@ As built (#1361), in `Services/Gateways/GatewayCommandService.cs`:
   Both answer 409 once the command is no longer the caller's to report on (finished, expired, or
   failed by the sweep), so a late report never overwrites the first outcome, and 403 to a gateway
   that is not approved. The log stops at 1,000,000 characters with one "[Log truncated...]" line.
+- A progress post carries its batch number (`sequence`, 1 upward per command). The command keeps the
+  highest one appended (`last_progress_sequence`); a batch at or below it is a resend after a lost
+  answer, accepted without appending its lines again. A post without a number (0) is always appended.
 - A heartbeat's running and interrupted lists are applied only for an approved gateway.
 - Files are stored with the command (`gateway_command_files.content`), not referenced from the
   artifact row. #1375 decides whether command files reference the build's artifacts instead. A file
@@ -609,7 +612,9 @@ commands yet" until #1365 onward plug executors in behind `ICommandExecutor`.
 **Commands customer IT runs** (from an administrator prompt), in either order:
 
 - `install [--account DOMAIN\name$]` creates the service `ALWorkbenchGateway` ("AL Workbench
-  Gateway"), delayed automatic start, restarted by Windows after a crash but not after a clean stop.
+  Gateway"), delayed automatic start, restarted by Windows after a crash but not after a clean stop. The recovery options also apply
+  when the service stops with a failure exit code (`sc failureflag ... 1`): an unexpected error ends
+  the loop with exit code 1 instead of a clean stop.
   It runs as its own **virtual account** `NT SERVICE\ALWorkbenchGateway` by default: no password,
   not an administrator, the computer account on the network. A **group managed service account**
   can be named instead, for when the gateway must act on other machines as a domain identity
@@ -638,7 +643,14 @@ changes.
 `%ProgramData%`'s rights: `gateway.json` (address, gateway id, key name and fingerprint, service
 account; nothing secret) writable by administrators only; `state\started-commands.json` (the
 run-once list), `work\<command id>\` (a command's downloaded files, removed when it ends) and
-`logs\` writable by the service account too.
+`logs\` writable by the service account too. Any local user may create a folder in
+`%ProgramData%`, and its owner can always rewrite its rights, so `install` and `register` make
+Administrators the owner of the folder and of everything in it, give the subfolders no rules of
+their own beyond the service account's change right (they inherit the rest), and refuse with a
+plain message if the owner cannot be set or the folder holds a link. Every service start checks it
+again: an owner other than Administrators or SYSTEM (or the service account, for what it wrote in
+the writable folders), an inherited root, or a write right for anyone else, and the service logs
+what it found (event 2008) and exits with a failure code instead of running.
 
 **The loop** (`GatewayRunner`) is one loop, so the order is plain:
 
@@ -667,20 +679,31 @@ run-once list), `work\<command id>\` (a command's downloaded files, removed when
 3. Recorded as started, on disk, before anything else happens.
 4. Files downloaded into its work folder, each stopped as soon as it exceeds its announced size,
    then checked by size and SHA-256. Any mismatch fails the command; the verb never sees the file.
+   A download has 30 minutes in all, body included, and gives up if nothing arrives for 2 minutes
+   (a connection dropped without a word), then is retried like any unreachable answer. Each file
+   is opened read-only, sharing read only, before it is hashed, and stays open until the verb
+   ends, so on Windows nothing can change or delete it between the check and its use.
 5. The executor runs. Its progress lines are batched: at most one post every 3 seconds, at most 200
    lines a post, lines over 2,000 characters cut, at most 10,000 lines held (more are counted and
-   reported as left out). A 409 on progress stops the verb.
-6. The result is posted, retried with back-off until it arrives, including through a 401 or a 403 while a new key waits for approval (a 409 means AL Workbench already
-   closed it, and is accepted), then the command is marked finished.
+   reported as left out). Each batch is numbered, and one whose post failed is sent again
+   unchanged before anything newer, so a lost answer never doubles lines. A 409 on progress stops
+   the verb.
+6. The result is saved in the run-once file, then posted, retried with back-off until it arrives,
+   including through a 401 or a 403 while a new key waits for approval (a 409 means AL Workbench
+   already closed it, and is accepted), then the command is marked finished.
 
-A stop in the middle leaves the command started-not-finished, which the next start reports as
-interrupted.
+A stop while the verb runs leaves the command started-not-finished, which the next start reports
+as interrupted. A stop after the verb finished does not lose its result: the post gets 15 more
+seconds (the host waits 30 for the service to stop), and a result that still has not arrived stays
+saved. The next start lists it as running, sends it before polling for anything new, and logs that
+it did (event 1005); it is not reported as interrupted.
 
 **The local log**: the Windows event log (Application, source "AL Workbench Gateway", created by
 `install`) and a file per day in `logs\`, kept 30 days. Each command gets a line when it starts and
 when it ends, naming the verb, who asked for it, and the outcome, with fixed event ids (1000
-started, 1001 succeeded, 1002 failed, 1003 refused, 1004 interrupted) so customer IT can filter on
-them. "Who asked" travels with the command: `GatewayCommandMessage.requestedBy` (the requester's
+started, 1001 succeeded, 1002 failed, 1003 refused, 1004 interrupted, 1005 result sent after a
+restart; 2007 stopped on an unexpected error, 2008 data folder rights loosened) so customer IT can
+filter on them. "Who asked" travels with the command: `GatewayCommandMessage.requestedBy` (the requester's
 display name) and `startedByAgent`, added for this; an older gateway ignores them.
 
 **Proxy and certificates.** One `HttpClient` with the system proxy (WinHTTP / Internet Options, or
