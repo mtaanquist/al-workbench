@@ -19,19 +19,26 @@ public sealed class InviteService
 {
     public static readonly TimeSpan InviteLifetime = TimeSpan.FromDays(7);
 
+    /// <summary>Shown when a password acceptance is tried in a Microsoft-only organisation.</summary>
+    public const string MicrosoftOnlyMessage =
+        "Your organisation signs in with Microsoft, so this invite can't set a password. Choose \"Accept with Microsoft\" instead.";
+
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
+    private readonly AuthService _auth;
     private readonly TimeProvider _clock;
     private readonly ILogger<InviteService> _logger;
 
     public InviteService(
         AppDbContext db,
         IOrganizationContext orgContext,
+        AuthService auth,
         TimeProvider clock,
         ILogger<InviteService> logger)
     {
         _db = db;
         _orgContext = orgContext;
+        _auth = auth;
         _clock = clock;
         _logger = logger;
     }
@@ -172,15 +179,21 @@ public sealed class InviteService
     {
         var errors = new Dictionary<string, string>();
         var trimmedName = (displayName ?? string.Empty).Trim();
-        if (trimmedName.Length is < 2 or > 80) errors["DisplayName"] = "Full name must be 2-80 characters.";
+        ValidateDisplayName(trimmedName, errors);
         ALDevToolbox.Services.Account.AuthService.ValidatePassword(password, errors);
         if (errors.Count > 0) throw new PlanValidationException(errors);
 
-        var invite = await FindValidByTokenAsync(token, ct)
-            ?? throw new PlanValidationException(new Dictionary<string, string>
-            {
-                ["Token"] = "This invite link is no longer valid. Ask the admin for a new one."
-            });
+        var invite = await FindValidByTokenAsync(token, ct) ?? throw InviteInvalid();
+
+        // A Microsoft-only organisation refuses every password sign-in, reset
+        // and magic link for its members, so a password set here could never
+        // be used again, and signing in with it would be the one password
+        // session the policy forbids (#1336). The invite page offers
+        // "Accept with Microsoft" instead; this refuses a post that skips it.
+        if (await _auth.IsMicrosoftOnlyOrganizationAsync(invite.OrganizationId, ct))
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Password"] = MicrosoftOnlyMessage });
+        }
 
         var now = _clock.GetUtcNow().UtcDateTime;
         // Fence category 6 (existence-only uniqueness probe): emails are unique
@@ -218,6 +231,31 @@ public sealed class InviteService
             invite.Id, user.Id, user.Email, invite.OrganizationId);
         return user;
     }
+
+    /// <summary>
+    /// The first half of accepting with Microsoft: checks the name the
+    /// invitee typed and that the invite is still good, before the browser is
+    /// sent to Microsoft. The account itself is created when Microsoft hands
+    /// the person back (<see cref="EntraSignInService.CompleteAsync"/>), which
+    /// checks the invite again, since it can be revoked in between.
+    /// </summary>
+    public async Task<Invite> PrepareMicrosoftAcceptanceAsync(string token, string displayName, CancellationToken ct = default)
+    {
+        var errors = new Dictionary<string, string>();
+        ValidateDisplayName((displayName ?? string.Empty).Trim(), errors);
+        if (errors.Count > 0) throw new PlanValidationException(errors);
+        return await FindValidByTokenAsync(token, ct) ?? throw InviteInvalid();
+    }
+
+    private static void ValidateDisplayName(string trimmedName, Dictionary<string, string> errors)
+    {
+        if (trimmedName.Length is < 2 or > 80) errors["DisplayName"] = "Full name must be 2-80 characters.";
+    }
+
+    private static PlanValidationException InviteInvalid() => new(new Dictionary<string, string>
+    {
+        ["Token"] = "This invite link is no longer valid. Ask the admin for a new one.",
+    });
 
     private static PlanValidationException EmailTaken() => new(new Dictionary<string, string>
     {

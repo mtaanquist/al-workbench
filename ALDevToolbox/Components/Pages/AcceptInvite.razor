@@ -5,6 +5,7 @@
 @using ALDevToolbox.Services
 @using ALDevToolbox.Services.Account
 @inject InviteService Invites
+@inject AuthService Auth
 
 <PageTitle>Accept invite · AL Workbench</PageTitle>
 
@@ -62,10 +63,22 @@ else if (_invite is null)
 }
 else
 {
-    <AuthCard Title="@($"Join {_invite.Organization?.Name}")" FormAction="/auth/accept-invite">
+    @* An organisation that signs in only with Microsoft refuses passwords for
+       its members, so a password set here could never be used again (#1336).
+       It gets the same card without the password, and the account is created
+       when Microsoft hands the person back. *@
+    <AuthCard Title="@($"Join {_invite.Organization?.Name}")"
+              FormAction="@(_microsoftOnly ? "/auth/accept-invite/microsoft" : "/auth/accept-invite")">
         <Sub>
             You've been invited as <strong>@FormatRoleLabel(_invite.Role)</strong>@RoleBlurb(_invite.Role).
-            Set a name and a password to finish.
+            @if (_microsoftOnly)
+            {
+                <text>Your organisation signs in with Microsoft: set your name, then sign in with the Microsoft work account for this address to finish.</text>
+            }
+            else
+            {
+                <text>Set a name and a password to finish.</text>
+            }
         </Sub>
         <Alerts>
             @if (Error is not null && Message is not null)
@@ -97,16 +110,19 @@ else
                     <input class="input" id="ai-name" type="text" name="DisplayName" required
                            minlength="2" maxlength="80" autofocus placeholder="Kirsten Jensen" />
                 </div>
-                <div class="field">
-                    <label class="field__label" for="ai-password">Password</label>
-                    <input class="input" id="ai-password" type="password" name="Password" required
-                           minlength="12" autocomplete="new-password" />
-                    <span class="field__hint">At least 12 characters, and not one you use anywhere else.</span>
-                </div>
+                @if (!_microsoftOnly)
+                {
+                    <div class="field">
+                        <label class="field__label" for="ai-password">Password</label>
+                        <input class="input" id="ai-password" type="password" name="Password" required
+                               minlength="12" autocomplete="new-password" />
+                        <span class="field__hint">At least 12 characters, and not one you use anywhere else.</span>
+                    </div>
+                }
             </div>
             <button type="submit" class="btn btn--primary" style="height: var(--control-h-lg)">
-                <Icon Name="user-plus" Width="16" Height="16" />
-                <span>Accept invite</span>
+                <Icon Name="@(_microsoftOnly ? "log-in" : "user-plus")" Width="16" Height="16" />
+                <span>@(_microsoftOnly ? "Accept with Microsoft" : "Accept invite")</span>
             </button>
         </ChildContent>
         <Foot>
@@ -123,6 +139,7 @@ else
 
     private Invite? _invite;
     private bool _loaded;
+    private bool _microsoftOnly;
 
     /// <summary>
     /// One clause that makes the role mean something. This reader was told
@@ -148,6 +165,10 @@ else
         if (!string.IsNullOrEmpty(Token))
         {
             _invite = await Invites.FindValidByTokenAsync(Token);
+            if (_invite is not null)
+            {
+                _microsoftOnly = await Auth.IsMicrosoftOnlyOrganizationAsync(_invite.OrganizationId);
+            }
         }
         _loaded = true;
     }

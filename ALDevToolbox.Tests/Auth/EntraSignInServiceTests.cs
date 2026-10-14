@@ -282,6 +282,95 @@ public sealed class EntraSignInServiceTests : IDisposable
 
     private const string OidB = "bbbbbbbb-0000-0000-0000-000000000001";
 
+    // ===== Accepting an invite with Microsoft (#1336) =====
+
+    [Fact]
+    public async Task Accepting_an_invite_creates_the_active_account_with_its_role_and_link_without_xms_edov()
+    {
+        // The invite link proved the person holds the address, so the tenant
+        // need not send xms_edov for this one account.
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.Editor);
+        await using var ctx = _db.NewContext();
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "Kirsten@cronus.com", "K"), Ip,
+            new EntraInviteAcceptance(invite!, "  Kirsten Jensen  "));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.Success);
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Email == "kirsten@cronus.com");
+        user.Status.Should().Be(UserStatus.Active);
+        user.Role.Should().Be(UserRole.Editor);
+        user.DisplayName.Should().Be("Kirsten Jensen");
+        var link = await read.UserExternalLogins.IgnoreQueryFilters().SingleAsync();
+        (link.UserId, link.Issuer, link.Subject).Should().Be((user.Id, TenantA, Oid));
+        (await read.Invites.IgnoreQueryFilters().SingleAsync()).AcceptedAt.Should().NotBeNull();
+        (await read.SignupRequests.IgnoreQueryFilters().AnyAsync()).Should().BeFalse("an invite needs no approval");
+    }
+
+    [Fact]
+    public async Task Accepting_an_invite_with_a_microsoft_account_for_another_address_creates_nothing()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.User);
+        await using var ctx = _db.NewContext();
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "someone.else@cronus.com", "Someone"), Ip,
+            new EntraInviteAcceptance(invite!, "Kirsten Jensen"));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.InviteEmailMismatch);
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email.EndsWith("@cronus.com") && u.Email != "invite-admin@cronus.com"))
+            .Should().BeFalse();
+        (await read.Invites.IgnoreQueryFilters().SingleAsync()).AcceptedAt.Should().BeNull("the invite stays usable");
+    }
+
+    [Fact]
+    public async Task Accepting_an_invite_from_a_tenant_the_organisation_does_not_allow_creates_nothing()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        await SeedOrgEntraAsync(TestDb.OtherOrgId, TenantB);
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.User);
+        await using var ctx = _db.NewContext();
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        // TenantB is allowed somewhere, just not by the organisation the invite names.
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantB, Oid, "kirsten@cronus.com", "Kirsten"), Ip,
+            new EntraInviteAcceptance(invite!, "Kirsten Jensen"));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.TenantNotAllowed);
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == "kirsten@cronus.com")).Should().BeFalse();
+    }
+
+    private InviteService NewInvites(AppDbContext ctx) =>
+        new(ctx, _db.OrgContext, new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System),
+            TimeProvider.System, NullLogger<InviteService>.Instance);
+
+    private async Task<string> SeedInviteAsync(int orgId, string email, UserRole role)
+    {
+        var inviterId = await SeedUserAsync(orgId, "invite-admin@cronus.com");
+        var (raw, hash) = TokenIssuer.Issue();
+        await using var ctx = _db.NewContext();
+        ctx.Invites.Add(new Invite
+        {
+            OrganizationId = orgId,
+            Email = email,
+            Role = role,
+            TokenHash = hash,
+            CreatedAt = DateTime.UtcNow,
+            ExpiresAt = DateTime.UtcNow.AddDays(7),
+            InvitedByUserId = inviterId,
+        });
+        await ctx.SaveChangesAsync();
+        return raw;
+    }
+
     private async Task SetUserStateAsync(string email, UserStatus status, DateTime? lastLoginAt = null)
     {
         await using var ctx = _db.NewContext();
