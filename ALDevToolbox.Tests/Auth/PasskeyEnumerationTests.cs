@@ -6,6 +6,7 @@ using ALDevToolbox.Tests.Infrastructure;
 using Fido2NetLib;
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.DependencyInjection;
 using ALDevToolbox.Services.Operations;
 
 namespace ALDevToolbox.Tests.Auth;
@@ -33,7 +34,10 @@ public sealed class PasskeyEnumerationTests : IDisposable
         var deployment = DeploymentIdentity.LoadOrCreate(
             Path.Combine(Path.GetTempPath(), "aldt-pk-deploy-" + Guid.NewGuid().ToString("N")),
             NullLogger.Instance);
-        return new PasskeyService(ctx, fido2, _db.DataProtectionProvider, TimeProvider.System, config, deployment);
+        return new PasskeyService(ctx, fido2, _db.DataProtectionProvider, TimeProvider.System, config, deployment,
+            new CapturingEmailService(),
+            new ALDevToolbox.Services.Email.EmailRenderer(new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider(), NullLoggerFactory.Instance),
+            NullLogger<PasskeyService>.Instance);
     }
 
     [Fact]

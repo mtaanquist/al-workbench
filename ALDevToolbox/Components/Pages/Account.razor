@@ -19,6 +19,7 @@
 @inject NavigationManager Nav
 @inject RecoveryCodeService RecoveryCodes
 @inject PasskeyService Passkeys
+@inject AppDbContext Db
 @inject EntraSignInService Entra
 @inject IEmailService Email
 @inject PersonalAccessTokenService Pats
@@ -405,6 +406,17 @@ else
                                 </tbody>
                             </table>
                         }
+                        @if (PasswordChangedRecently && _passkeys.Count > 0)
+                        {
+                            <div class="card__body">
+                                <Alert Tone="AlertTone.Warn">
+                                    <span>
+                                        Your password was changed on <Timestamp Value="@_user.CredentialsChangedAt" Format="d MMM yyyy" />.
+                                        Changing it doesn't remove passkeys, so check you recognise every one above and remove any you don't.
+                                    </span>
+                                </Alert>
+                            </div>
+                        }
                         @if (!string.IsNullOrEmpty(_passkeyError))
                         {
                             <div class="card__body">
@@ -414,10 +426,31 @@ else
                             </div>
                         }
                         <div class="card__foot">
-                            <button type="button" class="btn" @onclick="RegisterPasskeyAsync" disabled="@_busy">
-                                <Icon Name="plus" Width="16" Height="16" />
-                                <span>Add a passkey</span>
-                            </button>
+                            @if (!_passkeyFresh && _passkeyCanStepUp)
+                            {
+                                @* Adding a passkey adds a way in, so it asks for a recent second step first. *@
+                                <a class="btn" href="@ConfirmForPasskeyUrl">
+                                    <Icon Name="plus" Width="16" Height="16" />
+                                    <span>Add a passkey</span>
+                                </a>
+                                <span class="form-actions__note">We'll ask you to confirm it's you first.</span>
+                            }
+                            else
+                            {
+                                <form id="passkey-add" class="u-row" @onsubmit="RegisterPasskeyAsync" @onsubmit:preventDefault>
+                                    <AntiforgeryToken />
+                                    @if (!_passkeyFresh)
+                                    {
+                                        <input class="input" type="password" name="Password" required
+                                               autocomplete="current-password" aria-label="Current password"
+                                               placeholder="Confirm with your current password" />
+                                    }
+                                    <button type="submit" class="btn" disabled="@_busy">
+                                        <Icon Name="plus" Width="16" Height="16" />
+                                        <span>Add a passkey</span>
+                                    </button>
+                                </form>
+                            }
                         </div>
                     </section>
                 }
@@ -1180,6 +1213,16 @@ else
     private bool _busy;
     private string? _passkeyError;
     private IReadOnlyList<UserPasskey> _passkeys = Array.Empty<UserPasskey>();
+    // Adding a passkey needs a recent second step (_passkeyFresh), or, from an
+    // account with nothing to step up with, the current password.
+    private bool _passkeyFresh;
+    private bool _passkeyCanStepUp;
+    private static readonly string ConfirmForPasskeyUrl = ALDevToolbox.Endpoints.StepUpEndpoints.Url(
+        $"{ALDevToolbox.Endpoints.RouteConstants.AccountSecurity}?{ALDevToolbox.Endpoints.RouteConstants.OkQuery}=confirmed-passkey");
+    /// <summary>How long after a password change or reset the passkey card asks the person to look over their passkeys.</summary>
+    private static readonly TimeSpan PasskeyReviewWindow = TimeSpan.FromDays(14);
+    private bool PasswordChangedRecently => _user?.CredentialsChangedAt is { } at
+        && DateTime.UtcNow - at <= PasskeyReviewWindow;
     private IReadOnlyList<UserExternalLogin> _entraLinks = Array.Empty<UserExternalLogin>();
     private bool _orgEntraEnabled;
     private string? _entraLinkError;
@@ -1244,6 +1287,14 @@ else
         if (_canConfirmWithoutPassword && AuthStateTask is not null)
         {
             _confirmedRecently = await Tools.IsFreshAsync((await AuthStateTask).User);
+        }
+        if (Passkeys.IsConfigured && AuthStateTask is not null)
+        {
+            var principal = (await AuthStateTask).User;
+            _passkeyFresh = await Tools.IsFreshAsync(principal);
+            var methods = await ALDevToolbox.Endpoints.StepUpEndpoints.AvailableMethodsAsync(
+                Db, Passkeys, Entra, _user.Id, StepUpAuth.Method(principal), CancellationToken.None);
+            _passkeyCanStepUp = methods?.Any == true;
         }
         _tokens = await Pats.ListForUserAsync(_user.Id);
         _clients = await OAuthClients.ListForUserAsync(_user.Id);
@@ -1462,7 +1513,7 @@ else
         return code switch
         {
             "display-name" => Section.Profile,
-            "password" or "confirmed" or "totp-disabled" or "email-mfa-sent" or "email-mfa-enabled"
+            "password" or "confirmed" or "confirmed-passkey" or "totp-disabled" or "email-mfa-sent" or "email-mfa-enabled"
                 or "email-mfa-disabled" or "passkey-added" or "passkey-deleted" or "passkey-renamed"
                 or "ms-linked" or "ms-unlinked"
                 or "Totp" or "Email" or "Code" or "Password" or "CurrentPassword" or "NewPassword"
@@ -1478,6 +1529,7 @@ else
         "password" => "Password updated.",
         "display-name" => "Full name updated.",
         "confirmed" => "You're confirmed for the next few minutes. You can now get new recovery codes or turn off two-step verification.",
+        "confirmed-passkey" => "You're confirmed for the next few minutes. You can now add a passkey.",
         "totp-disabled" => "Authenticator app turned off.",
         "email-mfa-sent" => "We sent you a verification code. Enter it below to turn on email codes.",
         "email-mfa-enabled" => "Email codes turned on.",
@@ -1550,7 +1602,9 @@ else
         _passkeyError = null;
         try
         {
-            await JS.InvokeVoidAsync("aldtPasskey.register");
+            // Null means the browser is already heading to the success page;
+            // otherwise it is the server's reason for not starting.
+            _passkeyError = await JS.InvokeAsync<string?>("aldtPasskey.register", "passkey-add");
         }
         catch (JSDisconnectedException)
         {

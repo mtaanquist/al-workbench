@@ -36,9 +36,31 @@ function decodeAssertOptions(opts) {
     return opts;
 }
 
+// The antiforgery token rendered inside the form with this id, for the JSON
+// posts below (they send it as a header, since a JSON body is not a form).
+function antiforgeryFrom(formId) {
+    const form = formId ? document.getElementById(formId) : null;
+    const input = form ? form.querySelector('input[name="__RequestVerificationToken"]') : null;
+    return input ? input.value : '';
+}
+
 window.aldtPasskey = {
-    async register() {
-        const optionsRes = await fetch('/account/passkeys/registration-options', { method: 'GET' });
+    // Returns null once the browser is on its way to the success page, or the
+    // server's sentence when it refused to start (not confirmed recently, or
+    // a wrong password), for the page to show beside the button.
+    async register(formId) {
+        const token = antiforgeryFrom(formId);
+        const form = formId ? document.getElementById(formId) : null;
+        const passwordInput = form ? form.querySelector('input[name="Password"]') : null;
+        const optionsRes = await fetch('/account/passkeys/registration-options', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'RequestVerificationToken': token },
+            body: JSON.stringify({ password: passwordInput ? passwordInput.value : null }),
+        });
+        if (optionsRes.status === 403) {
+            const refusal = await optionsRes.json().catch(() => ({}));
+            return refusal.error || 'Confirm it\'s you first, then add the passkey.';
+        }
         if (!optionsRes.ok) throw new Error('Failed to start passkey registration.');
         const opts = decodeCreateOptions(await optionsRes.json());
 
@@ -59,7 +81,7 @@ window.aldtPasskey = {
         const nickname = prompt('Name this passkey:', 'Passkey') || 'Passkey';
         const completeRes = await fetch('/account/passkeys', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'RequestVerificationToken': token },
             body: JSON.stringify({ nickname, response }),
         });
         if (!completeRes.ok) {
@@ -67,6 +89,7 @@ window.aldtPasskey = {
             throw new Error(txt || 'Passkey registration failed.');
         }
         window.location.href = '/account/security?ok=passkey-added';
+        return null;
     },
 
     async login(email) {

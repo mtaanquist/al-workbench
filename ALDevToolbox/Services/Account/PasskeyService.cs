@@ -8,6 +8,8 @@ using Fido2NetLib.Objects;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using ALDevToolbox.Services.Operations;
+using ALDevToolbox.Components.Email;
+using ALDevToolbox.Services.Email;
 
 namespace ALDevToolbox.Services.Account;
 
@@ -65,6 +67,9 @@ public sealed class PasskeyService
     private readonly TimeProvider _clock;
     private readonly WebAuthnConfig _config;
     private readonly DeploymentIdentity _deployment;
+    private readonly IEmailService _email;
+    private readonly EmailRenderer _emailRenderer;
+    private readonly ILogger<PasskeyService> _logger;
 
     public PasskeyService(
         AppDbContext db,
@@ -72,7 +77,10 @@ public sealed class PasskeyService
         IDataProtectionProvider protection,
         TimeProvider clock,
         WebAuthnConfig config,
-        DeploymentIdentity deployment)
+        DeploymentIdentity deployment,
+        IEmailService email,
+        EmailRenderer emailRenderer,
+        ILogger<PasskeyService> logger)
     {
         _db = db;
         _fido2 = fido2;
@@ -80,6 +88,9 @@ public sealed class PasskeyService
         _clock = clock;
         _config = config;
         _deployment = deployment;
+        _email = email;
+        _emailRenderer = emailRenderer;
+        _logger = logger;
     }
 
     /// <summary>Did the operator configure a WebAuthn RP id? Passkey UI hides itself when this is false.</summary>
@@ -123,12 +134,19 @@ public sealed class PasskeyService
         return (options, _protector.Protect(envelope));
     }
 
-    /// <summary>Validates the attestation response and persists the new credential.</summary>
+    /// <summary>
+    /// Validates the attestation response, persists the new credential, writes
+    /// an audit row and queues a "passkey added" email to the account's own
+    /// address with a link to <paramref name="securityUrl"/>. A passkey is a
+    /// full sign-in, so the owner hears about every one; the endpoint is what
+    /// asks for a fresh step-up before the ceremony starts.
+    /// </summary>
     public async Task<UserPasskey> CompleteRegistrationAsync(
         int userId,
         string nickname,
         AuthenticatorAttestationRawResponse rawResponse,
         string protectedChallenge,
+        string securityUrl,
         CancellationToken ct = default)
     {
         AssertConfigured();
@@ -171,7 +189,60 @@ public sealed class PasskeyService
         };
         _db.UserPasskeys.Add(passkey);
         await _db.SaveChangesAsync(ct);
+        await RecordAsync(userId, passkey, AuditAction.Created, ct);
+        _logger.LogInformation("Passkey {PasskeyId} added for user {UserId}.", passkey.Id, userId);
+        await NotifyAddedAsync(userId, passkey, securityUrl, ct);
         return passkey;
+    }
+
+    /// <summary>
+    /// Writes the audit row for a passkey added or removed. By hand rather than
+    /// through <c>AuditInterceptor</c>: the row's counter and last-used time move
+    /// on every sign-in, and the log wants the two events that matter, not that.
+    /// </summary>
+    private async Task RecordAsync(int userId, UserPasskey passkey, AuditAction action, CancellationToken ct)
+    {
+        // Filtered: the signed-in user's own row, inside their org.
+        var organizationId = await _db.Users.AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => u.OrganizationId)
+            .FirstAsync(ct);
+        _db.AuditLog.Add(new AuditLogEntry
+        {
+            Timestamp = _clock.GetUtcNow().UtcDateTime,
+            ChangedBy = await AuditActor.ResolveAsync(_db, userId, ct),
+            ChangedByUserId = userId,
+            OrganizationId = organizationId,
+            EntityType = AuditEntityType.Passkey,
+            EntityId = passkey.Id,
+            Action = action,
+            EntityName = passkey.Nickname,
+        });
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Queues the "a passkey was added" email. A failure is logged, not thrown:
+    /// the passkey is already saved, and failing the request would only make the
+    /// person add it a second time.
+    /// </summary>
+    private async Task NotifyAddedAsync(int userId, UserPasskey passkey, string securityUrl, CancellationToken ct)
+    {
+        try
+        {
+            var user = await _db.Users.AsNoTracking()
+                .Where(u => u.Id == userId)
+                .Select(u => new { u.Email, u.DisplayName })
+                .FirstAsync(ct);
+            var addedAt = passkey.CreatedAt.ToString("d MMM yyyy, HH:mm 'UTC'", System.Globalization.CultureInfo.InvariantCulture);
+            var content = await PasskeyAddedEmail.RenderAsync(
+                _emailRenderer, user.DisplayName, passkey.Nickname, addedAt, securityUrl, ct);
+            await _email.SendAsync(user.Email, content, EmailPurpose.PasskeyAdded, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not queue the passkey-added email for user {UserId}.", userId);
+        }
     }
 
     /// <summary>
@@ -403,6 +474,8 @@ public sealed class PasskeyService
         if (row is null) return;
         _db.UserPasskeys.Remove(row);
         await _db.SaveChangesAsync(ct);
+        await RecordAsync(userId, row, AuditAction.Deleted, ct);
+        _logger.LogInformation("Passkey {PasskeyId} removed by user {UserId}.", passkeyId, userId);
     }
 
     public async Task RenameAsync(int userId, int passkeyId, string newName, CancellationToken ct = default)

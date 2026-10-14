@@ -38,7 +38,7 @@ public sealed class AuditDisplayTests
 
     /// <summary>
     /// The stronger form of the camel-case check above: it names the exact set
-    /// of types allowed to fall through to <c>ToString()</c>. Those four are
+    /// of types allowed to fall through to <c>ToString()</c>. Those are
     /// single words that already read as the word a person would use; anything
     /// else added to the enum fails here until someone decides its label, which
     /// is the real rule. The seam check alone would let through a new
@@ -57,6 +57,7 @@ public sealed class AuditDisplayTests
                 AuditEntityType.Invite,
                 AuditEntityType.Recipe,
                 AuditEntityType.Team,
+                AuditEntityType.Passkey,
             });
     }
 

@@ -49,6 +49,9 @@ public enum EmailPurpose
     UpgradeNotification,
     /// <summary>A solution notification: an update was scheduled or moved on a solution the person follows.</summary>
     SolutionNotification,
+
+    /// <summary>"A passkey was added to your account", to the account's own address. Queued, like every security notice.</summary>
+    PasskeyAdded,
 }
 
 /// <summary>Where an outbox row is in its life.</summary>
