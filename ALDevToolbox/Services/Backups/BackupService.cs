@@ -36,7 +36,8 @@ public sealed record BackupRow(
 /// Restores run in-place: the service flips
 /// <see cref="MaintenanceModeState"/> on, drops every object in the
 /// <c>public</c> schema, runs <c>pg_restore</c>, and lifts maintenance mode
-/// in a <c>finally</c>. See <c>.design/milestones.md</c> M18.
+/// once the restore has finished. A restore that fails after the drop keeps
+/// maintenance mode on (#1321). See <c>.design/milestones.md</c> M18.
 /// </para>
 /// </summary>
 public sealed class BackupService
@@ -256,6 +257,16 @@ public sealed class BackupService
     /// </para>
     ///
     /// <para>
+    /// A file <c>pg_restore --list</c> cannot read is refused before anything
+    /// changes. If the restore still fails once the schema has been dropped,
+    /// the schema is migrated and the inventory put back as far as possible,
+    /// maintenance mode stays on with a reason that says so, and
+    /// <see cref="BackupRestoreFailedException"/> is thrown: reopening would
+    /// hand every user an empty or half-loaded database, while staying closed
+    /// leaves the SiteAdmin the backups page to restore another one (#1321).
+    /// </para>
+    ///
+    /// <para>
     /// <paramref name="ct"/> only covers the checks and the wait for the
     /// backup lock. Once maintenance mode is on, the drop and the
     /// <c>pg_restore</c> run to completion even if the caller goes away (the
@@ -282,6 +293,12 @@ public sealed class BackupService
             });
         }
 
+        // Read the dump's table of contents before anything is dropped. This
+        // catches a truncated header, a file that is not a dump at all and a
+        // dump from a newer pg_dump than ours; it cannot vouch for the data
+        // section, which only the restore itself reads (#1321).
+        await EnsureDumpIsReadableAsync(path, ct);
+
         // Same advisory lock the backup path takes, so a scheduled pg_dump (or
         // off-site prune) can't run against the schema we're about to drop. See
         // issue #370.
@@ -293,15 +310,19 @@ public sealed class BackupService
         var sw = Stopwatch.StartNew();
         // Deliberately not the caller's token from here on; see the remarks above.
         var destructive = CancellationToken.None;
+        var dropped = false;
+        var restored = false;
         try
         {
             // Drop everything in `public` so pg_restore lays the schema down on
             // a clean slate. The dump itself doesn't drop the schema (only the
             // owned objects) because that gives partial restores room to fail
-            // mid-flight without nuking unrelated state.
+            // mid-flight without nuking unrelated state. Both statements go in
+            // one command, so they commit or fail together.
             await ExecuteSqlAsync(
                 "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;",
                 destructive);
+            dropped = true;
 
             var builder = new NpgsqlConnectionStringBuilder(_connectionString);
             await RunPgToolAsync(
@@ -317,29 +338,121 @@ public sealed class BackupService
                 },
                 destructive);
 
-            // A dump taken by an older version restores an older schema.
-            // Startup is the only other place migrations run, so without this
-            // every query on a newer column fails until the next restart.
-            _db.Database.SetCommandTimeout(ALDevToolbox.Endpoints.StartupTasks.MigrationCommandTimeout);
-            try
-            {
-                await _db.Database.MigrateAsync(destructive);
-            }
-            finally
-            {
-                _db.Database.SetCommandTimeout((int?)null);
-            }
-
+            await MigrateAsync(destructive);
             await RestoreInventoryAsync(inventory, destructive);
             if (_systemSettings is not null) await _systemSettings.ReloadAfterRestoreAsync(destructive);
+            restored = true;
 
             sw.Stop();
             _logger.LogInformation(
                 "Restored backup {FileName} in {ElapsedMs} ms.", row.FileName, sw.ElapsedMilliseconds);
         }
+        catch (Exception ex) when (dropped)
+        {
+            // The old database is gone and the new one is missing or partial.
+            // Reopening would hand every user an empty or half-loaded site, so
+            // maintenance mode stays on. Bring the schema up to date and put the
+            // inventory back so the backups page still lists every file and the
+            // SiteAdmin can restore another one from it (#1321).
+            _logger.LogError(ex,
+                "Restore of backup {FileName} failed after the database was dropped; staying in maintenance mode.",
+                row.FileName);
+            await RecoverAfterFailedRestoreAsync(inventory);
+            _maintenance.Enter(
+                $"Restoring backup {row.FileName} failed. The site stays closed until a site administrator restores another backup.");
+            throw new BackupRestoreFailedException(
+                "the site is still in maintenance mode and only site administrators can use it. "
+                    + "Restore another backup to bring it back online.",
+                ex);
+        }
+        catch (Exception ex) when (ex is not InvalidOperationException)
+        {
+            // The drop never happened, so the database is as it was. Rethrown as
+            // the type the restore endpoint already reports to the SiteAdmin.
+            _logger.LogError(ex, "Restore of backup {FileName} failed before anything was changed.", row.FileName);
+            throw new InvalidOperationException(
+                "The database could not be prepared for the restore; nothing was changed. See the server logs for details.",
+                ex);
+        }
         finally
         {
-            _maintenance.Exit();
+            if (restored || !dropped) _maintenance.Exit();
+        }
+    }
+
+    /// <summary>
+    /// Refuses a file <c>pg_restore</c> cannot read the table of contents of,
+    /// before maintenance mode or the drop. Only the header and the table of
+    /// contents are read, so this is quick even for a large dump.
+    /// </summary>
+    private async Task EnsureDumpIsReadableAsync(string path, CancellationToken ct)
+    {
+        try
+        {
+            await RunPgToolAsync(_pgRestorePath, new[] { "--list", path }, ct);
+        }
+        catch (InvalidOperationException)
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["BackupId"] = "This backup file can't be read. It may be damaged or incomplete, or taken by a newer "
+                    + "version of PostgreSQL. Nothing was changed - pick another backup.",
+            });
+        }
+    }
+
+    /// <summary>
+    /// Brings the restored schema up to this version's migrations. A dump taken
+    /// by an older version restores an older schema, and startup is the only
+    /// other place migrations run, so without this every query on a newer
+    /// column fails until the next restart (#1255).
+    /// </summary>
+    private async Task MigrateAsync(CancellationToken ct)
+    {
+        _db.Database.SetCommandTimeout(ALDevToolbox.Endpoints.StartupTasks.MigrationCommandTimeout);
+        try
+        {
+            await _db.Database.MigrateAsync(ct);
+        }
+        finally
+        {
+            _db.Database.SetCommandTimeout((int?)null);
+        }
+    }
+
+    /// <summary>
+    /// Best effort after a restore that failed once the database was dropped:
+    /// migrate whatever is there (an empty schema becomes an empty but complete
+    /// one), put the backup inventory back, and reload the in-memory settings.
+    /// Each step is guarded on its own so one failure does not stop the next;
+    /// the original failure is what the caller reports.
+    /// </summary>
+    private async Task RecoverAfterFailedRestoreAsync(BackupInventory inventory)
+    {
+        var ct = CancellationToken.None;
+        try
+        {
+            await MigrateAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Migrating the database after a failed restore also failed.");
+        }
+        try
+        {
+            await RestoreInventoryAsync(inventory, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Putting back the backup inventory after a failed restore also failed.");
+        }
+        try
+        {
+            if (_systemSettings is not null) await _systemSettings.ReloadAfterRestoreAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Reloading settings after a failed restore also failed.");
         }
     }
 
@@ -544,5 +657,19 @@ public sealed class BackupService
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
+    }
+}
+
+/// <summary>
+/// A full restore failed after the database was dropped. Maintenance mode is
+/// still on, and stays on until a SiteAdmin restores another backup (or the
+/// container restarts). Derives from <see cref="InvalidOperationException"/> so
+/// the restore endpoint reports it like any other failed restore. See #1321.
+/// </summary>
+public sealed class BackupRestoreFailedException : InvalidOperationException
+{
+    public BackupRestoreFailedException(string message, Exception innerException)
+        : base(message, innerException)
+    {
     }
 }

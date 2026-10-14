@@ -203,27 +203,100 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     /// <summary>
-    /// Even when pg_restore blows up mid-flight, the <c>finally</c> in
-    /// <see cref="BackupService.RestoreAsync"/> must lift maintenance mode —
-    /// otherwise the app stays 503 for non-SiteAdmin until someone restarts
-    /// the container.
+    /// A file pg_restore cannot read (here: four bytes of garbage, like a
+    /// truncated download) is refused before maintenance mode or the drop, so
+    /// the database the site is running on is left alone. See issue #1321.
     /// </summary>
     [PgToolFact]
-    public async Task RestoreAsync_lifts_maintenance_when_pg_restore_fails()
+    public async Task RestoreAsync_refuses_an_unreadable_file_before_dropping_anything()
     {
         var svc = NewService();
+        await using (var ctx = _db.NewContext())
+        {
+            ctx.Organizations.Add(new Organization
+            {
+                Name = "Marker", Slug = "marker-before-refused-restore",
+                IsPending = false, CreatedAt = DateTime.UtcNow,
+            });
+            await ctx.SaveChangesAsync();
+        }
         var backup = await svc.CreateAsync(BackupKind.AdHoc);
-        // Replace the dump file with garbage. pg_restore will read the header,
-        // refuse, and exit non-zero — BackupService should surface that and
-        // still leave maintenance mode lifted.
         var path = Path.Combine(_backupsDir, backup.FileName);
         await File.WriteAllBytesAsync(path, new byte[] { 0x00, 0x01, 0x02, 0x03 });
 
         Func<Task> act = () => svc.RestoreAsync(backup.Id);
 
-        await act.Should().ThrowAsync<InvalidOperationException>();
-        _maintenance.IsActive.Should().BeFalse(
-            "maintenance mode must be lifted even when pg_restore fails");
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors["BackupId"].Should().Contain("can't be read");
+        _maintenance.IsActive.Should().BeFalse("nothing was changed, so the site stays open");
+        await using (var ctx = _db.NewContext())
+        {
+            (await ctx.Organizations.IgnoreQueryFilters()
+                .AnyAsync(o => o.Slug == "marker-before-refused-restore"))
+                .Should().BeTrue("the database was not dropped");
+            (await ctx.Backups.AsNoTracking().Select(b => b.Id).ToListAsync())
+                .Should().Equal([backup.Id]);
+        }
+    }
+
+    /// <summary>
+    /// A dump whose table of contents reads fine can still fail during the
+    /// restore itself, after the schema is gone. The site must not reopen on
+    /// that, and the backups page must still work so the SiteAdmin can restore
+    /// another backup from it; that restore then reopens the site. See #1321.
+    /// </summary>
+    [Fact]
+    public async Task RestoreAsync_that_fails_after_the_drop_stays_in_maintenance_and_can_restore_another_backup()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Uses a shell script as a stand-in for pg_restore.");
+        var failFlag = Path.Combine(_backupsDir, "fail-restore");
+        // Stand-in pg_restore: the table-of-contents check always passes; the
+        // restore itself fails while the flag file exists, having restored nothing.
+        var tool = WriteFakeTool("fake-pg-restore", $"""
+            [ "$1" = "--list" ] && exit 0
+            [ -f '{failFlag}' ] && exit 1
+            exit 0
+            """);
+        await File.WriteAllTextAsync(failFlag, "", TestContext.Current.CancellationToken);
+
+        var brokenId = await AddBackupRowWithFileAsync();
+        int otherId;
+        await using (var ctx = _db.NewContext())
+        {
+            var other = new Backup
+            {
+                FileName = "aldevtoolbox-20260515T000000000Z-adhoc" + BackupService.BackupFileSuffix,
+                FileSizeBytes = 15,
+                CreatedAt = _clock.GetUtcNow().UtcDateTime.AddDays(1),
+                Kind = BackupKind.AdHoc,
+                IsPinned = true,
+            };
+            ctx.Backups.Add(other);
+            await ctx.SaveChangesAsync();
+            otherId = other.Id;
+        }
+        await File.WriteAllTextAsync(
+            Path.Combine(_backupsDir, "aldevtoolbox-20260515T000000000Z-adhoc" + BackupService.BackupFileSuffix),
+            "not a real dump", TestContext.Current.CancellationToken);
+        var svc = NewService(_options with { PgRestorePath = tool });
+
+        Func<Task> act = () => svc.RestoreAsync(brokenId);
+
+        var ex = await act.Should().ThrowAsync<BackupRestoreFailedException>();
+        ex.Which.Message.Should().Contain("maintenance mode");
+        _maintenance.IsActive.Should().BeTrue("the database was dropped and nothing usable replaced it");
+        _maintenance.Reason.Should().Contain("failed");
+
+        // The schema was migrated and the inventory put back, so the page the
+        // SiteAdmin lands on still lists every backup.
+        var listed = await svc.ListAsync();
+        listed.Select(b => b.Id).Should().BeEquivalentTo([brokenId, otherId]);
+        listed.Single(b => b.Id == otherId).IsPinned.Should().BeTrue();
+
+        File.Delete(failFlag);
+        await NewService(_options with { PgRestorePath = tool }).RestoreAsync(otherId);
+
+        _maintenance.IsActive.Should().BeFalse("a restore that completes reopens the site");
     }
 
     /// <summary>
@@ -242,6 +315,7 @@ public sealed class BackupServiceTests : IDisposable
         // Stand-in pg_restore: announces itself, then waits until the test lets
         // it finish (or the fixture directory goes away, so it never outlives the test).
         var tool = WriteFakeTool("fake-pg-restore", $"""
+            [ "$1" = "--list" ] && exit 0
             : > '{started}'
             while [ -d '{_backupsDir}' ] && [ ! -f '{release}' ]; do sleep 0.05; done
             exit 0

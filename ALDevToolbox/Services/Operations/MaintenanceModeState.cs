@@ -22,9 +22,11 @@ public sealed class MaintenanceModeState
     public DateTime StartedAtUtc => _startedAt;
 
     /// <summary>
-    /// Flips the flag on. The caller owns the <c>try/finally</c> that calls
-    /// <see cref="Exit"/> so a thrown restore never leaves the app stuck in
-    /// maintenance.
+    /// Flips the flag on, or replaces the reason when it is already on. The
+    /// caller owns the <c>try/finally</c> that calls <see cref="Exit"/>. The
+    /// one deliberate exception is a restore that fails after the database was
+    /// dropped: it leaves the flag on, with a reason saying so, until a SiteAdmin
+    /// restores another backup or the process restarts (#1321).
     /// </summary>
     public void Enter(string reason)
     {

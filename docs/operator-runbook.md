@@ -104,8 +104,23 @@ and `/healthz` / `/readyz` keep going.
 Verify: post-restore, `/readyz` is 200 and `/site-admin/audit` shows the
 *Restore* entry. Non-SiteAdmin sign-in works.
 
-If the restore fails part-way, the database is in an indeterminate state —
-restore the most recent pre-restore backup to roll back, then investigate.
+A file that can't be read (truncated, not a backup at all, or taken by a newer
+PostgreSQL) is refused before anything changes; the backups page says so and
+the app stays open.
+
+If the restore fails part-way, the old database is already gone, so the app
+stays in maintenance mode instead of reopening on an empty or half-loaded
+database. The backups page still lists every backup file and says the restore
+failed: restore the pre-restore backup from step 1 (or another known-good one)
+from there, and maintenance mode lifts when that restore completes. Then
+investigate the failure in the logs.
+
+Maintenance mode lives in the app process, so restarting the container lifts it
+and the app opens on whatever the database holds. Only do that if you have lost
+your SiteAdmin session: sign-in is blocked while maintenance mode is on. On an
+emptied database startup creates the bootstrap admin again from
+`BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD`, if they are set; sign in
+with it and restore from the backups page.
 
 ## Off-site (S3-compatible) backups
 

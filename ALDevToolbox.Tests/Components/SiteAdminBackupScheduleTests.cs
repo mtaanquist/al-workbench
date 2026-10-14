@@ -32,6 +32,7 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
 
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly MaintenanceModeState _maintenance = new();
     private readonly string _deploymentDir = Path.Combine(Path.GetTempPath(), "aldt-test-deploy-" + Guid.NewGuid().ToString("N"));
 
     public SiteAdminBackupScheduleTests()
@@ -56,7 +57,7 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
         _ctx.Services.AddSingleton<IConfiguration>(config);
         _ctx.Services.AddDataProtection();
         _ctx.Services.AddScoped<SystemSettingsService>();
-        _ctx.Services.AddSingleton(new MaintenanceModeState());
+        _ctx.Services.AddSingleton(_maintenance);
         _ctx.Services.AddScoped<BackupService>();
         _ctx.Services.AddScoped(sp => new PerTenantBackupService(
             sp.GetRequiredService<AppDbContext>(), _db.OrgContext,
@@ -202,6 +203,41 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
             cut.Find("p.card__sub").TextContent.Should().Contain("daily at 04:00 (Europe/Copenhagen).");
             cut.Markup.Should().NotContain("04:00 UTC").And.NotContain("02:00 UTC.");
             cut.Markup.Should().Contain("2026-07-01 04:00:00", "the listed backup ran at the scheduled time, shown in the same zone");
+        });
+    }
+
+    /// <summary>
+    /// A restore that fails after the drop keeps the site in maintenance mode
+    /// (#1321). The SiteAdmin lands back on the backups page, which has to say
+    /// so, or nothing tells them the site is still closed to everyone else.
+    /// </summary>
+    [Fact]
+    public void The_backups_page_says_when_the_site_is_in_maintenance_mode()
+    {
+        At(Summer);
+        _maintenance.Enter("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed.");
+
+        var cut = _ctx.Render<SiteAdminBackups>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var alert = cut.Find("[role=alert]").TextContent;
+            alert.Should().Contain("The site is in maintenance mode and only site administrators can use it.");
+            alert.Should().Contain("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed.");
+        });
+    }
+
+    [Fact]
+    public void The_backups_page_has_no_maintenance_notice_when_the_site_is_open()
+    {
+        At(Summer);
+
+        var cut = _ctx.Render<SiteAdminBackups>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("A complete copy of everything on this site.");
+            cut.Markup.Should().NotContain("maintenance mode");
         });
     }
 

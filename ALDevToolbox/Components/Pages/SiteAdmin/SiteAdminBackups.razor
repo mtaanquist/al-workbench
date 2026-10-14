@@ -11,6 +11,7 @@
 @inject TimeProvider Clock
 @inject OffsiteBackupService Offsite
 @inject OffsiteRestoreJobs RestoreJobs
+@inject MaintenanceModeState Maintenance
 @inject ILogger<SiteAdminBackups> Log
 
 <PageTitle>Database backups · Site administration · AL Workbench</PageTitle>
@@ -33,6 +34,17 @@
             each day; pinned copies are never deleted to make room for newer ones.
         </p>
 
+        @if (Maintenance.IsActive)
+        {
+            @* Shown to SiteAdmins only (everyone else gets the maintenance page), and
+               mainly after a failed restore, which keeps maintenance mode on (#1321). *@
+            <Alert Tone="AlertTone.Warn" Role="alert">
+                <span>
+                    The site is in maintenance mode and only site administrators can use it.
+                    @Maintenance.Reason
+                </span>
+            </Alert>
+        }
         @if (!string.IsNullOrEmpty(Message))
         {
             <Alert Tone="AlertTone.Danger"><span>@Message</span></Alert>
