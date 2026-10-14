@@ -30,6 +30,12 @@ public enum EmailPurpose
     /// <summary>Confirm-your-new-address link, sent to the new address.</summary>
     EmailChangeConfirmation,
 
+    /// <summary>
+    /// To the current address when an administrator asks to change it (with a
+    /// link to stop the change), and again once the change is confirmed.
+    /// </summary>
+    EmailChangeNotice,
+
     /// <summary>Six-digit two-factor code. Sent inline — someone is waiting on it.</summary>
     MfaCode,
 

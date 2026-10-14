@@ -1,7 +1,8 @@
+
 @* Sent to the new address after an administrator changes a user's email. *@
 <EmailLayout Preheader="Confirm the new email address on your account." Reason="You received this because an administrator changed the email address on an AL Workbench account to this one.">
     <EmailParagraph>Hi @DisplayName,</EmailParagraph>
-    <EmailParagraph>An administrator changed the email address on your AL Workbench account to this one. Confirm it within 24 hours. Until you do, you still sign in with your old address.</EmailParagraph>
+    <EmailParagraph>An administrator changed the email address on your AL Workbench account to this one. So that a change nobody expected can be stopped, it can't be confirmed before <strong>@ConfirmableFrom</strong>. The link works until <strong>@ExpiresAt</strong>. Until you confirm, you still sign in with your old address.</EmailParagraph>
     <EmailButton Href="@ConfirmUrl">Confirm new address</EmailButton>
     <EmailParagraph>If you were not expecting this, ignore this email and the change will not take effect.</EmailParagraph>
 </EmailLayout>
@@ -12,10 +13,20 @@
     [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
     [Parameter, EditorRequired] public string ConfirmUrl { get; set; } = string.Empty;
 
-    public static Task<EmailContent> RenderAsync(EmailRenderer renderer, string displayName, string confirmUrl, CancellationToken ct = default)
+    /// <summary>When the link starts working, already formatted for the organisation's time zone.</summary>
+    [Parameter, EditorRequired] public string ConfirmableFrom { get; set; } = string.Empty;
+
+    /// <summary>When the link stops working, formatted the same way.</summary>
+    [Parameter, EditorRequired] public string ExpiresAt { get; set; } = string.Empty;
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer, string displayName, string confirmUrl, string confirmableFrom, string expiresAt,
+        CancellationToken ct = default)
         => renderer.RenderAsync<EmailChangeConfirmEmail>(Subject, new Dictionary<string, object?>
         {
             [nameof(DisplayName)] = displayName,
             [nameof(ConfirmUrl)] = confirmUrl,
+            [nameof(ConfirmableFrom)] = confirmableFrom,
+            [nameof(ExpiresAt)] = expiresAt,
         }, ct);
 }

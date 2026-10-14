@@ -1,0 +1,45 @@
+@page "/account/email-change/cancel"
+@layout ALDevToolbox.Components.Layout.AuthLayout
+@using ALDevToolbox.Components.Shared
+
+<PageTitle>Stop email change · AL Workbench</PageTitle>
+
+@* Opened from the notice sent to the current address when an administrator
+   asks to change it. A button rather than a link that acts by itself, so a
+   mail scanner that opens every link can't stop changes nobody objected to. *@
+@if (string.IsNullOrEmpty(Token))
+{
+    <AuthCard Title="That link is missing something">
+        <Sub>
+            This link looks incomplete - email apps sometimes cut long links in half.
+            Open it from the email again.
+        </Sub>
+        <Foot>
+            <a class="auth__link" href="/login">Back to sign in</a>
+        </Foot>
+    </AuthCard>
+}
+else
+{
+    <AuthCard Title="Stop the email change?" FormAction="/auth/account/email-change/cancel">
+        <Sub>
+            An administrator asked to change the email address on your account. Stop it and
+            your account keeps the address you received this link at.
+        </Sub>
+        <ChildContent>
+            <input type="hidden" name="Token" value="@Token" />
+            <button type="submit" class="btn btn--primary" style="height: var(--control-h-lg)">
+                <Icon Name="x" Width="16" Height="16" />
+                <span>Stop the change</span>
+            </button>
+        </ChildContent>
+        <Foot>
+            <a class="auth__link" href="/login">Back to sign in</a>
+        </Foot>
+        <Legal>This link works once. If you expected the change, close this page.</Legal>
+    </AuthCard>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "token")] public string? Token { get; set; }
+}

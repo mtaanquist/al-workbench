@@ -6,14 +6,11 @@
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Endpoints
 @using ALDevToolbox.Services
-@using Microsoft.AspNetCore.DataProtection
 @using Microsoft.EntityFrameworkCore
 @using static ALDevToolbox.Components.Shared.AdminPageHelpers
 @inject IOrganizationContext Org
 @inject ALDevToolbox.Services.Account.UserAdministrationService Accounts
-@inject IDataProtectionProvider Protection
-@inject IHttpContextAccessor Http
-@inject IJSRuntime JS
+@inject IEmailService Email
 @inject ILogger<AdminAdministrationUsers> Log
 
 @*
@@ -51,20 +48,11 @@
     }
     else if (Ok == "email-pending")
     {
-        <Alert Tone="AlertTone.Success" Block="true">
+        <Alert Tone="AlertTone.Success">
             <span>
-                Email change requested. We sent a confirmation link to the new address; it expires in 24 hours.
-                @if (!string.IsNullOrEmpty(_oneShotLink))
-                {
-                    <span>If email isn't reaching the user, share this link with them instead:</span>
-                    <span class="u-row">
-                        <code class="code">@_oneShotLink</code>
-                        <button type="button" class="btn btn--sm" @onclick="CopyLinkAsync">
-                            <Icon Name="copy" Width="14" Height="14" />
-                            <span>Copy</span>
-                        </button>
-                    </span>
-                }
+                Email change requested. We sent a confirmation link to the new address, and told the current
+                address with a link to stop the change. The change can't be confirmed until 24 hours from now,
+                so the person has time to stop it.
             </span>
         </Alert>
     }
@@ -341,16 +329,32 @@
                                 @if (!string.IsNullOrEmpty(u.PendingEmail))
                                 {
                                     <p class="field__hint">
-                                        Pending change to <strong>@u.PendingEmail</strong> (requested <Timestamp Value="@u.PendingEmailAt" />).
+                                        Pending change to <strong>@u.PendingEmail</strong> (requested <Timestamp Value="@u.PendingEmailAt" />@if (u.PendingEmailAt is { } requestedAt)
+                                        {
+                                            <span>, can be confirmed from <Timestamp Value="@(requestedAt + ALDevToolbox.Services.Account.UserAdministrationService.EmailChangeConfirmDelay)" /></span>
+                                        }).
                                     </p>
                                 }
-                                <form method="post" action="/admin/users/@u.Id/email" class="u-row">
-                                    <AntiforgeryToken />
-                                    <input class="input input--sm" type="email" name="NewEmail" required maxlength="254"
-                                           aria-label="New email address" placeholder="new@example.com" />
-                                    <button type="submit" class="btn btn--sm btn--primary">Send confirmation</button>
-                                    <button type="button" class="btn btn--sm" @onclick="() => ToggleEmailRow(0)">Cancel</button>
-                                </form>
+                                @if (!_emailConfigured)
+                                {
+                                    <div class="u-row">
+                                        <p class="field__hint">@AdminUserEndpoints.EmailChangeNeedsEmailMessage</p>
+                                        <button type="button" class="btn btn--sm" @onclick="() => ToggleEmailRow(0)">Close</button>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <form method="post" action="/admin/users/@u.Id/email" class="u-row">
+                                        <AntiforgeryToken />
+                                        <input class="input input--sm" type="email" name="NewEmail" required maxlength="254"
+                                               aria-label="New email address" placeholder="new@example.com" />
+                                        <button type="submit" class="btn btn--sm btn--primary">Send confirmation</button>
+                                        <button type="button" class="btn btn--sm" @onclick="() => ToggleEmailRow(0)">Cancel</button>
+                                    </form>
+                                    <p class="field__hint">
+                                        The new address gets a link to confirm, which works after 24 hours. The current address is told who asked, with a link to stop the change.
+                                    </p>
+                                }
                             </td>
                         </tr>
                     }
@@ -390,7 +394,7 @@
     private IReadOnlyList<BulkActionFailure> _lastFailures = Array.Empty<BulkActionFailure>();
     private ConfirmDialog? _confirm;
     private int _emailRowOpen;
-    private string? _oneShotLink;
+    private bool _emailConfigured = true;
     private int _nameRowOpen;
     private string _nameDraft = string.Empty;
     private string? _nameError;
@@ -443,13 +447,6 @@
         }
     }
 
-    private async Task CopyLinkAsync()
-    {
-        if (_oneShotLink is null) return;
-        try { await JS.InvokeVoidAsync("aldtCopy", _oneShotLink); }
-        catch { /* clipboard API blocked - user can copy manually */ }
-    }
-
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         // Once per target, and only once its row exists: the table renders
@@ -464,12 +461,6 @@
             catch (JSException) { /* the row went away mid-render - nothing to focus */ }
             catch (JSDisconnectedException) { return; }
         }
-
-        if (!firstRender) return;
-        var ctx = Http.HttpContext;
-        if (ctx is null) return;
-        _oneShotLink = EndpointHelpers.ReadAndClearOneShotInviteCookie(ctx, Protection);
-        if (_oneShotLink is not null) StateHasChanged();
     }
 
     private enum BulkAction { Disable, Enable, PromoteAdmin, DemoteUser }
@@ -491,6 +482,9 @@
         _entraLinkedUserIds = page.EntraLinkedUserIds;
         _invites = page.Invites;
         _selected.RemoveWhere(id => !_active.Any(u => u.Id == id));
+        // An email change has to reach the person's current address, so the
+        // form is replaced by an explanation when the site can't send email.
+        _emailConfigured = await Email.IsConfiguredAsync();
     }
 
     private void ToggleRow(int id, ChangeEventArgs e)
