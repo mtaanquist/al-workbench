@@ -1,5 +1,6 @@
 using System.Net;
 using System.Reflection;
+using ALWorkbench.Gateway.Contracts;
 
 namespace ALWorkbench.Gateway.Core;
 
@@ -34,10 +35,17 @@ public static class GatewayHttp
         };
         var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         client.DefaultRequestHeaders.UserAgent.ParseAdd($"ALWorkbench.Gateway/{ProgramVersion}");
+        // On every request, so AL Workbench can refuse a gateway too old for it with a
+        // message that says so, before it reads anything else (GatewayProtocol.MinimumGatewayVersion).
+        client.DefaultRequestHeaders.Add(GatewayProtocol.GatewayVersionHeader, ProgramVersion);
         return client;
     }
 
-    /// <summary>The gateway program's version, as reported to AL Workbench.</summary>
+    /// <summary>
+    /// The gateway program's version, as reported to AL Workbench: the release it was
+    /// published with (release.yml stamps it from the tag), <c>0.0.0-staging.&lt;commit&gt;</c>
+    /// for a staging preview, or <c>0.0.0-dev</c> for a local build.
+    /// </summary>
     public static string ProgramVersion { get; } =
         (Assembly.GetEntryAssembly() ?? typeof(GatewayHttp).Assembly)
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0]

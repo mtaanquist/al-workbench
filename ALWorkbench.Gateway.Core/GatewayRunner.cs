@@ -54,7 +54,8 @@ public sealed record GatewayRunnerOptions(string WorkDirectory, string MachineNa
 /// and polls again after the first heartbeat that says it is approved. A 401 (revoked,
 /// or this computer's clock far off) does not stop it: it logs an error with what to
 /// check and keeps trying on the same back-off, so a drifted clock never leaves the
-/// customer with a dead service.</para>
+/// customer with a dead service. A 426 (this gateway is older than AL Workbench accepts)
+/// is handled the same way, with a line that says how to update.</para>
 /// </summary>
 public sealed class GatewayRunner
 {
@@ -240,6 +241,15 @@ public sealed class GatewayRunner
                     // gateway left refused for days writes a line every five minutes, not a flood.
                     var wait = backoff.Next();
                     _logger.CredentialRefused(ex.Message, (int)Math.Ceiling(wait.TotalSeconds));
+                    await _clock.Delay(wait, ct).ConfigureAwait(false);
+                }
+                catch (GatewayOutdatedException ex)
+                {
+                    // Like a refused credential: not a reason to stop. Customer IT updates
+                    // the program, which restarts the service; until then one line per
+                    // attempt says what to do, at most every five minutes.
+                    var wait = backoff.Next();
+                    _logger.Outdated(_options.Version, ex.Message, (int)Math.Ceiling(wait.TotalSeconds));
                     await _clock.Delay(wait, ct).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException)
@@ -561,7 +571,7 @@ public sealed class GatewayRunner
                 await _clock.Delay(backoff.Next(), ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException or GatewayNotApprovedException
-                                       or GatewayCredentialRefusedException)
+                                       or GatewayCredentialRefusedException or GatewayOutdatedException)
             {
                 return GatewayCommandOutcome.Failure($"Could not download '{file.Name}': {ex.Message} Nothing was run.");
             }
@@ -615,10 +625,12 @@ public sealed class GatewayRunner
                 return;
             }
             catch (Exception ex) when (ex is WorkbenchUnreachableException or GatewayCredentialRefusedException
-                                       or GatewayNotApprovedException)
+                                       or GatewayNotApprovedException or GatewayOutdatedException)
             {
                 // Not approved: the key was replaced and an Admin has not approved the new
-                // one yet. The result waits for that rather than being lost.
+                // one yet. Outdated: AL Workbench was updated past this gateway's version
+                // while the command ran. Either way the result waits rather than being
+                // lost; it is saved, so an updated gateway sends it on its first start.
                 var wait = backoff.Next();
                 _logger.LogWarning("Could not report the result of command {CommandId} ({Reason}); trying again in {Seconds} seconds.",
                     commandId, ex.Message, (int)Math.Ceiling(wait.TotalSeconds));

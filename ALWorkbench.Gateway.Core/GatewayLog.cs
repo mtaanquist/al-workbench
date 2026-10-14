@@ -29,6 +29,7 @@ public static partial class GatewayLog
     public const int PolicyUnsafeId = 3003;
     public const int FailedId = 2007;
     public const int FolderLoosenedId = 2008;
+    public const int OutdatedId = 2009;
 
     [LoggerMessage(EventId = CommandStartedId, Level = LogLevel.Information,
         Message = "Started command {CommandId} ({Verb}), requested by {RequestedBy}.")]
@@ -77,6 +78,10 @@ public static partial class GatewayLog
     [LoggerMessage(EventId = CredentialRefusedId, Level = LogLevel.Error,
         Message = "AL Workbench refused this gateway's credentials: {Reason} Trying again in {Seconds} seconds. If the reason mentions the time, correct this computer's clock; the gateway carries on by itself once it is right. If the gateway was revoked, ask an Admin for a new registration code and run 'register' again.")]
     public static partial void CredentialRefused(this ILogger logger, string reason, int seconds);
+
+    [LoggerMessage(EventId = OutdatedId, Level = LogLevel.Error,
+        Message = "AL Workbench refuses this version of the gateway ({Version}): {Reason} Trying again in {Seconds} seconds. To update: download the gateway from Administration → Gateways in AL Workbench, stop the AL Workbench Gateway service, replace ALWorkbench.Gateway.exe with the new file, and start the service. The registration and settings are kept.")]
+    public static partial void Outdated(this ILogger logger, string version, string reason, int seconds);
 
     [LoggerMessage(EventId = PolicyLoadedId, Level = LogLevel.Information,
         Message = "Read the gateway settings in {PolicyFile}: {Count} service tiers listed. Anything not listed there is refused.")]

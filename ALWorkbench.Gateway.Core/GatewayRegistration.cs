@@ -140,7 +140,7 @@ public sealed class GatewayRegistration
                 $"{ex.Message} Check the address, and that this computer can open it in a browser (proxy and firewall).", ex);
         }
         catch (Exception ex) when (ex is WorkbenchRefusedException or GatewayCredentialRefusedException
-                                   or GatewayNotApprovedException or CommandClosedException)
+                                   or GatewayNotApprovedException or CommandClosedException or GatewayOutdatedException)
         {
             throw new GatewayRegistrationException($"AL Workbench refused the registration: {ex.Message}", ex);
         }

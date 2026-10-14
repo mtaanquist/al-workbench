@@ -281,6 +281,57 @@ public sealed class GatewayRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_426_does_not_stop_the_gateway_it_logs_how_to_update_backs_off_and_recovers()
+    {
+        // AL Workbench was updated past this gateway's version: customer IT replaces the
+        // program, and until then the service keeps running and keeps saying why.
+        const string reason = "This gateway is version 11.18.0, and this AL Workbench needs version 11.19.0 or later.";
+        var attempts = 0;
+        _workbench.Respond = request =>
+        {
+            if (++attempts <= 3) return FakeWorkbench.Refused((HttpStatusCode)GatewayProtocol.OutdatedStatusCode, reason);
+            if (request.Path == GatewayProtocol.NextCommandPath) _stop.Cancel();
+            return request.Path == GatewayProtocol.HeartbeatPath ? FakeWorkbench.Heartbeat(approved: true) : FakeWorkbench.NoContent();
+        };
+
+        var outcome = await RunAsync();
+
+        outcome.Should().Be(GatewayRunOutcome.Stopped);
+        var refusals = _log.Lines.Where(l => l.EventId == GatewayLog.OutdatedId).ToList();
+        refusals.Should().HaveCount(3).And.OnlyContain(l => l.Level == Microsoft.Extensions.Logging.LogLevel.Error);
+        refusals[0].Message.Should().Contain(reason).And.Contain("1.0.0")
+            .And.Contain("stop the AL Workbench Gateway service").And.Contain("replace ALWorkbench.Gateway.exe");
+        _log.Messages(GatewayLog.UnreachableId).Should().BeEmpty("an old gateway is not an unreachable workbench");
+        var waits = _clock.Delays.Take(3).ToList();
+        for (var i = 0; i < 3; i++)
+        {
+            waits[i].Should().BeGreaterThanOrEqualTo(Backoff.Ceiling(i + 1) / 2).And.BeLessThanOrEqualTo(Backoff.Ceiling(i + 1));
+        }
+        _workbench.Requests.Skip(3).Select(r => r.Path).Should().Equal(GatewayProtocol.HeartbeatPath, GatewayProtocol.NextCommandPath);
+    }
+
+    [Fact]
+    public async Task A_result_refused_as_outdated_is_kept_and_retried()
+    {
+        Serve([Command(94)]);
+        var inner = _workbench.Respond;
+        var resultAttempts = 0;
+        _workbench.Respond = request =>
+        {
+            if (request.Path == GatewayProtocol.CommandResultPath(94) && ++resultAttempts < 3)
+            {
+                return FakeWorkbench.Refused((HttpStatusCode)GatewayProtocol.OutdatedStatusCode, "This gateway is too old.");
+            }
+            return inner(request);
+        };
+
+        await RunAsync();
+
+        resultAttempts.Should().Be(3);
+        _runOnce.Unfinished().Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task Interrupted_ids_are_not_reported_again_after_an_approved_heartbeat()
     {
         _runOnce.MarkStarted(72);

@@ -136,7 +136,7 @@ public sealed class ProgressBatcher : IDisposable
             return true;
         }
         catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException or GatewayNotApprovedException
-                                   or GatewayCredentialRefusedException
+                                   or GatewayCredentialRefusedException or GatewayOutdatedException
                                    || (ex is OperationCanceledException && !ct.IsCancellationRequested))
         {
             // Kept as _unsent: it may have arrived with only the answer lost, so it goes

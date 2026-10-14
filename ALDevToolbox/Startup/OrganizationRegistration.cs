@@ -25,6 +25,8 @@ public static class OrganizationRegistration
         // every request, so it is a singleton; the table behind it is the truth.
         services.AddScoped<ALDevToolbox.Services.Gateways.GatewayCommandService>();
         services.AddSingleton<ALDevToolbox.Services.Gateways.GatewayCommandSignal>();
+        // Build-time stamps only: the gateway download and the version gateways are compared with (#1363).
+        services.AddSingleton(ALDevToolbox.Services.Gateways.GatewayBuild.FromAssembly(typeof(ALDevToolbox.Services.Gateways.GatewayBuild).Assembly));
         return services;
     }
 }
