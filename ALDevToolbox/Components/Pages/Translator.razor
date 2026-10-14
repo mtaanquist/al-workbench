@@ -72,7 +72,7 @@
                 @* Click is wired in Translator.razor.js (initPicker), not via
                    @onclick — showOpenFilePicker must run inside the user gesture,
                    which a SignalR round-trip would drop. *@
-                <span class="tdrop__hint">.xlf or .xliff · up to @(_maxFileMb) MB · your edits save straight back to this file</span>
+                <span class="tdrop__hint">.xlf or .xliff · up to @(_maxFileMb) MB · your edits save straight back to the file you open (a build-generated .g.xlf is saved as a new language file instead)</span>
                 <button type="button" class="btn btn--primary tdrop__btn" disabled="@_busy">
                     <Icon Name="folder-open" Width="15" Height="15" Css="btn__icon" /> Choose file
                 </button>
@@ -212,7 +212,7 @@ else
                 else
                 {
                     <button type="button" class="pw__file tr-rename" @onclick="() => _editingName = true"
-                            title="@(_canSaveInPlace ? "Rename the copy you export - the file you opened keeps its name" : "Rename the file you export")">
+                            title="@(_fromGeneratedFile ? "Rename the translation file you download" : _canSaveInPlace ? "Rename the copy you export - the file you opened keeps its name" : "Rename the file you export")">
                         @_fileName
                         <Icon Name="pencil" Width="12" Height="12" />
                     </button>
@@ -280,8 +280,8 @@ else
                    the next build (#1325). The work goes out as a language file
                    of its own instead, named in the head. *@
                 <button type="button" class="btn btn--sm btn--primary" @onclick="ExportCopyAsync" disabled="@_busy"
-                        title="Download your translation as @_fileName. The file you opened is recreated by every build, so it is left as it is.">
-                    <Icon Name="download" Width="14" Height="14" Css="btn__icon" /><span>Export a copy@(_unsaved ? $" ({DirtyCount()})" : "")</span>
+                        title="Download your translation as @_fileName and put it next to the file you opened in your Translations folder. The file you opened is rebuilt by every build, so it is left as it is.">
+                    <Icon Name="download" Width="14" Height="14" Css="btn__icon" /><span>Download translation@(_unsaved ? $" ({DirtyCount()})" : "")</span>
                 </button>
             }
             else if (_canSaveInPlace)
@@ -307,6 +307,34 @@ else
         </div>
 
         <div class="pw__bar">
+            @if (_fromGeneratedFile && !_generatedNoteDismissed)
+            {
+                @* The header shows a different file name from the one the user
+                   opened, and the language was chosen for them; without this
+                   they would think they opened the wrong file (#1325). Inside
+                   the bar, full width, because the frame's grid has a fixed
+                   row for each of head, bar, body and foot. *@
+                <Alert Tone="AlertTone.Info" Block="true" Role="status" Class="tr-gennote">
+                    <span class="tr-gennote__text">
+                        @if (_openedFileName is not null)
+                        {
+                            <strong>@_openedFileName</strong>
+                        }
+                        else
+                        {
+                            <text>The file you opened</text>
+                        }
+                        is the file your build creates, and every build overwrites it. Your translation is saved as a new file, <strong>@_fileName</strong>,
+                        to put next to it in your Translations folder. The language is set to
+                        @LanguageLabel(_targetLang) - change it above if you are translating into another
+                        language, and the file name follows.
+                    </span>
+                    <button type="button" class="btn btn--sm btn--ghost btn--icon" aria-label="Dismiss"
+                            title="Dismiss" @onclick="() => _generatedNoteDismissed = true">
+                        <Icon Name="x" Width="14" Height="14" />
+                    </button>
+                </Alert>
+            }
             @* One tab per state, and every badge is the number of rows its own
                tab produces. The three-tab version showed 88 on a tab that
                filtered to 175, because the filter counted units needing review
@@ -692,6 +720,12 @@ else
                     <Icon Name="folder-git-2" Width="11" Height="11" />@_repoSource.Repository.Name
                 </span>
             }
+            else if (_fromGeneratedFile && _openedFileName is not null)
+            {
+                @* The head shows the language file's name; this keeps the name
+                   of the file actually opened in view beside it. *@
+                <span class="tr-foot__orig">started from @_openedFileName</span>
+            }
             else if (!string.IsNullOrEmpty(_original))
             {
                 <span class="tr-foot__orig">from @_original</span>
@@ -705,7 +739,10 @@ else
                    view renders. Advertising it in the grid was a lie. *@
                 <span class="kbd-hint"><span class="kbd-hint__label">Apply suggestion</span><span class="kbd">Alt</span> <span>+</span> <span class="kbd">1</span>&#8211;<span class="kbd">9</span></span>
             }
-            <span class="kbd-hint"><span class="kbd-hint__label">@(_canSaveInPlace ? "Save" : "Export")</span><span class="kbd">Ctrl</span><span class="kbd">S</span></span>
+            @if (!_fromGeneratedFile)
+            {
+                <span class="kbd-hint"><span class="kbd-hint__label">@(_canSaveInPlace ? "Save" : "Export")</span><span class="kbd">Ctrl</span><span class="kbd">S</span></span>
+            }
 
             <div class="tprog" role="img" aria-label="@c.Pct% translated: @c.Final final, @c.Translated translated, @c.Review needing review, @c.Todo untranslated">
                 <div class="tprog__bar" aria-hidden="true">
@@ -883,6 +920,10 @@ else
     // compiler's generated file. It is never saved in place and exports as a
     // language file named for _targetLang. See AdoptGeneratedFileAsync.
     private bool _fromGeneratedFile;
+    // The generated file's own name, shown beside the language file's name so
+    // the two are never confused, and whether its explanation was dismissed.
+    private string? _openedFileName;
+    private bool _generatedNoteDismissed;
 
     // True when there are edits that haven't been exported. Drives both the
     // in-app navigation guard (the modal) and the browser-level beforeunload
@@ -1114,7 +1155,7 @@ else
             }
 
             LoadParsed(file.Name, parsed);
-            await AdoptGeneratedFileAsync(parsed, persist: false);
+            await AdoptGeneratedFileAsync(parsed, persist: false, openedFileName: file.Name);
 
             // Hand the verbatim original to IndexedDB via a stream (off the
             // 32 KB interop arg path), so a refresh can restore it.
@@ -1183,7 +1224,7 @@ else
 
         LoadParsed(fileName, parsed);
         _canSaveInPlace = true; // opened with a writable handle
-        await AdoptGeneratedFileAsync(parsed, persist: true);
+        await AdoptGeneratedFileAsync(parsed, persist: true, openedFileName: fileName);
         await SelectAsync(_filtered.FirstOrDefault()?.Id ?? _units.FirstOrDefault()?.Id);
     }
 
@@ -1225,11 +1266,17 @@ else
     /// the export it sends later carries the language and name chosen here.
     /// The upload path writes the record afterwards and passes false.
     /// </param>
-    private async Task AdoptGeneratedFileAsync(XliffDocument parsed, bool persist)
+    /// <param name="openedFileName">
+    /// The name the file has on disk, for the notice and the footer. Null on a
+    /// restore, whose session only remembers the language file's name.
+    /// </param>
+    private async Task AdoptGeneratedFileAsync(XliffDocument parsed, bool persist, string? openedFileName)
     {
-        _fromGeneratedFile = TranslationFileRules.IsUntranslatedSource(parsed.SourceLanguage, parsed.TargetLanguage);
+        _fromGeneratedFile = TranslationFileRules.IsUntranslatedSource(parsed);
         if (!_fromGeneratedFile) return;
 
+        _openedFileName = openedFileName;
+        _generatedNoteDismissed = false;
         _canSaveInPlace = false;
         // Same as the repository path: "translate English into English" is
         // what the file says, not what anybody wants.
@@ -1296,7 +1343,7 @@ else
             // (and re-prompted) on the Save gesture itself, not here. Never for
             // the generated file, which only ever exports (#1325).
             _canSaveInPlace = await _module.InvokeAsync<bool>("hasHandle");
-            await AdoptGeneratedFileAsync(parsed, persist: true);
+            await AdoptGeneratedFileAsync(parsed, persist: true, openedFileName: null);
 
             // Re-apply the saved edit overlay.
             var byId = _units.ToDictionary(u => u.Id, StringComparer.Ordinal);
@@ -2243,7 +2290,17 @@ else
     [JSInvokable]
     public async Task SaveFromKey()
     {
-        if (_module is null || _busy || !_canSaveInPlace) return;
+        if (_module is null || _busy) return;
+        if (_fromGeneratedFile && _repoSource is null)
+        {
+            // Ctrl+S out of habit would otherwise do nothing, and nothing
+            // looks a lot like "saved" (#1325).
+            Flash("This file is rebuilt by every build, so your work is not saved into it - use Download translation to keep it.",
+                ToastKind.Warn);
+            StateHasChanged();
+            return;
+        }
+        if (!_canSaveInPlace) return;
         await SaveInPlaceAsync(SerializeEdits());
         StateHasChanged();
     }

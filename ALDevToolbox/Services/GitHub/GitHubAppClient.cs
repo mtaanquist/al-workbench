@@ -1027,6 +1027,37 @@ public sealed partial class GitHubAppClient
     }
 
     /// <summary>
+    /// The head commit of the most recently updated closed (or merged) pull
+    /// request from <paramref name="headBranch"/>, or <see langword="null"/>
+    /// when that branch has never had one closed. GitHub keeps that commit
+    /// under the pull request for good, so a branch still pointing at it holds
+    /// nothing that would be lost by moving it.
+    /// </summary>
+    public async Task<string?> GetLatestClosedPullRequestHeadShaAsync(
+        string credential, string owner, string repo, string headBranch, CancellationToken ct = default)
+    {
+        var head = Uri.EscapeDataString($"{owner}:{headBranch}");
+        using var request = NewRequest(
+            HttpMethod.Get,
+            $"{RepoPath(owner, repo)}/pulls?state=closed&head={head}&sort=updated&direction=desc&per_page=1",
+            credential);
+        using var document = await SendOrNotFoundAsync(request, ct);
+        if (document is null || document.RootElement.ValueKind != JsonValueKind.Array) return null;
+
+        foreach (var item in document.RootElement.EnumerateArray())
+        {
+            if (item.TryGetProperty("head", out var h)
+                && h.ValueKind == JsonValueKind.Object
+                && h.TryGetProperty("sha", out var sha)
+                && sha.ValueKind == JsonValueKind.String)
+            {
+                return sha.GetString();
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Every file in a commit, a branch or a tag, in one call.
     ///
     /// <para>One recursive read rather than a Contents listing per folder: the
