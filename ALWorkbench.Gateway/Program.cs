@@ -261,7 +261,8 @@ internal static class GatewayProgram
         RequireAdministrator();
         var options = GatewayWorker.PolicyOptions();
         var source = new GatewayPolicySource(options, new WindowsFileAccessCheck(), SystemGatewayClock.Instance, TimeZoneInfo.Local, NullLogger.Instance);
-        var report = source.Refresh().Report;
+        source.Refresh();
+        var report = source.FullReport;
 
         Console.WriteLine($"Settings file: {options.PolicyFile}");
         Console.WriteLine(report.State switch
@@ -286,7 +287,7 @@ internal static class GatewayProgram
 
         var failed = report.State != GatewayPolicyStates.Valid;
         var locator = new RegistryServiceTierLocator();
-        var runner = new PowerShellRunner(new SystemProcessRunner(), PowerShellExecutables.Windows());
+        var runner = new PowerShellRunner(new SystemProcessRunner(new JobObjectContainment()), PowerShellExecutables.Windows(), new WindowsFileAccessCheck());
         foreach (var instance in source.InForce.Instances.Where(i =>
                      string.Equals(i.Tier.Machine, Environment.MachineName, StringComparison.OrdinalIgnoreCase)))
         {

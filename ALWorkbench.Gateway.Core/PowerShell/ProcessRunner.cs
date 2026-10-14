@@ -37,6 +37,19 @@ public interface IProcessRunner
 }
 
 /// <summary>
+/// Ties a started child to the gateway so that whatever it starts in turn dies with
+/// it. On Windows a process tree kill only reaches the children Windows still lists
+/// under the process, and a grandchild whose parent already exited is no longer
+/// listed; the Windows host puts each child in a job object that kills everything in
+/// it when closed (<c>ALWorkbench.Gateway/JobObjectContainment</c>). Disposing the
+/// returned object ends everything still running in it.
+/// </summary>
+public interface IProcessContainment
+{
+    IDisposable Contain(Process process);
+}
+
+/// <summary>
 /// The real <see cref="IProcessRunner"/>. Arguments go through
 /// <see cref="ProcessStartInfo.ArgumentList"/>, so the runtime quotes each one for the
 /// platform; no shell is involved. A timeout or a cancellation kills the whole process
@@ -45,6 +58,14 @@ public interface IProcessRunner
 /// </summary>
 public sealed class SystemProcessRunner : IProcessRunner
 {
+    private readonly IProcessContainment? _containment;
+
+    /// <param name="containment">On Windows, the job object each child goes into; null elsewhere, where the tree kill is used alone.</param>
+    public SystemProcessRunner(IProcessContainment? containment = null)
+    {
+        _containment = containment;
+    }
+
     /// <summary>Output beyond this many characters per stream is dropped, so a runaway child cannot exhaust the service's memory.</summary>
     public const int MaxOutputChars = 8 * 1024 * 1024;
 
@@ -66,6 +87,20 @@ public sealed class SystemProcessRunner : IProcessRunner
 
         using var process = new Process { StartInfo = start };
         process.Start();
+        // Disposed when this method returns, so anything the child left running when
+        // it ended, or when it was killed, ends with it. A service the child started
+        // through Windows' service manager is not its child and keeps running.
+        IDisposable? containment;
+        try
+        {
+            containment = _containment?.Contain(process);
+        }
+        catch
+        {
+            Kill(process);
+            throw;
+        }
+        using var contained = containment;
 
         var stdout = ReadAsync(process.StandardOutput, spec.OnOutputLine);
         var stderr = ReadAsync(process.StandardError, null);

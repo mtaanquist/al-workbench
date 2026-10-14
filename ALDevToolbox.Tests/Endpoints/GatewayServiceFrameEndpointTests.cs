@@ -75,7 +75,11 @@ public sealed class GatewayServiceFrameEndpointTests : IDisposable
                     {
                         [GatewayCommandParameters.Machine] = "CRONUS-BC01",
                         [GatewayCommandParameters.Instance] = "BC140",
-                        [GatewayCommandParameters.Apps] = new JsonArray(new JsonObject { [GatewayCommandParameters.AppPublisher] = "CRONUS Partner" }),
+                        [GatewayCommandParameters.Apps] = new JsonArray(new JsonObject
+                        {
+                            [GatewayCommandParameters.AppFile] = "CRONUS_Coffee_1.4.0.0.app",
+                            [GatewayCommandParameters.AppPublisher] = "CRONUS Partner",
+                        }),
                     },
                     RequestedByUserId: admin.Id, Files: [new GatewayCommandFileInput("CRONUS_Coffee_1.4.0.0.app", app)]));
         }

@@ -11,8 +11,16 @@ public sealed record PolicyDecision(bool Allowed, string? Reason)
     public static PolicyDecision Refuse(string reason) => new(false, reason);
 }
 
-/// <summary>An app a <c>publish-install</c> command says it will publish.</summary>
-public sealed record AppToPublish(string Publisher, bool Signed);
+/// <summary>
+/// An app a <c>publish-install</c> command says it will publish. Every field is the
+/// server's claim: the policy check refuses on it early, and the verb must check the
+/// <c>.app</c> itself (its publisher, its signature, and that the files are the apps
+/// declared here) before publishing anything (#1375).
+/// </summary>
+/// <param name="File">The name of the command's file that holds the app.</param>
+/// <param name="Publisher">The publisher the command declares.</param>
+/// <param name="Signed">Whether the command declares the app signed.</param>
+public sealed record AppToPublish(string File, string Publisher, bool Signed);
 
 /// <summary>
 /// What the local policy check needs to know about a command, read from its
@@ -65,6 +73,7 @@ public sealed record PolicyRequest(
                     problem ??= "An app in the command has no publisher.";
                     return null;
                 }
+                if (!TryText(app, GatewayCommandParameters.AppFile, out var file, ref problem)) return null;
                 if (app[GatewayCommandParameters.AppSigned] is { } signedNode
                     && (signedNode.GetValueKind() is not (System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False)))
                 {
@@ -72,8 +81,12 @@ public sealed record PolicyRequest(
                     return null;
                 }
                 var signed = app[GatewayCommandParameters.AppSigned]?.GetValue<bool>() ?? false;
-                apps.Add(new AppToPublish(publisher, signed));
+                apps.Add(new AppToPublish(file ?? string.Empty, publisher, signed));
             }
+        }
+        if (command.Verb == GatewayVerb.PublishInstall && (problem = AppsMatchFiles(apps, command.Files)) is not null)
+        {
+            return null;
         }
 
         var unpublish = false;
@@ -94,6 +107,29 @@ public sealed record PolicyRequest(
             apps,
             unpublish,
             command.StartedByAgent);
+    }
+
+    /// <summary>
+    /// A <c>publish-install</c> must say what it publishes, one app for each file it
+    /// carries. Without that, an empty or missing list would pass every publisher and
+    /// signing rule while the verb published whatever files came with the command.
+    /// </summary>
+    private static string? AppsMatchFiles(IReadOnlyList<AppToPublish> apps, IReadOnlyList<GatewayCommandFileMessage> files)
+    {
+        if (apps.Count == 0)
+        {
+            return "The command does not list the apps it would publish, so the gateway cannot check them against its settings.";
+        }
+        var names = files.Select(f => f.Name).ToList();
+        var named = apps.Select(a => a.File).ToList();
+        if (named.Any(string.IsNullOrEmpty)
+            || named.Distinct(StringComparer.Ordinal).Count() != named.Count
+            || names.Distinct(StringComparer.Ordinal).Count() != names.Count
+            || !named.Order(StringComparer.Ordinal).SequenceEqual(names.Order(StringComparer.Ordinal), StringComparer.Ordinal))
+        {
+            return "The command's list of apps does not match its files one to one, so the gateway cannot tell which publisher each file is from.";
+        }
+        return null;
     }
 
     private static bool TryText(JsonObject parameters, string name, out string? value, ref string? problem)
@@ -259,6 +295,8 @@ public static class PolicyEnforcer
             {
                 return PolicyDecision.Refuse($"Not allowed by {Settings}: {tier.Tier} does not take apps from the publisher '{app.Publisher}'.");
             }
+            // A declared signature is a claim, not proof: with allow_unsigned off, the
+            // verb checks the .app's own signature before publishing (#1375).
             if (!app.Signed && !tier.AllowUnsigned)
             {
                 return PolicyDecision.Refuse($"Not allowed by {Settings}: {tier.Tier} does not take unsigned apps.");

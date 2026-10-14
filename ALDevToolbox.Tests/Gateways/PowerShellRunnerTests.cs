@@ -60,7 +60,7 @@ public sealed class PowerShellRunnerTests
     [MemberData(nameof(Hostile))]
     public void A_parameter_value_never_reaches_the_command_line_and_arrives_intact_on_standard_input(string value)
     {
-        var runner = new PowerShellRunner(new CapturingRunner(), Programs);
+        var runner = new PowerShellRunner(new CapturingRunner(), Programs, new FakeFileAccess());
         var target = new PowerShellTarget(PowerShellEdition.WindowsPowerShell, @"C:\Program Files\Microsoft Dynamics 365 Business Central\140\Service");
 
         var plain = runner.BuildSpec(PowerShellOperations.SelfTest, target, new JsonObject { ["instance"] = "BC140" }, TimeSpan.FromMinutes(1), "M");
@@ -81,7 +81,7 @@ public sealed class PowerShellRunnerTests
     [Fact]
     public void The_child_is_started_with_fixed_switches_and_the_script_reads_its_input_with_ConvertFrom_Json()
     {
-        var spec = new PowerShellRunner(new CapturingRunner(), Programs)
+        var spec = new PowerShellRunner(new CapturingRunner(), Programs, new FakeFileAccess())
             .BuildSpec(Echo, new PowerShellTarget(PowerShellEdition.PowerShell7, null), new JsonObject(), TimeSpan.FromSeconds(5), "M");
 
         spec.FileName.Should().Be(Programs.PowerShell7);
@@ -94,10 +94,48 @@ public sealed class PowerShellRunnerTests
     [Fact]
     public void An_operation_that_needs_the_module_refuses_to_run_without_the_tiers_folder()
     {
-        var act = () => new PowerShellRunner(new CapturingRunner(), Programs)
+        var act = () => new PowerShellRunner(new CapturingRunner(), Programs, new FakeFileAccess())
             .BuildSpec(PowerShellOperations.SelfTest, new PowerShellTarget(PowerShellEdition.WindowsPowerShell, null), new JsonObject(), TimeSpan.FromSeconds(5), "M");
 
         act.Should().Throw<ArgumentException>();
+    }
+
+    // ---------------------------------------------------------------- the tier's module folder
+
+    [Fact]
+    public async Task A_tier_whose_module_folder_others_can_change_is_refused_before_PowerShell_starts()
+    {
+        const string folder = @"C:\Program Files\Microsoft Dynamics 365 Business Central\140\Service";
+        const string module = folder + @"\Microsoft.Dynamics.Nav.Management.dll";
+        var access = new FakeFileAccess();
+        access.FolderContents[folder] = [folder + @"\NavAdminTool.ps1", module];
+        access.Problems[module] = $"CRONUS\\Developers can change {module}. Only Administrators and SYSTEM may.";
+        var processes = new CapturingRunner();
+        var runner = new PowerShellRunner(processes, Programs, access);
+        var target = new PowerShellTarget(PowerShellEdition.WindowsPowerShell, folder);
+
+        var outcome = await runner.RunAsync(PowerShellOperations.SelfTest, target, new JsonObject(), TimeSpan.FromMinutes(1), null, CancellationToken.None);
+
+        outcome.Succeeded.Should().BeFalse();
+        outcome.Error.Should().StartWith("Someone other than administrators can change the Business Central administration module")
+            .And.Contain("Microsoft.Dynamics.Nav.Management.dll");
+        processes.Specs.Should().BeEmpty();
+        access.Asked.Should().Contain([folder, folder + @"\NavAdminTool.ps1", module]);
+
+        access.Problems.Clear();
+        (await runner.RunAsync(PowerShellOperations.SelfTest, target, new JsonObject(), TimeSpan.FromMinutes(1), null, CancellationToken.None))
+            .Error.Should().NotStartWith("Someone other than administrators", "a safe folder runs");
+        processes.Specs.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void An_operation_that_loads_no_module_checks_no_module_folder()
+    {
+        var access = new FakeFileAccess();
+        new PowerShellRunner(new CapturingRunner(), Programs, access)
+            .ModuleProblems(Echo, new PowerShellTarget(PowerShellEdition.WindowsPowerShell, @"C:\Somewhere"))
+            .Should().BeEmpty();
+        access.Asked.Should().BeEmpty();
     }
 
     // ---------------------------------------------------------------- reading the result
@@ -114,7 +152,7 @@ public sealed class PowerShellRunnerTests
         };
         var progress = new List<string>();
 
-        var outcome = await new PowerShellRunner(processes, Programs)
+        var outcome = await new PowerShellRunner(processes, Programs, new FakeFileAccess())
             .RunAsync(Echo, new PowerShellTarget(PowerShellEdition.WindowsPowerShell, null), new JsonObject(), TimeSpan.FromMinutes(1), progress.Add, CancellationToken.None);
 
         outcome.Succeeded.Should().BeTrue();
@@ -184,6 +222,53 @@ public sealed class PowerShellRunnerTests
         outcome.StandardOutput.Should().Be(nasty + "|from stdin " + nasty + "\n");
     }
 
+    private sealed class RecordingContainment : IProcessContainment
+    {
+        public List<int> Contained { get; } = [];
+
+        public int Released { get; private set; }
+
+        public bool Fail { get; init; }
+
+        public IDisposable Contain(Process process)
+        {
+            Contained.Add(process.Id);
+            if (Fail) throw new System.ComponentModel.Win32Exception(5, "Access is denied.");
+            return new Release(this);
+        }
+
+        private sealed class Release(RecordingContainment owner) : IDisposable
+        {
+            public void Dispose() => owner.Released++;
+        }
+    }
+
+    [Fact]
+    public async Task Each_child_is_contained_as_it_starts_and_released_when_it_ends()
+    {
+        if (!File.Exists("/bin/sh")) Assert.Skip("Needs /bin/sh.");
+        var containment = new RecordingContainment();
+
+        var outcome = await new SystemProcessRunner(containment).RunAsync(
+            new ProcessSpec("/bin/sh", ["-c", "echo $$"], null, TimeSpan.FromSeconds(30)), CancellationToken.None);
+
+        containment.Contained.Should().Equal(int.Parse(outcome.StandardOutput.Trim()));
+        containment.Released.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_child_that_cannot_be_contained_is_killed_and_the_failure_is_raised()
+    {
+        if (!File.Exists("/bin/sh") || !OperatingSystem.IsLinux()) Assert.Skip("Needs /bin/sh on Linux.");
+
+        var containment = new RecordingContainment { Fail = true };
+        var act = () => new SystemProcessRunner(containment).RunAsync(
+            new ProcessSpec("/bin/sh", ["-c", "sleep 60"], null, TimeSpan.FromSeconds(30)), CancellationToken.None);
+
+        await act.Should().ThrowAsync<System.ComponentModel.Win32Exception>();
+        await WaitUntilGoneAsync(containment.Contained.Single());
+    }
+
     [Fact]
     public async Task A_child_that_runs_past_its_timeout_is_killed_with_everything_it_started()
     {
@@ -241,7 +326,7 @@ public sealed class PowerShellRunnerTests
     {
         var pwsh = FindOnPath(OperatingSystem.IsWindows() ? "pwsh.exe" : "pwsh");
         if (pwsh is null) Assert.Skip("PowerShell 7 (pwsh) is not installed here.");
-        var runner = new PowerShellRunner(new SystemProcessRunner(), new PowerShellExecutables(pwsh, pwsh));
+        var runner = new PowerShellRunner(new SystemProcessRunner(), new PowerShellExecutables(pwsh, pwsh), new FakeFileAccess());
         var progress = new List<string>();
 
         var outcome = await runner.RunAsync(Echo, new PowerShellTarget(PowerShellEdition.PowerShell7, null),
@@ -266,7 +351,7 @@ public sealed class PowerShellRunnerTests
                 [pscustomobject]@{ ServerInstance = 'MicrosoftDynamicsNavServer$' + $ServerInstance; State = 'Running'; Version = '14.0.29530.0' }
             }
             """);
-        var runner = new PowerShellRunner(new SystemProcessRunner(), new PowerShellExecutables(pwsh, pwsh));
+        var runner = new PowerShellRunner(new SystemProcessRunner(), new PowerShellExecutables(pwsh, pwsh), new FakeFileAccess());
 
         var loaded = await runner.RunAsync(PowerShellOperations.SelfTest, new PowerShellTarget(PowerShellEdition.PowerShell7, tier.Path),
             new JsonObject { ["instance"] = "BC140" }, TimeSpan.FromMinutes(1), null, CancellationToken.None);

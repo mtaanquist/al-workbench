@@ -6,46 +6,61 @@ using ALWorkbench.Gateway.Core.Policy;
 namespace ALWorkbench.Gateway;
 
 /// <summary>
-/// <see cref="IFileAccessCheck"/> from the file's or folder's access list: it must be
-/// owned by Administrators, SYSTEM or TrustedInstaller, and no one else may hold a
-/// right that changes it (write, append, attributes, delete, delete children, change
-/// permissions, take ownership, or the generic write and all rights). Deny entries
-/// are ignored, since they only take rights away, and so are inherit-only entries,
-/// which do not apply to the object itself. The gateway's own service account is not
-/// on the list on purpose: see <c>.design/on-prem-gateway.md</c>, "File permissions
-/// are part of the policy".
+/// <see cref="IFileAccessCheck"/> from the file's or folder's access list. Reading
+/// the list is all this class does; the rule (who may own it, which rights count,
+/// which inherited entries count) is <see cref="AccessRules"/>, so it is tested on
+/// any platform. The gateway's own service account is not trusted on purpose: see
+/// <c>.design/on-prem-gateway.md</c>, "File permissions are part of the policy".
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal sealed class WindowsFileAccessCheck : IFileAccessCheck
 {
-    /// <summary><c>NT SERVICE\TrustedInstaller</c>, which owns and may write everything Windows installs under Program Files.</summary>
-    private static readonly SecurityIdentifier TrustedInstaller = new("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464");
-
-    private static readonly HashSet<SecurityIdentifier> Trusted =
-    [
-        new(WellKnownSidType.BuiltinAdministratorsSid, null),
-        new(WellKnownSidType.LocalSystemSid, null),
-        TrustedInstaller,
-    ];
-
-    private const FileSystemRights ChangeRights =
-        FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.WriteAttributes
-        | FileSystemRights.WriteExtendedAttributes | FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles
-        | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
-
-    private const int GenericAll = 0x10000000;
-    private const int GenericWrite = 0x40000000;
+    /// <summary>A folder with more than this many entries is not walked further; the folder's own entries still cover what is created in it.</summary>
+    private const int MaxContents = 20_000;
 
     public bool Exists(string path) => File.Exists(path);
+
+    public IReadOnlyList<string> Contents(string folder)
+    {
+        if (!Directory.Exists(folder)) return [];
+        try
+        {
+            return Directory.EnumerateFileSystemEntries(folder, "*", new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                // A subfolder the gateway cannot list is still listed itself, and
+                // Problem() on it says it could not be read.
+                IgnoreInaccessible = true,
+                AttributesToSkip = 0,
+            }).Take(MaxContents).ToList();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            // Problem() on the folder says it could not be read; nothing more to list.
+            return [];
+        }
+    }
 
     public string? Problem(string path)
     {
         FileSystemSecurity security;
+        bool isFolder;
         try
         {
-            if (Directory.Exists(path)) security = new DirectoryInfo(path).GetAccessControl();
-            else if (File.Exists(path)) security = new FileInfo(path).GetAccessControl();
-            else return null;
+            if (Directory.Exists(path))
+            {
+                security = new DirectoryInfo(path).GetAccessControl();
+                isFolder = true;
+            }
+            else if (File.Exists(path))
+            {
+                security = new FileInfo(path).GetAccessControl();
+                isFolder = false;
+            }
+            else
+            {
+                return null;
+            }
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PrivilegeNotHeldException)
         {
@@ -53,27 +68,29 @@ internal sealed class WindowsFileAccessCheck : IFileAccessCheck
         }
 
         var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-        if (owner is null || !Trusted.Contains(owner))
+        var entries = new List<AccessEntry>();
+        foreach (FileSystemAccessRule rule in security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier)))
+        {
+            if (rule.IdentityReference is not SecurityIdentifier who) continue;
+            entries.Add(new AccessEntry(
+                who.Value,
+                (int)rule.FileSystemRights,
+                rule.AccessControlType == AccessControlType.Allow,
+                rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly),
+                rule.InheritanceFlags != InheritanceFlags.None));
+        }
+
+        var verdict = AccessRules.Evaluate(owner?.Value, entries, isFolder);
+        if (!verdict.OwnerTrusted)
         {
             return $"{Name(owner)} owns {path}, and an owner can always change it. Make Administrators the owner.";
         }
-
-        var others = new List<string>();
-        foreach (FileSystemAccessRule rule in security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier)))
-        {
-            if (rule.AccessControlType != AccessControlType.Allow) continue;
-            if (rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)) continue;
-            if (rule.IdentityReference is not SecurityIdentifier who || Trusted.Contains(who)) continue;
-            var rights = (int)rule.FileSystemRights;
-            if ((rule.FileSystemRights & ChangeRights) == 0 && (rights & (GenericAll | GenericWrite)) == 0) continue;
-            var name = Name(who);
-            if (!others.Contains(name)) others.Add(name);
-        }
-        return others.Count == 0
+        return verdict.Others.Count == 0
             ? null
-            : $"{string.Join(", ", others)} can change {path}. Only Administrators and SYSTEM may.";
+            : $"{string.Join(", ", verdict.Others.Select(s => Name(new SecurityIdentifier(s))))} can change {path}. Only Administrators and SYSTEM may.";
     }
 
+    /// <summary>The account's name, or its SID when Windows cannot name it (a deleted account, an unreachable domain).</summary>
     private static string Name(SecurityIdentifier? sid)
     {
         if (sid is null) return "An unknown account";
@@ -81,8 +98,10 @@ internal sealed class WindowsFileAccessCheck : IFileAccessCheck
         {
             return sid.Translate(typeof(NTAccount)).Value;
         }
-        catch (IdentityNotMappedException)
+        catch (SystemException)
         {
+            // IdentityNotMappedException, and the SystemException Translate throws when
+            // the domain controller cannot be reached.
             return sid.Value;
         }
     }

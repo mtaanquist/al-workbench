@@ -16,6 +16,17 @@ public sealed record GatewayPolicyReport
     /// <summary>How often the report is sent again although nothing changed.</summary>
     public static readonly TimeSpan ResendInterval = TimeSpan.FromMinutes(15);
 
+    /// <summary>The most problems a report lists; the rest are counted in one last line. The gateway's own log has them all.</summary>
+    public const int MaxProblems = 50;
+
+    /// <summary>
+    /// The largest report the gateway sends, as UTF-8 JSON bytes; well inside what AL
+    /// Workbench accepts with a heartbeat, so a large file can never get the heartbeat
+    /// refused and the gateway shown offline. A larger one is replaced by a short
+    /// report with <see cref="TooLarge"/> set.
+    /// </summary>
+    public const int MaxJsonBytes = 128 * 1024;
+
     /// <summary>One of <see cref="GatewayPolicyStates"/>.</summary>
     [JsonPropertyName("state")]
     public string State { get; init; } = GatewayPolicyStates.Missing;
@@ -35,6 +46,15 @@ public sealed record GatewayPolicyReport
     /// <summary>How the gateway reaches machines other than its own.</summary>
     [JsonPropertyName("machines")]
     public IReadOnlyList<GatewayPolicyMachine> Machines { get; init; } = [];
+
+    /// <summary>
+    /// The full report was over <see cref="MaxJsonBytes"/>, so this one carries only
+    /// <see cref="State"/> and a problem saying so. AL Workbench keeps the last full
+    /// report it has and marks it out of date; the gateway still enforces the file as
+    /// it is.
+    /// </summary>
+    [JsonPropertyName("tooLarge")]
+    public bool TooLarge { get; init; }
 }
 
 /// <summary>The values of <see cref="GatewayPolicyReport.State"/>.</summary>

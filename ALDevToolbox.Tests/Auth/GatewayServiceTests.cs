@@ -557,7 +557,51 @@ public sealed class GatewayServiceTests : IDisposable
             gateway.PolicyReportedAt.Should().Be(reportedAt, "a heartbeat without a report keeps the stored one");
             var stored = System.Text.Json.JsonSerializer.Deserialize<GatewayPolicyReport>(gateway.EffectivePolicyJson!)!;
             stored.Should().BeEquivalentTo(report);
+            gateway.PolicyStale.Should().BeFalse();
         }
+    }
+
+    [Fact]
+    public async Task A_policy_report_too_large_to_keep_leaves_the_stored_one_marked_out_of_date_until_a_full_one_arrives()
+    {
+        await SeedAsync();
+        using var key = GatewayTestKit.NewKey();
+        var registered = await GatewayTestKit.RegisterAsync(_db, _clock, TestDb.DefaultOrgId, _admin.Id, key);
+        var asGateway = new AmbientOrganizationContext { CurrentOrganizationId = TestDb.DefaultOrgId };
+        var good = new GatewayPolicyReport
+        {
+            State = GatewayPolicyStates.Valid,
+            Instances = [new GatewayPolicyInstance { Machine = "CRONUS-BC01", Name = "BC140", Allow = ["inventory"] }],
+        };
+        async Task<ALDevToolbox.Domain.Entities.Gateway> BeatAsync(GatewayPolicyReport policy)
+        {
+            _clock.Advance(TimeSpan.FromMinutes(1));
+            await using (var ctx = _db.NewContext(asGateway))
+            {
+                (await GatewayTestKit.NewService(ctx, asGateway, _clock).HeartbeatAsync(
+                    registered.GatewayId, new GatewayHeartbeatRequest { Version = "1.3.0", Policy = policy })).Should().NotBeNull("the heartbeat itself is never refused for its report");
+            }
+            await using var read = _db.NewContext();
+            return await read.Gateways.AsNoTracking().SingleAsync();
+        }
+
+        var first = await BeatAsync(good);
+
+        // The gateway cut its report down because it was too large to send.
+        var marked = await BeatAsync(new GatewayPolicyReport { State = GatewayPolicyStates.Valid, TooLarge = true, Problems = ["The gateway's settings are too large to show in AL Workbench (300 KB)."] });
+        marked.PolicyStale.Should().BeTrue();
+        marked.EffectivePolicyJson.Should().Be(first.EffectivePolicyJson);
+        marked.PolicyReportedAt.Should().Be(first.PolicyReportedAt);
+
+        // Back to a full report: stored, and current again.
+        var fresh = await BeatAsync(good);
+        fresh.PolicyStale.Should().BeFalse();
+
+        // One over what the workbench keeps, from a gateway that did not cut it down.
+        var huge = good with { Problems = [new string('x', GatewayService.MaxPolicyJsonChars)] };
+        var tooBig = await BeatAsync(huge);
+        tooBig.PolicyStale.Should().BeTrue();
+        tooBig.EffectivePolicyJson.Should().Be(fresh.EffectivePolicyJson);
     }
 
     [Fact]

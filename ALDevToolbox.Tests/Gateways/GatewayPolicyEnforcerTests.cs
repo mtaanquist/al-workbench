@@ -64,13 +64,31 @@ public sealed class GatewayPolicyEnforcerTests
 
     private static readonly GatewayPolicy Parsed = GatewayPolicyParser.Parse(Policy, "CRONUS-BC01").Policy!;
 
-    private static GatewayCommandMessage Command(GatewayVerb verb, string? machine, string? instance, bool byAgent = false, Action<JsonObject>? more = null)
+    /// <summary>
+    /// A command. A <c>publish-install</c> gets one app from CRONUS Partner unless
+    /// <paramref name="more"/> lists its own, and carries one file for each app it lists
+    /// unless <paramref name="files"/> says otherwise.
+    /// </summary>
+    private static GatewayCommandMessage Command(
+        GatewayVerb verb, string? machine, string? instance, bool byAgent = false, Action<JsonObject>? more = null, string[]? files = null)
     {
         var parameters = new JsonObject();
         if (machine is not null) parameters[GatewayCommandParameters.Machine] = machine;
         if (instance is not null) parameters[GatewayCommandParameters.Instance] = instance;
+        if (verb == GatewayVerb.PublishInstall) parameters[GatewayCommandParameters.Apps] = Apps(("CRONUS Partner", null));
         more?.Invoke(parameters);
-        return new GatewayCommandMessage { Id = 1, Verb = verb, Parameters = parameters, SecondsLeft = 600, StartedByAgent = byAgent };
+        files ??= parameters[GatewayCommandParameters.Apps] is JsonArray apps
+            ? apps.Select(a => (a as JsonObject)?[GatewayCommandParameters.AppFile]?.GetValue<string>()).OfType<string>().ToArray()
+            : [];
+        return new GatewayCommandMessage
+        {
+            Id = 1,
+            Verb = verb,
+            Parameters = parameters,
+            SecondsLeft = 600,
+            StartedByAgent = byAgent,
+            Files = files.Select((name, i) => new GatewayCommandFileMessage { Id = i + 1, Name = name, Sha256 = new string('0', 64), Size = 1 }).ToList(),
+        };
     }
 
     private static PolicyDecision Check(GatewayCommandMessage command, DateTimeOffset? at = null, GatewayPolicy? policy = null)
@@ -80,9 +98,13 @@ public sealed class GatewayPolicyEnforcerTests
         return PolicyEnforcer.Check(policy ?? Parsed, request, at ?? Noon, Copenhagen);
     }
 
-    private static JsonArray Apps(params (string Publisher, bool? Signed)[] apps) => new(apps.Select(a =>
+    private static JsonArray Apps(params (string Publisher, bool? Signed)[] apps) => new(apps.Select((a, i) =>
     {
-        var app = new JsonObject { [GatewayCommandParameters.AppPublisher] = a.Publisher };
+        var app = new JsonObject
+        {
+            [GatewayCommandParameters.AppFile] = $"CRONUS_App{i + 1}.app",
+            [GatewayCommandParameters.AppPublisher] = a.Publisher,
+        };
         if (a.Signed is not null) app[GatewayCommandParameters.AppSigned] = a.Signed;
         return (JsonNode)app;
     }).ToArray());
@@ -134,6 +156,55 @@ public sealed class GatewayPolicyEnforcerTests
         Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p[GatewayCommandParameters.UnpublishPrevious] = "yes"))
             .Allowed.Should().BeFalse();
         Check(Command(GatewayVerb.RestartInstance, "CRONUS-BC01", null)).Reason.Should().Contain("not both");
+    }
+
+    [Fact]
+    public void A_deployment_that_does_not_list_its_apps_is_refused()
+    {
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p.Remove(GatewayCommandParameters.Apps), files: ["CRONUS_Coffee.app"]))
+            .Reason.Should().Contain("does not list the apps");
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p[GatewayCommandParameters.Apps] = new JsonArray(), files: ["CRONUS_Coffee.app"]))
+            .Reason.Should().Contain("does not list the apps");
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p.Remove(GatewayCommandParameters.Apps), files: []))
+            .Reason.Should().Contain("does not list the apps", "a deployment with nothing to check is refused too");
+    }
+
+    [Fact]
+    public void A_deployment_whose_apps_do_not_match_its_files_one_to_one_is_refused()
+    {
+        const string mismatch = "does not match its files one to one";
+        // One app declared, two files carried: the second file's publisher is unknown.
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", files: ["CRONUS_App1.app", "Other_Partner.app"]))
+            .Reason.Should().Contain(mismatch);
+        // Two apps declared, one file carried.
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: WithApps(("CRONUS Partner", null), ("CRONUS Partner", null)), files: ["CRONUS_App1.app"]))
+            .Reason.Should().Contain(mismatch);
+        // As many apps as files, but naming a file the command does not carry.
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", files: ["Other_Partner.app"]))
+            .Reason.Should().Contain(mismatch);
+        // Two apps naming the same file.
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p[GatewayCommandParameters.Apps] = new JsonArray(
+                new JsonObject { [GatewayCommandParameters.AppFile] = "CRONUS_App1.app", [GatewayCommandParameters.AppPublisher] = "CRONUS Partner" },
+                new JsonObject { [GatewayCommandParameters.AppFile] = "CRONUS_App1.app", [GatewayCommandParameters.AppPublisher] = "CRONUS Partner" }),
+                files: ["CRONUS_App1.app", "CRONUS_App2.app"]))
+            .Reason.Should().Contain(mismatch);
+        // An app that names no file.
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p[GatewayCommandParameters.Apps] = new JsonArray(
+                new JsonObject { [GatewayCommandParameters.AppPublisher] = "CRONUS Partner" }),
+                files: ["CRONUS_App1.app"]))
+            .Reason.Should().Contain(mismatch);
+        // Matching, in any order.
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: WithApps(("CRONUS Partner", null), ("CRONUS Partner", null)), files: ["CRONUS_App2.app", "CRONUS_App1.app"]))
+            .Allowed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void A_declared_signature_passes_the_policy_check_as_a_claim_the_verb_must_verify()
+    {
+        // The check cannot see a signature; it refuses a declared-unsigned app early and
+        // leaves proving a declared-signed one to the verb (#1375).
+        var request = PolicyRequest.FromCommand(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "SIGNED", more: WithApps(("CRONUS Partner", true))), out _)!;
+        request.Apps.Should().ContainSingle().Which.Should().Be(new AppToPublish("CRONUS_App1.app", "CRONUS Partner", true));
     }
 
     // ---------------------------------------------------------------- permissions per verb
@@ -221,7 +292,11 @@ public sealed class GatewayPolicyEnforcerTests
     [Fact]
     public void Unpublishing_previous_versions_needs_unpublish_and_named_scripts_need_scripts()
     {
-        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "PROD", more: p => p[GatewayCommandParameters.UnpublishPrevious] = true), at: Noon.AddHours(10))
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "PROD", more: p =>
+            {
+                WithApps(("CRONUS Partner", true))(p);
+                p[GatewayCommandParameters.UnpublishPrevious] = true;
+            }), at: Noon.AddHours(10))
             .Reason.Should().Contain("does not allow 'unpublish'");
 
         var withScripts = GatewayPolicyParser.Parse("""
@@ -235,7 +310,7 @@ public sealed class GatewayPolicyEnforcerTests
             publish_on = { machine = "CRONUS-BC01", instance = "BC140" }
             before = 'C:\ALWorkbench\before-deploy.ps1'
             """, "CRONUS-BC01").Policy!;
-        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140"), policy: withScripts)
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: WithApps(("CRONUS Partner", true))), policy: withScripts)
             .Reason.Should().Contain("does not allow 'scripts'");
     }
 

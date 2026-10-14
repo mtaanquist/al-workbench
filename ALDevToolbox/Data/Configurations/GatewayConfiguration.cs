@@ -33,6 +33,7 @@ internal sealed class GatewayConfiguration : IEntityTypeConfiguration<Gateway>
         // sends a typed GatewayPolicyReport, serialised by GatewayService.
         entity.Property(e => e.EffectivePolicyJson).HasColumnName("effective_policy").HasColumnType("jsonb");
         entity.Property(e => e.PolicyReportedAt).HasColumnName("policy_reported_at");
+        entity.Property(e => e.PolicyStale).HasColumnName("policy_stale");
 
         entity.HasIndex(e => new { e.OrganizationId, e.RevokedAt });
 

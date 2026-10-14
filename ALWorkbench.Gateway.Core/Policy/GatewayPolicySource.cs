@@ -78,8 +78,10 @@ public sealed class GatewayPolicySource : IGatewayPolicy
     private IReadOnlyList<string> _problems = [];
     private string? _reportJson;
     private GatewayPolicyReport _report = new();
+    private GatewayPolicyReport _fullReport = new();
     private long _version;
-    private bool _readFailureLogged;
+    /// <summary>Why the last read of the file failed; null once a read succeeds.</summary>
+    private string? _readFailure;
 
     public GatewayPolicySource(GatewayPolicyOptions options, IFileAccessCheck access, IGatewayClock clock, TimeZoneInfo zone, ILogger logger)
     {
@@ -112,17 +114,59 @@ public sealed class GatewayPolicySource : IGatewayPolicy
             _problems = problems;
             _inForce = inForce;
 
-            var report = inForce.ToReport(state, problems);
-            var json = JsonSerializer.Serialize(report, ReportJson);
+            // Changes are noticed on the whole report; what is sent is cut down to size.
+            var full = inForce.ToReport(state, problems);
+            var json = JsonSerializer.Serialize(full, ReportJson);
             if (json != _reportJson)
             {
                 _reportJson = json;
-                _report = report;
+                _fullReport = full;
+                _report = Bounded(full with { Problems = Capped(problems) });
                 _version++;
                 LogChange(state, problems, inForce);
             }
             return new PolicySnapshot(_report, _version);
         }
+    }
+
+    /// <summary>The whole report, every problem and tier included, for the check command customer IT runs; <see cref="Refresh"/> returns the one sent to AL Workbench.</summary>
+    public GatewayPolicyReport FullReport
+    {
+        get { lock (_lock) return _fullReport; }
+    }
+
+    /// <summary>The first <see cref="GatewayPolicyReport.MaxProblems"/> problems, and a line counting the rest.</summary>
+    public static IReadOnlyList<string> Capped(IReadOnlyList<string> problems)
+    {
+        ArgumentNullException.ThrowIfNull(problems);
+        if (problems.Count <= GatewayPolicyReport.MaxProblems) return problems;
+        return
+        [
+            .. problems.Take(GatewayPolicyReport.MaxProblems),
+            $"And {problems.Count - GatewayPolicyReport.MaxProblems} more; run the gateway's check command on its computer to see them all.",
+        ];
+    }
+
+    /// <summary>
+    /// The report as sent, or a short stand-in when it is over
+    /// <see cref="GatewayPolicyReport.MaxJsonBytes"/>, so the heartbeat that carries it
+    /// is never refused for its size and the gateway never goes offline over its own
+    /// settings.
+    /// </summary>
+    public static GatewayPolicyReport Bounded(GatewayPolicyReport report)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(report, ReportJson).Length;
+        if (bytes <= GatewayPolicyReport.MaxJsonBytes) return report;
+        return new GatewayPolicyReport
+        {
+            State = report.State,
+            TooLarge = true,
+            Problems =
+            [
+                $"The gateway's settings are too large to show in AL Workbench ({bytes / 1024} KB). The gateway enforces them as written; run its check command on its computer to see them.",
+            ],
+        };
     }
 
     public PolicyDecision Check(GatewayCommandMessage command)
@@ -152,7 +196,7 @@ public sealed class GatewayPolicySource : IGatewayPolicy
         var decision = PolicyEnforcer.Check(policy, request, _clock.UtcNow, _zone);
         if (!decision.Allowed && state == GatewayPolicyStates.Invalid && request.Verb != GatewayVerb.RefreshInventory)
         {
-            return PolicyDecision.Refuse(decision.Reason + " The customer's gateway.toml has mistakes, so only reading is allowed until it is corrected.");
+            return PolicyDecision.Refuse(decision.Reason + " The customer's gateway.toml has mistakes or could not be read, so only reading is allowed until that is fixed.");
         }
         return decision;
     }
@@ -164,6 +208,7 @@ public sealed class GatewayPolicySource : IGatewayPolicy
         {
             _fileHash = null;
             _parsed = null;
+            _readFailure = null;
             return;
         }
         byte[] bytes;
@@ -173,13 +218,13 @@ public sealed class GatewayPolicySource : IGatewayPolicy
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Being saved right now, most likely: keep what is in force and read it
-            // again on the next round.
-            if (!_readFailureLogged) _logger.LogWarning("Could not read {PolicyFile} ({Reason}); using the settings read before.", _options.PolicyFile, ex.Message);
-            _readFailureLogged = true;
+            // Being saved right now, most likely, but possibly with a change that takes
+            // a permission away: only reading is allowed until the file reads again
+            // (Evaluate), and it is read again on the next round.
+            _readFailure = ex.Message;
             return;
         }
-        _readFailureLogged = false;
+        _readFailure = null;
         var hash = Convert.ToHexString(SHA256.HashData(bytes));
         if (hash == _fileHash && _parsed is not null) return;
         _fileHash = hash;
@@ -203,7 +248,15 @@ public sealed class GatewayPolicySource : IGatewayPolicy
         string state;
         var problems = new List<string>();
         GatewayPolicy inForce;
-        if (_parsed is null)
+        if (_readFailure is not null)
+        {
+            // The file is there but could not be read: what it says now is unknown, so
+            // the tiers last read stay readable and nothing changes until it reads.
+            state = GatewayPolicyStates.Invalid;
+            problems.Add($"The gateway could not read {_options.PolicyFile} ({_readFailure}). Until it can, it only reads from the tiers the file listed before.");
+            inForce = (_parsed?.Policy ?? _lastGood)?.ReadOnly() ?? GatewayPolicy.Empty;
+        }
+        else if (_parsed is null)
         {
             state = GatewayPolicyStates.Missing;
             problems.Add($"There is no {GatewayPolicyParser.FileName} in {_options.ProgramFolder}, so the gateway refuses every command.");
@@ -231,10 +284,16 @@ public sealed class GatewayPolicySource : IGatewayPolicy
         return (state, problems, inForce);
     }
 
-    /// <summary>The program folder, the policy file and each script with its folder: who else can change them.</summary>
+    /// <summary>
+    /// The program folder with everything in it (the program, its DLLs and the policy
+    /// file), and each script with its folder: who else can change them. The whole
+    /// program folder, because replacing one DLL the service loads is as good as
+    /// editing the policy.
+    /// </summary>
     private List<string> AccessProblems(GatewayPolicy? policy)
     {
-        var paths = new List<string> { _options.ProgramFolder };
+        var problems = FileAccessChecks.FolderAndContents(_access, _options.ProgramFolder);
+        var paths = new List<string>();
         if (File.Exists(_options.PolicyFile)) paths.Add(_options.PolicyFile);
         foreach (var script in policy?.Scripts ?? [])
         {
@@ -243,11 +302,11 @@ public sealed class GatewayPolicySource : IGatewayPolicy
             var folder = WindowsFolderOf(script);
             if (folder is not null) paths.Add(folder);
         }
-        return paths
+        problems.AddRange(paths
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(_access.Problem)
-            .OfType<string>()
-            .ToList();
+            .OfType<string>());
+        return problems.Distinct(StringComparer.Ordinal).ToList();
     }
 
     /// <summary>The folder of a Windows path, worked out by hand so it behaves the same when tests run on Linux.</summary>

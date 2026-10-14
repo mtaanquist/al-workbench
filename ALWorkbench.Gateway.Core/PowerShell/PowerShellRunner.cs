@@ -88,7 +88,10 @@ public static class PowerShellChoice
 /// <c>Microsoft.BusinessCentral.Management</c> and <c>Microsoft.BusinessCentral.Apps.Management</c>
 /// it finds there (<c>.psd1</c>, then <c>.psm1</c>, then <c>.dll</c>), and fails when it
 /// finds none. The folder itself comes from the tier's Windows service
-/// (<see cref="ServiceTierInstall"/>).</para>
+/// (<see cref="ServiceTierInstall"/>). Whoever can change a file in that folder gets
+/// code running in the gateway's PowerShell, so before loading it the runner checks
+/// the folder and everything in it as it checks the gateway's own files, and refuses
+/// to run against a tier where someone other than administrators can change them.</para>
 ///
 /// <para><b>The result</b> comes back on standard output between two lines holding a
 /// marker that is random for each run, as base64 of UTF-8 JSON; everything else the
@@ -154,11 +157,26 @@ public sealed class PowerShellRunner
 
     private readonly IProcessRunner _processes;
     private readonly PowerShellExecutables _executables;
+    private readonly IFileAccessCheck _access;
 
-    public PowerShellRunner(IProcessRunner processes, PowerShellExecutables executables)
+    public PowerShellRunner(IProcessRunner processes, PowerShellExecutables executables, IFileAccessCheck access)
     {
         _processes = processes;
         _executables = executables;
+        _access = access;
+    }
+
+    /// <summary>
+    /// Who other than administrators can change the administration module the
+    /// operation would load for <paramref name="target"/>: its folder and every file in
+    /// it. Empty when it is safe to load, or when the operation loads no module.
+    /// </summary>
+    public IReadOnlyList<string> ModuleProblems(PowerShellOperation operation, PowerShellTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(target);
+        if (!operation.NeedsAdminModule || string.IsNullOrWhiteSpace(target.ServiceFolder)) return [];
+        return FileAccessChecks.FolderAndContents(_access, target.ServiceFolder);
     }
 
     /// <summary>
@@ -203,6 +221,14 @@ public sealed class PowerShellRunner
         PowerShellOperation operation, PowerShellTarget target, JsonObject parameters, TimeSpan timeout,
         Action<string>? progress, CancellationToken ct)
     {
+        var unsafeModule = ModuleProblems(operation, target);
+        if (unsafeModule.Count > 0)
+        {
+            return new PowerShellResult(false, [],
+                "Someone other than administrators can change the Business Central administration module the gateway would load for this tier, so it does not run anything there. "
+                + string.Join(" ", unsafeModule),
+                [], false);
+        }
         var marker = "ALWB-RESULT-" + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
         var insideResult = false;
         var spec = BuildSpec(operation, target, parameters, timeout, marker) with
