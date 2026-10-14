@@ -50,9 +50,17 @@ public static class WorkbenchAddress
 
     /// <summary>
     /// The request path for a protocol route (<c>/gateway/heartbeat</c>) on a workbench
-    /// that may be served under a path: the path the server sees, and so the one the
-    /// token's <c>htu</c> must name.
+    /// that may be served under a path, as the server reads it: unescaped, so
+    /// <c>/al%20work</c> is <c>/al work</c>. This is the path the token's <c>htu</c>
+    /// must name; <see cref="RequestUriFor"/> is the address the request goes to.
     /// </summary>
     public static string PathFor(string workbenchUrl, string route) =>
-        new Uri(workbenchUrl).AbsolutePath.TrimEnd('/') + route;
+        Uri.UnescapeDataString(new Uri(workbenchUrl).AbsolutePath).TrimEnd('/') + route;
+
+    /// <summary>The address a protocol route is sent to, escaped as on the wire.</summary>
+    public static Uri RequestUriFor(string workbenchUrl, string route)
+    {
+        var baseUri = new Uri(workbenchUrl);
+        return new Uri(baseUri.GetLeftPart(UriPartial.Authority) + baseUri.AbsolutePath.TrimEnd('/') + route);
+    }
 }

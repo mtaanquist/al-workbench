@@ -160,6 +160,7 @@ public sealed class GatewayRegistrationClientTests
     [InlineData("https://workbench.cronus.example/", "https://workbench.cronus.example", "/gateway/heartbeat")]
     [InlineData("https://cronus.example/al/", "https://cronus.example/al", "/al/gateway/heartbeat")]
     [InlineData("http://localhost:5000", "http://localhost:5000", "/gateway/heartbeat")]
+    [InlineData("https://cronus.example/al work", "https://cronus.example/al%20work", "/al work/gateway/heartbeat")]
     public void The_address_is_normalised_and_keeps_a_path_the_workbench_is_served_under(string raw, string normalised, string heartbeatPath)
     {
         var url = WorkbenchAddress.TryNormalise(raw, out var error);

@@ -121,7 +121,7 @@ public static class GatewayEndpoints
             if (request is null) return Malformed();
             try
             {
-                return await commands.AppendProgressAsync(GatewayIdOf(ctx), id, request.Lines, ct)
+                return await commands.AppendProgressAsync(GatewayIdOf(ctx), id, request.Lines, request.Sequence, ct)
                     ? Results.NoContent()
                     : NotRunningResult();
             }

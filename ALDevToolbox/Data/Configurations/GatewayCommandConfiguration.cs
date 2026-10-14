@@ -30,6 +30,7 @@ internal sealed class GatewayCommandConfiguration : IEntityTypeConfiguration<Gat
         entity.Property(e => e.ClaimedAt).HasColumnName("claimed_at");
         entity.Property(e => e.StartedAt).HasColumnName("started_at");
         entity.Property(e => e.LastReportedAt).HasColumnName("last_reported_at");
+        entity.Property(e => e.LastProgressSequence).HasColumnName("last_progress_sequence").IsRequired();
         entity.Property(e => e.FinishedAt).HasColumnName("finished_at");
         entity.Property(e => e.ResultJson).HasColumnName("result").HasColumnType("jsonb");
         entity.Property(e => e.FailureMessage).HasColumnName("failure_message");

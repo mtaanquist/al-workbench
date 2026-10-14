@@ -17,13 +17,28 @@ public enum GatewayRunOutcome
     /// file or a script it names; the gateway does not start (see <see cref="IGatewayPolicy.Start"/>).
     /// </summary>
     PolicyUnsafe,
+    /// An unexpected error ended the loop (a damaged settings file, a key that cannot be
+    /// opened, a state file that cannot be written). Logged; the service should exit
+    /// with a failure code so Windows' recovery options restart it.
+    /// </summary>
+    Failed,
 }
 
 /// <summary>Where the runner keeps per-command files and how it describes itself.</summary>
 /// <param name="WorkDirectory">A folder only the service account and Administrators can write; each command's files go in a subfolder, removed when it ends.</param>
 /// <param name="MachineName">This computer's name, sent with every heartbeat.</param>
 /// <param name="Version">The gateway program's version.</param>
-public sealed record GatewayRunnerOptions(string WorkDirectory, string MachineName, string Version);
+public sealed record GatewayRunnerOptions(string WorkDirectory, string MachineName, string Version)
+{
+    public static readonly TimeSpan DefaultResultGrace = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// How long a result may still take to arrive once the service is asked to stop.
+    /// Must stay inside the host's shutdown timeout. A result that does not make it is
+    /// kept on disk and sent on the next start.
+    /// </summary>
+    public TimeSpan ResultGrace { get; init; } = DefaultResultGrace;
+}
 
 /// <summary>
 /// The service's main loop: heartbeat every 60 seconds, long-poll for the next
@@ -92,8 +107,30 @@ public sealed class GatewayRunner
         _random = random;
     }
 
-    /// <summary>Runs until <paramref name="ct"/> is cancelled, or returns at once when there is nothing registered.</summary>
+    /// <summary>
+    /// Runs until <paramref name="ct"/> is cancelled, or returns at once when there is
+    /// nothing registered. Never throws: an unexpected error is logged and returned as
+    /// <see cref="GatewayRunOutcome.Failed"/>, so the service can exit with a failure
+    /// code rather than stop as if asked to.
+    /// </summary>
     public async Task<GatewayRunOutcome> RunAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await RunCoreAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return GatewayRunOutcome.Stopped;
+        }
+        catch (Exception ex)
+        {
+            _logger.Failed(ex, ex.Message);
+            return GatewayRunOutcome.Failed;
+        }
+    }
+
+    private async Task<GatewayRunOutcome> RunCoreAsync(CancellationToken ct)
     {
         var settings = _settings.Load();
         if (settings is null || settings.GatewayId == 0 || string.IsNullOrEmpty(settings.KeyName))
@@ -104,10 +141,14 @@ public sealed class GatewayRunner
         _fingerprint = settings.KeyFingerprint;
         // The policy source logs what is wrong, in words for customer IT.
         if (_policy.Start().Count > 0) return GatewayRunOutcome.PolicyUnsafe;
+        // Results that finished before the last stop but never arrived: listed as
+        // running until they are posted, not reported as interrupted.
+        var savedResults = _runOnce.PendingResults();
         lock (_lock)
         {
             _interrupted.Clear();
             _interrupted.AddRange(_runOnce.Unfinished());
+            _running.UnionWith(savedResults.Keys);
         }
 
         using var client = new WorkbenchClient(_http, settings, _keys, _clock);
@@ -146,7 +187,7 @@ public sealed class GatewayRunner
                             {
                                 await finished.ConfigureAwait(false);
                             }
-                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
                             {
                                 // The command stays "started, not finished": AL Workbench fails it
                                 // once heartbeats stop listing it, and it is never run again.
@@ -161,6 +202,15 @@ public sealed class GatewayRunner
                         // Waiting for an Admin: no polling, only the heartbeat, which
                         // says when approval has come.
                         await _clock.Delay(UntilHeartbeat(), ct).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (savedResults.Count > 0)
+                    {
+                        // Before taking anything new: these commands are done, AL Workbench
+                        // only has to hear how they ended.
+                        running = PostSavedResultsAsync(client, savedResults, commandStop.Token);
+                        savedResults = new Dictionary<long, GatewayCommandResultRequest>();
                         continue;
                     }
 
@@ -200,17 +250,14 @@ public sealed class GatewayRunner
                 }
             }
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            return GatewayRunOutcome.Stopped;
-        }
         finally
         {
             await commandStop.CancelAsync().ConfigureAwait(false);
             if (running is not null)
             {
                 // A command cut short stays "started, not finished" in the run-once
-                // store, and the next start reports it as interrupted.
+                // store, and the next start reports it as interrupted; one that finished
+                // has its result saved, and the next start sends that.
                 try
                 {
                     await running.ConfigureAwait(false);
@@ -219,7 +266,24 @@ public sealed class GatewayRunner
                 {
                     // Expected while stopping.
                 }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "A command ended with an unexpected error in the gateway.");
+                }
             }
+        }
+    }
+
+    /// <summary>Sends results saved before the last stop, then forgets them.</summary>
+    private async Task PostSavedResultsAsync(WorkbenchClient client, IReadOnlyDictionary<long, GatewayCommandResultRequest> results, CancellationToken ct)
+    {
+        await Task.Yield();
+        foreach (var (id, result) in results)
+        {
+            await ReportAsync(client, id, result, ct).ConfigureAwait(false);
+            _runOnce.MarkFinished(id);
+            lock (_lock) _running.Remove(id);
+            _logger.ResultReportedLate(id);
         }
     }
 
@@ -306,7 +370,7 @@ public sealed class GatewayRunner
         {
             const string replayed = "This gateway already started this command once, and never runs a command twice.";
             _logger.CommandRefused(command.Id, verb, who, replayed);
-            await ReportAsync(client, command.Id, GatewayCommandOutcome.Failure(replayed), ct).ConfigureAwait(false);
+            await ReportAsync(client, command.Id, ToRequest(GatewayCommandOutcome.Failure(replayed)), ct).ConfigureAwait(false);
             return;
         }
 
@@ -318,7 +382,7 @@ public sealed class GatewayRunner
             const string expired = "The command's time to start ran out before the gateway could start it. Nothing was changed.";
             _runOnce.MarkStarted(command.Id);
             _logger.CommandRefused(command.Id, verb, who, expired);
-            await ReportAsync(client, command.Id, GatewayCommandOutcome.Failure(expired), ct).ConfigureAwait(false);
+            await SaveAndReportAsync(client, command.Id, GatewayCommandOutcome.Failure(expired), ct).ConfigureAwait(false);
             _runOnce.MarkFinished(command.Id);
             return;
         }
@@ -331,7 +395,7 @@ public sealed class GatewayRunner
             var reason = decision.Reason ?? "Not allowed by the customer's gateway settings.";
             _runOnce.MarkStarted(command.Id);
             _logger.CommandRefused(command.Id, verb, who, reason);
-            await ReportAsync(client, command.Id, GatewayCommandOutcome.Failure(reason + " Nothing was changed."), ct).ConfigureAwait(false);
+            await SaveAndReportAsync(client, command.Id, GatewayCommandOutcome.Failure(reason + " Nothing was changed."), ct).ConfigureAwait(false);
             _runOnce.MarkFinished(command.Id);
             return;
         }
@@ -343,23 +407,47 @@ public sealed class GatewayRunner
         var folder = Path.Combine(_options.WorkDirectory, command.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
         try
         {
-            using var batcher = new ProgressBatcher((lines, t) => client.PostProgressAsync(command.Id, lines, t), _clock, _logger);
+            using var batcher = new ProgressBatcher((lines, sequence, t) => client.PostProgressAsync(command.Id, lines, sequence, t), _clock, _logger);
             using var verbStop = CancellationTokenSource.CreateLinkedTokenSource(ct, batcher.Closed);
             using var pumpStop = new CancellationTokenSource();
             var pump = batcher.RunAsync(pumpStop.Token, ct);
+            // The downloaded files stay open, deny-write and deny-delete, from their
+            // hash check until the verb has finished: what was checked is what runs.
+            var held = new List<FileStream>();
             GatewayCommandOutcome outcome;
             try
             {
-                var (files, refusal) = await DownloadFilesAsync(client, command, folder, verbStop.Token).ConfigureAwait(false);
+                var (files, refusal) = await DownloadFilesAsync(client, command, folder, held, verbStop.Token, ct).ConfigureAwait(false);
                 outcome = refusal ?? await ExecuteAsync(new GatewayCommandContext(command, files, batcher.Add), verbStop.Token, ct).ConfigureAwait(false);
             }
             finally
             {
+                foreach (var file in held) await file.DisposeAsync().ConfigureAwait(false);
                 await pumpStop.CancelAsync().ConfigureAwait(false);
-                await pump.ConfigureAwait(false);
+                try
+                {
+                    await pump.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // Stopping mid-post: the lines go, the result still matters.
+                }
             }
-            ct.ThrowIfCancellationRequested();
-            await batcher.DrainAsync(ct).ConfigureAwait(false);
+
+            // The verb has finished: from here a stop must not lose its result. The last
+            // lines are sent only while not stopping; the result is kept on disk and
+            // sent within the grace period, or on the next start.
+            if (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    await batcher.DrainAsync(ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // As above.
+                }
+            }
 
             if (batcher.Closed.IsCancellationRequested)
             {
@@ -367,7 +455,7 @@ public sealed class GatewayRunner
             }
             else
             {
-                await ReportAsync(client, command.Id, outcome, ct).ConfigureAwait(false);
+                await SaveAndReportAsync(client, command.Id, outcome, ct).ConfigureAwait(false);
                 if (outcome.Succeeded) _logger.CommandSucceeded(command.Id, verb, who);
                 else _logger.CommandFailed(command.Id, verb, who, outcome.FailureMessage ?? "No reason given.");
             }
@@ -404,33 +492,46 @@ public sealed class GatewayRunner
     /// <summary>
     /// Downloads each file and checks its SHA-256. Any mismatch fails the command
     /// before the verb sees a single file: a swapped or damaged file is never run.
+    /// Each file is opened read-only, sharing read only, before it is hashed, and the
+    /// handle goes into <paramref name="held"/> for the caller to close once the verb
+    /// is done; on Windows nothing can then change or delete the file between the
+    /// check and its use.
     /// </summary>
     private async Task<(Dictionary<long, string> Files, GatewayCommandOutcome? Refusal)> DownloadFilesAsync(
-        WorkbenchClient client, GatewayCommandMessage command, string folder, CancellationToken ct)
+        WorkbenchClient client, GatewayCommandMessage command, string folder, List<FileStream> held,
+        CancellationToken verbStop, CancellationToken ct)
     {
         var files = new Dictionary<long, string>();
         if (command.Files.Count == 0) return (files, null);
         Directory.CreateDirectory(folder);
-        foreach (var file in command.Files)
+        try
         {
-            var path = Path.Combine(folder, $"{file.Id}-{SafeFileName(file.Name)}");
-            var downloaded = await DownloadOneAsync(client, command.Id, file, path, ct).ConfigureAwait(false);
-            if (downloaded is not null) return (files, downloaded);
+            foreach (var file in command.Files)
+            {
+                var path = Path.Combine(folder, $"{file.Id}-{SafeFileName(file.Name)}");
+                var downloaded = await DownloadOneAsync(client, command.Id, file, path, verbStop).ConfigureAwait(false);
+                if (downloaded is not null) return (files, downloaded);
 
-            string actual;
-            await using (var stream = File.OpenRead(path))
-            {
-                actual = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false));
+                var locked = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                held.Add(locked);
+                var actual = Convert.ToHexStringLower(await SHA256.HashDataAsync(locked, verbStop).ConfigureAwait(false));
+                locked.Position = 0;
+                if (!string.Equals(actual, file.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    held.Remove(locked);
+                    await locked.DisposeAsync().ConfigureAwait(false);
+                    File.Delete(path);
+                    return (files, GatewayCommandOutcome.Failure(
+                        $"The file '{file.Name}' that arrived is not the one AL Workbench sent: its SHA-256 does not match. Nothing was run."));
+                }
+                files[file.Id] = path;
             }
-            if (!string.Equals(actual, file.Sha256, StringComparison.OrdinalIgnoreCase))
-            {
-                File.Delete(path);
-                return (files, GatewayCommandOutcome.Failure(
-                    $"The file '{file.Name}' that arrived is not the one AL Workbench sent: its SHA-256 does not match. Nothing was run."));
-            }
-            files[file.Id] = path;
+            return (files, null);
         }
-        return (files, null);
+        catch (OperationCanceledException) when (verbStop.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            return (files, GatewayCommandOutcome.Failure("Stopped because AL Workbench closed the command. Nothing was run."));
+        }
     }
 
     /// <summary>Null when the file is on disk at its declared size; otherwise the outcome to fail the command with.</summary>
@@ -467,19 +568,34 @@ public sealed class GatewayRunner
         }
     }
 
+    private static GatewayCommandResultRequest ToRequest(GatewayCommandOutcome outcome) => new()
+    {
+        Succeeded = outcome.Succeeded,
+        Result = outcome.Result,
+        FailureMessage = outcome.Succeeded ? null : outcome.FailureMessage ?? "The command failed.",
+    };
+
     /// <summary>
-    /// Posts the outcome, retrying while AL Workbench cannot be reached: the result is
+    /// Saves the result, then posts it. A stop (<paramref name="ct"/>) does not cut the
+    /// post off at once: it gets <see cref="GatewayRunnerOptions.ResultGrace"/> more.
+    /// If even that is not enough the result stays saved and the next start sends it.
+    /// </summary>
+    private async Task SaveAndReportAsync(WorkbenchClient client, long commandId, GatewayCommandOutcome outcome, CancellationToken ct)
+    {
+        var request = ToRequest(outcome);
+        _runOnce.SaveResult(commandId, request);
+        using var report = new CancellationTokenSource();
+        using var stopping = ct.Register(() => report.CancelAfter(_options.ResultGrace));
+        await ReportAsync(client, commandId, request, report.Token).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Posts the result, retrying while AL Workbench cannot be reached: the result is
     /// the one report that must arrive. A 409 means AL Workbench already closed the
     /// command, which is logged and accepted.
     /// </summary>
-    private async Task ReportAsync(WorkbenchClient client, long commandId, GatewayCommandOutcome outcome, CancellationToken ct)
+    private async Task ReportAsync(WorkbenchClient client, long commandId, GatewayCommandResultRequest request, CancellationToken ct)
     {
-        var request = new GatewayCommandResultRequest
-        {
-            Succeeded = outcome.Succeeded,
-            Result = outcome.Result,
-            FailureMessage = outcome.Succeeded ? null : outcome.FailureMessage ?? "The command failed.",
-        };
         var backoff = new Backoff(_random);
         while (true)
         {

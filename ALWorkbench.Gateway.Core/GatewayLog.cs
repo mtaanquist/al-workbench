@@ -15,6 +15,7 @@ public static partial class GatewayLog
     public const int CommandFailedId = 1002;
     public const int CommandRefusedId = 1003;
     public const int CommandInterruptedId = 1004;
+    public const int ResultReportedLateId = 1005;
     public const int RegisteredId = 2000;
     public const int WaitingForApprovalId = 2001;
     public const int ApprovedId = 2002;
@@ -26,6 +27,8 @@ public static partial class GatewayLog
     public const int PolicyInvalidId = 3001;
     public const int PolicyMissingId = 3002;
     public const int PolicyUnsafeId = 3003;
+    public const int FailedId = 2007;
+    public const int FolderLoosenedId = 2008;
 
     [LoggerMessage(EventId = CommandStartedId, Level = LogLevel.Information,
         Message = "Started command {CommandId} ({Verb}), requested by {RequestedBy}.")]
@@ -46,6 +49,10 @@ public static partial class GatewayLog
     [LoggerMessage(EventId = CommandInterruptedId, Level = LogLevel.Warning,
         Message = "Command {CommandId} was cut short when the gateway last stopped. Reported it to AL Workbench as interrupted; it will not be run again.")]
     public static partial void CommandInterrupted(this ILogger logger, long commandId);
+
+    [LoggerMessage(EventId = ResultReportedLateId, Level = LogLevel.Information,
+        Message = "Reported the result of command {CommandId} to AL Workbench. It finished before the gateway last stopped, and the result had not arrived yet.")]
+    public static partial void ResultReportedLate(this ILogger logger, long commandId);
 
     [LoggerMessage(EventId = RegisteredId, Level = LogLevel.Information,
         Message = "Registered with {WorkbenchUrl} as gateway {GatewayId} ({Name}), key fingerprint {Fingerprint}.")]
@@ -90,4 +97,12 @@ public static partial class GatewayLog
     [LoggerMessage(EventId = NotRegisteredId, Level = LogLevel.Error,
         Message = "This gateway is not registered yet. Run 'ALWorkbench.Gateway register --url <address> --code <code>' as an administrator, then start the service.")]
     public static partial void NotRegistered(this ILogger logger);
+
+    [LoggerMessage(EventId = FailedId, Level = LogLevel.Critical,
+        Message = "The gateway stopped because of an unexpected error: {Reason} Windows restarts the service as set in its recovery options. If this repeats, send the gateway's log files to whoever looks after AL Workbench.")]
+    public static partial void Failed(this ILogger logger, Exception exception, string reason);
+
+    [LoggerMessage(EventId = FolderLoosenedId, Level = LogLevel.Critical,
+        Message = "The gateway will not run: the access rights on its data folder {Folder} are not the ones it set. {Problems} Someone other than an administrator may have changed its settings or files. Check the folder, then run 'ALWorkbench.Gateway install' again as an administrator to put the rights back.")]
+    public static partial void FolderLoosened(this ILogger logger, string folder, string problems);
 }
