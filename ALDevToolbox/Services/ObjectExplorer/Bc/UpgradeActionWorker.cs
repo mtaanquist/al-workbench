@@ -37,16 +37,21 @@ public sealed class UpgradeActionWorker : BackgroundService
     private readonly TimeProvider _clock;
     private readonly ILogger<UpgradeActionWorker> _logger;
     private readonly WorkerHeartbeat _heartbeat;
+    private readonly Operations.MaintenanceModeState? _maintenance;
 
     public UpgradeActionWorker(
         IServiceProvider services,
         TimeProvider clock,
         ILogger<UpgradeActionWorker> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build the worker by hand keep compiling;
+        // production DI always supplies the singleton.
+        Operations.MaintenanceModeState? maintenance = null)
     {
         _services = services;
         _clock = clock;
         _logger = logger;
+        _maintenance = maintenance;
         // Polls every 30 seconds and is idle most of the time. A sweep sends at most one
         // booked app install (an upload or an AppSource update), or asks again about one
         // nobody saw finish, in all - not per organisation - and waits for it, so
@@ -80,6 +85,16 @@ public sealed class UpgradeActionWorker : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             _heartbeat.Tick();
+            // Not while a restore runs or a failed one holds the site closed over a
+            // database that may be half-loaded: a sweep installs apps and moves
+            // update dates in customers' environments (#1321). Booked rows stay
+            // pending and fire on the first sweep after the site reopens.
+            if (_maintenance?.IsActive == true)
+            {
+                try { await Task.Delay(PollInterval, stoppingToken); }
+                catch (OperationCanceledException) { return; }
+                continue;
+            }
             try
             {
                 _heartbeat.BeginActive();

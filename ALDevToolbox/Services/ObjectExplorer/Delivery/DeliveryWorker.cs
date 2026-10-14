@@ -26,23 +26,41 @@ public sealed class DeliveryWorker : QueueDrainWorker<DeliveryJob>
 
     private readonly DeliveryQueue _queue;
     private readonly IServiceProvider _services;
+    private readonly ILogger<DeliveryWorker> _logger;
+    private readonly Operations.MaintenanceModeState? _maintenance;
 
     public DeliveryWorker(
         int slot,
         DeliveryQueue queue,
         IServiceProvider services,
         ILogger<DeliveryWorker> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so the tests that build the worker by hand keep compiling;
+        // production DI always supplies the singleton.
+        Operations.MaintenanceModeState? maintenance = null)
         // A single publish uploads a handful of apps and polls install status; 30
         // minutes is generous headroom while still catching a wedged run.
         : base(queue.Reader, logger, heartbeats, $"{nameof(DeliveryWorker)} {slot}", TimeSpan.FromMinutes(30))
     {
         _queue = queue;
         _services = services;
+        _logger = logger;
+        _maintenance = maintenance;
     }
 
     protected override async Task RunJobAsync(DeliveryJob job, CancellationToken ct)
     {
+        // A restore is running, or a failed one is holding the site closed over a
+        // database that may be half-loaded: never publish to a customer's
+        // environment from that. The row stays scheduled, so the scheduler queues
+        // it again once the site reopens (#1321).
+        if (_maintenance?.IsActive == true)
+        {
+            _logger.LogInformation(
+                "Holding back {Job}: maintenance mode is active. It runs once the site reopens.", Describe(job));
+            return;
+        }
+
         using var orgScope = AmbientOrganizationScope.Enter(job.Identity);
         await using var scope = _services.CreateAsyncScope();
         var deliveries = scope.ServiceProvider.GetRequiredService<DeliveryService>();

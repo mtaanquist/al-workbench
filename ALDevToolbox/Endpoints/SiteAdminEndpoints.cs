@@ -497,6 +497,13 @@ internal static class SiteAdminEndpoints
             {
                 RedirectFirstError(ctx, RouteConstants.SiteAdminBackups, ex);
             }
+            catch (ALDevToolbox.Services.Backups.BackupRestoreFailedException ex)
+            {
+                // The site is held closed; the page's own notice says so and what
+                // to do, so a second message would only repeat it (#1321).
+                logger.LogError(ex, "Restore failed for backup {Id}; the site is held in maintenance mode.", id);
+                ctx.Response.Redirect(RouteConstants.SiteAdminBackups);
+            }
             catch (Exception ex) when (ex is InvalidOperationException or IOException)
             {
                 logger.LogError(ex, "Restore failed for backup {Id}.", id);

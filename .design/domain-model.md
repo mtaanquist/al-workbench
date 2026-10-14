@@ -211,6 +211,8 @@ Indexes:
 
 The relation is purely cosmetic for end-users — generation does not consult it. A user who deselects a default module gets a workspace without that module, just as they would by leaving an unticked module unticked. Soft-deleted modules are silently dropped from the pre-selection at form load time.
 
+Deleting a module leaves its rows here. The template editor and its TOML leave a soft-deleted module out (it has no checkbox to untick), and saving keeps its row, ordered after the live ones, so restoring the module makes it a default again (#1326).
+
 The write-path reconciler in `TemplateService.UpdateAsync` matches existing rows by `module_id` (the natural identity), **not** by list position — position-based mutation would trip the `(runtime_template_id, module_id)` unique index when two rows swap places, and EF would refuse with a circular-dependency error. Reorders rewrite `ordering`; `module_id` stays put on each row.
 
 ### `runtime_template_included_files`

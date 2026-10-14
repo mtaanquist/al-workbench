@@ -63,6 +63,8 @@ The entire state of the app is in the Postgres database in the `pg-data` named v
 
 Backup is `pg_dump -Fc` against the `db` service. M18 ships a built-in backup hosted service that runs `pg_dump` on a schedule and writes to `/var/lib/aldevtoolbox/backups`; until then, an external cron job is the simplest robust approach. The in-app "Export to TOML" remains useful for human-readable snapshots of the catalogue, but it does not capture audit history.
 
+**A full restore fails closed (#1321).** The in-place restore reads the whole dump with `pg_restore` (and checks its size against the row) before it touches anything, and refuses a file that does not read cleanly. If the restore still fails once the schema is dropped, the app does not reopen: maintenance mode is held on, the schema is migrated and the backup inventory put back so the backups page still works, and the inventory from before the failure is kept in memory so the next successful restore puts back the full list. The delivery, environment-refresh and upgrade workers stand down while maintenance mode is on, so nothing acts on a half-loaded database. Only a successful restore, or a process restart, lifts the hold. Operator steps are in `docs/operator-runbook.md`, "In-place restore".
+
 ## Upgrades
 
 Standard:

@@ -184,6 +184,69 @@ public sealed class TemplateServiceWriteSideTests : IDisposable
         rows[1].Id.Should().Be(alphaJoinId);
     }
 
+    /// <summary>
+    /// #1326: a template whose default module was deleted loads without it,
+    /// saves unchanged, and keeps the link so restoring the module makes it a
+    /// default again.
+    /// </summary>
+    [Fact]
+    public async Task Template_with_a_deleted_default_module_saves_unchanged_and_keeps_the_link()
+    {
+        int templateId, retiredJoinId;
+        await using (var seed = _db.NewContext())
+        {
+            seed.Modules.AddRange(ModuleBuilder.Default("alpha"), ModuleBuilder.Default("retired"), ModuleBuilder.Default("beta"));
+            await seed.SaveChangesAsync();
+
+            var template = TemplateBuilder.Default("runtime-retired");
+            var ids = seed.Modules.ToDictionary(m => m.Key, m => m.Id);
+            template.DefaultModules.Add(new RuntimeTemplateDefaultModule { OrganizationId = template.OrganizationId, ModuleId = ids["alpha"], Ordering = 0 });
+            template.DefaultModules.Add(new RuntimeTemplateDefaultModule { OrganizationId = template.OrganizationId, ModuleId = ids["retired"], Ordering = 1 });
+            template.DefaultModules.Add(new RuntimeTemplateDefaultModule { OrganizationId = template.OrganizationId, ModuleId = ids["beta"], Ordering = 2 });
+            seed.RuntimeTemplates.Add(template);
+            await seed.SaveChangesAsync();
+            templateId = template.Id;
+            retiredJoinId = template.DefaultModules.Single(d => d.ModuleId == ids["retired"]).Id;
+
+            seed.Modules.Single(m => m.Key == "retired").DeletedAt = DateTime.UtcNow;
+            await seed.SaveChangesAsync();
+        }
+
+        TemplateAuthoring authoring;
+        await using (var ctx = _db.NewContext())
+        {
+            authoring = (await NewService(ctx).GetAuthoringByKeyAsync("runtime-retired"))!;
+        }
+        authoring.DefaultModuleKeys.Should().Equal("alpha", "beta");
+
+        // A rename only: before #1326 this was refused with "Unknown default module(s): retired".
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).UpdateAsync(templateId, authoring with { Name = "Renamed" });
+        }
+
+        await using (var verify = _db.NewContext())
+        {
+            var rows = await verify.RuntimeTemplateDefaultModules
+                .Where(d => d.RuntimeTemplateId == templateId)
+                .OrderBy(d => d.Ordering)
+                .Include(d => d.Module!)
+                .ToListAsync();
+            rows.Select(r => r.Module!.Key).Should().Equal("alpha", "beta", "retired");
+            rows.Single(r => r.Module!.Key == "retired").Id.Should().Be(retiredJoinId);
+
+            verify.Modules.Single(m => m.Key == "retired").DeletedAt = null;
+            await verify.SaveChangesAsync();
+        }
+
+        await using (var ctx = _db.NewContext())
+        {
+            var restored = await NewService(ctx).GetAuthoringByKeyAsync("runtime-retired");
+            restored!.Name.Should().Be("Renamed");
+            restored.DefaultModuleKeys.Should().Equal("alpha", "beta", "retired");
+        }
+    }
+
     [Fact]
     public async Task Create_rejects_invalid_folder_path_segments()
     {

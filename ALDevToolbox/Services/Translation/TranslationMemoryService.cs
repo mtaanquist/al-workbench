@@ -74,9 +74,19 @@ public sealed class TranslationMemoryService
     /// in it each time and skewing the tie-break between suggestions. Null
     /// learns every translated unit, which is what a file from elsewhere wants.
     /// </param>
+    /// <param name="sourceRepository">
+    /// The repository (<c>owner/name</c>) the file was saved to, when it was.
+    /// This is what hides the pairs from anyone who cannot see a solution
+    /// tracking that repository (#1252): a pair learned without one is visible
+    /// to the whole organisation, so a save to a Private solution's repository
+    /// has to pass it (#1324). Null for an export or an upload, which belong
+    /// to no repository.
+    /// </param>
+    /// <param name="sourcePath">The file's path in <paramref name="sourceRepository"/>.</param>
     /// <returns>How many pairs were new.</returns>
     public async Task<int> LearnFromXliffAsync(
-        string xml, string? origin = null, CancellationToken ct = default, IReadOnlyCollection<string>? unitIds = null)
+        string xml, string? origin = null, CancellationToken ct = default, IReadOnlyCollection<string>? unitIds = null,
+        string? sourceRepository = null, string? sourcePath = null)
     {
         if (unitIds is { Count: 0 }) return 0;
         XliffDocument parsed;
@@ -99,7 +109,7 @@ public sealed class TranslationMemoryService
             var wanted = unitIds as IReadOnlySet<string> ?? new HashSet<string>(unitIds, StringComparer.Ordinal);
             parsed = parsed with { Units = parsed.Units.Where(u => wanted.Contains(u.Id)).ToList() };
         }
-        return await UpsertAsync(PairsFrom(parsed, label), ct);
+        return await UpsertAsync(PairsFrom(parsed, label, sourceRepository, sourcePath), ct);
     }
 
     /// <summary>
