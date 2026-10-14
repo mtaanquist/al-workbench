@@ -72,11 +72,12 @@ UI, MCP), and the gateway does only what has to happen on the customer's Windows
   or two of being queued.
 - **Commands are rows** (`gateway_commands`), not messages. A deployment survives a restart of
   either side, and the table is the audit trail.
-- **Heartbeat carries inventory.** The gateway posts what it sees on a regular interval and after
-  any command that changes it. The on-premises mirror is *pushed*, where the online one is *pulled*
+- **Inventory is pushed.** The gateway posts what it sees every 15 minutes and after any command
+  that changes it; the 60-second heartbeat only says it is alive. The workbench writes only what
+  changed. The on-premises mirror is *pushed*, where the online one is *pulled*
   by `EnvironmentRefreshScheduler`.
-- **Single app instance.** The wake-up signal and the replay cache are in memory, like the build
-  queue and the schedulers; `deployment.md` already says to stay on one app instance.
+- **Single app instance.** The wake-up signal is in memory, like the build queue and the
+  schedulers; `deployment.md` already says to stay on one app instance.
 
 Rejected: a SignalR or WebSocket channel (more connection state for the same result; it can be added
 over the same table later if live log streaming needs it), a cloud relay such as Azure Relay (a new
@@ -84,36 +85,51 @@ external dependency, CLAUDE.md), inbound access or a VPN (customers will not ope
 
 ## Registration and authentication
 
-1. An org Admin opens **Administration -> Gateways** and presses **Add gateway**. AL Workbench shows
+1. An org Admin opens **Administration → Gateways** and presses **Add gateway**. AL Workbench shows
    a **registration code**: random, single use, valid for one hour, shown once, stored hashed
    (`gateway_registration_codes`).
 2. On the server, customer IT installs the gateway and runs `ALWorkbench.Gateway register --url
    <workbench> --code <code>`. The gateway generates an **ECDSA P-256 key pair**, keeps the private
-   key under the service account's own DPAPI scope (not machine scope, so other processes on the box
-   cannot read it), and sends the public key with the code.
-3. AL Workbench checks the code, creates the `gateways` row with the public key, marks the code
-   used, and returns the gateway id. The exchange is rate-limited per address.
-4. From then on every request carries a short-lived JWT the gateway signs itself:
-   `iss` = gateway id, `aud` = the workbench origin + `/gateway`, `iat`, `exp` (at most 5 minutes
-   after `iat`), `jti`. AL Workbench verifies the signature against the stored public key, the
-   audience, the times (2 minutes of clock skew) and refuses a `jti` it has seen before (an in-memory
-   cache kept until the token's expiry). No reusable secret ever crosses the wire, and a database
-   leak exposes no credential.
-5. The **authentication handler** builds a principal with the same organisation claim PAT validation
-   sets (`HttpOrganizationContext.OrganizationIdClaim`), plus a gateway-id claim and **no user
+   key non-exportable in the Windows key store (the TPM where the machine has one), readable only by
+   the gateway's service account. Local administrators and SYSTEM can still reach it, as they can
+   reach anything on the box; nothing else can. It sends the public key with the code.
+3. AL Workbench checks the code, creates the `gateways` row with the public key in a **pending**
+   state, marks the code used, and returns the gateway id. The exchange is rate-limited per client
+   address (the forwarded address behind Caddy, not the proxy's).
+4. **An Admin approves it.** The Gateways page shows the pending gateway's machine name and a short
+   fingerprint of its key; the gateway prints the same fingerprint when it registers. Until an Admin
+   compares them and presses Approve, the gateway can heartbeat but receives no commands and no
+   files. A leaked registration code therefore cannot quietly enrol a rogue machine.
+5. From then on every request carries a JWT the gateway signs itself, one per request:
+   `iss` = gateway id, `aud` = the workbench origin + `/gateway`, `iat`, `exp` (at most 60 seconds
+   after `iat`), `jti`, and the request it is for: `htm` (method), `htu` (path) and, for a request
+   with a body, `bh` (SHA-256 of the body). AL Workbench verifies the signature against the stored
+   public key, the audience, the request binding, the times (60 seconds of clock skew), and refuses
+   a `jti` it has seen before. Seen `jti`s are kept in a small table until they expire
+   (`gateway_seen_tokens`, swept with the commands), so a restart of the app does not open a replay
+   window. No reusable secret ever crosses the wire, and a database leak exposes no credential.
+6. The **authentication handler** is its own scheme, registered like the PAT scheme and opted into
+   only by the gateway routes through a policy that requires the gateway-id claim. No cookie or MCP
+   policy accepts it, and the gateway routes accept nothing else. It builds a principal with the
+   same organisation claim PAT validation sets (`HttpOrganizationContext.OrganizationIdClaim`), plus a gateway-id claim and **no user
    claim**. The EF query filter then scopes everything the gateway endpoints read, exactly as for a
-   person. Services called from gateway endpoints must not need a user; their audit actor is the
-   gateway ("Gateway CRONUS-BC01").
+   person. Services called from gateway endpoints must not need a user; the principal's name is the
+   gateway's ("Gateway CRONUS-BC01"), which is what the audit interceptor records as the actor, with
+   no user id.
 
 **Revoke, rotate, retire.** Revoking stamps `revoked_at` and refuses the next request. Rotating is a
-new registration code for the same gateway; the new key replaces the old one on exchange. Retiring
-revokes it, unlinks its environments and cancels scheduled deployments to them, after a
+new registration code bound to that gateway's id; on exchange the new key replaces the old one, which
+is refused from then on, and the gateway goes back to pending until an Admin approves the new
+fingerprint. Retiring
+revokes it, unlinks its environments (below) and cancels scheduled deployments to them, after a
 confirmation that says how many. All three are audited.
 
-**Online and offline.** A gateway is offline after three missed heartbeats (heartbeat every
-60 seconds). Admins are notified when it goes offline and when it comes back (a notification
-category, `notifications.md`). Commands for an offline gateway expire with "The gateway was
-offline" rather than waiting.
+**Online and offline.** The heartbeat is light: every 60 seconds the gateway says it is alive and
+which command ids it is running. A gateway is offline after three missed heartbeats. The command
+sweep detects the transitions and notifies the organisation's Admins when a gateway goes offline and
+when it comes back, under a new notification category **Gateways** (`NotificationCategory.Gateways`,
+labelled "Gateways", `notifications.md`). Commands for an offline gateway expire with "The gateway
+was offline" rather than waiting.
 
 ## Commands
 
@@ -131,17 +147,30 @@ enum shared by both sides through `ALWorkbench.Gateway.Contracts`; an unknown ve
 | `restart-instance`, `stop-instance`, `start-instance` | One tier | #1371 |
 | `import-licence` | `Import-NAVServerLicense`, then the restart group | #1369 |
 
-**Files.** A command that needs files (an `.app`, a licence) names them with their SHA-256. The
-gateway downloads them from `GET /gateway/commands/{id}/files/{name}`, which serves only files that
-command names, only to that gateway, and the gateway refuses a hash mismatch.
+**Files.** A command that needs files (an `.app`, a licence) names them by file id with their
+SHA-256. The gateway downloads them from `GET /gateway/commands/{id}/files/{fileId}`, which checks
+explicitly, beyond the organisation filter, that the command's gateway is the caller, that the
+command is claimed or running and not expired, and that the file belongs to that command. The
+gateway refuses a hash mismatch.
 
-**Replay and expiry.** Every command has an id and an expiry (default: 15 minutes past its due
-time). The gateway refuses an expired command or an id it has run before. A claimed command whose
-gateway stops heartbeating is failed after 10 minutes.
+**Expiry.** Every command must be *claimed* by its expiry: 15 minutes past its due time, or the end
+of the delivery window it was scheduled in, whichever is earlier. Only the server's clock judges
+that: the command carries the seconds it has left, and the gateway refuses one that has run out by
+its own count from receipt, never by comparing clocks. A due deployment whose gateway is offline
+therefore fails at its expiry with "The gateway was offline", and never starts after its window.
+Once claimed, a command is not timed out while the gateway keeps heartbeating it as running, because
+a data upgrade can legitimately take a long time. A claimed command whose gateway stops heartbeating
+is failed after 10 minutes of silence.
+
+**Run once, across restarts.** The gateway keeps the ids it has started in a local file, so it never
+runs one twice, including after it restarts. If it restarts in the middle of a command, its first
+heartbeat reports that id as interrupted; the server marks the command failed with "The gateway
+restarted while this was running; check the environment", asks for a fresh inventory, and never
+sends it again. A person decides whether to deploy again.
 
 **The sweep** that expires and fails commands is a `PolledScheduler` that loops organisations with
 `AmbientOrganizationScope`, as `DeliveryScheduler` does, so it adds no `IgnoreQueryFilters()` call.
-It and the wake-up signal register with `/healthz/workers`.
+It registers with `/healthz/workers`.
 
 ## Running the cmdlets
 
@@ -151,7 +180,13 @@ one gateway manage BC 14 and BC 26 tiers on one machine. Older modules need Wind
 newer ones also load in PowerShell 7; the gateway picks per instance and uses 5.1 when unsure.
 Parameters go to the child as data (JSON on standard input), never by building a command string, so
 nothing in a command can inject script. The runner sits behind a seam so every operation is
-unit-tested on the Linux CI against captured outputs.
+unit-tested on the Linux CI against captured outputs. Most cmdlets return objects the child turns into
+JSON; `Export-NAVServerLicenseInformation` returns text, so its parser (licensee, expiry, object
+ranges per type) is part of the gateway and tested against captured licences from BC 14 and a current
+version.
+
+Every cmdlet that acts on one app is given `-Name`, `-Publisher` and `-Version`, because several
+versions of an app are published at once during an upgrade.
 
 ## The local policy file
 
@@ -166,7 +201,7 @@ whatever the server sent.
 machine = "CRONUS-BC01"        # this machine
 name = "BC140"
 install = true                 # may publish and install
-tenant = "default"             # multitenant servers: the tenant to target
+tenants = ["default"]          # multitenant servers: the tenants this gateway may target
 publishers = ["CRONUS Partner"] # optional allow-list of app publishers
 allow_unsigned = true          # Publish-NAVApp -SkipVerification (our builds are unsigned)
 scope = "tenant"               # tenant (default) or global
@@ -185,6 +220,8 @@ restart = [
   { machine = "CRONUS-BC02", instance = "BC140" },
 ]
 restart_mode = "stop-all-then-start-all"   # or "one-by-one"
+shared_restart = false         # see "Shared multitenant tiers"; refuse restarts that reach other Solutions
+licence_target = "NavDatabase" # Import-NAVServerLicense -Database: NavDatabase, Master, Default or Tenant
 before = 'C:\ALWorkbench\before-deploy.ps1' # optional, customer IT's own scripts
 after = 'C:\ALWorkbench\after-restart.ps1'
 
@@ -194,12 +231,24 @@ name = "CRONUS-BC02"
 method = "service-manager"     # or "powershell-remoting"
 ```
 
-**File permissions are part of the policy.** At start the gateway checks that the policy file and
-every script it names are writable only by Administrators and the gateway's service account, and
-refuses to start otherwise: whoever can write them gets code running as a Business Central
-administrator.
+**File permissions are part of the policy.** At start, and before each command, the gateway checks
+that the program folder, the policy file and every script it names are writable only by
+Administrators. The service account may read them but not write them: a compromised gateway process
+must not be able to widen its own policy. The gateway refuses to start otherwise, because whoever
+can write them gets code running as a Business Central administrator.
 
-**Remote machines.** In Windows PowerShell 5.1, `Stop-Service` / `Start-Service` have no
+**Shared multitenant tiers.** On a multitenant server several tenants, often several customers,
+share the service tiers and the application database. Linking is per tenant, but a restart or a
+licence imported into the application database reaches every tenant on those tiers. So: the Deploy,
+licence and restart dialogs list every Solution whose environments sit on the tiers involved; the
+gateway refuses a restart group or an application-level licence import that reaches tiers linked to
+more than one Solution unless that database sets `shared_restart = true`; and a deployment to one
+tenant of a shared server is published tenant-scoped (below) so the app itself never reaches the
+others.
+
+**Remote machines.** The service account needs remote service control rights on each machine
+(remote procedure call and file sharing reachable inside the network), or PowerShell remoting where
+that method is chosen; the setup guide (#1376) says this. In Windows PowerShell 5.1, `Stop-Service` / `Start-Service` have no
 `-ComputerName`, but `Get-Service -ComputerName <machine> -Name 'MicrosoftDynamicsNavServer$<instance>'
 | Stop-Service` works over the remote service manager. PowerShell 7 removed `-ComputerName` from
 `Get-Service`, so `service-manager` steps always run in 5.1. `powershell-remoting` uses
@@ -211,14 +260,15 @@ New tables, all org-scoped with the usual query filter:
 
 | Table | Holds |
 | --- | --- |
-| `gateways` | Name, public key, registered at, last seen, reported version, machine name, effective policy (JSON), revoked at |
-| `gateway_registration_codes` | Code hash, created by, expires at, used at |
+| `gateways` | Name, public key and its fingerprint, state (pending, approved), registered at, approved by and at, last seen, reported version, machine name, effective policy (JSON), revoked at |
+| `gateway_registration_codes` | Code hash, created by, expires at, used at, gateway id (set for a rotation code) |
+| `gateway_seen_tokens` | Gateway, `jti`, expires at (replay protection; swept with the commands) |
 | `gateway_commands` | As in "Commands" above |
-| `gateway_command_files` | Command id, file name, SHA-256, bytes (or a reference to the artifact row it came from) |
+| `gateway_command_files` | Id, command id, file name, SHA-256, bytes (or a reference to the artifact row it came from) |
 | `gateway_instances` | Gateway, machine, instance name, version, state, database server and name, multitenant, open sessions, licence (licensee, expiry, ranges as JSON with object types), read at, missing since |
 | `gateway_instance_tenants` | Instance, tenant id, state |
 | `gateway_instance_apps` | Instance, tenant, app id, name, publisher, version, data version, scope, installed, sync state |
-| `oe_project_licences` | Solution, file name, bytes (at most 1 MB), SHA-256, uploaded by and at |
+| `oe_project_licenses` | Solution, file name, bytes (at most 1 MB), SHA-256, uploaded by and at (code spells it `License`, as `OeProject.LicenseType` does; copy says licence) |
 
 The inventory tables are a stable upsert keyed by gateway + machine + instance (+ tenant); an
 instance that stops being reported is stamped `missing_since`, never deleted, as
@@ -234,12 +284,22 @@ was the alternative; it was rejected because the deployment pipeline's target
 Environments list all key on `OeProjectEnvironment`, and a second table would mean two foreign keys
 everywhere.
 
-- `(gateway_instance_id, tenant_id)` is **unique** among on-premises rows: one service tier and
-  tenant belongs to one Solution. Only an **org Admin** links and unlinks (audited), so the managers of
+- `(gateway_instance_id, tenant_id)` is **unique** among on-premises rows: a partial unique index
+  filtered to `kind = 'OnPremises'`, with a single-tenant server stored as tenant `default` rather
+  than null so the index cannot be dodged. One service tier and tenant belongs to one Solution. Only an **org Admin** links and unlinks (audited), so the managers of
   one Solution can never deploy to, restart or relicense another customer's tier on a shared
   hosting gateway.
-- Name and type (Production or Test) are chosen when linking; `Version`, `Status` and
-  `WebClientLoginUrl` are written from the inventory, so pages that read them need no branching.
+- Name and type are chosen when linking. The name is unique per Solution, because the existing
+  unique index on `(project_id, name)` covers both kinds. The type is stored as `Production` or
+  `Sandbox`, the values the existing checks compare against (`BcContracts`, `ArtifactService`,
+  `CustomerModuleService`, `DependencyDriftService`); on-premises copy labels `Sandbox` "Test".
+  `Version`, `Status` and `WebClientLoginUrl` are written from the inventory, so pages that read
+  them need no branching.
+- **Unlinking does not delete the row.** A deployment pipeline's foreign key to the environment is
+  `Restrict`, so an unlinked row is stamped `MissingSince` (shown as "no longer linked") and its
+  `OeEnvironmentApp` rows are removed. Pipelines that point at it show it as gone and refuse to
+  deploy, as for an online environment the customer deleted. Linking the same tier again revives
+  the row.
 - For linked rows, every inventory upsert also rewrites the environment's `OeEnvironmentApp` rows
   from `gateway_instance_apps`, so third-party module versions (`CustomerModuleService`) come from
   what is installed, as for online.
@@ -253,18 +313,22 @@ Every reader decides whether on-premises rows belong:
 
 | Reader | On-premises rows |
 | --- | --- |
-| `EnvironmentRefreshScheduler` / `ProjectConnectionService` refresh | **Excluded** - the gateway pushes instead |
+| `EnvironmentRefreshScheduler` / `ProjectConnectionService` refresh | **Excluded** - filters `Kind = Online` before upserting and before stamping `MissingSince`, so a refresh never marks a linked tier missing |
+| `BcUpdateScheduleChange`, `EnvironmentQueries` (the panel and update reads) | **Excluded** |
 | `UpgradeFleetService`, `EnvironmentUpgradeService`, `UpgradeActionService`, `UpgradeActionWorker` (Upgrades page) | **Excluded** - Microsoft's platform updates only |
 | `EnvironmentUpdateNotifier` | **Excluded** - Microsoft's update notices only |
 | `HeldInstalls` | **Excluded** - Microsoft's deferred schedules only |
 | `DeliveryService`, `ReleasePipelineService` | Included, through the delivery seam (#1374, #1367) |
 | `PipelinesDashboardService` | Included |
-| `ProjectCustomerInfoService` (production facts) | Included - the linked Production instance's version and address |
+| `ProjectCustomerInfoService` (production facts) | Included, with a new predicate: today `ReadProductionFactsAsync` requires `MicrosoftCloud` hosting and a configured connection (`ConfiguredProjects`); it becomes *(online, configured, Production row)* or *(on-premises, linked Production row)* |
+| `ArtifactService` (what is shipped to production) | Included |
+| `ProjectBuildService` missing-dependency report | Included |
 | `CustomerModuleService` | Included - versions from installed apps |
 | `DependencyDriftService` | Included - installed versions are what drift compares against |
 | `EnvironmentPaletteSource`, `PaletteContextService` | Included |
 | `ProjectBuildService` | Included (licence check, #1370) |
 | Environments list and environment page | Included, with only the fields on-premises has |
+| MCP tools (`DeliverTools`, the environment and deployment reads) | Included, marked `onPremises` |
 
 ## What on-premises turns off, revised
 
@@ -283,9 +347,10 @@ Every reader decides whether on-premises rows belong:
 
 ## Deploying to on-premises
 
-The delivery orchestration stays one flow. #1374 moves the *install the apps on this environment*
-step of `DeliveryService` behind one interface with two implementations: the Admin Center one
-(today's code) and the gateway one. That clears CLAUDE.md's interface bar the way
+The delivery orchestration stays one flow. #1374 puts everything in `DeliveryService` that talks
+to Business Central behind one interface with two implementations, the Admin Center one (today's
+code) and the gateway one: the live status re-read before uploading, the installed-apps read, the
+downgrade refusal that reads it, and the install of each app. That clears CLAUDE.md's interface bar the way
 `IOffsiteStorageProvider` did. Shared, unchanged: claiming, per-app result rows, dependency order,
 skip-if-already-installed (#931), failure short-circuit, the delivery window, prepared deployments
 and approvals, one deployment per environment at a time.
@@ -306,11 +371,13 @@ The `publish-install` verb, per app in dependency order, on the database's publi
    `-SkipVerification` only when the policy allows unsigned apps. The publisher must be on the
    instance's allow-list when it has one.
 3. `Sync-NAVApp -Tenant <id> -Mode <mode>`.
-4. Decided from `Get-NAVAppInfo -Tenant <id>` including the data version: an older version installed,
+4. Decided from `Get-NAVAppInfo -Tenant <id> -TenantSpecificProperties`, which reports the data
+   version: an older version installed,
    or uninstalled with its data kept, gets `Start-NAVAppDataUpgrade`; one never installed gets
    `Install-NAVApp`; the same version already installed is skipped.
-5. If the pipeline says so (default on), `Unpublish-NAVApp` the previous version, **only when no
-   tenant on the server still has it installed**; otherwise it is left, and the result says why.
+5. If the pipeline says so (default on), `Unpublish-NAVApp` the previous version: with `-Tenant` for
+   a tenant-scoped app; for a globally published one, **only when no tenant on the server still has
+   it installed**, otherwise it is left and the result says why.
 
 Then the **restart group** for that database runs, but only if every app succeeded. Nothing is
 stopped before publishing: one tier has to be running to publish against. Restarting matters most on
@@ -329,10 +396,15 @@ the deployment with the install reported as done. Output goes to the deployment 
 **Upload and import (#1369).** On an on-premises environment a person who manages the Solution
 uploads the licence file, picks database or tenant (as the policy allows), and confirms that the
 listed tiers will restart. The `import-licence` verb runs `Import-NAVServerLicense` on the publishing
-tier, then the restart group (tiers only read a new licence on restart), then a fresh inventory.
-Format follows the version: `.flf` before BC 22, `.bclicense` from BC 22; a file the target cannot
-import is refused with a message naming both. The file follows the Solution's visibility. AL
-Workbench never parses licence files; what it shows comes from `Export-NAVServerLicenseInformation`.
+tier with `-Database` set as the policy's `licence_target` says (`NavDatabase`, `Master`, `Default`,
+or `Tenant` with `-Tenant`), then the restart group (tiers only read a new licence on restart), then
+a fresh inventory. A database-level import on a shared server reaches every tenant and follows the
+shared-tier rule above. Format: `.flf` before BC 22, `.bclicense` from BC 22. Whether BC 22 and later
+still accept an `.flf` is checked against a real server when #1369 is built; until then a file
+the target's version cannot import is refused with a message naming both, and that rule follows the
+finding. The file follows the Solution's visibility. AL
+Workbench never parses licence files; what it shows is the gateway's parse of
+`Export-NAVServerLicenseInformation`.
 
 **Expiry warning.** The environment page shows the expiry; people following the Solution get a
 notification ahead of it (30 days).
@@ -375,7 +447,11 @@ server configuration (`Set-NAVServerConfiguration`) is out of scope.
 **What the design protects against:**
 
 - A stolen database row: it holds a public key, nothing usable.
-- A replayed or intercepted request: short-lived signed tokens, audience and `jti` checks, TLS.
+- A leaked registration code: the gateway it enrols waits for an Admin to approve its fingerprint.
+- A replayed or intercepted request: one signed token per request, bound to the method, path and
+  body, 60 seconds long, `jti` remembered across restarts, TLS.
+- A compromised gateway process widening its own policy: the policy and scripts are read-only to
+  the service account.
 - A Solution manager reaching another customer: Admin-only linking, one Solution per tier.
 - A command the customer did not agree to: the local policy file, which the server cannot change.
 - Script injection: no verb carries script; parameters are data.
@@ -390,11 +466,15 @@ with a certificate the customer trusts and `allow_unsigned = false`. The setup g
 customer IT in plain words.
 
 **Tenant isolation.** Two new `IgnoreQueryFilters()` call sites, both category 1 (pre-auth routing),
-approved by the maintainer in #1359:
+approved by the maintainer in #1359. Each carries its one-line category comment and moves the
+per-file baseline in `IgnoreQueryFiltersBaselineTests`:
 
 1. Gateway credential validation: the lookup by `gateways.id == <iss>` with `revoked_at == null`, to
    read the public key and the organisation before any claim exists.
 2. The registration-code exchange: the lookup by code hash with `used_at == null` and not expired.
+
+The replay table's `jti` check and the file download run under the organisation claim, and the
+download also checks the command's gateway against the caller explicitly.
 
 Nothing else on the gateway path crosses the fence: the expiry sweep uses `AmbientOrganizationScope`
 per organisation, and the gateway endpoints run under the organisation claim from the credential.
@@ -409,12 +489,14 @@ The gateway does not update itself; the workbench shows "Out of date" and custom
 | --- | --- | --- |
 | `ALWorkbench.Gateway.Contracts` | `net10.0` | DTOs, the verb enum, protocol version; referenced by the app and the gateway |
 | `ALWorkbench.Gateway.Core` | `net10.0` | All gateway logic behind seams (policy, runner, poll loop); tested on Linux CI |
-| `ALWorkbench.Gateway` | `net10.0-windows` | Thin Windows Service host, DPAPI, event log; `EnableWindowsTargeting` so the solution still builds on Linux |
+| `ALWorkbench.Gateway` | `net10.0-windows` | Thin Windows Service host, the Windows key store, event log; `EnableWindowsTargeting` so the solution still builds on Linux |
 
 These projects use the product name, not the `ALDevToolbox` plumbing spelling. The
 "AL Workbench in the product" rule in CLAUDE.md protects *existing* identifiers; new projects have
 none to protect, and the gateway's exe, Windows service ("AL Workbench Gateway") and event log
-source are read by customer IT. The app keeps `ALDevToolbox`. CLAUDE.md's naming table records this.
+source are read by customer IT. The app keeps `ALDevToolbox`. CLAUDE.md's naming table records this, and its "Project at a glance"
+and the `PROJECT.md` folder map list the gateway projects next to the app and its tests once they
+exist (#1361, #1362).
 
 The Dockerfile's restore layer copies the contracts csproj alongside `ALDevToolbox.csproj`. The
 release workflow gains a Windows job that publishes the gateway self-contained single-file for
