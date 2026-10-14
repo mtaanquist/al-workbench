@@ -105,6 +105,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The on-premises gateway's wire format, shared with the gateway itself.
+         See .design/on-prem-gateway.md. -->
+    <ProjectReference Include="..\ALWorkbench.Gateway.Contracts\ALWorkbench.Gateway.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Test access to internal seams kept narrow on purpose: BackupScheduler
          exposes TickOnceAsync (#71) so schedule-decision tests can drive
          it without the Task.Delay loop. -->

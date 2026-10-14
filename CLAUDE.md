@@ -6,7 +6,7 @@ Guidance for working on this repository: the principles, fences, and conventions
 
 - **AL Workbench** — internal Blazor Server tool covering a Business Central solution end to end: generating workspaces and extensions from runtime templates, exploring and translating source, building and shipping repositories, and operating the customer environments they land on.
 - Stack: .NET 10, Blazor Server, EF Core 10 + Npgsql against PostgreSQL 18, Tomlyn. Lucide icons are vendored as embedded SVGs (no NuGet dependency); see `Resources/Icons/`.
-- Two projects at the repo root: `ALDevToolbox/` (the app, layered by folder) and `ALDevToolbox.Tests/` (xUnit v3 + AwesomeAssertions). The solution file is `ALDevToolbox.slnx` at the repo root. `PROJECT.md` has the folder-by-folder map — match it when adding files.
+- Three projects at the repo root: `ALDevToolbox/` (the app, layered by folder), `ALDevToolbox.Tests/` (xUnit v3 + AwesomeAssertions) and `ALWorkbench.Gateway.Contracts/` (the on-premises gateway's wire format, shared by the app and the gateway; plain `net10.0`, no package references). The solution file is `ALDevToolbox.slnx` at the repo root. `PROJECT.md` has the folder-by-folder map — match it when adding files.
 - Source of truth for behaviour: documents under `.design/` (indexed in `PROJECT.md`). If code disagrees with the design doc, fix one of them — don't leave them out of sync.
 
 ## Development principles
@@ -138,6 +138,13 @@ Three of those are frozen for reasons worth stating, because they look like left
 So when you write something a user reads, write AL Workbench; when you name a directory, a
 service, a volume or a namespace, leave it alone; and don't "fix" one side to match the
 other.
+
+**New projects take the product name.** The on-premises gateway's projects
+(`ALWorkbench.Gateway.Contracts`, and `ALWorkbench.Gateway.Core` / `ALWorkbench.Gateway`
+when they land) are spelled `ALWorkbench`, namespace included: the rule above protects
+*existing* identifiers, a new project has none to protect, and the gateway's program,
+Windows service and event log source are read by customer IT. The app itself keeps
+`ALDevToolbox`. See `.design/on-prem-gateway.md`, "Projects, packaging and naming".
 
 ### Stay inside the architectural fences
 

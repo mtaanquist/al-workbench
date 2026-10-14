@@ -10,7 +10,11 @@
 FROM mcr.microsoft.com/dotnet/sdk@sha256:e1ffd2a92ae84c1291bc1b6887501f8af98e6331e7af6d4c8d37168c5e87a64c AS build
 WORKDIR /src
 
+# Restore from the project files alone so the layer survives source edits. The
+# app references the gateway contracts project (.design/on-prem-gateway.md), so
+# its csproj has to be here too or the restore cannot resolve the reference.
 COPY ALDevToolbox/ALDevToolbox.csproj ALDevToolbox/
+COPY ALWorkbench.Gateway.Contracts/ALWorkbench.Gateway.Contracts.csproj ALWorkbench.Gateway.Contracts/
 RUN dotnet restore ALDevToolbox/ALDevToolbox.csproj
 
 COPY . ./

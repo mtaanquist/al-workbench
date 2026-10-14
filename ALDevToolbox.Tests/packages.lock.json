@@ -929,6 +929,7 @@
       "aldevtoolbox": {
         "type": "Project",
         "dependencies": {
+          "ALWorkbench.Gateway.Contracts": "[1.0.0, )",
           "AWSSDK.S3": "[4.0.104.1, )",
           "Azure.Storage.Blobs": "[12.30.0, )",
           "BCrypt.Net-Next": "[4.2.0, )",
@@ -948,6 +949,9 @@
           "Otp.NET": "[1.4.1, )",
           "Tomlyn": "[2.10.1, )"
         }
+      },
+      "alworkbench.gateway.contracts": {
+        "type": "Project"
       }
     }
   }
