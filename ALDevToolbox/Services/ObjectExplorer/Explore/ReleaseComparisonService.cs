@@ -559,8 +559,11 @@ public sealed class ReleaseComparisonService
         var map = new Dictionary<string, CompareObject>(StringComparer.Ordinal);
         foreach (var o in objects)
         {
-            // (kind, object id) is unique within a release; fall back to name for
-            // id-less objects (AL interfaces). First wins on the rare collision.
+            // The objects come from one module per app (LoadCompareObjectsAsync), and
+            // (kind, object id) is unique across those; a release with two versions
+            // of an app repeats it, which is why the loads keep only the winner.
+            // Fall back to name for id-less objects (AL interfaces). First wins on
+            // the rare collision between two different apps.
             var key = o.ObjectId is int id
                 ? $"{o.Kind}#{id}"
                 : $"{o.Kind}#name:{o.Name.ToLowerInvariant()}";
@@ -612,12 +615,29 @@ public sealed class ReleaseComparisonService
                 ReleaseId = f.Module!.ReleaseId,
                 Label = f.Module!.Release!.Label,
                 FileId = f.Id,
+                f.ModuleId,
                 BcVersion = f.Module!.Release!.BcVersion,
                 ImportedAt = f.Module!.Release!.ImportedAt,
             })
             .ToListAsync(ct);
+        if (candidates.Count == 0) return new();
+
+        // A release holding two versions of this app (an amend) would be listed
+        // once per version, and one entry would open the old file. Keep only the
+        // file of the version that release resolves to, the module compare's pick;
+        // if that version dropped the file, the release is not offered (#1332).
+        var releaseIds = candidates.Select(c => c.ReleaseId).Distinct().ToList();
+        var appModules = await _db.OeModules.AsNoTracking()
+            .Where(m => m.AppId == anchor.AppId && releaseIds.Contains(m.ReleaseId))
+            .Select(m => new { m.ReleaseId, m.Id, m.AppId, m.Name, m.Publisher, m.Version })
+            .ToListAsync(ct);
+        var winningModuleIds = appModules
+            .GroupBy(m => m.ReleaseId)
+            .Select(g => OneModulePerApp(g.Select(m => new ModuleCompareRow(m.Id, m.AppId, m.Name, m.Publisher, m.Version)).ToList())[anchor.AppId].ModuleId)
+            .ToHashSet();
 
         return candidates
+            .Where(c => winningModuleIds.Contains(c.ModuleId))
             .Select(c => new CompareTargetOption(
                 c.ReleaseId, c.Label, c.FileId,
                 TargetIsOlder: IsOlderRelease(c.BcVersion, c.ImportedAt, anchor.BcVersion, anchor.ImportedAt)))

@@ -122,7 +122,7 @@ public class ReleaseImportService
     /// <summary>The status message a release gets when its upload request ended mid-ingest (#1331).</summary>
     internal const string InterruptedUploadMessage =
         "The upload was interrupted before it finished, because the page was closed or the connection dropped. "
-        + "Delete this release and upload the .app files again.";
+        + "Soft delete this release and upload the .app files again.";
 
     /// <summary>
     /// Validates the metadata, reserves the label, and inserts the Release row

@@ -210,6 +210,51 @@ public sealed class ReleaseCompareFilesFlatTests : IDisposable
             .Should().BeNull();
     }
 
+    /// <summary>
+    /// The source viewer's "Compare with release" picker makes the same pick: a
+    /// release holding two versions of the app is offered once, opening the newer
+    /// version's file, and a release whose newer version dropped the file is not
+    /// offered at all (#1332).
+    /// </summary>
+    [Fact]
+    public async Task Compare_targets_offer_the_higher_version_of_a_release_holding_two_of_one_app()
+    {
+        await using var ctx = _db.NewContext();
+        var anchorRelease = NewRelease("CRONUS picker 2.0.0.0");
+        var amended = NewRelease("CRONUS picker amended");
+        var dropped = NewRelease("CRONUS picker dropped");
+        ctx.OeReleases.AddRange(anchorRelease, amended, dropped);
+        await ctx.SaveChangesAsync();
+        await EnsureContentAsync(ctx, HashA);
+        await EnsureContentAsync(ctx, HashB);
+        var appId = Guid.NewGuid();
+        var anchorModule = NewModule(anchorRelease.Id, appId, "Contoso", "2.0.0.0");
+        var amendedOlder = NewModule(amended.Id, appId, "Contoso", "2.0.9.0");
+        var droppedOlder = NewModule(dropped.Id, appId, "Contoso", "2.0.9.0");
+        ctx.OeModules.AddRange(anchorModule, amendedOlder, droppedOlder);
+        await ctx.SaveChangesAsync();
+        var amendedNewer = NewModule(amended.Id, appId, "Contoso", "2.0.10.0");
+        var droppedNewer = NewModule(dropped.Id, appId, "Contoso", "2.0.10.0");
+        ctx.OeModules.AddRange(amendedNewer, droppedNewer);
+        await ctx.SaveChangesAsync();
+        var anchorFile = NewFile(anchorModule.Id, "src/Contoso.al", HashA);
+        var amendedOlderFile = NewFile(amendedOlder.Id, "src/Contoso.al", HashA);
+        var droppedOlderFile = NewFile(droppedOlder.Id, "src/Contoso.al", HashA);
+        ctx.OeModuleFiles.AddRange(anchorFile, amendedOlderFile, droppedOlderFile);
+        await ctx.SaveChangesAsync();
+        var amendedNewerFile = NewFile(amendedNewer.Id, "src/Contoso.al", HashB);
+        ctx.OeModuleFiles.Add(amendedNewerFile);
+        await ctx.SaveChangesAsync();
+
+        await using var read = _db.NewContext();
+        var targets = await NewComparison(read).GetCompareTargetsAsync(anchorFile.Id);
+
+        var target = targets.Should().ContainSingle(
+            "the release whose newer version dropped the file has nothing to compare against").Which;
+        target.ReleaseId.Should().Be(amended.Id);
+        target.TargetFileId.Should().Be(amendedNewerFile.Id);
+    }
+
     private static OeModuleObject NewObject(long moduleId, string kind, int objectId, string name, long fileId) => new()
     {
         OrganizationId = TestDb.DefaultOrgId,

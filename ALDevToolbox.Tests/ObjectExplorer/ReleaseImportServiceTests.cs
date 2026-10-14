@@ -700,6 +700,9 @@ public sealed class ReleaseImportServiceTests : IDisposable
         release.Status.Should().Be("failed", "a release nobody is importing must not stay ingesting");
         release.StatusMessage.Should().Be(ReleaseImportService.InterruptedUploadMessage);
         svc.Ingests.IsRunning(release.Id).Should().BeFalse();
+        await using var retry = _db.NewContext();
+        await NewService(retry).Invoking(s => s.ReopenForRetryAsync(release.Id)).Should().NotThrowAsync(
+            "a failed release can be retried, which the stuck ingesting one refused");
     }
 
     [Fact]
