@@ -107,6 +107,72 @@ public sealed class TotpServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_code_works_once_and_the_next_step_works_again()
+    {
+        // #1336: a code someone else saw or relayed must not work a second
+        // time inside its ~90-second window.
+        var userId = await SeedUserAsync();
+        var secret = await EnrolAsync(userId);
+        _clock.Advance(TimeSpan.FromSeconds(30));
+        var code = CodeAt(secret, _clock.GetUtcNow());
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewTotp(ctx).VerifyAsync(userId, code)).Should().BeTrue();
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewTotp(ctx).VerifyAsync(userId, code)).Should().BeFalse("the same code was already used");
+        }
+
+        _clock.Advance(TimeSpan.FromSeconds(30));
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewTotp(ctx).VerifyAsync(userId, CodeAt(secret, _clock.GetUtcNow()))).Should().BeTrue();
+        }
+    }
+
+    [Fact]
+    public async Task An_older_code_still_in_the_window_is_refused_after_a_newer_one_was_used()
+    {
+        var userId = await SeedUserAsync();
+        var secret = await EnrolAsync(userId);
+        _clock.Advance(TimeSpan.FromSeconds(60));
+        var older = CodeAt(secret, _clock.GetUtcNow().AddSeconds(-30));
+        var current = CodeAt(secret, _clock.GetUtcNow());
+
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewTotp(ctx).VerifyAsync(userId, current)).Should().BeTrue();
+        }
+        await using (var ctx = _db.NewContext())
+        {
+            (await NewTotp(ctx).VerifyAsync(userId, older)).Should().BeFalse();
+        }
+    }
+
+    [Fact]
+    public async Task The_code_that_confirmed_setup_cannot_be_used_to_sign_in()
+    {
+        var userId = await SeedUserAsync();
+        var secret = await EnrolAsync(userId);
+
+        await using var ctx = _db.NewContext();
+        (await NewTotp(ctx).VerifyAsync(userId, CodeAt(secret, _clock.GetUtcNow()))).Should().BeFalse();
+    }
+
+    private async Task<string> EnrolAsync(int userId)
+    {
+        await using var ctx = _db.NewContext();
+        var enrollment = await NewTotp(ctx).BeginEnrollmentAsync(userId);
+        await NewTotp(ctx).ConfirmEnrollmentAsync(userId, CodeAt(enrollment.SecretBase32, _clock.GetUtcNow()));
+        return enrollment.SecretBase32;
+    }
+
+    private static string CodeAt(string secret, DateTimeOffset at) =>
+        new Totp(Base32Encoding.ToBytes(secret)).ComputeTotp(at.UtcDateTime);
+
+    [Fact]
     public async Task Disable_clears_secret_recovery_codes_and_flag()
     {
         var userId = await SeedUserAsync();

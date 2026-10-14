@@ -16,6 +16,7 @@ internal sealed class UserTotpSecretConfiguration : IEntityTypeConfiguration<Use
         entity.Property(e => e.ConfirmedAt).HasColumnName("confirmed_at");
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
         entity.Property(e => e.LastUsedAt).HasColumnName("last_used_at");
+        entity.Property(e => e.LastUsedTimeStep).HasColumnName("last_used_time_step");
         entity.HasIndex(e => e.UserId).IsUnique();
         entity.HasOne(e => e.User)
             .WithMany()
