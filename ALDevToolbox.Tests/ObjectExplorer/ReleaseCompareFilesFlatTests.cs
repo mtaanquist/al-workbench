@@ -154,6 +154,118 @@ public sealed class ReleaseCompareFilesFlatTests : IDisposable
     }
 
     /// <summary>
+    /// The object compare and "Compare with..." make the same pick as the module
+    /// compare above (#1332). They used to read every object of the release and
+    /// keep whichever copy came back first, which is the older version when it was
+    /// written first, as it is after an amend: the changed object read
+    /// "unchanged", an object the newer version dropped still showed, and the diff
+    /// link opened the old file.
+    /// </summary>
+    [Fact]
+    public async Task Object_compare_picks_the_higher_version_when_a_release_holds_two_of_one_app()
+    {
+        await using var ctx = _db.NewContext();
+        var left = NewRelease("CRONUS objects 2.0.0.0");
+        var right = NewRelease("CRONUS objects amended");
+        ctx.OeReleases.AddRange(left, right);
+        await ctx.SaveChangesAsync();
+        await EnsureContentAsync(ctx, HashA);
+        await EnsureContentAsync(ctx, HashB);
+        var appId = Guid.NewGuid();
+        var oldLeft = NewModule(left.Id, appId, "Contoso", "2.0.0.0");
+        var older = NewModule(right.Id, appId, "Contoso", "2.0.9.0");
+        ctx.OeModules.AddRange(oldLeft, older);
+        await ctx.SaveChangesAsync();
+        var newer = NewModule(right.Id, appId, "Contoso", "2.0.10.0");
+        ctx.OeModules.Add(newer);
+        await ctx.SaveChangesAsync();
+        var leftFile = NewFile(oldLeft.Id, "src/Contoso.al", HashA);
+        var olderFile = NewFile(older.Id, "src/Contoso.al", HashA);
+        var droppedFile = NewFile(older.Id, "src/Dropped.al", HashA);
+        var newerFile = NewFile(newer.Id, "src/Contoso.al", HashB);
+        ctx.OeModuleFiles.AddRange(leftFile, olderFile, droppedFile, newerFile);
+        await ctx.SaveChangesAsync();
+        // The older copy's objects go in first, so a first-wins pick over an
+        // unordered read lands on them.
+        ctx.OeModuleObjects.AddRange(
+            NewObject(oldLeft.Id, "table", 50100, "Contoso Setup", leftFile.Id),
+            NewObject(older.Id, "table", 50100, "Contoso Setup", olderFile.Id),
+            NewObject(older.Id, "codeunit", 50101, "Contoso Dropped", droppedFile.Id));
+        await ctx.SaveChangesAsync();
+        ctx.OeModuleObjects.Add(NewObject(newer.Id, "table", 50100, "Contoso Setup", newerFile.Id));
+        await ctx.SaveChangesAsync();
+
+        await using var read = _db.NewContext();
+        var comparison = NewComparison(read);
+
+        var set = await comparison.CompareReleaseObjectsAsync(left.Id, right.Id, includeUnchanged: true);
+        var row = set.Rows.Should().ContainSingle(
+            "the codeunit only the older version carried is not part of what the release resolves to").Which;
+        row.Status.Should().Be("modified");
+        row.RightFileId.Should().Be(newerFile.Id);
+
+        var counterpart = await comparison.FindObjectFileInReleaseAsync(right.Id, "table", 50100, "Contoso Setup");
+        counterpart.Should().Be(newerFile.Id);
+        (await comparison.FindObjectFileInReleaseAsync(right.Id, "codeunit", 50101, "Contoso Dropped"))
+            .Should().BeNull();
+    }
+
+    /// <summary>
+    /// The source viewer's "Compare with release" picker makes the same pick: a
+    /// release holding two versions of the app is offered once, opening the newer
+    /// version's file, and a release whose newer version dropped the file is not
+    /// offered at all (#1332).
+    /// </summary>
+    [Fact]
+    public async Task Compare_targets_offer_the_higher_version_of_a_release_holding_two_of_one_app()
+    {
+        await using var ctx = _db.NewContext();
+        var anchorRelease = NewRelease("CRONUS picker 2.0.0.0");
+        var amended = NewRelease("CRONUS picker amended");
+        var dropped = NewRelease("CRONUS picker dropped");
+        ctx.OeReleases.AddRange(anchorRelease, amended, dropped);
+        await ctx.SaveChangesAsync();
+        await EnsureContentAsync(ctx, HashA);
+        await EnsureContentAsync(ctx, HashB);
+        var appId = Guid.NewGuid();
+        var anchorModule = NewModule(anchorRelease.Id, appId, "Contoso", "2.0.0.0");
+        var amendedOlder = NewModule(amended.Id, appId, "Contoso", "2.0.9.0");
+        var droppedOlder = NewModule(dropped.Id, appId, "Contoso", "2.0.9.0");
+        ctx.OeModules.AddRange(anchorModule, amendedOlder, droppedOlder);
+        await ctx.SaveChangesAsync();
+        var amendedNewer = NewModule(amended.Id, appId, "Contoso", "2.0.10.0");
+        var droppedNewer = NewModule(dropped.Id, appId, "Contoso", "2.0.10.0");
+        ctx.OeModules.AddRange(amendedNewer, droppedNewer);
+        await ctx.SaveChangesAsync();
+        var anchorFile = NewFile(anchorModule.Id, "src/Contoso.al", HashA);
+        var amendedOlderFile = NewFile(amendedOlder.Id, "src/Contoso.al", HashA);
+        var droppedOlderFile = NewFile(droppedOlder.Id, "src/Contoso.al", HashA);
+        ctx.OeModuleFiles.AddRange(anchorFile, amendedOlderFile, droppedOlderFile);
+        await ctx.SaveChangesAsync();
+        var amendedNewerFile = NewFile(amendedNewer.Id, "src/Contoso.al", HashB);
+        ctx.OeModuleFiles.Add(amendedNewerFile);
+        await ctx.SaveChangesAsync();
+
+        await using var read = _db.NewContext();
+        var targets = await NewComparison(read).GetCompareTargetsAsync(anchorFile.Id);
+
+        var target = targets.Should().ContainSingle(
+            "the release whose newer version dropped the file has nothing to compare against").Which;
+        target.ReleaseId.Should().Be(amended.Id);
+        target.TargetFileId.Should().Be(amendedNewerFile.Id);
+    }
+
+    private static OeModuleObject NewObject(long moduleId, string kind, int objectId, string name, long fileId) => new()
+    {
+        OrganizationId = TestDb.DefaultOrgId,
+        ModuleId = moduleId,
+        Kind = kind,
+        ObjectId = objectId,
+        Name = name,
+        SourceFileId = fileId,
+    };
+
+    /// <summary>
     /// The database cut and the in-memory sort used different orders (the
     /// column's en_US collation against OrdinalIgnoreCase), so past the cap the
     /// "first N" could skip rows in the middle. en_US ranks "A1" before "a b";
