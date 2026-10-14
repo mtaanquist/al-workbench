@@ -30,6 +30,7 @@ Agreed with the maintainer on 2026-10-03:
 | Deployments | Waiting for approval, deployed, failed | #1036 |
 | Upgrades | A change someone scheduled on an environment ran, failed or could not be confirmed; an environment someone is to check on a planned upgrade reached the target version (ready to check) | #1046, #1047 |
 | Solutions | Update scheduled, update moved, latest date a week away, for solutions you follow | #1049 |
+| Gateways | An on-premises gateway went offline (three missed heartbeats) or came back; to the organisation's Admins only, so only they see its row on the account page. See `on-prem-gateway.md`, "Online and offline" | #1361 |
 
 ## How it works
 

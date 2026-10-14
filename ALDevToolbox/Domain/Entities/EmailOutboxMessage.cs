@@ -56,6 +56,9 @@ public enum EmailPurpose
     /// <summary>A solution notification: an update was scheduled or moved on a solution the person follows.</summary>
     SolutionNotification,
 
+    /// <summary>A gateway notification: an on-premises gateway went offline or came back. To Admins.</summary>
+    GatewayNotification,
+
     /// <summary>"A passkey was added to your account", to the account's own address. Queued, like every security notice.</summary>
     PasskeyAdded,
 }
