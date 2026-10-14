@@ -1074,7 +1074,12 @@
             await Projects.ConfirmRepositoryAccessAsync(id, repositoryId);
             row.AccessConfirmed = true;
             _loadedProject = await Projects.GetProjectAsync(id) ?? _loadedProject;
-            _message = $"Confirmed. Builds include {(string.IsNullOrWhiteSpace(row.DisplayName) ? "this repository" : row.DisplayName)} from now on.";
+            _message = $"Confirmed. Builds include {(string.IsNullOrWhiteSpace(row.DisplayName) ? "this repository" : row.DisplayName)} from now on. Automatic builds now run with your access.";
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException)
+        {
+            // Removed by someone else between the read and the save.
+            _repoErrors[row] = new Dictionary<string, string> { ["Url"] = "This repository is no longer on the solution. Reload the page." };
         }
         catch (ProjectAccessDeniedException)
         {

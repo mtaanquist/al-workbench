@@ -48,6 +48,13 @@ public sealed class RepositoryReadProbe
     /// </summary>
     public async Task<Outcome> CanReadAsync(RepositoryProvider provider, string url, CancellationToken ct = default)
     {
+        // Callers validate the address first; asked again here because this is the
+        // boundary that runs git, and anything else is a no rather than an argument.
+        if (!RepositoryLinks.IsValidUrl(provider, url))
+        {
+            _logger.LogInformation("Refused to check read access to {Url}: not an address for {Provider}.", Redact(url), provider);
+            return new Outcome(false, HadCredential: false);
+        }
         var gitPath = Environment.GetEnvironmentVariable("GIT_PATH") is { Length: > 0 } configured ? configured : "git";
         var credentials = await _credentials.ResolveAsync(provider, ct).ConfigureAwait(false);
         var attempts = credentials
@@ -60,22 +67,31 @@ public sealed class RepositoryReadProbe
             try
             {
                 result = await _processRunner.RunAsync(new ProcessRunRequest(
-                    gitPath, ["ls-remote", url, "HEAD"], null, env, Timeout), ct).ConfigureAwait(false);
+                    gitPath, ["ls-remote", "--", url, "HEAD"], null, env, Timeout), ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogWarning(ex, "Could not run git to check read access to {Url}.", url);
+                _logger.LogWarning(ex, "Could not run git to check read access to {Url}.", Redact(url));
                 return new Outcome(false, credentials.Count > 0);
             }
             if (result.Succeeded)
             {
-                _logger.LogInformation("Read access to {Url} confirmed using {Source}.", url, source);
+                _logger.LogInformation("Read access to {Url} confirmed using {Source}.", Redact(url), source);
                 return new Outcome(true, credentials.Count > 0);
             }
         }
-        _logger.LogInformation("Read access to {Url} could not be confirmed with {CredentialCount} credential(s).", url, credentials.Count);
+        _logger.LogInformation("Read access to {Url} could not be confirmed with {CredentialCount} credential(s).", Redact(url), credentials.Count);
         return new Outcome(false, credentials.Count > 0);
     }
+
+    /// <summary>
+    /// <paramref name="url"/> for a log line, with any <c>user:password@</c> taken out:
+    /// an address typed with a token in it must not put the token in the logs.
+    /// </summary>
+    internal static string Redact(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.UserInfo.Length > 0
+            ? new UriBuilder(uri) { UserName = string.Empty, Password = string.Empty }.Uri.ToString()
+            : url;
 
     /// <summary>The same no-prompt, no-helper environment a build's git runs in, with nothing to authenticate with.</summary>
     private static Dictionary<string, string> AnonymousEnv() => new()

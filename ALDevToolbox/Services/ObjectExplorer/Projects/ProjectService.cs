@@ -614,21 +614,20 @@ public sealed class ProjectService
             }
             return await _gitHubAccess.CanAccessRepoAsync(id, fullName, ct)
                 ? null
-                : $"Your GitHub account can't see {fullName}, or GitHub couldn't be reached to check. Ask someone who can see it to add it, or try again in a moment.";
+                : $"Your GitHub account can't see {fullName}, or GitHub couldn't be reached to check. Ask someone who can see it to add or confirm it, or try again in a moment.";
         }
 
         var outcome = await _readProbe.CanReadAsync(provider, url, ct);
         if (outcome.CanRead) return null;
         return outcome.HadCredential
-            ? $"Your {provider.DisplayName()} access can't read this repository, or it couldn't be reached. Check the address, or ask someone who can read it to add it."
+            ? $"Your {provider.DisplayName()} access can't read this repository, or it couldn't be reached. Check the address, or ask someone who can read it to add or confirm it."
             : $"The workbench couldn't read this repository, and you have nothing set up to read private {provider.DisplayName()} repositories with. Add a build token under Account → Repository access, then try again.";
     }
 
     /// <summary>
     /// Confirms, with the acting person's own access, that they can read one of the
     /// solution's repositories, so builds include it from now on. For a repository
-    /// added before confirmations were recorded, or one nobody has confirmed yet: the
-    /// Repositories tab offers it on every such row. The same check as adding one
+    /// nobody has confirmed yet: the Repositories tab offers it on every such row. The same check as adding one
     /// (<see cref="ReadAccessErrorAsync"/>), and the same hand-over: like adding a
     /// repository, confirming one puts something new into what the automatic builds
     /// clone, so those builds and automatic update pull requests run as the person who
@@ -648,6 +647,12 @@ public sealed class ProjectService
         await _access.EnsureCanManageAsync(project.Id, project.CreatedByUserId, ct);
         var repository = project.Repositories.FirstOrDefault(r => r.Id == repositoryId)
             ?? throw Validation("Url", "This repository is no longer on the solution. Reload the page.");
+        // A row saved before addresses were validated as they are now is not one to
+        // hand to git; the person fixes the address, and saving checks it then.
+        if (!RepositoryLinks.IsValidUrl(repository.Provider, repository.Url))
+        {
+            throw Validation("Url", "This address isn't one the workbench can check. Correct it and save the solution, which checks it for you.");
+        }
 
         var orgLogin = repository.Provider == RepositoryProvider.GitHub
             ? await _gitHubAccess.GetConnectedOrgLoginAsync(ct)
@@ -666,7 +671,7 @@ public sealed class ProjectService
         await _db.SaveChangesAsync(ct);
         _logger.LogInformation(
             "User {UserId} confirmed read access to repository {RepositoryId} ({Url}) of solution {ProjectId}.",
-            userId, repository.Id, repository.Url, projectId);
+            userId, repository.Id, RepositoryReadProbe.Redact(repository.Url), projectId);
 
         await WarmDiscoveryAsync(project.Id, ct);
     }

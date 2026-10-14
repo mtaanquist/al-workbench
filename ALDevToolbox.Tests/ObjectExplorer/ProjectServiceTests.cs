@@ -576,7 +576,7 @@ public sealed class ProjectServiceTests : IDisposable
 
         (await RepositoryUrlsAsync(id)).Should().HaveCount(3);
         _gitHub.Calls.Should().BeEmpty("the App only answers for its own organisation");
-        _gitRemote.Calls.Select(c => c.Arguments[1]).Should()
+        _gitRemote.Calls.Select(c => c.Arguments[^2]).Should()
             .Equal("https://github.com/acme/core", "https://github.com/fabrikam/shared", AzureExtensions.Url);
         var added = await RepositoryRowAsync(id, AzureExtensions.Url);
         added.AddedByUserId.Should().Be(colleagueId);
@@ -692,6 +692,89 @@ public sealed class ProjectServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Confirming_access_is_refused_to_someone_who_cannot_manage_the_solution()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var repoId = await SeedUnconfirmedRepositoryAsync(id, AzureExtensions);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.Where(p => p.Id == id)
+                .ExecuteUpdateAsync(u => u.SetProperty(p => p.Visibility, ProjectVisibility.ReadOnly));
+        }
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: false);
+        _gitRemote.Calls.Clear();
+
+        var act = () => Svc(_db.NewContext()).ConfirmRepositoryAccessAsync(id, repoId);
+
+        await act.Should().ThrowAsync<ProjectAccessDeniedException>();
+        _gitRemote.Calls.Should().BeEmpty();
+        (await RepositoryRowAsync(id, AzureExtensions.Url)).AccessConfirmedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Confirming_a_repository_whose_address_is_not_valid_asks_for_it_to_be_corrected()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var repoId = await SeedUnconfirmedRepositoryAsync(id,
+            new ProjectRepositoryInput(RepositoryProvider.GitHub, "https://git.example.com/cronus/payroll", "Payroll"));
+        _gitRemote.Calls.Clear();
+
+        var act = () => Svc(_db.NewContext()).ConfirmRepositoryAccessAsync(id, repoId);
+
+        (await act.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors["Url"].Should().Contain("Correct it and save the solution");
+        _gitRemote.Calls.Should().BeEmpty("an address that is not the host's never reaches git");
+    }
+
+    [Fact]
+    public async Task The_check_never_hands_git_an_address_that_is_not_the_hosts()
+    {
+        await using var ctx = _db.NewContext();
+        var probe = _db.NewRepositoryReadProbe(ctx, git: _gitRemote);
+
+        var outcome = await probe.CanReadAsync(RepositoryProvider.GitHub, "--upload-pack=touch /tmp/x");
+
+        outcome.CanRead.Should().BeFalse();
+        _gitRemote.Calls.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task With_nothing_set_up_the_check_runs_once_with_no_credential_and_no_helper()
+    {
+        await using var ctx = _db.NewContext();
+        var probe = _db.NewRepositoryReadProbe(ctx, git: _gitRemote);
+
+        var outcome = await probe.CanReadAsync(RepositoryProvider.AzureDevOps, AzureExtensions.Url);
+
+        outcome.Should().Be(new ALDevToolbox.Services.ObjectExplorer.Projects.RepositoryReadProbe.Outcome(true, false));
+        var call = _gitRemote.Calls.Should().ContainSingle().Subject;
+        call.Arguments.Should().Equal("ls-remote", "--", AzureExtensions.Url, "HEAD");
+        call.Environment!.Values.Should().NotContain(v => v.Contains("Authorization"));
+        call.Environment!["GIT_CONFIG_KEY_0"].Should().Be("credential.helper");
+        call.Environment!["GIT_CONFIG_VALUE_0"].Should().BeEmpty();
+        call.Environment!["GIT_TERMINAL_PROMPT"].Should().Be("0");
+    }
+
+    [Fact]
+    public async Task Re_spelling_a_repository_address_keeps_its_confirmation()
+    {
+        var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
+        var before = await RepositoryRowAsync(id, Core.Url);
+        _db.OrgContext.CurrentUserId = await SeedColleagueAsync(gitHubLinked: false);
+        _gitRemote.Calls.Clear();
+        _gitRemote.Readable = false;
+
+        await Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null,
+            Core with { Url = "https://github.com/acme/core.git" }));
+
+        var after = await RepositoryRowAsync(id, "https://github.com/acme/core.git");
+        after.Id.Should().Be(before.Id);
+        after.AccessConfirmedByUserId.Should().Be(OwnerUserId);
+        after.AccessConfirmedAt.Should().Be(before.AccessConfirmedAt);
+        _gitRemote.Calls.Should().BeEmpty("the same repository written another way is not a new one to check");
+    }
+
+    [Fact]
     public async Task Saving_the_solution_does_not_confirm_a_repository_already_on_it()
     {
         var id = await Svc(_db.NewContext()).CreateProjectAsync(NewInput("CRONUS A/S", "dk", null, Core));
@@ -717,7 +800,7 @@ public sealed class ProjectServiceTests : IDisposable
         var row = await RepositoryRowAsync(id, moved.Url);
         row.AddedByUserId.Should().Be(colleagueId);
         row.AccessConfirmedByUserId.Should().Be(colleagueId);
-        _gitRemote.Calls.Select(c => c.Arguments[1]).Should().EndWith(moved.Url);
+        _gitRemote.Calls.Select(c => c.Arguments[^2]).Should().EndWith(moved.Url);
 
         _gitRemote.Readable = false;
         var act = () => Svc(_db.NewContext()).UpdateProjectAsync(id, NewInput("CRONUS A/S", "dk", null, Core,

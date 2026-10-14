@@ -675,6 +675,8 @@ public sealed class DependencyDriftService
         var urls = await _db.OeProjectRepositories.AsNoTracking()
             .Where(r => r.Provider == RepositoryProvider.GitHub)
             .Where(r => _db.OeProjects.Any(p => p.Id == r.ProjectId && p.DeletedAt == null))
+            // A repository nobody confirmed they can read is not read with the installation token.
+            .Where(r => r.AccessConfirmedAt != null)
             .Select(r => r.Url)
             .ToListAsync(ct);
 

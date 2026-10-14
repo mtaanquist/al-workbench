@@ -51,7 +51,9 @@
         {
             <Alert Tone="AlertTone.Warn">
                 <span>
-                    @(UnconfirmedCount == 1 ? "1 repository is" : $"{UnconfirmedCount} repositories are") left out of builds until someone confirms they can read it.
+                    @(UnconfirmedCount == 1
+                        ? "1 repository is left out of builds until someone confirms they can read it."
+                        : $"{UnconfirmedCount} repositories are left out of builds until someone confirms they can read them.")
                     @(CanManage
                         ? "If you can open it on GitHub or Azure DevOps, press Confirm access next to it."
                         : "Ask someone who manages this solution, and can open the repository, to confirm access.")

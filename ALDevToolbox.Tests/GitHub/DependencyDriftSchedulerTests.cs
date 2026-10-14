@@ -184,6 +184,7 @@ public sealed class DependencyDriftSchedulerTests : IDisposable
                     Provider = ALDevToolbox.Domain.ValueObjects.RepositoryProvider.GitHub,
                     Url = $"https://github.com/{repository}",
                     DisplayName = repository.Split('/')[^1],
+                    AccessConfirmedAt = DateTime.UtcNow,
                 },
             ],
         };
