@@ -369,6 +369,17 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
 .page.sol .header-tab::after { bottom: 0; }
 .page.sol .header-tab:focus-visible { outline-offset: -2px; }
 
+/* The settings frame (SettingsPage: Administration, Account, the site settings) has
+   the same tab row, and Administration reached ten tabs with Gateways (#1360). On a
+   phone the row's min-content widened the whole .settings grid, so every card under
+   it ran off the screen with its buttons out of reach. Same remedy as the solution
+   page's above: the grid's children may shrink, and the tab row scrolls. */
+.settings > * { min-width: 0; }
+.settings__tabs .header-tabs { min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+.settings__tabs .header-tab { flex: none; white-space: nowrap; }
+.settings__tabs .header-tab::after { bottom: 0; }
+.settings__tabs .header-tab:focus-visible { outline-offset: -2px; }
+
 /* The modal scrim in the dark theme. The hand-off's recipe mixes --ink into
    transparent, which dims a light page and does the opposite to a dark one: --ink is
    near-white there, so the page behind a dialog went pale grey and the dialog lost

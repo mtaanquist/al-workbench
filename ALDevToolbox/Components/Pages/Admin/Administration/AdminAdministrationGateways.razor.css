@@ -1,0 +1,16 @@
+/* The check code an Admin compares by eye against the one the gateway printed:
+   large enough to read group by group. */
+.gw-check {
+    margin: var(--space-3) 0;
+    text-align: center;
+}
+
+.gw-check .code {
+    font-size: var(--text-lg);
+    padding: var(--space-2) var(--space-3);
+    letter-spacing: .04em;
+}
+
+.gw-table {
+    overflow-x: auto;
+}

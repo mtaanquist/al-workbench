@@ -1,0 +1,350 @@
+@page "/admin/administration/gateways"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Roles = "Admin")]
+@rendermode InteractiveServer
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Endpoints
+@using ALDevToolbox.Services.Gateways
+@inject GatewayService Gateways
+@inject PublicOrigin Origin
+@inject NavigationManager Nav
+@inject ILogger<AdminAdministrationGateways> Log
+
+@*
+    Gateways tab of the Administration surface (.design/on-prem-gateway.md).
+
+    Named user: an org Admin setting up the first gateway for a customer whose
+    Business Central runs in their own network, working with that customer's IT,
+    who installs it on a Windows server there. They know Business Central; they
+    have never seen a gateway. Primary action: Add gateway, which shows a one-time
+    code and the command to run on the server. The second step that matters is
+    Approve, after comparing the code the server printed with the one shown here -
+    so a pending gateway carries that button on its row, not in the menu.
+*@
+
+<PageTitle>Gateways · Administration · AL Workbench</PageTitle>
+
+<AdministrationHeader ActiveTab="AdministrationHeader.Tab.Gateways">
+    <Actions>
+        @if (_gateways is { Count: > 0 } && _issued is null)
+        {
+            <button type="button" class="btn btn--sm btn--primary" @onclick="AddGatewayAsync" disabled="@_busy">
+                <Icon Name="plus" Width="14" Height="14" />
+                <span>Add gateway</span>
+            </button>
+        }
+    </Actions>
+    <Body>
+        @if (_error is not null)
+        {
+            <Alert Tone="AlertTone.Danger"><span>@_error</span></Alert>
+        }
+        @if (_success is not null)
+        {
+            <Alert Tone="AlertTone.Success"><span>@_success</span></Alert>
+        }
+
+        @if (_issued is not null)
+        {
+            <section class="card">
+                <div class="card__head">
+                    <div>
+                        <h2 class="card__title">@(_issuedFor is null ? "Register the new gateway" : $"Give {_issuedFor} a new key")</h2>
+                        <p class="card__sub">
+                            Valid until <Timestamp Value="@_issued.ExpiresAt" Format="HH:mm" />, and only once.
+                            This code is shown only now - if you lose it, create a new one.
+                        </p>
+                    </div>
+                </div>
+                <div class="card__body">
+                    <p>
+                        On the Windows server where the gateway is installed, open a command prompt
+                        as an administrator and run:
+                    </p>
+                    <div class="code-block code-block--inlinebar">
+                        <pre id="gateway-register-command">@RegisterCommand</pre>
+                        <CopyButton Target="#gateway-register-command" />
+                    </div>
+                    <p>
+                        The gateway then prints a check code and appears below as
+                        <strong>Waiting for approval</strong>. Approve it once the check code on the
+                        server matches the one shown here.
+                    </p>
+                </div>
+                <div class="card__foot">
+                    <button type="button" class="btn" @onclick="CloseCode">
+                        <Icon Name="check" Width="16" Height="16" />
+                        <span>Done</span>
+                    </button>
+                </div>
+            </section>
+        }
+
+        @if (_gateways is null)
+        {
+            <LoadingBlock Text="Loading gateways..." />
+        }
+        else if (_gateways.Count == 0)
+        {
+            @if (_issued is null)
+            {
+                <div class="card">
+                    <EmptyState Icon="server" Title="No gateways yet">
+                        <Text>
+                            A gateway lets AL Workbench manage Business Central servers in a
+                            customer's own network, without opening their firewall. It is a small
+                            Windows service the customer's IT installs on one of their servers.
+                            Add one to get a code to install it with.
+                        </Text>
+                        <Action>
+                            <button type="button" class="btn btn--primary" @onclick="AddGatewayAsync" disabled="@_busy">
+                                <Icon Name="plus" Width="15" Height="15" />
+                                <span>Add gateway</span>
+                            </button>
+                        </Action>
+                    </EmptyState>
+                </div>
+            }
+        }
+        else
+        {
+            <section class="card">
+                <div class="card__head"><h2 class="card__title">Gateways (@_gateways.Count)</h2></div>
+                @* Scrolls sideways inside the card on a phone rather than running
+                   off the screen with the Approve button out of reach. *@
+                <div class="gw-table">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Gateway</th>
+                            <th scope="col">State</th>
+                            <th scope="col">Last seen</th>
+                            <th scope="col">Version</th>
+                            <th scope="col" class="data-table__actions">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var g in _gateways)
+                    {
+                        var gateway = g;
+                        <tr>
+                            <td>
+                                @gateway.Name
+                                @if (!string.Equals(gateway.Name, gateway.MachineName, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    <div class="u-muted">on @gateway.MachineName</div>
+                                }
+                            </td>
+                            <td>
+                                <StatusPill Tone="@ToneOf(gateway.Status)">@LabelOf(gateway.Status)</StatusPill>
+                                @if (gateway.Status == GatewayStatus.WaitingForApproval)
+                                {
+                                    <div class="u-muted">Check code <span class="code">@gateway.KeyFingerprint</span></div>
+                                }
+                            </td>
+                            <td class="u-muted"><Timestamp Value="@gateway.LastSeenAt" Relative="true" Placeholder="@("Never")" /></td>
+                            <td class="u-muted">@(gateway.ReportedVersion ?? "-")</td>
+                            <td class="data-table__actions">
+                                @if (gateway.Status != GatewayStatus.Revoked)
+                                {
+                                    <span class="u-row">
+                                        @if (gateway.Status == GatewayStatus.WaitingForApproval)
+                                        {
+                                            <button type="button" class="btn btn--sm" @onclick="() => ApproveAsync(gateway)" disabled="@_busy">
+                                                <Icon Name="shield" Width="14" Height="14" />
+                                                <span>Approve</span>
+                                            </button>
+                                        }
+                                        <RowActions Label="@($"Actions for {gateway.Name}")">
+                                            <button type="button" class="menu__item" role="menuitem" @onclick="() => RenameAsync(gateway)">
+                                                <Icon Name="pencil" Width="14" Height="14" />
+                                                <span>Rename</span>
+                                            </button>
+                                            <button type="button" class="menu__item" role="menuitem" @onclick="() => RotateAsync(gateway)">
+                                                <Icon Name="key-round" Width="14" Height="14" />
+                                                <span>New registration code</span>
+                                            </button>
+                                            <button type="button" class="menu__item menu__item--danger" role="menuitem" @onclick="() => RevokeAsync(gateway)">
+                                                <Icon Name="shield-off" Width="14" Height="14" />
+                                                <span>Revoke</span>
+                                            </button>
+                                        </RowActions>
+                                    </span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+                </div>
+            </section>
+        }
+    </Body>
+</AdministrationHeader>
+
+<ConfirmDialog @ref="_approveDialog" Title="Approve this gateway?" ConfirmLabel="Approve gateway"
+               ConfirmButtonClass="btn--primary" ConfirmIcon="shield" HeadIcon="shield">
+    @if (_target is not null)
+    {
+        <p>
+            When <strong>@_target.MachineName</strong> registered, the gateway printed a check code on
+            that server. Approve only if it is exactly this one:
+        </p>
+        <p class="gw-check"><span class="code">@_target.KeyFingerprint</span></p>
+        <p class="u-muted">
+            If the codes differ, or nobody you know installed this gateway, revoke it instead.
+        </p>
+    }
+</ConfirmDialog>
+
+<ConfirmDialog @ref="_revokeDialog" />
+
+<ConfirmDialog @ref="_rotateDialog" />
+
+<ConfirmDialog @ref="_renameDialog" Title="Rename gateway" ConfirmLabel="Rename"
+               ConfirmButtonClass="btn--primary" HeadIcon="pencil"
+               ConfirmDisabled="@string.IsNullOrWhiteSpace(_nameDraft)">
+    <div class="field">
+        <label class="field__label" for="gateway-name">Name</label>
+        <input class="input" type="text" id="gateway-name" @bind="_nameDraft" @bind:event="oninput"
+               maxlength="@GatewayService.MaxNameLength" required placeholder="e.g. CRONUS server room" />
+        <span class="field__hint">How the gateway is listed here. The server's own name does not change.</span>
+    </div>
+</ConfirmDialog>
+
+@code {
+    private List<GatewaySummary>? _gateways;
+    private IssuedGatewayCode? _issued;
+    private string? _issuedFor;
+    private GatewaySummary? _target;
+    private string _nameDraft = string.Empty;
+    private string? _error;
+    private string? _success;
+    private bool _busy;
+
+    private ConfirmDialog _approveDialog = default!;
+    private ConfirmDialog _revokeDialog = default!;
+    private ConfirmDialog _rotateDialog = default!;
+    private ConfirmDialog _renameDialog = default!;
+
+    /// <summary>
+    /// The address the gateway registers with: the configured public origin, else
+    /// the one this page was opened on - the same rule email links follow.
+    /// </summary>
+    private string WorkbenchUrl => Origin.Configured ?? Nav.BaseUri.TrimEnd('/');
+
+    private string RegisterCommand => $"ALWorkbench.Gateway register --url {WorkbenchUrl} --code {_issued?.Code}";
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync() => _gateways = await Gateways.ListAsync();
+
+    private async Task AddGatewayAsync()
+    {
+        await RunAsync(async () =>
+        {
+            _issued = await Gateways.CreateRegistrationCodeAsync();
+            _issuedFor = null;
+        });
+    }
+
+    private void CloseCode()
+    {
+        _issued = null;
+        _issuedFor = null;
+    }
+
+    private async Task ApproveAsync(GatewaySummary gateway)
+    {
+        _target = gateway;
+        if (!await _approveDialog.OpenAsync($"Approve {gateway.Name}?", string.Empty, "Approve gateway", "btn--primary", "shield")) return;
+        await RunAsync(async () =>
+        {
+            await Gateways.ApproveAsync(gateway.Id);
+            _success = $"{gateway.Name} is approved. It can now receive work from AL Workbench.";
+        });
+    }
+
+    private async Task RevokeAsync(GatewaySummary gateway)
+    {
+        var confirmed = await _revokeDialog.OpenAsync(
+            $"Revoke {gateway.Name}?",
+            "AL Workbench will refuse everything this gateway sends from now on. This cannot be undone: "
+            + "to use that server again, add it as a new gateway.",
+            "Revoke gateway");
+        if (!confirmed) return;
+        await RunAsync(async () =>
+        {
+            await Gateways.RevokeAsync(gateway.Id);
+            _success = $"{gateway.Name} is revoked.";
+        });
+    }
+
+    private async Task RotateAsync(GatewaySummary gateway)
+    {
+        var confirmed = await _rotateDialog.OpenAsync(
+            $"Give {gateway.Name} a new key?",
+            "Use this when the server was rebuilt, or you think the gateway's key may have been copied. "
+            + "You get a new code to run on the server. The gateway keeps working until it registers with it; "
+            + "after that it waits for your approval again.",
+            "Create code", "btn--primary", "key-round");
+        if (!confirmed) return;
+        await RunAsync(async () =>
+        {
+            _issued = await Gateways.CreateRotationCodeAsync(gateway.Id);
+            _issuedFor = gateway.Name;
+        });
+    }
+
+    private async Task RenameAsync(GatewaySummary gateway)
+    {
+        _nameDraft = gateway.Name;
+        if (!await _renameDialog.OpenAsync()) return;
+        await RunAsync(async () =>
+        {
+            await Gateways.RenameAsync(gateway.Id, _nameDraft);
+            _success = $"Renamed to {_nameDraft.Trim()}.";
+        });
+    }
+
+    /// <summary>One action at a time, its outcome in the alert, and the list re-read after.</summary>
+    private async Task RunAsync(Func<Task> action)
+    {
+        _busy = true;
+        _error = null;
+        _success = null;
+        try
+        {
+            await action();
+            await LoadAsync();
+        }
+        catch (PlanValidationException ex)
+        {
+            _error = string.Join(" ", ex.Errors.Values);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.LogError(ex, "Gateway action failed.");
+            _error = "That did not work. Try again, and if it keeps failing, ask your site administrator to check the log.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private static string ToneOf(GatewayStatus status) => status switch
+    {
+        GatewayStatus.Online => "success",
+        GatewayStatus.Offline => "danger",
+        GatewayStatus.WaitingForApproval => "warn",
+        _ => "muted",
+    };
+
+    private static string LabelOf(GatewayStatus status) => status switch
+    {
+        GatewayStatus.Online => "Online",
+        GatewayStatus.Offline => "Offline",
+        GatewayStatus.WaitingForApproval => "Waiting for approval",
+        _ => "Revoked",
+    };
+}
