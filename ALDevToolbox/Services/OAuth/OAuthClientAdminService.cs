@@ -191,6 +191,8 @@ public sealed class OAuthClientAdminService
         // client as revoked so the lists show a consistent picture.
         var now = _clock.GetUtcNow().UtcDateTime;
         var consents = await _db.OAuthConsents
+            // Fence category 2 (SiteAdmin cross-org console): only caller is
+            // /site-admin/oauth-clients, gated by [Authorize(Roles = SiteAdminRole)].
             .IgnoreQueryFilters()
             .Where(c => c.ClientId == clientId && c.RevokedAt == null)
             .ToListAsync(cancellationToken);

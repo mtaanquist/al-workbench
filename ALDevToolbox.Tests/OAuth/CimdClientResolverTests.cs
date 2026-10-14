@@ -30,6 +30,8 @@ public sealed class CimdClientResolverTests : IDisposable
     private readonly TestDb _db = new();
     private readonly ServiceProvider _services;
     private readonly StubHandler _http = new();
+    private readonly CimdFetchLimiter _limiter = new();
+    private readonly ALDevToolbox.Tests.Auth.FakeTimeProvider _clock = new(new DateTimeOffset(2026, 10, 14, 9, 0, 0, TimeSpan.Zero));
 
     public CimdClientResolverTests()
     {
@@ -47,6 +49,7 @@ public sealed class CimdClientResolverTests : IDisposable
     {
         _services.Dispose();
         _http.Dispose();
+        _limiter.Dispose();
         _db.Dispose();
     }
 
@@ -69,10 +72,51 @@ public sealed class CimdClientResolverTests : IDisposable
         await ResolveAsync(ClientId);
 
         _http.Serve(ClientId, Document(SecondRedirect));
+        _clock.Advance(CimdClientResolver.RefreshInterval);
         var context = await ResolveAsync(ClientId);
 
         context.IsRejected.Should().BeFalse();
         (await RedirectsAsync()).Should().Equal(SecondRedirect);
+    }
+
+    [Fact]
+    public async Task A_recently_refreshed_client_is_used_without_fetching_again()
+    {
+        // The consent form posts the same request back, and an anonymous
+        // caller can repeat it at will; neither should dial the URL each time.
+        _http.Serve(ClientId, Document(FirstRedirect));
+        await ResolveAsync(ClientId);
+        var fetches = _http.Requests;
+
+        _http.Serve(ClientId, Document(SecondRedirect));
+        _clock.Advance(CimdClientResolver.RefreshInterval - TimeSpan.FromSeconds(1));
+        var context = await ResolveAsync(ClientId);
+
+        context.IsRejected.Should().BeFalse();
+        _http.Requests.Should().Be(fetches);
+        (await RedirectsAsync()).Should().Equal(FirstRedirect);
+    }
+
+    [Fact]
+    public async Task Fetches_past_the_per_caller_budget_are_refused_without_dialling_the_url()
+    {
+        // Distinct client ids, so the recently-refreshed shortcut never applies
+        // and each request would otherwise fetch and write a row.
+        for (var i = 0; i < CimdFetchLimiter.PermitLimit; i++)
+        {
+            var id = $"https://assistant{i}.cronus.example/client.json";
+            _http.Serve(id, Document(FirstRedirect.Replace("assistant.", $"assistant{i}."), clientId: id));
+            (await ResolveAsync(id)).IsRejected.Should().BeFalse();
+        }
+        var fetches = _http.Requests;
+
+        const string oneTooMany = "https://one-too-many.cronus.example/client.json";
+        _http.Serve(oneTooMany, Document("https://one-too-many.cronus.example/callback", clientId: oneTooMany));
+        var context = await ResolveAsync(oneTooMany);
+
+        context.IsRejected.Should().BeTrue();
+        context.Error.Should().Be(OpenIddictConstants.Errors.TemporarilyUnavailable);
+        _http.Requests.Should().Be(fetches);
     }
 
     [Theory]
@@ -124,6 +168,8 @@ public sealed class CimdClientResolverTests : IDisposable
         var resolver = new CimdClientResolver(
             scope.ServiceProvider.GetRequiredService<IOpenIddictApplicationManager>(),
             new StubFactory(_http),
+            _limiter,
+            _clock,
             NullLogger<CimdClientResolver>.Instance);
         var context = new ValidateAuthorizationRequestContext(new OpenIddictServerTransaction
         {
@@ -179,9 +225,15 @@ public sealed class CimdClientResolverTests : IDisposable
 
         public void Serve(string url, string body) => _bodies[url] = body;
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
-            Task.FromResult(_bodies.TryGetValue(request.RequestUri!.ToString(), out var body)
+        /// <summary>How many fetches have been made.</summary>
+        public int Requests { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requests++;
+            return Task.FromResult(_bodies.TryGetValue(request.RequestUri!.ToString(), out var body)
                 ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") }
                 : new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
     }
 }

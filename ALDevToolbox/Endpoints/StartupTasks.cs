@@ -201,6 +201,7 @@ internal static class StartupTasks
         // them to failed here would silently undo the resume. Cross-org by
         // design — same blessed startup-maintenance category as the
         // migration/seed/bootstrap steps above, never a request.
+        // Fence category 3 (startup, no request org): job rows only, ids out.
         var resumableReleaseIds = await db.OeImportJobs
             .IgnoreQueryFilters()
             .Where(j => j.Status == "queued")

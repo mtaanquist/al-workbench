@@ -81,7 +81,7 @@ internal static class AccountPasskeyEndpoints
             });
             ctx.Response.ContentType = "application/json";
             await ctx.Response.WriteAsync(options.ToJson(), ct);
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequireCurrentCredentials();
 
         // The second leg needs no fresh check of its own: the only envelope it
         // accepts is a registration one (PasskeyService refuses a sign-in or
@@ -123,7 +123,7 @@ internal static class AccountPasskeyEndpoints
                 ctx.Response.StatusCode = 400;
                 await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
             }
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequireCurrentCredentials();
 
         app.MapPost("/auth/account/passkeys/{id:int}/delete", async (
             int id, HttpContext ctx, PasskeyService passkeys, IOrganizationContext org,
@@ -257,7 +257,7 @@ internal static class AccountPasskeyEndpoints
                 var msg = string.IsNullOrEmpty(first.Value) ? "Invalid token request." : first.Value;
                 ctx.Response.Redirect($"/account/ai?err={Uri.EscapeDataString(msg)}");
             }
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequireCurrentCredentials();
 
         // Revoke: stamps RevokedAt. No-op when the token doesn't belong to
         // the caller's org (the query filter hides it). Redirects back to

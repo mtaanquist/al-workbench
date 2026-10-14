@@ -147,6 +147,7 @@ public sealed class PersistedImportJobs
         // every org's job rows here is the design.
         // A build's row comes along so it resumes in its place in the build queue (#1137).
         // The filter is off for that read too; it is pinned to b.ReleaseId == j.ReleaseId.
+        // Fence category 3 (startup, no request org): each job carries its own org id.
         var survivors = await _db.OeImportJobs.IgnoreQueryFilters()
             .Where(j => j.Status == "queued" || j.Status == "running")
             // Oldest first, so waiting push builds resume in the order they were pushed.
@@ -318,6 +319,7 @@ public sealed class PersistedImportJobs
         // Resolve release labels cross-org (this is the SiteAdmin console) so
         // the workers page can name each import rather than show a bare id.
         var releaseIds = jobs.Select(j => j.ReleaseId).Distinct().ToList();
+        // Fence category 2 (SiteAdmin cross-org console): pinned to the job rows' release ids.
         var labels = await _db.OeReleases.IgnoreQueryFilters()
             .Where(r => releaseIds.Contains(r.Id))
             .Select(r => new { r.Id, r.Label })

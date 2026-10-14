@@ -204,18 +204,28 @@ the resolver:
    with `registration_source: "cimd"` and the auth method stamped into
    `properties` JSON.
 
-The resolver re-fetches on **every** authorize request, not just the
-first one. That's what lets ChatGPT (or any issuer) rotate its signing
-keys or amend its `redirect_uris` without an admin nuking the application
-row: a stale snapshot would otherwise break every refresh attempt until
-someone deleted the row by hand. /authorize is rare enough (once per
-consent grant per device, not once per API call) that the extra HTTPS GET
-is affordable.
+The resolver re-fetches on authorize requests, not just the first one.
+That's what lets ChatGPT (or any issuer) rotate its signing keys or amend
+its `redirect_uris` without an admin nuking the application row: a stale
+snapshot would otherwise break every refresh attempt until someone deleted
+the row by hand.
+
+The authorize request is anonymous, though, so a fetch is also a way for
+anyone to make the server dial a URL and write an `oauth_applications`
+row (#1336). Two limits bound it. A row the resolver created or refreshed
+within the last ten minutes (`refreshed_at` in its `properties`,
+`CimdClientResolver.RefreshInterval`) is used as it is with no fetch,
+which also covers the consent form posting the same request back. And
+every fetch spends a permit from `CimdFetchLimiter`, ten per ten minutes
+per client IP, the same budget `/oauth/register` has; past it the request
+is refused with `temporarily_unavailable`. A row registered another way
+(DCR or by an admin) is refused before any fetch.
 
 Recovery flow when the issuer rotates: the user's refresh fails because
 the JWKS attached to the application no longer matches the assertion key
 → the client prompts the user to reconnect → /authorize fires → the
-resolver re-fetches the CIMD document and the JWKS → the row is updated
+resolver re-fetches the CIMD document and the JWKS (once the ten-minute
+reuse window since the last fetch has passed) → the row is updated
 in place via `UpdateAsync` → consent screen → fresh tokens issued. No
 admin needed.
 

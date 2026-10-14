@@ -88,12 +88,15 @@ public sealed class EndpointFactory : IDisposable
     /// Returns a fresh <see cref="HttpClient"/>. Redirects are not followed so
     /// tests can assert the redirect target. The auth cookie defaults to
     /// "Secure" so requests must use HTTPS — base address is set to https.
+    /// Pass <paramref name="handleCookies"/> false to send the Cookie header
+    /// by hand, for a test that needs the cookie value itself.
     /// </summary>
-    public HttpClient CreateClient() =>
+    public HttpClient CreateClient(bool handleCookies = true) =>
         _factory.CreateClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false,
             BaseAddress = new Uri("https://localhost/"),
+            HandleCookies = handleCookies,
         });
 
     public IServiceProvider Services => _factory.Services;

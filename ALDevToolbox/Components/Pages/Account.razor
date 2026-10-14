@@ -83,10 +83,12 @@ else
 
             @if (!string.IsNullOrEmpty(Error) && !string.IsNullOrEmpty(Message))
             {
-                @* Endpoints redirect with err=<field>&msg=<sentence>, so the pair
-                   is what carries meaning - a bare err= is a field name. *@
+                @* Endpoints redirect with err=<field>&msg=<sentence>. The field
+                   key says it went wrong (danger, not warn) but is never shown:
+                   it is a code name ("Totp"), and the sentence already says
+                   which setting it is about. *@
                 <Alert Tone="AlertTone.Danger">
-                    <span><strong>@Error:</strong> @Message</span>
+                    <span>@Message</span>
                 </Alert>
             }
             else if (!string.IsNullOrEmpty(Message))

@@ -90,6 +90,14 @@ internal static class AccountEndpoints
         // user's own id.
         var user = await db.Users.IgnoreQueryFilters().FirstAsync(u => u.Id == org.CurrentUserId!.Value, ct);
         if (await MayConfirmWithoutPasswordAsync(ctx, db, user.Id, ct)) return user;
+        if (string.IsNullOrEmpty(password) && await HasMicrosoftLinkAsync(db, user.Id, ct))
+        {
+            // The page hid the password box because the session was fresh when
+            // it loaded; the window has since closed. "Password is incorrect"
+            // would blame a box the person never saw.
+            ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.MsgQuery}={Uri.EscapeDataString(ConfirmationExpiredMessage)}");
+            return null;
+        }
         if (!auth.VerifyPassword(password, user.PasswordHash))
         {
             ctx.Response.Redirect($"{RouteConstants.AccountSecurity}?{RouteConstants.ErrQuery}=Password&{RouteConstants.MsgQuery}={Uri.EscapeDataString("Password is incorrect.")}");
@@ -113,8 +121,15 @@ internal static class AccountEndpoints
     {
         var tools = ctx.RequestServices.GetRequiredService<Services.Tools.ToolEnablement>();
         if (!await tools.IsFreshAsync(ctx.User, ct)) return false;
-        // Filtered: the signed-in user's own links, inside their org.
-        return await db.UserExternalLogins.AsNoTracking()
-            .AnyAsync(l => l.UserId == userId && l.Provider == EntraSignInService.ProviderName, ct);
+        return await HasMicrosoftLinkAsync(db, userId, ct);
     }
+
+    /// <summary>Shown when a Microsoft-linked account posts no password after its confirmation window closed.</summary>
+    internal const string ConfirmationExpiredMessage =
+        "Your confirmation has expired. Choose \"Confirm with Microsoft\" again, or enter your password.";
+
+    private static Task<bool> HasMicrosoftLinkAsync(AppDbContext db, int userId, CancellationToken ct) =>
+        // Filtered: the signed-in user's own links, inside their org.
+        db.UserExternalLogins.AsNoTracking()
+            .AnyAsync(l => l.UserId == userId && l.Provider == EntraSignInService.ProviderName, ct);
 }

@@ -6642,6 +6642,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_used_at");
 
+                    b.Property<long?>("LastUsedTimeStep")
+                        .HasColumnType("bigint")
+                        .HasColumnName("last_used_time_step");
+
                     b.Property<string>("SecretEncrypted")
                         .IsRequired()
                         .HasColumnType("text")
