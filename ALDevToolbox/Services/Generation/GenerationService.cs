@@ -216,6 +216,7 @@ public class GenerationService
 
         var template = await LoadTemplateAsync(plan.TemplateKey, ct, pathsOnly);
         ValidateCoreRangeAgainstTemplate(plan, template);
+        ValidateSelectedExtensionPaths(plan, template);
         var modules = await LoadSelectedModulesAsync(plan.SelectedModuleKeys, ct, pathsOnly);
         var orgConfig = await GetOrgConfigAsync(ct);
 
@@ -714,6 +715,37 @@ public class GenerationService
 
         static string Describe(EmittableExtension e) =>
             e.IsModuleClone ? $"the {e.ModuleName} module ({e.ModuleKey})" : $"the template's {e.Path} extension";
+    }
+
+    /// <summary>
+    /// Refuses a selected extension the template does not have. It used to be
+    /// skipped while the saved workspace settings still listed it, so a typo
+    /// ("Tests" for "Test") produced a workspace without that extension and
+    /// reported success. Same rule as unknown module keys (#1242, #1342).
+    /// Matched ordinally, as <see cref="BuildExtensionList"/> matches them.
+    /// </summary>
+    private static void ValidateSelectedExtensionPaths(ProjectPlan plan, RuntimeTemplate template)
+    {
+        var known = new HashSet<string>(template.WorkspaceExtensions.Select(e => e.Path), StringComparer.Ordinal);
+        var unknown = plan.SelectedExtensionPaths
+            .Where(p => !known.Contains(p))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (unknown.Count == 0) return;
+
+        var optional = template.WorkspaceExtensions
+            .Where(e => !e.Required)
+            .OrderBy(e => e.Ordering)
+            .Select(e => e.Path)
+            .ToList();
+        var choices = optional.Count == 0
+            ? "This template has no optional extensions."
+            : $"Pick from {string.Join(", ", optional.Select(p => $"'{p}'"))}.";
+        throw new PlanValidationException(new Dictionary<string, string>
+        {
+            ["SelectedExtensionPaths"] =
+                $"The template has no extension called {string.Join(", ", unknown.Select(p => $"'{p}'"))}. {choices}",
+        });
     }
 
     /// <summary>

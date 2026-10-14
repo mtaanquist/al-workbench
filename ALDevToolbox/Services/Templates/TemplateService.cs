@@ -290,7 +290,7 @@ public class TemplateService
     public async Task<RuntimeTemplate> CreateAsync(TemplateAuthoring input, CancellationToken ct = default)
     {
         var (defaults, appSourceCop, defaultModuleIds, appVersionId, includedFileIds) =
-            await ValidateAsync(input, existingId: null, ct);
+            await ValidateAsync(input, existingId: null, savedModuleKeys: NoModuleKeys, ct);
 
         // Auto-include the canonical app.json for every new template so the
         // admin doesn't have to remember to tick the box. Resolves by path
@@ -382,8 +382,15 @@ public class TemplateService
 
         // Key is immutable after creation — ignore whatever the input carries.
         var validatable = input with { Key = existing.Key };
+        // Module keys the template already depends on: a module deleted since
+        // they were saved must not stop the template being saved again (#1342).
+        var savedModuleKeys = existing.WorkspaceExtensions
+            .SelectMany(e => e.Dependencies)
+            .Where(d => d.RefModuleKey is not null)
+            .Select(d => d.RefModuleKey!)
+            .ToHashSet(StringComparer.Ordinal);
         var (defaults, appSourceCop, defaultModuleIds, appVersionId, includedFileIds) =
-            await ValidateAsync(validatable, existingId: id, ct);
+            await ValidateAsync(validatable, existingId: id, savedModuleKeys, ct);
 
         existing.Runtime = input.Runtime.Trim();
         existing.Name = input.Name.Trim();
@@ -769,13 +776,14 @@ public class TemplateService
     /// problem so the editor can highlight everything at once.
     /// </summary>
     private async Task<(TemplateDefaults Defaults, AppSourceCopSettings AppSourceCop, IReadOnlyList<int> DefaultModuleIds, int? DefaultApplicationVersionId, IReadOnlyList<int> IncludedFileIds)>
-        ValidateAsync(TemplateAuthoring input, int? existingId, CancellationToken ct)
+        ValidateAsync(TemplateAuthoring input, int? existingId, IReadOnlySet<string> savedModuleKeys, CancellationToken ct)
     {
         var errors = new Dictionary<string, string>();
 
         await ValidateMetadataAsync(input, existingId, errors, ct);
         var (defaults, appSourceCop) = TemplateValidation.ParseJsonOverrides(input, errors);
         TemplateValidation.ValidateExtensions(input.Extensions, errors);
+        await ValidateDependencyModuleKeysAsync(input, savedModuleKeys, errors, ct);
         var defaultModuleIds = await ResolveDefaultModuleIdsAsync(input, errors, ct);
         var defaultApplicationVersionId = await ResolveApplicationVersionIdAsync(input, errors, ct);
         var (includedFileIds, workspaceRootPaths) = await ResolveIncludedFileIdsAsync(input, errors, ct);
@@ -880,6 +888,53 @@ public class TemplateService
         if (input.CoreIdRangeTo <= input.CoreIdRangeFrom) errors[nameof(input.CoreIdRangeTo)] = "Core ID range end must be greater than the start.";
         if (input.ModuleIdRangeStart <= 0) errors[nameof(input.ModuleIdRangeStart)] = "Module ID range start must be greater than zero.";
         if (input.ModuleIdRangeSize <= 0) errors[nameof(input.ModuleIdRangeSize)] = "Module ID range size must be greater than zero.";
+    }
+
+    private static readonly IReadOnlySet<string> NoModuleKeys = new HashSet<string>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Refuses a <c>module =</c> dependency whose key is new in this save and
+    /// names no live module, so a typo is caught where it was typed rather than
+    /// vanishing from every generated app.json (#1342). A key the template
+    /// already had is left alone even when its module has since been deleted:
+    /// generation drops it like an unticked module, and refusing it would stop
+    /// the template being saved at all, which is the #1326 trap. Keys are
+    /// compared as a set, not by row position, so reordering is not "new".
+    /// Only dependencies that set the module shape alone are checked; the
+    /// shape rules in <see cref="TemplateValidation"/> report the rest.
+    /// </summary>
+    private async Task ValidateDependencyModuleKeysAsync(
+        TemplateAuthoring input, IReadOnlySet<string> savedModuleKeys,
+        Dictionary<string, string> errors, CancellationToken ct)
+    {
+        var refs = input.Extensions
+            .SelectMany((ext, i) => ext.Dependencies.Select((dep, j) => (Ext: i, Dep: j, dep)))
+            .Where(r => r.dep.RefModuleKey is not null && r.dep.RefExtensionPath is null && r.dep.LitId is null)
+            .Select(r => (r.Ext, r.Dep, Key: r.dep.RefModuleKey!.Trim()))
+            .ToList();
+
+        foreach (var (ext, dep, _) in refs.Where(r => r.Key.Length == 0))
+        {
+            errors[$"Extensions[{ext}].Dependencies[{dep}].Module"] =
+                "Enter the key of the module this extension depends on, or remove the dependency.";
+        }
+
+        var added = refs.Where(r => r.Key.Length > 0 && !savedModuleKeys.Contains(r.Key)).ToList();
+        if (added.Count == 0) return;
+
+        var keys = added.Select(r => r.Key).Distinct(StringComparer.Ordinal).ToList();
+        var live = await _db.Modules
+            .AsNoTracking()
+            .Where(m => keys.Contains(m.Key) && m.DeletedAt == null)
+            .Select(m => m.Key)
+            .ToListAsync(ct);
+        var liveKeys = new HashSet<string>(live, StringComparer.Ordinal);
+
+        foreach (var (ext, dep, key) in added.Where(r => !liveKeys.Contains(r.Key)))
+        {
+            errors[$"Extensions[{ext}].Dependencies[{dep}].Module"] =
+                $"No module with the key '{key}' exists. Check the spelling of the key you added, or pick a module from the catalogue.";
+        }
     }
 
     /// <summary>

@@ -146,6 +146,7 @@ public sealed class TemplateImportService
         // (including the untracked folder rows shoved into them) against the
         // source. CLAUDE.md: AsNoTracking on every read-only EF query.
         var source = await _db.RuntimeTemplates
+            // Fence category 5 (system-org fork read): pinned to t.OrganizationId == systemOrgId.
             .IgnoreQueryFilters()
             .AsNoTracking()
             .Where(t => t.Id == systemTemplateId && t.OrganizationId == systemOrgId.Value)
