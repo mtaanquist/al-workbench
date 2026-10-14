@@ -237,14 +237,26 @@ public sealed class InviteService
     /// invitee typed and that the invite is still good, before the browser is
     /// sent to Microsoft. The account itself is created when Microsoft hands
     /// the person back (<see cref="EntraSignInService.CompleteAsync"/>), which
-    /// checks the invite again, since it can be revoked in between.
+    /// checks the invite again, since it can be revoked in between. Refused
+    /// unless the inviting organisation signs in only with Microsoft.
     /// </summary>
     public async Task<Invite> PrepareMicrosoftAcceptanceAsync(string token, string displayName, CancellationToken ct = default)
     {
         var errors = new Dictionary<string, string>();
         ValidateDisplayName((displayName ?? string.Empty).Trim(), errors);
         if (errors.Count > 0) throw new PlanValidationException(errors);
-        return await FindValidByTokenAsync(token, ct) ?? throw InviteInvalid();
+        var invite = await FindValidByTokenAsync(token, ct) ?? throw InviteInvalid();
+        // Only where a password cannot be used. Elsewhere the password form is
+        // the one way in, which keeps this path as small as the problem it
+        // solves.
+        if (!await _auth.IsMicrosoftOnlyOrganizationAsync(invite.OrganizationId, ct))
+        {
+            throw new PlanValidationException(new Dictionary<string, string>
+            {
+                ["Password"] = "Set a password to accept this invite.",
+            });
+        }
+        return invite;
     }
 
     private static void ValidateDisplayName(string trimmedName, Dictionary<string, string> errors)

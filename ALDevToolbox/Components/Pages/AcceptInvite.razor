@@ -83,14 +83,11 @@ else
         <Alerts>
             @if (Error is not null && Message is not null)
             {
+                @* err= is the field the endpoint blames; it picks the danger
+                   tone but is not shown, since the sentence already says what
+                   it is about. *@
                 <Alert Tone="AlertTone.Danger">
-                    <span>
-                        @if (AuthCard.FieldLabel(@Error) is { } label)
-                        {
-                            <strong>@label:</strong>
-                        }
-                        @Message
-                    </span>
+                    <span>@Message</span>
                 </Alert>
             }
         </Alerts>

@@ -348,6 +348,100 @@ public sealed class EntraSignInServiceTests : IDisposable
         (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == "kirsten@cronus.com")).Should().BeFalse();
     }
 
+    [Fact]
+    public async Task Accepting_an_invite_with_a_microsoft_account_already_linked_here_is_refused()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var holderId = await SeedUserAsync(TestDb.DefaultOrgId, "holder@cronus.com");
+        await SeedLinkAsync(holderId, TenantA, Oid);
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.Admin);
+        await using var ctx = _db.NewContext();
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "kirsten@cronus.com", "Kirsten"), Ip,
+            new EntraInviteAcceptance(invite!, "Kirsten Jensen"));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.IdentityTakenElsewhere);
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().AnyAsync(u => u.Email == "kirsten@cronus.com")).Should().BeFalse();
+        (await read.Invites.IgnoreQueryFilters().SingleAsync()).AcceptedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Accepting_an_invite_for_an_address_that_already_has_an_account_signs_in_without_the_invites_role()
+    {
+        // The invite does not apply: the existing account is resolved as an
+        // ordinary sign-in, so it binds only on xms_edov and keeps its role.
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var existingId = await SeedUserAsync(TestDb.DefaultOrgId, "kirsten@cronus.com");
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.Admin);
+        await using var ctx = _db.NewContext();
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "kirsten@cronus.com", "Kirsten", EmailVerified: true), Ip,
+            new EntraInviteAcceptance(invite!, "Kirsten Jensen"));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.Success);
+        result.User!.Id.Should().Be(existingId);
+        await using var read = _db.NewContext();
+        var user = await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == existingId);
+        user.Role.Should().Be(UserRole.User);
+        user.DisplayName.Should().Be("Existing User");
+        (await read.Invites.IgnoreQueryFilters().SingleAsync()).AcceptedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Accepting_an_invite_that_loses_a_race_for_the_address_creates_nothing_and_leaves_the_invite_usable()
+    {
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA);
+        var token = await SeedInviteAsync(TestDb.DefaultOrgId, "kirsten@cronus.com", UserRole.User);
+        // Another account for the address lands between the lookup and the save.
+        var racer = new InsertUserBeforeFirstSave(_db, TestDb.DefaultOrgId, "kirsten@cronus.com");
+        await using var ctx = _db.NewContext(racer);
+        var invite = await NewInvites(ctx).FindValidByTokenAsync(token);
+
+        var result = await NewService(ctx).AcceptInviteAsync(
+            new EntraTokenIdentity(TenantA, Oid, "kirsten@cronus.com", "Kirsten"), Ip,
+            new EntraInviteAcceptance(invite!, "Kirsten Jensen"));
+
+        result.Outcome.Should().Be(EntraCompletionOutcome.EmailTakenElsewhere);
+        await using var read = _db.NewContext();
+        (await read.Users.IgnoreQueryFilters().CountAsync(u => u.Email == "kirsten@cronus.com")).Should().Be(1, "only the racer's row");
+        (await read.UserExternalLogins.IgnoreQueryFilters().AnyAsync()).Should().BeFalse();
+        (await read.Invites.IgnoreQueryFilters().SingleAsync()).AcceptedAt.Should().BeNull();
+        (await read.LoginAttempts.AnyAsync(a => a.Email == "kirsten@cronus.com" && !a.Succeeded)).Should().BeTrue();
+    }
+
+    /// <summary>Inserts a user from another context just before the first save it sees, once.</summary>
+    private sealed class InsertUserBeforeFirstSave(TestDb db, int orgId, string email) : SaveChangesInterceptor
+    {
+        private bool _done;
+
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (!_done)
+            {
+                _done = true;
+                await using var other = db.NewContext();
+                other.Users.Add(new User
+                {
+                    OrganizationId = orgId,
+                    Email = email,
+                    DisplayName = "Racer",
+                    PasswordHash = "x",
+                    Role = UserRole.User,
+                    Status = UserStatus.Active,
+                    CreatedAt = DateTime.UtcNow,
+                });
+                await other.SaveChangesAsync(cancellationToken);
+            }
+            return result;
+        }
+    }
+
     private InviteService NewInvites(AppDbContext ctx) =>
         new(ctx, _db.OrgContext, new AuthService(ctx, NullLogger<AuthService>.Instance, TimeProvider.System),
             TimeProvider.System, NullLogger<InviteService>.Instance);

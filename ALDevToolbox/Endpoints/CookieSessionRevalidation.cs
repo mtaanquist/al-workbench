@@ -121,9 +121,13 @@ internal static class CookieSessionRevalidation
             if (!await SessionPredatesCredentialChangeAsync(ctx)) return await next(filterContext);
 
             await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+            // The 401 carries a body: a bare one is re-executed by the status
+            // pages as a POST to /not-found, which fails antiforgery and
+            // reaches the script as a 400.
             return ctx.Request.HasFormContentType
                 ? Results.Redirect(RouteConstants.Login)
-                : Results.Unauthorized();
+                : Results.Json(new { error = "Your session has ended. Sign in again." },
+                    statusCode: StatusCodes.Status401Unauthorized);
         });
 
     /// <summary>

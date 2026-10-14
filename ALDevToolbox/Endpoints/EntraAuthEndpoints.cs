@@ -285,6 +285,15 @@ internal static class EntraAuthEndpoints
                 ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}=entra-failed");
                 return;
             }
+            // The link is a lasting credential and the round trip to Microsoft
+            // can outlast a reset made meanwhile, so the cut-off the start of
+            // the handshake applied is applied again here (#1336).
+            if (await CookieSessionRevalidation.SessionPredatesCredentialChangeAsync(ctx.HttpContext))
+            {
+                await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                ctx.Response.Redirect(RouteConstants.Login);
+                return;
+            }
             try
             {
                 await entra.LinkAsync(linkUserId, token, ct);

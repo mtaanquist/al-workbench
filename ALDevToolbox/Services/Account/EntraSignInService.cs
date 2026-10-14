@@ -629,8 +629,8 @@ public sealed class EntraSignInService
             // own save does not retry them, and leave the invite usable.
             _db.Entry(inviteLink).State = EntityState.Detached;
             _db.Entry(user).State = EntityState.Detached;
-            _db.Entry(invite).State = EntityState.Unchanged;
             invite.AcceptedAt = null;
+            _db.Entry(invite).State = EntityState.Unchanged;
             var identityTaken = DbErrors.IsUniqueViolation(ex, UserExternalLoginConfiguration.IdentityIndexName);
             _logger.LogWarning(ex,
                 "Accepting invite {InviteId} with Microsoft lost a race ({What}); no account was created.",

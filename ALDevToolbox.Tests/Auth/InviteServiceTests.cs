@@ -189,6 +189,55 @@ public sealed class InviteServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Accepting_with_microsoft_is_refused_where_a_password_works()
+    {
+        var admin = await SeedAdminAsync(TestDb.DefaultOrgId);
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            (token, _) = await NewService(ctx, admin.Id, TestDb.DefaultOrgId).CreateAsync("password.org@example.com", UserRole.User, null);
+        }
+
+        await using var ctx2 = _db.NewContext();
+        var svc = new InviteService(ctx2, new AmbientOrganizationContext(), new AuthService(ctx2, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
+        Func<Task> act = () => svc.PrepareMicrosoftAcceptanceAsync(token, "Password Person");
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("Password");
+    }
+
+    [Fact]
+    public async Task Accepting_with_microsoft_is_allowed_in_a_microsoft_only_organisation()
+    {
+        var admin = await SeedAdminAsync(TestDb.DefaultOrgId);
+        string token;
+        await using (var ctx = _db.NewContext())
+        {
+            (token, _) = await NewService(ctx, admin.Id, TestDb.DefaultOrgId).CreateAsync("ms.org@example.com", UserRole.User, null);
+        }
+        await MakeMicrosoftOnlyAsync(TestDb.DefaultOrgId);
+
+        await using var ctx2 = _db.NewContext();
+        var svc = new InviteService(ctx2, new AmbientOrganizationContext(), new AuthService(ctx2, NullLogger<AuthService>.Instance, _clock), _clock, NullLogger<InviteService>.Instance);
+        var invite = await svc.PrepareMicrosoftAcceptanceAsync(token, "MS Person");
+        invite.Email.Should().Be("ms.org@example.com");
+    }
+
+    private async Task MakeMicrosoftOnlyAsync(int orgId)
+    {
+        await using var ctx = _db.NewContext();
+        var settings = await ctx.OrganizationSettings.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.OrganizationId == orgId);
+        if (settings is null)
+        {
+            settings = new OrganizationSettings { OrganizationId = orgId };
+            ctx.OrganizationSettings.Add(settings);
+        }
+        settings.EntraEnabled = true;
+        settings.LocalLoginPolicy = LocalLoginPolicy.EntraOnly;
+        settings.UpdatedAt = DateTime.UtcNow;
+        await ctx.SaveChangesAsync();
+    }
+
+    [Fact]
     public async Task Accept_rejects_a_second_use_of_the_same_token()
     {
         var admin = await SeedAdminAsync(TestDb.DefaultOrgId);
