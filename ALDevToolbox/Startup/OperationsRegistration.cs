@@ -113,6 +113,23 @@ public static class OperationsRegistration
                         QueueLimit = 0,
                     }));
 
+            // POST /gateway/register exchanges a one-time registration code for a
+            // pending gateway (.design/on-prem-gateway.md). It is anonymous - the code
+            // in the body is the credential - so the limit is what keeps a script
+            // from guessing codes. Customer IT registers a gateway once and may
+            // retype a code a few times; ten an hour per address is plenty for that
+            // and nothing for a guesser against 160 random bits. The address is the
+            // forwarded client address when the proxy is trusted (ForwardedHeadersSetup).
+            options.AddPolicy(GatewayEndpoints.RegisterRateLimitPolicy, httpContext =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 10,
+                        Window = TimeSpan.FromHours(1),
+                        QueueLimit = 0,
+                    }));
+
             // POST /github/webhook is the workbench's one inbound route (#627). It is
             // anonymous by necessity - GitHub carries no cookie - so the limiter is
             // the backstop against somebody pointing a load generator at it. The

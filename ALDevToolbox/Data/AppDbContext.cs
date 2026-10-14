@@ -145,6 +145,12 @@ public class AppDbContext : DbContext
     public DbSet<UserRecoveryCode> UserRecoveryCodes => Set<UserRecoveryCode>();
     public DbSet<UserPasskey> UserPasskeys => Set<UserPasskey>();
     public DbSet<PersonalAccessToken> PersonalAccessTokens => Set<PersonalAccessToken>();
+    // On-premises gateways (.design/on-prem-gateway.md). All three are org-scoped;
+    // the credential lookup and the registration-code exchange are the two reads
+    // that cross the filter, both in GatewayService.
+    public DbSet<Gateway> Gateways => Set<Gateway>();
+    public DbSet<GatewayRegistrationCode> GatewayRegistrationCodes => Set<GatewayRegistrationCode>();
+    public DbSet<GatewaySeenToken> GatewaySeenTokens => Set<GatewaySeenToken>();
     public DbSet<UserRepositoryToken> UserRepositoryTokens => Set<UserRepositoryToken>();
     public DbSet<UserNotificationSetting> UserNotificationSettings => Set<UserNotificationSetting>();
     public DbSet<NotificationDigestItem> NotificationDigestItems => Set<NotificationDigestItem>();
@@ -400,6 +406,9 @@ public class AppDbContext : DbContext
         ScopeToOrganization<RecipeSuggestion>(modelBuilder);
         ScopeToOrganization<RecipeSuggestionFile>(modelBuilder);
         ScopeToOrganization<PersonalAccessToken>(modelBuilder);
+        ScopeToOrganization<Gateway>(modelBuilder);
+        ScopeToOrganization<GatewayRegistrationCode>(modelBuilder);
+        ScopeToOrganization<GatewaySeenToken>(modelBuilder);
         ScopeToOrganization<UserRepositoryToken>(modelBuilder);
         ScopeToOrganization<UserNotificationSetting>(modelBuilder);
         ScopeToOrganization<NotificationDigestItem>(modelBuilder);

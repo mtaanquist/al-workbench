@@ -8,7 +8,8 @@ namespace ALDevToolbox.Startup;
 
 /// <summary>
 /// Sign-in schemes and authorisation policies: the auth cookie, the PAT bearer
-/// scheme, Microsoft (Entra ID) sign-in, and the MCP bearer policy.
+/// scheme, Microsoft (Entra ID) sign-in, the on-premises gateway scheme, and the
+/// MCP bearer and gateway policies.
 /// </summary>
 public static class AuthenticationRegistration
 {
@@ -68,6 +69,12 @@ public static class AuthenticationRegistration
             // set as the cookie path so IOrganizationContext resolves identically.
             .AddScheme<AuthenticationSchemeOptions, ALDevToolbox.Services.Account.PatAuthenticationHandler>(
                 ALDevToolbox.Services.Account.PatAuthenticationHandler.AuthenticationScheme,
+                _ => { })
+            // On-premises gateways (.design/on-prem-gateway.md): a per-request token
+            // each gateway signs with its own key. Only the gateway routes opt in,
+            // through the "Gateway" policy below; nothing else lists this scheme.
+            .AddScheme<AuthenticationSchemeOptions, ALDevToolbox.Services.Gateways.GatewayAuthenticationHandler>(
+                ALDevToolbox.Services.Gateways.GatewayAuthenticationHandler.AuthenticationScheme,
                 _ => { })
             // Microsoft (Entra ID) sign-in — issue #552 slice 2. One handler serves
             // every org: the app-registration credentials live in the database (per
@@ -197,6 +204,21 @@ public static class AuthenticationRegistration
                 };
                 policy.RequireAuthenticatedUser();
                 policy.RequireClaim(HttpOrganizationContext.UserIdClaim);
+                policy.RequireClaim(HttpOrganizationContext.OrganizationIdClaim);
+            });
+            // The gateway routes accept the gateway scheme and nothing else - a
+            // signed-in person's cookie or an assistant's token does not get in -
+            // and a principal must carry the gateway-id claim only that scheme
+            // sets. The MCP policies above require a user id, which a gateway
+            // principal never has, so the reverse holds too.
+            options.AddPolicy(ALDevToolbox.Services.Gateways.GatewayAuthenticationHandler.PolicyName, policy =>
+            {
+                policy.AuthenticationSchemes = new[]
+                {
+                    ALDevToolbox.Services.Gateways.GatewayAuthenticationHandler.AuthenticationScheme,
+                };
+                policy.RequireAuthenticatedUser();
+                policy.RequireClaim(ALDevToolbox.Services.Gateways.GatewayAuthenticationHandler.GatewayIdClaim);
                 policy.RequireClaim(HttpOrganizationContext.OrganizationIdClaim);
             });
             // Kept under the old name for one release so anything that hard-coded

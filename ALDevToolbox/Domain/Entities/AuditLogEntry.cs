@@ -86,6 +86,19 @@ public enum AuditEntityType
     /// that belongs in the log. Named by the passkey's nickname.
     /// </summary>
     Passkey,
+
+    /// <summary>
+    /// An on-premises gateway: registered, approved, renamed, given a new key or
+    /// revoked. Heartbeats are not audited - they are written with
+    /// <c>ExecuteUpdateAsync</c>. See <c>.design/on-prem-gateway.md</c>.
+    /// </summary>
+    Gateway,
+
+    /// <summary>
+    /// A one-time code to register a gateway, or to give one a new key: who
+    /// handed it out and when it was used. The code itself is never stored.
+    /// </summary>
+    GatewayRegistrationCode,
 }
 
 /// <summary>The kind of change captured by an audit row.</summary>

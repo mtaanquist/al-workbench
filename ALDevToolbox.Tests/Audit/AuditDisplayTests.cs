@@ -58,6 +58,7 @@ public sealed class AuditDisplayTests
                 AuditEntityType.Recipe,
                 AuditEntityType.Team,
                 AuditEntityType.Passkey,
+                AuditEntityType.Gateway,
             });
     }
 

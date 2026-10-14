@@ -487,6 +487,172 @@ namespace ALDevToolbox.Data.Migrations
                     b.ToTable("email_outbox", (string)null);
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.Gateway", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime?>("ApprovedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("approved_at");
+
+                    b.Property<int?>("ApprovedByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("approved_by_user_id");
+
+                    b.Property<string>("KeyFingerprint")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("key_fingerprint");
+
+                    b.Property<DateTime>("KeyRegisteredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("key_registered_at");
+
+                    b.Property<DateTime?>("LastSeenAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_seen_at");
+
+                    b.Property<string>("MachineName")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("machine_name");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("name");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<byte[]>("PublicKey")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("public_key");
+
+                    b.Property<DateTime>("RegisteredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("registered_at");
+
+                    b.Property<string>("ReportedVersion")
+                        .HasColumnType("text")
+                        .HasColumnName("reported_version");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("revoked_at");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("state");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ApprovedByUserId");
+
+                    b.HasIndex("OrganizationId", "RevokedAt");
+
+                    b.ToTable("gateways", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayRegistrationCode", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("CodeHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("code_hash");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<int?>("CreatedByUserId")
+                        .HasColumnType("integer")
+                        .HasColumnName("created_by_user_id");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<int?>("GatewayId")
+                        .HasColumnType("integer")
+                        .HasColumnName("gateway_id");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<DateTime?>("UsedAt")
+                        .IsConcurrencyToken()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("used_at");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CodeHash")
+                        .IsUnique();
+
+                    b.HasIndex("CreatedByUserId");
+
+                    b.HasIndex("GatewayId");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.ToTable("gateway_registration_codes", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewaySeenToken", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<int>("GatewayId")
+                        .HasColumnType("integer")
+                        .HasColumnName("gateway_id");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<string>("TokenId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("token_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("GatewayId", "ExpiresAt");
+
+                    b.HasIndex("GatewayId", "TokenId")
+                        .IsUnique();
+
+                    b.ToTable("gateway_seen_tokens", (string)null);
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryCandidate", b =>
                 {
                     b.Property<int>("Id")
@@ -7220,6 +7386,66 @@ namespace ALDevToolbox.Data.Migrations
                         .IsRequired();
 
                     b.Navigation("Article");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.Gateway", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "ApprovedByUser")
+                        .WithMany()
+                        .HasForeignKey("ApprovedByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ApprovedByUser");
+
+                    b.Navigation("Organization");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayRegistrationCode", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.User", "CreatedByUser")
+                        .WithMany()
+                        .HasForeignKey("CreatedByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Gateway", "Gateway")
+                        .WithMany()
+                        .HasForeignKey("GatewayId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", "Organization")
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("CreatedByUser");
+
+                    b.Navigation("Gateway");
+
+                    b.Navigation("Organization");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewaySeenToken", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Gateway", "Gateway")
+                        .WithMany()
+                        .HasForeignKey("GatewayId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Gateway");
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GitHubRepositoryCandidate", b =>

@@ -3,7 +3,7 @@ using ALDevToolbox.Services.Organizations;
 
 namespace ALDevToolbox.Startup;
 
-/// <summary>Per-organisation configuration, administration, teams and auditing.</summary>
+/// <summary>Per-organisation configuration, administration, teams, gateways and auditing.</summary>
 public static class OrganizationRegistration
 {
     /// <summary>Registers the organisation-scoped services.</summary>
@@ -18,6 +18,9 @@ public static class OrganizationRegistration
         services.AddScoped<OrganizationAdminService>();
         services.AddScoped<DisplayTimeZone>();
         services.AddScoped<TeamService>();
+        // On-premises gateways: Administration → Gateways, and the gateway's own
+        // authentication (.design/on-prem-gateway.md).
+        services.AddScoped<ALDevToolbox.Services.Gateways.GatewayService>();
         return services;
     }
 }
