@@ -87,6 +87,11 @@ public class ReleaseImportService
     /// Creates a Release and ingests every supplied <c>.app</c> upload. Per-app
     /// failures abort the run and flip the Release to <c>failed</c>; partial
     /// modules stay in the DB so an operator can inspect what got through.
+    /// The ingest runs inside the caller's request, so this method is the
+    /// caller <see cref="ProcessReleaseAsync"/> leaves a cancellation to: a
+    /// request that ends early (the admin closed the tab) fails the release
+    /// rather than leaving it <c>ingesting</c> with nobody importing it, which
+    /// would refuse Retry and Add modules until the next restart (#1331).
     /// </summary>
     public async Task<ReleaseImportSummary> ImportReleaseAsync(
         ReleaseImportRequest request,
@@ -101,8 +106,23 @@ public class ReleaseImportService
             });
         }
         var releaseId = await BeginReleaseAsync(ReleaseImportMetadata.From(request), ct).ConfigureAwait(false);
-        return await ProcessReleaseAsync(releaseId, request.Uploads, request.StoreSymbolReference, ct).ConfigureAwait(false);
+        try
+        {
+            return await ProcessReleaseAsync(releaseId, request.Uploads, request.StoreSymbolReference, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Release ingest interrupted because the upload request ended: ReleaseId={ReleaseId}", releaseId);
+            await StampFailedAsync(releaseId, InterruptedUploadMessage, onlyWhileIngesting: true).ConfigureAwait(false);
+            throw;
+        }
     }
+
+    /// <summary>The status message a release gets when its upload request ended mid-ingest (#1331).</summary>
+    internal const string InterruptedUploadMessage =
+        "The upload was interrupted before it finished, because the page was closed or the connection dropped. "
+        + "Delete this release and upload the .app files again.";
 
     /// <summary>
     /// Validates the metadata, reserves the label, and inserts the Release row
@@ -288,11 +308,16 @@ public class ReleaseImportService
     /// that does not land leaves the release <c>ingesting</c> with nobody importing
     /// it, and builds parenting onto it wait for it (#1180).
     /// </summary>
-    private async Task StampFailedAsync(int releaseId, string message)
+    /// <param name="onlyWhileIngesting">
+    /// Leaves a release that has already reached another state alone: a cancellation
+    /// that lands after the ingest saved the release <c>ready</c> must not undo that.
+    /// </param>
+    private async Task StampFailedAsync(int releaseId, string message, bool onlyWhileIngesting = false)
     {
         _db.ChangeTracker.Clear();
         var failed = await _db.OeReleases.FindAsync(new object?[] { releaseId }, CancellationToken.None).ConfigureAwait(false);
         if (failed is null) return;
+        if (onlyWhileIngesting && !string.Equals(failed.Status, "ingesting", StringComparison.Ordinal)) return;
         failed.Status = "failed";
         failed.StatusMessage = message;
         failed.UpdatedAt = DateTime.UtcNow;
