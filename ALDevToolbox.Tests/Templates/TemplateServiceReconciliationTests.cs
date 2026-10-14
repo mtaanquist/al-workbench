@@ -384,6 +384,75 @@ public sealed class TemplateServiceWriteSideTests : IDisposable
         await act.Should().ThrowAsync<PlanValidationException>();
     }
 
+    [Fact]
+    public async Task Create_rejects_a_module_dependency_whose_key_names_no_module()
+    {
+        // #1342: generation drops a module dependency whose module is not in
+        // the workspace, so a typo used to save fine and then vanish.
+        await using (var seed = _db.NewContext())
+        {
+            seed.Modules.Add(ModuleBuilder.Default("document-capture"));
+            var deleted = ModuleBuilder.Default("payroll");
+            deleted.DeletedAt = DateTime.UtcNow;
+            seed.Modules.Add(deleted);
+            await seed.SaveChangesAsync();
+        }
+        var input = NewAuthoring("runtime-module-dep", extensions: new[]
+        {
+            new ExtensionAuthoring(
+                Path: "Core",
+                NameTemplate: "Core",
+                Required: true,
+                Application: null, Runtime: null,
+                IdRangeFrom: null, IdRangeTo: null,
+                Folders: Array.Empty<FolderAuthoring>(),
+                Dependencies: new[]
+                {
+                    ModuleDependency("document-capture"),
+                    ModuleDependency("documnet-capture"),
+                    ModuleDependency("payroll"),
+                }),
+        });
+
+        await using var ctx = _db.NewContext();
+        var act = () => NewService(ctx).CreateAsync(input);
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Keys.Should().BeEquivalentTo(
+            "Extensions[0].Dependencies[1].Module", "Extensions[0].Dependencies[2].Module");
+        ex.Which.Errors["Extensions[0].Dependencies[1].Module"].Should().Contain("'documnet-capture'");
+    }
+
+    [Fact]
+    public async Task Create_accepts_a_module_dependency_on_a_live_module()
+    {
+        await using (var seed = _db.NewContext())
+        {
+            seed.Modules.Add(ModuleBuilder.Default("document-capture"));
+            await seed.SaveChangesAsync();
+        }
+        var input = NewAuthoring("runtime-module-dep-ok", extensions: new[]
+        {
+            new ExtensionAuthoring(
+                Path: "Core",
+                NameTemplate: "Core",
+                Required: true,
+                Application: null, Runtime: null,
+                IdRangeFrom: null, IdRangeTo: null,
+                Folders: Array.Empty<FolderAuthoring>(),
+                Dependencies: new[] { ModuleDependency("document-capture") }),
+        });
+
+        await using var ctx = _db.NewContext();
+        var saved = await NewService(ctx).CreateAsync(input);
+
+        saved.WorkspaceExtensions.Single().Dependencies.Single().RefModuleKey.Should().Be("document-capture");
+    }
+
+    private static DependencyAuthoring ModuleDependency(string key) => new(
+        RefExtensionPath: null, RefModuleKey: key,
+        LitId: null, LitName: null, LitPublisher: null, LitVersion: null);
+
     // ===== Helpers =====
 
     private TemplateService NewService(Data.AppDbContext ctx) =>

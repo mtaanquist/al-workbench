@@ -776,6 +776,7 @@ public class TemplateService
         await ValidateMetadataAsync(input, existingId, errors, ct);
         var (defaults, appSourceCop) = TemplateValidation.ParseJsonOverrides(input, errors);
         TemplateValidation.ValidateExtensions(input.Extensions, errors);
+        await ValidateDependencyModuleKeysAsync(input, errors, ct);
         var defaultModuleIds = await ResolveDefaultModuleIdsAsync(input, errors, ct);
         var defaultApplicationVersionId = await ResolveApplicationVersionIdAsync(input, errors, ct);
         var (includedFileIds, workspaceRootPaths) = await ResolveIncludedFileIdsAsync(input, errors, ct);
@@ -880,6 +881,40 @@ public class TemplateService
         if (input.CoreIdRangeTo <= input.CoreIdRangeFrom) errors[nameof(input.CoreIdRangeTo)] = "Core ID range end must be greater than the start.";
         if (input.ModuleIdRangeStart <= 0) errors[nameof(input.ModuleIdRangeStart)] = "Module ID range start must be greater than zero.";
         if (input.ModuleIdRangeSize <= 0) errors[nameof(input.ModuleIdRangeSize)] = "Module ID range size must be greater than zero.";
+    }
+
+    /// <summary>
+    /// Refuses a <c>module =</c> dependency whose key names no live module.
+    /// Generation drops a module dependency whose module is not part of the
+    /// workspace, which is right for a real module left unticked
+    /// (.design/generation-engine.md) but meant a typo or a deleted module
+    /// saved fine and then vanished from every generated app.json (#1342).
+    /// Only dependencies that set the module shape alone are checked here;
+    /// the shape rules in <see cref="TemplateValidation"/> report the rest.
+    /// </summary>
+    private async Task ValidateDependencyModuleKeysAsync(
+        TemplateAuthoring input, Dictionary<string, string> errors, CancellationToken ct)
+    {
+        var refs = input.Extensions
+            .SelectMany((ext, i) => ext.Dependencies.Select((dep, j) => (Ext: i, Dep: j, dep)))
+            .Where(r => r.dep.RefModuleKey is not null && r.dep.RefExtensionPath is null && r.dep.LitId is null)
+            .Select(r => (r.Ext, r.Dep, Key: r.dep.RefModuleKey!.Trim()))
+            .ToList();
+        if (refs.Count == 0) return;
+
+        var keys = refs.Select(r => r.Key).Distinct(StringComparer.Ordinal).ToList();
+        var live = await _db.Modules
+            .AsNoTracking()
+            .Where(m => keys.Contains(m.Key) && m.DeletedAt == null)
+            .Select(m => m.Key)
+            .ToListAsync(ct);
+        var liveKeys = new HashSet<string>(live, StringComparer.Ordinal);
+
+        foreach (var (ext, dep, key) in refs.Where(r => !liveKeys.Contains(r.Key)))
+        {
+            errors[$"Extensions[{ext}].Dependencies[{dep}].Module"] =
+                $"No module with the key '{key}' exists. Check the spelling, or remove this dependency if the module was deleted.";
+        }
     }
 
     /// <summary>

@@ -300,7 +300,7 @@ Validation: the resolved ranges must not overlap. `ValidateIdRanges` checks this
 `workspace_extension_dependencies` rows are emitted in `Ordering`, after any implicit deps the resolver injects. Three reference shapes (the CHECK constraint enforces exactly one per row):
 
 - **`ref_extension_path`** — intra-workspace reference to another extension. The resolver looks up the target's freshly-allocated GUID and substituted name and emits a dep node. A reference to a `path` that isn't in this workspace (optional but not selected, or a typo) fails fast with `PlanValidationException`.
-- **`ref_module_key`** — catalogue reference. When the named module was also selected for this workspace, point at its cloned extension's GUID. Otherwise the dep is silently dropped; the template-save validator should have rejected dangling references already.
+- **`ref_module_key`** — catalogue reference. When the named module was also selected for this workspace, point at its cloned extension's GUID. Otherwise (a real module the user didn't tick) the dep is dropped. A key that names no live module is refused when the template is saved, so a typo never reaches generation.
 - **`lit_id` + `lit_name` + `lit_publisher` + `lit_version`** — literal AL app coordinates. Emitted as-is.
 
 **Implicit deps.** Module-cloned extensions get an implicit dependency on every required template-declared extension (Core, Hotfix, etc.) prepended before their own declared deps. So a Document Capture module clone in a workspace with required Core and Hotfix extensions ships with `dependencies = [Core, Hotfix, ...module's own]` even when the module's own declarations don't mention them. This lets the AL compiler see them without the template author having to spell it out.

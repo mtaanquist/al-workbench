@@ -249,6 +249,41 @@ public sealed class WorkspaceGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task An_unknown_extension_name_is_refused_rather_than_dropped()
+    {
+        // #1342: "Tests" for "Test" used to produce a workspace without the
+        // test app, report success, and record the typo in the saved settings.
+        var template = TemplateBuilder.Default();
+        template.WorkspaceExtensions.Add(new WorkspaceExtension
+        {
+            OrganizationId = template.OrganizationId,
+            Path = "Test",
+            NameTemplate = "{{extension_prefix}} Test",
+            Required = false,
+            Ordering = 1,
+        });
+        await SeedTemplateAsync(template);
+
+        var act = () => NewService().GenerateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(selectedExtensions: new[] { "Tests" }));
+
+        var ex = await act.Should().ThrowAsync<PlanValidationException>();
+        ex.Which.Errors.Should().ContainKey("SelectedExtensionPaths")
+            .WhoseValue.Should().Contain("'Tests'").And.Contain("'Test'");
+    }
+
+    [Fact]
+    public async Task Naming_a_required_extension_among_the_selected_ones_is_accepted()
+    {
+        await SeedTemplateAsync(TemplateBuilder.Default());
+
+        var errors = await NewService().ValidateWorkspaceAsync(
+            PlanBuilder.WorkspacePlan(selectedExtensions: new[] { "Core" }));
+
+        errors.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task A_deleted_module_key_is_refused()
     {
         var deleted = ModuleBuilder.Default("payroll", "Payroll");
