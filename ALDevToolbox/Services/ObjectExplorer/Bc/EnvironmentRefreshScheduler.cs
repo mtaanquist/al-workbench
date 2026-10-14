@@ -36,6 +36,7 @@ public sealed class EnvironmentRefreshScheduler : PolledScheduler
     private readonly EnvironmentRefreshQueue _queue;
     private readonly TimeProvider _clock;
     private readonly ILogger<EnvironmentRefreshScheduler> _logger;
+    private readonly Operations.MaintenanceModeState? _maintenance;
 
     // The last UTC date a sweep ran, so the five-minute poll fires the sweep once per
     // night rather than twelve times inside the sweep hour.
@@ -55,7 +56,10 @@ public sealed class EnvironmentRefreshScheduler : PolledScheduler
         EnvironmentRefreshQueue queue,
         TimeProvider clock,
         ILogger<EnvironmentRefreshScheduler> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so a scheduler built by hand keeps compiling; production DI
+        // always supplies the singleton.
+        Operations.MaintenanceModeState? maintenance = null)
         // Polls every 5 minutes; a sweep only enumerates and enqueues (the round trips
         // run on EnvironmentRefreshWorker), so a 10-minute active ceiling is ample.
         : base(logger, heartbeats, nameof(EnvironmentRefreshScheduler),
@@ -68,7 +72,8 @@ public sealed class EnvironmentRefreshScheduler : PolledScheduler
         _queue = queue;
         _clock = clock;
         _logger = logger;
-        _startOffset = TimeSpan.FromMinutes(Random.Shared.Next(0, (int)MaxStartOffset.TotalMinutes + 1));
+        _maintenance = maintenance;
+        _startOffset =TimeSpan.FromMinutes(Random.Shared.Next(0, (int)MaxStartOffset.TotalMinutes + 1));
     }
 
     /// <summary>
@@ -87,6 +92,9 @@ public sealed class EnvironmentRefreshScheduler : PolledScheduler
         var nowUtc = _clock.GetUtcNow().UtcDateTime;
         var today = DateOnly.FromDateTime(nowUtc);
         if (!IsDue(nowUtc, _lastSweptUtcDate, _startOffset)) return;
+        // Not while a restore runs or a failed one holds the site closed (#1321).
+        // Today's sweep stays owed, so a later poll inside the hour still runs it.
+        if (_maintenance?.IsActive == true) return;
 
         await SweepAsync(ct).ConfigureAwait(false);
         _lastSweptUtcDate = today;
