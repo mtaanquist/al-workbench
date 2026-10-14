@@ -227,7 +227,10 @@ public sealed class GatewayRunner
             InterruptedCommandIds = interrupted,
         }, ct).ConfigureAwait(false);
 
-        // AL Workbench has them now: it fails each one and never sends it again.
+        // AL Workbench only applies the lists for an approved gateway, so a pending one
+        // keeps reporting them until a heartbeat is answered as approved. Then AL
+        // Workbench has them: it fails each one and never sends it again.
+        if (!answer.Approved) return answer;
         foreach (var id in interrupted)
         {
             _runOnce.MarkFinished(id);
@@ -457,8 +460,11 @@ public sealed class GatewayRunner
                 _logger.LogError("AL Workbench refused the result of command {CommandId}: {Reason}", commandId, ex.Message);
                 return;
             }
-            catch (Exception ex) when (ex is WorkbenchUnreachableException or GatewayCredentialRefusedException)
+            catch (Exception ex) when (ex is WorkbenchUnreachableException or GatewayCredentialRefusedException
+                                       or GatewayNotApprovedException)
             {
+                // Not approved: the key was replaced and an Admin has not approved the new
+                // one yet. The result waits for that rather than being lost.
                 var wait = backoff.Next();
                 _logger.LogWarning("Could not report the result of command {CommandId} ({Reason}); trying again in {Seconds} seconds.",
                     commandId, ex.Message, (int)Math.Ceiling(wait.TotalSeconds));

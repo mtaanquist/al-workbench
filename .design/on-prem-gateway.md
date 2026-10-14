@@ -643,7 +643,8 @@ run-once list), `work\<command id>\` (a command's downloaded files, removed when
 **The loop** (`GatewayRunner`) is one loop, so the order is plain:
 
 - The first heartbeat goes before any poll, and carries the ids the run-once file lists as started
-  but never finished: the interrupted ones. Once AL Workbench has them they are marked finished
+  but never finished: the interrupted ones. Once a heartbeat is answered as approved (AL Workbench
+  ignores a pending gateway's lists, so a pending one keeps sending them) they are marked finished
   locally and never reported or run again.
 - Heartbeats every 60 seconds, also while a command runs, listing it as running.
 - While the gateway is not approved (the heartbeat says so, or a poll answers 403) it does not poll
@@ -669,7 +670,7 @@ run-once list), `work\<command id>\` (a command's downloaded files, removed when
 5. The executor runs. Its progress lines are batched: at most one post every 3 seconds, at most 200
    lines a post, lines over 2,000 characters cut, at most 10,000 lines held (more are counted and
    reported as left out). A 409 on progress stops the verb.
-6. The result is posted, retried with back-off until it arrives (a 409 means AL Workbench already
+6. The result is posted, retried with back-off until it arrives, including through a 401 or a 403 while a new key waits for approval (a 409 means AL Workbench already
    closed it, and is accepted), then the command is marked finished.
 
 A stop in the middle leaves the command started-not-finished, which the next start reports as

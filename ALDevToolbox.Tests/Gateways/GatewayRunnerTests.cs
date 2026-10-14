@@ -275,6 +275,52 @@ public sealed class GatewayRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Interrupted_ids_are_not_reported_again_after_an_approved_heartbeat()
+    {
+        _runOnce.MarkStarted(72);
+        _runOnce = new FileRunOnceStore(_folder.RunOnceFile, _clock);
+        var heartbeats = 0;
+        _workbench.Respond = request =>
+        {
+            if (request.Path == GatewayProtocol.HeartbeatPath)
+            {
+                if (++heartbeats == 2) _stop.Cancel();
+                return FakeWorkbench.Heartbeat(approved: true);
+            }
+            return FakeWorkbench.NoContent();
+        };
+
+        await RunAsync();
+
+        var beats = _workbench.To(GatewayProtocol.HeartbeatPath).Select(r => r.Json<GatewayHeartbeatRequest>()).ToList();
+        beats[0].InterruptedCommandIds.Should().Equal(72);
+        beats[1].InterruptedCommandIds.Should().BeEmpty();
+        new FileRunOnceStore(_folder.RunOnceFile, _clock).Unfinished().Should().BeEmpty();
+        _log.Messages(GatewayLog.CommandInterruptedId).Should().ContainSingle().Which.Should().Contain("72");
+    }
+
+    [Fact]
+    public async Task A_result_refused_while_waiting_for_approval_is_kept_and_retried()
+    {
+        Serve([Command(93)]);
+        var inner = _workbench.Respond;
+        var resultAttempts = 0;
+        _workbench.Respond = request =>
+        {
+            if (request.Path == GatewayProtocol.CommandResultPath(93) && ++resultAttempts < 3)
+            {
+                return FakeWorkbench.Refused(HttpStatusCode.Forbidden, "This gateway is waiting for an Admin to approve it.");
+            }
+            return inner(request);
+        };
+
+        await RunAsync();
+
+        resultAttempts.Should().Be(3);
+        _runOnce.Unfinished().Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task A_result_refused_with_401_is_kept_and_retried_until_it_arrives()
     {
         Serve([Command(92)]);
@@ -459,7 +505,7 @@ public sealed class GatewayRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task After_a_restart_mid_command_the_first_heartbeat_reports_it_interrupted_once()
+    public async Task After_a_restart_mid_command_heartbeats_report_it_interrupted_until_an_approved_answer()
     {
         // The previous run started command 71 and stopped before finishing it.
         _runOnce.MarkStarted(71);
@@ -469,17 +515,22 @@ public sealed class GatewayRunnerTests : IDisposable
         {
             if (request.Path == GatewayProtocol.HeartbeatPath)
             {
-                if (++heartbeats == 2) _stop.Cancel();
-                return FakeWorkbench.Heartbeat(approved: false);
+                // The workbench ignores the lists of a gateway that is not approved, so the
+                // first (pending) answer must not count as delivered.
+                heartbeats++;
+                return FakeWorkbench.Heartbeat(approved: heartbeats >= 2);
             }
+            _stop.Cancel();
             return FakeWorkbench.NoContent();
         };
 
         await RunAsync();
 
         var beats = _workbench.To(GatewayProtocol.HeartbeatPath).Select(r => r.Json<GatewayHeartbeatRequest>()).ToList();
+        beats.Should().HaveCount(2);
         beats[0].InterruptedCommandIds.Should().Equal(71);
-        beats[1].InterruptedCommandIds.Should().BeEmpty();
+        beats[1].InterruptedCommandIds.Should().Equal(71);
+        _workbench.Requests.Last().Path.Should().Be(GatewayProtocol.NextCommandPath);
         new FileRunOnceStore(_folder.RunOnceFile, _clock).Unfinished().Should().BeEmpty();
         new FileRunOnceStore(_folder.RunOnceFile, _clock).HasStarted(71).Should().BeTrue();
         _log.Messages(GatewayLog.CommandInterruptedId).Should().ContainSingle().Which.Should().Contain("71");
