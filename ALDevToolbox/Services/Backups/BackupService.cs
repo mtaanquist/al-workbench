@@ -562,13 +562,14 @@ public sealed class BackupService
     /// Why this installation can't take over another installation's backups
     /// (#1322), as a sentence for the SiteAdmin; <see langword="null"/> when it
     /// can. It has to be fresh: no organisation besides the system one, no
-    /// user besides the bootstrap admin, no solutions, no releases, and no
-    /// backups of its own (only ones downloaded with Recover). Restoring
-    /// another installation's dump over anything more would replace real data
-    /// with a neighbour's, which the deployment stamp exists to stop.
+    /// user besides the bootstrap admin, no solutions and no releases. Its own
+    /// backups don't count: a new server takes one on its first start, and
+    /// with the rest empty it holds nothing. Restoring another installation's
+    /// dump over anything more would replace real data with a neighbour's,
+    /// which the deployment stamp exists to stop.
     ///
     /// <para>
-    /// Only the organisation and backup checks read tables without a query
+    /// Only the organisation check reads a table without a query
     /// filter. Users, solutions and releases are counted through the normal
     /// filter, so they count the SiteAdmin caller's own organisation. That is
     /// enough, and needs no <c>IgnoreQueryFilters()</c>: the organisation check
@@ -600,10 +601,9 @@ public sealed class BackupService
         {
             return "This installation already has solutions or releases of its own, so another installation's backup can't be restored over it.";
         }
-        if (await _db.Backups.AsNoTracking().AnyAsync(b => b.RecoveredFromDeploymentId == null, ct))
-        {
-            return "This server already has backups of its own. Delete them first if this installation really is new.";
-        }
+        // Deliberately no check on this server's own backups: a new server takes
+        // one within seconds of its first start, and the checks above already
+        // show the site is empty, so that backup holds nothing worth protecting.
         return null;
     }
 

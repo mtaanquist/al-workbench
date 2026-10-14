@@ -173,9 +173,8 @@ If the server is gone (lost host, lost `pg-data`, lost `app-backups`):
 **When Recover is not offered.** Recover only appears, and Restore of a
 recovered backup only works, on an installation that is still new: only
 the default organisation, no user besides the first administrator, no
-solutions, no releases, and no backups of its own. If the new server has
-already taken its first nightly backup, delete that backup first. The
-reason for the rule: a backup from another installation replaces
+solutions and no releases. Backups the new server has already taken of
+itself don't count. The reason for the rule: a backup from another installation replaces
 everything, and the stamp on each backup exists to stop a neighbour's
 backup in the same storage being restored over real data.
 

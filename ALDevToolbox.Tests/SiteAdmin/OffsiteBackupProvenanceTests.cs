@@ -390,7 +390,7 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
     }
 
     [Fact]
-    public async Task An_installation_with_users_or_backups_of_its_own_is_not_fresh()
+    public async Task An_installation_with_users_is_not_fresh_but_its_own_backups_do_not_count()
     {
         await MakeFreshAsync();
         await using (var ctx = _db.NewContext())
@@ -406,7 +406,9 @@ public sealed class OffsiteBackupProvenanceTests : IDisposable
 
             ctx.Backups.Add(new Backup { FileName = "own.dump", CreatedAt = Now, Kind = BackupKind.Scheduled });
             await ctx.SaveChangesAsync();
-            (await NewBackups(FakePgRestore(), ctx).RecoveryBlockerAsync()).Should().Contain("backups of its own");
+            // The backup a new server takes on its first start must not block
+            // recovering the installation it replaces.
+            (await NewBackups(FakePgRestore(), ctx).RecoveryBlockerAsync()).Should().BeNull();
         }
     }
 
