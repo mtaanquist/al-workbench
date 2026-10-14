@@ -385,21 +385,28 @@ command never runs under an older version than the one on disk. States, reported
 | State | When | What is allowed |
 | --- | --- | --- |
 | `valid` | Read without mistakes | The file as written |
-| `invalid` | Mistakes, or a named script is missing | The tiers of the last good version, `inventory` only, until fixed |
+| `invalid` | Mistakes, a named script is missing, or the file could not be read | The tiers of the last good version, `inventory` only, until fixed |
 | `missing` | No `gateway.toml` | Nothing; the gateway still starts, so it can be registered and approved first |
 | `unsafe` | Someone other than administrators can change the files | Nothing; at start the gateway stops with exit code 1 |
 
 A file with mistakes keeps the last good tiers readable rather than refusing everything: an edit
 that broke the file may have been meant to take a permission away, so the old permissions are not
-kept, but reads change nothing and AL Workbench keeps seeing the tiers. Each change of state is
-logged once (event ids 3000 read, 3001 mistakes, 3002 missing, 3003 unsafe).
+kept, but reads change nothing and AL Workbench keeps seeing the tiers. A file that is there but
+cannot be read (held open by an editor, or its rights changed) is treated the same way until a read
+succeeds, since what it now says is unknown. Each change of state is logged once (event ids 3000
+read, 3001 mistakes, 3002 missing, 3003 unsafe).
 
-**File permissions** (`IFileAccessCheck`; `WindowsFileAccessCheck` in the host). The program folder,
-`gateway.toml`, and each named script and its folder must be owned by Administrators, SYSTEM or
-TrustedInstaller, and no one else may hold a right that changes them (write, append, attributes,
+**File permissions** (`IFileAccessCheck`; `WindowsFileAccessCheck` in the host reads the access
+list, `AccessRules` judges it). The program folder and every file and folder in it (the program, its
+DLLs, `gateway.toml`), and each named script and its folder must be owned by Administrators, SYSTEM
+or TrustedInstaller, and no one else may hold a right that changes them (write, append, attributes,
 delete, delete children, change permissions, take ownership, generic write or all). That includes
-the gateway's own service account. Deny and inherit-only entries are ignored. Checked on the same
-schedule as the file; at start a problem logs event 3003 and ends the service with exit code 1,
+the gateway's own service account. On a folder, an inherit-only entry that is passed on to files or
+folders created in it counts like one on the folder itself, since it decides who can write the next
+DLL; on a file it applies to nothing. Deny entries, and the CREATOR OWNER and CREATOR GROUP
+placeholders, add nobody. A folder where many files are open names five and counts the rest. The
+same rule covers the tier's install folder whose `NavAdminTool.ps1` or module the runner loads (see
+the runner, below). Checked on the same schedule as the file; at start a problem logs event 3003 and ends the service with exit code 1,
 the same way as loosened data-folder rights (event 2008), so the recovery options `install` sets
 restart it every minute and it starts by itself once the rights are fixed. Later, a problem refuses
 every command, reads included.
@@ -408,8 +415,11 @@ every command, reads included.
 downloaded). A refusal is reported as the command's failure with the reason and "Nothing was
 changed.", and logged with event id 1003. The command names its tier with the parameters in
 `GatewayCommandParameters` (`machine`, `instance`, `tenant`, and for `publish-install` `apps`
-with each app's `publisher` and `signed`, and `unpublishPrevious`); a parameter of the wrong shape
-refuses the command. What each verb needs:
+with each app's `file`, `publisher` and `signed`, and `unpublishPrevious`); a parameter of the wrong
+shape refuses the command. A `publish-install` must list its apps, never an empty list, with exactly
+one app for each of the command's files, named by the file's name; otherwise it is refused, because
+an empty list would pass every publisher and signing rule while the verb published whatever files
+came with it. What each verb needs:
 
 | Verb | Needs |
 | --- | --- |
@@ -421,15 +431,22 @@ refuses the command. What each verb needs:
 
 Then, for every change: refused when any tier it touches is `production` and an AI assistant asked
 ("AI assistants cannot change on-premises production"), and refused outside any touched tier's
-`change_hours`. The publisher checked here is the one the command declares; the `publish-install`
-verb (#1375) checks it again against the `.app`'s own manifest. The shared-tier rule
+`change_hours`. Everything this check knows about an app is what the command declares: the
+publisher, the `signed` flag and which file is which. It refuses on the claim early; the
+`publish-install` verb (#1375) must verify it against the files (see the open items). The shared-tier rule
 (`shared_restart`) needs to know which Solutions each tier is linked to, which only AL Workbench
 knows; it is enforced with the restart group (#1368).
 
 **The report.** `GatewayPolicyReport` (contracts) goes with the first heartbeat after start, after
 any change, and every 15 minutes; other heartbeats stay small. AL Workbench stores it in
 `gateways.effective_policy` (jsonb) with `policy_reported_at`, whether or not the gateway is
-approved yet, and keeps the stored one when a heartbeat carries none or one over 256 KB.
+approved yet, and keeps the stored one when a heartbeat carries none. The gateway lists at most 50
+problems (and counts the rest), and a report over 128 KB of JSON is replaced by a short one with
+`tooLarge` set and the state, so a large file can never get the heartbeat refused and the gateway
+shown offline; `check` still shows all of it. When AL Workbench receives that short report, or one
+over its own 256 KB limit from a gateway that did not cut it down, it keeps the stored report and
+sets `policy_stale`, so it is never shown as what the gateway enforces now; the next full report
+clears it.
 
 **The runner** (`PowerShellRunner` over `IProcessRunner`). One child process per operation:
 `powershell.exe` or `pwsh.exe` with fixed switches (`-NoLogo -NoProfile -NonInteractive
@@ -444,7 +461,15 @@ the folder holds (`.psd1`, `.psm1`, then `.dll`); the folder is the one in the t
 image path (`MicrosoftDynamicsNavServer$<instance>`, read by `RegistryServiceTierLocator`). The
 result comes back on standard output between two marker lines as base64 JSON; other lines are log,
 streamed as progress; a failure is a non-zero exit with PowerShell's error on standard error.
-A timeout or a cancellation kills the whole process tree.
+A timeout or a cancellation kills the whole process tree. On Windows each child also goes into a
+job object set to kill everything in it when closed (`JobObjectContainment` behind
+`IProcessContainment`), closed when the operation ends, so a grandchild whose parent already exited,
+which a tree kill no longer finds, cannot outlive the command.
+
+Before it loads a tier's module, the runner checks the tier's install folder and everything in it
+with the same rule as the gateway's own files, and refuses to run anything against a tier where
+someone other than administrators can change them: whoever can replace `NavAdminTool.ps1` or a
+module DLL there gets code running in the gateway's PowerShell. `check` reports it for each tier.
 
 PowerShell per tier (`PowerShellChoice`): the file's `powershell` if set; else 7 from Business
 Central 24 (assumed to be the first whose module needs modern .NET; to be confirmed against real servers
@@ -468,8 +493,11 @@ first exercised with #1365.
   Windows PowerShell 5.1.
 - **`shared_restart`** (#1368). The gateway cannot tell which Solutions share a tier, so the rule is
   parsed and reported but not enforced; the restart group enforces it.
-- **Publisher against the `.app`** (#1375). The policy checks the publisher the command declares;
-  `publish-install` must read it again from each `.app`'s manifest and refuse a mismatch.
+- **Each `.app` against the declared list** (#1375). The policy check sees only what the command
+  declares. Before publishing anything, `publish-install` must check that the files are exactly the
+  apps declared (as many, one each), read each `.app`'s publisher from its own manifest and refuse
+  a mismatch with the declared one, and verify each signature itself: with `allow_unsigned = false`,
+  an app whose Authenticode or NAVX signature does not verify is refused whatever `signed` claimed.
 
 ## Data model
 
@@ -477,7 +505,7 @@ New tables, all org-scoped with the usual query filter:
 
 | Table | Holds |
 | --- | --- |
-| `gateways` | Name, public key and its fingerprint, state (pending, approved), registered at, approved by and at, last seen, reported version, machine name, effective policy (JSON) and when it was reported, revoked at, the online state last announced to Admins |
+| `gateways` | Name, public key and its fingerprint, state (pending, approved), registered at, approved by and at, last seen, reported version, machine name, effective policy (JSON), when it was reported and whether it is out of date, revoked at, the online state last announced to Admins |
 | `gateway_registration_codes` | Code hash, created by, expires at, used at, gateway id (set for a rotation code) |
 | `gateway_seen_tokens` | Gateway, `jti`, expires at (replay protection; swept with the commands) |
 | `gateway_commands` | As in "Commands" above |

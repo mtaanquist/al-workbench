@@ -274,4 +274,9 @@ internal sealed class FakeFileAccess : ALWorkbench.Gateway.Core.Policy.IFileAcce
     }
 
     public bool Exists(string path) => Existing.Contains(path) || File.Exists(path);
+
+    /// <summary>What <see cref="Contents"/> lists for a folder; a folder not given lists nothing.</summary>
+    public Dictionary<string, List<string>> FolderContents { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public IReadOnlyList<string> Contents(string folder) => FolderContents.GetValueOrDefault(folder) ?? [];
 }

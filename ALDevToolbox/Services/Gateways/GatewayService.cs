@@ -509,14 +509,25 @@ public sealed class GatewayService
 
         // The policy report comes with some heartbeats only (after the gateway starts,
         // after its file changed, every 15 minutes); the others keep the stored one.
+        // A report too large to store, or one the gateway already cut down because it
+        // was too large to send, keeps the stored one but marks it out of date, so it
+        // is never shown as what the gateway enforces now.
         string? policyJson = null;
+        var policyStale = false;
         if (request.Policy is not null)
         {
             policyJson = JsonSerializer.Serialize(request.Policy);
-            if (policyJson.Length > MaxPolicyJsonChars)
+            if (request.Policy.TooLarge)
             {
-                _logger.LogWarning("Gateway {GatewayId} reported a policy of {Length} characters; keeping the one stored before.", gatewayId, policyJson.Length);
+                _logger.LogWarning("Gateway {GatewayId} says its policy is too large to send; keeping the one stored before, marked out of date.", gatewayId);
                 policyJson = null;
+                policyStale = true;
+            }
+            else if (policyJson.Length > MaxPolicyJsonChars)
+            {
+                _logger.LogWarning("Gateway {GatewayId} reported a policy of {Length} characters; keeping the one stored before, marked out of date.", gatewayId, policyJson.Length);
+                policyJson = null;
+                policyStale = true;
             }
         }
 
@@ -533,6 +544,11 @@ public sealed class GatewayService
             {
                 s.SetProperty(g => g.EffectivePolicyJson, policyJson);
                 s.SetProperty(g => g.PolicyReportedAt, now);
+                s.SetProperty(g => g.PolicyStale, false);
+            }
+            else if (policyStale)
+            {
+                s.SetProperty(g => g.PolicyStale, true);
             }
         }, ct).ConfigureAwait(false);
         if (updated == 0) return null;

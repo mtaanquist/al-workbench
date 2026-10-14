@@ -544,6 +544,10 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("policy_reported_at");
 
+                    b.Property<bool>("PolicyStale")
+                        .HasColumnType("boolean")
+                        .HasColumnName("policy_stale");
+
                     b.Property<byte[]>("PublicKey")
                         .IsRequired()
                         .HasColumnType("bytea")

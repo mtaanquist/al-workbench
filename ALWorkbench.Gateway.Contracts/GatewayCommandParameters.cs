@@ -20,14 +20,24 @@ public static class GatewayCommandParameters
 
     /// <summary>
     /// <c>publish-install</c>: the apps to publish, each an object with
-    /// <see cref="AppPublisher"/> and <see cref="AppSigned"/>.
+    /// <see cref="AppFile"/>, <see cref="AppPublisher"/> and <see cref="AppSigned"/>.
+    /// Required and never empty, with exactly one entry for each of the command's
+    /// files: the gateway refuses a <c>publish-install</c> whose list does not match
+    /// its files one to one.
     /// </summary>
     public const string Apps = "apps";
+
+    /// <summary>The name of the command's file that holds this app, as in <c>GatewayCommandFileMessage.Name</c>.</summary>
+    public const string AppFile = "file";
 
     /// <summary>An app's publisher, as its <c>app.json</c> says.</summary>
     public const string AppPublisher = "publisher";
 
-    /// <summary>Whether the app is signed. Left out means unsigned, which AL Workbench's builds are.</summary>
+    /// <summary>
+    /// Whether AL Workbench believes the app is signed. Left out means unsigned, which AL
+    /// Workbench's builds are. Only a claim: the policy check uses it to refuse early, and
+    /// the verb checks the file's own signature before publishing (#1375).
+    /// </summary>
     public const string AppSigned = "signed";
 
     /// <summary><c>publish-install</c>: whether to unpublish each app's previous version afterwards.</summary>

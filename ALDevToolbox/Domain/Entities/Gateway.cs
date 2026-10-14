@@ -92,6 +92,13 @@ public class Gateway
     /// <summary>When <see cref="EffectivePolicyJson"/> was last received.</summary>
     public DateTime? PolicyReportedAt { get; set; }
 
+    /// <summary>
+    /// True when the gateway's latest report was too large to store or to send, so
+    /// <see cref="EffectivePolicyJson"/> is an older one and must not be shown as what
+    /// the gateway enforces now. Cleared by the next full report.
+    /// </summary>
+    public bool PolicyStale { get; set; }
+
     /// <summary>Stamped on revoke. A revoked gateway's next request is refused; there is no un-revoke.</summary>
     public DateTime? RevokedAt { get; set; }
 }
