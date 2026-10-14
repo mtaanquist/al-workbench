@@ -274,10 +274,29 @@ public sealed class EntraSignInServiceTests : IDisposable
         await using var ctx = _db.NewContext();
 
         var result = await NewService(ctx).CompleteAsync(
-            new EntraTokenIdentity(TenantA, Oid, "new@elsewhere.example", "New Person"), Ip);
+            new EntraTokenIdentity(TenantA, Oid, "new@elsewhere.example", "New Person", EmailVerified: true), Ip);
 
         result.Outcome.Should().Be(EntraCompletionOutcome.PendingApproval,
             "auto-join requires ownership of a claimed domain, mirroring the verified signup flow");
+    }
+
+    [Fact]
+    public async Task Complete_refuses_a_returning_identity_whose_account_is_still_pending()
+    {
+        // The link stored at unverified provisioning must not open the account
+        // before an Admin approves it.
+        await SeedOrgEntraAsync(TestDb.DefaultOrgId, TenantA, autoJoin: true, domain: "cronus.com");
+        var token = new EntraTokenIdentity(TenantA, Oid, "new@cronus.com", "New Person");
+        await using (var first = _db.NewContext())
+        {
+            (await NewService(first).CompleteAsync(token, Ip)).Outcome
+                .Should().Be(EntraCompletionOutcome.PendingApproval);
+        }
+        await using var ctx = _db.NewContext();
+
+        var again = await NewService(ctx).CompleteAsync(token, Ip);
+
+        again.Outcome.Should().Be(EntraCompletionOutcome.AccountPending);
     }
 
     [Fact]

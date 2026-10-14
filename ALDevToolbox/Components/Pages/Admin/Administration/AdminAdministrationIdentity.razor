@@ -132,7 +132,7 @@
                 </SettingRow>
 
                 <SettingRow Name="Let them in without approval"
-                            Hint="Only works once email is set up on this site, so the address can be confirmed first. Otherwise new people wait for an admin.">
+                            Hint="Only works once email is set up on this site, so the address can be confirmed first. Otherwise new people wait for an admin. People who sign in with Microsoft also wait for an admin unless your Microsoft registration confirms email addresses.">
                     <Switch Checked="_autoJoinVerifiedDomainUsers" CheckedChanged="OnAutoJoinChangedAsync"
                             Disabled="@_savingAutoJoin"
                             Label="@(_autoJoinVerifiedDomainUsers ? "Join straight away" : "Wait for approval")" />
