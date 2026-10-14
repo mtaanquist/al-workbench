@@ -168,7 +168,7 @@ internal static class AccountMfaEndpoints
                 var first = ex.Errors.FirstOrDefault();
                 ctx.Response.Redirect($"/account/2fa/totp/setup?{RouteConstants.ErrQuery}={Uri.EscapeDataString(first.Key)}&{RouteConstants.MsgQuery}={Uri.EscapeDataString(first.Value)}");
             }
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequireCurrentCredentials();
 
         app.MapPost("/auth/account/2fa/totp/disable", async (
             HttpContext ctx, TotpService totp, AuthService auth, AppDbContext db,
@@ -267,7 +267,7 @@ internal static class AccountMfaEndpoints
             var codes = await recovery.RegenerateAsync(user.Id, ct);
             SetOneShotRecoveryCodesCookie(ctx, protection, codes);
             ctx.Response.Redirect("/account/2fa/recovery-codes?show=1");
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequireCurrentCredentials();
 
         return app;
     }

@@ -263,7 +263,7 @@ internal static class OAuthEndpoints
                 userId, canonicalScopes, clientId, orgId);
 
             await ctx.SignInAsync(OpenIddictServerAspNetCoreDefaults.AuthenticationScheme, principal);
-        });
+        }).RequireCurrentCredentials();
     }
 
     private static bool IsScopeSupported(string scope)
