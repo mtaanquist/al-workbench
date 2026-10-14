@@ -435,7 +435,7 @@ public sealed class GatewayServiceTests : IDisposable
         var now = new DateTime(2026, 10, 14, 12, 0, 0, DateTimeKind.Utc);
         GatewayService.StatusOf(GatewayState.Approved, now, now, now).Should().Be(GatewayStatus.Revoked);
         GatewayService.StatusOf(GatewayState.Pending, now, null, now).Should().Be(GatewayStatus.WaitingForApproval);
-        GatewayService.StatusOf(GatewayState.Approved, null, null, now).Should().Be(GatewayStatus.Offline);
+        GatewayService.StatusOf(GatewayState.Approved, null, null, now).Should().Be(GatewayStatus.NotConnectedYet);
         GatewayService.StatusOf(GatewayState.Approved, now - TimeSpan.FromMinutes(3), null, now).Should().Be(GatewayStatus.Online);
         GatewayService.StatusOf(GatewayState.Approved, now - TimeSpan.FromMinutes(3) - TimeSpan.FromSeconds(1), null, now).Should().Be(GatewayStatus.Offline);
     }

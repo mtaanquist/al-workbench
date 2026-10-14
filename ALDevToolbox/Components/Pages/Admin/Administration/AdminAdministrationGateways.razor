@@ -1,12 +1,15 @@
 @page "/admin/administration/gateways"
 @attribute [Microsoft.AspNetCore.Authorization.Authorize(Roles = "Admin")]
 @rendermode InteractiveServer
+@implements IDisposable
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Endpoints
 @using ALDevToolbox.Services.Gateways
 @inject GatewayService Gateways
 @inject PublicOrigin Origin
 @inject NavigationManager Nav
+@inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
 @inject ILogger<AdminAdministrationGateways> Log
 
 @*
@@ -48,27 +51,37 @@
             <section class="card">
                 <div class="card__head">
                     <div>
-                        <h2 class="card__title">@(_issuedFor is null ? "Register the new gateway" : $"Give {_issuedFor} a new key")</h2>
+                        <h2 class="card__title">@(_issuedFor is null ? "Register the new gateway" : $"Re-register {_issuedFor}")</h2>
                         <p class="card__sub">
-                            Valid until <Timestamp Value="@_issued.ExpiresAt" Format="HH:mm" />, and only once.
+                            Works once, until <Timestamp Value="@_issued.ExpiresAt" Format="HH:mm" />.
                             This code is shown only now - if you lose it, create a new one.
                         </p>
                     </div>
                 </div>
                 <div class="card__body">
-                    <p>
-                        On the Windows server where the gateway is installed, open a command prompt
-                        as an administrator and run:
-                    </p>
-                    <div class="code-block code-block--inlinebar">
-                        <pre id="gateway-register-command">@RegisterCommand</pre>
-                        <CopyButton Target="#gateway-register-command" />
-                    </div>
-                    <p>
-                        The gateway then prints a check code and appears below as
-                        <strong>Waiting for approval</strong>. Approve it once the check code on the
-                        server matches the one shown here.
-                    </p>
+                    @* The install step gains a download link once the gateway is published (#1363). *@
+                    <ol class="gw-steps">
+                        @if (_issuedFor is null)
+                        {
+                            <li>Install the AL Workbench Gateway on a Windows server in the customer's network that can reach Business Central.</li>
+                        }
+                        <li>
+                            On that server, open a command prompt as an administrator and run this command:
+                            <div class="code-block code-block--inlinebar">
+                                <pre id="gateway-register-command">@RegisterCommand</pre>
+                                <CopyButton Target="#gateway-register-command" />
+                            </div>
+                        </li>
+                        <li>Approve it here, once the check code the server prints matches the one in the list below.</li>
+                    </ol>
+                    @if (_registered is null)
+                    {
+                        <p class="u-muted" role="status">Waiting for the server to register...</p>
+                    }
+                    else
+                    {
+                        <p role="status"><strong>@_registered</strong> has registered. Check its code below and approve it.</p>
+                    }
                 </div>
                 <div class="card__foot">
                     <button type="button" class="btn" @onclick="CloseCode">
@@ -91,9 +104,14 @@
                     <EmptyState Icon="server" Title="No gateways yet">
                         <Text>
                             A gateway lets AL Workbench manage Business Central servers in a
-                            customer's own network, without opening their firewall. It is a small
-                            Windows service the customer's IT installs on one of their servers.
-                            Add one to get a code to install it with.
+                            customer's own network, without opening their firewall.
+                            Add one to get a one-time code that connects it to AL Workbench.
+                            @* The install step gains a download link once the gateway is published (#1363). *@
+                            <ol class="gw-steps gw-steps--empty">
+                                <li>Install the AL Workbench Gateway on a Windows server in the customer's network that can reach Business Central.</li>
+                                <li>On that server, run the command you get when you add the gateway.</li>
+                                <li>Approve it here.</li>
+                            </ol>
                         </Text>
                         <Action>
                             <button type="button" class="btn btn--primary" @onclick="AddGatewayAsync" disabled="@_busy">
@@ -116,9 +134,9 @@
                     <thead>
                         <tr>
                             <th scope="col">Gateway</th>
-                            <th scope="col">State</th>
+                            <th scope="col">Status</th>
                             <th scope="col">Last seen</th>
-                            <th scope="col">Version</th>
+                            <th scope="col" class="gw-col-version">Version</th>
                             <th scope="col" class="data-table__actions">Actions</th>
                         </tr>
                     </thead>
@@ -128,21 +146,41 @@
                         var gateway = g;
                         <tr>
                             <td>
-                                @gateway.Name
+                                <span class="u-nowrap">@gateway.Name</span>
                                 @if (!string.Equals(gateway.Name, gateway.MachineName, StringComparison.OrdinalIgnoreCase))
                                 {
-                                    <div class="u-muted">on @gateway.MachineName</div>
+                                    <div class="u-muted">on <span class="u-nowrap">@gateway.MachineName</span></div>
+                                }
+                                @if (gateway.ReportedVersion is not null)
+                                {
+                                    @* Takes the Version column's place on a narrow screen. *@
+                                    <div class="u-muted gw-version-inline">Version @gateway.ReportedVersion</div>
                                 }
                             </td>
                             <td>
                                 <StatusPill Tone="@ToneOf(gateway.Status)">@LabelOf(gateway.Status)</StatusPill>
                                 @if (gateway.Status == GatewayStatus.WaitingForApproval)
                                 {
-                                    <div class="u-muted">Check code <span class="code">@gateway.KeyFingerprint</span></div>
+                                    <div class="u-muted">Check code <span class="code u-nowrap">@gateway.KeyFingerprint</span></div>
+                                }
+                                else if (gateway.Status == GatewayStatus.NotConnectedYet)
+                                {
+                                    <div class="u-muted">Start the AL Workbench Gateway service on the server</div>
                                 }
                             </td>
-                            <td class="u-muted"><Timestamp Value="@gateway.LastSeenAt" Relative="true" Placeholder="@("Never")" /></td>
-                            <td class="u-muted">@(gateway.ReportedVersion ?? "-")</td>
+                            <td class="u-muted">
+                                @if (gateway.Status == GatewayStatus.WaitingForApproval && gateway.LastSeenAt is null)
+                                {
+                                    <span>Registered <Timestamp Value="@gateway.KeyRegisteredAt" Relative="true" /></span>
+                                }
+                                else
+                                {
+                                    @* The column header is hidden on a phone, so the cell says what it is. *@
+                                    <span class="gw-label-narrow">Last seen: </span>
+                                    <Timestamp Value="@gateway.LastSeenAt" Relative="true" Placeholder="@("Never")" />
+                                }
+                            </td>
+                            <td class="u-muted gw-col-version">@(gateway.ReportedVersion ?? "-")</td>
                             <td class="data-table__actions">
                                 @if (gateway.Status != GatewayStatus.Revoked)
                                 {
@@ -161,7 +199,7 @@
                                             </button>
                                             <button type="button" class="menu__item" role="menuitem" @onclick="() => RotateAsync(gateway)">
                                                 <Icon Name="key-round" Width="14" Height="14" />
-                                                <span>New registration code</span>
+                                                <span>Re-register</span>
                                             </button>
                                             <button type="button" class="menu__item menu__item--danger" role="menuitem" @onclick="() => RevokeAsync(gateway)">
                                                 <Icon Name="shield-off" Width="14" Height="14" />
@@ -212,9 +250,18 @@
 </ConfirmDialog>
 
 @code {
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(3);
+
     private List<GatewaySummary>? _gateways;
     private IssuedGatewayCode? _issued;
     private string? _issuedFor;
+    private int? _issuedForId;
+    /// <summary>Name of the gateway that used the open code, once one has.</summary>
+    private string? _registered;
+    /// <summary>Each gateway's key time when the code was shown, to spot the one that uses it.</summary>
+    private Dictionary<int, DateTime> _keysWhenIssued = new();
+    private PeriodicTimer? _poll;
+    private CancellationTokenSource? _pollCts;
     private GatewaySummary? _target;
     private string _nameDraft = string.Empty;
     private string? _error;
@@ -228,7 +275,8 @@
 
     /// <summary>
     /// The address the gateway registers with: the configured public origin, else
-    /// the one this page was opened on - the same rule email links follow.
+    /// the one this page was opened on - the same rule the gateway handler uses for
+    /// the token audience (<see cref="PublicOrigin.For"/>), so the two always agree.
     /// </summary>
     private string WorkbenchUrl => Origin.Configured ?? Nav.BaseUri.TrimEnd('/');
 
@@ -244,13 +292,18 @@
         {
             _issued = await Gateways.CreateRegistrationCodeAsync();
             _issuedFor = null;
+            _issuedForId = null;
         });
+        if (_issued is not null) StartWatching();
     }
 
     private void CloseCode()
     {
+        StopWatching();
         _issued = null;
         _issuedFor = null;
+        _issuedForId = null;
+        _registered = null;
     }
 
     private async Task ApproveAsync(GatewaySummary gateway)
@@ -260,7 +313,7 @@
         await RunAsync(async () =>
         {
             await Gateways.ApproveAsync(gateway.Id);
-            _success = $"{gateway.Name} is approved. It can now receive work from AL Workbench.";
+            _success = $"Approved. {gateway.Name} can now receive work from AL Workbench.";
         });
     }
 
@@ -282,7 +335,7 @@
     private async Task RotateAsync(GatewaySummary gateway)
     {
         var confirmed = await _rotateDialog.OpenAsync(
-            $"Give {gateway.Name} a new key?",
+            $"Re-register {gateway.Name}?",
             "Use this when the server was rebuilt, or you think the gateway's key may have been copied. "
             + "You get a new code to run on the server. The gateway keeps working until it registers with it; "
             + "after that it waits for your approval again.",
@@ -292,7 +345,9 @@
         {
             _issued = await Gateways.CreateRotationCodeAsync(gateway.Id);
             _issuedFor = gateway.Name;
+            _issuedForId = gateway.Id;
         });
+        if (_issued is not null) StartWatching();
     }
 
     private async Task RenameAsync(GatewaySummary gateway)
@@ -305,6 +360,70 @@
             _success = $"Renamed to {_nameDraft.Trim()}.";
         });
     }
+
+    /// <summary>
+    /// While the code card is open, re-reads the list every few seconds so the
+    /// gateway appears (waiting for approval) without a reload. Stops once it has,
+    /// when the code expires, or when the card is closed or the page left.
+    /// </summary>
+    private void StartWatching()
+    {
+        StopWatching();
+        _registered = null;
+        _keysWhenIssued = (_gateways ?? []).ToDictionary(g => g.Id, g => g.KeyRegisteredAt);
+        _pollCts = new CancellationTokenSource();
+        _poll = new PeriodicTimer(PollInterval);
+        _ = WatchAsync(_poll, _issued!.ExpiresAt, _issuedForId, _pollCts.Token);
+    }
+
+    private async Task WatchAsync(PeriodicTimer timer, DateTime expiresAt, int? rotatingId, CancellationToken token)
+    {
+        try
+        {
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                // Own DI scope per tick: this runs off the circuit's dispatcher, and the
+                // page's own GatewayService shares the circuit's DbContext with clicks (#679).
+                List<GatewaySummary> list;
+                await using (var scope = ScopeFactory.CreateAsyncScope())
+                {
+                    list = await scope.ServiceProvider.GetRequiredService<GatewayService>().ListAsync(token);
+                }
+                if (token.IsCancellationRequested) break;
+
+                // A new code is used by a gateway that was not in the list; a re-register
+                // code by the same gateway, which then carries a newer key.
+                var arrived = list.FirstOrDefault(g => rotatingId is { } id
+                    ? g.Id == id && _keysWhenIssued.TryGetValue(id, out var before) && g.KeyRegisteredAt != before
+                    : !_keysWhenIssued.ContainsKey(g.Id));
+                await InvokeAsync(() =>
+                {
+                    if (token.IsCancellationRequested) return;
+                    _gateways = list;
+                    if (arrived is not null) _registered = arrived.Name;
+                    StateHasChanged();
+                });
+                if (arrived is not null || Clock.GetUtcNow().UtcDateTime >= expiresAt) break;
+            }
+        }
+        catch (OperationCanceledException) { /* card closed or circuit torn down */ }
+        catch (ObjectDisposedException) when (token.IsCancellationRequested) { /* torn down mid-poll */ }
+        catch (Exception ex)
+        {
+            Log.LogWarning(ex, "Refreshing the gateway list failed; it stops refreshing until the page is reloaded.");
+        }
+    }
+
+    private void StopWatching()
+    {
+        var cts = Interlocked.Exchange(ref _pollCts, null);
+        var timer = Interlocked.Exchange(ref _poll, null);
+        try { cts?.Cancel(); } catch (ObjectDisposedException) { /* already gone */ }
+        cts?.Dispose();
+        timer?.Dispose();
+    }
+
+    public void Dispose() => StopWatching();
 
     /// <summary>One action at a time, its outcome in the alert, and the list re-read after.</summary>
     private async Task RunAsync(Func<Task> action)
@@ -345,6 +464,7 @@
         GatewayStatus.Online => "Online",
         GatewayStatus.Offline => "Offline",
         GatewayStatus.WaitingForApproval => "Waiting for approval",
+        GatewayStatus.NotConnectedYet => "Not connected yet",
         _ => "Revoked",
     };
 }

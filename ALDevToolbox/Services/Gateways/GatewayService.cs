@@ -15,8 +15,14 @@ public enum GatewayStatus
     WaitingForApproval,
     /// <summary>Approved, and heard from within <see cref="GatewayService.OnlineWindow"/>.</summary>
     Online,
-    /// <summary>Approved, and silent for longer than <see cref="GatewayService.OnlineWindow"/>.</summary>
+    /// <summary>Approved, and silent for longer than <see cref="GatewayService.OnlineWindow"/> after having been heard from.</summary>
     Offline,
+    /// <summary>
+    /// Approved, and never heard from: the service on the server has not started yet.
+    /// Kept apart from <see cref="Offline"/> because it is a setup step still to do,
+    /// not something that went wrong.
+    /// </summary>
+    NotConnectedYet,
     /// <summary>Revoked: every request it makes is refused.</summary>
     Revoked,
 }
@@ -142,7 +148,8 @@ public sealed class GatewayService
     {
         if (revokedAt is not null) return GatewayStatus.Revoked;
         if (state != GatewayState.Approved) return GatewayStatus.WaitingForApproval;
-        return lastSeenAt is { } seen && now - seen <= OnlineWindow ? GatewayStatus.Online : GatewayStatus.Offline;
+        if (lastSeenAt is not { } seen) return GatewayStatus.NotConnectedYet;
+        return now - seen <= OnlineWindow ? GatewayStatus.Online : GatewayStatus.Offline;
     }
 
     // ---------------------------------------------------------------- codes
