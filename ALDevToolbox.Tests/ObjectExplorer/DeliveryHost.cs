@@ -41,6 +41,7 @@ internal static class DeliveryHost
         services.AddSingleton<IBcAdminClient>(new UnreachableAdminClient());
         services.AddSingleton(queue ?? new DeliveryQueue());
         services.AddSingleton(new BcPanelCache(TimeProvider.System));
+        services.AddScoped<DeliveryTargetFactory>();
         services.AddScoped<DeliveryService>();
         services.AddSingleton(db.NewContextFactory());
         services.AddSingleton<IEmailService>(new CapturingEmailService());

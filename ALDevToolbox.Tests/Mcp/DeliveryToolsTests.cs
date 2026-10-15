@@ -37,7 +37,7 @@ public sealed class DeliveryToolsTests : IDisposable
 
     private DeliveryTools NewTools(AppDbContext ctx, HttpMessageHandler? api = null) =>
         new(new DeliveryService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
-                new ThrowingTokenSource(), new ThrowingAppManagementClient(), new ThrowingAdminClient(), _queue,
+                new DeliveryTargetFactory(new ThrowingTokenSource(), new ThrowingAppManagementClient(), new ThrowingAdminClient()), _queue,
                 new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
                 _db.NewToolEnablement(ctx),
                 TimeProvider.System,

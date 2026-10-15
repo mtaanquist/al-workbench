@@ -92,7 +92,7 @@ public sealed class ReleaseBuildDialogTests : IDisposable
         var org = new SignedOutOrganizationContext();
         return new DeliveryService(db, org,
             new ProjectAccess(db, org),
-            new UnusedTokenSource(), new UnusedAppManagementClient(), new UnusedAdminClient(),
+            new DeliveryTargetFactory(new UnusedTokenSource(), new UnusedAppManagementClient(), new UnusedAdminClient()),
             new DeliveryQueue(),
             new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
             new ALDevToolbox.Services.Tools.ToolEnablement(TestDb.EverythingEnabled(),

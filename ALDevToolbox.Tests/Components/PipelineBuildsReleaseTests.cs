@@ -75,6 +75,7 @@ public sealed class PipelineBuildsReleaseTests : IDisposable
         _ctx.Services.AddScoped<ProjectConnectionService>();
         _ctx.Services.AddSingleton<IDeliveryTokenSource, UnusedTokenSource>();
         _ctx.Services.AddSingleton(new DeliveryQueue());
+        _ctx.Services.AddScoped<DeliveryTargetFactory>();
         _ctx.Services.AddScoped<DeliveryService>();
         _ctx.Services.AddSingleton(TimeProvider.System);
         _ctx.Services.AddScoped<OrganizationConfigService>();
