@@ -1,0 +1,2 @@
+/* An on-premises tier whose gateway has gone quiet: the facts beside it are old. */
+.tier-state--warn { color: var(--warning-text); }

@@ -1,0 +1,242 @@
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Services.Gateways
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@inject UpgradeFleetService Fleet
+@inject OnPremisesEnvironmentService OnPremises
+@inject ILogger<ProjectDetailEnvironments> Log
+
+@*
+    The Environments tab of an on-premises solution: the customer's Business Central
+    servers, linked from an on-premises gateway. It takes the place of the Business
+    Central tab, which is the online connection and does not exist on-premises.
+
+    Named users: a BC consultant checking which version a hosted customer runs (anyone
+    who can see the solution), and the org Admin who links the servers (only an Admin
+    may: one gateway can serve several customers, and which customer a server belongs
+    to is that Admin's decision). Linking is one obvious button with a picker that
+    names gateway, server and tier; unlinking is per row behind a confirm.
+    See .design/on-prem-gateway.md, "An on-premises environment is an OeProjectEnvironment row".
+*@
+
+<div class="form-sec__head">
+    <h2 class="card__title">
+        Service tiers
+        @if (_rows is { Count: > 0 })
+        {
+            <StatusPill Tone="muted"><span>@_rows.Count linked</span></StatusPill>
+        }
+    </h2>
+    @if (_canLink && _rows is { Count: > 0 })
+    {
+        <button type="button" class="btn btn--sm @(_busy ? "btn--loading" : "")" @onclick="LinkAsync" disabled="@_busy">
+            <Icon Name="link" Width="14" Height="14" />
+            <span class="btn__label">Link service tier</span>
+        </button>
+    }
+</div>
+<p class="form-sec__cap">
+    The customer's Business Central servers, as the on-premises gateway in their network reports them. The
+    version, state and installed apps are read every 15 minutes.
+</p>
+
+@if (_error is { } error)
+{
+    <Alert Tone="AlertTone.Danger"><span>@error</span></Alert>
+}
+else if (_done is { } done)
+{
+    <Alert Tone="AlertTone.Success"><span>@done</span></Alert>
+}
+
+<div class="card">
+    @if (_rows is null)
+    {
+        <div class="card__body"><LoadingBlock Text="Loading service tiers..." /></div>
+    }
+    else if (_rows.Count == 0)
+    {
+        <EmptyState Icon="server" Title="No service tiers linked yet">
+            <Text>
+                @if (_canLink)
+                {
+                    <text>Link this customer's Business Central servers from your on-premises gateway. Everyone who can see the solution then sees the version each one runs and what is installed.</text>
+                }
+                else
+                {
+                    <text>An administrator links this customer's Business Central servers from your on-premises gateway. Once they have, the version each one runs and what is installed show here.</text>
+                }
+            </Text>
+            <Action>
+                @if (_canLink)
+                {
+                    <button type="button" class="btn @(_busy ? "btn--loading" : "")" @onclick="LinkAsync" disabled="@_busy">
+                        <Icon Name="link" Width="15" Height="15" />
+                        <span class="btn__label">Link service tier</span>
+                    </button>
+                }
+            </Action>
+        </EmptyState>
+    }
+    else
+    {
+        <table class="data-table pd-tiers">
+            <thead>
+                <tr>
+                    <th scope="col">Environment</th>
+                    <th scope="col">Server</th>
+                    <th scope="col">Version</th>
+                    <th scope="col">Last read</th>
+                    @if (_canLink)
+                    {
+                        <th scope="col" class="data-table__actions"><span class="u-sr">Actions</span></th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in _rows)
+                {
+                    <tr>
+                        <td>
+                            <span class="cell-stack">
+                                <a class="cell-stack__main" href="@row.Href()">@row.EnvironmentName</a>
+                                <span class="cell-stack__sub">@(row.OnPremises?.EnvironmentLabel ?? row.EnvironmentType) - @BcEnvironmentStatus.StatusWord(row.Status)</span>
+                            </span>
+                        </td>
+                        <td>
+                            <span class="cell-stack">
+                                <span class="cell-stack__main">@(row.OnPremises?.TierName ?? "—")</span>
+                                <span class="cell-stack__sub">@(row.OnPremises is { Multitenant: true } t ? $"Tenant {t.TenantId}" : "Single tenant")</span>
+                            </span>
+                        </td>
+                        <td class="u-num">@(row.Version ?? "—")</td>
+                        <td>
+                            <span class="cell-stack">
+                                <span class="cell-stack__main"><Timestamp Value="@row.OnPremises?.ReadAt" Relative="true" Placeholder="Not yet" /></span>
+                                <span class="cell-stack__sub"><OnPremisesTierState Row="row" /></span>
+                            </span>
+                        </td>
+                        @if (_canLink)
+                        {
+                            <td class="data-table__actions">
+                                <button type="button" class="btn btn--sm" disabled="@_busy" @onclick="() => UnlinkAsync(row)">Unlink</button>
+                            </td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+<LinkServiceTierDialog @ref="_dialog" />
+<ConfirmDialog @ref="_confirm" />
+
+@code {
+    /// <summary>The solution.</summary>
+    [Parameter, EditorRequired] public int Id { get; set; }
+
+    /// <summary>Its name, for the dialogs.</summary>
+    [Parameter] public string? SolutionName { get; set; }
+
+    /// <summary>Raised after a link or unlink, so the page can re-read what it shows about the solution.</summary>
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private List<UpgradeFleetRow>? _rows;
+    private bool _canLink;
+    private bool _busy;
+    private string? _error;
+    private string? _done;
+    private LinkServiceTierDialog? _dialog;
+    private ConfirmDialog? _confirm;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _canLink = await OnPremises.CanLinkAsync();
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            // The fleet's own read, so the rows here and on the Environments list are
+            // the same rows, seen through the same visibility.
+            _rows = (await Fleet.ListFleetAsync(includeSoftDeleted: true, includeOnPremises: true))
+                .Where(r => r.ProjectId == Id && r.IsOnPremises)
+                .OrderByDescending(r => r.IsProduction)
+                .ThenBy(r => r.EnvironmentName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Reading the service tiers of solution {ProjectId} failed.", Id);
+            _rows = [];
+            _error = "Couldn't load the service tiers. Reload the page to try again.";
+        }
+    }
+
+    private async Task LinkAsync()
+    {
+        if (_dialog is null || _busy) return;
+        _error = null;
+        _done = null;
+        _busy = true;
+        try
+        {
+            var tiers = await OnPremises.ListLinkableTiersAsync(Id);
+            var choice = await _dialog.OpenAsync(SolutionName ?? "this customer", tiers, (_rows ?? []).Select(r => r.EnvironmentName));
+            if (choice is null) return;
+            await OnPremises.LinkAsync(Id, new LinkTierInput(choice.InstanceId, choice.TenantId, choice.Name));
+            _done = $"Linked {choice.Name}. Its version and apps show here and on the Environments list.";
+            await LoadAsync();
+            await OnChanged.InvokeAsync();
+        }
+        catch (PlanValidationException ex)
+        {
+            _error = ex.Errors.Values.FirstOrDefault() ?? "Couldn't link that service tier.";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            _canLink = false;
+            _error = "Only an administrator can link service tiers.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task UnlinkAsync(UpgradeFleetRow row)
+    {
+        if (_confirm is null || _busy) return;
+        _error = null;
+        _done = null;
+        var confirmed = await _confirm.OpenAsync(
+            title: $"Unlink {row.EnvironmentName}?",
+            message: $"{SolutionName} stops showing {row.OnPremises?.TierName ?? row.EnvironmentName}. Nothing on the server changes, "
+                + "and you can link it again later. The version and modules typed on the Customer tab come back while no production tier is linked.",
+            confirmLabel: "Unlink");
+        if (!confirmed) return;
+        _busy = true;
+        try
+        {
+            await OnPremises.UnlinkAsync(Id, row.EnvironmentId);
+            _done = $"Unlinked {row.EnvironmentName}.";
+            await LoadAsync();
+            await OnChanged.InvokeAsync();
+        }
+        catch (PlanValidationException ex)
+        {
+            _error = ex.Errors.Values.FirstOrDefault() ?? "Couldn't unlink that service tier.";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            _canLink = false;
+            _error = "Only an administrator can unlink service tiers.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

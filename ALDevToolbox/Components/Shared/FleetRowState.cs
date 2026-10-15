@@ -41,7 +41,7 @@ public static class FleetRowState
         return row.Status!.ToLowerInvariant() switch
         {
             "active" => "is-published",
-            "updating" or "upgrading" or "preparing" => "is-running",
+            "updating" or "upgrading" or "preparing" or "starting" or "stopping" => "is-running",
             "suspended" or "softdeleted" => "is-queued",
             _ => "is-failed",
         };

@@ -17,7 +17,7 @@
                 {
                     @if (_modules.EnvironmentName is { } envName && _modules.FetchedAt is { } fetched)
                     {
-                        <text>What is installed in <a href="@EnvironmentAppsHref(_modules.EnvironmentId!.Value)">@envName</a>, as Business Central reported it <Timestamp Value="@fetched" Relative="true" />. Only modules in your organisation's catalogue are shown.</text>
+                        <text>What is installed in <a href="@EnvironmentAppsHref(_modules.EnvironmentId!.Value)">@envName</a>, as @(_modules.FromOnPremisesTier ? "the on-premises gateway" : "Business Central") reported it <Timestamp Value="@fetched" Relative="true" />. Only modules in your organisation's catalogue are shown.</text>
                     }
                     else
                     {
@@ -107,7 +107,7 @@
                 {
                     <a class="btn btn--sm" href="@($"/solutions/{Id}/bc")">Open the Business Central tab</a>
                 }
-                else if (_modules.ReadFromEnvironment && _modules.EnvironmentId is { } envId && CanManageSolution)
+                else if (_modules.ReadFromEnvironment && _modules.EnvironmentId is { } envId && CanManageSolution && !_modules.FromOnPremisesTier)
                 {
                     <a class="btn btn--sm" href="@EnvironmentAppsHref(envId)">@(_modules.FetchedAt is null ? "Read them now" : $"Open {_modules.EnvironmentName}")</a>
                 }
@@ -215,6 +215,8 @@
     {
         { CatalogCount: 0 } => "An editor or administrator chooses which add-ons are worth tracking under Admin → Customer modules. Once they have, this fills in.",
         { ReadFromEnvironment: true, EnvironmentName: null } => "Connect this solution to Business Central on its Business Central tab. Its environments, and the apps installed in them, are read overnight after that.",
+        { ReadFromEnvironment: true, FromOnPremisesTier: true, FetchedAt: null } =>
+            $"The on-premises gateway hasn't reported the apps installed in {_modules.EnvironmentName} yet. It reads them every 15 minutes while it is online.",
         { ReadFromEnvironment: true, FetchedAt: null } => CanManageSolution
             ? $"The apps installed in {_modules.EnvironmentName} are read overnight. To fetch them now, open the environment's Apps tab."
             : $"The apps installed in {_modules.EnvironmentName} are read overnight.",
