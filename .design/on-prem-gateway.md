@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374), the gateway side of `publish-install` (#1375) and deploying through the gateway from AL Workbench (#1367) exist; the restart group and scripts (#1368), licences and the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374), the gateway side of `publish-install` (#1375), deploying through the gateway from AL Workbench (#1367) and the restart group with the customer's before and after scripts (#1368) exist; licences and the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -350,11 +350,12 @@ can write them gets code running as a Business Central administrator.
 **Shared multitenant tiers.** On a multitenant server several tenants, often several customers,
 share the service tiers and the application database. Linking is per tenant, but a restart or a
 licence imported into the application database reaches every tenant on those tiers. So: the Deploy,
-licence and restart dialogs list every Solution whose environments sit on the tiers involved; the
-gateway refuses a restart group or an application-level licence import that reaches tiers linked to
-more than one Solution unless that database sets `shared_restart = true`; and a deployment to one
+licence and restart dialogs list every Solution whose environments sit on the tiers involved; a
+restart group or an application-level licence import that reaches tiers linked to more than one
+Solution is refused unless that database sets `shared_restart = true`; and a deployment to one
 tenant of a shared server is published tenant-scoped (below) so the app itself never reaches the
-others.
+others. As built (#1368) the refusal is AL Workbench's, not the gateway's, and the Deploy dialog
+gives a count of the other Solutions rather than their names: "The restart group, as built".
 
 **Remote machines.** The service account needs remote service control rights on each machine
 (remote procedure call and file sharing reachable inside the network), or PowerShell remoting where
@@ -452,7 +453,7 @@ publisher, the `signed` flag and which file is which. It refuses on the claim ea
 `publish-install` verb (#1375) then checks it against the files themselves ("The `publish-install`
 verb, as built"). The shared-tier rule
 (`shared_restart`) needs to know which Solutions each tier is linked to, which only AL Workbench
-knows; it is enforced with the restart group (#1368).
+knows, so AL Workbench enforces it (#1368, "The restart group, as built").
 
 **The report.** `GatewayPolicyReport` (contracts) goes with the first heartbeat after start, after
 any change, and every 15 minutes; other heartbeats stay small. AL Workbench stores it in
@@ -512,8 +513,9 @@ first exercised with #1365.
   PowerShell 7 (Business Central 24) is an assumption, and passing the parameters on standard input
   is only tested under `pwsh`. #1365 built the inventory that is to confirm both, but has not yet
   been run against a real server; "Inventory, as built" lists what to check.
-- **`shared_restart`** (#1368). The gateway cannot tell which Solutions share a tier, so the rule is
-  parsed and reported but not enforced; the restart group enforces it.
+- ~~**`shared_restart`** (#1368).~~ Closed by #1368: AL Workbench enforces it, since only it knows
+  which Solutions are linked to which tiers. The gateway still parses and reports it, and does not
+  enforce it: "The restart group, as built" has why a rule on the gateway's side was rejected.
 - ~~**Each `.app` against the declared list** (#1375).~~ Closed by #1375. The policy check still sees
   only what the command declares; before any cmdlet runs, `publish-install` now hashes each file
   again, reads its id, name, publisher and version from the `.app`'s own manifest and refuses a
@@ -881,8 +883,9 @@ the deployment with the install reported as done. Output goes to the deployment 
 
 ### Deploying to on-premises, as built (#1367)
 
-The AL Workbench side of `publish-install`. The restart group and the before and after scripts are
-still #1368's: the command carries no restart, and the deployment says so (below).
+The AL Workbench side of `publish-install`. The restart group and the before and after scripts came
+with #1368 ("The restart group, as built"); what follows was written before them, and the notes on
+restarts below are kept for a gateway older than that.
 
 **The target.** `GatewayDeliveryTarget` (`Services/ObjectExplorer/Delivery/`) is the second
 `IDeliveryTarget`, built by `DeliveryTargetFactory` for an `OnPremises` row with a linked tier, from
@@ -976,10 +979,12 @@ icon and "Nothing was changed for this app.", the collapsed row says only "The g
 pipeline's last-deployment line treat Refused as the app that stopped the run. Log lines from the
 gateway land in the deployment log; a `REFUSED` line is tinted like a failure.
 
-**Restarts are not done yet (#1368).** The command's result carries `restarted`, always false today;
-it is stored as `oe_project_deliveries.tiers_restarted` (null online). A deployed on-premises run
-says "Service tiers were not restarted" and the summary adds "The service tiers were not restarted.",
-so nobody assumes a BC 14 tier has dropped its old subscribers.
+**Restarts, before #1368.** The command's result carries `restarted`; it is stored as
+`oe_project_deliveries.tiers_restarted` (null online). A gateway older than #1368 always says false
+and reports no steps, and for it a deployed on-premises run still says "Service tiers were not
+restarted" and the summary adds "The service tiers were not restarted.", so nobody assumes a BC 14
+tier has dropped its old subscribers. From #1368 the gateway reports each tier and script, and those
+lines take the note's place.
 
 **What on-premises refuses, and where.** The rules are enforced in the services, not only the editor:
 
@@ -1187,10 +1192,10 @@ was read, and its steps (`verify`, `signature`, `publish`, `sync`, `install` or 
 `unpublish`, each `done`, `failed` or `skipped`; the `signature` step carries the signer too), and
 `restarted`. The signer fields are additive, so the schema stays 1.
 
-**The restart group's hook.** `PublishInstallVerb.RunRestartGroupAsync` runs only after every app
-went through. Today it writes "The service tiers were not restarted: this version of the gateway
-does not restart them yet." and the result says `restarted: false`; #1368 fills it in, with the
-after script.
+**The restart group's hook.** `PublishInstallVerb.RestartGroupAsync` runs only after every app
+went through. Until #1368 it wrote "this version of the gateway does not restart them yet" and the
+result said `restarted: false`; it now runs the restart group and the after script, and `restarted`
+is true only when every tier of the group came back ("The restart group, as built").
 
 **Where it differs from the steps above:** an unpublish that fails fails the deployment (the new
 version is installed; the step says so), as the first failure stops everything; a downgrade is
@@ -1238,6 +1243,101 @@ Windows that the write is refused.
 - that `Publish-NAVApp -Path` can read the file from the gateway's work folder under the gateway's
   service account;
 - how long a large data upgrade takes against the six-hour limit per app.
+
+### The restart group, as built (#1368)
+
+**Order.** `publish-install` runs, on the gateway: the policy check; every file verified and
+examined; the database's **before script**; then publish, sync, install or upgrade, unpublish for
+each app on the publishing tier; then, only when every app went through, the **restart group**;
+then the **after script**. A failing before script skips every app ("Not started, because the
+before script failed."), records the after script as not run, and fails the command with "No app was
+published.". An app that fails records the after script as not run and restarts nothing. When every
+app was already installed nothing changed, so nothing is restarted and the after script does not
+run either. The settings are read again just before the restart: if they no longer allow `restart`
+on a group tier, the command fails with the apps installed and nothing restarted.
+
+**The group.** The tiers are the `restart` list of the `[[database]]` the publishing tier is listed
+under (`publish_on` when the list is left out), in the file's order; a tier no database names is
+restarted on its own. Only tiers the file lists are ever touched, whatever the command says.
+`stop-all-then-start-all` stops each tier in order until one fails, then starts every tier it
+stopped, so a failure never leaves a tier down that was running; the tiers it did not reach are "not
+restarted". `one-by-one` stops and starts each tier before the next, and stops at the first that does
+not come back; the rest are "Not restarted, because X did not come back.". The gateway waits up to 5
+minutes for a tier to stop and 10 for it to run again. These are fixed, not settings.
+
+**Service control** (`Core/RestartGroup/ServiceControlScript.cs`, `RestartGroupRunner.cs`) always
+runs in Windows PowerShell 5.1, whatever the tier's `powershell` setting, and never loads the
+Business Central module: it only needs the Windows service. That decision is the one
+"Remote machines" above anticipates: PowerShell 7 dropped `-ComputerName` from `Get-Service`, so
+`service-manager` needs 5.1, and spawning `powershell.exe` for every tier keeps one code path for
+local and remote tiers. A local tier and `service-manager` use `Get-Service -Name
+'MicrosoftDynamicsNavServer$<instance>'` (with `-ComputerName <machine>` for a remote one);
+`powershell-remoting` runs the same script block through `Invoke-Command -ComputerName`. The machine
+and instance go in as parameters, never into the script text. It calls the service controller's
+`Stop()`/`Start()` and `WaitForStatus` with the timeout, not `Stop-Service`, because `Stop-Service`
+waits without a limit. A remote tier needs its `[[machine]]` section; the check refuses one without.
+
+**Scripts** (`Core/RestartGroup/CustomerScripts.cs`) are named only in the settings file. Before
+each run the gateway checks the file exists and that it and its folder are writable only by
+Administrators and SYSTEM (the same `AccessRules` as the program folder), and refuses otherwise. It
+runs the script in Windows PowerShell 5.1 as the service account, with its path passed as data, for
+up to 30 minutes; every line it prints goes to the deployment log as "before script: ..." or "after
+script: ...". A non-zero exit code, an error that stops it, or the timeout fails it. The tier needs
+`scripts` in its allow list (the policy check asks for it when the database names a script).
+
+**The `restart-group` verb** (`RestartGroupVerb`) restarts a database's group on its own, for
+licence imports (#1369) and the environment page's restart (#1371). Its parameters are the machine
+and instance of any tier of the group; the check needs `service_control` on every group tier. It
+runs no scripts. It succeeds when every tier came back and otherwise fails with the first failed
+tier's message, the result attached.
+
+**The result.** `GatewayPublishInstallResult` gained `restart` (`GatewayRestartGroupResult`: the
+mode, `restarted`, a message when nothing was restarted, and each tier with `restarted`, `failed` or
+`not-restarted`, its message and its last state) and `scripts` (each with its stage, path, outcome
+`succeeded`, `failed` or `not-run`, exit code and message). Both are additive; the schema stays 1.
+
+**AL Workbench.** The follower (`DeliveryService.FollowGatewayDeliveryAsync`) reads the steps out of
+the result (`DeliveryGatewaySteps.From`) and stores them on the deployment as
+`oe_project_deliveries.gateway_steps` (jsonb, migration `20270206000000_RecordGatewaySteps`): the
+before script, one line per tier, the after script, each `done`, `failed` or `not-done`. A group
+nothing was done to (nothing installed, the settings changed) is one line naming its tiers. A
+command that failed though no app did fails the deployment with the step's own sentence: "The
+customer's before script (before-deploy.ps1) failed, so nothing was installed.", "The apps were
+installed, but CRONUS-BC02 / BC140 did not restart.", or "The apps were installed and the service
+tiers restarted, but the customer's after script (after-restart.ps1) failed."; otherwise the
+gateway's own message. The deployment page shows a "Service tiers and scripts" list under the apps,
+the timeline's last step says "Installed, restart failed" or "Installed, after script failed", the
+next step says what to ask the customer's IT, and "Deploy again" is not offered when the apps went
+in, since the same build would change nothing and restart nothing. `list_deployments` returns the
+steps as `gatewaySteps`.
+
+**The Deploy dialog** reads `RestartGroupPlan` (`Services/Gateways/`) through
+`DeliveryService.GetRestartPlanAsync` once it is open: the tiers that restart, how, the scripts, and
+the tiers the inventory reports on the same database (by `DatabaseKey`) that the group leaves out.
+It warns, before the person commits, that those tiers restart and that everyone signed in is signed
+out and loses unsaved work. Before the gateway has reported valid settings it says at least the
+linked tier restarts.
+
+**`shared_restart` is enforced by AL Workbench.** `RestartGroupPlan.Refusal` refuses when another
+Solution has a live on-premises environment linked to one of the group's tiers and the database does
+not set `shared_restart = true`. It is checked when the deployment is made (`ResolveReleaseAsync`)
+and again when it runs (`GatewayDeliveryTarget.ReadStatusAsync`), as AL Workbench's own refusal,
+not "The gateway refused". The Deploy dialog shows it as an error and disables its button. Solutions
+are counted under the caller's query filter, so another organisation's links are not seen; a
+gateway belongs to one organisation, so that only matters for a tier two organisations' gateways
+both report. A rule on the gateway was considered and rejected: the only thing it can see is the
+tenant list, and several tenants of one customer on one server is a normal setup that it would have
+refused. The dialog gives a count of the other Solutions, not their names, so a deployment does not
+tell one customer's consultant another customer's name; that differs from "Shared multitenant tiers"
+above, which says to list them.
+
+**To verify on real servers:** `Get-Service -ComputerName` against a remote BC 14 tier with the
+service account's rights, and the error it gives without them; `Invoke-Command` with the same
+script block where WinRM is on; how long a BC 14 tier with many companies takes to stop and start
+against the 5 and 10 minute limits; that a service that never reaches Running surfaces as the
+timeout and not as a hang; a before and an after script under 5.1 as the service account,
+including one that writes to the error stream and one that calls `exit 2`; and that the folder
+check accepts the default rights on `C:\Program Files\AL Workbench Gateway\scripts`.
 
 ## Licences
 
@@ -1294,7 +1394,8 @@ server configuration (`Set-NAVServerConfiguration`) is out of scope.
   As built (#1367): `deploy_build` refuses an on-premises Production target from an agent whatever
   the organisation's setting, and otherwise runs the same path as the web UI, including the
   offline-gateway failure; `list_deployment_pipelines` carries `targetIsOnPremises`, and
-  `list_deployments` reports `refused` app statuses and `tiersRestarted`.
+  `list_deployments` reports `refused` app statuses and `tiersRestarted`, and from #1368
+  `gatewaySteps` (each script and tier restart, in order).
 - **No write tools** for licences or tier actions in this milestone, as environment actions are
   web-only today.
 
