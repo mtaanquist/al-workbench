@@ -90,7 +90,14 @@
                 <a href="@SourceHref">"@SourceName"</a>
             }
         }
-        <text> into the @EnvType environment </text><a href="@EnvHref">"@EnvName"</a>.
+        @if (_isOnPremises)
+        {
+            <text> into the on-premises @(_isProduction ? "production" : "test") service tier </text><a href="@EnvHref">"@EnvName"</a><text>, through its gateway.</text>
+        }
+        else
+        {
+            <text> into the @EnvType environment </text><a href="@EnvHref">"@EnvName"</a><text>.</text>
+        }
     </SubtitleContent>
     <Actions>
         <a class="btn" href="/pipelines/deployments"><Icon Name="arrow-left" Width="15" Height="15" /><span>All deployment pipelines</span></a>
@@ -1889,12 +1896,12 @@
 
         if (d.InstallStartedAt is { } uploaded)
         {
-            steps.Add(new(d.Apps.Count > 1 ? "First app uploaded" : "Uploaded", "running", Clock(uploaded), Exact(uploaded),
+            steps.Add(new(_isOnPremises ? "Sent to the gateway" : d.Apps.Count > 1 ? "First app uploaded" : "Uploaded", "running", Clock(uploaded), Exact(uploaded),
                 (d.StartedAt ?? d.ClaimedAt) is { } from ? Duration(uploaded - from) : ""));
         }
         else if (d.IsScheduled || (d.IsActive && d.InstallStartedAt is null && d.DeploymentSchedule == BcDeploymentSchedule.Immediate))
         {
-            steps.Add(new("Upload", "pending", "-", null, ""));
+            steps.Add(new(_isOnPremises ? "Send" : "Upload", "pending", "-", null, ""));
         }
 
         if (d.IsScheduled || d.IsActive)
@@ -1911,6 +1918,7 @@
             {
                 ProjectDeliveryStatus.Deployed => "Installed",
                 ProjectDeliveryStatus.HandedOff => "Handed over",
+                _ when d.Apps.Any(a => a.Status == ProjectDeliveryResultStatus.Refused) => "Refused",
                 _ => d.InstallStartedAt is not null ? "Installing failed" : null,
             };
             if (stepLabel is not null && from is { } began)
@@ -2033,7 +2041,10 @@
         if (!parsed.FromBusinessCentral)
         {
             var ours = stored ?? failedApp?.Message ?? "The deployment failed.";
-            return new FailureView(ours, null, ours, null, null, null, failedApp, false);
+            // A refusal's sentence carries the customer's whole rule; the closed row only
+            // needs to say which app it stopped at (#1367).
+            var collapsed = failedApp is { Status: ProjectDeliveryResultStatus.Refused } ? $"The gateway refused {label}" : ours;
+            return new FailureView(collapsed, null, ours, null, null, null, failedApp, false);
         }
 
         var code = parsed.Code.Length > 0 ? parsed.Code : null;
