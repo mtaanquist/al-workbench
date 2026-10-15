@@ -20,7 +20,10 @@ public sealed record PolicyDecision(bool Allowed, string? Reason)
 /// <param name="File">The name of the command's file that holds the app.</param>
 /// <param name="Publisher">The publisher the command declares.</param>
 /// <param name="Signed">Whether the command declares the app signed.</param>
-public sealed record AppToPublish(string File, string Publisher, bool Signed);
+/// <param name="Id">The app id the command declares; the policy check does not need it, the verb does.</param>
+/// <param name="Name">The app name the command declares, when it sends one.</param>
+/// <param name="Version">The version the command declares; the verb needs it.</param>
+public sealed record AppToPublish(string File, string Publisher, bool Signed, string? Id = null, string? Name = null, string? Version = null);
 
 /// <summary>
 /// What the local policy check needs to know about a command, read from its
@@ -73,7 +76,13 @@ public sealed record PolicyRequest(
                     problem ??= "An app in the command has no publisher.";
                     return null;
                 }
-                if (!TryText(app, GatewayCommandParameters.AppFile, out var file, ref problem)) return null;
+                if (!TryText(app, GatewayCommandParameters.AppFile, out var file, ref problem)
+                    || !TryText(app, GatewayCommandParameters.AppId, out var id, ref problem)
+                    || !TryText(app, GatewayCommandParameters.AppName, out var name, ref problem)
+                    || !TryText(app, GatewayCommandParameters.AppVersion, out var version, ref problem))
+                {
+                    return null;
+                }
                 if (app[GatewayCommandParameters.AppSigned] is { } signedNode
                     && (signedNode.GetValueKind() is not (System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False)))
                 {
@@ -81,7 +90,7 @@ public sealed record PolicyRequest(
                     return null;
                 }
                 var signed = app[GatewayCommandParameters.AppSigned]?.GetValue<bool>() ?? false;
-                apps.Add(new AppToPublish(file ?? string.Empty, publisher, signed));
+                apps.Add(new AppToPublish(file ?? string.Empty, publisher, signed, id, name, version));
             }
         }
         if (command.Verb == GatewayVerb.PublishInstall && (problem = AppsMatchFiles(apps, command.Files)) is not null)

@@ -40,9 +40,51 @@ public static class GatewayCommandParameters
     /// </summary>
     public const string AppSigned = "signed";
 
+    /// <summary>
+    /// An app's id (a GUID), as its <c>app.json</c> says. <c>publish-install</c> needs it:
+    /// the gateway reads the id from the <c>.app</c> itself and refuses a file that is
+    /// not the app declared (#1375).
+    /// </summary>
+    public const string AppId = "id";
+
+    /// <summary>
+    /// An app's name, as its <c>app.json</c> says. Optional: when it is sent, the file's
+    /// own name must match it. The cmdlets are given the name read from the file.
+    /// </summary>
+    public const string AppName = "name";
+
+    /// <summary>
+    /// An app's version (<c>1.4.0.0</c>), as its <c>app.json</c> says. <c>publish-install</c>
+    /// needs it, and refuses a file whose own version differs.
+    /// </summary>
+    public const string AppVersion = "version";
+
     /// <summary><c>publish-install</c>: whether to unpublish each app's previous version afterwards.</summary>
     public const string UnpublishPrevious = "unpublishPrevious";
 
+    /// <summary>
+    /// <c>publish-install</c>: the schema sync mode, one of <see cref="GatewaySyncModes"/>
+    /// (<c>Sync-NAVApp -Mode</c>). Left out means <see cref="GatewaySyncModes.Add"/>;
+    /// any other word refuses the command.
+    /// </summary>
+    public const string SyncMode = "syncMode";
+
     /// <summary>The tenant a single-tenant server has.</summary>
     public const string DefaultTenant = "default";
+}
+
+/// <summary>
+/// The schema sync modes a <c>publish-install</c> may ask for, spelt as
+/// <c>Sync-NAVApp -Mode</c> and AL Workbench's <c>BcSyncMode</c> spell them.
+/// </summary>
+public static class GatewaySyncModes
+{
+    /// <summary>Additive schema changes only. The default.</summary>
+    public const string Add = "Add";
+
+    /// <summary>Destructive schema changes allowed: data in removed fields is lost.</summary>
+    public const string ForceSync = "ForceSync";
+
+    /// <summary>Every mode the gateway accepts, compared exactly, case included.</summary>
+    public static readonly IReadOnlyList<string> All = [Add, ForceSync];
 }
