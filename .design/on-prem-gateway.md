@@ -696,6 +696,21 @@ multitenant server. Where it differs from, or adds to, the decision above:
   Filtered to the kind alone, an unlinked row would hold its tier forever, and a customer who moves
   from one Solution to another could never be linked to the new one. Linking the tier back to the
   Solution that had it still revives that Solution's own row.
+- **An unlinked row gives its name up too.** `ix_oe_project_environments_project_name` is filtered
+  to `missing_since IS NULL OR kind = 'Online'` (`EnvironmentQueries.HoldsName` is the same rule for
+  lookups by name, such as `DeliveryService`'s). So a customer who moves to Business Central online
+  gets their "Production" from the next refresh, and a tier on a rebuilt gateway (a new
+  `gateway_instances` row) can be linked as "Production" again. Online rows keep holding their name
+  while missing, as before.
+- **Relinking under a taken name is refused, not renamed.** Linking a tier back revives its own row;
+  if another live row has taken the name meanwhile, the link is refused with a `Name` error and the
+  Admin picks another name. Reviving a second "Production" is impossible, and renaming either row
+  behind the Admin's back would be worse than asking.
+- **Plain indexes for the foreign keys.** The partial indexes above cannot serve a referential
+  action, which has to find every referencing row, so `gateway_instance_id` (`SET NULL`) and
+  `project_id` (`CASCADE`, no longer covered once the name index was filtered) each have a plain
+  index. `OeFactTableIndexTests` now ignores filtered indexes, except one filtered to
+  `<column> IS NOT NULL`.
 - **`gateway_instance_id` is `ON DELETE SET NULL`.** Inventory rows are never deleted today, but a
   gateway deleted outright must not take a Solution's environment (and its pipelines' target) with
   it.
@@ -711,11 +726,28 @@ multitenant server. Where it differs from, or adds to, the decision above:
 - **Freshness:** an on-premises row says "Gateway offline since <time>" when its gateway is offline
   (the gateway's own state, `GatewayService.StatusOf`), "Not read since <time>" when the gateway is
   online but the tier has not been read for an hour, and that the gateway "no longer reports" it when
-  the instance is stamped missing. Those three are the only states with a warning colour.
+  the instance, or the tenant on it, is stamped missing. Those three are the only states with a
+  warning colour.
+- **Out of touch is never healthy.** In any of those three states (`OnPremisesTierFacts.NeedsAttention`,
+  `FleetRowState.IsOutOfTouch`) the last state is shown as the last one: the environment page's pill
+  is muted and reads "Last seen running" (or the last state), and the Environments list gives the row
+  the warning glyph and keyline and counts it under Needs attention. The environment page then shows
+  only the warning, without the freshness line; "Open the gateway" in it is for Admins only.
+- **A tenant the gateway stops reporting** is treated like a tier it stops reporting. The inventory
+  does not write the server's newer facts onto its environment, and the readers that take the
+  customer's current state (production facts, module versions, the module filter) leave it out
+  through `EnvironmentQueries.StillReported`. Nothing is stored for it: it is derived from
+  `gateway_instance_tenants.missing_since` on read.
+- **`FetchedAt` is the last good read.** An inventory whose read of the tier failed (`ReadError`)
+  leaves the environment's `FetchedAt` alone, so "read 3 days ago" stays true.
+- **Multitenant is inferred when the flag is unknown.** A server reporting more than one live tenant
+  is multitenant even when the gateway could not read the configuration flag, in the link dialog, in
+  `LinkAsync` (which then wants a tenant) and on the environment page.
 - **Deploying is refused for now.** `DeliveryService` refuses an on-premises target, both when a
   release is resolved and when a scheduled one is claimed, with "... Deploying to on-premises through
   the gateway isn't available yet, so nothing was sent."; the pipeline editor does not offer an
-  on-premises target. Both lift with #1374 and #1367.
+  on-premises target, and `ReleasePipelineService` refuses one sent past the editor with a
+  `ProjectEnvironmentId` error. All three lift with #1374 and #1367.
 - **What the environment page shows:** Overview (the service tier, its database, tenant, sessions,
   licence expiry and the gateway), Apps (from the mirror) and Workbench history. Operations and
   Sessions are Business Central online's live reads and are not offered; an address naming them lands
