@@ -1,0 +1,150 @@
+{
+  "schema": 1,
+  "instance": "BC250",
+  "powerShell": "7.4.6",
+  "state": "Running",
+  "version": "25.4.29661.29927",
+  "service": {
+    "state": "Running",
+    "startMode": "Auto",
+    "account": "NT SERVICE\\MicrosoftDynamicsNavServer$BC250"
+  },
+  "configuration": {
+    "DatabaseServer": "CRONUS-SQL",
+    "DatabaseInstance": null,
+    "DatabaseName": "BC250 App",
+    "Multitenant": "true",
+    "ClientServicesPort": "7085",
+    "SOAPServicesPort": "7087",
+    "ODataServicesPort": "7088",
+    "ManagementServicesPort": "7086",
+    "DeveloperServicesPort": "7089",
+    "PublicWebBaseUrl": "https://bc.cronus.example/BC250"
+  },
+  "tenants": [
+    {
+      "id": "cronus-dk",
+      "state": "Operational",
+      "databaseName": "BC250 CRONUS DK",
+      "sessionCount": 5,
+      "apps": [
+        {
+          "appId": "437dbf0e-84ff-417a-965d-ed2bb9650972",
+          "name": "Base Application",
+          "publisher": "Microsoft",
+          "version": "25.4.29661.29927",
+          "dataVersion": "25.4.29661.29927",
+          "scope": "Global",
+          "syncState": "Synced",
+          "isInstalled": "True",
+          "isPublished": "True"
+        },
+        {
+          "appId": "63ca2fa4-4f03-4f2b-a480-172fef340d3f",
+          "name": "System Application",
+          "publisher": "Microsoft",
+          "version": "25.4.29661.29927",
+          "dataVersion": "25.4.29661.29927",
+          "scope": "Global",
+          "syncState": "Synced",
+          "isInstalled": "True",
+          "isPublished": "True"
+        },
+        {
+          "appId": "f3552374-a1f2-4356-848e-196002525837",
+          "name": "Business Foundation",
+          "publisher": "Microsoft",
+          "version": "25.4.29661.29927",
+          "dataVersion": "25.4.29661.29927",
+          "scope": "Global",
+          "syncState": "Synced",
+          "isInstalled": "True",
+          "isPublished": "True"
+        },
+        {
+          "appId": "8c1a6b1e-4a35-4b5a-9a8f-0c7d2e3f4a51",
+          "name": "CRONUS Freight Extension",
+          "publisher": "CRONUS Partner A/S",
+          "version": "3.1.0.7",
+          "dataVersion": "3.1.0.7",
+          "scope": "Tenant",
+          "syncState": "Synced",
+          "isInstalled": "True",
+          "isPublished": "True"
+        }
+      ]
+    },
+    {
+      "id": "cronus-se",
+      "state": "Operational",
+      "databaseName": "BC250 CRONUS SE",
+      "sessionCount": 0,
+      "apps": [
+        {
+          "appId": "437dbf0e-84ff-417a-965d-ed2bb9650972",
+          "name": "Base Application",
+          "publisher": "Microsoft",
+          "version": "25.4.29661.29927",
+          "dataVersion": "25.4.29661.29927",
+          "scope": "Global",
+          "syncState": "Synced",
+          "isInstalled": "True",
+          "isPublished": "True"
+        },
+        {
+          "appId": "63ca2fa4-4f03-4f2b-a480-172fef340d3f",
+          "name": "System Application",
+          "publisher": "Microsoft",
+          "version": "25.4.29661.29927",
+          "dataVersion": "25.4.29661.29927",
+          "scope": "Global",
+          "syncState": "Synced",
+          "isInstalled": "True",
+          "isPublished": "True"
+        },
+        {
+          "appId": "f3552374-a1f2-4356-848e-196002525837",
+          "name": "Business Foundation",
+          "publisher": "Microsoft",
+          "version": "25.4.29661.29927",
+          "dataVersion": "25.4.29661.29927",
+          "scope": "Global",
+          "syncState": "Synced",
+          "isInstalled": "True",
+          "isPublished": "True"
+        },
+        {
+          "appId": "8c1a6b1e-4a35-4b5a-9a8f-0c7d2e3f4a51",
+          "name": "CRONUS Freight Extension",
+          "publisher": "CRONUS Partner A/S",
+          "version": "3.1.0.7",
+          "dataVersion": "3.0.0.2",
+          "scope": "Tenant",
+          "syncState": "Synced",
+          "isInstalled": "True",
+          "isPublished": "True"
+        }
+      ]
+    }
+  ],
+  "tenantSpecificProperties": true,
+  "sessions": {
+    "total": 5,
+    "perTenant": [
+      {
+        "tenant": "cronus-dk",
+        "count": 5
+      },
+      {
+        "tenant": "cronus-se",
+        "count": 0
+      }
+    ],
+    "users": null
+  },
+  "licence": {
+    "text": "Microsoft Dynamics 365 Business Central (on-premises) licence\n\nLicensed To           : CRONUS Danmark A/S\nLicensed By           : CRONUS Partner A/S\nSerial Number         : 7654321\nCreated Date          : 2025-01-06\nExpiration Date       : 2026-12-31\nLicence Type          : Customer (Subscription)\n\nObject Assignment\n\nObject Type           Range\nTable                 50000..50149\nTableData             50000..50149\nPage                  50000..50149\nReport                50000..50099\nCodeunit              50000..50199\nXMLport               50000..50019\nQuery                 50000..50019\n",
+    "truncated": false
+  },
+  "unavailable": {}
+}

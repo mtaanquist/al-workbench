@@ -726,6 +726,397 @@ namespace ALDevToolbox.Data.Migrations
                     b.ToTable("gateway_command_files", (string)null);
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstance", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int?>("ClientServicesPort")
+                        .HasColumnType("integer")
+                        .HasColumnName("client_services_port");
+
+                    b.Property<string>("DatabaseInstance")
+                        .HasColumnType("text")
+                        .HasColumnName("database_instance");
+
+                    b.Property<string>("DatabaseName")
+                        .HasColumnType("text")
+                        .HasColumnName("database_name");
+
+                    b.Property<string>("DatabaseServer")
+                        .HasColumnType("text")
+                        .HasColumnName("database_server");
+
+                    b.Property<int?>("DeveloperServicesPort")
+                        .HasColumnType("integer")
+                        .HasColumnName("developer_services_port");
+
+                    b.Property<string>("Environment")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("environment");
+
+                    b.Property<DateTime>("FirstReportedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("first_reported_at");
+
+                    b.Property<int>("GatewayId")
+                        .HasColumnType("integer")
+                        .HasColumnName("gateway_id");
+
+                    b.Property<string>("Machine")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("machine");
+
+                    b.Property<int?>("ManagementServicesPort")
+                        .HasColumnType("integer")
+                        .HasColumnName("management_services_port");
+
+                    b.Property<DateTime?>("MissingSince")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("missing_since");
+
+                    b.Property<bool?>("Multitenant")
+                        .HasColumnType("boolean")
+                        .HasColumnName("multitenant");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("name");
+
+                    b.Property<int?>("ODataServicesPort")
+                        .HasColumnType("integer")
+                        .HasColumnName("odata_services_port");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<string>("PowerShell")
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasColumnName("powershell");
+
+                    b.Property<string>("PublicWebBaseUrl")
+                        .HasColumnType("text")
+                        .HasColumnName("public_web_base_url");
+
+                    b.Property<DateTime?>("ReadAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("read_at");
+
+                    b.Property<string>("ReadError")
+                        .HasColumnType("text")
+                        .HasColumnName("read_error");
+
+                    b.Property<DateTime>("ReportedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("reported_at");
+
+                    b.Property<string>("ServiceAccount")
+                        .HasColumnType("text")
+                        .HasColumnName("service_account");
+
+                    b.Property<string>("ServiceStartMode")
+                        .HasColumnType("text")
+                        .HasColumnName("service_start_mode");
+
+                    b.Property<string>("ServiceState")
+                        .HasColumnType("text")
+                        .HasColumnName("service_state");
+
+                    b.Property<int?>("SessionCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("session_count");
+
+                    b.Property<string>("SessionUsersJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("session_users");
+
+                    b.Property<int?>("SoapServicesPort")
+                        .HasColumnType("integer")
+                        .HasColumnName("soap_services_port");
+
+                    b.Property<string>("State")
+                        .HasColumnType("text")
+                        .HasColumnName("state");
+
+                    b.Property<bool>("TenantsTruncated")
+                        .HasColumnType("boolean")
+                        .HasColumnName("tenants_truncated");
+
+                    b.Property<string>("UnavailableJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("unavailable");
+
+                    b.Property<string>("Version")
+                        .HasColumnType("text")
+                        .HasColumnName("version");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("GatewayId", "Machine", "Name")
+                        .IsUnique();
+
+                    b.ToTable("gateway_instances", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstanceApp", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("AppId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("app_id");
+
+                    b.Property<string>("DataVersion")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("data_version");
+
+                    b.Property<bool?>("IsInstalled")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_installed");
+
+                    b.Property<bool?>("IsPublished")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_published");
+
+                    b.Property<DateTime?>("MissingSince")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("missing_since");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("name");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<string>("Publisher")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("publisher");
+
+                    b.Property<string>("Scope")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("scope");
+
+                    b.Property<string>("SyncState")
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("sync_state");
+
+                    b.Property<int>("TenantRowId")
+                        .HasColumnType("integer")
+                        .HasColumnName("tenant_row_id");
+
+                    b.Property<string>("Version")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("version");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("TenantRowId", "AppId", "Version")
+                        .IsUnique();
+
+                    b.ToTable("gateway_instance_apps", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstanceLicence", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateOnly?>("ExpiresOn")
+                        .HasColumnType("date")
+                        .HasColumnName("expires_on");
+
+                    b.Property<int>("InstanceId")
+                        .HasColumnType("integer")
+                        .HasColumnName("instance_id");
+
+                    b.Property<string>("Licensee")
+                        .HasColumnType("text")
+                        .HasColumnName("licensee");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<string>("ParseProblems")
+                        .HasColumnType("text")
+                        .HasColumnName("parse_problems");
+
+                    b.Property<DateTime>("ReadAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("read_at");
+
+                    b.Property<string>("SerialNumber")
+                        .HasColumnType("text")
+                        .HasColumnName("serial_number");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("text");
+
+                    b.Property<string>("TextSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("text_sha256");
+
+                    b.Property<bool>("Truncated")
+                        .HasColumnType("boolean")
+                        .HasColumnName("truncated");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstanceId")
+                        .IsUnique();
+
+                    b.HasIndex("OrganizationId");
+
+                    b.ToTable("gateway_instance_licences", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstanceLicenceRange", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<int>("FromId")
+                        .HasColumnType("integer")
+                        .HasColumnName("from_id");
+
+                    b.Property<int>("LicenceId")
+                        .HasColumnType("integer")
+                        .HasColumnName("licence_id");
+
+                    b.Property<string>("ObjectType")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("object_type");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<string>("Permissions")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("permissions");
+
+                    b.Property<int>("ToId")
+                        .HasColumnType("integer")
+                        .HasColumnName("to_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("LicenceId", "ObjectType");
+
+                    b.ToTable("gateway_instance_licence_ranges", (string)null);
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstanceTenant", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime?>("AppsReadAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("apps_read_at");
+
+                    b.Property<bool>("AppsTruncated")
+                        .HasColumnType("boolean")
+                        .HasColumnName("apps_truncated");
+
+                    b.Property<string>("DatabaseName")
+                        .HasColumnType("text")
+                        .HasColumnName("database_name");
+
+                    b.Property<int>("InstanceId")
+                        .HasColumnType("integer")
+                        .HasColumnName("instance_id");
+
+                    b.Property<DateTime?>("MissingSince")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("missing_since");
+
+                    b.Property<int>("OrganizationId")
+                        .HasColumnType("integer")
+                        .HasColumnName("organization_id");
+
+                    b.Property<DateTime>("ReadAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("read_at");
+
+                    b.Property<int?>("SessionCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("session_count");
+
+                    b.Property<string>("State")
+                        .HasColumnType("text")
+                        .HasColumnName("state");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("tenant_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId");
+
+                    b.HasIndex("InstanceId", "TenantId")
+                        .IsUnique();
+
+                    b.ToTable("gateway_instance_tenants", (string)null);
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayRegistrationCode", b =>
                 {
                     b.Property<int>("Id")
@@ -7611,6 +8002,91 @@ namespace ALDevToolbox.Data.Migrations
                     b.Navigation("Command");
                 });
 
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstance", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Gateway", "Gateway")
+                        .WithMany()
+                        .HasForeignKey("GatewayId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Gateway");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstanceApp", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.GatewayInstanceTenant", "Tenant")
+                        .WithMany("Apps")
+                        .HasForeignKey("TenantRowId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstanceLicence", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.GatewayInstance", "Instance")
+                        .WithOne("Licence")
+                        .HasForeignKey("ALDevToolbox.Domain.Entities.GatewayInstanceLicence", "InstanceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Instance");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstanceLicenceRange", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.GatewayInstanceLicence", "Licence")
+                        .WithMany("Ranges")
+                        .HasForeignKey("LicenceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Licence");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstanceTenant", b =>
+                {
+                    b.HasOne("ALDevToolbox.Domain.Entities.GatewayInstance", "Instance")
+                        .WithMany("Tenants")
+                        .HasForeignKey("InstanceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ALDevToolbox.Domain.Entities.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Instance");
+                });
+
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayRegistrationCode", b =>
                 {
                     b.HasOne("ALDevToolbox.Domain.Entities.User", "CreatedByUser")
@@ -9570,6 +10046,23 @@ namespace ALDevToolbox.Data.Migrations
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayCommand", b =>
                 {
                     b.Navigation("Files");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstance", b =>
+                {
+                    b.Navigation("Licence");
+
+                    b.Navigation("Tenants");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstanceLicence", b =>
+                {
+                    b.Navigation("Ranges");
+                });
+
+            modelBuilder.Entity("ALDevToolbox.Domain.Entities.GatewayInstanceTenant", b =>
+                {
+                    b.Navigation("Apps");
                 });
 
             modelBuilder.Entity("ALDevToolbox.Domain.Entities.Module", b =>

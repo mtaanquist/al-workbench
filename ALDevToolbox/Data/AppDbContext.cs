@@ -155,6 +155,13 @@ public class AppDbContext : DbContext
     // the filter - the sweep visits one organisation at a time.
     public DbSet<GatewayCommand> GatewayCommands => Set<GatewayCommand>();
     public DbSet<GatewayCommandFile> GatewayCommandFiles => Set<GatewayCommandFile>();
+    // The on-premises mirror (#1365): what each gateway's inventory reports. Written
+    // from the gateway's reports under its organisation claim; nothing crosses the filter.
+    public DbSet<GatewayInstance> GatewayInstances => Set<GatewayInstance>();
+    public DbSet<GatewayInstanceTenant> GatewayInstanceTenants => Set<GatewayInstanceTenant>();
+    public DbSet<GatewayInstanceApp> GatewayInstanceApps => Set<GatewayInstanceApp>();
+    public DbSet<GatewayInstanceLicence> GatewayInstanceLicences => Set<GatewayInstanceLicence>();
+    public DbSet<GatewayInstanceLicenceRange> GatewayInstanceLicenceRanges => Set<GatewayInstanceLicenceRange>();
     public DbSet<UserRepositoryToken> UserRepositoryTokens => Set<UserRepositoryToken>();
     public DbSet<UserNotificationSetting> UserNotificationSettings => Set<UserNotificationSetting>();
     public DbSet<NotificationDigestItem> NotificationDigestItems => Set<NotificationDigestItem>();
@@ -415,6 +422,11 @@ public class AppDbContext : DbContext
         ScopeToOrganization<GatewaySeenToken>(modelBuilder);
         ScopeToOrganization<GatewayCommand>(modelBuilder);
         ScopeToOrganization<GatewayCommandFile>(modelBuilder);
+        ScopeToOrganization<GatewayInstance>(modelBuilder);
+        ScopeToOrganization<GatewayInstanceTenant>(modelBuilder);
+        ScopeToOrganization<GatewayInstanceApp>(modelBuilder);
+        ScopeToOrganization<GatewayInstanceLicence>(modelBuilder);
+        ScopeToOrganization<GatewayInstanceLicenceRange>(modelBuilder);
         ScopeToOrganization<UserRepositoryToken>(modelBuilder);
         ScopeToOrganization<UserNotificationSetting>(modelBuilder);
         ScopeToOrganization<NotificationDigestItem>(modelBuilder);

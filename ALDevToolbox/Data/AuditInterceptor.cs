@@ -92,6 +92,10 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
             [typeof(GatewayRegistrationCode)] = AuditEntityType.GatewayRegistrationCode,
             // Deliberately absent: GatewaySeenToken, the replay table - one row per
             // gateway request, and nobody's decision.
+            // Deliberately absent: GatewayInstance and its tenants, apps, licence and
+            // ranges (the on-premises mirror, #1365). Every row is what a gateway read
+            // from a customer's server, rewritten by each inventory report; nobody
+            // decides anything there, and auditing it would add rows every 15 minutes.
             // Deliberately absent: OeEnvironmentUpgradeAction
             // (oe_environment_upgrade_actions). That table is itself a log — who asked
             // for which platform-update action, when it fired, and what came back — and

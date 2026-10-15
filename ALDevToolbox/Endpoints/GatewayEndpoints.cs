@@ -152,6 +152,30 @@ public static class GatewayEndpoints
         })
         .RequireAuthorization(GatewayAuthenticationHandler.PolicyName);
 
+        // The inventory (#1365): one tier, or part of one, per post, every 15 minutes
+        // and after commands. A post of its own rather than a heartbeat field or a
+        // command result: the scheduled round has no command to report on, and a
+        // heartbeat must stay small so a large server never gets it refused and the
+        // gateway shown offline. At one post per tier it is far inside the group's
+        // rate limit, and the gateway keeps each under 2 MB.
+        group.MapPost("/inventory", async (HttpContext ctx, GatewayInventoryService inventory, CancellationToken ct) =>
+        {
+            if (!IsApproved(ctx)) return NotApprovedResult();
+            var request = await ReadJsonAsync<GatewayInventoryReport>(ctx, GatewayProtocol.MaxRequestBodyBytes, ct);
+            if (request is null) return Malformed();
+            try
+            {
+                return await inventory.ApplyReportAsync(GatewayIdOf(ctx), request, ct)
+                    ? Results.NoContent()
+                    : RevokedResult();
+            }
+            catch (PlanValidationException ex)
+            {
+                return Refused(ex.Errors, StatusCodes.Status400BadRequest);
+            }
+        })
+        .RequireAuthorization(GatewayAuthenticationHandler.PolicyName);
+
         // Checked explicitly beyond the organisation filter: the command is this
         // gateway's, still claimed or running, and the file is that command's.
         group.MapGet("/commands/{id:long}/files/{fileId:long}", async (long id, long fileId, HttpContext ctx, GatewayCommandService commands, CancellationToken ct) =>

@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373) and the download with each release (#1363) exist; the verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363) and the inventory (#1365) exist; the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -216,8 +216,9 @@ Neither is ever sent again.
 runs one twice, including after it restarts. If it restarts in the middle of a command, its first
 heartbeat reports that id as interrupted; the server marks the command failed with "The gateway
 restarted while this was running; check the environment", asks for a fresh inventory, and never
-sends it again. A person decides whether to deploy again. (The fresh inventory is queued once the
-`refresh-inventory` verb exists, #1365; #1361 only fails the command.)
+sends it again. A person decides whether to deploy again. (As built, the server queues nothing for
+the fresh inventory: a gateway that restarted reads every tier as its first act anyway; see
+"Inventory, as built".)
 
 **The sweep** that expires and fails commands is a `PolledScheduler` that loops organisations with
 `AmbientOrganizationScope`, as `DeliveryScheduler` does, so it adds no `IgnoreQueryFilters()` call.
@@ -234,9 +235,9 @@ newer ones also load in PowerShell 7; the gateway picks per instance and uses 5.
 Parameters go to the child as data (JSON on standard input), never by building a command string, so
 nothing in a command can inject script. The runner sits behind a seam so every operation is
 unit-tested on the Linux CI against captured outputs. Most cmdlets return objects the child turns into
-JSON; `Export-NAVServerLicenseInformation` returns text, so its parser (licensee, expiry, object
-ranges per type) is part of the gateway and tested against captured licences from BC 14 and a current
-version.
+JSON; `Export-NAVServerLicenseInformation` returns text, so it needs a parser (licensee, expiry, object
+ranges per type), tested against captured licences from BC 14 and a current version. As built
+(#1365) that parser runs in AL Workbench, not the gateway; see "Inventory, as built".
 
 Every cmdlet that acts on one app is given `-Name`, `-Publisher` and `-Version`, because several
 versions of an app are published at once during an upgrade.
@@ -450,10 +451,14 @@ clears it.
 
 **The runner** (`PowerShellRunner` over `IProcessRunner`). One child process per operation:
 `powershell.exe` or `pwsh.exe` with fixed switches (`-NoLogo -NoProfile -NonInteractive
--ExecutionPolicy Bypass -EncodedCommand`) and a script made only of the fixed bootstrap and the
-operation's own constant script. The parameters, the module folder and a per-run random marker
-go on standard input as base64 of UTF-8 JSON, which the script reads with `ConvertFrom-Json`, so the
-command line is identical whatever the parameters hold. The bootstrap dot-sources `NavAdminTool.ps1`
+-ExecutionPolicy Bypass -EncodedCommand`) and an encoded command that is the fixed bootstrap alone.
+The operation's own constant script, the parameters, the module folder and a per-run random marker
+go on standard input as base64 of UTF-8 JSON; the bootstrap makes a script block of the operation's
+script and passes it the parameters, read with `ConvertFrom-Json`, as one object, so the command
+line is identical for every operation and whatever the parameters hold. (Until #1365 the operation's
+script was part of the encoded command; UTF-16 and base64 cap that at about 11,000 characters of
+script, and the inventory script is longer. Standard input is a pipe between the gateway and its own
+child, so carrying a constant there opens nothing.) The bootstrap dot-sources `NavAdminTool.ps1`
 from the tier's install folder, or, without it, imports whichever of the
 `Microsoft.Dynamics.Nav.Management`, `Microsoft.Dynamics.Nav.Apps.Management`,
 `Microsoft.BusinessCentral.Management` and `Microsoft.BusinessCentral.Apps.Management` modules
@@ -489,8 +494,8 @@ first exercised with #1365.
 
 - **PowerShell choice and standard input under 5.1** (#1365). The version from which a tier gets
   PowerShell 7 (Business Central 24) is an assumption, and passing the parameters on standard input
-  is only tested under `pwsh`; the inventory spike confirms both against real servers running
-  Windows PowerShell 5.1.
+  is only tested under `pwsh`. #1365 built the inventory that is to confirm both, but has not yet
+  been run against a real server; "Inventory, as built" lists what to check.
 - **`shared_restart`** (#1368). The gateway cannot tell which Solutions share a tier, so the rule is
   parsed and reported but not enforced; the restart group enforces it.
 - **Each `.app` against the declared list** (#1375). The policy check sees only what the command
@@ -498,6 +503,105 @@ first exercised with #1365.
   apps declared (as many, one each), read each `.app`'s publisher from its own manifest and refuse
   a mismatch with the declared one, and verify each signature itself: with `allow_unsigned = false`,
   an app whose Authenticode or NAVX signature does not verify is refused whatever `signed` claimed.
+
+### Inventory, as built (#1365)
+
+**What is read.** For each tier the policy file lets it read (`inventory`), on its own computer, the
+gateway runs one fixed script (`InventoryScript`) through the runner and gets one JSON document
+back: the instance's state and version (`Get-NAVServerInstance`); its Windows service's state, start
+mode and account (`Win32_Service`); ten whitelisted configuration keys (database server, instance
+and name, multitenant, the five ports, the public web base URL), never the whole configuration;
+its tenants (`Get-NAVTenant`; a single-tenant tier gets one tenant, `default`, with no cmdlet
+needed); each tenant's apps (`Get-NAVAppInfo -Tenant`, with `-TenantSpecificProperties` where the
+cmdlet has it, which adds data version and sync state); session counts per tenant
+(`Get-NAVServerSession`); and the licence as text (`Export-NAVServerLicenseInformation | Out-String`).
+User names of sessions are read only where the tier allows `session_users`, and dropped again by the
+gateway if the script returned them anyway. A stopped tier is asked only for the first three. It is
+read-only throughout: no cmdlet that changes anything is in the script.
+
+**Defensive by construction, for BC 14.** Before each part the script checks that the cmdlet, and
+any parameter it would add, exists (`Get-Command`). A part that is missing, fails or runs too long is
+left out and named in `unavailable` with the reason, and the rest is still sent. Each part runs in
+a second runspace with its own time limit (60 seconds, three minutes for one tenant's apps), and the
+whole tier has 20 minutes; a part that times out is abandoned with its runspace and the next part
+gets a fresh one. A tier on another computer (#1368's) or without a Windows service is reported with
+an error instead of being read.
+
+**When.** At start once approved, then every 15 minutes, two minutes after a round that could not
+be sent, and after every command that is not itself a refresh (anything a verb does may change
+what a tier looks like). Not while the gateway's files are unsafe. A round is not a command: it
+runs between polls, like one, with heartbeats going on. A restarted gateway therefore inventories
+first, which is what "Run once, across restarts" needs; the server queues nothing for it.
+
+**`refresh-inventory`** reads the named tier, or every readable tier when it names none, and the
+command's result is `{ read, failed }`. A tier the policy file does not let the gateway read fails
+the command. The gateway page's **Refresh now** (Admin only, approved gateways only) queues one with
+no tier named, or returns the one already waiting; the page then polls for three minutes.
+
+**Sending: `POST /gateway/inventory`, one tier per post.** Not a heartbeat field, because a
+heartbeat must stay small for a large server never to get it refused and the gateway shown offline;
+not a command result, because the scheduled round has no command. The report
+(`GatewayInventoryReport`, `schemaVersion` 1) carries the tiers read and, in a full round, the
+**roster**: every tier the policy file lets the gateway read. A tier AL Workbench knows that is not in
+the roster is marked missing; a single-tier refresh sends no roster and marks nothing. With no
+readable tier at all, one report with an empty roster is sent. A tier too large for one post (aimed
+at 2 MB, against the 4 MB body limit) is split by tenants, the whole tenant list in every part and
+each tenant's apps in exactly one. One post per tier every 15 minutes is far inside the gateway rate
+limit.
+
+**Bounds.** The gateway cuts each list to its limit (`GatewayInventoryLimits`: 1,000 tenants per
+tier, 1,000 apps per tenant, 500 session users, 512 KB of licence text, 200 tiers) and flags what it
+cut (`tenantsTruncated`, `appsTruncated`, `truncated`). AL Workbench refuses a report over any limit
+whole, with a field-keyed 400: only a gateway that does not cut can send one, and refusing is
+clearer than storing part of it silently. A cut list marks nothing missing, since what was cut is
+unknown.
+
+**Storing.** `GatewayInventoryService` upserts by gateway + machine + instance, tenant id, and app id
++ version, all without regard to case, so ids are stable and the latest spelling is kept. What is
+true now (state, version, service, session counts) is overwritten, null meaning unread; what
+changes slowly (configuration, tenants, apps, licence) is kept when a report could not read it. A
+tier that could not be read at all keeps everything and shows why. An unchanged app is not written.
+The licence is parsed when its text's SHA-256 changes, and its ranges are replaced whole. The five
+tables are organisation-scoped with the query filter, listed in `TenantTableCatalog` with the
+authentication and audit tables (counted, never restored from a snapshot: the gateway rewrites them
+within 15 minutes), and deliberately not audited: they record what a server reported, not anyone's
+decision.
+
+**The licence is parsed in AL Workbench, not the gateway** (`GatewayLicenceParser`), so a layout we
+read wrongly is fixed with a deployment rather than a manual update on every customer's server.
+It reads the licensee, serial number, expiry date (ISO, day-first with `-` or `.`, `/` when only one
+reading is possible; one that reads both ways is a parse problem rather than a guess) and object
+ranges by type (`50000 50099`, `50000..50099` or `50000-50099`, with the permissions after them).
+What it cannot read is kept as parse problems next to the text.
+
+**The page.** The gateway's name on Administration → Gateways opens its page
+(`/admin/administration/gateways/{id}`, Admin only): status, last seen, version, and a table of
+tiers with machine, version, state, database, tenants, installed apps, licence expiry (marked when
+expired or within 30 days), when it was last read and whether it is missing, with the parts not
+read listed under a tier. Empty states say what to do for a gateway still waiting for approval, a
+revoked one, and one that has not reported yet.
+
+**`ALWorkbench.Gateway check --inventory <folder>`** runs the script for every readable tier on this
+computer and writes each raw result to `inventory-<machine>-<instance>.json`. It sends nothing. That
+is how the samples in `ALDevToolbox.Tests/Gateways/InventorySamples/` are to be replaced: they are
+synthetic today, written from documentation.
+
+**To verify on real servers** before the inventory is trusted (none of this has met a real Business
+Central yet; the script has only run under `pwsh` on Linux against stand-in cmdlets):
+
+- that Windows PowerShell 5.1 reads the operation and parameters from standard input, and the
+  runspace-per-part timeouts behave the same there;
+- that Business Central 24 is where the module needs PowerShell 7 (`PowerShellChoice`), on a machine
+  with BC 14 and a current version side by side;
+- the module and `NavAdminTool.ps1` names in each version's install folder, and whether loading the
+  module a second time for the part runspace takes long;
+- which versions have `-TenantSpecificProperties` on `Get-NAVAppInfo` and `-Tenant` on
+  `Get-NAVServerSession`, and what `Get-NAVTenant` does on a single-tenant tier;
+- the shape of `Get-NAVServerConfiguration` with and without `-AsXml`, and `Multitenant` as text;
+- the layout of `Export-NAVServerLicenseInformation` for an `.flf` (BC 14) and a `.bclicense`
+  licence, especially the expiry line and the object ranges, then replace the samples;
+- how long `Get-NAVAppInfo` takes on a tenant with many apps, against the three-minute limit;
+- the service account the gateway runs as can run every cmdlet above.
 
 ## Data model
 
@@ -510,14 +614,17 @@ New tables, all org-scoped with the usual query filter:
 | `gateway_seen_tokens` | Gateway, `jti`, expires at (replay protection; swept with the commands) |
 | `gateway_commands` | As in "Commands" above |
 | `gateway_command_files` | Id, command id, file name, SHA-256, bytes (or a reference to the artifact row it came from) |
-| `gateway_instances` | Gateway, machine, instance name, environment (production, test, development, from the policy file), version, state, database server and name, multitenant, open sessions, licence (licensee, expiry, ranges as JSON with object types), read at, missing since |
-| `gateway_instance_tenants` | Instance, tenant id, state |
-| `gateway_instance_apps` | Instance, tenant, app id, name, publisher, version, data version, scope, installed, sync state |
+| `gateway_instances` | Gateway, machine, instance name, environment (production, test, development, from the policy file), version, state, Windows service state, start mode and account, database server, instance and name, multitenant, ports, public web base URL, open sessions (and user names where `session_users` allows), PowerShell used, read error, parts not read (JSON), first reported, reported at, read at, missing since |
+| `gateway_instance_tenants` | Instance, tenant id, state, database name, open sessions, apps cut to size, apps read at, read at, missing since |
+| `gateway_instance_apps` | Tenant, app id, name, publisher, version, data version, scope, installed, published, sync state, missing since |
+| `gateway_instance_licences` | Instance (one each), licensee, serial number, expiry, the text as read, its SHA-256, cut to size, parse problems, read at |
+| `gateway_instance_licence_ranges` | Licence, object type, from and to id, permissions |
 | `oe_project_licenses` | Solution, file name, bytes (at most 1 MB), SHA-256, uploaded by and at (code spells it `License`, as `OeProject.LicenseType` does; copy says licence) |
 
-The inventory tables are a stable upsert keyed by gateway + machine + instance (+ tenant); an
-instance that stops being reported is stamped `missing_since`, never deleted, as
-`OeProjectEnvironment` treats environments that vanish.
+The inventory tables are a stable upsert keyed by gateway + machine + instance (+ tenant, + app id
+and version); an instance, tenant or app that stops being reported is stamped `missing_since`, never
+deleted, as `OeProjectEnvironment` treats environments that vanish. Licence ranges are replaced whole
+when the licence text changes.
 
 ### An on-premises environment is an `OeProjectEnvironment` row
 
@@ -982,7 +1089,7 @@ Staging builds are never signed and are kept as a workflow artifact on the run, 
 ## Decisions (resolved)
 
 - **Name:** "On-premises gateway", never "agent".
-- **Connection:** outbound HTTPS long-poll; commands as rows; inventory pushed on heartbeat.
+- **Connection:** outbound HTTPS long-poll; commands as rows; inventory pushed on its own route (`POST /gateway/inventory`), not the heartbeat (#1365).
 - **Credential:** gateway-generated key pair, signed short-lived tokens; no shared secret.
 - **Scope:** a gateway belongs to the organisation and may serve many Solutions; each tier + tenant
   is linked to exactly one Solution, by an Admin.

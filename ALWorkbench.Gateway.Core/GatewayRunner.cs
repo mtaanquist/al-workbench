@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
+using System.Text.Json.Nodes;
 using ALWorkbench.Gateway.Contracts;
+using ALWorkbench.Gateway.Core.Inventory;
 using ALWorkbench.Gateway.Core.Policy;
 using Microsoft.Extensions.Logging;
 
@@ -75,6 +77,7 @@ public sealed class GatewayRunner
     private readonly ILogger _logger;
     private readonly GatewayRunnerOptions _options;
     private readonly Random? _random;
+    private readonly GatewayInventory? _inventory;
 
     private readonly Lock _lock = new();
     private readonly HashSet<long> _running = [];
@@ -83,6 +86,13 @@ public sealed class GatewayRunner
     private string _fingerprint = string.Empty;
     private long _policySentVersion = -1;
     private long? _policySentAt;
+    /// <summary>When the last round of inventory ended (monotonic); null when one is due now.</summary>
+    private long? _inventoryAt;
+    /// <summary>How long after <see cref="_inventoryAt"/> the next round is due.</summary>
+    private TimeSpan _inventoryWait = GatewayInventoryLimits.Interval;
+
+    /// <summary>After a round that could not be sent, the next try comes this much sooner than the usual interval.</summary>
+    public static readonly TimeSpan InventoryRetry = TimeSpan.FromMinutes(2);
 
     public GatewayRunner(
         HttpClient http,
@@ -94,7 +104,8 @@ public sealed class GatewayRunner
         IGatewayClock clock,
         ILogger logger,
         GatewayRunnerOptions options,
-        Random? random = null)
+        Random? random = null,
+        GatewayInventory? inventory = null)
     {
         _http = http;
         _settings = settings;
@@ -106,6 +117,7 @@ public sealed class GatewayRunner
         _logger = logger;
         _options = options;
         _random = random;
+        _inventory = inventory;
     }
 
     /// <summary>
@@ -212,6 +224,14 @@ public sealed class GatewayRunner
                         // only has to hear how they ended.
                         running = PostSavedResultsAsync(client, savedResults, commandStop.Token);
                         savedResults = new Dictionary<long, GatewayCommandResultRequest>();
+                        continue;
+                    }
+
+                    if (_inventory is not null && InventoryDue())
+                    {
+                        // At start, every 15 minutes, and after each command: read
+                        // the tiers, one at a time like a command, with heartbeats going on.
+                        running = RunScheduledInventoryAsync(client, commandStop.Token);
                         continue;
                     }
 
@@ -428,7 +448,7 @@ public sealed class GatewayRunner
             try
             {
                 var (files, refusal) = await DownloadFilesAsync(client, command, folder, held, verbStop.Token, ct).ConfigureAwait(false);
-                outcome = refusal ?? await ExecuteAsync(new GatewayCommandContext(command, files, batcher.Add), verbStop.Token, ct).ConfigureAwait(false);
+                outcome = refusal ?? await ExecuteAsync(client, new GatewayCommandContext(command, files, batcher.Add), verbStop.Token, ct).ConfigureAwait(false);
             }
             finally
             {
@@ -470,6 +490,9 @@ public sealed class GatewayRunner
                 else _logger.CommandFailed(command.Id, verb, who, outcome.FailureMessage ?? "No reason given.");
             }
             _runOnce.MarkFinished(command.Id);
+            // Whatever the verb did, the tiers may look different now: read them
+            // again before the next poll. A refresh has just read them.
+            if (command.Verb != GatewayVerb.RefreshInventory) RequestInventory();
         }
         finally
         {
@@ -478,10 +501,14 @@ public sealed class GatewayRunner
         }
     }
 
-    private async Task<GatewayCommandOutcome> ExecuteAsync(GatewayCommandContext context, CancellationToken verbStop, CancellationToken ct)
+    private async Task<GatewayCommandOutcome> ExecuteAsync(WorkbenchClient client, GatewayCommandContext context, CancellationToken verbStop, CancellationToken ct)
     {
         try
         {
+            if (context.Command.Verb == GatewayVerb.RefreshInventory && _inventory is not null)
+            {
+                return await RunCommandedInventoryAsync(client, context, verbStop).ConfigureAwait(false);
+            }
             return await _executor.ExecuteAsync(context, verbStop).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -497,6 +524,81 @@ public sealed class GatewayRunner
             _logger.LogError(ex, "Command {CommandId} hit an unexpected error.", context.Command.Id);
             return GatewayCommandOutcome.Failure($"The gateway hit an unexpected error: {ex.Message}");
         }
+    }
+
+    private bool InventoryDue()
+    {
+        lock (_lock) return _inventoryAt is not { } at || _clock.Elapsed(at) >= _inventoryWait;
+    }
+
+    private void RequestInventory()
+    {
+        lock (_lock) _inventoryAt = null;
+    }
+
+    private void InventoryDone(TimeSpan wait)
+    {
+        lock (_lock)
+        {
+            _inventoryAt = _clock.Timestamp();
+            _inventoryWait = wait;
+        }
+    }
+
+    /// <summary>
+    /// The gateway's own round of inventory. Not a command: nothing is recorded as
+    /// started, and a round that cannot be sent is simply tried again a little later.
+    /// Skipped while someone other than administrators can change the gateway's files,
+    /// when nothing may be read at all.
+    /// </summary>
+    private async Task RunScheduledInventoryAsync(WorkbenchClient client, CancellationToken ct)
+    {
+        await Task.Yield();
+        var snapshot = _policy.Refresh();
+        if (snapshot.Report.State == GatewayPolicyStates.Unsafe)
+        {
+            InventoryDone(GatewayInventoryLimits.Interval);
+            return;
+        }
+        try
+        {
+            var summary = await _inventory!.RunAsync(_policy.InForce, null, client.PostInventoryAsync, null, ct).ConfigureAwait(false);
+            InventoryDone(GatewayInventoryLimits.Interval);
+            _logger.InventorySent(summary.Read, summary.Failed);
+        }
+        catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException or GatewayNotApprovedException
+                                   or GatewayCredentialRefusedException or GatewayOutdatedException or CommandClosedException)
+        {
+            InventoryDone(InventoryRetry);
+            _logger.InventoryNotSent(ex.Message, (int)InventoryRetry.TotalMinutes);
+        }
+    }
+
+    /// <summary>
+    /// <c>refresh-inventory</c>: the policy check has already allowed it. Reads the tier
+    /// the command names, or every readable tier when it names none, and sends each as
+    /// the scheduled round does; the command's result counts what was read.
+    /// </summary>
+    private async Task<GatewayCommandOutcome> RunCommandedInventoryAsync(WorkbenchClient client, GatewayCommandContext context, CancellationToken ct)
+    {
+        var target = PolicyRequest.FromCommand(context.Command, out _)?.Target;
+        InventoryRunSummary summary;
+        try
+        {
+            summary = await _inventory!.RunAsync(_policy.InForce, target, client.PostInventoryAsync, context.Progress, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException or GatewayNotApprovedException
+                                   or GatewayCredentialRefusedException or GatewayOutdatedException or CommandClosedException)
+        {
+            return GatewayCommandOutcome.Failure($"The gateway read the service tiers but could not send what it read to AL Workbench: {ex.Message}");
+        }
+        if (target is null) InventoryDone(GatewayInventoryLimits.Interval);
+        var result = new JsonObject { ["read"] = summary.Read, ["failed"] = summary.Failed };
+        if (target is not null && summary.Read + summary.Failed == 0)
+        {
+            return GatewayCommandOutcome.Failure($"{target} is not a service tier the gateway may read.", result);
+        }
+        return GatewayCommandOutcome.Success(result);
     }
 
     /// <summary>
@@ -640,7 +742,7 @@ public sealed class GatewayRunner
     }
 
     /// <summary>The file's own name with anything Windows would not accept replaced, and never a path.</summary>
-    internal static string SafeFileName(string name)
+    public static string SafeFileName(string name)
     {
         var leaf = Path.GetFileName(name.Replace('\\', '/'));
         var invalid = Path.GetInvalidFileNameChars().Concat(['<', '>', ':', '"', '|', '?', '*', '/', '\\']).ToHashSet();

@@ -1,0 +1,81 @@
+.gw-refresh-note {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-3);
+}
+
+.gw-tiers {
+    overflow-x: auto;
+}
+
+.gw-tiers .tag {
+    margin-left: var(--space-1);
+}
+
+/* A tier the gateway stopped reporting stays listed, quieter. */
+.gw-tier--missing td {
+    color: var(--ink-3);
+}
+
+.gw-tier-problem {
+    margin-top: var(--space-1);
+    color: var(--danger-text);
+    max-width: 32rem;
+}
+
+.gw-tier-unread {
+    margin-top: var(--space-1);
+    color: var(--ink-3);
+    font-size: var(--text-sm);
+    max-width: 32rem;
+}
+
+.gw-tier-unread summary {
+    cursor: pointer;
+}
+
+.gw-tier-unread ul {
+    margin: var(--space-1) 0 0;
+    padding-left: var(--space-4);
+}
+
+/* On a phone each tier is one block: its name and what was read, then each fact
+   on its own line under the column's name, so nothing scrolls sideways. */
+@media (max-width: 700px) {
+    .gw-tiers thead {
+        display: none;
+    }
+
+    .gw-tiers tbody tr {
+        display: block;
+        padding: var(--space-3) var(--space-4);
+        border-bottom: 1px solid var(--border);
+    }
+
+    .gw-tiers tbody tr:last-child {
+        border-bottom: 0;
+    }
+
+    .gw-tiers tbody td {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-1) var(--space-2);
+        align-items: baseline;
+        width: auto;
+        height: auto;
+        padding: var(--space-1) 0 0;
+        border: 0;
+    }
+
+    .gw-tiers tbody td:first-child {
+        display: block;
+        padding-top: 0;
+    }
+
+    .gw-tiers tbody td[data-label]::before {
+        content: attr(data-label) ":";
+        color: var(--ink-3);
+        min-width: 8rem;
+    }
+}

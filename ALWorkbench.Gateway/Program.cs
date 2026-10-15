@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using ALWorkbench.Gateway;
 using ALWorkbench.Gateway.Contracts;
 using ALWorkbench.Gateway.Core;
+using ALWorkbench.Gateway.Core.Inventory;
 using ALWorkbench.Gateway.Core.Policy;
 using ALWorkbench.Gateway.Core.PowerShell;
 using Microsoft.Extensions.DependencyInjection;
@@ -19,7 +20,8 @@ using Microsoft.Extensions.Logging.EventLog;
 //   register --url <address> --code <code>   make a key, exchange the code, print the fingerprint
 //   install [--account DOMAIN\name$]           create the Windows service (see ServiceInstaller)
 //   uninstall                                  remove the service, the key and the stored settings
-//   check                                      read gateway.toml and try each local tier, changing nothing
+//   check [--inventory <folder>]               read gateway.toml and try each local tier, changing nothing;
+//                                              with --inventory, also save what the inventory reads from each
 //   run                                        the service itself; Windows starts it with this
 // See .design/on-prem-gateway.md.
 
@@ -50,7 +52,7 @@ internal static class GatewayProgram
                 "register" => await RegisterAsync(Options(args)),
                 "install" => Install(Options(args)),
                 "uninstall" => Uninstall(),
-                "check" => await CheckAsync(),
+                "check" => await CheckAsync(Options(args)),
                 "run" => await RunAsync(args),
                 _ => Usage(command),
             };
@@ -89,10 +91,13 @@ internal static class GatewayProgram
                   AL Workbench under Administration → Gateways → Add gateway, and then
                   approves the gateway there.
 
-              ALWorkbench.Gateway check
+              ALWorkbench.Gateway check [--inventory <folder>]
                   Reads gateway.toml beside the program, shows what it allows for each
                   service tier, checks that only administrators can change it, and asks
                   each service tier on this computer for its state. Changes nothing.
+                  With --inventory, also reads each service tier on this computer the
+                  way the gateway reports it to AL Workbench (versions, tenants, apps,
+                  sessions, licence) and saves it as one file per tier in <folder>.
 
               ALWorkbench.Gateway uninstall
                   Removes the service, the gateway's key and its settings. The log files stay.
@@ -256,9 +261,14 @@ internal static class GatewayProgram
     /// can change it, what each tier is allowed, and a harmless read from each tier on
     /// this computer, which proves the right PowerShell and administration module load.
     /// </summary>
-    private static async Task<int> CheckAsync()
+    private static async Task<int> CheckAsync(Dictionary<string, string> arguments)
     {
         RequireAdministrator();
+        var inventoryFolder = arguments.GetValueOrDefault("inventory");
+        if (arguments.Keys.Any(k => !string.Equals(k, "inventory", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new UsageException("check takes one option: --inventory <folder>.");
+        }
         var options = GatewayWorker.PolicyOptions();
         var source = new GatewayPolicySource(options, new WindowsFileAccessCheck(), SystemGatewayClock.Instance, TimeZoneInfo.Local, NullLogger.Instance);
         source.Refresh();
@@ -314,7 +324,44 @@ internal static class GatewayProgram
                 failed = true;
             }
         }
+
+        if (inventoryFolder is not null && !await SaveInventoryAsync(source.InForce, inventoryFolder, runner, locator)) failed = true;
         return failed ? 1 : 0;
+    }
+
+    /// <summary>
+    /// Runs the inventory script against each tier on this computer that allows
+    /// <c>inventory</c>, and saves what it printed, untouched, as one JSON file per tier:
+    /// the real-world samples AL Workbench's tests are meant to read (see
+    /// ALDevToolbox.Tests/Gateways/InventorySamples). Changes nothing on the tiers.
+    /// </summary>
+    private static async Task<bool> SaveInventoryAsync(GatewayPolicy policy, string folder, PowerShellRunner runner, IServiceTierLocator locator)
+    {
+        Directory.CreateDirectory(folder);
+        var reader = new PowerShellInventoryReader(runner, locator, Environment.MachineName);
+        var ok = true;
+        Console.WriteLine();
+        Console.WriteLine($"Saving what the inventory reads to {folder}. The files hold each tier's app list and licence information:");
+        Console.WriteLine("share them only with whoever looks after AL Workbench.");
+        foreach (var instance in policy.Instances.Where(i =>
+                     i.Allows(PolicyPermission.Inventory)
+                     && string.Equals(i.Tier.Machine, Environment.MachineName, StringComparison.OrdinalIgnoreCase)))
+        {
+            Console.Write($"Reading {instance.Tier}... ");
+            var raw = await reader.ReadRawAsync(instance, null, CancellationToken.None);
+            if (raw.Output is null)
+            {
+                Console.WriteLine("failed.");
+                Console.WriteLine("  " + raw.Error);
+                ok = false;
+                continue;
+            }
+            var file = Path.Combine(folder, $"inventory-{GatewayRunner.SafeFileName(instance.Tier.Machine)}-{GatewayRunner.SafeFileName(instance.Tier.Instance)}.json");
+            await File.WriteAllTextAsync(file, raw.Output.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+            var unavailable = raw.Output["unavailable"] is JsonObject reasons ? reasons.Count : 0;
+            Console.WriteLine($"saved {Path.GetFileName(file)} (PowerShell {raw.PowerShell}; {unavailable} part(s) could not be read).");
+        }
+        return ok;
     }
 
     /// <summary>How long stopping may take: the result grace plus room for the rest.</summary>

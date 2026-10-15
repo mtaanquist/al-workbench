@@ -28,6 +28,12 @@ public interface IGatewayPolicy
 
     /// <summary>Whether the policy allows <paramref name="command"/> right now. Refreshes first.</summary>
     PolicyDecision Check(GatewayCommandMessage command);
+
+    /// <summary>
+    /// The policy in force since the last <see cref="Refresh"/>: which tiers the
+    /// inventory reads, and with which permissions.
+    /// </summary>
+    GatewayPolicy InForce { get; }
 }
 
 /// <summary>Where the policy lives and which computer the gateway is on.</summary>

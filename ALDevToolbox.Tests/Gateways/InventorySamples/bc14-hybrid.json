@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "instance": "BC140",
+  "powerShell": "5.1.17763.5830",
+  "state": "Running",
+  "version": "14.0.47786.0",
+  "service": {
+    "state": "Running",
+    "startMode": "Auto",
+    "account": "CRONUS\\svc-bc140$"
+  },
+  "configuration": {
+    "DatabaseServer": "CRONUS-SQL",
+    "DatabaseInstance": "BCDEMO",
+    "DatabaseName": "Demo Database BC (14-0)",
+    "Multitenant": "false",
+    "ClientServicesPort": "7046",
+    "SOAPServicesPort": "7047",
+    "ODataServicesPort": "7048",
+    "ManagementServicesPort": "7045",
+    "DeveloperServicesPort": "7049",
+    "PublicWebBaseUrl": null
+  },
+  "tenants": {
+    "value": [
+      {
+        "id": "default",
+        "state": "Operational",
+        "databaseName": "Demo Database BC (14-0)",
+        "sessionCount": 3,
+        "apps": [
+          {
+            "appId": "437dbf0e-84ff-417a-965d-ed2bb9650972",
+            "name": "Base Application",
+            "publisher": "Microsoft",
+            "version": "14.0.47786.0",
+            "dataVersion": null,
+            "scope": null,
+            "syncState": null,
+            "isInstalled": "True",
+            "isPublished": null
+          },
+          {
+            "appId": "63ca2fa4-4f03-4f2b-a480-172fef340d3f",
+            "name": "System Application",
+            "publisher": "Microsoft",
+            "version": "14.0.47786.0",
+            "dataVersion": null,
+            "scope": null,
+            "syncState": null,
+            "isInstalled": "True",
+            "isPublished": null
+          },
+          {
+            "appId": "8c1a6b1e-4a35-4b5a-9a8f-0c7d2e3f4a51",
+            "name": "CRONUS Freight Extension",
+            "publisher": "CRONUS Partner A/S",
+            "version": "2.3.0.12",
+            "dataVersion": null,
+            "scope": null,
+            "syncState": null,
+            "isInstalled": "True",
+            "isPublished": null
+          },
+          {
+            "appId": "8c1a6b1e-4a35-4b5a-9a8f-0c7d2e3f4a51",
+            "name": "CRONUS Freight Extension",
+            "publisher": "CRONUS Partner A/S",
+            "version": "2.4.0.3",
+            "dataVersion": null,
+            "scope": null,
+            "syncState": null,
+            "isInstalled": "False",
+            "isPublished": null
+          }
+        ]
+      }
+    ],
+    "Count": 1
+  },
+  "tenantSpecificProperties": false,
+  "sessions": {
+    "total": 3,
+    "perTenant": [
+      {
+        "tenant": "default",
+        "count": 3
+      }
+    ],
+    "users": [
+      "CRONUS\\ANNA",
+      "CRONUS\\BO",
+      "CRONUS\\SVEN"
+    ]
+  },
+  "licence": {
+    "text": "**************************************************************************************\n*  Microsoft Dynamics 365 Business Central - licence information\n**************************************************************************************\n\nLicensed to             : CRONUS International Ltd.\n                          5 The Ring\n                          Westminster, London W2 8HG\nLicensed by             : CRONUS Partner A/S\nSerial No.              : 6312345\nCreated                 : 14-03-2019 10:42\nConfiguration           : 9999\n\nProduct Line            : Dynamics 365 Business Central On-Premises\nCountry                 : W1\n\n**************************************************************************************\nObject Assignment\n**************************************************************************************\nObject Type      From        To          Read    Insert  Modify  Delete  Execute\nTableData        50000       50099       Direct  Direct  Direct  Direct\nTable            50000       50099                                       Direct\nPage             50000       50099                                       Direct\nReport           50000       50049                                       Direct\nCodeunit         50000       50099                                       Direct\nXMLport          50000       50009                                       Direct\nQuery            50000       50009                                       Direct\nMenuSuite        1050        1059                                        Direct\n",
+    "truncated": false
+  },
+  "unavailable": {
+    "apps.tenantSpecificProperties": "This Business Central version has no -TenantSpecificProperties, so data versions and sync states are not shown."
+  }
+}

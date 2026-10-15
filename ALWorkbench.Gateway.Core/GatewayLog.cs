@@ -16,6 +16,8 @@ public static partial class GatewayLog
     public const int CommandRefusedId = 1003;
     public const int CommandInterruptedId = 1004;
     public const int ResultReportedLateId = 1005;
+    public const int InventorySentId = 1006;
+    public const int InventoryNotSentId = 1007;
     public const int RegisteredId = 2000;
     public const int WaitingForApprovalId = 2001;
     public const int ApprovedId = 2002;
@@ -54,6 +56,14 @@ public static partial class GatewayLog
     [LoggerMessage(EventId = ResultReportedLateId, Level = LogLevel.Information,
         Message = "Reported the result of command {CommandId} to AL Workbench. It finished before the gateway last stopped, and the result had not arrived yet.")]
     public static partial void ResultReportedLate(this ILogger logger, long commandId);
+
+    [LoggerMessage(EventId = InventorySentId, Level = LogLevel.Information,
+        Message = "Read {Read} service tier(s) and sent what they report to AL Workbench; {Failed} could not be read. The gateway only reads, and reads only the tiers gateway.toml allows 'inventory' on.")]
+    public static partial void InventorySent(this ILogger logger, int read, int failed);
+
+    [LoggerMessage(EventId = InventoryNotSentId, Level = LogLevel.Warning,
+        Message = "Could not send the service tiers' inventory to AL Workbench ({Reason}). Trying again in {Minutes} minutes.")]
+    public static partial void InventoryNotSent(this ILogger logger, string reason, int minutes);
 
     [LoggerMessage(EventId = RegisteredId, Level = LogLevel.Information,
         Message = "Registered with {WorkbenchUrl} as gateway {GatewayId} ({Name}), key fingerprint {Fingerprint}.")]

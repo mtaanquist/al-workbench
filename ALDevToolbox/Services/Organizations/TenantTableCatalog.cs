@@ -168,6 +168,15 @@ internal static class TenantTableCatalog
         // counted because they are the bulk of it.
         "gateway_commands",
         "gateway_command_files",
+        // The on-premises mirror: what each gateway last reported about its service
+        // tiers. Rewritten from the next report every 15 minutes, so a snapshot of it
+        // is only an older reading; and its parent, gateways, is not restored either.
+        // Counted because a hosting server's app lists are not small.
+        "gateway_instances",
+        "gateway_instance_tenants",
+        "gateway_instance_apps",
+        "gateway_instance_licences",
+        "gateway_instance_licence_ranges",
         "audit_log",
     ];
 

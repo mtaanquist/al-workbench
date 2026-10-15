@@ -157,7 +157,8 @@
                         var gateway = g;
                         <tr>
                             <td>
-                                <span class="u-nowrap">@gateway.Name</span>
+                                @* Its own page lists the service tiers it reports. *@
+                                <a class="u-nowrap" href="@($"/admin/administration/gateways/{gateway.Id}")">@gateway.Name</a>
                                 @if (!string.Equals(gateway.Name, gateway.MachineName, StringComparison.OrdinalIgnoreCase))
                                 {
                                     <div class="u-muted">on <span class="u-nowrap">@gateway.MachineName</span></div>
@@ -518,20 +519,7 @@
         _ => null,
     };
 
-    private static string ToneOf(GatewayStatus status) => status switch
-    {
-        GatewayStatus.Online => "success",
-        GatewayStatus.Offline => "danger",
-        GatewayStatus.WaitingForApproval => "warn",
-        _ => "muted",
-    };
+    private static string ToneOf(GatewayStatus status) => GatewayStatusText.ToneOf(status);
 
-    private static string LabelOf(GatewayStatus status) => status switch
-    {
-        GatewayStatus.Online => "Online",
-        GatewayStatus.Offline => "Offline",
-        GatewayStatus.WaitingForApproval => "Waiting for approval",
-        GatewayStatus.NotConnectedYet => "Not connected yet",
-        _ => "Revoked",
-    };
+    private static string LabelOf(GatewayStatus status) => GatewayStatusText.LabelOf(status);
 }

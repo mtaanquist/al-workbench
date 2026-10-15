@@ -70,6 +70,12 @@ public sealed class WorkbenchClient : IDisposable
         return await ReadJsonAsync<GatewayCommandMessage>(response, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Sends what one round of inventory read (or one part of it).</summary>
+    public async Task PostInventoryAsync(GatewayInventoryReport report, CancellationToken ct)
+    {
+        using var response = await SendAsync(HttpMethod.Post, GatewayProtocol.InventoryPath, Json(report), RequestTimeout, ct).ConfigureAwait(false);
+    }
+
     public async Task PostProgressAsync(long commandId, IReadOnlyList<string> lines, long sequence, CancellationToken ct)
     {
         using var response = await SendAsync(HttpMethod.Post, GatewayProtocol.CommandProgressPath(commandId),

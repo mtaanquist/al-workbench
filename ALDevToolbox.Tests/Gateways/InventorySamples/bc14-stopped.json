@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "instance": "BC140TEST",
+  "powerShell": "5.1.17763.5830",
+  "state": "Stopped",
+  "version": "14.0.47786.0",
+  "service": {
+    "state": "Stopped",
+    "startMode": "Manual",
+    "account": "CRONUS\\svc-bc140$"
+  },
+  "configuration": {
+    "DatabaseServer": "CRONUS-SQL",
+    "DatabaseInstance": "BCDEMO",
+    "DatabaseName": "Test Database BC (14-0)",
+    "Multitenant": "false",
+    "ClientServicesPort": "7146",
+    "SOAPServicesPort": "7147",
+    "ODataServicesPort": "7148",
+    "ManagementServicesPort": "7145",
+    "DeveloperServicesPort": "7149",
+    "PublicWebBaseUrl": null
+  },
+  "tenants": null,
+  "tenantSpecificProperties": false,
+  "sessions": null,
+  "licence": null,
+  "unavailable": {
+    "tenants": "The service tier is not running.",
+    "apps": "The service tier is not running.",
+    "sessions": "The service tier is not running.",
+    "licence": "The service tier is not running."
+  }
+}
