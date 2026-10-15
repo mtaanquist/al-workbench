@@ -2316,27 +2316,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         var ids = environmentIds.Distinct().ToList();
         if (ids.Count == 0) return [];
 
-        var snapshot = await _access.GetSnapshotAsync(ct);
-        var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
-        var found = await _db.OeProjectEnvironments.AsNoTracking()
-            .Where(e => ids.Contains(e.Id))
-            .Where(e => _db.OeProjects.Where(visible).Any(p => p.Id == e.ProjectId))
-            .Select(e => new
-            {
-                e.Id,
-                e.ProjectId,
-                ProjectName = e.Project!.Name,
-                ProjectDeleted = e.Project!.DeletedAt != null,
-                OwnerId = e.Project!.CreatedByUserId,
-                e.Name,
-                e.Type,
-                e.Status,
-                e.SoftDeletedOn,
-                e.MissingSince,
-                e.UpdateWindowStart,
-                e.UpdateWindowEnd,
-            })
-            .ToDictionaryAsync(e => e.Id, ct);
+        var (found, canManage) = await LoadBulkTargetsAsync(ids, ct);
 
         // A deployment already booked for the environment's current window keeps its time
         // while that time falls in the new window, and otherwise moves to the new window's
@@ -2348,12 +2328,6 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             .Distinct()
             .ToListAsync(ct)).ToHashSet();
 
-        var canManage = new Dictionary<int, bool>();
-        foreach (var project in found.Values.Where(e => !e.ProjectDeleted).GroupBy(e => e.ProjectId))
-        {
-            canManage[project.Key] = await _access.CanManageAsync(project.Key, project.First().OwnerId, ct);
-        }
-
         var rows = new List<DeliveryWindowChangePreviewRow>(ids.Count);
         foreach (var id in ids)
         {
@@ -2364,9 +2338,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
                 continue;
             }
 
-            var gone = e.ProjectDeleted || e.MissingSince is not null
-                || e.SoftDeletedOn is not null || BcEnvironmentStatus.IsSoftDeleted(e.Status);
-            var group = gone ? DeliveryWindowChangeGroup.Missing
+            var group = e.IsGone ? DeliveryWindowChangeGroup.Missing
                 : !canManage[e.ProjectId] ? DeliveryWindowChangeGroup.NoAccess
                 : e.UpdateWindowStart == start && e.UpdateWindowEnd == end ? DeliveryWindowChangeGroup.AlreadySet
                 : DeliveryWindowChangeGroup.WillChange;
@@ -2420,6 +2392,166 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             results.Count(r => r.Outcome == DeliveryWindowChangeOutcome.Changed), results.Count,
             results.Count(r => r.Outcome == DeliveryWindowChangeOutcome.Failed));
         return results;
+    }
+
+    /// <summary>
+    /// What setting the AppSource apps update cadence to <paramref name="cadence"/> on each
+    /// of <paramref name="environmentIds"/> would do, one row per id in the order given:
+    /// <see cref="AppCadenceChangeGroup.WillChange"/>, <see cref="AppCadenceChangeGroup.AlreadySet"/>,
+    /// <see cref="AppCadenceChangeGroup.NoAccess"/> or <see cref="AppCadenceChangeGroup.Missing"/>.
+    /// Reads only our own mirror, so "already set" is what the last refresh saw; a row
+    /// whose cadence was never read counts as a change. The grouping and the access
+    /// rules are the bulk delivery window's (#961).
+    /// </summary>
+    public async Task<List<AppCadenceChangePreviewRow>> PreviewAppUpdateCadenceForManyAsync(
+        IReadOnlyCollection<int> environmentIds, string cadence, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(environmentIds);
+        RequireOrganizationId();
+        if (BcAppUpdateCadence.Normalize(cadence) is not { } value)
+        {
+            throw Validation("Cadence", "Choose how often Marketplace apps should update.");
+        }
+
+        var ids = environmentIds.Distinct().ToList();
+        if (ids.Count == 0) return [];
+
+        var (found, canManage) = await LoadBulkTargetsAsync(ids, ct);
+        var rows = new List<AppCadenceChangePreviewRow>(ids.Count);
+        foreach (var id in ids)
+        {
+            if (!found.TryGetValue(id, out var e))
+            {
+                rows.Add(new AppCadenceChangePreviewRow(id, null, null, null, null, null, AppCadenceChangeGroup.Missing));
+                continue;
+            }
+
+            var current = BcAppUpdateCadence.Normalize(e.AppSourceAppsUpdateCadence);
+            var group = e.IsGone ? AppCadenceChangeGroup.Missing
+                : !canManage[e.ProjectId] ? AppCadenceChangeGroup.NoAccess
+                : current == value ? AppCadenceChangeGroup.AlreadySet
+                : AppCadenceChangeGroup.WillChange;
+            rows.Add(new AppCadenceChangePreviewRow(
+                id, e.ProjectId, e.ProjectName, e.Name, e.Type, current, group));
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Sets the AppSource apps update cadence on many environments at once. Groups first
+    /// with <see cref="PreviewAppUpdateCadenceForManyAsync"/>, then writes each
+    /// <see cref="AppCadenceChangeGroup.WillChange"/> row through
+    /// <see cref="SetAppUpdateCadenceAsync"/>, so the access check, the write to the
+    /// customer's tenant and the audited row update are the single-environment ones. Every
+    /// other row is skipped. A row that fails is reported and does not stop the rest.
+    /// </summary>
+    public async Task<List<AppCadenceChangeResult>> SetAppUpdateCadenceForManyAsync(
+        IReadOnlyCollection<int> environmentIds, string cadence, CancellationToken ct = default)
+    {
+        var preview = await PreviewAppUpdateCadenceForManyAsync(environmentIds, cadence, ct);
+        var value = BcAppUpdateCadence.Normalize(cadence)!;
+        var results = new List<AppCadenceChangeResult>(preview.Count);
+        foreach (var row in preview)
+        {
+            if (row.Group != AppCadenceChangeGroup.WillChange)
+            {
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Skipped, null));
+                continue;
+            }
+            try
+            {
+                await SetAppUpdateCadenceAsync(row.ProjectId!.Value, row.EnvironmentId, value, ct);
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Changed, null));
+            }
+            catch (PlanValidationException ex)
+            {
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Failed,
+                    ex.Errors.Values.FirstOrDefault() ?? "Business Central didn't accept the change."));
+            }
+            catch (ProjectAccessDeniedException ex)
+            {
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Failed, ex.Message));
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // Each row is a call to a different customer's tenant, so one network
+                // failure must not cost the rest of the batch. The detail goes to the log;
+                // the row gets words a consultant can act on.
+                _logger.LogError(ex,
+                    "Setting the AppSource update cadence on environment {EnvironmentId} of solution {ProjectId} failed.",
+                    row.EnvironmentId, row.ProjectId);
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Failed,
+                    "Business Central didn't answer. Try again, or check the solution's connection."));
+            }
+        }
+
+        _logger.LogInformation(
+            "User {UserId} set the AppSource update cadence {Cadence} on {Changed} of {Selected} environment(s) ({Skipped} skipped, {Failed} failed).",
+            _orgContext.CurrentUserId, value,
+            results.Count(r => r.Outcome == AppCadenceChangeOutcome.Changed), results.Count,
+            results.Count(r => r.Outcome == AppCadenceChangeOutcome.Skipped),
+            results.Count(r => r.Outcome == AppCadenceChangeOutcome.Failed));
+        return results;
+    }
+
+    /// <summary>
+    /// The environments a bulk settings change was asked for, as far as the caller can see
+    /// them, and whether the caller manages each one's solution - asked once per solution,
+    /// not once per row. An environment of a solution the caller cannot see is left out,
+    /// so it answers as one that does not exist, as
+    /// <see cref="UpgradeFleetService.GetEnvironmentAsync"/> does.
+    /// </summary>
+    private async Task<(Dictionary<int, BulkTarget> Found, Dictionary<int, bool> CanManage)> LoadBulkTargetsAsync(
+        List<int> ids, CancellationToken ct)
+    {
+        var snapshot = await _access.GetSnapshotAsync(ct);
+        var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
+        var found = await _db.OeProjectEnvironments.AsNoTracking()
+            .Where(e => ids.Contains(e.Id))
+            .Where(e => _db.OeProjects.Where(visible).Any(p => p.Id == e.ProjectId))
+            .Select(e => new BulkTarget(
+                e.Id,
+                e.ProjectId,
+                e.Project!.Name,
+                e.Project!.DeletedAt != null,
+                e.Project!.CreatedByUserId,
+                e.Name,
+                e.Type,
+                e.Status,
+                e.SoftDeletedOn,
+                e.MissingSince,
+                e.UpdateWindowStart,
+                e.UpdateWindowEnd,
+                e.AppSourceAppsUpdateCadence))
+            .ToDictionaryAsync(e => e.Id, ct);
+
+        var canManage = new Dictionary<int, bool>();
+        foreach (var project in found.Values.Where(e => !e.ProjectDeleted).GroupBy(e => e.ProjectId))
+        {
+            canManage[project.Key] = await _access.CanManageAsync(project.Key, project.First().OwnerId, ct);
+        }
+        return (found, canManage);
+    }
+
+    /// <summary>One environment as a bulk settings change reads it from the mirror.</summary>
+    private sealed record BulkTarget(
+        int Id,
+        int ProjectId,
+        string ProjectName,
+        bool ProjectDeleted,
+        int? OwnerId,
+        string Name,
+        string Type,
+        string? Status,
+        DateTime? SoftDeletedOn,
+        DateTime? MissingSince,
+        TimeOnly? UpdateWindowStart,
+        TimeOnly? UpdateWindowEnd,
+        string? AppSourceAppsUpdateCadence)
+    {
+        /// <summary>Its solution is deleted, or Business Central no longer has it or is deleting it.</summary>
+        public bool IsGone => ProjectDeleted || MissingSince is not null
+            || SoftDeletedOn is not null || BcEnvironmentStatus.IsSoftDeleted(Status);
     }
 
     /// <summary>
@@ -3046,6 +3178,49 @@ public enum DeliveryWindowChangeOutcome { Changed, Skipped, Failed }
 public sealed record DeliveryWindowChangeResult(
     DeliveryWindowChangePreviewRow Row,
     DeliveryWindowChangeOutcome Outcome,
+    string? Error);
+
+/// <summary>Where one environment lands in the preview of a bulk AppSource cadence change.</summary>
+public enum AppCadenceChangeGroup
+{
+    /// <summary>The cadence differs from the one asked for (or was never read), and the caller manages the solution.</summary>
+    WillChange,
+
+    /// <summary>The environment already has this cadence; skipped.</summary>
+    AlreadySet,
+
+    /// <summary>The caller cannot manage the environment's solution; skipped.</summary>
+    NoAccess,
+
+    /// <summary>The environment, or its solution, no longer exists, or the customer deleted it; skipped.</summary>
+    Missing,
+}
+
+/// <summary>
+/// One environment in the preview of a bulk AppSource cadence change. The names are null
+/// for a <see cref="AppCadenceChangeGroup.Missing"/> row this caller could not read at all;
+/// <paramref name="CurrentCadence"/> is null when the cadence was never read.
+/// </summary>
+public sealed record AppCadenceChangePreviewRow(
+    int EnvironmentId,
+    int? ProjectId,
+    string? ProjectName,
+    string? EnvironmentName,
+    string? EnvironmentType,
+    string? CurrentCadence,
+    AppCadenceChangeGroup Group)
+{
+    /// <summary>True for a Production environment.</summary>
+    public bool IsProduction => string.Equals(EnvironmentType, "Production", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>What happened to one environment in a bulk AppSource cadence change.</summary>
+public enum AppCadenceChangeOutcome { Changed, Skipped, Failed }
+
+/// <summary>One environment's result of a bulk AppSource cadence change; <paramref name="Error"/> is set on a failed row.</summary>
+public sealed record AppCadenceChangeResult(
+    AppCadenceChangePreviewRow Row,
+    AppCadenceChangeOutcome Outcome,
     string? Error);
 
 /// <summary>One fetched BC environment — the project detail page's environment row.</summary>

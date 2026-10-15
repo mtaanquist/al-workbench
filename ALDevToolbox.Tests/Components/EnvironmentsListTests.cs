@@ -750,6 +750,65 @@ public sealed class EnvironmentsListTests : IDisposable
         production.UpdateWindowEnd.Should().Be(new TimeOnly(6, 0));
     }
 
+    /// <summary>
+    /// The cadence dialog previews before it writes: which rows change and from what, and
+    /// which already have that cadence and are skipped. After the run it says how many were
+    /// updated and how many skipped. With no connection here, the one row that changes is
+    /// refused by the service, and the result says so rather than claiming it was set.
+    /// </summary>
+    [Fact]
+    public async Task The_cadence_dialog_skips_environments_already_on_it_and_reports_each_row()
+    {
+        var id = await SeedSolutionAsync("CRONUS Denmark");
+        var now = DateTime.UtcNow;
+        await SeedEnvironmentAsync(id, "Production", "Production", "Active", now, now);
+        await SeedEnvironmentAsync(id, "Test", "Sandbox", "Active", now, now);
+        await using (var seed = _db.NewContext())
+        {
+            (await seed.OeProjectEnvironments.SingleAsync(e => e.Name == "Production")).AppSourceAppsUpdateCadence = BcAppUpdateCadence.Default;
+            (await seed.OeProjectEnvironments.SingleAsync(e => e.Name == "Test")).AppSourceAppsUpdateCadence = BcAppUpdateCadence.DuringMajorUpgrade;
+            await seed.SaveChangesAsync();
+        }
+
+        var cut = _ctx.Render<EnvironmentsList>();
+        cut.WaitForAssertion(() => cut.Find("th.data-table__col-check input[type=checkbox]").Change(true));
+        cut.WaitForAssertion(() => BarButton(cut, "Set AppSource cadence...").Click());
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("#bac-title").TextContent.Trim().Should().Be("Set the AppSource update cadence for 2 selected environments");
+            cut.FindAll(".bac-row").Should().BeEmpty("nothing is previewed until a cadence is chosen");
+            cut.FindAll(".confirm-dialog__actions button").Last().HasAttribute("disabled").Should().BeTrue();
+        });
+
+        cut.WaitForAssertion(() => cut.Find("#bac-cadence").Change(BcAppUpdateCadence.DuringMajorUpgrade));
+        cut.WaitForAssertion(() =>
+        {
+            var heads = cut.FindAll(".bac-group__head").Select(h => h.TextContent.Trim()).ToList();
+            heads.Should().Equal(new[] { "Will change (1)", "Skipped - already on this cadence (1)" }, cut.Find(".confirm-dialog").OuterHtml);
+            var rows = cut.FindAll(".bac-row");
+            rows[0].TextContent.Should().Contain("CRONUS Denmark - Production")
+                .And.Contain("Microsoft's default → Only with major updates");
+            rows[1].TextContent.Trim().Should().Be("CRONUS Denmark - Test");
+            cut.Find(".bac-count").TextContent.Should().Be("1 environment will change, and it is production.");
+            cut.FindAll(".confirm-dialog__actions button").Last().TextContent.Trim()
+                .Should().Be("Set cadence on 1 environment");
+        });
+
+        cut.WaitForAssertion(() => cut.FindAll(".confirm-dialog__actions button").Last().Click());
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("#bac-title").TextContent.Trim().Should().Be("AppSource update cadence set");
+            cut.Find(".bac-lead").TextContent.Should().Be("No environments were changed. 1 skipped. 1 couldn't be changed.");
+            cut.Find(".bac-row__what--failed").TextContent.Should().Contain("Business Central connection");
+            cut.FindAll(".bulk-bar").Should().BeEmpty("the ticks have done their job");
+        });
+
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Name == "Production"))
+            .AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.Default);
+    }
+
     /// <summary>Many customers are only ever called by their short name (#966).</summary>
     [Fact]
     public async Task The_search_finds_a_solution_by_its_short_name_and_the_row_shows_it()

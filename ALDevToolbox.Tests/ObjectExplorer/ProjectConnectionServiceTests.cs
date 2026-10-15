@@ -121,10 +121,18 @@ public sealed class ProjectConnectionServiceTests : IDisposable
                 new BcTimeZone("Romance Standard Time", "(UTC+01:00) Brussels, Copenhagen, Madrid, Paris", "+01:00"),
             });
 
+        /// <summary>An exception to throw for one environment's cadence write, so a batch can lose a row.</summary>
+        public Func<string, Exception?>? CadenceThrowsFor;
+
+        /// <summary>Every environment a cadence write reached, in order.</summary>
+        public List<string> CadenceWrites { get; } = new();
+
         public Task SetAppUpdateCadenceAsync(string accessToken, string? applicationFamily, string environmentName, string cadence, CancellationToken ct = default)
         {
             if (WriteThrows is not null) throw WriteThrows;
+            if (CadenceThrowsFor?.Invoke(environmentName) is { } thrown) throw thrown;
             Cadence = cadence;
+            CadenceWrites.Add(environmentName);
             return Task.CompletedTask;
         }
 
@@ -4472,6 +4480,156 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using var verify = _db.NewContext();
         (await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == fleet.Changes))
             .UpdateWindowStart.Should().BeNull();
+    }
+
+    // ── AppSource cadence on many environments at once ────────────────────
+
+    /// <summary>
+    /// A connected solution with one of each: a row that changes, a row already on the
+    /// target cadence, one never read, a deleted one, and - on a Read-only solution
+    /// someone else owns - one the owner cannot manage.
+    /// </summary>
+    private async Task<(int Changes, int AlreadySet, int NeverRead, int Deleted, int Foreign)> SeedCadenceFleetAsync()
+    {
+        var (mine, changes) = await SeedEnvironmentAsync("Production");
+        await SeedUserAsync(9802, "another-one@example.com", UserRole.Editor);
+        var theirs = await SeedProjectAsync("Fabrikam");
+        await using var ctx = _db.NewContext();
+        (await ctx.OeProjects.SingleAsync(p => p.Id == theirs)).CreatedByUserId = 9802;
+        (await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == changes)).AppSourceAppsUpdateCadence = BcAppUpdateCadence.Default;
+        await ctx.SaveChangesAsync();
+        await NarrowAsync(theirs);
+
+        OeProjectEnvironment Env(int projectId, string name, string? cadence) => new()
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = name, Type = "Sandbox",
+            ApplicationFamily = "BusinessCentral", FetchedAt = DateTime.UtcNow,
+            AppSourceAppsUpdateCadence = cadence,
+        };
+        var already = Env(mine, "Test", BcAppUpdateCadence.DuringMajorUpgrade);
+        var neverRead = Env(mine, "Training", null);
+        var deleted = Env(mine, "Old", BcAppUpdateCadence.Default);
+        deleted.SoftDeletedOn = DateTime.UtcNow.AddDays(-1);
+        var foreign = Env(theirs, "Production", BcAppUpdateCadence.Default);
+        ctx.OeProjectEnvironments.AddRange(already, neverRead, deleted, foreign);
+        await ctx.SaveChangesAsync();
+        return (changes, already.Id, neverRead.Id, deleted.Id, foreign.Id);
+    }
+
+    [Fact]
+    public async Task The_bulk_cadence_preview_groups_each_selected_environment()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        const int neverExisted = 987656;
+
+        await using var ctx = _db.NewContext();
+        var preview = await Svc(ctx, TokenOk()).PreviewAppUpdateCadenceForManyAsync(
+            [fleet.Changes, fleet.AlreadySet, fleet.NeverRead, fleet.Deleted, fleet.Foreign, neverExisted],
+            "duringmajorupgrade");
+
+        preview.Select(p => (p.EnvironmentId, p.Group)).Should().Equal(
+            (fleet.Changes, AppCadenceChangeGroup.WillChange),
+            (fleet.AlreadySet, AppCadenceChangeGroup.AlreadySet),
+            (fleet.NeverRead, AppCadenceChangeGroup.WillChange),
+            (fleet.Deleted, AppCadenceChangeGroup.Missing),
+            (fleet.Foreign, AppCadenceChangeGroup.NoAccess),
+            (neverExisted, AppCadenceChangeGroup.Missing));
+        preview[0].CurrentCadence.Should().Be(BcAppUpdateCadence.Default);
+        preview[0].ProjectName.Should().Be("CRONUS A/S");
+        preview[2].CurrentCadence.Should().BeNull("a cadence never read is a change, not a match");
+        preview[5].EnvironmentName.Should().BeNull("an id nobody can read has no name to give");
+    }
+
+    [Fact]
+    public async Task Setting_a_cadence_on_many_writes_only_the_rows_that_change_and_reports_each()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        var admin = new FakeAdminClient();
+
+        List<AppCadenceChangeResult> results;
+        await using (var ctx = _db.NewContext())
+        {
+            results = await Svc(ctx, TokenOk(), admin).SetAppUpdateCadenceForManyAsync(
+                [fleet.Changes, fleet.AlreadySet, fleet.NeverRead, fleet.Deleted, fleet.Foreign],
+                BcAppUpdateCadence.DuringMajorUpgrade);
+        }
+
+        results.Select(r => (r.Row.EnvironmentId, r.Outcome)).Should().Equal(
+            (fleet.Changes, AppCadenceChangeOutcome.Changed),
+            (fleet.AlreadySet, AppCadenceChangeOutcome.Skipped),
+            (fleet.NeverRead, AppCadenceChangeOutcome.Changed),
+            (fleet.Deleted, AppCadenceChangeOutcome.Skipped),
+            (fleet.Foreign, AppCadenceChangeOutcome.Skipped));
+        admin.CadenceWrites.Should().Equal(new[] { "Production", "Training" },
+            "Business Central is only asked about the rows that change");
+
+        await using var verify = _db.NewContext();
+        var rows = await verify.OeProjectEnvironments.AsNoTracking().ToDictionaryAsync(e => e.Id);
+        rows[fleet.Changes].AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.DuringMajorUpgrade);
+        rows[fleet.NeverRead].AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.DuringMajorUpgrade);
+        rows[fleet.Deleted].AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.Default, "a deleted environment is skipped");
+        rows[fleet.Foreign].AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.Default,
+            "the owner cannot manage somebody else's read-only solution");
+    }
+
+    [Fact]
+    public async Task One_refused_cadence_write_does_not_stop_the_rest_of_the_batch()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        var admin = new FakeAdminClient
+        {
+            CadenceThrowsFor = name => name switch
+            {
+                "Production" => new BcApiException(HttpStatusCode.Forbidden, "Business Central refused the change."),
+                "Training" => new HttpRequestException("connection reset"),
+                _ => null,
+            },
+        };
+        var third = await SeedExtraCadenceRowAsync(fleet.Changes, "UAT");
+
+        List<AppCadenceChangeResult> results;
+        await using (var ctx = _db.NewContext())
+        {
+            results = await Svc(ctx, TokenOk(), admin).SetAppUpdateCadenceForManyAsync(
+                [fleet.Changes, fleet.NeverRead, third], BcAppUpdateCadence.DuringMajorUpgrade);
+        }
+
+        results.Select(r => r.Outcome).Should().Equal(
+            AppCadenceChangeOutcome.Failed, AppCadenceChangeOutcome.Failed, AppCadenceChangeOutcome.Changed);
+        results[0].Error.Should().Be("Business Central refused the change.");
+        results[1].Error.Should().NotContain("connection reset", "raw exception text never reaches the page");
+        admin.CadenceWrites.Should().Equal("UAT");
+
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == fleet.Changes))
+            .AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.Default, "a refused write leaves our copy as it was");
+    }
+
+    private async Task<int> SeedExtraCadenceRowAsync(int besideEnvironmentId, string name)
+    {
+        await using var ctx = _db.NewContext();
+        var projectId = (await ctx.OeProjectEnvironments.SingleAsync(e => e.Id == besideEnvironmentId)).ProjectId;
+        var env = new OeProjectEnvironment
+        {
+            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = name, Type = "Sandbox",
+            ApplicationFamily = "BusinessCentral", FetchedAt = DateTime.UtcNow,
+        };
+        ctx.OeProjectEnvironments.Add(env);
+        await ctx.SaveChangesAsync();
+        return env.Id;
+    }
+
+    [Fact]
+    public async Task An_unknown_bulk_cadence_is_refused_before_anything_is_written()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        var admin = new FakeAdminClient();
+
+        await using var ctx = _db.NewContext();
+        var act = () => Svc(ctx, TokenOk(), admin).SetAppUpdateCadenceForManyAsync([fleet.Changes], "Whenever");
+
+        (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Cadence");
+        admin.CadenceWrites.Should().BeEmpty();
     }
 
     [Fact]
