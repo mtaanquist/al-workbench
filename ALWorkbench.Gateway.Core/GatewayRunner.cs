@@ -560,11 +560,19 @@ public sealed class GatewayRunner
             InventoryDone(GatewayInventoryLimits.Interval);
             return;
         }
+        var inForce = _policy.InForce;
+        if (!IsInForce(snapshot, inForce))
+        {
+            InventoryDone(GatewayInventoryLimits.Interval);
+            _logger.InventorySkipped();
+            return;
+        }
         try
         {
-            var summary = await _inventory!.RunAsync(_policy.InForce, null, client.PostInventoryAsync, null, ct).ConfigureAwait(false);
+            var summary = await _inventory!.RunAsync(inForce, null, client.PostInventoryAsync, null, ct).ConfigureAwait(false);
             InventoryDone(GatewayInventoryLimits.Interval);
             _logger.InventorySent(summary.Read, summary.Failed);
+            foreach (var refused in summary.Refused) _logger.InventoryRefused(refused);
         }
         catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException or GatewayNotApprovedException
                                    or GatewayCredentialRefusedException or GatewayOutdatedException or CommandClosedException)
@@ -575,6 +583,16 @@ public sealed class GatewayRunner
     }
 
     /// <summary>
+    /// Whether a policy is really in force. <see cref="GatewayPolicy.Empty"/> stands for
+    /// none (no file, or a broken one with no earlier good version); reporting it would
+    /// send an empty roster and have AL Workbench mark every tier missing. A valid file
+    /// that lists no tiers is a policy of its own, and its empty roster is meant.
+    /// </summary>
+    private static bool IsInForce(PolicySnapshot snapshot, GatewayPolicy inForce) =>
+        snapshot.Report.State is not (GatewayPolicyStates.Missing or GatewayPolicyStates.Unsafe)
+        && !ReferenceEquals(inForce, GatewayPolicy.Empty);
+
+    /// <summary>
     /// <c>refresh-inventory</c>: the policy check has already allowed it. Reads the tier
     /// the command names, or every readable tier when it names none, and sends each as
     /// the scheduled round does; the command's result counts what was read.
@@ -582,10 +600,16 @@ public sealed class GatewayRunner
     private async Task<GatewayCommandOutcome> RunCommandedInventoryAsync(WorkbenchClient client, GatewayCommandContext context, CancellationToken ct)
     {
         var target = PolicyRequest.FromCommand(context.Command, out _)?.Target;
+        var inForce = _policy.InForce;
+        if (!IsInForce(_policy.Refresh(), inForce))
+        {
+            return GatewayCommandOutcome.Failure(
+                "The gateway has no settings in force (gateway.toml is missing, or has mistakes and there is no earlier good version), so it read nothing. Ask the customer's IT to fix gateway.toml.");
+        }
         InventoryRunSummary summary;
         try
         {
-            summary = await _inventory!.RunAsync(_policy.InForce, target, client.PostInventoryAsync, context.Progress, ct).ConfigureAwait(false);
+            summary = await _inventory!.RunAsync(inForce, target, client.PostInventoryAsync, context.Progress, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is WorkbenchUnreachableException or WorkbenchRefusedException or GatewayNotApprovedException
                                    or GatewayCredentialRefusedException or GatewayOutdatedException or CommandClosedException)
@@ -593,7 +617,8 @@ public sealed class GatewayRunner
             return GatewayCommandOutcome.Failure($"The gateway read the service tiers but could not send what it read to AL Workbench: {ex.Message}");
         }
         if (target is null) InventoryDone(GatewayInventoryLimits.Interval);
-        var result = new JsonObject { ["read"] = summary.Read, ["failed"] = summary.Failed };
+        foreach (var refused in summary.Refused) _logger.InventoryRefused(refused);
+        var result = new JsonObject { ["read"] = summary.Read, ["failed"] = summary.Failed, ["refused"] = summary.Refused.Count };
         if (target is not null && summary.Read + summary.Failed == 0)
         {
             return GatewayCommandOutcome.Failure($"{target} is not a service tier the gateway may read.", result);

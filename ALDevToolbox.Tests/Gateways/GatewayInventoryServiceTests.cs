@@ -290,6 +290,81 @@ public sealed class GatewayInventoryServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_report_the_database_could_not_store_is_refused_with_a_reason_instead()
+    {
+        var gateway = await GatewayAsync();
+
+        var noList = () => ApplyAsync(gateway, new GatewayInventoryReport { Instances = null! });
+        var longPowerShell = () => ApplyAsync(gateway, Report(Tier("BC250") with { PowerShell = "7.4.6-preview.1" }));
+        var noLicenceText = () => ApplyAsync(gateway, Report(Tier("BC250") with { Licence = new GatewayLicenceInventory { Text = null! } }));
+
+        (await noList.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("instances");
+        (await longPowerShell.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("powerShell");
+        (await noLicenceText.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("licence");
+        (await RowsAsync()).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Free_text_is_cut_to_size_on_the_way_in()
+    {
+        var gateway = await GatewayAsync();
+        var huge = new string('x', GatewayInventoryLimits.MaxTextChars + 500);
+
+        await ApplyAsync(gateway, Report(Tier("BC250", Tenant("cronus-dk", App(AppA, name: huge)) with { DatabaseName = huge }) with
+        {
+            State = huge,
+            Service = new GatewayServiceInventory { Account = huge },
+            Unavailable = new Dictionary<string, string> { [huge] = huge },
+            SessionUsers = [huge],
+        }));
+
+        var instance = (await RowsAsync()).Single();
+        instance.State.Should().HaveLength(GatewayInventoryLimits.MaxTextChars);
+        instance.ServiceAccount.Should().HaveLength(GatewayInventoryLimits.MaxTextChars);
+        instance.UnavailableJson.Length.Should().BeLessThan(2 * GatewayInventoryLimits.MaxTextChars + 20);
+        instance.SessionUsersJson!.Length.Should().BeLessThan(GatewayInventoryLimits.MaxTextChars + 10);
+        var tenant = instance.Tenants.Single();
+        tenant.DatabaseName.Should().HaveLength(GatewayInventoryLimits.MaxTextChars);
+        tenant.Apps.Single().Name.Should().HaveLength(GatewayInventoryLimits.MaxTextChars);
+    }
+
+    [Fact]
+    public async Task Two_reports_adding_the_same_new_tier_at_once_end_in_a_conflict_not_a_fault()
+    {
+        var gateway = await GatewayAsync();
+        // While the first report saves, a second one adds the same tier through
+        // another connection: the first then hits the unique index.
+        var interceptor = new RunBeforeSave(async () => await ApplyAsync(gateway, Report(Tier("BC250", Tenant("cronus-dk", App(AppA))))));
+
+        await using var ctx = _db.NewContext(interceptor);
+        var first = () => Service(ctx).ApplyReportAsync(gateway, Report(Tier("BC250", Tenant("cronus-dk", App(AppA)))));
+
+        (await first.Should().ThrowAsync<GatewayInventoryConflictException>()).Which.Message.Should().Contain("Send this one again");
+        // Sent again, it updates the row the other report made.
+        (await ApplyAsync(gateway, Report(Tier("BC250", Tenant("cronus-dk", App(AppA)))))).Should().BeTrue();
+        (await RowsAsync()).Should().ContainSingle().Which.Tenants.Should().ContainSingle().Which.Apps.Should().ContainSingle();
+    }
+
+    /// <summary>Runs <c>action</c> once, just before the first save of the context it is attached to.</summary>
+    private sealed class RunBeforeSave(Func<Task> action) : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
+    {
+        private bool _ran;
+
+        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> SavingChangesAsync(
+            Microsoft.EntityFrameworkCore.Diagnostics.DbContextEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (!_ran)
+            {
+                _ran = true;
+                await action();
+            }
+            return result;
+        }
+    }
+
+    [Fact]
     public async Task A_revoked_gateways_report_is_not_stored()
     {
         var gateway = await GatewayAsync();

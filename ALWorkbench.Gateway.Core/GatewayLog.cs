@@ -18,6 +18,8 @@ public static partial class GatewayLog
     public const int ResultReportedLateId = 1005;
     public const int InventorySentId = 1006;
     public const int InventoryNotSentId = 1007;
+    public const int InventoryRefusedId = 1008;
+    public const int InventorySkippedId = 1009;
     public const int RegisteredId = 2000;
     public const int WaitingForApprovalId = 2001;
     public const int ApprovedId = 2002;
@@ -64,6 +66,14 @@ public static partial class GatewayLog
     [LoggerMessage(EventId = InventoryNotSentId, Level = LogLevel.Warning,
         Message = "Could not send the service tiers' inventory to AL Workbench ({Reason}). Trying again in {Minutes} minutes.")]
     public static partial void InventoryNotSent(this ILogger logger, string reason, int minutes);
+
+    [LoggerMessage(EventId = InventoryRefusedId, Level = LogLevel.Warning,
+        Message = "AL Workbench did not take the inventory of {Tier}. The other service tiers were still sent, and this one is sent again with the next reading.")]
+    public static partial void InventoryRefused(this ILogger logger, string tier);
+
+    [LoggerMessage(EventId = InventorySkippedId, Level = LogLevel.Warning,
+        Message = "Did not read the service tiers: gateway.toml is missing, or has mistakes and there is no earlier good version to fall back on. Nothing is reported until it is fixed, so AL Workbench keeps showing what it last knew.")]
+    public static partial void InventorySkipped(this ILogger logger);
 
     [LoggerMessage(EventId = RegisteredId, Level = LogLevel.Information,
         Message = "Registered with {WorkbenchUrl} as gateway {GatewayId} ({Name}), key fingerprint {Fingerprint}.")]

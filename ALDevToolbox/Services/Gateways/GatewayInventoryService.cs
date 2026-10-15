@@ -40,6 +40,18 @@ public sealed record GatewayInstanceRow(
         : $"{DatabaseServer}{(string.IsNullOrEmpty(DatabaseInstance) ? string.Empty : "\\" + DatabaseInstance)} / {DatabaseName}";
 }
 
+/// <summary>
+/// Another post from the same gateway created the same new row at the same moment.
+/// The endpoint answers 409 and the gateway sends the report again.
+/// </summary>
+public sealed class GatewayInventoryConflictException : Exception
+{
+    public GatewayInventoryConflictException(int gatewayId, Exception inner)
+        : base($"Another report from gateway {gatewayId} added the same service tier, tenant or app at the same moment. Send this one again.", inner)
+    {
+    }
+}
+
 /// <summary>A gateway's page: the gateway, the tiers it reports, and whether a refresh is on its way.</summary>
 /// <param name="RefreshRequestedAt">When the refresh still waiting for the gateway was asked for; null when none is.</param>
 public sealed record GatewayInventoryView(
@@ -79,6 +91,12 @@ public sealed class GatewayInventoryService
     /// <summary>Longest app id or version stored: a GUID is 36 characters, a version four numbers.</summary>
     public const int MaxAppKeyLength = 64;
 
+    /// <summary>Longest PowerShell version word stored ("5.1", "7"); the column is this wide.</summary>
+    public const int MaxPowerShellLength = 10;
+
+    /// <summary>Every other text field is cut to this on the way in, whatever the gateway sent.</summary>
+    private static string? Text(string? value) => Cut(value, GatewayInventoryLimits.MaxTextChars);
+
     private static readonly JsonSerializerOptions Json = new();
 
     private readonly AppDbContext _db;
@@ -113,6 +131,7 @@ public sealed class GatewayInventoryService
     /// gone or revoked.
     /// </summary>
     /// <exception cref="PlanValidationException">The report is a schema this AL Workbench does not know, or over a limit.</exception>
+    /// <exception cref="GatewayInventoryConflictException">A concurrent report created the same new row first; nothing was saved.</exception>
     public async Task<bool> ApplyReportAsync(int gatewayId, GatewayInventoryReport report, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(report);
@@ -155,7 +174,17 @@ public sealed class GatewayInventoryService
             }
         }
 
-        await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
+        catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
+        {
+            // Two posts for the same gateway both created the same new tier, tenant
+            // or app. Nothing of this one was kept; sent again, it finds the row the
+            // other one made and updates it.
+            throw new GatewayInventoryConflictException(gatewayId, ex);
+        }
         _logger.LogInformation(
             "Gateway {GatewayId} reported {Instances} service tier(s) ({Roster} in its roster).",
             gatewayId, report.Instances.Count, report.Roster?.Count);
@@ -174,37 +203,44 @@ public sealed class GatewayInventoryService
         if (reported.Error is not null)
         {
             // Nothing could be read: keep the last known facts and say why.
-            row.ReadError = reported.Error;
+            row.ReadError = Text(reported.Error);
             row.UnavailableJson = "{}";
             return;
         }
 
         row.ReadError = null;
         row.ReadAt = now;
-        row.UnavailableJson = JsonSerializer.Serialize(reported.Unavailable, Json);
+        row.UnavailableJson = JsonSerializer.Serialize(
+            (reported.Unavailable ?? new Dictionary<string, string>())
+                .Where(u => !Blank(u.Key))
+                .GroupBy(u => Text(u.Key)!, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => Text(g.First().Value) ?? string.Empty, StringComparer.Ordinal),
+            Json);
 
         // What is true right now: overwritten, null meaning it could not be read.
-        row.State = reported.State;
-        row.Version = reported.Version;
-        row.ServiceState = reported.Service?.State;
-        row.ServiceStartMode = reported.Service?.StartMode;
-        row.ServiceAccount = reported.Service?.Account;
+        row.State = Text(reported.State);
+        row.Version = Text(reported.Version);
+        row.ServiceState = Text(reported.Service?.State);
+        row.ServiceStartMode = Text(reported.Service?.StartMode);
+        row.ServiceAccount = Text(reported.Service?.Account);
         row.SessionCount = reported.SessionCount;
-        row.SessionUsersJson = reported.SessionUsers is null ? null : JsonSerializer.Serialize(reported.SessionUsers, Json);
+        row.SessionUsersJson = reported.SessionUsers is null
+            ? null
+            : JsonSerializer.Serialize(reported.SessionUsers.Where(u => !Blank(u)).Select(Text), Json);
 
         // What changes slowly: kept when this report could not read it.
         if (reported.Configuration is { } configuration)
         {
-            row.DatabaseServer = configuration.DatabaseServer;
-            row.DatabaseInstance = configuration.DatabaseInstance;
-            row.DatabaseName = configuration.DatabaseName;
+            row.DatabaseServer = Text(configuration.DatabaseServer);
+            row.DatabaseInstance = Text(configuration.DatabaseInstance);
+            row.DatabaseName = Text(configuration.DatabaseName);
             row.Multitenant = configuration.Multitenant;
             row.ClientServicesPort = configuration.ClientServicesPort;
             row.SoapServicesPort = configuration.SoapServicesPort;
             row.ODataServicesPort = configuration.ODataServicesPort;
             row.ManagementServicesPort = configuration.ManagementServicesPort;
             row.DeveloperServicesPort = configuration.DeveloperServicesPort;
-            row.PublicWebBaseUrl = configuration.PublicWebBaseUrl;
+            row.PublicWebBaseUrl = Text(configuration.PublicWebBaseUrl);
         }
         if (reported.Tenants is { } tenants)
         {
@@ -230,8 +266,8 @@ public sealed class GatewayInventoryService
                 instance.Tenants.Add(tenant);
             }
             tenant.TenantId = id;
-            tenant.State = reported.State;
-            tenant.DatabaseName = reported.DatabaseName;
+            tenant.State = Text(reported.State);
+            tenant.DatabaseName = Text(reported.DatabaseName);
             tenant.SessionCount = reported.SessionCount;
             tenant.ReadAt = now;
             tenant.MissingSince = null;
@@ -273,8 +309,8 @@ public sealed class GatewayInventoryService
             }
             seen.Add(app);
             // Assigned only when different, so an unchanged app is not an UPDATE.
-            Set(app.Name, reported.Name, v => app.Name = v);
-            Set(app.Publisher, reported.Publisher, v => app.Publisher = v);
+            Set(app.Name, Text(reported.Name), v => app.Name = v);
+            Set(app.Publisher, Text(reported.Publisher), v => app.Publisher = v);
             SetNullable(app.DataVersion, Cut(reported.DataVersion, MaxAppKeyLength), v => app.DataVersion = v);
             SetNullable(app.Scope, Cut(reported.Scope, 20), v => app.Scope = v);
             SetNullable(app.SyncState, Cut(reported.SyncState, 40), v => app.SyncState = v);
@@ -341,6 +377,10 @@ public sealed class GatewayInventoryService
             errors["schemaVersion"] = $"This AL Workbench reads inventory reports of version {GatewayInventoryReport.CurrentSchemaVersion}, not {report.SchemaVersion}. Update the gateway, or AL Workbench.";
             throw new PlanValidationException(errors);
         }
+        if (report.Instances is null)
+        {
+            errors["instances"] = "The report has no list of service tiers; send an empty list when there is none.";
+        }
         var instances = report.Instances ?? [];
         if (report.Roster is { Count: > GatewayInventoryLimits.MaxRosterTiers })
         {
@@ -388,7 +428,15 @@ public sealed class GatewayInventoryService
             {
                 errors["sessionUsers"] = $"{tier} reports more than {GatewayInventoryLimits.MaxSessionUsers} signed-in users.";
             }
-            if (instance.Licence is { } licence && licence.Text.Length > GatewayInventoryLimits.MaxLicenceTextChars)
+            if (instance.PowerShell is { Length: > MaxPowerShellLength })
+            {
+                errors["powerShell"] = $"{tier} names its PowerShell in more than {MaxPowerShellLength} characters; send \"5.1\" or \"7\".";
+            }
+            if (instance.Licence is { Text: null })
+            {
+                errors["licence"] = $"{tier} reports licence information without its text; leave the licence out when it was not read.";
+            }
+            else if (instance.Licence is { } licence && licence.Text.Length > GatewayInventoryLimits.MaxLicenceTextChars)
             {
                 errors["licence"] = $"{tier} reports licence information longer than {GatewayInventoryLimits.MaxLicenceTextChars} characters. The gateway should cut it, marked as cut.";
             }

@@ -88,7 +88,8 @@ public static class InventoryNormaliser
                 : null,
             Configuration = root["configuration"] is JsonObject configuration ? Configuration(configuration) : null,
             Tenants = tenants,
-            TenantsTruncated = tenantsCut,
+            // The script stops at the limit and says so; the normaliser cuts what is over it.
+            TenantsTruncated = tenantsCut || (tenants is not null && Bool(Text(root["tenantsTruncated"])) == true),
             SessionCount = Int(sessions?["total"]),
             SessionUsers = users,
             Licence = Licence(root["licence"] as JsonObject),

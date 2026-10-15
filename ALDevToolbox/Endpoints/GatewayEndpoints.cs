@@ -173,6 +173,11 @@ public static class GatewayEndpoints
             {
                 return Refused(ex.Errors, StatusCodes.Status400BadRequest);
             }
+            catch (GatewayInventoryConflictException ex)
+            {
+                // The gateway sends it again: 409 on this route is a race, not a closed command.
+                return Refused(new Dictionary<string, string> { ["inventory"] = ex.Message }, StatusCodes.Status409Conflict);
+            }
         })
         .RequireAuthorization(GatewayAuthenticationHandler.PolicyName);
 

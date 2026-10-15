@@ -174,6 +174,7 @@ public static class InventoryScript
             service = $null
             configuration = $null
             tenants = $null
+            tenantsTruncated = $false
             tenantSpecificProperties = $false
             sessions = $null
             licence = $null
@@ -275,7 +276,9 @@ public static class InventoryScript
                 }
                 $index = 0
                 foreach ($row in @($tenantRows)) {
-                    if ($index -ge $maxTenants) { break }
+                    # Says so when it stops early: a list cut without the flag would have
+                    # AL Workbench mark every tenant past the limit missing each round.
+                    if ($index -ge $maxTenants) { $result.tenantsTruncated = $true; break }
                     $index++
                     $tenant = [ordered]@{ id = [string]$row.id; state = $row.state; databaseName = $row.databaseName; sessionCount = $null; apps = $null }
                     if ($hasApps) {

@@ -202,9 +202,9 @@ public sealed class WorkbenchClient : IDisposable
                 HttpStatusCode.Conflict => new CommandClosedException(reason),
                 (HttpStatusCode)GatewayProtocol.OutdatedStatusCode => new GatewayOutdatedException(reason),
                 HttpStatusCode.TooManyRequests or HttpStatusCode.RequestTimeout or HttpStatusCode.ProxyAuthenticationRequired
-                    => new WorkbenchUnreachableException($"AL Workbench answered {(int)response.StatusCode}: {reason}"),
+                    => new WorkbenchUnreachableException($"AL Workbench answered {(int)response.StatusCode}: {reason}", status: response.StatusCode),
                 >= HttpStatusCode.InternalServerError
-                    => new WorkbenchUnreachableException($"AL Workbench answered {(int)response.StatusCode}: {reason}"),
+                    => new WorkbenchUnreachableException($"AL Workbench answered {(int)response.StatusCode}: {reason}", status: response.StatusCode),
                 _ => new WorkbenchRefusedException(response.StatusCode, reason),
             };
         }

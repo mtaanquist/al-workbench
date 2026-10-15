@@ -247,6 +247,125 @@ public sealed class GatewayInventoryParsingTests
         licence.Problems.Should().HaveCount(3);
     }
 
+    [Fact]
+    public void A_very_long_line_is_skipped_quickly_instead_of_holding_the_request()
+    {
+        var text = "Licensed to : CRONUS Danmark A/S\nTable 1" + new string(' ', 20_000) + "\nTable 50000..50099\n";
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        var licence = GatewayLicenceParser.Parse(text);
+
+        clock.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(500));
+        licence.Licensee.Should().Be("CRONUS Danmark A/S");
+        licence.Ranges.Should().ContainSingle().Which.Should().Be(new LicenceRange("Table", 50000, 50099, null));
+        licence.Problems.Should().ContainSingle().Which.Should().Contain("too long");
+    }
+
+    [Theory]
+    [InlineData("01/13/10000")]
+    [InlineData("13/01/99999")]
+    [InlineData("0001-01-01")]
+    [InlineData("01.01.1800")]
+    public void A_year_no_licence_states_is_reported_rather_than_failing(string text)
+    {
+        var act = () => GatewayLicenceParser.ParseDate(text, out _);
+
+        act.Should().NotThrow();
+        GatewayLicenceParser.ParseDate(text, out var problem).Should().BeNull();
+        problem.Should().Contain("could not be read");
+        GatewayLicenceParser.Parse("Licensed to : CRONUS\nExpiration Date : " + text).Problems.Should().Contain(p => p.Contains("could not be read"));
+    }
+
+    [Fact]
+    public void Tenants_the_script_stopped_at_the_limit_are_flagged_as_cut()
+    {
+        var output = new JsonObject
+        {
+            ["schema"] = 1,
+            ["state"] = "Running",
+            ["tenants"] = new JsonArray(new JsonObject { ["id"] = "cronus-dk" }, new JsonObject { ["id"] = "cronus-se" }),
+            ["tenantsTruncated"] = true,
+        };
+
+        var inventory = InventoryNormaliser.FromScriptOutput(output, Tier("BC250"));
+
+        inventory.Tenants.Should().HaveCount(2);
+        inventory.TenantsTruncated.Should().BeTrue("a list the script cut must not have the rest marked missing");
+        output["tenantsTruncated"] = false;
+        InventoryNormaliser.FromScriptOutput(output, Tier("BC250")).TenantsTruncated.Should().BeFalse();
+    }
+
+    // ---------------------------------------------------------------- a round that AL Workbench refuses in part
+
+    private static Func<GatewayInventoryReport, CancellationToken, Task> Refusing(string instance, Exception refusal, List<GatewayInventoryReport> taken) =>
+        (report, _) =>
+        {
+            if (report.Instances.Any(i => i.Name == instance)) throw refusal;
+            taken.Add(report);
+            return Task.CompletedTask;
+        };
+
+    public static TheoryData<string> PerReportRefusals => ["400", "413", "500"];
+
+    [Theory]
+    [MemberData(nameof(PerReportRefusals))]
+    public async Task A_tier_AL_Workbench_refuses_is_skipped_and_the_others_are_still_sent(string status)
+    {
+        Exception refusal = status == "500"
+            ? new ALWorkbench.Gateway.Core.WorkbenchUnreachableException("AL Workbench answered 500: boom", status: System.Net.HttpStatusCode.InternalServerError)
+            : new ALWorkbench.Gateway.Core.WorkbenchRefusedException((System.Net.HttpStatusCode)int.Parse(status, System.Globalization.CultureInfo.InvariantCulture), "No.");
+        var taken = new List<GatewayInventoryReport>();
+
+        var summary = await new GatewayInventory(new FakeInventoryReader()).RunAsync(Policy, null, Refusing("BC250", refusal, taken), null, CancellationToken.None);
+
+        taken.SelectMany(r => r.Instances).Select(i => i.Name).Should().Equal("BC140", "BC140TEST");
+        summary.Posts.Should().Be(2);
+        summary.Refused.Should().ContainSingle().Which.Should().StartWith("CRONUS-BC01 / BC250");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(System.Net.HttpStatusCode.ServiceUnavailable)]
+    [InlineData(System.Net.HttpStatusCode.BadGateway)]
+    public async Task An_AL_Workbench_that_cannot_be_reached_ends_the_round_for_a_retry_soon(System.Net.HttpStatusCode? status)
+    {
+        var down = new ALWorkbench.Gateway.Core.WorkbenchUnreachableException("Could not reach AL Workbench.", status: status);
+        var taken = new List<GatewayInventoryReport>();
+
+        var act = () => new GatewayInventory(new FakeInventoryReader()).RunAsync(Policy, null, Refusing("BC250", down, taken), null, CancellationToken.None);
+
+        await act.Should().ThrowAsync<ALWorkbench.Gateway.Core.WorkbenchUnreachableException>();
+        taken.Should().ContainSingle("the tier before was sent; the round stops at the first it cannot send");
+    }
+
+    [Fact]
+    public async Task A_conflict_is_sent_again_and_taken()
+    {
+        var attempts = 0;
+        var waits = new List<TimeSpan>();
+        var inventory = new GatewayInventory(new FakeInventoryReader(), (wait, _) => { waits.Add(wait); return Task.CompletedTask; });
+
+        var summary = await inventory.RunAsync(Policy, new TierRef("CRONUS-BC01", "BC250"), (_, _) =>
+            ++attempts < 3 ? throw new ALWorkbench.Gateway.Core.CommandClosedException("Send this one again.") : Task.CompletedTask,
+            null, CancellationToken.None);
+
+        attempts.Should().Be(3);
+        waits.Should().HaveCount(2);
+        summary.Should().Be(new InventoryRunSummary(1, 0, 1));
+    }
+
+    [Fact]
+    public async Task A_conflict_that_does_not_clear_is_reported_as_refused()
+    {
+        var inventory = new GatewayInventory(new FakeInventoryReader(), (_, _) => Task.CompletedTask);
+
+        var summary = await inventory.RunAsync(Policy, new TierRef("CRONUS-BC01", "BC250"),
+            (_, _) => throw new ALWorkbench.Gateway.Core.CommandClosedException("Send this one again."), null, CancellationToken.None);
+
+        summary.Posts.Should().Be(0);
+        summary.Refused.Should().ContainSingle();
+    }
+
     // ---------------------------------------------------------------- splitting into posts
 
     [Fact]
@@ -371,7 +490,7 @@ public sealed class GatewayInventoryParsingTests
         }
         """.Replace("STATE", state, StringComparison.Ordinal);
 
-    private static async Task<(ALWorkbench.Gateway.Core.PowerShell.PowerShellResult Outcome, GatewayInstanceInventory Inventory)> RunScriptAsync(string state, string tierName)
+    private static async Task<(ALWorkbench.Gateway.Core.PowerShell.PowerShellResult Outcome, GatewayInstanceInventory Inventory)> RunScriptAsync(string state, string tierName, string? adminTool = null, int? maxTenants = null)
     {
         var pwsh = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
             .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
@@ -379,11 +498,12 @@ public sealed class GatewayInventoryParsingTests
             .FirstOrDefault(File.Exists);
         if (pwsh is null) Assert.Skip("PowerShell 7 (pwsh) is not installed here.");
         using var tier = new ScratchFolder();
-        await File.WriteAllTextAsync(Path.Combine(tier.Path, "NavAdminTool.ps1"), Bc14AdminTool(state));
+        await File.WriteAllTextAsync(Path.Combine(tier.Path, "NavAdminTool.ps1"), adminTool ?? Bc14AdminTool(state));
         var runner = new ALWorkbench.Gateway.Core.PowerShell.PowerShellRunner(
             new ALWorkbench.Gateway.Core.PowerShell.SystemProcessRunner(), new(pwsh, pwsh), new FakeFileAccess());
         var parameters = InventoryScript.Parameters(tierName, tier.Path, includeSessionUsers: true);
         parameters["sectionSeconds"] = 5;
+        if (maxTenants is { } max) parameters["maxTenants"] = max;
 
         var outcome = await runner.RunAsync(InventoryScript.Operation,
             new ALWorkbench.Gateway.Core.PowerShell.PowerShellTarget(PowerShellEdition.PowerShell7, tier.Path),
@@ -413,6 +533,38 @@ public sealed class GatewayInventoryParsingTests
         inventory.Unavailable.Should().ContainKeys("service", "apps.tenantSpecificProperties", "licence");
         inventory.Unavailable["licence"].Should().Be("Did not answer within 5 seconds.");
         inventory.Licence.Should().BeNull();
+    }
+
+    /// <summary>A multitenant tier with three tenants, each with one app; everything else answers nothing.</summary>
+    private const string MultitenantAdminTool = """
+        function Get-NAVServerInstance([string]$ServerInstance) {
+            [pscustomobject]@{ State = 'Running'; Version = '25.4.29661.29927' }
+        }
+        function Get-NAVServerConfiguration([string]$ServerInstance, [switch]$AsXml) {
+            [xml]'<configuration><appSettings><add key="Multitenant" value="true" /></appSettings></configuration>'
+        }
+        function Get-NAVTenant([string]$ServerInstance) {
+            foreach ($id in @('cronus-dk', 'cronus-se', 'cronus-no')) { [pscustomobject]@{ Id = $id; State = 'Operational'; DatabaseName = 'BC250 ' + $id } }
+        }
+        function Get-NAVAppInfo([string]$ServerInstance, [string]$Tenant, [switch]$TenantSpecificProperties) {
+            [pscustomobject]@{ AppId = '437dbf0e-84ff-417a-965d-ed2bb9650972'; Name = 'Base Application'; Publisher = 'Microsoft'; Version = '25.4.29661.29927'; ExtensionDataVersion = '25.4.29661.29927'; SyncState = 'Synced' }
+        }
+        """;
+
+    [Fact]
+    public async Task With_pwsh_installed_tenants_past_the_limit_come_back_flagged_so_none_are_marked_missing()
+    {
+        var (outcome, inventory) = await RunScriptAsync("Running", "BC250", MultitenantAdminTool, maxTenants: 2);
+
+        outcome.Succeeded.Should().BeTrue(outcome.Error);
+        outcome.Output[0]!["tenantsTruncated"]!.GetValue<bool>().Should().BeTrue();
+        inventory.Tenants!.Select(t => t.Id).Should().Equal("cronus-dk", "cronus-se");
+        inventory.TenantsTruncated.Should().BeTrue();
+        inventory.Tenants![0].Apps.Should().ContainSingle().Which.SyncState.Should().Be("Synced");
+
+        var (_, all) = await RunScriptAsync("Running", "BC250", MultitenantAdminTool, maxTenants: 3);
+        all.Tenants.Should().HaveCount(3);
+        all.TenantsTruncated.Should().BeFalse();
     }
 
     [Fact]

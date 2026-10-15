@@ -40,6 +40,16 @@ public static partial class GatewayLicenceParser
     /// <summary>Ranges kept per licence; a real one has a few hundred at most.</summary>
     public const int MaxRanges = 5000;
 
+    /// <summary>
+    /// Longest line read. A real licence line is under 200 characters; a longer one is
+    /// skipped, because both patterns backtrack on long runs of spaces and a line of
+    /// many thousand would hold the request for seconds.
+    /// </summary>
+    public const int MaxLineChars = 1000;
+
+    /// <summary>A last guard on each match, should a line under the limit still be slow.</summary>
+    private const int MatchTimeoutMilliseconds = 200;
+
     private static readonly string[] LicenseeLabels = ["Licensed to", "Licensee", "Customer name", "Customer", "Licensed To"];
     private static readonly string[] SerialLabels = ["Serial No.", "Serial No", "Serial number", "Serial Number", "Serial"];
     private static readonly string[] ExpiryLabels = ["Expiration Date", "Expiration date", "Expiry date", "Expiry Date", "Expires", "Expiration", "Valid until", "Valid to"];
@@ -64,10 +74,10 @@ public static partial class GatewayLicenceParser
         ["Permission Set"] = "PermissionSet",
     };
 
-    [GeneratedRegex(@"^\s*(?<label>[A-Za-z][A-Za-z .()/]*?)\s*:\s*(?<value>.*?)\s*$")]
+    [GeneratedRegex(@"^\s*(?<label>[A-Za-z][A-Za-z .()/]*?)\s*:\s*(?<value>.*?)\s*$", RegexOptions.None, MatchTimeoutMilliseconds)]
     private static partial Regex LabelledLine();
 
-    [GeneratedRegex(@"^\s*(?<type>Permission Set|[A-Za-z]+)\s+(?<from>\d{1,10})\s*(?:\.\.|-|\s)\s*(?<to>\d{1,10})(?<rest>.*)$")]
+    [GeneratedRegex(@"^\s*(?<type>Permission Set|[A-Za-z]+)\s+(?<from>\d{1,10})\s*(?:\.\.|-|\s)\s*(?<to>\d{1,10})(?<rest>.*)$", RegexOptions.None, MatchTimeoutMilliseconds)]
     private static partial Regex RangeLine();
 
     public static ParsedLicence Parse(string? text)
@@ -82,9 +92,25 @@ public static partial class GatewayLicenceParser
         var ranges = new List<LicenceRange>();
         var lines = text.Replace("\r", string.Empty, StringComparison.Ordinal).Split('\n');
         var tooMany = false;
+        var skipped = 0;
         foreach (var line in lines)
         {
-            var range = RangeLine().Match(line);
+            if (line.Length > MaxLineChars)
+            {
+                skipped++;
+                continue;
+            }
+            Match range, labelled;
+            try
+            {
+                range = RangeLine().Match(line);
+                labelled = range.Success ? Match.Empty : LabelledLine().Match(line);
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                skipped++;
+                continue;
+            }
             if (range.Success && ObjectTypes.TryGetValue(range.Groups["type"].Value, out var type))
             {
                 if (int.TryParse(range.Groups["from"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var from)
@@ -102,7 +128,6 @@ public static partial class GatewayLicenceParser
                 continue;
             }
 
-            var labelled = LabelledLine().Match(line);
             if (!labelled.Success) continue;
             var label = labelled.Groups["label"].Value.Trim();
             var value = labelled.Groups["value"].Value.Trim();
@@ -120,6 +145,7 @@ public static partial class GatewayLicenceParser
             if (dateProblem is not null) problems.Add(dateProblem);
         }
         if (ranges.Count == 0) problems.Add("No licensed object ranges were found in the licence information.");
+        if (skipped > 0) problems.Add($"{skipped} line(s) of the licence information were too long or too slow to read and were skipped.");
         if (tooMany) problems.Add($"The licence lists more than {MaxRanges} object ranges; only the first {MaxRanges} were kept.");
         return new ParsedLicence(licensee, serial, expires, ranges, problems);
     }
@@ -128,7 +154,8 @@ public static partial class GatewayLicenceParser
     /// A date as a licence prints it. ISO first; with dashes or dots, day first (how a
     /// Business Central server with a European culture prints it); with slashes, the
     /// order is decided by a part over 12, and a date that reads both ways is reported
-    /// rather than guessed. A word such as "None" or "Never" means no expiry.
+    /// rather than guessed. A word such as "None" or "Never" means no expiry. Years
+    /// outside 1900 to 9999 are not a date a licence states, and are reported.
     /// </summary>
     internal static DateOnly? ParseDate(string text, out string? problem)
     {
@@ -141,11 +168,13 @@ public static partial class GatewayLicenceParser
         {
             return null;
         }
-        if (DateOnly.TryParseExact(first, ["yyyy-MM-dd", "yyyy-M-d", "yyyyMMdd"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var iso))
+        if (DateOnly.TryParseExact(first, ["yyyy-MM-dd", "yyyy-M-d", "yyyyMMdd"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var iso)
+            && iso.Year >= 1900)
         {
             return iso;
         }
-        if (DateOnly.TryParseExact(first, ["dd-MM-yyyy", "d-M-yyyy", "dd.MM.yyyy", "d.M.yyyy"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var dayFirst))
+        if (DateOnly.TryParseExact(first, ["dd-MM-yyyy", "d-M-yyyy", "dd.MM.yyyy", "d.M.yyyy"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var dayFirst)
+            && dayFirst.Year >= 1900)
         {
             return dayFirst;
         }
@@ -153,7 +182,7 @@ public static partial class GatewayLicenceParser
         if (parts.Length == 3
             && int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var a)
             && int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var b)
-            && int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var year) && year >= 1900)
+            && int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var year) && year is >= 1900 and <= 9999)
         {
             (int Month, int Day)? order = a > 12 && b <= 12 ? (b, a) : b > 12 && a <= 12 ? (a, b) : a == b ? (a, b) : null;
             if (order is { } md && md.Month is >= 1 and <= 12 && md.Day >= 1 && md.Day <= DateTime.DaysInMonth(year, md.Month))

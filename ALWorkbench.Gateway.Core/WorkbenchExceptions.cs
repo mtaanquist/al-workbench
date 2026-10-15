@@ -9,7 +9,17 @@ namespace ALWorkbench.Gateway.Core;
 /// </summary>
 public sealed class WorkbenchUnreachableException : Exception
 {
-    public WorkbenchUnreachableException(string message, Exception? inner = null) : base(message, inner) { }
+    public WorkbenchUnreachableException(string message, Exception? inner = null, HttpStatusCode? status = null) : base(message, inner)
+    {
+        Status = status;
+    }
+
+    /// <summary>
+    /// What AL Workbench answered, when it answered at all; null for no connection or
+    /// a timeout. The inventory round tells "the server is down" from "the server
+    /// fails on this one report" by it.
+    /// </summary>
+    public HttpStatusCode? Status { get; }
 }
 
 /// <summary>
