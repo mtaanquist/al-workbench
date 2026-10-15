@@ -70,7 +70,7 @@ public sealed class ImportLicenceVerbTests : IDisposable
 
     private async Task<GatewayCommandOutcome> ImportAsync(
         string fileName = "CRONUS.flf", string asked = "NavDatabase", string? tenant = null, Version? version = null,
-        byte[]? content = null, string? sha = null, string machine = "CRONUS-BC01")
+        byte[]? content = null, string? sha = null, string machine = "CRONUS-BC01", CancellationToken ct = default)
     {
         var bytes = content ?? "CRONUS licence"u8.ToArray();
         var path = Path.Combine(_scratch.Path, fileName);
@@ -83,7 +83,7 @@ public sealed class ImportLicenceVerbTests : IDisposable
             SecondsLeft = 900,
             Files = [new GatewayCommandFileMessage { Id = 9, Name = fileName, Sha256 = sha ?? Convert.ToHexStringLower(SHA256.HashData(bytes)), Size = bytes.Length }],
         };
-        return await Verb(version).ExecuteAsync(new GatewayCommandContext(command, new Dictionary<long, string> { [9] = path }, _progress.Add, RefreshAsync), CancellationToken.None);
+        return await Verb(version).ExecuteAsync(new GatewayCommandContext(command, new Dictionary<long, string> { [9] = path }, _progress.Add, RefreshAsync), ct);
     }
 
     private Task<string?> RefreshAsync(TierRef tier, CancellationToken ct)
@@ -225,7 +225,7 @@ public sealed class ImportLicenceVerbTests : IDisposable
     {
         var outcome = await ImportAsync(fileName: "CRONUS.bclicense");
 
-        outcome.FailureMessage.Should().Contain("Business Central 14").And.Contain("imports .flf licences");
+        outcome.FailureMessage.Should().Contain("Business Central 14").And.Contain("needs an .flf file");
         _server.Runs.Should().BeEmpty();
     }
 
@@ -266,13 +266,46 @@ public sealed class ImportLicenceVerbTests : IDisposable
     }
 
     [Fact]
-    public async Task PowerShell_failing_before_it_reports_counts_as_not_imported()
+    public async Task PowerShell_ending_before_it_reports_says_it_is_unknown_whether_the_licence_was_imported()
     {
         _server.LicenceImportCrashes = true;
 
         var outcome = await ImportAsync();
 
-        outcome.FailureMessage.Should().Contain("PowerShell could not load the module.");
+        outcome.FailureMessage.Should().StartWith("It is not known whether the licence was imported")
+            .And.Contain("PowerShell could not load the module")
+            .And.NotContain("keep the licence they had");
+        _server.Timeline.Should().BeEmpty();
+        var result = Result(outcome);
+        result.ImportUnknown.Should().BeTrue();
+        result.Imported.Should().BeFalse();
+        result.Restart.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task An_import_that_times_out_says_it_is_unknown_and_restarts_nothing()
+    {
+        _server.LicenceImportTimesOut = true;
+
+        var outcome = await ImportAsync();
+
+        outcome.FailureMessage.Should().StartWith("It is not known whether the licence was imported: the import did not finish in time")
+            .And.NotContain("keep the licence they had");
+        Result(outcome).ImportUnknown.Should().BeTrue();
+        _server.Timeline.Should().BeEmpty();
+        _refreshed.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task An_import_that_is_stopped_returns_an_unknown_result_rather_than_throwing()
+    {
+        using var stop = new CancellationTokenSource();
+        _server.LicenceImportStopped = stop;
+
+        var outcome = await ImportAsync(ct: stop.Token);
+
+        outcome.FailureMessage.Should().StartWith("It is not known whether the licence was imported: the import was stopped");
+        Result(outcome).ImportUnknown.Should().BeTrue();
         _server.Timeline.Should().BeEmpty();
     }
 
@@ -298,11 +331,32 @@ public sealed class ImportLicenceVerbTests : IDisposable
 
         var outcome = await ImportAsync();
 
-        outcome.FailureMessage.Should().Contain("The licence was imported, but the customer's gateway settings no longer allow 'restart' on CRONUS-BC02 / BC140");
+        outcome.FailureMessage.Should().StartWith("The licence was imported, but the customer's gateway settings no longer allow it")
+            .And.Contain("CRONUS-BC02 / BC140 does not allow 'restart'");
         _server.Timeline.Should().Equal(
             "import-licence NavDatabase default CRONUS.flf",
             "refresh CRONUS-BC01 / BC140",
             "refresh CRONUS-BC02 / BC140");
+    }
+
+    [Fact]
+    public async Task Change_hours_that_close_during_the_import_leave_the_tiers_running()
+    {
+        // A window that excludes the current hour, whenever the test runs.
+        var hour = DateTimeOffset.UtcNow.Hour;
+        var window = $"{(hour + 2) % 24:00}:00-{(hour + 3) % 24:00}:00";
+        _server.AfterLicenceImport = () => _policy.InForce = new TextPolicy(
+            Policy(bc01Allow: "[\"inventory\", \"publish\", \"restart\", \"licence\"]\nchange_hours = \"" + window + "\"")).InForce;
+
+        var outcome = await ImportAsync();
+
+        outcome.Succeeded.Should().BeFalse();
+        outcome.FailureMessage.Should().StartWith("The licence was imported, but the customer's gateway settings no longer allow it");
+        var result = Result(outcome);
+        result.Imported.Should().BeTrue();
+        result.Restart!.Restarted.Should().BeFalse();
+        _server.Timeline.Should().NotContain(l => l.StartsWith("stop ", StringComparison.Ordinal));
+        _refreshed.Should().Equal("CRONUS-BC01 / BC140", "CRONUS-BC02 / BC140");
     }
 
     [Fact]

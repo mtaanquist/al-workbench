@@ -1386,9 +1386,12 @@ both report. A rule on the gateway was considered and rejected: the only thing i
 tenant list, and several tenants of one customer on one server is a normal setup that it would have
 refused. The dialog gives a count of the other Solutions, not their names, so a deployment does not
 tell one customer's consultant another customer's name; that differs from "Shared multitenant tiers"
-above, which says to list them. The dialog ends the refusal with what to do next (ask the customer's
-IT to allow a shared restart of the named tiers, or link each Solution to its own tiers, then try
-again) and hides the Production acknowledgement, since there is nothing to acknowledge.
+above, which says to list them. The refusal leads with the effect ("This deployment would restart
+service tiers (the named tiers) that another Solution also uses, and sign out its users."), then what
+to do next (ask the customer's IT to allow shared restarts for this database in the gateway's
+settings file, `shared_restart`, or to give each Solution its own service tiers, then try again; a
+licence import, #1369, says the same with "import"), and the dialog hides the Production
+acknowledgement, since there is nothing to acknowledge.
 
 **To verify on real servers:** that `powershell.exe -File` exits 0 for a script that ends with a
 `robocopy` returning 1 and no `exit`, 2 for `exit 2`, and 1 for a `throw`; that `RequestAdditionalTime`
@@ -1440,17 +1443,27 @@ and deployment say "Licence not checked".
 its Overview tab: the licence the linked tier runs as the gateway last read it (licensed to, expiry,
 serial number, when it was read, and the object ranges folded under "Object ranges (N)"), the last
 upload (file, who, when, where it went, and how its import went: Waiting, Importing, Imported,
-Imported with problems, Not imported, with the gateway's sentence), and an outline **Upload
-licence...** button for people who can manage the Solution (`ProjectAccess.CanManageAsync`). Anyone
-who can see the Solution sees the card; the file itself downloads (`GET /licences/{id}/file`) only
-for a manager, and anything else answers 404. The meta row above the tabs carries "Licence expires",
-and from 30 days before the expiry a warning sits above the tabs on every tab, a danger alert once it
-has expired.
+Imported with problems, Not imported, Not known, with a sentence for the consultant), and an outline
+**Import licence...** button for people who can manage the Solution (`ProjectAccess.CanManageAsync`).
+Anyone who can see the Solution sees the card; the file itself downloads (`GET /licences/{id}/file`)
+only for a manager, and anything else answers 404. The meta row above the tabs carries "Licence
+expires" (the date alone), and from 30 days before the expiry a warning sits above the tabs on every
+tab, a danger alert once it has expired, with its own **Import licence...** button. While the last
+upload is waiting or importing, that warning gives way to "A new licence is being imported", so it
+does not argue with the card; the page re-reads the card every 5 seconds until the import ends, and
+stops when the page moves on to another environment.
+
+**Days are counted on the customer's calendar.** "Today", for the warning, the days left and the
+notices, is the date in the Solution's Business Central time zone (`OeProject.BcTimeZone`, the zone
+its update windows are in), since a licence runs out at the customer's midnight; UTC when the
+Solution has none or it is not a known zone (`OnPremisesLicenceService.TodayFor`).
 
 **Where the licence goes is shown, not chosen.** The policy file sets one `licence_target` per
-database, so there is nothing for the person to pick: the dialog says "Imported into the application
-database" (or the master database, for every tenant; the server's default database; the tenant X
-only), by which tier, and which file type that tier's version takes. The command carries the target
+database, so there is nothing for the person to pick: the dialog ("Import a new licence into
+Production") says "Imported into the application database (set in the customer's gateway settings)"
+(or the master database, for every tenant; the server's default database; the tenant X only),
+"Imported by" the tier, and one hint under the file button: "Business Central 25 needs a .bclicense
+file." The command carries the target
 the person was shown (`licenceTarget`), and the gateway refuses it if its settings now say anything
 else, so what runs is what was confirmed. A database with no `licence_target` refuses the upload.
 
@@ -1469,14 +1482,18 @@ format the importing tier's version takes, naming both); then the environment, k
 linked, the tier and tenant still reported, the gateway online, settings reported and valid, the
 publishing tier listed with `licence`, a `licence_target` set, the tenant allowed for a `Tenant`
 target, `restart` on every group tier, the publishing tier running, its version known, and finally
-`RestartGroupPlan.Refusal`. The upload row and the command are written in one transaction, then the
-gateway is woken, so a crash in between leaves neither.
+`RestartGroupPlan.RefusalFor("import", ...)`. The upload row and the command are written in one
+transaction, then the gateway is woken, so a crash in between leaves neither.
 
 **`shared_restart` applies to every target, `Tenant` included.** A `Tenant` import changes the
 licence of one tenant only, but the restart that follows restarts the service tiers, and a restarted
 tier signs out every tenant on it. So a Tenant import whose restart group reaches another Solution's
-environment is refused exactly as a deployment is, by `RestartGroupPlan.Refusal`, before any command
-is sent; the gateway never sees it, because only AL Workbench knows which Solutions share a tier.
+environment is refused exactly as a deployment is, by the same `RestartGroupPlan` rule, before any
+command is sent; the gateway never sees it, because only AL Workbench knows which Solutions share a
+tier. The refusal leads with the effect ("This import would restart service tiers that another
+Solution also uses, and sign out its users.") and names `shared_restart` as a line in the gateway's
+settings file, since AL Workbench has no screen for it; a deployment's says the same with
+"deployment".
 
 **The `import-licence` verb** (`Core/Licence/ImportLicenceVerb.cs`) checks the command against the
 settings again (the publishing tier, `licence`, the tenant for a Tenant target, `restart` on every
@@ -1486,18 +1503,38 @@ format for the tier's version), then runs **import, restart, refresh** in that o
 Tenant target, refusing rather than importing server-wide when the cmdlet has no `-Tenant`, and
 `-Force` when the cmdlet has it, so a non-interactive session is never asked to confirm) on the
 publishing tier, in the tier's PowerShell; then the database's restart group through
-`RestartGroupRunner`, after reading the settings again (if they no longer allow it the tiers keep
-running and the command fails with the licence imported); then it reads every tier of the database
-again (`GatewayCommandContext.RefreshInventory`) and posts the inventory, so the page shows the new
-licence before the result arrives. A failed import restarts nothing ("Nothing was restarted, so the
-service tiers keep the licence they had."); a failed restart or reading afterwards fails or notes it
-with "The licence was imported, but ...". The result (`GatewayImportLicenceResult`: target,
-`imported`, `restart`, `refreshed`, `refreshMessage`) is additive; the schema stays 1. No before or
-after scripts run for a licence import.
+`RestartGroupRunner`, after the **whole** policy check again (`IGatewayPolicy.Check`: change hours,
+the production and agent rules, the permissions, read-only), not only the restart permissions, so a
+settings file changed during the import, or change hours that closed meanwhile, stop the restart the
+way they would stop a new command (the tiers keep running and the command fails with the licence
+imported); then it reads every tier of the database again (`GatewayCommandContext.RefreshInventory`)
+and posts the inventory, so the page shows the new licence before the result arrives.
+
+Only Business Central's own answer counts as "not imported": the script's `{ ok: false }` ("Nothing
+was restarted, so the service tiers keep the licence they had."). An import that was **cut off**
+before it answered (PowerShell timed out, ended without a result, or the command or the gateway was
+stopped) may have reached the database, so it restarts nothing and reports `importUnknown`: "It is
+not known whether the licence was imported ...". A stop is caught and returned as that result rather
+than thrown, so the gateway keeps it and sends it when it can. A failed restart or reading afterwards
+fails or notes it with "The licence was imported, but ...". The result (`GatewayImportLicenceResult`:
+target, `imported`, `importUnknown`, `restart`, `refreshed`, `refreshMessage`) is additive; the
+schema stays 1. No before or after scripts run for a licence import.
+
+**How the card reads the command.** Queued or claimed is Waiting, running is Importing; a result with
+the import done is Imported or Imported with problems; `importUnknown` is **Not known**; Business
+Central's refusal is Not imported with its reason. A failed command with **no** result is Not imported
+only when the gateway refused it before running anything (its refusals all end "Nothing was
+changed."); otherwise (the gateway restarted or went silent mid-run and the sweep failed it) it is
+Not known, and so is an upload whose command is gone with its gateway. The gateway's refusal texts
+name `gateway.toml` and its sections, which are customer IT's, so the card says "The customer's
+gateway settings did not allow this import ... Ask the customer's IT to check them." instead, and the
+raw text stays in the command's log on the gateway's page; a restart the settings stopped is said the
+same way.
 
 **Storage and audit.** `oe_project_licenses` (migration `20270208000000_AddProjectLicenses`) keeps
 each upload once, never changed afterwards, so its one audit row (`ProjectLicense`, "Licence file")
-is the upload itself; the bytes are recorded as `ContentSha256`, never copied. How the import went is
+is the upload itself. It stores the target and, for a Tenant import, the tenant as sent, so "Last
+upload ... into the tenant X" names where it went even if the environment is later linked elsewhere; the bytes are recorded as `ContentSha256`, never copied. How the import went is
 read from the command, not stored on the row. The command carries its own copy of the file.
 
 **Expiry notices.** `LicenceExpiryScheduler` (hourly per organisation, off with
@@ -1505,9 +1542,11 @@ read from the command, not stored on the row. The command carries its own copy o
 (category Solutions; in the app, and by email for those who chose it) 30 days before the expiry the
 linked tier's licence states, 7 days before, and once on the day it has expired. Each threshold is
 claimed on the environment row (`license_expiry_notice_for`, `license_expiry_notice_days`) with a
-compare-and-set before anything is sent, so it sends once however often the sweep runs; a licence
-first seen inside a threshold sends only the nearest one, and a new expiry date starts the thresholds
-again. Unlinked environments are skipped.
+compare-and-set before anything is sent, so it sends once however often the sweep runs; if sending
+then fails, the claim is set back the same way (only if it is still this sweep's), so the next sweep
+tries again rather than losing that notice. A licence first seen inside a threshold sends only the
+nearest one, and a new expiry date starts the thresholds again. Days are counted in the Solution's
+time zone, as on the page. Unlinked environments are skipped.
 
 **MCP.** `get_environment` gives an on-premises environment's `licence`: licensee, serial number,
 expiry, when read, the object ranges, and the last upload (file, who, when, where it went, its import

@@ -119,33 +119,58 @@ public sealed class ImportLicenceVerb : ICommandExecutor
             return Refuse(format);
         }
 
-        // 1. Import.
+        // 1. Import. Only an answer from the script itself says whether Business Central
+        // imported it. A run that was cut off (it timed out, or the command or the gateway
+        // was stopped) may have got as far as the database, so it says it does not know.
         var shell = new PowerShellTarget(PowerShellChoice.For(tier.PowerShell, install.Version), install.ServiceFolder);
+        if (_runner.ModuleProblems(ImportLicenceScript.Import, shell) is { Count: > 0 } unsafeModule)
+        {
+            return Refuse("Someone other than administrators can change the Business Central administration module the gateway would load for this tier, so it does not run anything there. "
+                + string.Join(" ", unsafeModule));
+        }
         var tenant = request.Tenant;
         context.Progress($"Importing the licence {file.Name} into {Where(target, tenant)} on {tier.Tier}.");
-        var ran = await _runner.RunAsync(ImportLicenceScript.Import, shell,
-            ImportLicenceScript.Parameters(tier.Tier.Instance, path, target, tenant),
-            ImportLicenceScript.Timeout, context.Progress, ct).ConfigureAwait(false);
-        var entry = ran.Succeeded ? ran.Output.OfType<JsonObject>().FirstOrDefault() : null;
-        if (entry?["ok"]?.GetValueKind() != System.Text.Json.JsonValueKind.True)
+        PowerShellResult ran;
+        try
         {
-            var why = entry?["error"] is JsonValue text && text.GetValueKind() == System.Text.Json.JsonValueKind.String
+            ran = await _runner.RunAsync(ImportLicenceScript.Import, shell,
+                ImportLicenceScript.Parameters(tier.Tier.Instance, path, target, tenant),
+                ImportLicenceScript.Timeout, context.Progress, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Returned rather than thrown, so the gateway keeps the result and sends it
+            // when it can: AL Workbench must not read this as "not imported".
+            return Unknown(target, "the import was stopped before Business Central said how it went");
+        }
+        var entry = ran.Succeeded ? ran.Output.OfType<JsonObject>().FirstOrDefault() : null;
+        if (entry?["ok"]?.GetValueKind() == System.Text.Json.JsonValueKind.False)
+        {
+            var why = entry["error"] is JsonValue text && text.GetValueKind() == System.Text.Json.JsonValueKind.String
                 ? text.GetValue<string>()
-                : ran.Error ?? "PowerShell ended before it said how the import went.";
+                : "Business Central gave no reason.";
             context.Progress("FAILED Business Central did not import the licence: " + why);
             return GatewayCommandOutcome.Failure(
                 $"Business Central did not import the licence: {why} Nothing was restarted, so the service tiers keep the licence they had.",
                 Result(target, imported: false, restart: null, refreshMessage: null));
         }
+        if (entry?["ok"]?.GetValueKind() != System.Text.Json.JsonValueKind.True)
+        {
+            return Unknown(target, ran.TimedOut
+                ? "the import did not finish in time and was stopped"
+                : "PowerShell ended before it said how the import went (" + (ran.Error ?? "no reason given").TrimEnd('.') + ")");
+        }
         context.Progress($"Imported the licence into {Where(target, tenant)}. Restarting the service tiers, which read a new licence only when they start.");
 
-        // 2. Restart, under the settings as they are now.
-        var snapshot = _policy.Refresh();
-        var policy = snapshot.Policy ?? _policy.InForce;
+        // 2. Restart, under the settings as they are now: the whole check again, so a
+        // file changed during the import (change hours, a tier taken out, read-only)
+        // stops the restart the way it would stop a new command.
+        var again = _policy.Check(command);
+        var policy = again.Policy ?? _policy.InForce;
         string? refusal = null;
-        if (snapshot.Report.State != GatewayPolicyStates.Valid)
+        if (!again.Allowed)
         {
-            refusal = "the customer's gateway settings changed during the import and now only allow reading, so the service tiers were not restarted.";
+            refusal = "the customer's gateway settings no longer allow it: " + (again.Reason ?? "no reason given").TrimEnd('.') + ". So the service tiers were not restarted.";
         }
         else if (policy.Find(tier.Tier) is null)
         {
@@ -221,6 +246,15 @@ public sealed class ImportLicenceVerb : ICommandExecutor
         GatewayLicenceTargets.Tenant => tenant is null ? "one tenant's database" : $"tenant '{tenant}'",
         _ => $"'{target}'",
     };
+
+    /// <summary>
+    /// The import was cut off before Business Central answered: nothing is restarted, and
+    /// the result says the licence may or may not be in the database.
+    /// </summary>
+    private static GatewayCommandOutcome Unknown(string target, string why) =>
+        GatewayCommandOutcome.Failure(
+            $"It is not known whether the licence was imported: {why}. Nothing was restarted. The licence the service tiers show after their next restart is the one in the database; to be sure, upload it again.",
+            new GatewayImportLicenceResult { Target = target, ImportUnknown = true }.ToJson());
 
     private static GatewayCommandOutcome Refuse(string message) => GatewayCommandOutcome.Failure(message + " Nothing was changed.");
 

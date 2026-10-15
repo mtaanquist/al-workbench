@@ -4,6 +4,7 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects;
+using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALWorkbench.Gateway.Contracts;
@@ -45,15 +46,22 @@ public enum LicenceImportState
     ImportedWithProblems,
     /// <summary>Not imported; nothing was restarted.</summary>
     Failed,
+    /// <summary>
+    /// The import was cut off, or its record is gone, before anyone could say how it went:
+    /// the licence may or may not be in the database. Nothing was restarted.
+    /// </summary>
+    Unknown,
 }
 
 /// <summary>A licence someone uploaded, with how its import went.</summary>
+/// <param name="Where">Where it was imported, in words, as it was sent ("the application database").</param>
 /// <param name="Message">What went wrong, or what to check, when the import did not simply succeed.</param>
 public sealed record LicenceUpload(
     int Id,
     string FileName,
     int Size,
     string LicenceTarget,
+    string Where,
     string? UploadedBy,
     DateTime UploadedAt,
     LicenceImportState State,
@@ -118,6 +126,22 @@ public sealed class OnPremisesLicenceService
 
     /// <summary>The file types the upload takes, mirrored as the file input's <c>accept</c>.</summary>
     public const string Accept = GatewayLicenceFormats.Flf + "," + GatewayLicenceFormats.BcLicense;
+
+    /// <summary>
+    /// What a consultant is told when the customer's gateway refused an import before it
+    /// changed anything. The gateway's own reason names its settings file and sections,
+    /// which are customer IT's, so it stays in the command's log on the gateway's page.
+    /// </summary>
+    public const string GatewayRefusedMessage =
+        "The customer's gateway settings did not allow this import, so nothing was changed. Ask the customer's IT to check them. An administrator can see the gateway's own reason on the gateway's page under Administration → Gateways.";
+
+    /// <summary>
+    /// "Today" for a licence's expiry: the date in the Solution's Business Central time zone
+    /// (<c>OeProject.BcTimeZone</c>), the customer's clock, since a licence runs out at the
+    /// customer's midnight; UTC when the Solution has none or it is not a known zone.
+    /// </summary>
+    public static DateOnly TodayFor(DateTimeOffset utcNow, string? timeZone) =>
+        DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(utcNow, UpdateWindow.ResolveTimeZone(timeZone)).DateTime);
 
     private readonly AppDbContext _db;
     private readonly IOrganizationContext _orgContext;
@@ -184,7 +208,7 @@ public sealed class OnPremisesLicenceService
             .OrderByDescending(l => l.UploadedAt).ThenByDescending(l => l.Id)
             .Select(l => new
             {
-                l.Id, l.FileName, l.Size, l.LicenceTarget, l.UploadedAt, l.GatewayCommandId,
+                l.Id, l.FileName, l.Size, l.LicenceTarget, l.Tenant, l.UploadedAt, l.GatewayCommandId,
                 UploadedBy = l.UploadedByUser == null ? null : l.UploadedByUser.DisplayName,
             })
             .FirstOrDefaultAsync(ct);
@@ -192,7 +216,8 @@ public sealed class OnPremisesLicenceService
         if (upload is not null)
         {
             var (state, message) = await ImportStateAsync(upload.GatewayCommandId, ct);
-            last = new LicenceUpload(upload.Id, upload.FileName, upload.Size, upload.LicenceTarget, upload.UploadedBy,
+            last = new LicenceUpload(upload.Id, upload.FileName, upload.Size, upload.LicenceTarget,
+                Where(upload.LicenceTarget, upload.Tenant ?? OnPremisesEnvironmentService.DefaultTenant), upload.UploadedBy,
                 upload.UploadedAt, state, message);
         }
 
@@ -274,12 +299,13 @@ public sealed class OnPremisesLicenceService
 
         var (machine, instance) = facts.PublishingTier;
         var target = plan.LicenceTarget!;
+        // Only a tenant import names the tenant; the other targets are server-wide.
+        var tenant = target == GatewayLicenceTargets.Tenant ? facts.TenantId ?? OnPremisesEnvironmentService.DefaultTenant : null;
         var parameters = new GatewayImportLicenceParameters
         {
             Machine = machine,
             Instance = instance,
-            // Only a tenant import names the tenant; the other targets are server-wide.
-            Tenant = target == GatewayLicenceTargets.Tenant ? facts.TenantId ?? OnPremisesEnvironmentService.DefaultTenant : null,
+            Tenant = tenant,
             LicenceTarget = target,
         };
         var userId = _orgContext.CurrentUserId;
@@ -317,6 +343,7 @@ public sealed class OnPremisesLicenceService
                 Size = content.Length,
                 Sha256 = Convert.ToHexStringLower(SHA256.HashData(content)),
                 LicenceTarget = target,
+                Tenant = tenant,
                 UploadedByUserId = userId,
                 UploadedAt = now,
                 GatewayCommandId = commandId,
@@ -460,7 +487,7 @@ public sealed class OnPremisesLicenceService
             // settings must say is allowed. Only AL Workbench knows which Solutions are
             // linked where, so it is refused here and never reaches the gateway. A Tenant
             // import is no exception: the tiers restart for every tenant on them.
-            return forDialog ? restart?.DialogRefusal : restart?.Refusal;
+            return restart?.RefusalFor("import", forDialog);
         }
     }
 
@@ -474,7 +501,13 @@ public sealed class OnPremisesLicenceService
         _ => "nowhere yet",
     };
 
-    /// <summary>How the import a command carries went, from the command row.</summary>
+    /// <summary>
+    /// How the import a command carries went, from the command row, in words for the
+    /// consultant. What is not known is said as not known: an import the gateway was cut off
+    /// in, or whose command is gone, may have reached the database, so it is never called
+    /// "not imported". The gateway's own refusals are not repeated: they name its settings
+    /// file, which is customer IT's (<see cref="GatewayRefusedMessage"/>).
+    /// </summary>
     private async Task<(LicenceImportState State, string? Message)> ImportStateAsync(long? commandId, CancellationToken ct)
     {
         if (commandId is not { } id) return (LicenceImportState.Failed, "The import was never sent.");
@@ -482,31 +515,55 @@ public sealed class OnPremisesLicenceService
             .Where(c => c.Id == id)
             .Select(c => new { c.Status, c.FailureMessage, c.ResultJson })
             .FirstOrDefaultAsync(ct);
-        if (command is null) return (LicenceImportState.Failed, "The gateway's record of the import is gone.");
+        if (command is null) return (LicenceImportState.Unknown, UnknownMessage("The record of the import is gone (its gateway was removed)"));
         var result = ParseResult(command.ResultJson);
         return command.Status switch
         {
             GatewayCommandStatus.Queued or GatewayCommandStatus.Claimed => (LicenceImportState.Waiting, null),
             GatewayCommandStatus.Running => (LicenceImportState.Running, null),
+            GatewayCommandStatus.Expired => (LicenceImportState.Failed,
+                "The gateway did not pick up the import in time, so nothing was imported or restarted. Check that the gateway is online, then upload the licence again."),
             GatewayCommandStatus.Succeeded when result is { Imported: true, Restart.Restarted: true } && result.Refreshed
                 => (LicenceImportState.Imported, null),
             GatewayCommandStatus.Succeeded when result is { Imported: true, Restart.Restarted: true }
-                => (LicenceImportState.ImportedWithProblems, result.RefreshMessage),
+                => (LicenceImportState.ImportedWithProblems, "The service tiers were restarted, but could not be read again straight away, so the licence shown here may be the old one until the gateway's next reading."),
             GatewayCommandStatus.Succeeded or GatewayCommandStatus.Failed when result is { Imported: true }
-                => (LicenceImportState.ImportedWithProblems, command.FailureMessage ?? RestartProblem(result.Restart)),
-            GatewayCommandStatus.Succeeded => (LicenceImportState.Imported, null),
-            _ => (LicenceImportState.Failed, command.FailureMessage ?? "The import did not finish."),
+                => (LicenceImportState.ImportedWithProblems, RestartProblem(result.Restart) ?? command.FailureMessage),
+            GatewayCommandStatus.Succeeded when result is null => (LicenceImportState.Imported, null),
+            _ when result is { ImportUnknown: true }
+                => (LicenceImportState.Unknown, UnknownMessage("The import was cut off before Business Central said how it went")),
+            // Business Central's own answer: the reason is Business Central's, so it is shown.
+            _ when result is { Imported: false }
+                => (LicenceImportState.Failed, command.FailureMessage ?? "Business Central did not import the licence. Nothing was restarted."),
+            // No result: refused before anything ran, which the gateway always says it was ...
+            _ when command.FailureMessage?.TrimEnd().EndsWith(RefusalEnding, StringComparison.Ordinal) == true
+                => (LicenceImportState.Failed, GatewayRefusedMessage),
+            // ... or stopped part-way (the gateway restarted or went silent while running it).
+            _ => (LicenceImportState.Unknown, UnknownMessage("The gateway stopped before it reported how the import went")),
         };
     }
+
+    /// <summary>How every refusal the gateway makes before running anything ends.</summary>
+    private const string RefusalEnding = "Nothing was changed.";
+
+    private static string UnknownMessage(string why) =>
+        $"{why}, so it is not known whether the licence was imported. Nothing was restarted. "
+        + "If the Licence card does not show the new expiry after the service tiers next restart, upload the licence again.";
 
     private static string? RestartProblem(GatewayRestartGroupResult? restart)
     {
         if (restart is null) return "The service tiers were not restarted, so they keep the old licence until they next start.";
-        if (restart.Message is { Length: > 0 } message) return message;
+        // Not one tier was touched: the customer's settings stopped the restart.
+        if (!restart.Restarted && restart.Tiers.Count > 0
+            && restart.Tiers.All(t => t.Outcome == GatewayRestartTierOutcomes.NotRestarted))
+        {
+            return "The customer's gateway settings did not allow the restart, so the service tiers keep the old licence until they next start. Ask the customer's IT to check the settings, or to restart the service tiers.";
+        }
         var failed = restart.Tiers.Where(t => t.Outcome != GatewayRestartTierOutcomes.Restarted)
             .Select(t => $"{t.Machine} / {t.Instance}" + (t.Message is { Length: > 0 } m ? $": {m}" : ""))
             .ToList();
-        return failed.Count == 0 ? null : "Not every service tier restarted. " + string.Join(" ", failed);
+        if (failed.Count > 0) return "Not every service tier restarted, so those keep the old licence until they next start. " + string.Join(" ", failed);
+        return restart.Message is { Length: > 0 } message ? message : null;
     }
 
     private static GatewayImportLicenceResult? ParseResult(string? json)

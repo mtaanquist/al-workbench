@@ -129,6 +129,12 @@ internal sealed class FakeBusinessCentral : IProcessRunner
             var tenant = parameters["tenant"]!.GetValue<string>();
             var file = Path.GetFileName(parameters["path"]!.GetValue<string>());
             if (LicenceImportCrashes) return Task.FromResult(new ProcessOutcome(1, string.Empty, "PowerShell could not load the module.", false));
+            if (LicenceImportTimesOut) return Task.FromResult(new ProcessOutcome(-1, "Importing the licence.\n", string.Empty, true));
+            if (LicenceImportStopped is { } stop)
+            {
+                stop.Cancel();
+                throw new OperationCanceledException(stop.Token);
+            }
             if (LicenceImportError is null)
             {
                 Timeline.Add($"import-licence {database} {tenant} {file}");
@@ -400,6 +406,12 @@ internal sealed class FakeBusinessCentral : IProcessRunner
 
     /// <summary>The licence import's PowerShell fails before the script reports anything.</summary>
     public bool LicenceImportCrashes { get; set; }
+
+    /// <summary>The licence import's PowerShell runs past its timeout and is killed.</summary>
+    public bool LicenceImportTimesOut { get; set; }
+
+    /// <summary>Cancelled while the licence import runs, as stopping the command or the gateway does.</summary>
+    public CancellationTokenSource? LicenceImportStopped { get; set; }
 
     /// <summary>Called after a licence import went through, e.g. to change the settings before the restart.</summary>
     public Action? AfterLicenceImport { get; set; }

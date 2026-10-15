@@ -19,6 +19,7 @@ internal sealed class ProjectLicenseConfiguration : IEntityTypeConfiguration<OeP
         entity.Property(e => e.Size).HasColumnName("size").IsRequired();
         entity.Property(e => e.Sha256).HasColumnName("sha256").HasMaxLength(64).IsRequired();
         entity.Property(e => e.LicenceTarget).HasColumnName("licence_target").HasMaxLength(20).IsRequired();
+        entity.Property(e => e.Tenant).HasColumnName("tenant").HasMaxLength(255);
         entity.Property(e => e.UploadedByUserId).HasColumnName("uploaded_by_user_id");
         entity.Property(e => e.UploadedAt).HasColumnName("uploaded_at").IsRequired();
         entity.Property(e => e.GatewayCommandId).HasColumnName("gateway_command_id");

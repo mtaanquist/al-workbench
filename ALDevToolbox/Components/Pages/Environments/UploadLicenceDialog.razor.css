@@ -15,9 +15,9 @@
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
-    margin-bottom: var(--space-3);
     min-width: 0;
 }
+.lic-dialog__hint { margin: var(--space-1) 0 var(--space-3); font-size: var(--text-sm); }
 .lic-dialog__name { font-weight: 500; overflow-wrap: anywhere; min-width: 0; }
 
 .lic-dialog__restart { display: grid; gap: var(--space-2); min-width: 0; }
@@ -31,3 +31,4 @@
     .lic-dialog__facts { grid-template-columns: minmax(0, 1fr); }
     .lic-dialog__facts dd { margin-bottom: var(--space-1); }
 }
+.lic-dialog ::deep .field-error.lic-dialog__hint { display: flex; margin: var(--space-1) 0 var(--space-3); }

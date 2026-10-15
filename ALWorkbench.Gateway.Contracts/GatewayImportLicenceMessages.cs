@@ -104,6 +104,9 @@ public static class GatewayLicenceFormats
     /// Why a tier running <paramref name="version"/> cannot import <paramref name="fileName"/>,
     /// naming both; null when it can. An unknown version refuses: the rule cannot be applied.
     /// </summary>
+    /// <summary>"an .flf", "a .bclicense": read aloud, .flf starts with a vowel sound.</summary>
+    private static string Article(string format) => format == Flf ? "an" : "a";
+
     public static string? Refusal(string fileName, Version? version)
     {
         var format = FormatOf(fileName);
@@ -117,10 +120,8 @@ public static class GatewayLicenceFormats
         }
         var expected = For(version.Major);
         if (format == expected) return null;
-        return $"{fileName} is a {format} licence, but the service tier runs Business Central {version.Major} ({version}), which imports {expected} licences. "
-            + (expected == BcLicense
-                ? $"Ask Microsoft or the partner for the licence in the {BcLicense} format."
-                : $"Versions before Business Central {FirstBcLicenseMajor} need the licence in the {Flf} format.");
+        return $"This is {Article(format)} {format} licence, but Business Central {version.Major} needs {Article(expected)} {expected} file. "
+            + $"Ask the customer for the {expected} version of their licence.";
     }
 }
 
@@ -144,6 +145,14 @@ public sealed record GatewayImportLicenceResult
     /// <summary>True when <c>Import-NAVServerLicense</c> succeeded.</summary>
     [JsonPropertyName("imported")]
     public bool Imported { get; init; }
+
+    /// <summary>
+    /// True when the import was cut off (it timed out, or the command or the gateway was
+    /// stopped) before Business Central said how it went: the licence may or may not be in
+    /// the database. <see cref="Imported"/> is false and nothing was restarted.
+    /// </summary>
+    [JsonPropertyName("importUnknown")]
+    public bool ImportUnknown { get; init; }
 
     /// <summary>The restart group, tier by tier; null when it never got that far (the import failed).</summary>
     [JsonPropertyName("restart")]

@@ -232,8 +232,9 @@ on one of its linked on-premises environments expires in 30 days, in 7 days, and
 expired, by the expiry date the gateway last read from the tier. Each of the three is sent once:
 the environment row records the expiry date and the nearest threshold already sent, claimed
 before anything goes out, so an hourly sweep never repeats one, and a licence first seen inside a
-threshold sends only the nearest. A new expiry date starts again. See `on-prem-gateway.md`,
-"Licences, as built".
+threshold sends only the nearest. A send that fails puts its claim back, so the next sweep sends
+it. A new expiry date starts again. Days are counted in the solution's Business Central time zone
+(UTC when it has none). See `on-prem-gateway.md`, "Licences, as built".
 
 ## Digests (#1037)
 

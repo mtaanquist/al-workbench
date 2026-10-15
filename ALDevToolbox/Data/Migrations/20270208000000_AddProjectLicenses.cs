@@ -38,6 +38,7 @@ namespace ALDevToolbox.Data.Migrations
                     size = table.Column<int>(type: "integer", nullable: false),
                     sha256 = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
                     licence_target = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    tenant = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
                     uploaded_by_user_id = table.Column<int>(type: "integer", nullable: true),
                     uploaded_at = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
                     gateway_command_id = table.Column<long>(type: "bigint", nullable: true)

@@ -142,6 +142,41 @@ public sealed class LicenceExpiryNotifierTests : IDisposable
     }
 
     [Fact]
+    public async Task A_notice_that_fails_to_send_is_not_lost_and_goes_on_the_next_sweep()
+    {
+        await SetExpiryAsync(Today.AddDays(20));
+
+        (await RunAsync(failSend: true)).Should().Be(0, "the send failed");
+        await using (var ctx = _db.NewContext())
+        {
+            var env = await ctx.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == _environmentId);
+            env.LicenseExpiryNoticeFor.Should().BeNull("the claim is put back");
+            env.LicenseExpiryNoticeDays.Should().BeNull();
+        }
+        (await TitlesAsync()).Should().BeEmpty();
+
+        (await RunAsync()).Should().Be(1, "the next sweep sends it");
+        (await TitlesAsync()).Should().Equal("Licence expires in 20 days: CRONUS Coffee - Production");
+    }
+
+    [Fact]
+    public async Task Days_are_counted_on_the_solutions_calendar()
+    {
+        // 23:30 UTC on 15 October is already 16 October in Copenhagen, so a licence that
+        // runs out on 16 October has expired there, while UTC would still say one day left.
+        _clock.Advance(TimeSpan.FromHours(14.5)); // 23:30 UTC
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjects.ExecuteUpdateAsync(s => s.SetProperty(p => p.BcTimeZone, "Europe/Copenhagen"));
+        }
+        await SetExpiryAsync(new DateOnly(2026, 10, 16));
+
+        (await RunAsync()).Should().Be(1);
+
+        (await TitlesAsync()).Should().Equal("Licence expired: CRONUS Coffee - Production");
+    }
+
+    [Fact]
     public async Task An_unlinked_environment_is_not_notified()
     {
         await SetExpiryAsync(Today.AddDays(3));
@@ -169,14 +204,16 @@ public sealed class LicenceExpiryNotifierTests : IDisposable
             .ToListAsync();
     }
 
-    private async Task<int> RunAsync()
+    /// <param name="failSend">Makes reading the followers fail, so the notice cannot be sent.</param>
+    private async Task<int> RunAsync(bool failSend = false)
     {
         await using var ctx = _db.NewContext();
+        await using var followsCtx = failSend ? _db.NewContext(new FailingReads()) : _db.NewContext();
         var preferences = new NotificationPreferenceService(ctx, _db.OrgContext, _clock, NullLogger<NotificationPreferenceService>.Instance);
         var notifications = new NotificationService(
             ctx, _db.NewContextFactory(), preferences, _email, new EmailRenderer(_services, NullLoggerFactory.Instance),
             new PublicOrigin(Origin), _db.OrgContext, _clock, NullLogger<NotificationService>.Instance);
-        var follows = new ProjectFollowService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), _clock,
+        var follows = new ProjectFollowService(followsCtx, _db.OrgContext, new ProjectAccess(followsCtx, _db.OrgContext), _clock,
             NullLogger<ProjectFollowService>.Instance);
         return await new LicenceExpiryNotifier(ctx, notifications, follows, _clock, NullLogger<LicenceExpiryNotifier>.Instance)
             .NotifyDueAsync();
@@ -236,6 +273,15 @@ public sealed class LicenceExpiryNotifierTests : IDisposable
         await ctx.SaveChangesAsync();
         _instanceId = instance.Id;
         _environmentId = env.Id;
+    }
+
+    private sealed class FailingReads : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+    {
+        public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(
+            System.Data.Common.DbCommand command, Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader> result,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("The database went away.");
     }
 
     private sealed class CapturingEmailService : IEmailService

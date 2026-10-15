@@ -194,10 +194,10 @@ public sealed class DeliverTools
             apps.Select(a => new InstalledApp(a.AppId, a.Name, a.Publisher, a.Version, a.DeliveredFromWorkbench)).ToList(),
             apps.Count == 0 ? null : apps.Max(a => a.FetchedAt),
             history.Take(RecentHistoryCount).Select(ToHistory).ToList(),
-            licence is null ? null : ToLicence(licence, row.Fleet.OnPremises?.TenantId));
+            licence is null ? null : ToLicence(licence));
     }
 
-    private static OnPremisesLicenceDetail ToLicence(Gateways.OnPremisesLicenceView view, string? tenant) => new(
+    private static OnPremisesLicenceDetail ToLicence(Gateways.OnPremisesLicenceView view) => new(
         view.Installed?.Licensee,
         view.Installed?.SerialNumber,
         view.Installed?.ExpiresOn?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
@@ -208,7 +208,7 @@ public sealed class DeliverTools
                 upload.FileName,
                 upload.UploadedBy,
                 upload.UploadedAt,
-                Gateways.OnPremisesLicenceService.Where(upload.LicenceTarget, tenant ?? Gateways.OnPremisesEnvironmentService.DefaultTenant),
+                upload.Where,
                 upload.State.ToString(),
                 upload.Message)
             : null);
@@ -761,7 +761,7 @@ public sealed record LicenceObjectRange(string ObjectType, int From, int To);
 /// <summary>A licence file uploaded in the workbench and how its import went.</summary>
 /// <param name="UploadedBy">Who uploaded it; null when the account is gone.</param>
 /// <param name="ImportedInto">Where it was imported, in words, e.g. "the application database".</param>
-/// <param name="ImportState">'Waiting', 'Running', 'Imported', 'ImportedWithProblems' or 'Failed'.</param>
+/// <param name="ImportState">'Waiting', 'Running', 'Imported', 'ImportedWithProblems', 'Failed' or 'Unknown' (cut off before it was known whether the licence was imported).</param>
 /// <param name="Message">What went wrong or what to check, when the import did not simply succeed.</param>
 public sealed record LicenceUploadSummary(
     string FileName,

@@ -1076,8 +1076,8 @@ public sealed class OnPremisesDeliveryTests : IDisposable
 
         var plan = await NewService(_db.NewContext()).GetRestartPlanAsync(seed.ReleasePipelineId);
         plan!.OtherSolutions.Should().Be(1);
-        plan.Refusal.Should().StartWith(OnPremisesDeployFacts.NotAllowed)
-            .And.Contain("another solution's environment");
+        plan.Refusal.Should().StartWith("This deployment would restart service tiers that another Solution also uses, and sign out its users.")
+            .And.Contain("gateway's settings file (shared_restart)").And.EndWith("Nothing was sent.");
 
         var refused = () => NewService(_db.NewContext()).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
         (await refused.Should().ThrowAsync<PlanValidationException>())
@@ -1102,7 +1102,7 @@ public sealed class OnPremisesDeliveryTests : IDisposable
 
         var delivery = await LoadAsync(id);
         delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
-        delivery.FailureMessage.Should().StartWith(OnPremisesDeployFacts.NotAllowed).And.Contain("another solution's environment");
+        delivery.FailureMessage.Should().StartWith("This deployment would restart service tiers that another Solution also uses");
         delivery.FailureMessage.Should().NotContain("The gateway refused", "AL Workbench refused it, not the gateway");
         await using var read = _db.NewContext();
         (await read.GatewayCommands.CountAsync()).Should().Be(0);

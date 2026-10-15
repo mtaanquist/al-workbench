@@ -78,29 +78,42 @@ else
     <span class="meta-item"><span class="meta-item__label">Tenant</span><span class="meta-item__value">@TenantText(tier)</span></span>
     <span class="meta-item"><span class="meta-item__label">Delivery window</span><span class="meta-item__value">@DeliveryWindow</span></span>
     <span class="meta-item"><span class="meta-item__label">Apps installed</span><span class="meta-item__value">@(Apps is { Count: > 0 } a ? a.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "—")</span></span>
-    <span class="meta-item"><span class="meta-item__label">Licence expires</span><span class="meta-item__value">@* The date alone: the alert below says how soon. *@@(tier?.LicenceExpiresOn is { } headExpires ? LicenceDate(headExpires) : tier is null ? "—" : LicenceText(tier))</span></span>
+    <span class="meta-item"><span class="meta-item__label">Licence expires</span><span class="meta-item__value">@(tier is null ? "—" : LicenceText(tier))</span></span>
 </div>
 
 @* A licence that runs out stops everyone signing in, so a month ahead it is said above
-   the tabs, on every tab, with the way to fix it. *@
-@if (tier?.LicenceExpiresOn is { } expiresOn && expiresOn.DayNumber - Today.DayNumber <= OnPremisesLicenceService.ExpiryWarningDays)
+   the tabs, on every tab, with the button that fixes it. While a new licence is being
+   imported the warning would only argue with the card below, so it says that instead. *@
+@if (Licence?.LastUpload is { State: LicenceImportState.Waiting or LicenceImportState.Running })
+{
+    <Alert Tone="AlertTone.Info" Block="true">
+        <span>A new licence is being imported. The Licence card below shows how it goes.</span>
+    </Alert>
+}
+else if (tier?.LicenceExpiresOn is { } expiresOn && expiresOn.DayNumber - Today.DayNumber <= OnPremisesLicenceService.ExpiryWarningDays)
 {
     var daysLeft = expiresOn.DayNumber - Today.DayNumber;
     <Alert Tone="@(daysLeft <= 0 ? AlertTone.Danger : AlertTone.Warn)" Block="true">
-        <span>
-            <b>@(daysLeft <= 0
-                ? $"The Business Central licence expired on {LicenceDate(expiresOn)}."
-                : $"The Business Central licence expires on {LicenceDate(expiresOn)}, in {(daysLeft == 1 ? "1 day" : $"{daysLeft} days")}.")</b>
-            @(daysLeft <= 0 ? " Nobody can sign in to Business Central until a new one is imported." : " Ask the customer for their new licence file.")
+        <div class="onprem__expiry">
+            <span>
+                <b>@(daysLeft <= 0
+                    ? $"The Business Central licence expired on {LicenceDate(expiresOn)}."
+                    : $"The Business Central licence expires on {LicenceDate(expiresOn)}, in {(daysLeft == 1 ? "1 day" : $"{daysLeft} days")}.")</b>
+                @(daysLeft <= 0 ? " Nobody can sign in to Business Central until a new one is imported." : "")
+                @if (CanManage)
+                {
+                    <text> Ask the customer for their new licence file, then import it here.</text>
+                }
+                else
+                {
+                    <text> Ask the customer for their new licence file. Someone who manages this Solution can import it here.</text>
+                }
+            </span>
             @if (CanManage)
             {
-                <text> Upload it under </text><b>Licence</b><text> on the Overview tab.</text>
+                @ImportButton
             }
-            else
-            {
-                <text> Someone who manages this solution can upload it here.</text>
-            }
-        </span>
+        </div>
     </Alert>
 }
 
@@ -128,7 +141,6 @@ else if (!ShowApps)
                     <span class="meta-item"><span class="meta-item__label">State</span><span class="meta-item__value">@FleetRowState.StatusWord(Row, now)</span></span>
                     <span class="meta-item"><span class="meta-item__label">Database</span><span class="meta-item__value">@(tier.Database ?? "Not read yet")</span></span>
                     <span class="meta-item"><span class="meta-item__label">Open sessions</span><span class="meta-item__value">@(tier.SessionCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "Not read")</span></span>
-                    <span class="meta-item"><span class="meta-item__label">Licence expires</span><span class="meta-item__value">@LicenceText(tier)</span></span>
                     <span class="meta-item"><span class="meta-item__label">Gateway</span><span class="meta-item__value">@tier.GatewayName</span></span>
                     <span class="meta-item"><span class="meta-item__label">Delivery window</span><span class="meta-item__value">@DeliveryWindow</span></span>
                 </div>
@@ -155,11 +167,7 @@ else if (!ShowApps)
             </div>
             @if (CanManage && tier is not null)
             {
-                <button type="button" class="btn btn--sm @(UploadingLicence ? "btn--loading" : "")"
-                        @onclick="OnUploadLicence" disabled="@UploadingLicence">
-                    <Icon Name="upload" Width="14" Height="14" />
-                    <span class="btn__label">@(UploadingLicence ? "Sending the licence" : "Upload licence...")</span>
-                </button>
+                @ImportButton
             }
         </div>
         @if (LicenceError is { } licenceError)
@@ -175,7 +183,7 @@ else if (!ShowApps)
             @if (Licence.Installed is not { } installed)
             {
                 <EmptyState Icon="key-round" Title="No licence read yet">
-                    <Text>The gateway reads the licence with the rest of the service tier every 15 minutes while it is online. It appears here after its next reading.</Text>
+                    <Text>The gateway reads the licence every 15 minutes while it is online. It appears here after the next reading.</Text>
                 </EmptyState>
             }
             else
@@ -230,20 +238,24 @@ else if (!ShowApps)
                                 <span>@upload.FileName</span>
                             }
                             by @(upload.UploadedBy ?? "a former member") <Timestamp Value="@upload.UploadedAt" Relative="true" />,
-                            into @OnPremisesLicenceService.Where(upload.LicenceTarget, tier?.TenantId ?? OnPremisesEnvironmentService.DefaultTenant).
+                            into @upload.Where.
                         </span>
                     </p>
                     @if (upload.State is LicenceImportState.Waiting)
                     {
-                        <p class="u-muted onprem__upload-detail">Waiting for the gateway to pick it up. It checks for work every few seconds while it is online.</p>
+                        <p class="u-muted onprem__upload-detail">Waiting for the gateway to pick it up. If this does not change within a few minutes, the gateway may be offline: ask the customer's IT to check it.</p>
                     }
                     else if (upload.State is LicenceImportState.Running)
                     {
                         <p class="u-muted onprem__upload-detail">The gateway is importing it and restarting the service tiers. This page shows the result when it is done.</p>
                     }
-                    else if (upload.Message is { } message)
+                    else if (upload.Message is { } message && upload.State is LicenceImportState.Failed)
                     {
                         <FieldError Class="onprem__upload-detail" Message="@message" />
+                    }
+                    else if (upload.Message is { } note)
+                    {
+                        <p class="onprem__upload-detail onprem__upload-note">@note</p>
                     }
                 }
                 else
@@ -252,7 +264,7 @@ else if (!ShowApps)
                 }
                 @if (!Licence.CanManage)
                 {
-                    <p class="u-muted onprem__upload-detail">Only people who manage this solution can upload a licence.</p>
+                    <p class="u-muted onprem__upload-detail">Only people who manage this Solution can import a licence.</p>
                 }
             </div>
         }
@@ -335,15 +347,27 @@ else
     /// <summary>Opens the upload dialog.</summary>
     [Parameter] public EventCallback OnUploadLicence { get; set; }
 
-    private DateOnly Today => DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
+    /// <summary>Today on the customer's calendar, which is when a licence runs out.</summary>
+    private DateOnly Today => OnPremisesLicenceService.TodayFor(Clock.GetUtcNow(), Row.TimeZone);
 
     private static string LicenceDate(DateOnly date) =>
         ALDevToolbox.Components.Pages.Admin.Administration.GatewayStatusText.LicenceDate(date);
+
+    /// <summary>
+    /// The one way to import a licence, in the expiry warning and on the Licence card. An
+    /// outline button: nothing on this page is the primary action.
+    /// </summary>
+    private RenderFragment ImportButton => @<button type="button" class="btn btn--sm @(UploadingLicence ? "btn--loading" : "")"
+                                                    @onclick="OnUploadLicence" disabled="@UploadingLicence">
+        <Icon Name="upload" Width="14" Height="14" />
+        <span class="btn__label">@(UploadingLicence ? "Sending the licence" : "Import licence...")</span>
+    </button>;
 
     private static string UploadTone(LicenceImportState state) => state switch
     {
         LicenceImportState.Imported => "success",
         LicenceImportState.ImportedWithProblems => "warn",
+        LicenceImportState.Unknown => "warn",
         LicenceImportState.Failed => "danger",
         LicenceImportState.Running => "running",
         _ => "queued",
@@ -354,6 +378,7 @@ else
         LicenceImportState.Imported => "Imported",
         LicenceImportState.ImportedWithProblems => "Imported, with problems",
         LicenceImportState.Failed => "Not imported",
+        LicenceImportState.Unknown => "Not known",
         LicenceImportState.Running => "Importing",
         _ => "Waiting",
     };
@@ -365,12 +390,11 @@ else
     private static string TenantText(OnPremisesTierFacts? tier) =>
         tier is null ? "—" : tier.Multitenant == true ? tier.TenantId : "Single tenant";
 
-    private string LicenceText(OnPremisesTierFacts tier)
-    {
-        if (tier.LicenceExpiresOn is not { } expires) return tier.Licensee is null ? "Not read yet" : "No expiry date";
-        var today = DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
-        var date = ALDevToolbox.Components.Pages.Admin.Administration.GatewayStatusText.LicenceDate(expires);
-        if (expires < today) return $"{date} (expired)";
-        return expires.DayNumber - today.DayNumber <= 30 ? $"{date} (within 30 days)" : date;
-    }
+    /// <summary>
+    /// The expiry date alone: how soon it is, or that it has passed, is the warning above
+    /// the tabs, which a narrow column would otherwise cut off.
+    /// </summary>
+    private static string LicenceText(OnPremisesTierFacts tier) =>
+        tier.LicenceExpiresOn is { } expires ? LicenceDate(expires)
+        : tier.Licensee is null ? "Not read yet" : "No expiry date";
 }

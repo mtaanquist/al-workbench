@@ -123,6 +123,40 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         var parameters = JsonNode.Parse(command.ParametersJson)!.AsObject();
         parameters["tenant"]!.GetValue<string>().Should().Be("default");
         parameters[GatewayImportLicenceParameters.LicenceTargetParameter]!.GetValue<string>().Should().Be("Tenant");
+        var row = await ctx.OeProjectLicenses.AsNoTracking().SingleAsync();
+        row.LicenceTarget.Should().Be("Tenant");
+        row.Tenant.Should().Be("default");
+    }
+
+    [Fact]
+    public async Task The_last_upload_names_the_tenant_it_was_sent_to_even_after_the_environment_moves()
+    {
+        await SetPolicyAsync(target: GatewayLicenceTargets.Tenant);
+        await UploadAsync("CRONUS.bclicense", Licence);
+        await using (var write = _db.NewContext())
+        {
+            await write.OeProjectEnvironments.Where(e => e.Id == _environmentId)
+                .ExecuteUpdateAsync(u => u.SetProperty(e => e.TenantId, "cronus-dk"));
+        }
+
+        await using var ctx = _db.NewContext();
+        var view = await Service(ctx).GetViewAsync(_environmentId);
+
+        view!.LastUpload!.Where.Should().Be("the tenant default only");
+    }
+
+    [Fact]
+    public async Task A_server_wide_import_stores_no_tenant()
+    {
+        await SetPolicyAsync();
+
+        await UploadAsync("CRONUS.bclicense", Licence);
+
+        await using var ctx = _db.NewContext();
+        var row = await ctx.OeProjectLicenses.AsNoTracking().SingleAsync();
+        row.LicenceTarget.Should().Be("NavDatabase");
+        row.Tenant.Should().BeNull();
+        (await Service(ctx).GetViewAsync(_environmentId))!.LastUpload!.Where.Should().Be("the application database");
     }
 
     [Fact]
@@ -158,7 +192,8 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         var act = () => UploadAsync("CRONUS.flf", Licence);
 
         var refused = await act.Should().ThrowAsync<PlanValidationException>();
-        refused.Which.Errors["file"].Should().Contain(".flf").And.Contain(".bclicense").And.Contain("Business Central 25");
+        refused.Which.Errors["file"].Should().Be(
+            "This is an .flf licence, but Business Central 25 needs a .bclicense file. Ask the customer for the .bclicense version of their licence.");
         await NothingSentAsync();
     }
 
@@ -171,7 +206,8 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         var act = () => UploadAsync("CRONUS.bclicense", Licence);
 
         var refused = await act.Should().ThrowAsync<PlanValidationException>();
-        refused.Which.Errors["file"].Should().Contain("Business Central 14").And.Contain(".flf");
+        refused.Which.Errors["file"].Should().Be(
+            "This is a .bclicense licence, but Business Central 14 needs an .flf file. Ask the customer for the .flf version of their licence.");
         await NothingSentAsync();
     }
 
@@ -233,8 +269,8 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         var act = () => UploadAsync("CRONUS.bclicense", Licence);
 
         var refused = await act.Should().ThrowAsync<PlanValidationException>();
-        refused.Which.Errors["environment"].Should().StartWith(OnPremisesDeployFacts.NotAllowed)
-            .And.Contain("another solution's environment");
+        refused.Which.Errors["environment"].Should().StartWith("This import would restart service tiers that another Solution also uses, and sign out its users.")
+            .And.EndWith("Nothing was sent.");
         await NothingSentAsync();
     }
 
@@ -309,7 +345,9 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
         await using var ctx = _db.NewContext();
         var plan = await Service(ctx).GetImportPlanAsync(_environmentId);
 
-        plan!.Refusal.Should().Contain("allow a shared restart of CRONUS-BC01 / BC250, CRONUS-BC02 / BC250").And.EndWith("then try again.");
+        plan!.Refusal.Should().Be(
+            "This import would restart service tiers (CRONUS-BC01 / BC250, CRONUS-BC02 / BC250) that another Solution also uses, and sign out its users. "
+            + "Ask the customer's IT to allow shared restarts for this database in the gateway's settings file (shared_restart), or to give each Solution its own service tiers, then try again.");
     }
 
     [Fact]
@@ -374,6 +412,113 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
 
         view!.LastUpload!.State.Should().Be(LicenceImportState.ImportedWithProblems);
         view.LastUpload.Message.Should().StartWith("The licence was imported, but");
+    }
+
+    [Fact]
+    public async Task An_import_the_gateway_was_cut_off_in_reads_as_not_known()
+    {
+        await SetPolicyAsync();
+        await UploadAsync("CRONUS.bclicense", Licence);
+        await FinishCommandAsync(GatewayCommandStatus.Failed,
+            "It is not known whether the licence was imported: the import did not finish in time and was stopped. Nothing was restarted.",
+            new GatewayImportLicenceResult { Target = "NavDatabase", ImportUnknown = true });
+
+        await using var ctx = _db.NewContext();
+        var view = await Service(ctx).GetViewAsync(_environmentId);
+
+        view!.LastUpload!.State.Should().Be(LicenceImportState.Unknown);
+        view.LastUpload.Message.Should().Contain("it is not known whether the licence was imported").And.NotContain("Not imported");
+    }
+
+    [Fact]
+    public async Task An_import_swept_as_failed_with_no_result_reads_as_not_known()
+    {
+        await SetPolicyAsync();
+        await UploadAsync("CRONUS.bclicense", Licence);
+        // The gateway went silent while running it, and the sweep failed it.
+        await FinishCommandAsync(GatewayCommandStatus.Failed, "The gateway stopped reporting on this command.", null);
+
+        await using var ctx = _db.NewContext();
+        var view = await Service(ctx).GetViewAsync(_environmentId);
+
+        view!.LastUpload!.State.Should().Be(LicenceImportState.Unknown);
+        view.LastUpload.Message.Should().StartWith("The gateway stopped before it reported how the import went, so it is not known");
+    }
+
+    [Fact]
+    public async Task An_import_whose_command_is_gone_reads_as_not_known()
+    {
+        await SetPolicyAsync();
+        await UploadAsync("CRONUS.bclicense", Licence);
+        await using (var write = _db.NewContext())
+        {
+            await write.GatewayCommandFiles.ExecuteDeleteAsync();
+            await write.GatewayCommands.ExecuteDeleteAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var view = await Service(ctx).GetViewAsync(_environmentId);
+
+        view!.LastUpload!.State.Should().Be(LicenceImportState.Unknown);
+        view.LastUpload.Message.Should().Contain("is not known whether the licence was imported");
+    }
+
+    [Fact]
+    public async Task A_refusal_by_the_customers_gateway_is_said_for_the_consultant_not_in_the_settings_files_words()
+    {
+        await SetPolicyAsync();
+        await UploadAsync("CRONUS.bclicense", Licence);
+        await FinishCommandAsync(GatewayCommandStatus.Failed,
+            "Not allowed by the customer's gateway settings: no [[database]] section with a licence_target includes CRONUS-BC01 / BC250. Nothing was changed.",
+            null);
+
+        await using var ctx = _db.NewContext();
+        var view = await Service(ctx).GetViewAsync(_environmentId);
+
+        view!.LastUpload!.State.Should().Be(LicenceImportState.Failed);
+        view.LastUpload.Message.Should().Be(OnPremisesLicenceService.GatewayRefusedMessage);
+        view.LastUpload.Message.Should().NotContain("[[database]]").And.NotContain("gateway.toml").And.NotContain("licence_target");
+    }
+
+    [Fact]
+    public async Task A_restart_the_settings_stopped_after_the_import_says_so_in_plain_words()
+    {
+        await SetPolicyAsync();
+        await UploadAsync("CRONUS.bclicense", Licence);
+        await FinishCommandAsync(GatewayCommandStatus.Failed,
+            "The licence was imported, but the customer's gateway settings no longer allow it: CRONUS-BC02 / BC250 does not allow 'restart' (gateway.toml).",
+            new GatewayImportLicenceResult
+            {
+                Target = "NavDatabase",
+                Imported = true,
+                Restart = new GatewayRestartGroupResult
+                {
+                    Mode = "stop-all-then-start-all",
+                    Restarted = false,
+                    Message = "The customer's gateway settings no longer allow it (gateway.toml).",
+                    Tiers =
+                    [
+                        new GatewayRestartTierResult { Machine = "CRONUS-BC01", Instance = "BC250", Outcome = GatewayRestartTierOutcomes.NotRestarted },
+                        new GatewayRestartTierResult { Machine = "CRONUS-BC02", Instance = "BC250", Outcome = GatewayRestartTierOutcomes.NotRestarted },
+                    ],
+                },
+            });
+
+        await using var ctx = _db.NewContext();
+        var view = await Service(ctx).GetViewAsync(_environmentId);
+
+        view!.LastUpload!.State.Should().Be(LicenceImportState.ImportedWithProblems);
+        view.LastUpload.Message.Should().StartWith("The customer's gateway settings did not allow the restart").And.NotContain("gateway.toml");
+    }
+
+    [Fact]
+    public void Today_for_a_licence_is_the_solutions_calendar_day()
+    {
+        var lateUtc = new DateTimeOffset(2026, 10, 15, 23, 30, 0, TimeSpan.Zero);
+
+        OnPremisesLicenceService.TodayFor(lateUtc, "Europe/Copenhagen").Should().Be(new DateOnly(2026, 10, 16));
+        OnPremisesLicenceService.TodayFor(lateUtc, null).Should().Be(new DateOnly(2026, 10, 15), "no zone is UTC");
+        OnPremisesLicenceService.TodayFor(lateUtc, "Not/AZone").Should().Be(new DateOnly(2026, 10, 15), "an unknown zone is UTC");
     }
 
     [Fact]
@@ -566,13 +711,13 @@ public sealed class OnPremisesLicenceServiceTests : IDisposable
     }
 
     /// <summary>Ends the one queued command as the gateway would have.</summary>
-    private async Task FinishCommandAsync(GatewayCommandStatus status, string? failure, GatewayImportLicenceResult result)
+    private async Task FinishCommandAsync(GatewayCommandStatus status, string? failure, GatewayImportLicenceResult? result)
     {
         await using var ctx = _db.NewContext();
         await ctx.GatewayCommands.ExecuteUpdateAsync(s => s
             .SetProperty(c => c.Status, status)
             .SetProperty(c => c.FailureMessage, failure)
-            .SetProperty(c => c.ResultJson, result.ToJson().ToJsonString())
+            .SetProperty(c => c.ResultJson, result == null ? null : result.ToJson().ToJsonString())
             .SetProperty(c => c.FinishedAt, Start.UtcDateTime));
     }
 }

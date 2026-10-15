@@ -136,7 +136,8 @@
         {
             <OnPremisesEnvironmentSections Row="Row" Head="true" Apps="_onPremisesApps"
                                            DeliveryWindow="@DeliveryWindowText()" CanSeeGateway="_canSeeGateway"
-                                           CanManage="_canManage" />
+                                           CanManage="_canManage" Licence="_licence"
+                                           UploadingLicence="@(_settingBusy == "licence")" OnUploadLicence="UploadLicenceAsync" />
         }
         else
         {
@@ -1307,6 +1308,9 @@
             _operations = null;
             _operationsError = null;
             LeaveSessionsTab();
+            StopLicenceWatch();
+            _licence = null;
+            _licenceError = null;
             await Zone.EnsureLoadedAsync();
             await LoadEnvironmentAsync();
             _loaded = true;
@@ -2078,7 +2082,8 @@
     private UploadLicenceDialog? _licenceDialog;
     private OnPremisesLicenceView? _licence;
     private string? _licenceError;
-    private bool _licenceWatching;
+    /// <summary>The running watch of a licence import, and the environment it watches; null when none runs.</summary>
+    private CancellationTokenSource? _licenceWatch;
 
     private async Task LoadLicenceAsync()
     {
@@ -2102,46 +2107,71 @@
     /// <summary>
     /// Re-reads the licence every few seconds while its last upload is being imported, so
     /// the card says how it went without a reload. Stops when the import ends, when the
-    /// page is left, or after 30 minutes - a restart group of slow tiers is the long case.
+    /// page is left, when the page moves on to another environment (which starts its own
+    /// watch if it needs one), or after 30 minutes - a restart group of slow tiers is the
+    /// long case.
     /// </summary>
     private void WatchLicenceImport()
     {
-        if (_licenceWatching || !RendererInfo.IsInteractive) return;
-        _licenceWatching = true;
+        if (_licenceWatch is not null || !RendererInfo.IsInteractive) return;
+        var environmentId = Id;
+        var watch = CancellationTokenSource.CreateLinkedTokenSource(_gone.Token);
+        _licenceWatch = watch;
         _ = Task.Run(async () =>
         {
             var until = DateTime.UtcNow.AddMinutes(30);
             try
             {
-                while (!_gone.IsCancellationRequested && DateTime.UtcNow < until)
+                while (!watch.IsCancellationRequested && DateTime.UtcNow < until)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(5), _gone.Token);
+                    await Task.Delay(TimeSpan.FromSeconds(5), watch.Token);
+                    var pending = true;
                     await InvokeAsync(async () =>
                     {
-                        _licence = await Read(ct => Licences.GetViewAsync(Id, ct));
-                        if (_licence?.LastUpload is not { State: LicenceImportState.Waiting or LicenceImportState.Running })
+                        // The page may have moved to another environment meanwhile.
+                        if (watch.IsCancellationRequested || _loadedId != environmentId) return;
+                        var view = await Read(ct => Licences.GetViewAsync(environmentId, ct));
+                        if (watch.IsCancellationRequested || _loadedId != environmentId) return;
+                        _licence = view;
+                        pending = view?.LastUpload is { State: LicenceImportState.Waiting or LicenceImportState.Running };
+                        if (!pending)
                         {
                             // Imported or not, the tier's own reading moved too.
                             await LoadEnvironmentAsync();
                         }
                         StateHasChanged();
                     });
-                    if (_licence?.LastUpload is not { State: LicenceImportState.Waiting or LicenceImportState.Running }) break;
+                    if (!pending || _loadedId != environmentId) break;
                 }
             }
             catch (OperationCanceledException)
             {
-                // The page was left.
+                // The page was left, or moved to another environment.
             }
             catch (Exception ex)
             {
-                Log.LogWarning(ex, "Following the licence import for environment {EnvId} stopped.", Id);
+                Log.LogWarning(ex, "Following the licence import for environment {EnvId} stopped.", environmentId);
             }
             finally
             {
-                _licenceWatching = false;
+                Interlocked.CompareExchange(ref _licenceWatch, null, watch);
+                watch.Dispose();
             }
         });
+    }
+
+    /// <summary>Stops the licence import watch, if one runs.</summary>
+    private void StopLicenceWatch()
+    {
+        var watch = Interlocked.Exchange(ref _licenceWatch, null);
+        try
+        {
+            watch?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // It had just finished by itself.
+        }
     }
 
     private async Task UploadLicenceAsync()

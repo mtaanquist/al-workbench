@@ -46,6 +46,13 @@ public class OeProjectLicense
     /// </summary>
     public string LicenceTarget { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The tenant it was imported into when <see cref="LicenceTarget"/> is <c>Tenant</c>;
+    /// null for the server-wide targets. Kept as sent, so the page names the tenant the
+    /// licence went to even if the environment is later linked to another one.
+    /// </summary>
+    public string? Tenant { get; set; }
+
     /// <summary>Who uploaded it. Nullable (<c>ON DELETE SET NULL</c>) so the upload outlives the account.</summary>
     public int? UploadedByUserId { get; set; }
     public User? UploadedByUser { get; set; }

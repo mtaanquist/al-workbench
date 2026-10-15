@@ -20,7 +20,7 @@
 @inject OnPremisesLicenceService Licences
 @inject ILogger<UploadLicenceDialog> Log
 
-<ConfirmDialog @ref="_confirm" Wide="true" ConfirmDisabled="@(_file is null || _plan is null || _plan.Refusal is not null || _error is not null)">
+<ConfirmDialog @ref="_confirm" Wide="true" HeadIcon="key-round" ConfirmDisabled="@(_file is null || _plan is null || _plan.Refusal is not null || _error is not null)">
     <div class="lic-dialog">
     @if (_planError is { } planError)
     {
@@ -40,14 +40,9 @@
         {
             <dl class="lic-dialog__facts">
                 <dt>Imported into</dt>
-                <dd>@Capitalise(_plan.Where)</dd>
-                <dt>By the service tier</dt>
+                <dd>@Capitalise(_plan.Where) <span class="u-muted">(set in the customer's gateway settings)</span></dd>
+                <dt>Imported by</dt>
                 <dd class="lic-dialog__mono">@_plan.ImportTier</dd>
-                @if (_plan.Version is { } version && _plan.Format is { } format)
-                {
-                    <dt>File type</dt>
-                    <dd>@format <span class="u-muted">- Business Central @version.Major takes @format licence files</span></dd>
-                }
             </dl>
 
             <div class="lic-dialog__file">
@@ -60,20 +55,26 @@
                 {
                     <span class="u-muted" role="status">Reading the file...</span>
                 }
-                else if (_error is { } error)
-                {
-                    <FieldError Message="@error" />
-                }
                 else if (_file is { } file)
                 {
                     <span class="lic-dialog__name">@file.FileName</span>
                     <span class="u-muted">@FileSize(file.Bytes.Length)</span>
                 }
-                else
-                {
-                    <span class="u-muted">Choose the licence file the customer sent, ending in @(_plan.Format ?? ".flf or .bclicense").</span>
-                }
             </div>
+            @* One line under the file button: what the tier needs, or what is wrong with the
+               file chosen, which says the same thing about this file. *@
+            @if (_error is { } error)
+            {
+                <FieldError Class="lic-dialog__hint" Message="@error" />
+            }
+            else
+            {
+                <p class="u-muted lic-dialog__hint">
+                    @(_plan.Version is { } version && _plan.Format is { } format
+                        ? $"Business Central {version.Major} needs {(format == GatewayLicenceFormats.Flf ? "an" : "a")} {format} file."
+                        : "Choose the licence file the customer sent, ending in .flf or .bclicense.")
+                </p>
+            }
 
             @if (_plan.Restart is { } restart)
             {
@@ -82,7 +83,7 @@
                         <p>
                             @(restart.Known
                                 ? (restart.Tiers.Count == 1 ? "Business Central reads a new licence only when it starts, so after the import this service tier restarts:" : $"Business Central reads a new licence only when it starts, so after the import these {restart.Tiers.Count} service tiers restart:")
-                                : "Business Central reads a new licence only when it starts, so after the import the service tiers restart. The customer's gateway has not said which yet, so at least this one does:")
+                                : "Business Central reads a new licence only when it starts. After the import at least this service tier restarts. The gateway has not reported the others yet.")
                         </p>
                         <ul class="lic-dialog__tiers">
                             @foreach (var tier in restart.Tiers)
@@ -136,9 +137,9 @@
         StateHasChanged();
 
         var opening = _confirm.OpenAsync(
-            $"Upload a new licence to {environmentName}?",
+            $"Import a new licence into {environmentName}",
             "For a new Business Central licence from the customer, for example after they bought more objects. "
-            + "The gateway imports it on the customer's server, then restarts the service tiers so they use it.",
+            + "AL Workbench's gateway on the customer's server imports it, then restarts the service tiers so they use it.",
             "Import licence", "btn--danger");
         try
         {

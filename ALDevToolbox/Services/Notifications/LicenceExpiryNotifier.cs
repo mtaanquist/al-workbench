@@ -19,7 +19,11 @@ namespace ALDevToolbox.Services.Notifications;
 /// <see cref="OeProjectEnvironment.LicenseExpiryNoticeDays"/>) before anything is sent, so
 /// a threshold sends once however often the sweep runs, and a licence first seen inside a
 /// threshold sends only the nearest one. A different expiry date (a new licence) starts
-/// again from the top. Runs inside one organisation's scope, under the query filter.
+/// again from the top. If sending fails, the claim is put back the same way, so the next
+/// sweep tries that threshold again rather than losing it. Days are counted on the
+/// customer's calendar: the Solution's Business Central time zone, else UTC
+/// (<see cref="Gateways.OnPremisesLicenceService.TodayFor"/>). Runs inside one
+/// organisation's scope, under the query filter.
 /// See <c>.design/on-prem-gateway.md</c>, "Licences, as built".</para>
 /// </summary>
 public sealed class LicenceExpiryNotifier
@@ -64,7 +68,7 @@ public sealed class LicenceExpiryNotifier
     /// </summary>
     public async Task<int> NotifyDueAsync(CancellationToken ct = default)
     {
-        var today = DateOnly.FromDateTime(_clock.GetUtcNow().UtcDateTime);
+        var now = _clock.GetUtcNow();
         var rows = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.Kind == OeEnvironmentKind.OnPremises && e.MissingSince == null && e.GatewayInstanceId != null)
             .Select(e => new
@@ -73,6 +77,7 @@ public sealed class LicenceExpiryNotifier
                 e.ProjectId,
                 e.Name,
                 SolutionName = e.Project!.Name,
+                TimeZone = e.Project!.BcTimeZone,
                 ExpiresOn = e.GatewayInstance!.Licence == null ? null : e.GatewayInstance.Licence.ExpiresOn,
                 e.LicenseExpiryNoticeFor,
                 e.LicenseExpiryNoticeDays,
@@ -88,6 +93,7 @@ public sealed class LicenceExpiryNotifier
                 {
                     continue;
                 }
+                var today = Gateways.OnPremisesLicenceService.TodayFor(now, row.TimeZone);
                 var threshold = ThresholdFor(expires.DayNumber - today.DayNumber);
                 var sameLicence = row.LicenseExpiryNoticeFor == expires;
                 if (threshold is null)
@@ -108,7 +114,18 @@ public sealed class LicenceExpiryNotifier
                 {
                     continue;
                 }
-                await SendAsync(row.Id, row.ProjectId, row.Name, row.SolutionName, expires, expires.DayNumber - today.DayNumber, ct);
+                try
+                {
+                    await SendAsync(row.Id, row.ProjectId, row.Name, row.SolutionName, expires, expires.DayNumber - today.DayNumber, ct);
+                }
+                catch
+                {
+                    // Not sent, so not claimed: put the state back, only if it is still
+                    // ours, and let the next sweep try again. CancellationToken.None so a
+                    // stopping app still releases what it claimed.
+                    await ClaimAsync(row.Id, expires, threshold, row.LicenseExpiryNoticeFor, row.LicenseExpiryNoticeDays, CancellationToken.None);
+                    throw;
+                }
                 sent++;
                 _logger.LogInformation(
                     "Sent the {Threshold}-day licence expiry notice for environment {EnvironmentId} (expires {ExpiresOn}).",
