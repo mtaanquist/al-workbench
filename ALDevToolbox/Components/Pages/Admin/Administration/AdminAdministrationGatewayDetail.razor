@@ -189,7 +189,7 @@
                                         }
                                         else if (tier.LicenceExpiresOn is { } expires)
                                         {
-                                            <span class="u-nowrap">@expires.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)</span>
+                                            <span class="u-nowrap">@GatewayStatusText.LicenceDate(expires)</span>
                                             @if (LicenceTone(expires) is { } tone)
                                             {
                                                 <div><StatusPill Tone="@tone">@(tone == "danger" ? "Expired" : "Expires soon")</StatusPill></div>

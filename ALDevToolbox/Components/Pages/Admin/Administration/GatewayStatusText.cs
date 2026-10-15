@@ -21,4 +21,13 @@ public static class GatewayStatusText
         GatewayStatus.NotConnectedYet => "Not connected yet",
         _ => "Revoked",
     };
+
+    /// <summary>
+    /// A licence's expiry date as the licence states it. A calendar date, not an
+    /// instant: unlike the times on the page it does not go through
+    /// <c>&lt;Timestamp&gt;</c>, whose time-zone conversion would move it a day in
+    /// some zones.
+    /// </summary>
+    public static string LicenceDate(DateOnly date) =>
+        date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
 }
