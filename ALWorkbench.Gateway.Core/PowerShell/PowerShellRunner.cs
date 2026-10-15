@@ -72,12 +72,18 @@ public static class PowerShellChoice
 /// per operation. See <c>.design/on-prem-gateway.md</c>, "Running the cmdlets".
 ///
 /// <para><b>Nothing a command carries becomes script.</b> The child is started with
-/// fixed arguments and an encoded command built only from <see cref="Bootstrap"/> and
-/// the operation's own constant script, so the command line is the same whatever the
-/// parameters are. The parameters, the module folder and the result marker travel on
-/// standard input, as base64 of UTF-8 JSON (so no console code page can mangle them),
-/// and the script reads them with <c>ConvertFrom-Json</c>: a quote, a <c>;</c>, a
-/// <c>$( )</c> or a backtick in a value stays a character in a string.</para>
+/// fixed arguments and an encoded command that is <see cref="Bootstrap"/> alone, so
+/// the command line is the same for every operation and whatever the parameters are.
+/// The operation's own constant script, the parameters, the module folder and the
+/// result marker travel on standard input, as base64 of UTF-8 JSON (so no console code
+/// page can mangle them). The bootstrap turns the operation's script, and only that,
+/// into a script block; the parameters reach it as one object read with
+/// <c>ConvertFrom-Json</c>, so a quote, a <c>;</c>, a <c>$( )</c> or a backtick in a
+/// value stays a character in a string. The script used to be part of the encoded
+/// command, which capped an operation at about 11,000 characters (Windows' 32,767 for
+/// a whole command line, after UTF-16 and base64); the inventory script is longer.
+/// Standard input is a pipe between the gateway and its own child, so moving the
+/// constant there gives nobody a new way in.</para>
 ///
 /// <para><b>The administration module</b> comes from the tier's own install folder, so
 /// one gateway can manage tiers of several Business Central versions on one machine.
@@ -104,8 +110,9 @@ public sealed class PowerShellRunner
     public const int MaxCommandLineChars = 30_000;
 
     /// <summary>
-    /// The fixed script every operation runs inside. <c>__OPERATION__</c> is replaced
-    /// with the operation's constant script; nothing else is ever put into it.
+    /// The fixed script every operation runs inside, and the whole of the encoded
+    /// command. It runs the envelope's <c>operation</c>, the operation's constant
+    /// script, with the envelope's <c>parameters</c> as <c>$Parameters</c>.
     /// Works in Windows PowerShell 5.1 and PowerShell 7.
     /// </summary>
     public const string Bootstrap = """
@@ -138,10 +145,7 @@ public sealed class PowerShellRunner
                     if (-not $__found) { throw ('No Business Central administration module was found in ' + $__folder + '.') }
                 }
             }
-            $__operation = {
-                param($Parameters)
-        __OPERATION__
-            }
+            $__operation = [scriptblock]::Create("param(`$Parameters)`n" + [string]$__envelope.operation)
             $__result = @(& $__operation $__envelope.parameters)
             $__json = ConvertTo-Json -InputObject $__result -Depth 8 -Compress
             [Console]::Out.WriteLine($__marker)
@@ -194,18 +198,18 @@ public sealed class PowerShellRunner
             throw new ArgumentException("The operation needs the tier's administration module, and the tier's install folder is not known.", nameof(target));
         }
 
-        var script = Bootstrap.Replace("__OPERATION__", operation.Script, StringComparison.Ordinal);
-        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(Bootstrap));
         string[] arguments = ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded];
         var program = target.Edition == PowerShellEdition.PowerShell7 ? _executables.PowerShell7 : _executables.WindowsPowerShell;
         if (program.Length + arguments.Sum(a => a.Length + 3) > MaxCommandLineChars)
         {
-            throw new InvalidOperationException($"The PowerShell operation '{operation.Name}' is too long for a Windows command line.");
+            throw new InvalidOperationException("The PowerShell bootstrap is too long for a Windows command line.");
         }
 
         var envelope = new JsonObject
         {
             ["marker"] = marker,
+            ["operation"] = operation.Script,
             ["moduleFolder"] = operation.NeedsAdminModule ? target.ServiceFolder : null,
             ["parameters"] = parameters.DeepClone(),
         };
