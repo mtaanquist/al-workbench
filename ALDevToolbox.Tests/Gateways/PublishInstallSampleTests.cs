@@ -28,6 +28,9 @@ public sealed class PublishInstallSampleTests : IDisposable
         allow_unsigned = true
         """;
 
+    /// <summary>The package id of the build being deployed; the samples' published builds have others.</summary>
+    private static readonly Guid ThisBuild = Guid.Parse("0f9e8d7c-6b5a-4938-8271-605f4e3d2c1b");
+
     private readonly ScratchFolder _scratch = new();
 
     public void Dispose() => _scratch.Dispose();
@@ -48,11 +51,11 @@ public sealed class PublishInstallSampleTests : IDisposable
         var inspection = Sample("bc14-inspect.json");
 
         inspection.TenantSpecificProperties.Should().BeFalse();
-        inspection.Versions.Should().Equal(new AppVersionRow(new Version(1, 3, 0, 0), "Global", true, null));
+        inspection.Versions.Should().Equal(new AppVersionRow(new Version(1, 3, 0, 0), "Global", true, null, Guid.Parse("6c1e2a3b-4d5f-4a6b-8c7d-9e0f1a2b3c4d")));
         inspection.OtherTenants.Should().BeEmpty();
         inspection.Parameters["unpublishTenant"].Should().BeFalse();
 
-        var plan = AppInstallPlanner.Plan(inspection, new Version(1, 4, 0, 0), TierOf(Tier), "default", GatewaySyncModes.Add, unpublishPrevious: true);
+        var plan = AppInstallPlanner.Plan(inspection, new Version(1, 4, 0, 0), ThisBuild, TierOf(Tier), "default", GatewaySyncModes.Add, unpublishPrevious: true);
 
         plan.Outcome.Should().Be(GatewayPublishInstallOutcomes.Upgraded);
         plan.From.Should().Be(new Version(1, 3, 0, 0));
@@ -63,7 +66,7 @@ public sealed class PublishInstallSampleTests : IDisposable
     [Fact]
     public void A_current_multitenant_server_keeps_the_version_another_tenant_still_runs()
     {
-        var plan = AppInstallPlanner.Plan(Sample("bc25-inspect-multitenant.json"), new Version(1, 4, 0, 0), TierOf(Tier), "cronus-dk", GatewaySyncModes.Add, unpublishPrevious: true);
+        var plan = AppInstallPlanner.Plan(Sample("bc25-inspect-multitenant.json"), new Version(1, 4, 0, 0), ThisBuild, TierOf(Tier), "cronus-dk", GatewaySyncModes.Add, unpublishPrevious: true);
 
         plan.Outcome.Should().Be(GatewayPublishInstallOutcomes.Upgraded);
         plan.From.Should().Be(new Version(1, 3, 0, 0));
@@ -78,7 +81,7 @@ public sealed class PublishInstallSampleTests : IDisposable
         var inspection = Sample("bc25-inspect-uninstalled-with-data.json");
 
         inspection.Versions.Should().ContainSingle().Which.DataVersion.Should().Be(new Version(1, 3, 0, 0));
-        var plan = AppInstallPlanner.Plan(inspection, new Version(1, 4, 0, 0), TierOf(Tier), "default", GatewaySyncModes.ForceSync, unpublishPrevious: true);
+        var plan = AppInstallPlanner.Plan(inspection, new Version(1, 4, 0, 0), ThisBuild, TierOf(Tier), "default", GatewaySyncModes.ForceSync, unpublishPrevious: true);
 
         plan.Outcome.Should().Be(GatewayPublishInstallOutcomes.Upgraded);
         Words(plan).Should().Equal("publish", "sync", "upgrade", "unpublish 1.3.0.0");
@@ -89,13 +92,43 @@ public sealed class PublishInstallSampleTests : IDisposable
     [Fact]
     public void Data_kept_at_the_same_version_is_installed_again_rather_than_upgraded()
     {
-        var inspection = new AppInspection(true, [new AppVersionRow(new Version(1, 4, 0, 0), "Tenant", false, new Version(1, 4, 0, 0))], null, null,
+        var inspection = new AppInspection(true, [new AppVersionRow(new Version(1, 4, 0, 0), "Tenant", false, new Version(1, 4, 0, 0), ThisBuild)], null, null,
             new Dictionary<string, bool>());
 
-        var plan = AppInstallPlanner.Plan(inspection, new Version(1, 4, 0, 0), TierOf(Tier), "default", GatewaySyncModes.Add, unpublishPrevious: false);
+        var plan = AppInstallPlanner.Plan(inspection, new Version(1, 4, 0, 0), ThisBuild, TierOf(Tier), "default", GatewaySyncModes.Add, unpublishPrevious: false);
 
         plan.Outcome.Should().Be(GatewayPublishInstallOutcomes.Installed);
         Words(plan).Should().Equal("publish:skipped", "sync", "install");
+    }
+
+    [Fact]
+    public void A_version_whose_installed_state_was_not_reported_refuses_the_plan()
+    {
+        // What Get-NAVAppInfo without -TenantSpecificProperties gives, with no
+        // Get-NAVAppTenant to ask: the row is there, whether it is installed is not.
+        var inspection = AppInspection.FromScriptOutput(JsonNode.Parse("""
+            [{ "schema": 2, "tenantSpecificProperties": false, "installedFrom": null,
+               "versions": [{ "version": "1.5.0.0", "scope": "Tenant", "isInstalled": null, "packageId": "6c1e2a3b-4d5f-4a6b-8c7d-9e0f1a2b3c4d" }],
+               "otherTenants": null, "otherTenantsUnknown": "this Business Central version does not say which versions a tenant has installed" }]
+            """));
+
+        inspection.Versions.Single().Installed.Should().BeNull();
+        var plan = AppInstallPlanner.Plan(inspection, new Version(1, 4, 0, 0), ThisBuild, TierOf(Tier), "default", GatewaySyncModes.Add, unpublishPrevious: true);
+
+        plan.Refusal.Should().Contain("could not tell whether version 1.5.0.0 is installed on tenant 'default'");
+        plan.Steps.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_global_previous_version_is_kept_when_the_other_tenants_are_unknown()
+    {
+        var inspection = new AppInspection(true, [new AppVersionRow(new Version(1, 3, 0, 0), "Global", true, new Version(1, 3, 0, 0), Guid.NewGuid())],
+            null, "Get-NAVAppInfo did not say what tenant cronus-se has installed.", new Dictionary<string, bool>());
+
+        var plan = AppInstallPlanner.Plan(inspection, new Version(1, 4, 0, 0), ThisBuild, TierOf(Tier), "cronus-dk", GatewaySyncModes.Add, unpublishPrevious: true);
+
+        Words(plan).Should().Equal("publish", "sync", "upgrade", "unpublish:skipped");
+        plan.Steps[^1].SkipReason.Should().Contain("could not tell whether another tenant still uses it").And.Contain("cronus-se");
     }
 
     [Fact]
@@ -104,7 +137,7 @@ public sealed class PublishInstallSampleTests : IDisposable
         var inspection = new AppInspection(true, [new AppVersionRow(new Version(1, 5, 0, 0), "Tenant", false, new Version(1, 5, 0, 0))], null, null,
             new Dictionary<string, bool>());
 
-        var plan = AppInstallPlanner.Plan(inspection, new Version(1, 4, 0, 0), TierOf(Tier), "default", GatewaySyncModes.Add, unpublishPrevious: false);
+        var plan = AppInstallPlanner.Plan(inspection, new Version(1, 4, 0, 0), ThisBuild, TierOf(Tier), "default", GatewaySyncModes.Add, unpublishPrevious: false);
 
         plan.Refusal.Should().Contain("keeps data from version 1.5.0.0");
         plan.Steps.Should().BeEmpty();
@@ -174,9 +207,10 @@ public sealed class PublishInstallSampleTests : IDisposable
 
         outcome.Succeeded.Should().BeTrue(outcome.FailureMessage);
         calls.Should().Equal(
+            "Get-NAVAppInfo Path=7-coffee.app",
             "Get-NAVAppInfo Tenant=cronus-dk TenantSpecificProperties=True",
             "Get-NAVTenant",
-            "Get-NAVAppInfo Tenant=cronus-se TenantSpecificProperties=False",
+            "Get-NAVAppInfo Tenant=cronus-se TenantSpecificProperties=True",
             "Publish-NAVApp Scope=Tenant Tenant=cronus-dk SkipVerification=True File=7-coffee.app",
             "Sync-NAVApp Name=CRONUS Coffee Publisher=CRONUS Partner Version=1.4.0.0 Tenant=cronus-dk Mode=Add",
             "Start-NAVAppDataUpgrade Name=CRONUS Coffee Version=1.4.0.0 Tenant=cronus-dk",
@@ -197,13 +231,40 @@ public sealed class PublishInstallSampleTests : IDisposable
 
         outcome.Succeeded.Should().BeTrue(outcome.FailureMessage);
         calls.Should().Equal(
-            "Get-NAVAppInfo Tenant=default",
-            "Get-NAVTenant",
+            "Get-NAVAppInfo Path=7-coffee.app",
             "Get-AuthenticodeSignature File=7-coffee.app",
+            "Get-NAVAppInfo Tenant=default",
+            "Get-NAVAppTenant Name=CRONUS Coffee Version=1.3.0.0",
+            "Get-NAVTenant",
             "Publish-NAVApp Scope=Tenant Tenant=default SkipVerification=False File=7-coffee.app",
             "Sync-NAVApp Name=CRONUS Coffee Publisher=CRONUS Partner Version=1.4.0.0 Tenant=default Mode=Add",
             "Start-NAVAppDataUpgrade Name=CRONUS Coffee Version=1.4.0.0 Tenant=default",
             "Unpublish-NAVApp Name=CRONUS Coffee Version=1.3.0.0");
+        var app = GatewayPublishInstallResult.FromJson(outcome.Result)!.Apps.Single();
+        app.Outcome.Should().Be(GatewayPublishInstallOutcomes.Upgraded, "Get-NAVAppTenant says the tenant has 1.3.0.0 installed");
+        app.SignerThumbprint.Should().Be("3F2A9C41D07E5B86A1C2E4F60718293A4B5C6D7E");
+    }
+
+    [Fact]
+    public async Task With_pwsh_installed_business_central_14_without_any_way_to_read_installed_versions_changes_nothing()
+    {
+        var (outcome, calls, _) = await RunRealAsync("bc14-NavAdminTool.ps1", Tier, tenant: null, signed: false,
+            extraTool: "Remove-Item -Path Function:\\Get-NAVAppTenant");
+
+        outcome.Succeeded.Should().BeFalse();
+        outcome.FailureMessage.Should().Contain("could not tell whether version 1.3.0.0 is installed on tenant 'default'");
+        calls.Should().Equal("Get-NAVAppInfo Path=7-coffee.app", "Get-NAVAppInfo Tenant=default");
+    }
+
+    [Fact]
+    public async Task With_pwsh_installed_a_file_business_central_reads_as_another_publisher_changes_nothing()
+    {
+        var (outcome, calls, _) = await RunRealAsync("bc25-NavAdminTool.ps1", Tier + "\npublishers = [\"CRONUS Partner\"]\n", "cronus-dk", signed: false,
+            extraTool: "function Read-StubAppFile([string]$Path) { [pscustomobject]@{ AppId = [guid]'5b7d3f4e-6a1c-4c2b-9d8e-1f0a2b3c4d5e'; Name = 'CRONUS Coffee'; Publisher = 'Fabrikam'; Version = [version]'1.4.0.0' } }");
+
+        outcome.Succeeded.Should().BeFalse();
+        outcome.FailureMessage.Should().Contain("publisher 'Fabrikam', not 'CRONUS Partner'");
+        calls.Should().Equal("Get-NAVAppInfo Path=7-coffee.app");
     }
 
     [Fact]
@@ -216,8 +277,8 @@ public sealed class PublishInstallSampleTests : IDisposable
             extraTool: OperatingSystem.IsWindows() ? "function Get-AuthenticodeSignature([string]$LiteralPath) { [pscustomobject]@{ Status = 'NotSupportedFileFormat'; StatusMessage = 'Unknown file type.' } }" : null);
 
         outcome.Succeeded.Should().BeFalse();
-        outcome.FailureMessage.Should().Contain("the signature check failed");
-        calls.Should().NotContain(c => c.StartsWith("Publish-NAVApp", StringComparison.Ordinal));
+        outcome.FailureMessage.Should().Contain("The signature of 'coffee.app'").And.Contain("Nothing was changed");
+        calls.Should().Equal("Get-NAVAppInfo Path=7-coffee.app");
     }
 
     [Fact]

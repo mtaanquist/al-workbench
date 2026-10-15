@@ -48,8 +48,10 @@ public static class GatewayCommandParameters
     public const string AppId = "id";
 
     /// <summary>
-    /// An app's name, as its <c>app.json</c> says. Optional: when it is sent, the file's
-    /// own name must match it. The cmdlets are given the name read from the file.
+    /// An app's name, as its <c>app.json</c> says. Optional: left out, the gateway checks
+    /// the id, publisher and version only; sent, it must be non-blank text (a blank one
+    /// refuses the command) and the file's own name must match it. The cmdlets are given
+    /// the name read from the file.
     /// </summary>
     public const string AppName = "name";
 
@@ -65,7 +67,8 @@ public static class GatewayCommandParameters
     /// <summary>
     /// <c>publish-install</c>: the schema sync mode, one of <see cref="GatewaySyncModes"/>
     /// (<c>Sync-NAVApp -Mode</c>). Left out means <see cref="GatewaySyncModes.Add"/>;
-    /// any other word refuses the command.
+    /// any other word refuses the command, and <see cref="GatewaySyncModes.ForceSync"/>
+    /// is refused unless the tier has <c>allow_force_sync</c> in the customer's policy file.
     /// </summary>
     public const string SyncMode = "syncMode";
 

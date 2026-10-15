@@ -12,15 +12,17 @@ namespace ALWorkbench.Gateway.Core.PublishInstall;
 /// lists them (the build's dependency order), and unpublishes previous versions when
 /// asked. See <c>.design/on-prem-gateway.md</c>, "Deploying to on-premises".
 ///
-/// <para><b>Nothing runs before every file is checked.</b> <c>GatewayRunner</c> has
+/// <para><b>Nothing changes before every file is checked.</b> <c>GatewayRunner</c> has
 /// already checked the policy file and downloaded the files with their SHA-256. This
 /// verb checks the policy again (the file may have changed during a long download), then,
-/// for every app before any cmdlet runs: its SHA-256 again, that the file is the app the
-/// command declares (id, version, publisher and, when sent, name, read from the
-/// <c>.app</c>'s own manifest by <see cref="AppFile"/>), that the file's publisher is on
-/// the tier's list, and, where the tier does not take unsigned apps, that the file carries
-/// a signature whatever the command claimed. One refusal refuses the command with nothing
-/// changed.</para>
+/// for every app before any cmdlet that changes anything runs: its SHA-256 again, that
+/// the file is the app the command declares (id, version, publisher and, when sent, name,
+/// read from the <c>.app</c>'s own manifest by <see cref="AppFile"/>), that the file's
+/// publisher is on the tier's list, and, where the tier does not take unsigned apps, that
+/// the file carries a signature whatever the command claimed. Then, in one read-only
+/// PowerShell run (<see cref="PublishInstallScript.Examine"/>), that Business Central reads
+/// the same app from the file (<c>Get-NAVAppInfo -Path</c>), and what Windows says about
+/// its signature and signer. One refusal refuses the command with nothing changed.</para>
 ///
 /// <para><b>Then app by app.</b> <see cref="PublishInstallScript.Inspect"/> reads what the
 /// tenant has, <see cref="AppInstallPlanner"/> decides, and
@@ -29,11 +31,14 @@ namespace ALWorkbench.Gateway.Core.PublishInstall;
 /// skipped. The result (<see cref="GatewayPublishInstallResult"/>) lists every app either
 /// way.</para>
 ///
-/// <para><b>Signatures.</b> Where the tier does not allow unsigned apps the gateway asks
-/// Windows (<c>Get-AuthenticodeSignature</c>, which reads an <c>.app</c>'s signature
-/// through the component Business Central installs for it) and refuses anything but a
-/// valid signature, then publishes without <c>-SkipVerification</c>, so Business Central
-/// checks it as well. Off Windows the first check cannot run; the tests stand it in.</para>
+/// <para><b>Signatures.</b> Where the tier does not allow unsigned apps, or the file is
+/// signed, the gateway asks Windows (<c>Get-AuthenticodeSignature</c>, which reads an
+/// <c>.app</c>'s signature through the component Business Central installs for it) and
+/// records the signer's subject and thumbprint. Where the tier does not allow unsigned apps
+/// it refuses anything but a valid signature, then publishes without
+/// <c>-SkipVerification</c>, so Business Central checks it as well. Where the tier lists
+/// <c>signers</c>, a signature from anyone else is refused. Off Windows the check cannot
+/// run and fails closed; the tests stand it in.</para>
 /// </summary>
 public sealed class PublishInstallVerb : ICommandExecutor
 {
@@ -67,14 +72,12 @@ public sealed class PublishInstallVerb : ICommandExecutor
         var tier = _policy.InForce.Find(request.Target);
         if (tier is null) return Refuse($"{request.Target} is not listed in the customer's gateway settings (gateway.toml). Nothing was changed.");
 
-        var syncMode = GatewaySyncModes.Add;
-        if (command.Parameters[GatewayCommandParameters.SyncMode] is { } modeNode)
+        // Read and checked by PolicyRequest; checked here against the tier in force too,
+        // so ForceSync never reaches Sync-NAVApp on a tier that does not allow it.
+        var syncMode = request.SyncMode;
+        if (PolicyEnforcer.ForceSync(tier, syncMode) is { } forceSync)
         {
-            syncMode = modeNode.GetValueKind() == System.Text.Json.JsonValueKind.String ? modeNode.GetValue<string>() : string.Empty;
-            if (!GatewaySyncModes.All.Contains(syncMode, StringComparer.Ordinal))
-            {
-                return Refuse($"The command asks for a schema sync mode the gateway does not know; it takes {string.Join(" or ", GatewaySyncModes.All)}. Nothing was changed.");
-            }
+            return Refuse(forceSync.Reason + " Nothing was changed.");
         }
         if (!string.Equals(tier.Tier.Machine, _machineName, StringComparison.OrdinalIgnoreCase))
         {
@@ -94,22 +97,35 @@ public sealed class PublishInstallVerb : ICommandExecutor
             var report = reports[i];
             var refusal = await VerifyAsync(report, command, context.Files, tier, reports.Take(i), ct).ConfigureAwait(false);
             if (refusal is null) continue;
-            report.Outcome = GatewayPublishInstallOutcomes.Refused;
-            report.Message = refusal;
-            report.Step(GatewayPublishInstallSteps.Verify, GatewayPublishInstallStepOutcomes.Failed, message: refusal);
-            context.Progress($"{report.Title}: refused. {refusal}");
-            foreach (var other in reports.Where(r => r != report))
+            return RefuseApp(reports, report, GatewayPublishInstallSteps.Verify, refusal, context.Progress);
+        }
+        var examined = await ExamineAsync(reports, tier, target, context.Progress, ct).ConfigureAwait(false);
+        if (examined is { } refused)
+        {
+            if (refused.Report is null)
             {
-                other.Outcome = GatewayPublishInstallOutcomes.Skipped;
-                other.Message = "Not started, because another app in the deployment was refused.";
+                foreach (var report in reports)
+                {
+                    report.Outcome = GatewayPublishInstallOutcomes.Refused;
+                    report.Message = refused.Message;
+                    report.Step(GatewayPublishInstallSteps.Verify, GatewayPublishInstallStepOutcomes.Failed, message: refused.Message);
+                }
+                context.Progress(refused.Message);
+                return Finish(reports, refused.Message + " Nothing was changed.");
             }
-            return Finish(reports, $"{report.Title} was refused: {refusal} Nothing was changed.");
+            return RefuseApp(reports, refused.Report, refused.Step, refused.Message, context.Progress);
         }
         foreach (var report in reports)
         {
             report.Step(GatewayPublishInstallSteps.Verify, GatewayPublishInstallStepOutcomes.Done);
-            context.Progress($"{report.Title}: checked. The file is the app declared, from {report.File!.Publisher}, and its SHA-256 matches"
-                             + (tier.AllowUnsigned ? "." : "; it carries a signature."));
+            context.Progress($"{report.Title}: checked. The file is the app declared, from {report.File!.Publisher}, Business Central reads it the same way, and its SHA-256 matches.");
+            if (report.Signature is { } signature)
+            {
+                report.Step(GatewayPublishInstallSteps.Signature, signature.Valid ? GatewayPublishInstallStepOutcomes.Done : GatewayPublishInstallStepOutcomes.Skipped,
+                    message: signature.Valid ? null : $"The signature does not verify ({signature.Status}); the tier takes unsigned apps, so it is published as one.",
+                    signature: signature);
+                context.Progress($"{report.Title}: {SignedBy(signature)}");
+            }
         }
 
         // App by app, in the order the command lists them.
@@ -143,6 +159,96 @@ public sealed class PublishInstallVerb : ICommandExecutor
         ct.ThrowIfCancellationRequested();
         context.Progress("All apps are installed. The service tiers were not restarted: this version of the gateway does not restart them yet.");
         return Task.FromResult(false);
+    }
+
+    private static GatewayCommandOutcome RefuseApp(List<AppReport> reports, AppReport report, string step, string refusal, Action<string> progress)
+    {
+        report.Outcome = GatewayPublishInstallOutcomes.Refused;
+        report.Message = refusal;
+        report.Step(step, GatewayPublishInstallStepOutcomes.Failed, message: refusal, signature: step == GatewayPublishInstallSteps.Signature ? report.Signature : null);
+        progress($"{report.Title}: refused. {refusal}");
+        foreach (var other in reports.Where(r => r != report))
+        {
+            other.Outcome = GatewayPublishInstallOutcomes.Skipped;
+            other.Message = "Not started, because another app in the deployment was refused.";
+        }
+        return Finish(reports, $"{report.Title} was refused: {refusal} Nothing was changed.");
+    }
+
+    private static string SignedBy(AppSignature signature) =>
+        $"signed by {signature.Subject ?? "an unnamed certificate"} (thumbprint {signature.Thumbprint ?? "unknown"})"
+        + (signature.Valid ? "; the signature verifies on this computer." : $"; the signature does not verify ({signature.Status}).");
+
+    /// <summary>Whether Windows is asked about a file's signature: always when the tier requires one, and whenever the file carries one, to record who signed it.</summary>
+    private static bool AsksSignature(AppFileInfo file, EffectiveInstance tier) => file.HasSignature || !tier.AllowUnsigned;
+
+    /// <summary>Whether the signature decides anything: required by the tier, or checked against its <c>signers</c>.</summary>
+    private static bool SignatureCounts(AppFileInfo file, EffectiveInstance tier) => !tier.AllowUnsigned || (file.HasSignature && tier.Signers is not null);
+
+    /// <summary>
+    /// Every file read by Business Central and Windows in one read-only run, before anything
+    /// changes. Null when every app may go ahead; otherwise the app refused (null for all of
+    /// them), the step to blame and why.
+    /// </summary>
+    private async Task<(AppReport? Report, string Step, string Message)?> ExamineAsync(List<AppReport> reports, EffectiveInstance tier,
+        PowerShellTarget target, Action<string> progress, CancellationToken ct)
+    {
+        var asks = reports.Select(r => (Path: r.Path!, Signature: AsksSignature(r.File!, tier))).ToList();
+        var ran = await _runner.RunAsync(PublishInstallScript.Examine, target, PublishInstallScript.ExamineParameters(asks),
+            PublishInstallScript.ExamineTimeout, progress, ct).ConfigureAwait(false);
+        IReadOnlyDictionary<string, AppExamination> examined;
+        try
+        {
+            if (!ran.Succeeded) throw new FormatException(ran.Error ?? "PowerShell failed without saying why.");
+            examined = AppExamination.FromScriptOutput(ran.Output, asks.Select(a => a.Path));
+        }
+        catch (FormatException ex)
+        {
+            return (null, GatewayPublishInstallSteps.Verify, $"The gateway could not check the files the way Business Central reads them: {ex.Message}");
+        }
+
+        foreach (var report in reports)
+        {
+            var file = report.File!;
+            var name = report.Declared.File;
+            var seen = examined[report.Path!];
+            if (seen.AppError is { } error || seen.App is null)
+            {
+                return (report, GatewayPublishInstallSteps.Verify,
+                    $"Business Central could not read '{name}' ({seen.AppError ?? "it returned nothing"}), so the gateway cannot be sure it installs the app it checked.");
+            }
+            var differences = new List<string>();
+            if (seen.App.Id != file.Id) differences.Add($"app id {seen.App.Id}, not {file.Id}");
+            if (seen.App.Version != file.Version) differences.Add($"version {seen.App.Version}, not {file.Version}");
+            if (!string.Equals(seen.App.Publisher.Trim(), file.Publisher.Trim(), StringComparison.OrdinalIgnoreCase)) differences.Add($"publisher '{seen.App.Publisher}', not '{file.Publisher}'");
+            if (!string.Equals(seen.App.Name.Trim(), file.Name.Trim(), StringComparison.OrdinalIgnoreCase)) differences.Add($"name '{seen.App.Name}', not '{file.Name}'");
+            if (seen.App.PackageId != Guid.Empty && seen.App.PackageId != file.PackageId) differences.Add($"package id {seen.App.PackageId}, not {file.PackageId}");
+            if (differences.Count > 0)
+            {
+                return (report, GatewayPublishInstallSteps.Verify,
+                    $"Business Central reads '{name}' as a different app than its manifest says: {string.Join("; ", differences)}. The file may have been built to look like another app.");
+            }
+
+            if (!AsksSignature(file, tier)) continue;
+            report.Signature = seen.Signature;
+            if (!SignatureCounts(file, tier)) continue;
+            if (seen.Signature is not { } signature)
+            {
+                return (report, GatewayPublishInstallSteps.Signature,
+                    $"The signature of '{name}' could not be checked on this computer ({seen.SignatureError ?? "Windows did not say why"}).");
+            }
+            if (!signature.Valid)
+            {
+                return (report, GatewayPublishInstallSteps.Signature,
+                    $"The signature of '{name}' does not verify on this computer ({signature.Status}). {signature.StatusMessage}".TrimEnd());
+            }
+            if (!tier.AllowsSigner(signature.Subject, signature.Thumbprint))
+            {
+                return (report, GatewayPublishInstallSteps.Signature,
+                    $"'{name}' is signed by {signature.Subject ?? "an unnamed certificate"} (thumbprint {signature.Thumbprint ?? "unknown"}), who is not on {tier.Tier}'s list of signers in the customer's gateway settings.");
+            }
+        }
+        return null;
     }
 
     /// <summary>Null when the app may go ahead; otherwise why not, in a sentence.</summary>
@@ -228,7 +334,7 @@ public sealed class PublishInstallVerb : ICommandExecutor
             return Fail(report, null, $"The gateway could not read what tenant '{request.Tenant}' has of {report.Title}, so it changed nothing for it: {ex.Message}", progress);
         }
 
-        var plan = AppInstallPlanner.Plan(inspection, app.Version, tier, request.Tenant, syncMode, request.UnpublishPrevious);
+        var plan = AppInstallPlanner.Plan(inspection, app.Version, app.PackageId, tier, request.Tenant, syncMode, request.UnpublishPrevious);
         if (plan.Refusal is not null)
         {
             return Fail(report, null, $"{report.Title} cannot be installed: {plan.Refusal}", progress);
@@ -291,7 +397,6 @@ public sealed class PublishInstallVerb : ICommandExecutor
 
     private static string Done(PlannedStep step, string tenant, Version? from, string syncMode, EffectiveInstance tier) => step.Step switch
     {
-        GatewayPublishInstallSteps.Signature => "the signature verifies.",
         GatewayPublishInstallSteps.Publish => tier.Scope == PublishScope.Global
             ? "published for every tenant on the server."
             : $"published to tenant '{tenant}'.",
@@ -304,7 +409,6 @@ public sealed class PublishInstallVerb : ICommandExecutor
 
     private static string Failed(PlannedStep step) => step.Step switch
     {
-        GatewayPublishInstallSteps.Signature => "the signature check failed.",
         GatewayPublishInstallSteps.Publish => "publishing failed.",
         GatewayPublishInstallSteps.Sync => "synchronising failed.",
         GatewayPublishInstallSteps.Install => "installing failed.",
@@ -342,10 +446,21 @@ public sealed class PublishInstallVerb : ICommandExecutor
 
         public Version? From { get; set; }
 
+        /// <summary>What Windows said about the file's signature, when it was asked.</summary>
+        public AppSignature? Signature { get; set; }
+
         public string Title => File is { } f ? $"{f.Name} {f.Version}" : Declared.File;
 
-        public void Step(string step, string outcome, string? version = null, string? message = null) =>
-            _steps.Add(new GatewayPublishInstallStep { Step = step, Outcome = outcome, Version = version, Message = message });
+        public void Step(string step, string outcome, string? version = null, string? message = null, AppSignature? signature = null) =>
+            _steps.Add(new GatewayPublishInstallStep
+            {
+                Step = step,
+                Outcome = outcome,
+                Version = version,
+                Message = message,
+                SignerSubject = signature?.Subject,
+                SignerThumbprint = signature?.Thumbprint,
+            });
 
         public GatewayPublishInstallAppResult ToResult() => new()
         {
@@ -357,6 +472,8 @@ public sealed class PublishInstallVerb : ICommandExecutor
             Outcome = Outcome,
             FromVersion = From?.ToString(),
             Message = Message,
+            SignerSubject = Signature?.Subject,
+            SignerThumbprint = Signature?.Thumbprint,
             Steps = _steps.ToList(),
         };
     }

@@ -35,7 +35,7 @@ public static partial class GatewayPolicyParser
     public const int MaxTextLength = 260;
 
     private static readonly string[] InstanceKeys =
-        ["machine", "name", "environment", "allow", "change_hours", "tenants", "publishers", "allow_unsigned", "scope", "powershell"];
+        ["machine", "name", "environment", "allow", "change_hours", "tenants", "publishers", "allow_unsigned", "signers", "allow_force_sync", "scope", "powershell"];
     private static readonly string[] DatabaseKeys =
         ["name", "publish_on", "restart", "restart_mode", "shared_restart", "licence_target", "before", "after"];
     private static readonly string[] MachineKeys = ["name", "method"];
@@ -168,7 +168,9 @@ public static partial class GatewayPolicyParser
                 publishers,
                 ReadBool(values, "allow_unsigned") ?? false,
                 ReadWord(values, "scope", PolicyWords.Scopes) ?? PublishScope.Tenant,
-                ReadWord(values, "powershell", PolicyWords.PowerShellEditions)));
+                ReadWord(values, "powershell", PolicyWords.PowerShellEditions),
+                ReadTextList(values, "signers", allowEmpty: false),
+                ReadBool(values, "allow_force_sync") ?? false));
         }
 
         private void ReadDatabase(TableSyntaxBase table)
@@ -271,7 +273,11 @@ public static partial class GatewayPolicyParser
                     raw.Publishers,
                     raw.AllowUnsigned,
                     raw.Scope,
-                    raw.PowerShell));
+                    raw.PowerShell)
+                {
+                    Signers = raw.Signers,
+                    AllowForceSync = raw.AllowForceSync,
+                });
             }
 
             var databases = new List<PolicyDatabase>();
@@ -538,7 +544,9 @@ public static partial class GatewayPolicyParser
         List<string>? Publishers,
         bool AllowUnsigned,
         PublishScope Scope,
-        PowerShellEdition? PowerShell)
+        PowerShellEdition? PowerShell,
+        List<string>? Signers,
+        bool AllowForceSync)
     {
         /// <summary>Whether the tier set its own change_hours, which then replaces the default.</summary>
         public bool HoursSet => Hours is not null;

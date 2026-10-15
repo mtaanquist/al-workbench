@@ -559,6 +559,93 @@ public sealed class GatewayRunnerTests : IDisposable
         result.FailureMessage.Should().Contain("SHA-256 does not match").And.Contain("Nothing was run");
     }
 
+    /// <summary>
+    /// The runner holds each downloaded file open with <see cref="FileShare.Read"/> while the
+    /// verb runs. On Windows that refuses a writer outright; elsewhere .NET's file sharing is
+    /// advisory (a shared lock), so another writer can still get in. Either way the file
+    /// that reaches PowerShell is the one AL Workbench sent: blocked, or caught by the verb's
+    /// own hash before any cmdlet runs.
+    /// </summary>
+    [Fact]
+    public async Task A_publish_install_file_rewritten_after_the_download_never_reaches_PowerShell_changed()
+    {
+        var server = new FakeBusinessCentral();
+        var verb = new ALWorkbench.Gateway.Core.PublishInstall.PublishInstallVerb(
+            new TextPolicy("""
+                [[instance]]
+                machine = "CRONUS-BC01"
+                name = "BC250"
+                environment = "test"
+                allow = ["inventory", "publish", "unpublish", "restart"]
+                allow_unsigned = true
+                """),
+            new ALWorkbench.Gateway.Core.PowerShell.PowerShellRunner(server, new("powershell.exe", "pwsh.exe"), new FakeFileAccess()),
+            new FixedTierLocator(@"C:\BC\Service"), "CRONUS-BC01");
+        var sent = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0");
+        var swapped = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "Fabrikam", "1.4.0.0");
+        var file = new GatewayCommandFileMessage { Id = 9, Name = "CRONUS_Coffee.app", Sha256 = Convert.ToHexStringLower(SHA256.HashData(sent)), Size = sent.Length };
+        var command = Command(54, files: file) with
+        {
+            Verb = GatewayVerb.PublishInstall,
+            Parameters = new GatewayPublishInstallParameters
+            {
+                Machine = "CRONUS-BC01",
+                Instance = "BC250",
+                Apps = [new GatewayPublishInstallApp { File = "CRONUS_Coffee.app", Id = AppFiles.CoffeeId, Name = "CRONUS Coffee", Publisher = "CRONUS Partner", Version = "1.4.0.0" }],
+            }.ToParameters(),
+        };
+        Serve([command], new Dictionary<long, byte[]> { [9] = sent });
+        var tamper = new TamperingExecutor(verb, swapped);
+
+        await RunAsync(executor: new VerbExecutors(new Dictionary<GatewayVerb, ICommandExecutor> { [GatewayVerb.PublishInstall] = tamper }));
+
+        tamper.Tried.Should().BeTrue("the downloaded file was there to rewrite while the verb ran");
+        var result = Results().Single().Result;
+        if (tamper.Blocked)
+        {
+            result.Succeeded.Should().BeTrue(result.FailureMessage);
+            server.PublishedApps.Should().ContainSingle();
+        }
+        else
+        {
+            OperatingSystem.IsWindows().Should().BeFalse("Windows refuses a writer while the runner holds the file");
+            server.Runs.Should().BeEmpty();
+            result.Succeeded.Should().BeFalse();
+            result.FailureMessage.Should().Contain("SHA-256 does not match").And.Contain("Nothing was changed");
+        }
+    }
+
+    /// <summary>Rewrites the command's downloaded file in place, as another process on the computer might, then hands over to the verb.</summary>
+    private sealed class TamperingExecutor(ICommandExecutor verb, byte[] replacement) : ICommandExecutor
+    {
+        public bool Tried { get; private set; }
+
+        public bool Blocked { get; private set; }
+
+        public async Task<GatewayCommandOutcome> ExecuteAsync(GatewayCommandContext context, CancellationToken ct)
+        {
+            foreach (var path in context.Files.Values)
+            {
+                Tried = true;
+                try
+                {
+                    await using var writer = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+                    writer.SetLength(0);
+                    await writer.WriteAsync(replacement, ct);
+                }
+                catch (IOException)
+                {
+                    Blocked = true;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    Blocked = true;
+                }
+            }
+            return await verb.ExecuteAsync(context, ct);
+        }
+    }
+
     [Fact]
     public async Task A_file_larger_than_announced_is_cut_off_and_fails_the_command()
     {

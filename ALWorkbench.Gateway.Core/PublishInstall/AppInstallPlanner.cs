@@ -7,9 +7,15 @@ namespace ALWorkbench.Gateway.Core.PublishInstall;
 
 /// <summary>One version of the app as <c>Get-NAVAppInfo -Tenant</c> lists it.</summary>
 /// <param name="Scope"><c>Global</c> or <c>Tenant</c>; null when the version does not say.</param>
-/// <param name="Installed">Installed on the tenant; null when unknown.</param>
+/// <param name="Installed">
+/// Installed on the tenant; null when unknown. <c>Get-NAVAppInfo</c> fills
+/// <c>IsInstalled</c> only with <c>-TenantSpecificProperties</c>, so without it the script
+/// asks <c>Get-NAVAppTenant</c> or leaves this null; it never reads a missing value as
+/// "not installed".
+/// </param>
 /// <param name="DataVersion">The version the tenant's data is at, from <c>-TenantSpecificProperties</c>; null when there is none or it is unknown.</param>
-public sealed record AppVersionRow(Version Version, string? Scope, bool? Installed, Version? DataVersion);
+/// <param name="PackageId">The published package's id (<c>PackageId</c>), which differs between two builds of one version; null when unknown.</param>
+public sealed record AppVersionRow(Version Version, string? Scope, bool? Installed, Version? DataVersion, Guid? PackageId = null);
 
 /// <summary>Another tenant on the same server, and which versions of the app it has installed.</summary>
 public sealed record OtherTenant(string Id, IReadOnlyList<Version> Installed);
@@ -42,7 +48,8 @@ public sealed record AppInspection(
             if (!AppVersions.TryParse(Text(row["version"]), out var version)) continue;
             Version? data = null;
             if (AppVersions.TryParse(Text(row["dataVersion"]), out var parsed) && parsed > new Version(0, 0, 0, 0)) data = parsed;
-            versions.Add(new AppVersionRow(version, Text(row["scope"]), Bool(row["isInstalled"]), data));
+            Guid? packageId = Guid.TryParse(Text(row["packageId"]), out var package) ? package : null;
+            versions.Add(new AppVersionRow(version, Text(row["scope"]), Bool(row["isInstalled"]), data, packageId));
         }
 
         List<OtherTenant>? others = null;
@@ -67,11 +74,11 @@ public sealed record AppInspection(
         return new AppInspection(Bool(root["tenantSpecificProperties"]) ?? false, versions, others, Text(root["otherTenantsUnknown"]), parameters);
     }
 
-    private static JsonNode? Unwrap(JsonNode? node) =>
+    internal static JsonNode? Unwrap(JsonNode? node) =>
         node is JsonObject wrapped && wrapped["value"] is JsonArray inner && wrapped.ContainsKey("Count") ? inner : node;
 
     /// <summary>An array's items; a lone object or value as one item; nothing for null.</summary>
-    private static IEnumerable<JsonNode?> Items(JsonNode? node)
+    internal static IEnumerable<JsonNode?> Items(JsonNode? node)
     {
         switch (Unwrap(node))
         {
@@ -86,7 +93,7 @@ public sealed record AppInspection(
         }
     }
 
-    private static string? Text(JsonNode? node)
+    internal static string? Text(JsonNode? node)
     {
         if (node is not JsonValue value) return null;
         var text = value.GetValueKind() switch
@@ -100,7 +107,7 @@ public sealed record AppInspection(
         return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
     }
 
-    private static bool? Bool(JsonNode? node) => Text(node)?.ToLowerInvariant() switch
+    internal static bool? Bool(JsonNode? node) => Text(node)?.ToLowerInvariant() switch
     {
         "true" => true,
         "false" => false,
@@ -139,24 +146,47 @@ public sealed record AppPlan(string? Outcome, Version? From, IReadOnlyList<Plann
 /// <item>Otherwise (never installed, or uninstalled with data at this very version):
 /// publish, sync, <c>Install-NAVApp</c>.</item>
 /// </list>
+/// <para><b>Unknown is not "no".</b> When the tenant's installed state could not be read
+/// for some version (<c>Installed</c> null), every branch above depends on it, so the app
+/// is refused with nothing run.</para>
 /// <para>Publishing is left out when this version is already published (a deployment
-/// that failed after publishing, sent again). <c>-SkipVerification</c> only where the
-/// policy file allows unsigned apps; where it does not, Windows checks the signature
-/// first. When previous versions are to go, each one published to this tenant alone is
+/// that failed after publishing, sent again), but only when the published package is this
+/// very file: its <c>PackageId</c> must be the file's header package id. A different build
+/// with the same version, or one whose package id cannot be read, is refused rather than
+/// installed in the file's place. <c>-SkipVerification</c> only where the policy file
+/// allows unsigned apps; the signature itself is checked, by Windows, before any app is
+/// touched. When previous versions are to go, each one published to this tenant alone is
 /// unpublished with <c>-Tenant</c>; one published for every tenant only when no other
 /// tenant still has it installed, and otherwise left with the reason.</para>
 /// </summary>
 public static class AppInstallPlanner
 {
-    public static AppPlan Plan(AppInspection inspection, Version target, EffectiveInstance tier, string tenant, string syncMode, bool unpublishPrevious)
+    /// <param name="packageId">The file's package id, from its NAVX header.</param>
+    public static AppPlan Plan(AppInspection inspection, Version target, Guid packageId, EffectiveInstance tier, string tenant, string syncMode, bool unpublishPrevious)
     {
         ArgumentNullException.ThrowIfNull(inspection);
         ArgumentNullException.ThrowIfNull(tier);
+        if (inspection.Versions.FirstOrDefault(v => v.Installed is null) is { } unknown)
+        {
+            return Refused($"the gateway could not tell whether version {unknown.Version} is installed on tenant '{tenant}' (this Business Central version did not say), and what to do depends on it. Nothing was changed for this app.");
+        }
         var installed = inspection.Versions.Where(v => v.Installed == true).Select(v => v.Version).Distinct().ToList();
+
+        // The same version already published must be the same build, or "already
+        // installed" and "publish skipped" would both be about some other file.
+        var published = inspection.Versions.Where(v => v.Version == target).ToList();
+        if (published.Any(v => v.PackageId is { } id && id != packageId))
+        {
+            return Refused($"a different build with the same version ({target}) is already published on this server. Give the new build a higher version, or unpublish the other build first.");
+        }
 
         if (installed.Contains(target))
         {
             return new AppPlan(GatewayPublishInstallOutcomes.AlreadyInstalled, null, []);
+        }
+        if (published.Any(v => v.PackageId is null))
+        {
+            return Refused($"version {target} is already published on this server, and the gateway could not read which build that is (Business Central did not report its package id), so it did not install it in place of this file.");
         }
         if (installed.Where(v => v > target).Max() is { } newer)
         {
@@ -171,11 +201,7 @@ public static class AppInstallPlanner
         var from = installed.Where(v => v < target).DefaultIfEmpty().Max()
                    ?? (data is not null && data < target ? data : null);
         var steps = new List<PlannedStep>();
-        if (!tier.AllowUnsigned)
-        {
-            steps.Add(new PlannedStep(GatewayPublishInstallSteps.Signature, new AppStep(PublishInstallScript.Kinds.Signature)));
-        }
-        if (inspection.Versions.Any(v => v.Version == target))
+        if (published.Count > 0)
         {
             steps.Add(new PlannedStep(GatewayPublishInstallSteps.Publish, null,
                 SkipReason: $"Version {target} is already published on this server, so it was not published again."));

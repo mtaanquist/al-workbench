@@ -11,11 +11,15 @@ namespace ALWorkbench.Gateway.Core.PublishInstall;
 /// chosen from a fixed list of step kinds (<see cref="Kinds"/>), never from text the
 /// server sent. See <c>.design/on-prem-gateway.md</c>, "Deploying to on-premises".
 ///
-/// <para><b>Two processes per app, and the decision in between in C#.</b>
+/// <para><b>One read of the files, then two processes per app, and the decisions in C#.</b>
+/// <see cref="Examine"/> runs once, before anything changes, and reads every file as
+/// Business Central and Windows read it (its identity and its signature).
 /// <see cref="Inspect"/> reads what the tenant has of the app (every version
 /// <c>Get-NAVAppInfo -Tenant</c> lists, with <c>-TenantSpecificProperties</c> where the
-/// cmdlet has it, which adds the data version), which other tenants still have it
-/// installed, and which parameters this version's cmdlets take. <see cref="AppInstallPlanner"/>
+/// cmdlet has it, which adds whether it is installed and the data version; where it does
+/// not, which tenants have each version installed comes from <c>Get-NAVAppTenant</c>, and
+/// with neither it stays unknown), which other tenants still have it installed, and which
+/// parameters this version's cmdlets take. <see cref="AppInstallPlanner"/>
 /// decides from that, in C#, where it is tested without Business Central. <see cref="Apply"/>
 /// then runs the planned steps in order and stops at the first that fails. Publishing
 /// and syncing change neither what is installed nor the data version, so a decision made
@@ -44,7 +48,6 @@ public static class PublishInstallScript
     /// <summary>The step kinds <see cref="Apply"/> knows. Anything else fails the step.</summary>
     public static class Kinds
     {
-        public const string Signature = "signature";
         public const string Publish = "publish";
         public const string Sync = "sync";
         public const string Install = "install";
@@ -78,7 +81,93 @@ public static class PublishInstallScript
         };
     }
 
-    /// <summary>Read only: <c>Get-Command</c>, <c>Get-NAVAppInfo</c> and <c>Get-NAVTenant</c>.</summary>
+    /// <summary>Reading the files: one quick read of each, plus a signature check.</summary>
+    public static readonly TimeSpan ExamineTimeout = TimeSpan.FromMinutes(15);
+
+    /// <summary>The parameters of <see cref="Examine"/>: each file, and whether to read its signature.</summary>
+    public static JsonObject ExamineParameters(IEnumerable<(string Path, bool Signature)> files)
+    {
+        var list = new JsonArray();
+        foreach (var (path, signature) in files) list.Add(new JsonObject { ["path"] = path, ["signature"] = signature });
+        return new JsonObject { ["files"] = list };
+    }
+
+    /// <summary>
+    /// Read only, and run once for all of a command's files before anything is changed:
+    /// what Business Central itself reads from each <c>.app</c> (<c>Get-NAVAppInfo -Path</c>),
+    /// and, where asked, what Windows says about its signature
+    /// (<c>Get-AuthenticodeSignature</c>: status and signing certificate). The gateway's own
+    /// reading (<see cref="AppFile"/>) decides the publisher check; this one makes sure
+    /// Business Central reads the same app from the same bytes. Returns one entry per file:
+    /// <c>{ path, app { id, name, publisher, version, packageId }, appError, signature
+    /// { status, statusMessage, subject, thumbprint }, signatureError }</c>.
+    /// </summary>
+    public static readonly PowerShellOperation Examine = new("publish-install-examine", """
+        function Text($item, [string]$property) {
+            if ($null -eq $item) { return $null }
+            $p = $item.PSObject.Properties[$property]
+            if ($null -eq $p -or $null -eq $p.Value) { return $null }
+            return [string]$p.Value
+        }
+        function Get-Reason($record) {
+            $e = $record.Exception
+            while ($null -ne $e.InnerException) { $e = $e.InnerException }
+            $text = ([string]$e.Message).Trim()
+            if ($text.Length -gt 900) { $text = $text.Substring(0, 900) + '...' }
+            if ($text.Length -eq 0) { $text = 'It failed without saying why.' }
+            return $text
+        }
+
+        $info = Get-Command -Name 'Get-NAVAppInfo' -ErrorAction SilentlyContinue
+        $readsFiles = ($null -ne $info) -and $info.Parameters.ContainsKey('Path')
+        $signatures = $null -ne (Get-Command -Name 'Get-AuthenticodeSignature' -ErrorAction SilentlyContinue)
+        $results = @()
+        foreach ($file in @($Parameters.files)) {
+            $path = [string]$file.path
+            $entry = [ordered]@{ path = $path; app = $null; appError = $null; signature = $null; signatureError = $null }
+            if (-not $readsFiles) {
+                $entry.appError = 'Get-NAVAppInfo on this Business Central version cannot read an .app file'
+            } else {
+                try {
+                    $app = @(Get-NAVAppInfo -Path $path)
+                    if ($app.Count -ne 1) { throw ('Get-NAVAppInfo returned ' + $app.Count + ' apps for the file.') }
+                    $id = Text $app[0] 'AppId'
+                    if ($null -eq $id) { $id = Text $app[0] 'Id' }
+                    $entry.app = [pscustomobject]@{
+                        id = $id
+                        name = Text $app[0] 'Name'
+                        publisher = Text $app[0] 'Publisher'
+                        version = Text $app[0] 'Version'
+                        packageId = Text $app[0] 'PackageId'
+                    }
+                } catch {
+                    $entry.appError = Get-Reason $_
+                }
+            }
+            if ([bool]$file.signature) {
+                if (-not $signatures) {
+                    $entry.signatureError = 'Windows signature checking (Get-AuthenticodeSignature) is not available here'
+                } else {
+                    try {
+                        $signature = Get-AuthenticodeSignature -LiteralPath $path
+                        $certificate = $signature.SignerCertificate
+                        $entry.signature = [pscustomobject]@{
+                            status = [string]$signature.Status
+                            statusMessage = [string]$signature.StatusMessage
+                            subject = Text $certificate 'Subject'
+                            thumbprint = Text $certificate 'Thumbprint'
+                        }
+                    } catch {
+                        $entry.signatureError = Get-Reason $_
+                    }
+                }
+            }
+            $results += [pscustomobject]$entry
+        }
+        $results
+        """);
+
+    /// <summary>Read only: <c>Get-Command</c>, <c>Get-NAVAppInfo</c>, <c>Get-NAVAppTenant</c> and <c>Get-NAVTenant</c>.</summary>
     public static readonly PowerShellOperation Inspect = new("publish-install-inspect", """
         $instance = [string]$Parameters.instance
         $tenant = [string]$Parameters.tenant
@@ -103,33 +192,62 @@ public static class PublishInstallScript
             if ($text.Length -eq 0) { $text = 'It failed without saying why.' }
             return $text
         }
-        # The rows of one tenant's Get-NAVAppInfo that are this app.
-        function Get-Rows([string]$Tenant, [bool]$TenantSpecific) {
+        # The rows of one tenant's Get-NAVAppInfo that are this app. IsInstalled is read only
+        # with -TenantSpecificProperties: without it Get-NAVAppInfo leaves it unset, which
+        # would read as "not installed" when it means "not asked".
+        function Get-Rows([string]$Tenant) {
             $arguments = @{ ServerInstance = $instance; Tenant = $Tenant }
-            if ($TenantSpecific) { $arguments['TenantSpecificProperties'] = $true }
+            if ($tenantSpecific) { $arguments['TenantSpecificProperties'] = $true }
             foreach ($app in @(Get-NAVAppInfo @arguments)) {
                 $id = Text $app 'AppId'
                 if ($null -eq $id) { $id = Text $app 'Id' }
                 if ($null -ne $id -and $id.Trim('{', '}') -eq $appId) {
                     [pscustomobject]@{
                         version = Text $app 'Version'
+                        name = Text $app 'Name'
+                        publisher = Text $app 'Publisher'
                         scope = Text $app 'Scope'
-                        isInstalled = Text $app 'IsInstalled'
+                        isInstalled = $(if ($tenantSpecific) { Text $app 'IsInstalled' } else { $null })
                         isPublished = Text $app 'IsPublished'
                         dataVersion = Text $app 'ExtensionDataVersion'
                         syncState = Text $app 'SyncState'
+                        packageId = Text $app 'PackageId'
                     }
                 }
             }
+        }
+        # Without -TenantSpecificProperties: the tenants that have one version installed.
+        function Get-InstalledTenants($Row) {
+            $ids = New-Object System.Collections.Generic.List[string]
+            foreach ($t in @(Get-NAVAppTenant -ServerInstance $instance -Name $Row.name -Publisher $Row.publisher -Version ([version]$Row.version))) {
+                $id = Text $t 'Id'
+                if ($null -eq $id) { $id = Text $t 'TenantId' }
+                if ($null -eq $id) { throw 'Get-NAVAppTenant returned a tenant without an id.' }
+                $ids.Add($id)
+            }
+            return ,$ids
         }
 
         if ($null -eq (Get-Command -Name 'Get-NAVAppInfo' -ErrorAction SilentlyContinue)) {
             throw 'Get-NAVAppInfo is not available in this administration module.'
         }
         $tenantSpecific = Test-Parameter 'Get-NAVAppInfo' 'TenantSpecificProperties'
+        $appTenant = (-not $tenantSpecific) -and ($null -ne (Get-Command -Name 'Get-NAVAppTenant' -ErrorAction SilentlyContinue))
+        $installedFrom = $null
+        if ($tenantSpecific) { $installedFrom = 'TenantSpecificProperties' } elseif ($appTenant) { $installedFrom = 'Get-NAVAppTenant' }
+        $rows = @(Get-Rows $tenant)
+        $installedOn = @{}
+        if ($appTenant) {
+            foreach ($row in $rows) {
+                $ids = Get-InstalledTenants $row
+                $installedOn[[string]$row.version] = $ids
+                $row.isInstalled = [string](@($ids | Where-Object { $_ -eq $tenant }).Count -gt 0)
+            }
+        }
         $result = [ordered]@{
-            schema = 1
+            schema = 2
             tenantSpecificProperties = $tenantSpecific
+            installedFrom = $installedFrom
             parameters = [ordered]@{
                 publishScope = Test-Parameter 'Publish-NAVApp' 'Scope'
                 publishTenant = Test-Parameter 'Publish-NAVApp' 'Tenant'
@@ -138,23 +256,34 @@ public static class PublishInstallScript
                 upgradeTenant = Test-Parameter 'Start-NAVAppDataUpgrade' 'Tenant'
                 unpublishTenant = Test-Parameter 'Unpublish-NAVApp' 'Tenant'
             }
-            versions = @(Get-Rows $tenant $tenantSpecific)
+            versions = $rows
             otherTenants = $null
             otherTenantsUnknown = $null
         }
 
         # Whether another tenant still has a version installed decides whether a
-        # globally published previous version may go.
+        # globally published previous version may go. Read the same way as this tenant's;
+        # anything unknown leaves the list out, so the version is kept.
         if ($askOthers) {
             if ($null -eq (Get-Command -Name 'Get-NAVTenant' -ErrorAction SilentlyContinue)) {
                 $result.otherTenantsUnknown = 'Get-NAVTenant is not available in this administration module.'
+            } elseif ($null -eq $installedFrom) {
+                $result.otherTenantsUnknown = 'this Business Central version does not say which versions a tenant has installed'
             } else {
                 try {
                     $others = @()
                     foreach ($row in @(Get-NAVTenant -ServerInstance $instance)) {
                         $id = [string]$row.Id
                         if ($id -eq $tenant) { continue }
-                        $installed = @(Get-Rows $id $false | Where-Object { [string]$_.isInstalled -eq 'True' } | ForEach-Object { $_.version })
+                        if ($tenantSpecific) {
+                            $theirs = @(Get-Rows $id)
+                            if (@($theirs | Where-Object { $null -eq $_.isInstalled }).Count -gt 0) {
+                                throw ('Get-NAVAppInfo did not say what tenant ' + $id + ' has installed.')
+                            }
+                            $installed = @($theirs | Where-Object { [string]$_.isInstalled -eq 'True' } | ForEach-Object { $_.version })
+                        } else {
+                            $installed = @($installedOn.Keys | Where-Object { @($installedOn[$_] | Where-Object { $_ -eq $id }).Count -gt 0 })
+                        }
                         $others += [pscustomobject]@{ id = $id; installed = $installed }
                     }
                     $result.otherTenants = $others
@@ -217,16 +346,6 @@ public static class PublishInstallScript
             $entry = [ordered]@{ kind = $kind; version = $null; ok = $false; error = $null }
             try {
                 switch ($kind) {
-                    'signature' {
-                        Write-GatewayLog 'Checking the signature with Get-AuthenticodeSignature.'
-                        if ($null -eq (Get-Command -Name 'Get-AuthenticodeSignature' -ErrorAction SilentlyContinue)) {
-                            throw 'Windows signature checking (Get-AuthenticodeSignature) is not available here, so the signature could not be checked.'
-                        }
-                        $signature = Get-AuthenticodeSignature -LiteralPath $path
-                        if ([string]$signature.Status -ne 'Valid') {
-                            throw ('The signature does not verify on this computer (' + [string]$signature.Status + '). ' + [string]$signature.StatusMessage)
-                        }
-                    }
                     'publish' {
                         $arguments = @{ ServerInstance = $instance; Path = $path }
                         if ([bool]$step.skipVerification) { $arguments['SkipVerification'] = $true }

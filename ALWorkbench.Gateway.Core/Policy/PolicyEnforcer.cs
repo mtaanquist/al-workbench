@@ -35,7 +35,8 @@ public sealed record PolicyRequest(
     string Tenant,
     IReadOnlyList<AppToPublish> Apps,
     bool UnpublishPrevious,
-    bool StartedByAgent)
+    bool StartedByAgent,
+    string SyncMode = GatewaySyncModes.Add)
 {
     /// <summary>
     /// Reads the request out of a command, or says why it cannot. A parameter of the
@@ -109,13 +110,25 @@ public sealed record PolicyRequest(
             unpublish = unpublishNode.GetValue<bool>();
         }
 
+        if (!TryText(parameters, GatewayCommandParameters.SyncMode, out var syncMode, ref problem))
+        {
+            return null;
+        }
+        syncMode ??= GatewaySyncModes.Add;
+        if (!GatewaySyncModes.All.Contains(syncMode, StringComparer.Ordinal))
+        {
+            problem = $"The command asks for a schema sync mode the gateway does not know; it takes {string.Join(" or ", GatewaySyncModes.All)}.";
+            return null;
+        }
+
         return new PolicyRequest(
             command.Verb,
             machine is null ? null : new TierRef(machine, instance!),
             tenant ?? GatewayCommandParameters.DefaultTenant,
             apps,
             unpublish,
-            command.StartedByAgent);
+            command.StartedByAgent,
+            syncMode);
     }
 
     /// <summary>
@@ -170,7 +183,7 @@ public sealed record PolicyRequest(
 /// by <c>change_hours</c> or by who asked.</item>
 /// <item><c>publish-install</c>: sent to the database's publishing tier; <c>publish</c>
 /// there, the tenant and every publisher on its lists, <c>allow_unsigned</c> for an
-/// unsigned app, <c>unpublish</c> when previous versions are removed, <c>scripts</c>
+/// unsigned app, <c>allow_force_sync</c> for a ForceSync, <c>unpublish</c> when previous versions are removed, <c>scripts</c>
 /// when the database names a before or after script, and <c>restart</c> on every tier
 /// of the restart group.</item>
 /// <item><c>import-licence</c>: sent to the publishing tier of a database with a
@@ -223,6 +236,7 @@ public static class PolicyEnforcer
                     ?? Need(tier, PolicyPermission.Publish)
                     ?? Tenant(tier, request.Tenant)
                     ?? Apps(tier, request.Apps)
+                    ?? ForceSync(tier, request.SyncMode)
                     ?? (request.UnpublishPrevious ? Need(tier, PolicyPermission.Unpublish) : null)
                     ?? (database is { Before: not null } or { After: not null } ? Need(tier, PolicyPermission.Scripts) : null)
                     ?? NeedAll(group, PolicyPermission.Restart);
@@ -295,6 +309,12 @@ public static class PolicyEnforcer
     private static PolicyDecision? Tenant(EffectiveInstance tier, string tenant) => tier.AllowsTenant(tenant)
         ? null
         : PolicyDecision.Refuse($"Not allowed by {Settings}: {tier.Tier} may not act on tenant '{tenant}'.");
+
+    /// <summary>ForceSync can drop tables and fields with their data, so the tier has to allow it by name.</summary>
+    internal static PolicyDecision? ForceSync(EffectiveInstance tier, string syncMode) =>
+        syncMode != GatewaySyncModes.ForceSync || tier.AllowForceSync
+            ? null
+            : PolicyDecision.Refuse($"Not allowed by {Settings}: {tier.Tier} does not allow ForceSync (allow_force_sync).");
 
     private static PolicyDecision? Apps(EffectiveInstance tier, IReadOnlyList<AppToPublish> apps)
     {

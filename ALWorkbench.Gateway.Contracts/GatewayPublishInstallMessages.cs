@@ -44,11 +44,12 @@ public sealed record GatewayPublishInstallParameters
             {
                 [GatewayCommandParameters.AppFile] = app.File,
                 [GatewayCommandParameters.AppId] = app.Id.ToString("D"),
-                [GatewayCommandParameters.AppName] = app.Name,
                 [GatewayCommandParameters.AppPublisher] = app.Publisher,
                 [GatewayCommandParameters.AppVersion] = app.Version,
                 [GatewayCommandParameters.AppSigned] = app.Signed,
             };
+            // Optional: the gateway refuses a blank name rather than reading it as absent.
+            if (!string.IsNullOrWhiteSpace(app.Name)) item[GatewayCommandParameters.AppName] = app.Name;
             apps.Add(item);
         }
         var parameters = new JsonObject
@@ -72,7 +73,11 @@ public sealed record GatewayPublishInstallApp
 
     public Guid Id { get; init; }
 
-    public string Name { get; init; } = string.Empty;
+    /// <summary>
+    /// The app name. Optional: left out of the command when null or blank, and then the
+    /// gateway checks the file's id, publisher and version only.
+    /// </summary>
+    public string? Name { get; init; }
 
     public string Publisher { get; init; } = string.Empty;
 
@@ -156,6 +161,18 @@ public sealed record GatewayPublishInstallAppResult
     [JsonPropertyName("message")]
     public string? Message { get; init; }
 
+    /// <summary>
+    /// Who signed the file, as Windows reads the signature: the certificate's subject.
+    /// Null for an unsigned file or one whose signature was not read. Also on the
+    /// <see cref="GatewayPublishInstallSteps.Signature"/> step.
+    /// </summary>
+    [JsonPropertyName("signerSubject")]
+    public string? SignerSubject { get; init; }
+
+    /// <summary>The signing certificate's thumbprint; null as for <see cref="SignerSubject"/>.</summary>
+    [JsonPropertyName("signerThumbprint")]
+    public string? SignerThumbprint { get; init; }
+
     [JsonPropertyName("steps")]
     public IReadOnlyList<GatewayPublishInstallStep> Steps { get; init; } = [];
 }
@@ -177,6 +194,14 @@ public sealed record GatewayPublishInstallStep
 
     [JsonPropertyName("message")]
     public string? Message { get; init; }
+
+    /// <summary><see cref="GatewayPublishInstallSteps.Signature"/>: the signing certificate's subject.</summary>
+    [JsonPropertyName("signerSubject")]
+    public string? SignerSubject { get; init; }
+
+    /// <summary><see cref="GatewayPublishInstallSteps.Signature"/>: the signing certificate's thumbprint.</summary>
+    [JsonPropertyName("signerThumbprint")]
+    public string? SignerThumbprint { get; init; }
 }
 
 /// <summary>How an app ended. Words on the wire.</summary>
@@ -207,7 +232,10 @@ public static class GatewayPublishInstallSteps
     /// <summary>The file's SHA-256, its id, name, publisher and version, and whether it carries a signature.</summary>
     public const string Verify = "verify";
 
-    /// <summary>The file's signature, checked by Windows on the gateway's computer.</summary>
+    /// <summary>
+    /// The file's signature, checked by Windows on the gateway's computer before anything is
+    /// changed, with the signer recorded (and checked against the tier's <c>signers</c>).
+    /// </summary>
     public const string Signature = "signature";
 
     public const string Publish = "publish";

@@ -15,7 +15,13 @@ namespace ALWorkbench.Gateway.Core.PublishInstall;
 /// written when an <c>.app</c> is signed. Only says a signature is there, not that it
 /// verifies: that is Windows' job on the gateway's computer (see <see cref="AppFile"/>).
 /// </param>
-public sealed record AppFileInfo(Guid Id, string Name, string Publisher, Version Version, bool HasSignature);
+/// <param name="PackageId">
+/// The package id from the NAVX header: new for every build, so two builds with the same
+/// version differ by it. Business Central records it for a published app
+/// (<c>PackageId</c>), which is how the gateway tells whether the version already
+/// published is this very file. For a Ready2Run wrapper, the id of the app inside.
+/// </param>
+public sealed record AppFileInfo(Guid Id, string Name, string Publisher, Version Version, bool HasSignature, Guid PackageId);
 
 /// <summary>A file that is not an <c>.app</c> the gateway can read, with a sentence saying why.</summary>
 public sealed class AppFileException(string message) : Exception(message);
@@ -35,7 +41,8 @@ public sealed class AppFileException(string message) : Exception(message);
 ///
 /// <para><b>What it refuses.</b> A file without the header, a package longer than the
 /// file, an encrypted package (AppSource's <c>NAVX.NEA</c>: its manifest cannot be read,
-/// so its publisher cannot be checked), and a package without a manifest. A Ready2Run
+/// so its publisher cannot be checked), a package without a manifest, and one with more
+/// than one (names compared ignoring case). A Ready2Run
 /// wrapper (one nested <c>.app</c> beside <c>readytorunappmanifest.json</c>) is read
 /// through to the app inside it.</para>
 /// </summary>
@@ -82,7 +89,11 @@ public static class AppFile
         }
         var headerLength = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4, 4));
         var contentLength = BinaryPrimitives.ReadInt64LittleEndian(header.AsSpan(28, 8));
-        if (headerLength < HeaderLength || headerLength > 4096 || contentLength <= 0 || headerLength + contentLength > stream.Length)
+        var packageId = new Guid(header.AsSpan(12, 16));
+        // Compared as "longer than what is left", never as a sum: a length near
+        // long.MaxValue would overflow headerLength + contentLength into a negative
+        // number that passes.
+        if (headerLength < HeaderLength || headerLength > 4096 || contentLength <= 0 || contentLength > stream.Length - headerLength)
         {
             throw new AppFileException("It is not a Business Central .app file the gateway can read: its header does not match its length. The file may be damaged.");
         }
@@ -103,7 +114,12 @@ public static class AppFile
         {
             throw new AppFileException($"Its package could not be opened: {ex.Message}");
         }
-        return info with { HasSignature = hasSignature };
+        catch (Exception ex) when (ex is ArgumentOutOfRangeException or OverflowException)
+        {
+            throw new AppFileException("It is not a Business Central .app file the gateway can read: its header does not match its length. The file may be damaged.");
+        }
+        // A Ready2Run wrapper's info comes back from the app inside, with that app's package id.
+        return info with { HasSignature = hasSignature, PackageId = info.PackageId == Guid.Empty ? packageId : info.PackageId };
     }
 
     private static AppFileInfo ReadManifest(ZipArchive archive, bool nested)
@@ -154,12 +170,24 @@ public static class AppFile
 
         if (!Guid.TryParse(Attribute("Id"), out var id)) throw new AppFileException("Its NavxManifest.xml has an Id that is not a GUID.");
         if (!AppVersions.TryParse(Attribute("Version"), out var version)) throw new AppFileException("Its NavxManifest.xml has a Version that is not a version number.");
-        return new AppFileInfo(id, Attribute("Name"), Attribute("Publisher"), version, HasSignature: false);
+        return new AppFileInfo(id, Attribute("Name"), Attribute("Publisher"), version, HasSignature: false, PackageId: Guid.Empty);
     }
 
-    /// <summary>ZIP entry names have drifted in case across versions (NavxManifest, navxmanifest).</summary>
-    private static ZipArchiveEntry? Entry(ZipArchive archive, string name) =>
-        archive.Entries.FirstOrDefault(e => string.Equals(e.FullName, name, StringComparison.OrdinalIgnoreCase));
+    /// <summary>
+    /// ZIP entry names have drifted in case across versions (NavxManifest, navxmanifest).
+    /// A package with two entries that match is refused: which one Business Central reads is
+    /// not something to guess, and a second manifest naming an allowed publisher would
+    /// otherwise get an app past the publisher list.
+    /// </summary>
+    private static ZipArchiveEntry? Entry(ZipArchive archive, string name)
+    {
+        var matches = archive.Entries.Where(e => string.Equals(e.FullName, name, StringComparison.OrdinalIgnoreCase)).Take(2).ToList();
+        if (matches.Count > 1)
+        {
+            throw new AppFileException($"Its package has more than one {name}, so the gateway cannot tell which app it is.");
+        }
+        return matches.FirstOrDefault();
+    }
 
     /// <summary>A read-only, seekable view of part of another stream, so the ZIP reader sees only the package.</summary>
     private sealed class WindowStream : Stream

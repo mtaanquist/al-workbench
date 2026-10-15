@@ -46,6 +46,29 @@ public sealed record EffectiveInstance(
     public bool AllowsPublisher(string publisher) =>
         Publishers is null || Publishers.Contains(publisher.Trim(), StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// <c>signers</c>: whose signatures the tier accepts, as certificate thumbprints or
+    /// subjects. Null (left out) accepts any signature Windows calls valid.
+    /// </summary>
+    public IReadOnlyList<string>? Signers { get; init; }
+
+    /// <summary><c>allow_force_sync</c>: whether a deployment may sync with ForceSync. Off unless set.</summary>
+    public bool AllowForceSync { get; init; }
+
+    /// <summary>
+    /// Whether a signature by this certificate is accepted: any when <see cref="Signers"/>
+    /// is null; otherwise its thumbprint (ignoring case and spaces) or its subject (ignoring
+    /// case) must be listed.
+    /// </summary>
+    public bool AllowsSigner(string? subject, string? thumbprint)
+    {
+        if (Signers is null) return true;
+        static string Squeeze(string text) => new(text.Where(c => !char.IsWhiteSpace(c)).ToArray());
+        return Signers.Any(s =>
+            (thumbprint is not null && string.Equals(Squeeze(s), Squeeze(thumbprint), StringComparison.OrdinalIgnoreCase))
+            || (subject is not null && string.Equals(s.Trim(), subject.Trim(), StringComparison.OrdinalIgnoreCase)));
+    }
+
     public GatewayPolicyInstance ToReport() => new()
     {
         Machine = Tier.Machine,
@@ -56,6 +79,8 @@ public sealed record EffectiveInstance(
         Tenants = Tenants,
         Publishers = Publishers,
         AllowUnsigned = AllowUnsigned,
+        Signers = Signers,
+        AllowForceSync = AllowForceSync,
         Scope = PolicyWords.Scopes[Scope],
         PowerShell = PowerShell is { } edition ? PolicyWords.PowerShellEditions[edition] : null,
     };

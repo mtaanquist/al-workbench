@@ -15,10 +15,10 @@ internal static class AppFiles
 {
     public static readonly Guid CoffeeId = Guid.Parse("5b7d3f4e-6a1c-4c2b-9d8e-1f0a2b3c4d5e");
 
-    public static byte[] Build(Guid id, string name, string publisher, string version, bool signed = false, string? manifest = null)
+    public static byte[] Build(Guid id, string name, string publisher, string version, bool signed = false, string? manifest = null, Guid? packageId = null)
     {
         var package = Zip(("NavxManifest.xml", manifest ?? Manifest(id, name, publisher, version)), ("SymbolReference.json", "{}"));
-        return Wrap(package, signed);
+        return Wrap(package, signed, packageId);
     }
 
     public static string Manifest(Guid id, string name, string publisher, string version) => $"""
@@ -58,13 +58,13 @@ internal static class AppFiles
         return buffer.ToArray();
     }
 
-    public static byte[] Wrap(byte[] package, bool signed = false)
+    public static byte[] Wrap(byte[] package, bool signed = false, Guid? packageId = null)
     {
         var header = new byte[AppFile.HeaderLength];
         "NAVX"u8.CopyTo(header);
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(4), AppFile.HeaderLength);
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(8), 2);
-        Guid.NewGuid().TryWriteBytes(header.AsSpan(12, 16));
+        (packageId ?? Guid.NewGuid()).TryWriteBytes(header.AsSpan(12, 16));
         BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(28), package.Length);
         "NAVX"u8.CopyTo(header.AsSpan(36));
         var signature = signed ? Encoding.ASCII.GetBytes("stand-in for a PKCS #7 signature block") : [];
@@ -80,12 +80,14 @@ public sealed class GatewayAppFileTests
 {
     private static AppFileInfo Read(byte[] bytes) => AppFile.Read(new MemoryStream(bytes));
 
-    [Fact]
-    public void Reads_the_id_name_publisher_and_version_from_the_manifest()
-    {
-        var info = Read(AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0"));
+    private static readonly Guid Build14 = Guid.Parse("0f9e8d7c-6b5a-4938-8271-605f4e3d2c1b");
 
-        info.Should().Be(new AppFileInfo(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", new Version(1, 4, 0, 0), HasSignature: false));
+    [Fact]
+    public void Reads_the_id_name_publisher_and_version_from_the_manifest_and_the_package_id_from_the_header()
+    {
+        var info = Read(AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0", packageId: Build14));
+
+        info.Should().Be(new AppFileInfo(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", new Version(1, 4, 0, 0), HasSignature: false, PackageId: Build14));
     }
 
     [Fact]
@@ -117,6 +119,51 @@ public sealed class GatewayAppFileTests
         var act = () => Read(bytes);
 
         act.Should().Throw<AppFileException>().WithMessage("*header does not match its length*");
+    }
+
+    [Theory]
+    [InlineData(long.MaxValue)]
+    [InlineData(long.MaxValue - 39)]
+    [InlineData(long.MaxValue - 40)]
+    public void A_package_length_too_large_to_add_to_the_header_is_refused_rather_than_overflowing(long length)
+    {
+        // headerLength + length would wrap to a negative number that passes "<= file length".
+        var bytes = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0");
+        BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(28), length);
+
+        var act = () => Read(bytes);
+
+        act.Should().Throw<AppFileException>().WithMessage("*header does not match its length*");
+    }
+
+    [Theory]
+    [InlineData("NavxManifest.xml")]
+    [InlineData("navxmanifest.xml")]
+    [InlineData("NAVXMANIFEST.XML")]
+    public void A_package_with_a_second_manifest_is_refused_whichever_comes_first(string second)
+    {
+        // The first names an allowed publisher; which one Business Central reads is not
+        // the gateway's to guess, so it reads neither.
+        var package = AppFiles.Zip(
+            ("NavxManifest.xml", AppFiles.Manifest(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0")),
+            (second, AppFiles.Manifest(AppFiles.CoffeeId, "CRONUS Coffee", "Fabrikam", "1.4.0.0")));
+
+        var act = () => Read(AppFiles.Wrap(package));
+
+        act.Should().Throw<AppFileException>().WithMessage("*more than one NavxManifest.xml*");
+    }
+
+    [Fact]
+    public void A_ready2run_wrapper_with_two_inner_manifests_lists_is_refused()
+    {
+        var wrapper = AppFiles.Wrap(AppFiles.ZipBytes(
+            ("readytorunappmanifest.json", "{}"u8.ToArray()),
+            ("ReadyToRunAppManifest.json", "{}"u8.ToArray()),
+            ("CRONUS Partner_CRONUS Coffee_1.4.0.0.app", AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0"))));
+
+        var act = () => Read(wrapper);
+
+        act.Should().Throw<AppFileException>().WithMessage("*more than one readytorunappmanifest.json*");
     }
 
     [Fact]
@@ -151,11 +198,14 @@ public sealed class GatewayAppFileTests
     [Fact]
     public void A_ready2run_wrapper_is_read_through_to_the_app_inside()
     {
-        var inner = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0");
+        var inner = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0", packageId: Build14);
         var wrapper = AppFiles.Wrap(AppFiles.ZipBytes(
             ("readytorunappmanifest.json", "{}"u8.ToArray()),
             ("CRONUS Partner_CRONUS Coffee_1.4.0.0.app", inner)));
 
-        Read(wrapper).Name.Should().Be("CRONUS Coffee");
+        var info = Read(wrapper);
+
+        info.Name.Should().Be("CRONUS Coffee");
+        info.PackageId.Should().Be(Build14, "the package id is the app's own, from inside the wrapper");
     }
 }

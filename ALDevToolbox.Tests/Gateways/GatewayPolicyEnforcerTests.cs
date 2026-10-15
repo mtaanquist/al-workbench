@@ -335,6 +335,29 @@ public sealed class GatewayPolicyEnforcerTests
     }
 
     [Fact]
+    public void ForceSync_is_refused_unless_the_tier_allows_it_and_add_never_is()
+    {
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p[GatewayCommandParameters.SyncMode] = GatewaySyncModes.ForceSync))
+            .Reason.Should().Be("Not allowed by the customer's gateway settings: CRONUS-BC01 / BC140 does not allow ForceSync (allow_force_sync).");
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p[GatewayCommandParameters.SyncMode] = GatewaySyncModes.Add))
+            .Allowed.Should().BeTrue();
+
+        var allowing = GatewayPolicyParser.Parse(Policy.Replace("allow_unsigned = true", "allow_unsigned = true\nallow_force_sync = true", StringComparison.Ordinal), "CRONUS-BC01").Policy!;
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p[GatewayCommandParameters.SyncMode] = GatewaySyncModes.ForceSync), policy: allowing)
+            .Allowed.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("forcesync")]
+    [InlineData("Clean")]
+    [InlineData("")]
+    public void A_sync_mode_the_gateway_does_not_know_refuses_the_command(string mode)
+    {
+        Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p[GatewayCommandParameters.SyncMode] = mode))
+            .Allowed.Should().BeFalse();
+    }
+
+    [Fact]
     public void A_tenant_the_tier_does_not_list_is_refused_and_no_tenant_means_default()
     {
         Check(Command(GatewayVerb.PublishInstall, "CRONUS-BC01", "BC140", more: p => p[GatewayCommandParameters.Tenant] = "fabrikam"))

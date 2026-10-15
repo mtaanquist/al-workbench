@@ -9,16 +9,19 @@ namespace ALDevToolbox.Tests.Gateways;
 
 /// <summary>
 /// A Business Central server behind the fake process runner: answers
-/// <see cref="PublishInstallScript.Inspect"/> from its state and carries out
-/// <see cref="PublishInstallScript.Apply"/>'s steps on it, as the cmdlets would. It reads
+/// <see cref="PublishInstallScript.Examine"/> and <see cref="PublishInstallScript.Inspect"/>
+/// from its state, as those scripts would report it, and carries out
+/// <see cref="PublishInstallScript.Apply"/>'s steps on it, as the cmdlets would. What the
+/// real cmdlets return with and without <c>-TenantSpecificProperties</c> is the business of
+/// the stand-in administration tools in <c>PublishInstallSamples/</c>, run under pwsh. It reads
 /// what the runner put on standard input exactly as the real bootstrap does (base64 of
 /// the JSON envelope), so the tests see the parameters the gateway really sends. Every
 /// operation and every applied step is recorded.
 /// </summary>
 internal sealed class FakeBusinessCentral : IProcessRunner
 {
-    /// <summary>A published version of an app, and the tenant it was published to (null for every tenant).</summary>
-    public sealed record Published(string Name, Guid Id, Version Version, string? Tenant);
+    /// <summary>A published version of an app, the tenant it was published to (null for every tenant), and its build's package id.</summary>
+    public sealed record Published(string Name, Guid Id, Version Version, string? Tenant, Guid PackageId);
 
     public List<Published> PublishedApps { get; } = [];
 
@@ -30,10 +33,40 @@ internal sealed class FakeBusinessCentral : IProcessRunner
 
     public List<string> Tenants { get; } = ["default"];
 
-    /// <summary>False plays Business Central 14: no <c>-TenantSpecificProperties</c>, no <c>-Tenant</c> on <c>Unpublish-NAVApp</c>.</summary>
+    /// <summary>
+    /// False plays Business Central 14: no <c>-TenantSpecificProperties</c> (so the inspect
+    /// script reads installed state from <c>Get-NAVAppTenant</c>, and has no data versions),
+    /// no <c>-Tenant</c> on <c>Unpublish-NAVApp</c>.
+    /// </summary>
     public bool Current { get; set; } = true;
 
+    /// <summary>
+    /// Plays a version with neither <c>-TenantSpecificProperties</c> nor
+    /// <c>Get-NAVAppTenant</c>: the inspect script reports every installed state as unknown,
+    /// and the other tenants as unreadable.
+    /// </summary>
+    public bool InstalledStateUnknown { get; set; }
+
+    /// <summary>Why the other tenants could not be read, when set; the inspect script then leaves them out.</summary>
+    public string? OtherTenantsUnknown { get; set; }
+
+    /// <summary>False plays a version whose <c>Get-NAVAppInfo</c> reports no <c>PackageId</c>.</summary>
+    public bool ReportsPackageId { get; set; } = true;
+
+    /// <summary>Changes what Business Central reads from a file (<c>Get-NAVAppInfo -Path</c>), for files it reads differently from the gateway.</summary>
+    public Func<AppFileInfo, AppFileInfo>? BusinessCentralReads { get; set; }
+
+    /// <summary>False plays a version whose <c>Get-NAVAppInfo</c> has no <c>-Path</c>.</summary>
+    public bool ReadsFiles { get; set; } = true;
+
     public bool SignatureValid { get; set; } = true;
+
+    /// <summary>Null plays a computer where Windows cannot read the signature at all.</summary>
+    public string? SignatureError { get; set; }
+
+    public string SignerSubject { get; set; } = "CN=CRONUS Partner, O=CRONUS Partner, C=DK";
+
+    public string SignerThumbprint { get; set; } = "3F2A9C41D07E5B86A1C2E4F60718293A4B5C6D7E";
 
     /// <summary>The apply process runs past its time limit and is killed, after starting two steps.</summary>
     public bool ApplyTimesOut { get; set; }
@@ -47,8 +80,8 @@ internal sealed class FakeBusinessCentral : IProcessRunner
     /// <summary>Each step carried out, as one readable line, e.g. "publish CRONUS Coffee 1.4.0.0 Tenant default skip=True".</summary>
     public List<string> Steps { get; } = [];
 
-    public void Publish(string name, string version, string? tenant = null, Guid? id = null) =>
-        PublishedApps.Add(new Published(name, id ?? AppFiles.CoffeeId, Version.Parse(version), tenant));
+    public void Publish(string name, string version, string? tenant = null, Guid? id = null, Guid? packageId = null) =>
+        PublishedApps.Add(new Published(name, id ?? AppFiles.CoffeeId, Version.Parse(version), tenant, packageId ?? Guid.NewGuid()));
 
     public Task<ProcessOutcome> RunAsync(ProcessSpec spec, CancellationToken ct)
     {
@@ -57,7 +90,12 @@ internal sealed class FakeBusinessCentral : IProcessRunner
         var script = envelope["operation"]!.GetValue<string>();
         var parameters = envelope["parameters"]!.AsObject();
         JsonArray output;
-        if (script == PublishInstallScript.Inspect.Script)
+        if (script == PublishInstallScript.Examine.Script)
+        {
+            Runs.Add(("examine", parameters));
+            output = Examine(parameters);
+        }
+        else if (script == PublishInstallScript.Inspect.Script)
         {
             Runs.Add(("inspect", parameters));
             output = [Inspect(parameters)];
@@ -79,6 +117,46 @@ internal sealed class FakeBusinessCentral : IProcessRunner
     private IEnumerable<Published> VisibleTo(string tenant, Guid id) =>
         PublishedApps.Where(p => p.Id == id && (p.Tenant is null || p.Tenant == tenant));
 
+    private JsonArray Examine(JsonObject parameters)
+    {
+        var results = new JsonArray();
+        foreach (var file in parameters["files"]!.AsArray().OfType<JsonObject>())
+        {
+            var path = file["path"]!.GetValue<string>();
+            var entry = new JsonObject { ["path"] = path };
+            if (!ReadsFiles)
+            {
+                entry["appError"] = "Get-NAVAppInfo on this Business Central version cannot read an .app file";
+            }
+            else
+            {
+                var read = AppFile.Read(path);
+                if (BusinessCentralReads is { } change) read = change(read);
+                entry["app"] = new JsonObject
+                {
+                    ["id"] = read.Id.ToString("D"),
+                    ["name"] = read.Name,
+                    ["publisher"] = read.Publisher,
+                    ["version"] = read.Version.ToString(),
+                    ["packageId"] = ReportsPackageId ? read.PackageId.ToString("D") : null,
+                };
+            }
+            if (file["signature"]!.GetValue<bool>())
+            {
+                if (SignatureError is { } error) entry["signatureError"] = error;
+                else entry["signature"] = new JsonObject
+                {
+                    ["status"] = SignatureValid ? "Valid" : "HashMismatch",
+                    ["statusMessage"] = SignatureValid ? "Signature verified." : "The contents of the file might have been changed.",
+                    ["subject"] = SignerSubject,
+                    ["thumbprint"] = SignerThumbprint,
+                };
+            }
+            results.Add(entry);
+        }
+        return results;
+    }
+
     private JsonObject Inspect(JsonObject parameters)
     {
         var tenant = parameters["tenant"]!.GetValue<string>();
@@ -90,14 +168,16 @@ internal sealed class FakeBusinessCentral : IProcessRunner
             {
                 ["version"] = p.Version.ToString(),
                 ["scope"] = p.Tenant is null ? "Global" : "Tenant",
-                ["isInstalled"] = Installed.GetValueOrDefault((tenant, p.Name)) == p.Version ? "True" : "False",
+                ["isInstalled"] = InstalledStateUnknown ? null : Installed.GetValueOrDefault((tenant, p.Name)) == p.Version ? "True" : "False",
                 ["isPublished"] = "True",
                 ["dataVersion"] = Current ? Data.GetValueOrDefault((tenant, p.Name))?.ToString() : null,
                 ["syncState"] = Current ? "Synced" : null,
+                ["packageId"] = ReportsPackageId ? p.PackageId.ToString("D") : null,
             });
         }
         JsonArray? others = null;
-        if (parameters["otherTenants"]!.GetValue<bool>())
+        string? othersUnknown = InstalledStateUnknown ? "this Business Central version does not say which versions a tenant has installed" : OtherTenantsUnknown;
+        if (parameters["otherTenants"]!.GetValue<bool>() && othersUnknown is null)
         {
             others = [];
             foreach (var other in Tenants.Where(t => t != tenant))
@@ -112,8 +192,9 @@ internal sealed class FakeBusinessCentral : IProcessRunner
         }
         return new JsonObject
         {
-            ["schema"] = 1,
+            ["schema"] = 2,
             ["tenantSpecificProperties"] = Current,
+            ["installedFrom"] = InstalledStateUnknown ? null : Current ? "TenantSpecificProperties" : "Get-NAVAppTenant",
             ["parameters"] = new JsonObject
             {
                 ["publishScope"] = true,
@@ -122,6 +203,7 @@ internal sealed class FakeBusinessCentral : IProcessRunner
             },
             ["versions"] = versions,
             ["otherTenants"] = others,
+            ["otherTenantsUnknown"] = parameters["otherTenants"]!.GetValue<bool>() ? othersUnknown : null,
         };
     }
 
@@ -141,16 +223,12 @@ internal sealed class FakeBusinessCentral : IProcessRunner
             {
                 switch (kind)
                 {
-                    case "signature":
-                        if (!SignatureValid) error = "The signature does not verify on this computer (HashMismatch).";
-                        else Steps.Add($"signature {name} {version}");
-                        break;
                     case "publish":
                         var scope = step["scope"]!.GetValue<string>();
                         if (VisibleTo(tenant, id).Any(p => p.Version == version)) error = $"{name} {version} is already published.";
                         else
                         {
-                            PublishedApps.Add(new Published(name, id, version, scope == "Tenant" ? tenant : null));
+                            PublishedApps.Add(new Published(name, id, version, scope == "Tenant" ? tenant : null, AppFile.Read(parameters["path"]!.GetValue<string>()).PackageId));
                             Steps.Add($"publish {name} {version} {scope} {tenant} skip={step["skipVerification"]!.GetValue<bool>()}");
                         }
                         break;
