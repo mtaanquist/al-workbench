@@ -662,6 +662,15 @@ under its own heading — the ones that will be passed over and why.
   run is immediate (no booking in this version) and sends only the rows the preview put under
   Will change; the others are reported on their rows with the preview's reason, so a row
   with a booked update never has its version changed under the booking.
+- **Set AppSource cadence...**, in the bar's More menu beside Change the next version, sets how
+  often AppSource apps update on every selected environment. It needs the same grant as the
+  other bulk moves - that is why it lives here and not on the Environments list, where the
+  delivery-window action is gated on managing the solution instead. Picking a cadence previews
+  the rows grouped by the cadence they move from, with the ones already on it (and any without
+  the grant, or deleted) skipped and folded, and the count line says how many will change and
+  how many are skipped. The run writes each changing environment to the customer's tenant in
+  turn and reports how many were updated, skipped and refused. The service side is
+  `ProjectConnectionService.SetAppUpdateCadenceForManyAsync`; see `saas-delivery.md`, 5b.
 
 That dialog re-voices itself on the choice inside it, because immediate and booked carry
 opposite promises. Immediately keeps the danger button, the typed word, and "once it starts
@@ -1024,6 +1033,7 @@ Where it still differs, and why:
 | Sortable Customer and Next update headers; Previous / Next | Fixed order; count only | As on the Environments list. |
 | The table directly in the page | The table in a box that scrolls sideways, with the checkbox, state and Solution columns pinned | The page container clips rather than scrolls (#574), and nine columns do not fit a narrow window. |
 | The view select first in the bar, then the search | The search first, then the view select, then the commands | The order Solutions and Environments use, with the same search width and F3. Maintainer's decision, 2026-09-24 (#966). |
+| (no row) | **Set AppSource cadence...** in the bar's More menu | Ops asked to put many customers on one AppSource cadence without opening each environment. Same grant as the other bulk moves. No sheet draws the dialog. **Needs a design pass upstream.** |
 | Two fleet commands | A third, **Change the next version...**, beside them in the bar and in the row menu | #960. No sheet: it reuses the bar's disabled-until-ticked button and the other dialogs' preview (grouped rows under `upg-preview__head` headings, the count line, the typed word). **Needs a design pass upstream.** |
 | Nothing while an update runs | "Updating... started 6 minutes ago" under the next update while the page watches it, then "Updated to 29.2", or "Update failed" with a link to the environment's Operations tab | #982: the team sits on the page to see a started update finish. No sheet draws a live row; it reuses the row-result line (`upg-note`) and its spinner. **Needs a design pass upstream.** |
 | The solution name alone | The name, then the short name in the Solutions list's quieter tone | #966: customers are called by their abbreviation in daily speech; the search matches it too. |

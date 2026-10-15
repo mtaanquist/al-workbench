@@ -586,6 +586,12 @@ that names the environment and says what the click does there:
   updated. The one write that also touches a row of ours: the cached
   `app_source_apps_update_cadence` is refreshed from the value we just set, so the page
   agrees with the tenant without waiting for a Refresh.
+  Many environments at once: the Upgrades page's fleet view has **Set AppSource cadence...**
+  (see `environment-updates.md`, "The page"). `PreviewAppUpdateCadenceForManyAsync` groups the
+  selection from the mirrored column (will change, already set, no access, missing; a cadence
+  never read counts as a change) and `SetAppUpdateCadenceForManyAsync` writes each changing row
+  the same way as the single write. Unlike the environment page, the bulk write is gated on the
+  environment-updates grant, as the Upgrades page's other bulk moves are.
 - **Access with Microsoft 365 licences** — whether people holding only an M365 licence can
   sign in. It changes who can get into the environment, so the confirm says so in those
   words.

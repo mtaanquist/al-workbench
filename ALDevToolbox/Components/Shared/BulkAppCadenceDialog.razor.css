@@ -1,0 +1,85 @@
+/*
+    Scoped chrome for the bulk AppSource cadence dialog. The dialog, the select and
+    the field are the design system's; what is left is the grouped preview, drawn the
+    same way as the bulk delivery-window dialog's, and the result marks.
+*/
+
+.bac-body { display: grid; gap: var(--space-3); }
+.bac-lead { margin: 0; text-wrap: pretty; }
+.bac-count { margin: 0; font-size: var(--text-sm); color: var(--ink-2); }
+
+.bac-body ::deep .bac-select { width: 280px; max-width: 100%; }
+
+/* Ninety environments still can't push the buttons off the screen: the groups
+   scroll, not the dialog's controls. */
+.bac-groups { display: grid; gap: var(--space-3); max-height: 22rem; overflow-y: auto; }
+
+.bac-group__head {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-xs);
+    font-weight: var(--fw-semibold);
+    color: var(--ink-3);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.bac-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+
+/* The change sits under the name, never beside it: "With major and minor updates →
+   Only with major updates" is too long to share a line, and a column that is right-
+   aligned on some rows and wrapped left on others can't be scanned. */
+.bac-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-1) 0;
+    border-bottom: 1px solid var(--border);
+    font-size: var(--text-sm);
+}
+.bac-row:last-child { border-bottom: none; }
+
+.bac-row__who { font-weight: var(--fw-semibold); color: var(--ink); }
+.bac-row__what { color: var(--ink-3); }
+.bac-row--skip .bac-row__who,
+.bac-row--skip .bac-row__what { color: var(--ink-4); font-weight: var(--fw-regular); }
+
+.bac-row__what--done { color: var(--success-text); }
+.bac-row__what--failed { color: var(--danger-text); }
+.bac-row__what--done, .bac-row__what--failed { display: inline-flex; align-items: center; gap: var(--space-1); }
+
+/* ::deep: the pill is rendered by StatusPill, outside this file's scope. */
+.bac-row__who ::deep .bac-prod { margin-left: var(--space-2); font-weight: var(--fw-semibold); }
+
+/* Names only, several to a line: fifty environments are a few lines per group, not
+   fifty rows of two. */
+.bac-names {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+    gap: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+}
+.bac-name { color: var(--ink); }
+.bac-names--skip .bac-name { color: var(--ink-4); }
+.bac-name ::deep .bac-prod { margin-left: var(--space-1); }
+
+.bac-group__head--done { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--success-text); }
+
+/* The skipped groups start folded: a heading with its count, opened on demand. */
+.bac-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: var(--space-1); }
+.bac-fold > summary::-webkit-details-marker { display: none; }
+.bac-fold > summary::before {
+    content: "";
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid var(--ink-4);
+    border-bottom: 1.5px solid var(--ink-4);
+    transform: rotate(-45deg);
+    transition: transform var(--transition-fast);
+}
+.bac-fold[open] > summary::before { transform: rotate(45deg); }
+.bac-fold > summary:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.bac-fold__why { margin: 0 0 var(--space-1); font-size: var(--text-sm); color: var(--ink-3); }

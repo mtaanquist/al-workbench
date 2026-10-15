@@ -1,0 +1,424 @@
+@rendermode InteractiveServer
+@using ALDevToolbox.Domain.ValueObjects
+@using ALDevToolbox.Services.ObjectExplorer.Bc
+@inject ProjectConnectionService Connection
+@inject ILogger<BulkAppCadenceDialog> Log
+
+@*
+    "Set AppSource cadence..." for the rows ticked on the Upgrades page's fleet view. One cadence
+    for every selected environment; a preview grouped the way the bulk delivery window
+    groups its rows (BulkDeliveryWindowDialog), with the ones already on that cadence
+    skipped; then the per-row result. The grouping and the writes are
+    ProjectConnectionService's - this only renders them.
+
+    Unlike the delivery window, this writes to each customer's Business Central tenant,
+    so the lead says so, as the environment page's own confirm does.
+
+    Named user: somebody on the operations team putting every customer on the same
+    AppSource update cadence, who would otherwise open each environment's page in turn.
+*@
+
+@if (_open)
+{
+    <div class="modal-layer" role="dialog" aria-modal="true" aria-labelledby="bac-title"
+         tabindex="-1" @onkeydown="OnKeyDown" @ref="_root">
+        <div class="modal-backdrop" @onclick="Close" aria-hidden="true"></div>
+        <div class="confirm-dialog confirm-dialog--wide" @onclick:stopPropagation>
+            <div class="confirm-dialog__head">
+                <span class="confirm-dialog__icon" aria-hidden="true">
+                    <Icon Name="package" Width="17" Height="17" />
+                </span>
+                <h2 id="bac-title" class="confirm-dialog__title">
+                    @(_results is null ? $"Set the AppSource update cadence for {_ids.Count} selected environment{(_ids.Count == 1 ? "" : "s")}" : "AppSource update cadence set")
+                </h2>
+            </div>
+
+            @if (_results is { } results)
+            {
+                <div class="confirm-dialog__body bac-body">
+                    <p class="bac-lead">@ResultLine(results)</p>
+                    @ResultList(results)
+                </div>
+                <div class="confirm-dialog__actions">
+                    <button type="button" class="btn" @onclick="Close">Close</button>
+                </div>
+            }
+            else
+            {
+                <div class="confirm-dialog__body bac-body">
+                    <p class="bac-lead">
+                        How often apps the customer installed from AppSource are updated. This changes
+                        each customer's Business Central environment, so agree it with them first.
+                        Extensions you deploy yourself are not affected.
+                    </p>
+                    <div class="field">
+                        <label class="field__label" for="bac-cadence">Update cadence</label>
+                        <SelectBox Class="bac-select">
+                            <select id="bac-cadence" class="select" value="@(_cadence ?? string.Empty)"
+                                    disabled="@_saving" @onchange="OnCadenceChangedAsync">
+                                <option value="" disabled>Choose a cadence</option>
+                                @foreach (var option in BcAppUpdateCadence.All)
+                                {
+                                    <option value="@option">@BcAppUpdateCadence.Display(option)</option>
+                                }
+                            </select>
+                        </SelectBox>
+                    </div>
+
+                    @if (_preview is { } preview)
+                    {
+                        <p class="bac-count">@CountLine(preview)</p>
+                        @PreviewList(preview)
+                    }
+                    else if (_previewLoading)
+                    {
+                        <LoadingBlock Text="Checking the selected environments..." />
+                    }
+
+                    @if (_error is { } err)
+                    {
+                        <Alert Tone="AlertTone.Danger"><span>@err</span></Alert>
+                    }
+                </div>
+                <div class="confirm-dialog__actions">
+                    <button type="button" class="btn" @onclick="Close" disabled="@_saving">Cancel</button>
+                    <button type="button" class="btn @(_saving ? "btn--loading" : "")" @onclick="ApplyAsync" disabled="@(!CanApply)">
+                        <Icon Name="package" Width="14" Height="14" />
+                        <span>@ConfirmLabel</span>
+                    </button>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+
+    private bool _open;
+    private bool _focusPending;
+    private ElementReference _root;
+    private List<int> _ids = new();
+
+    /// <summary>The names the list already showed, for a row the service can no longer read at all.</summary>
+    private Dictionary<int, (string Project, string Environment)> _known = new();
+
+    private string? _cadence;
+    private List<AppCadenceChangePreviewRow>? _preview;
+    private bool _previewLoading;
+    private bool _previewAgain;
+    private bool _saving;
+    private string? _error;
+    private List<AppCadenceChangeResult>? _results;
+
+    /// <summary>
+    /// True while the dialog is reading or writing. The page and the dialog share one
+    /// database context, so the page holds back its own background re-read meanwhile.
+    /// </summary>
+    public bool IsWorking => _previewLoading || _saving;
+
+    /// <summary>True while the dialog is on screen. The Upgrades page holds its poll and its watch meanwhile.</summary>
+    public bool IsOpen => _open;
+
+    private int ChangeCount => _preview?.Count(p => p.Group == AppCadenceChangeGroup.WillChange) ?? 0;
+
+    private bool CanApply => _cadence is not null && !_saving && !_previewLoading && ChangeCount > 0;
+
+    private string ConfirmLabel =>
+        _saving ? "Setting..."
+        : _cadence is null || _preview is null ? "Set cadence"
+        : ChangeCount == 0 ? "Nothing to change"
+        : $"Set cadence on {Plural(ChangeCount)}";
+
+    private static string Plural(int n) => n == 1 ? "1 environment" : $"{n} environments";
+
+    /// <summary>Opens the dialog for the ticked rows. Nothing is chosen yet, so nothing is previewed.</summary>
+    public Task OpenAsync(IReadOnlyList<UpgradeFleetRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        _ids = rows.Select(r => r.EnvironmentId).Distinct().ToList();
+        _known = rows.GroupBy(r => r.EnvironmentId)
+            .ToDictionary(g => g.Key, g => (g.First().ProjectName, g.First().EnvironmentName));
+        _cadence = null;
+        _preview = null;
+        _previewLoading = false;
+        _previewAgain = false;
+        _saving = false;
+        _error = null;
+        _results = null;
+        _open = true;
+        _focusPending = true;
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focusPending && _open)
+        {
+            _focusPending = false;
+            try { await _root.FocusAsync(); }
+            catch { /* detached */ }
+        }
+    }
+
+    private async Task OnCadenceChangedAsync(ChangeEventArgs e)
+    {
+        _cadence = BcAppUpdateCadence.Normalize(e.Value?.ToString());
+        await RefreshPreviewAsync();
+    }
+
+    /// <summary>
+    /// Re-reads the preview for the cadence as it now stands. Two quick picks must not put
+    /// two queries on the one context at once, so a pick that lands while a read is
+    /// running is picked up by the same loop instead of starting its own.
+    /// </summary>
+    private async Task RefreshPreviewAsync()
+    {
+        if (_cadence is null)
+        {
+            _preview = null;
+            return;
+        }
+        if (_previewLoading)
+        {
+            _previewAgain = true;
+            return;
+        }
+
+        _previewLoading = true;
+        _error = null;
+        try
+        {
+            do
+            {
+                _previewAgain = false;
+                if (_cadence is not { } cadence)
+                {
+                    _preview = null;
+                    break;
+                }
+                _preview = await Connection.PreviewAppUpdateCadenceForManyAsync(_ids, cadence);
+            }
+            while (_previewAgain);
+        }
+        catch (PlanValidationException ex)
+        {
+            _preview = null;
+            _error = ex.Errors.Values.FirstOrDefault() ?? "That cadence can't be used.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Previewing an AppSource cadence for {Count} environment(s) failed.", _ids.Count);
+            _preview = null;
+            _error = "Couldn't check the selected environments. Try again in a moment.";
+        }
+        finally
+        {
+            _previewLoading = false;
+        }
+    }
+
+    private async Task ApplyAsync()
+    {
+        if (!CanApply || _cadence is not { } cadence) return;
+        _saving = true;
+        _error = null;
+        try
+        {
+            _results = await Connection.SetAppUpdateCadenceForManyAsync(_ids, cadence);
+        }
+        catch (PlanValidationException ex)
+        {
+            _error = ex.Errors.Values.FirstOrDefault() ?? "Couldn't set the cadence.";
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "Setting an AppSource cadence on {Count} environment(s) failed.", _ids.Count);
+            _error = "Couldn't finish. Some environments may already have the new cadence; open this again to see which still need it.";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private void Close()
+    {
+        // Not while a preview reads either: reopening would start a second read on the
+        // context the page shares while the first is still running.
+        if (_saving || _previewLoading) return;
+        _open = false;
+    }
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key is "Escape" or "Esc") Close();
+    }
+
+    // ── Wording ─────────────────────────────────────────────────────────
+
+    private string NewCadence => BcAppUpdateCadence.Display(_cadence);
+
+    /// <summary>"Production - Production" says nothing twice; the pill is only for a production environment named something else.</summary>
+    private static bool ShowProductionPill(AppCadenceChangePreviewRow row) =>
+        row.IsProduction && !string.Equals(row.EnvironmentName, "Production", StringComparison.OrdinalIgnoreCase);
+
+    private string Who(AppCadenceChangePreviewRow row)
+    {
+        var (project, environment) = _known.TryGetValue(row.EnvironmentId, out var k) ? k : (string.Empty, string.Empty);
+        return $"{row.ProjectName ?? project} - {row.EnvironmentName ?? environment}";
+    }
+
+    private static string GroupTitle(AppCadenceChangeGroup group) => group switch
+    {
+        AppCadenceChangeGroup.WillChange => "Will change",
+        AppCadenceChangeGroup.AlreadySet => "Skipped - already on this cadence",
+        AppCadenceChangeGroup.NoAccess => "Skipped - no access",
+        _ => "Skipped - missing or being deleted",
+    };
+
+    private string What(AppCadenceChangePreviewRow row) => row.Group switch
+    {
+        AppCadenceChangeGroup.WillChange => row.CurrentCadence is null
+            ? $"Current setting not known yet → {NewCadence}"
+            : $"{BcAppUpdateCadence.Display(row.CurrentCadence)} → {NewCadence}",
+        AppCadenceChangeGroup.AlreadySet => "Already on this cadence",
+        AppCadenceChangeGroup.NoAccess => "You can't change updates for this solution",
+        _ => "Not found in Business Central, or being deleted",
+    };
+
+    private static readonly AppCadenceChangeGroup[] GroupOrder =
+    [
+        AppCadenceChangeGroup.WillChange, AppCadenceChangeGroup.AlreadySet,
+        AppCadenceChangeGroup.NoAccess, AppCadenceChangeGroup.Missing,
+    ];
+
+    /// <summary>How much of the fleet this writes to, and how much of it is production.</summary>
+    private static string CountLine(List<AppCadenceChangePreviewRow> preview)
+    {
+        var changing = preview.Where(p => p.Group == AppCadenceChangeGroup.WillChange).ToList();
+        if (changing.Count == 0) return "Every selected environment already has this cadence or can't be changed.";
+        var production = changing.Count(p => p.IsProduction);
+        var lead = $"{Plural(changing.Count)} will change";
+        var line = production == 0 ? $"{lead}, none of them production."
+            : changing.Count == 1 ? $"{lead}, and it is production."
+            : production == changing.Count ? $"{lead}, all of them production."
+            : $"{lead}, {production} of them production.";
+        // The skipped groups are folded at the bottom of a list that can scroll, so their
+        // count is said up here too.
+        var skipped = preview.Count - changing.Count;
+        return skipped > 0 ? $"{line} {skipped} skipped." : line;
+    }
+
+    /// <summary>
+    /// The preview, built to stay readable at fifty or a hundred environments: the rows
+    /// that change are grouped by the cadence they move from, so the change is said once
+    /// per group rather than once per row, and each group lists only names, several to a
+    /// line. The skipped groups start folded - they are the part nobody needs to read
+    /// row by row - and say their reason once.
+    /// </summary>
+    private RenderFragment PreviewList(List<AppCadenceChangePreviewRow> preview) => @<div class="bac-groups">
+        @foreach (var from in preview.Where(p => p.Group == AppCadenceChangeGroup.WillChange)
+                     .GroupBy(p => p.CurrentCadence)
+                     .OrderByDescending(g => g.Count()))
+        {
+            var rows = from.ToList();
+            var title = from.Key is null
+                ? $"Current setting not known yet → {NewCadence}"
+                : $"{BcAppUpdateCadence.Display(from.Key)} → {NewCadence}";
+            <section aria-label="@title">
+                <p class="bac-group__head">@title (@rows.Count)</p>
+                @Names(rows.Select(r => (Who(r), ShowProductionPill(r))).ToList(), "bac-names")
+            </section>
+        }
+        @foreach (var group in GroupOrder.Where(g => g != AppCadenceChangeGroup.WillChange))
+        {
+            var rows = preview.Where(p => p.Group == group).ToList();
+            if (rows.Count == 0) continue;
+            <details class="bac-fold">
+                <summary class="bac-group__head">@GroupTitle(group) (@rows.Count)</summary>
+                @if (group != AppCadenceChangeGroup.AlreadySet)
+                {
+                    <p class="bac-fold__why">@What(rows[0])</p>
+                }
+                @Names(rows.Select(r => (Who(r), false)).ToList(), "bac-names bac-names--skip")
+            </details>
+        }
+    </div>;
+
+    /// <summary>Environment names, several to a line, with a pill on a production one named something else.</summary>
+    private RenderFragment Names(List<(string Name, bool Production)> names, string cssClass) => @<ul class="@cssClass">
+        @foreach (var (name, production) in names)
+        {
+            <li class="bac-name">
+                @name
+                @if (production)
+                {
+                    <StatusPill Tone="muted" Class="bac-prod"><span>Production</span></StatusPill>
+                }
+            </li>
+        }
+    </ul>;
+
+    private string ResultLine(List<AppCadenceChangeResult> results)
+    {
+        var changed = results.Count(r => r.Outcome == AppCadenceChangeOutcome.Changed);
+        var failed = results.Count(r => r.Outcome == AppCadenceChangeOutcome.Failed);
+        var skipped = results.Count(r => r.Outcome == AppCadenceChangeOutcome.Skipped);
+        var line = changed == 0
+            ? "No environments were changed."
+            : $"Updated {Plural(changed)} to \"{NewCadence}\".";
+        if (skipped > 0) line += $" {skipped} skipped.";
+        if (failed > 0) line += $" {failed} couldn't be changed.";
+        return line;
+    }
+
+    /// <summary>
+    /// After the run: what failed first, each with its reason, because that is the part
+    /// somebody has to act on; then the names that changed, and the skipped ones folded.
+    /// </summary>
+    private RenderFragment ResultList(List<AppCadenceChangeResult> results) => @<div class="bac-groups">
+        @{
+            var failed = results.Where(r => r.Outcome == AppCadenceChangeOutcome.Failed).ToList();
+            var changed = results.Where(r => r.Outcome == AppCadenceChangeOutcome.Changed).ToList();
+            var skipped = results.Where(r => r.Outcome == AppCadenceChangeOutcome.Skipped).ToList();
+        }
+        @if (failed.Count > 0)
+        {
+            <section aria-label="Couldn't be changed">
+                <p class="bac-group__head">Couldn't be changed (@failed.Count)</p>
+                <ul class="bac-list">
+                    @foreach (var result in failed)
+                    {
+                        <li class="bac-row">
+                            <span class="bac-row__who">@Who(result.Row)</span>
+                            <span class="bac-row__what bac-row__what--failed"><Icon Name="triangle-alert" Width="13" Height="13" /> @result.Error</span>
+                        </li>
+                    }
+                </ul>
+            </section>
+        }
+        @if (changed.Count > 0)
+        {
+            <section aria-label="Updated">
+                <p class="bac-group__head bac-group__head--done"><Icon Name="check" Width="13" Height="13" /> Now @NewCadence (@changed.Count)</p>
+                @Names(changed.Select(r => (Who(r.Row), false)).ToList(), "bac-names")
+            </section>
+        }
+        @if (skipped.Count > 0)
+        {
+            <details class="bac-fold">
+                <summary class="bac-group__head">Skipped (@skipped.Count)</summary>
+                <ul class="bac-list">
+                    @foreach (var result in skipped)
+                    {
+                        <li class="bac-row bac-row--skip">
+                            <span class="bac-row__who">@Who(result.Row)</span>
+                            <span class="bac-row__what">@What(result.Row)</span>
+                        </li>
+                    }
+                </ul>
+            </details>
+        }
+    </div>;
+}
