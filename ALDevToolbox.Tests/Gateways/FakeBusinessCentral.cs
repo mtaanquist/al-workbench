@@ -4,6 +4,7 @@ using ALWorkbench.Gateway.Contracts;
 using ALWorkbench.Gateway.Core.Policy;
 using ALWorkbench.Gateway.Core.PowerShell;
 using ALWorkbench.Gateway.Core.PublishInstall;
+using ALWorkbench.Gateway.Core.RestartGroup;
 
 namespace ALDevToolbox.Tests.Gateways;
 
@@ -106,12 +107,118 @@ internal sealed class FakeBusinessCentral : IProcessRunner
             if (ApplyTimesOut) return Task.FromResult(new ProcessOutcome(-1, "Publish-NAVApp, scope Tenant.\nSync-NAVApp, mode Add.\n", string.Empty, true));
             output = Apply(parameters);
         }
+        else if (script == ServiceControlScript.Control.Script)
+        {
+            Runs.Add(("service-control", parameters));
+            Programs.Add(spec.FileName);
+            return Task.FromResult(ServiceControl(parameters, marker));
+        }
+        else if (script == CustomerScripts.Run.Script)
+        {
+            Runs.Add(("script", parameters));
+            Programs.Add(spec.FileName);
+            return Task.FromResult(RunScript(spec, parameters, marker));
+        }
         else
         {
             throw new InvalidOperationException("The fake server does not know this operation.");
         }
-        var stdout = $"Business Central Administration Shell\n{marker}\n{Convert.ToBase64String(Encoding.UTF8.GetBytes(output.ToJsonString()))}\n{marker}\n";
-        return Task.FromResult(new ProcessOutcome(0, stdout, string.Empty, false));
+        return Task.FromResult(Answer(output, marker));
+    }
+
+    private static ProcessOutcome Answer(JsonArray output, string marker, string log = "Business Central Administration Shell\n") =>
+        new(0, $"{log}{marker}\n{Convert.ToBase64String(Encoding.UTF8.GetBytes(output.ToJsonString()))}\n{marker}\n", string.Empty, false);
+
+    // ---------------------------------------------------------------- service tiers (#1368)
+
+    /// <summary>A runner over this fake, as the Windows service builds one.</summary>
+    public PowerShellRunner Runner(IFileAccessCheck? access = null) =>
+        new(this, new PowerShellExecutables("powershell.exe", "pwsh.exe"), access ?? new FakeFileAccess());
+
+    /// <summary>The restart group's runner over this fake's service tiers, on <paramref name="machine"/>.</summary>
+    public RestartGroupRunner Restarts(string machine = "CRONUS-BC01") => new(Runner(), machine);
+
+    /// <summary>Customer IT's scripts, run by this fake, with their files checked by <paramref name="access"/>.</summary>
+    public CustomerScripts ScriptRunner(IFileAccessCheck? access = null)
+    {
+        var check = access ?? new FakeFileAccess();
+        return new CustomerScripts(Runner(check), check);
+    }
+
+    /// <summary>Everything that changed something, in order: app steps, service stops and starts, scripts.</summary>
+    public List<string> Timeline { get; } = [];
+
+    /// <summary>An app step, in <see cref="Steps"/> and the <see cref="Timeline"/>.</summary>
+    private void Record(string step)
+    {
+        Steps.Add(step);
+        Timeline.Add(step);
+    }
+
+    /// <summary>The program each service-control and script run was started with.</summary>
+    public List<string> Programs { get; } = [];
+
+    /// <summary>Windows service state per "MACHINE / instance"; a tier not listed is Running.</summary>
+    public Dictionary<string, string> ServiceStates { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Tiers ("MACHINE / instance") that never reach Stopped: the wait runs out at StopPending.</summary>
+    public HashSet<string> NeverStops { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Tiers that never report Running again: the wait runs out at StartPending.</summary>
+    public HashSet<string> NeverStarts { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Tiers whose service manager refuses the gateway, with PowerShell's error.</summary>
+    public Dictionary<string, string> ServiceErrors { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    private ProcessOutcome ServiceControl(JsonObject parameters, string marker)
+    {
+        var service = parameters["service"]!.GetValue<string>();
+        var machine = parameters["machine"]!.GetValue<string>();
+        var method = parameters["method"]!.GetValue<string>();
+        var action = parameters["action"]!.GetValue<string>();
+        var instance = service["MicrosoftDynamicsNavServer$".Length..];
+        var key = $"{(machine.Length == 0 ? "CRONUS-BC01" : machine)} / {instance}";
+        if (ServiceErrors.TryGetValue(key, out var error))
+        {
+            return new ProcessOutcome(1, string.Empty, error, false);
+        }
+        var before = ServiceStates.GetValueOrDefault(key, "Running");
+        var timedOut = false;
+        if (action == "stop")
+        {
+            timedOut = NeverStops.Contains(key);
+            ServiceStates[key] = timedOut ? "StopPending" : "Stopped";
+        }
+        else
+        {
+            timedOut = NeverStarts.Contains(key);
+            ServiceStates[key] = timedOut ? "StartPending" : "Running";
+        }
+        Timeline.Add($"{action} {key} {method}");
+        return Answer([new JsonObject { ["before"] = before, ["state"] = ServiceStates[key], ["timedOut"] = timedOut }], marker, string.Empty);
+    }
+
+    // ---------------------------------------------------------------- customer scripts (#1368)
+
+    /// <summary>What each script does: its exit code and the lines it writes. A script not listed exits 0 silently.</summary>
+    public Dictionary<string, (int ExitCode, string[] Lines)> Scripts { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Scripts that throw, with the error PowerShell reports.</summary>
+    public Dictionary<string, string> ScriptErrors { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Scripts that run past their time limit and are stopped.</summary>
+    public HashSet<string> ScriptsTimeOut { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    private ProcessOutcome RunScript(ProcessSpec spec, JsonObject parameters, string marker)
+    {
+        var path = parameters["path"]!.GetValue<string>();
+        Timeline.Add($"script {path}");
+        var (exitCode, lines) = Scripts.GetValueOrDefault(path, (0, []));
+        foreach (var line in lines) spec.OnOutputLine?.Invoke(line);
+        var log = string.Concat(lines.Select(l => l + "\n"));
+        if (ScriptsTimeOut.Contains(path)) return new ProcessOutcome(-1, log, string.Empty, true);
+        if (ScriptErrors.TryGetValue(path, out var error)) return new ProcessOutcome(1, log, error, false);
+        return Answer([new JsonObject { ["exitCode"] = exitCode }], marker, log);
     }
 
     private IEnumerable<Published> VisibleTo(string tenant, Guid id) =>
@@ -229,21 +336,21 @@ internal sealed class FakeBusinessCentral : IProcessRunner
                         else
                         {
                             PublishedApps.Add(new Published(name, id, version, scope == "Tenant" ? tenant : null, AppFile.Read(parameters["path"]!.GetValue<string>()).PackageId));
-                            Steps.Add($"publish {name} {version} {scope} {tenant} skip={step["skipVerification"]!.GetValue<bool>()}");
+                            Record($"publish {name} {version} {scope} {tenant} skip={step["skipVerification"]!.GetValue<bool>()}");
                         }
                         break;
                     case "sync":
-                        Steps.Add($"sync {name} {version} {tenant} {step["mode"]!.GetValue<string>()}");
+                        Record($"sync {name} {version} {tenant} {step["mode"]!.GetValue<string>()}");
                         break;
                     case "install":
                         Installed[(tenant, name)] = version;
                         Data[(tenant, name)] = version;
-                        Steps.Add($"install {name} {version} {tenant}");
+                        Record($"install {name} {version} {tenant}");
                         break;
                     case "upgrade":
                         Installed[(tenant, name)] = version;
                         Data[(tenant, name)] = version;
-                        Steps.Add($"upgrade {name} {version} {tenant}");
+                        Record($"upgrade {name} {version} {tenant}");
                         break;
                     case "unpublish":
                         stepVersion = step["version"]!.GetValue<string>();
@@ -253,7 +360,7 @@ internal sealed class FakeBusinessCentral : IProcessRunner
                         else
                         {
                             PublishedApps.RemoveAll(p => p.Name == name && p.Version == previous);
-                            Steps.Add($"unpublish {name} {previous}" + (tenantScoped && Current ? $" {tenant}" : string.Empty));
+                            Record($"unpublish {name} {previous}" + (tenantScoped && Current ? $" {tenant}" : string.Empty));
                         }
                         break;
                     default:

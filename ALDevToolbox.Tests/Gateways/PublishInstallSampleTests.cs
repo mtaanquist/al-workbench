@@ -189,9 +189,12 @@ public sealed class PublishInstallSampleTests : IDisposable
             }.ToParameters(),
             Files = [file],
         };
+        // The apps go through the real scripts under pwsh; restarting the tier afterwards
+        // needs Windows' service manager, so that part is the fake's.
+        var services = new FakeBusinessCentral();
         var verb = new PublishInstallVerb(new TextPolicy(toml),
             new PowerShellRunner(new SystemProcessRunner(), new PowerShellExecutables(pwsh, pwsh), new FakeFileAccess()),
-            new FixedTierLocator(tier), "CRONUS-BC01");
+            new FixedTierLocator(tier), "CRONUS-BC01", services.Restarts(), services.ScriptRunner());
         var progress = new List<string>();
 
         var outcome = await verb.ExecuteAsync(new GatewayCommandContext(command, new Dictionary<long, string> { [7] = path }, progress.Add), CancellationToken.None);

@@ -105,11 +105,26 @@ public sealed record GatewayPublishInstallResult
     public IReadOnlyList<GatewayPublishInstallAppResult> Apps { get; init; } = [];
 
     /// <summary>
-    /// Whether the restart group ran after the apps. False until the gateway restarts
-    /// tiers (#1368), and false whenever an app failed.
+    /// Whether every tier of the restart group was restarted after the apps. False
+    /// whenever an app failed, when nothing was installed, when a tier did not come back,
+    /// and from gateways older than #1368, which never restarted.
     /// </summary>
     [JsonPropertyName("restarted")]
     public bool Restarted { get; init; }
+
+    /// <summary>
+    /// The restart group, tier by tier (#1368). Null when it never got that far (an app
+    /// failed or was refused) and from older gateways. Additive, so the schema stays 1.
+    /// </summary>
+    [JsonPropertyName("restart")]
+    public GatewayRestartGroupResult? Restart { get; init; }
+
+    /// <summary>
+    /// The database's before and after scripts, in the order they ran or would have (#1368).
+    /// Empty when the policy names none, and from older gateways.
+    /// </summary>
+    [JsonPropertyName("scripts")]
+    public IReadOnlyList<GatewayScriptResult> Scripts { get; init; } = [];
 
     private static readonly JsonSerializerOptions Options = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 

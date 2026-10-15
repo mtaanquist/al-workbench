@@ -29,6 +29,7 @@ public sealed class PublishInstallVerbTests : IDisposable
     private readonly ScratchFolder _scratch = new();
     private readonly FakeBusinessCentral _server = new();
     private readonly List<string> _progress = [];
+    private readonly FakeFileAccess _files = new();
     private TextPolicy _policy = new(TestTier);
 
     public void Dispose() => _scratch.Dispose();
@@ -37,7 +38,9 @@ public sealed class PublishInstallVerbTests : IDisposable
         _policy,
         new PowerShellRunner(_server, new PowerShellExecutables("powershell.exe", "pwsh.exe"), new FakeFileAccess()),
         new FixedTierLocator(@"C:\Program Files\Microsoft Dynamics 365 Business Central\250\Service"),
-        machine);
+        machine,
+        _server.Restarts(machine),
+        _server.ScriptRunner(_files));
 
     /// <summary>An app for the command: its file on disk, and how the command declares it.</summary>
     private sealed record App(GatewayCommandFileMessage File, GatewayPublishInstallApp Declared, string Path);
@@ -111,10 +114,11 @@ public sealed class PublishInstallVerbTests : IDisposable
         app.Outcome.Should().Be(GatewayPublishInstallOutcomes.Installed);
         app.Id.Should().Be(AppFiles.CoffeeId.ToString("D"));
         StepWords(app).Should().Equal("verify:done", "publish:done", "sync:done", "install:done");
-        Result(outcome).Restarted.Should().BeFalse();
+        Result(outcome).Restarted.Should().BeTrue("a tier in no [[database]] restarts on its own after an install");
+        _server.Timeline.Should().EndWith(["stop CRONUS-BC01 / BC250 local", "start CRONUS-BC01 / BC250 local"]);
         _progress.Should().Contain("CRONUS Coffee 1.4.0.0: published to tenant 'default'.")
             .And.Contain("CRONUS Coffee 1.4.0.0: installed.")
-            .And.Contain(l => l.Contains("were not restarted", StringComparison.Ordinal));
+            .And.Contain("Restarted CRONUS-BC01 / BC250.");
     }
 
     [Fact]
@@ -446,7 +450,7 @@ public sealed class PublishInstallVerbTests : IDisposable
         var outcome = await RunAsync([MakeApp(signed: true)]);
 
         outcome.Succeeded.Should().BeTrue(outcome.FailureMessage);
-        _server.Runs.Select(r => r.Operation).Should().Equal("examine", "inspect", "apply");
+        _server.Runs.Select(r => r.Operation).Should().Equal("examine", "inspect", "apply", "service-control", "service-control");
         _server.Runs[0].Parameters["files"]![0]!["signature"]!.GetValue<bool>().Should().BeTrue();
         _server.Steps.Should().StartWith(["publish CRONUS Coffee 1.4.0.0 Tenant default skip=False"]);
         StepWords(Result(outcome).Apps.Single()).Should().StartWith(["verify:done", "signature:done", "publish:done"]);
@@ -757,8 +761,10 @@ public sealed class PublishInstallVerbTests : IDisposable
         StepWords(result[1]).Should().Equal("verify:done", "publish:done", "sync:failed");
         result[2].Message.Should().Be("Not started, because CRONUS Tea 1.4.0.0 failed.");
         Result(outcome).Restarted.Should().BeFalse();
+        Result(outcome).Restart.Should().BeNull("a failed install never restarts anything");
+        _server.Runs.Should().NotContain(r => r.Operation == "service-control");
         _progress.Should().Contain("CRONUS Cocoa 1.4.0.0: skipped, because CRONUS Tea 1.4.0.0 failed.")
-            .And.NotContain(l => l.Contains("were not restarted", StringComparison.Ordinal));
+            .And.NotContain(l => l.Contains("Restarting", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -794,7 +800,7 @@ public sealed class PublishInstallVerbTests : IDisposable
     {
         var verb = new PublishInstallVerb(_policy,
             new PowerShellRunner(new FailingProcesses(), new PowerShellExecutables("powershell.exe", "pwsh.exe"), new FakeFileAccess()),
-            new FixedTierLocator(@"C:\BC\Service"), "CRONUS-BC01");
+            new FixedTierLocator(@"C:\BC\Service"), "CRONUS-BC01", _server.Restarts(), _server.ScriptRunner(_files));
         var app = MakeApp();
         var command = new GatewayCommandMessage
         {

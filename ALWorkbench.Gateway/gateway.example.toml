@@ -127,15 +127,32 @@ allow_unsigned = true
 #   name            your name for the database, shown in AL Workbench
 #   publish_on      the tier that publishes apps and imports licences
 #   restart         the tiers restarted after an install or a licence import.
-#                   Leave it out to restart only the publishing tier.
-#   restart_mode    "stop-all-then-start-all" (the default) or "one-by-one"
+#                   Leave it out to restart only the publishing tier. Only the
+#                   tiers listed here are ever restarted, whatever AL Workbench
+#                   asks. List every tier that uses this database: a tier left out
+#                   keeps running the old version for everyone signed in to it.
+#   restart_mode    "stop-all-then-start-all" (the default) stops every tier, then
+#                   starts every tier, so old and new code never run side by side.
+#                   "one-by-one" restarts each tier before the next, so one is
+#                   always up, and stops at the first tier that does not come back.
+#                   Restarting signs everyone on these tiers out. The gateway waits
+#                   up to 5 minutes for a tier to stop and 10 for it to run again.
 #   shared_restart  true only if restarting these tiers may affect more than one
-#                   customer; otherwise such a restart is refused
+#                   customer; otherwise AL Workbench refuses a deployment whose
+#                   restart would reach tiers linked to more than one solution
 #   licence_target  where licences are imported: "NavDatabase", "Master",
 #                   "Default" or "Tenant". Leave it out to refuse licence imports.
-#   before, after   optional: the full path of your own PowerShell script to run
-#                   before a deployment and after the restart. A failing before
-#                   script stops the deployment before anything is published.
+#   before, after   optional: the full path of your own PowerShell script (.ps1,
+#                   on a local drive) to run before a deployment and after the
+#                   restart. The tier needs "scripts" in its allow list. They run
+#                   in Windows PowerShell 5.1 as the gateway's service account, for
+#                   up to 30 minutes, and what they print goes to the deployment's
+#                   log in AL Workbench. Exit with a code other than 0 (exit 1) or
+#                   throw an error to fail. A failing before script stops the
+#                   deployment before anything is published; a failing after script
+#                   marks the deployment failed with the apps installed. AL
+#                   Workbench cannot send or change these scripts. Only
+#                   administrators may be able to change them or their folder.
 #
 # A tier may belong to one database only.
 
@@ -163,7 +180,8 @@ licence_target = "NavDatabase"
 #   method  "service-manager" stops and starts the tier through Windows' remote
 #           service control (needs remote procedure call and file sharing open
 #           inside your network); "powershell-remoting" uses PowerShell remoting
-#           (WinRM).
+#           (WinRM). Either way the gateway's service account needs the right to
+#           stop and start the Business Central service on that computer.
 
 [[machine]]
 name = "CRONUS-BC02"

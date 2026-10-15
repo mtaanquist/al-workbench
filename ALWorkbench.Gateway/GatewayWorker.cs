@@ -5,6 +5,7 @@ using ALWorkbench.Gateway.Core.Inventory;
 using ALWorkbench.Gateway.Core.Policy;
 using ALWorkbench.Gateway.Core.PowerShell;
 using ALWorkbench.Gateway.Core.PublishInstall;
+using ALWorkbench.Gateway.Core.RestartGroup;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -63,11 +64,15 @@ internal sealed class GatewayWorker : BackgroundService
         var clock = SystemGatewayClock.Instance;
         using var http = GatewayHttp.Create();
         var policy = new GatewayPolicySource(PolicyOptions(), new WindowsFileAccessCheck(), clock, TimeZoneInfo.Local, _logger);
-        var powerShell = new PowerShellRunner(new SystemProcessRunner(new JobObjectContainment()), PowerShellExecutables.Windows(), new WindowsFileAccessCheck());
+        var fileAccess = new WindowsFileAccessCheck();
+        var powerShell = new PowerShellRunner(new SystemProcessRunner(new JobObjectContainment()), PowerShellExecutables.Windows(), fileAccess);
         var locator = new RegistryServiceTierLocator();
+        var restarts = new RestartGroupRunner(powerShell, Environment.MachineName);
+        var scripts = new CustomerScripts(powerShell, fileAccess);
         var verbs = new VerbExecutors(new Dictionary<ALWorkbench.Gateway.Contracts.GatewayVerb, ICommandExecutor>
         {
-            [ALWorkbench.Gateway.Contracts.GatewayVerb.PublishInstall] = new PublishInstallVerb(policy, powerShell, locator, Environment.MachineName),
+            [ALWorkbench.Gateway.Contracts.GatewayVerb.PublishInstall] = new PublishInstallVerb(policy, powerShell, locator, Environment.MachineName, restarts, scripts),
+            [ALWorkbench.Gateway.Contracts.GatewayVerb.RestartGroup] = new RestartGroupVerb(policy, restarts),
         });
         var runner = new GatewayRunner(
             http,

@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using ALWorkbench.Gateway.Contracts;
 using ALWorkbench.Gateway.Core.Policy;
 using ALWorkbench.Gateway.Core.PowerShell;
+using ALWorkbench.Gateway.Core.RestartGroup;
 
 namespace ALWorkbench.Gateway.Core.PublishInstall;
 
@@ -31,6 +32,12 @@ namespace ALWorkbench.Gateway.Core.PublishInstall;
 /// skipped. The result (<see cref="GatewayPublishInstallResult"/>) lists every app either
 /// way.</para>
 ///
+/// <para><b>Around the apps (#1368).</b> Customer IT's before script runs once every file
+/// is checked and before anything is published; if it fails, nothing is. Only after every
+/// app went through does the database's restart group run (<see cref="RestartGroupRunner"/>),
+/// then the after script. A failed install never restarts anything, and an install that
+/// changed nothing restarts nothing either.</para>
+///
 /// <para><b>Signatures.</b> Where the tier does not allow unsigned apps, or the file is
 /// signed, the gateway asks Windows (<c>Get-AuthenticodeSignature</c>, which reads an
 /// <c>.app</c>'s signature through the component Business Central installs for it) and
@@ -46,13 +53,18 @@ public sealed class PublishInstallVerb : ICommandExecutor
     private readonly PowerShellRunner _runner;
     private readonly IServiceTierLocator _locator;
     private readonly string _machineName;
+    private readonly RestartGroupRunner _restarts;
+    private readonly CustomerScripts _scripts;
 
-    public PublishInstallVerb(IGatewayPolicy policy, PowerShellRunner runner, IServiceTierLocator locator, string machineName)
+    public PublishInstallVerb(IGatewayPolicy policy, PowerShellRunner runner, IServiceTierLocator locator, string machineName,
+        RestartGroupRunner restarts, CustomerScripts scripts)
     {
         _policy = policy;
         _runner = runner;
         _locator = locator;
         _machineName = machineName;
+        _restarts = restarts;
+        _scripts = scripts;
     }
 
     public async Task<GatewayCommandOutcome> ExecuteAsync(GatewayCommandContext context, CancellationToken ct)
@@ -128,6 +140,26 @@ public sealed class PublishInstallVerb : ICommandExecutor
             }
         }
 
+        // Customer IT's before script, once every file is checked and before anything is
+        // published (#1368). A failure stops the deployment here.
+        var database = _policy.InForce.DatabaseOf(tier.Tier);
+        var scripts = new List<GatewayScriptResult>();
+        if (database?.Before is { } before)
+        {
+            var ran = await _scripts.RunAsync(GatewayScriptStages.Before, before, context.Progress, ct).ConfigureAwait(false);
+            scripts.Add(ran);
+            if (ran.Outcome != GatewayScriptOutcomes.Succeeded)
+            {
+                foreach (var report in reports)
+                {
+                    report.Outcome = GatewayPublishInstallOutcomes.Skipped;
+                    report.Message = "Not started, because the before script failed.";
+                }
+                if (database.After is { } notAfter) scripts.Add(CustomerScripts.NotRun(GatewayScriptStages.After, notAfter, "Not run, because the before script failed."));
+                return Finish(reports, $"The before script {before} failed: {ran.Message} No app was published.", scripts);
+            }
+        }
+
         // App by app, in the order the command lists them.
         for (var i = 0; i < reports.Count; i++)
         {
@@ -142,23 +174,77 @@ public sealed class PublishInstallVerb : ICommandExecutor
                 context.Progress($"{later.Title}: skipped, because {report.Title} failed.");
             }
             var after = reports.Count > i + 1 ? " The apps after it were not installed." : string.Empty;
-            return Finish(reports, failure + after);
+            if (database?.After is { } skippedAfter) scripts.Add(CustomerScripts.NotRun(GatewayScriptStages.After, skippedAfter, "Not run, because an app did not install."));
+            return Finish(reports, failure + after, scripts);
         }
 
-        var restarted = await RunRestartGroupAsync(context, ct).ConfigureAwait(false);
-        return GatewayCommandOutcome.Success(Result(reports, restarted));
+        return await RestartGroupAsync(reports, tier, database, scripts, context.Progress, ct).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Runs after every app succeeded, and only then: the restart group of the database
-    /// (#1368), and the after script customer IT names for it. Not built yet, so the
-    /// tiers are not restarted, and the log says so.
+    /// Runs after every app went through, and only then (#1368): the restart group of the
+    /// database, then the after script customer IT names for it. When nothing was installed
+    /// (every app was already on its version) nothing is restarted, since that would sign
+    /// everyone out for nothing. The settings are read again first: the apps may have taken
+    /// hours, and a tier that no longer allows <c>restart</c> is not restarted. A tier that
+    /// does not come back, or an after script that fails, fails the command with every app
+    /// still reported as installed.
     /// </summary>
-    private static Task<bool> RunRestartGroupAsync(GatewayCommandContext context, CancellationToken ct)
+    private async Task<GatewayCommandOutcome> RestartGroupAsync(List<AppReport> reports, EffectiveInstance tier, PolicyDatabase? database,
+        List<GatewayScriptResult> scripts, Action<string> progress, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();
-        context.Progress("All apps are installed. The service tiers were not restarted: this version of the gateway does not restart them yet.");
-        return Task.FromResult(false);
+        const string NotRestarted = "Not run, because the service tiers were not restarted.";
+        var changed = reports.Any(r => r.Outcome is GatewayPublishInstallOutcomes.Installed or GatewayPublishInstallOutcomes.Upgraded);
+        if (!changed)
+        {
+            var nothing = RestartGroupRunner.NotRun(_policy.InForce, tier.Tier, "Every app was already installed, so nothing changed and the service tiers were not restarted.");
+            progress(nothing.Message!);
+            if (database?.After is { } notAfter) scripts.Add(CustomerScripts.NotRun(GatewayScriptStages.After, notAfter, NotRestarted));
+            return GatewayCommandOutcome.Success(Result(reports, nothing, scripts));
+        }
+
+        progress("All apps are installed. Restarting the service tiers, so nobody keeps running the previous version.");
+        var snapshot = _policy.Refresh();
+        var policy = _policy.InForce;
+        string? refusal = null;
+        if (snapshot.Report.State != GatewayPolicyStates.Valid)
+        {
+            refusal = "the customer's gateway settings changed while the apps were installed and now only allow reading, so the service tiers were not restarted.";
+        }
+        else if (RestartGroupRunner.GroupOf(policy, tier.Tier).Tiers.FirstOrDefault(t => policy.Find(t)?.Allows(PolicyPermission.Restart) != true) is { } notAllowed)
+        {
+            refusal = $"the customer's gateway settings no longer allow 'restart' on {notAllowed}, so the service tiers were not restarted.";
+        }
+        if (refusal is not null)
+        {
+            progress("FAILED Not restarted: " + refusal);
+            var notRun = RestartGroupRunner.NotRun(policy, tier.Tier, char.ToUpperInvariant(refusal[0]) + refusal[1..]);
+            if (database?.After is { } notAfter) scripts.Add(CustomerScripts.NotRun(GatewayScriptStages.After, notAfter, NotRestarted));
+            return GatewayCommandOutcome.Failure($"All apps were installed, but {refusal}", Result(reports, notRun, scripts));
+        }
+
+        var restart = await _restarts.RunAsync(policy, tier.Tier, progress, ct).ConfigureAwait(false);
+        if (!restart.Restarted)
+        {
+            var failed = restart.Tiers.FirstOrDefault(t => t.Outcome == GatewayRestartTierOutcomes.Failed);
+            if (database?.After is { } notAfter) scripts.Add(CustomerScripts.NotRun(GatewayScriptStages.After, notAfter, "Not run, because the service tiers were not all restarted."));
+            return GatewayCommandOutcome.Failure(
+                $"All apps were installed, but the service tiers were not all restarted: {failed?.Message ?? restart.Message ?? "the gateway did not say why."}",
+                Result(reports, restart, scripts));
+        }
+
+        if (database?.After is { } after)
+        {
+            var ran = await _scripts.RunAsync(GatewayScriptStages.After, after, progress, ct).ConfigureAwait(false);
+            scripts.Add(ran);
+            if (ran.Outcome != GatewayScriptOutcomes.Succeeded)
+            {
+                return GatewayCommandOutcome.Failure(
+                    $"All apps were installed and the service tiers restarted, but the after script {after} failed: {ran.Message}",
+                    Result(reports, restart, scripts));
+            }
+        }
+        return GatewayCommandOutcome.Success(Result(reports, restart, scripts));
     }
 
     private static GatewayCommandOutcome RefuseApp(List<AppReport> reports, AppReport report, string step, string refusal, Action<string> progress)
@@ -419,14 +505,17 @@ public sealed class PublishInstallVerb : ICommandExecutor
 
     private static GatewayCommandOutcome Refuse(string message) => GatewayCommandOutcome.Failure(message);
 
-    private static GatewayCommandOutcome Finish(List<AppReport> reports, string message) =>
-        GatewayCommandOutcome.Failure(message, Result(reports, restarted: false));
+    private static GatewayCommandOutcome Finish(List<AppReport> reports, string message, IReadOnlyList<GatewayScriptResult>? scripts = null) =>
+        GatewayCommandOutcome.Failure(message, Result(reports, restart: null, scripts ?? []));
 
-    private static JsonObject Result(IEnumerable<AppReport> reports, bool restarted) => new GatewayPublishInstallResult
-    {
-        Apps = reports.Select(r => r.ToResult()).ToList(),
-        Restarted = restarted,
-    }.ToJson();
+    private static JsonObject Result(IEnumerable<AppReport> reports, GatewayRestartGroupResult? restart, IReadOnlyList<GatewayScriptResult> scripts) =>
+        new GatewayPublishInstallResult
+        {
+            Apps = reports.Select(r => r.ToResult()).ToList(),
+            Restarted = restart?.Restarted == true,
+            Restart = restart,
+            Scripts = scripts,
+        }.ToJson();
 
     /// <summary>One app's progress through the command, for its log lines and its entry in the result.</summary>
     private sealed class AppReport(AppToPublish declared)
