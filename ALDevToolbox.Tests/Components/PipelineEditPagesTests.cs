@@ -415,6 +415,116 @@ public sealed class PipelineEditPagesTests : IDisposable
 
     // --- rendering and seeding -----------------------------------------------
 
+    // ── On-premises targets (#1367) ──────────────────────────────────────────
+
+    /// <summary>Turns the seeded sandbox into a linked on-premises test tier, on a gateway whose settings may allow Force sync.</summary>
+    private async Task LinkOnPremisesAsync(Seed seed, bool allowForceSync, bool online = true)
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var policy = new ALWorkbench.Gateway.Contracts.GatewayPolicyReport
+        {
+            State = "valid",
+            Instances =
+            [
+                new ALWorkbench.Gateway.Contracts.GatewayPolicyInstance
+                {
+                    Machine = "CRONUS-BC01", Name = "BC250", Environment = "test", Allow = ["inventory", "publish"], AllowForceSync = allowForceSync,
+                },
+            ],
+        };
+        var instance = new GatewayInstance
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Gateway = new Gateway
+            {
+                OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS hosting", MachineName = "CRONUS-GW01",
+                KeyFingerprint = Guid.NewGuid().ToString("N"), State = GatewayState.Approved,
+                RegisteredAt = now, KeyRegisteredAt = now, LastSeenAt = online ? now : now.AddHours(-3),
+                EffectivePolicyJson = System.Text.Json.JsonSerializer.Serialize(policy),
+            },
+            Machine = "CRONUS-BC01", Name = "BC250", State = "Running",
+            FirstReportedAt = now, ReportedAt = now, ReadAt = now,
+        };
+        ctx.GatewayInstances.Add(instance);
+        await ctx.SaveChangesAsync();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.TestEnvId).ExecuteUpdateAsync(s => s
+            .SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises)
+            .SetProperty(e => e.TenantId, "default")
+            .SetProperty(e => e.GatewayInstanceId, instance.Id));
+    }
+
+    [Fact]
+    public async Task An_on_premises_target_offers_only_now_and_the_delivery_window_and_hides_force_sync_where_not_allowed()
+    {
+        var seed = await SeedAsync();
+        await LinkOnPremisesAsync(seed, allowForceSync: false);
+        var rpId = await SeedDeploymentPipelineAsync(seed);
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
+        cut.WaitForAssertion(() => cut.Find("#rpe-unpublish"));
+
+        cut.FindAll("#rpe-schedule option").Select(o => o.GetAttribute("value"))
+            .Should().Equal(BcDeploymentSchedule.Immediate, BcDeploymentSchedule.OurDeliveryWindow);
+        cut.FindAll("#rpe-sync option").Select(o => o.GetAttribute("value")).Should().Equal(BcSyncMode.Add);
+        cut.Find("#rpe-sync-onprem").TextContent.Should().Contain("Force sync isn't offered");
+        cut.Find("#rpe-unpublish").HasAttribute("checked").Should().BeTrue("removing the previous version is the default");
+        cut.Find("#rpe-onprem-hint").TextContent.Should().Contain("CRONUS hosting").And.Contain("CRONUS-BC01 / BC250");
+        cut.FindAll("#rpe-onprem-warning").Should().BeEmpty("the gateway is online and its settings allow publishing");
+    }
+
+    [Fact]
+    public async Task An_on_premises_target_offers_force_sync_where_the_gateway_settings_allow_it_and_saves_remove_previous_version()
+    {
+        var seed = await SeedAsync();
+        await LinkOnPremisesAsync(seed, allowForceSync: true);
+        var rpId = await SeedDeploymentPipelineAsync(seed);
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
+        cut.WaitForAssertion(() => cut.Find("#rpe-unpublish"));
+        cut.FindAll("#rpe-sync option").Select(o => o.GetAttribute("value")).Should().Equal(BcSyncMode.Add, BcSyncMode.ForceSync);
+
+        cut.Find("#rpe-unpublish").Change(false);
+        cut.Find(".page-head .btn--primary").Click();
+
+        cut.WaitForAssertion(() => Nav.ToBaseRelativePath(Nav.Uri).Should().Be($"pipelines/deployments/{rpId}"));
+        await using var read = _db.NewContext();
+        (await read.OeReleasePipelines.AsNoTracking().SingleAsync(r => r.Id == rpId)).UnpublishPrevious.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task An_on_premises_target_whose_gateway_is_offline_says_so_but_can_still_be_saved()
+    {
+        var seed = await SeedAsync();
+        await LinkOnPremisesAsync(seed, allowForceSync: false, online: false);
+        var rpId = await SeedDeploymentPipelineAsync(seed);
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
+
+        cut.WaitForAssertion(() => cut.Find("#rpe-onprem-warning").TextContent.Should()
+            .Be("The gateway CRONUS hosting is offline. You can save this pipeline, but deployments fail until the gateway is back."));
+        cut.Find(".page-head .btn--primary").HasAttribute("disabled").Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_deferred_schedule_saved_earlier_must_be_chosen_again_for_an_on_premises_target()
+    {
+        var seed = await SeedAsync();
+        await LinkOnPremisesAsync(seed, allowForceSync: false);
+        var rpId = await SeedDeploymentPipelineAsync(seed);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeReleasePipelines.Where(r => r.Id == rpId)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeploymentSchedule, BcDeploymentSchedule.NextMinorUpdate));
+        }
+
+        var cut = _ctx.Render<ReleasePipelineEdit>(p => p.Add(x => x.Id, rpId));
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Not available for an on-premises service tier - choose one"));
+        cut.Markup.Should().Contain("Choose when installs run to continue.");
+        cut.Find(".page-head .btn--primary").HasAttribute("disabled").Should().BeTrue();
+    }
+
     private IRenderedComponent<PipelineEdit> RenderNewPipeline(int projectId)
     {
         Nav.NavigateTo($"/pipelines/new?solution={projectId}");

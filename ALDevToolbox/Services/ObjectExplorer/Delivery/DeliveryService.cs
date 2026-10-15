@@ -2750,6 +2750,7 @@ public sealed class DeliveryService
                 BuildBranch = d.ProjectBuild != null ? d.ProjectBuild.Branch : null,
                 BuildReleaseTag = d.ProjectBuild != null ? d.ProjectBuild.GithubReleaseTag : null,
                 DiagnosticsLog = d.DiagnosticsLog,
+                TiersRestarted = d.TiersRestarted,
             })
             .ToListAsync(ct);
 
@@ -2786,7 +2787,7 @@ public sealed class DeliveryService
             .OrderBy(r => r.Ordering)
             .Select(r => new { r.Ordering, r.Status, r.AppId, r.AppName, r.AppVersion })
             .ToListAsync(ct);
-        var failed = results.FirstOrDefault(r => r.Status == ProjectDeliveryResultStatus.Failed);
+        var failed = results.FirstOrDefault(r => r.Status is ProjectDeliveryResultStatus.Failed or ProjectDeliveryResultStatus.Refused);
         if (failed is null) return null;
 
         // Results line up with the build's artifacts by position: both were taken from
@@ -3128,6 +3129,12 @@ public sealed record DeliveryHistoryRow(
 
     /// <summary>For a prepared deployment a newer build replaced: that build's id. Null otherwise.</summary>
     public int? ReplacedByBuildId { get; init; }
+
+    /// <summary>
+    /// On-premises: whether the gateway restarted the service tiers after installing (#1367).
+    /// False until the gateway restarts tiers (#1368); null online, where there are none to restart.
+    /// </summary>
+    public bool? TiersRestarted { get; init; }
 }
 
 /// <summary>One app's outcome within a delivery, for the history's per-app breakdown.</summary>

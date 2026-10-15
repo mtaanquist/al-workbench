@@ -128,6 +128,8 @@ public sealed class ReleasePipelineService
                 BuildPipelineDeleted = r.BuildPipeline != null && r.BuildPipeline.DeletedAt != null,
                 Disabled = r.DisabledAt != null,
                 BuildPipelineDisabled = r.BuildPipeline != null && r.BuildPipeline.DisabledAt != null,
+                TargetIsOnPremises = r.ProjectEnvironment.Kind == OeEnvironmentKind.OnPremises,
+                UnpublishPrevious = r.UnpublishPrevious,
             })
             .ToListAsync(ct);
     }
@@ -172,7 +174,7 @@ public sealed class ReleasePipelineService
                     At = d.FinishedAt ?? d.UpdatedAt,
                     d.DeploymentSchedule,
                     FailedApp = d.Results
-                        .Where(r => r.Status == ProjectDeliveryResultStatus.Failed)
+                        .Where(r => r.Status == ProjectDeliveryResultStatus.Failed || r.Status == ProjectDeliveryResultStatus.Refused)
                         .OrderBy(r => r.Ordering)
                         .Select(r => r.AppName)
                         .FirstOrDefault(),
@@ -1058,6 +1060,12 @@ public sealed record ReleasePipelineRow(
     /// <summary>True when a person typed the name because the generated one was taken; the editor shows it for editing.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public bool NameIsCustom { get; init; }
+
+    /// <summary>The target is a customer's on-premises service tier, deployed to through its gateway (#1367).</summary>
+    public bool TargetIsOnPremises { get; init; }
+
+    /// <summary>On-premises: each app's previous version is removed from the service tier once it is upgraded.</summary>
+    public bool UnpublishPrevious { get; init; } = true;
 
     // ── The delivery summary: filled by ListReleasePipelineOverviewAsync only ──
     //

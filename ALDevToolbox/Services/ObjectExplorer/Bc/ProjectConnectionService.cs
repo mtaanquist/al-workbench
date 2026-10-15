@@ -3108,7 +3108,7 @@ public sealed record ProjectEnvironmentRow(
     string? Version,
     /// <summary>Deep link into the environment's web client, for "Open in Business Central".</summary>
     string? WebClientLoginUrl,
-    /// <summary>A linked on-premises service tier rather than an online environment. Deployment pipelines cannot target one until #1367.</summary>
+    /// <summary>A linked on-premises service tier rather than an online environment, deployed to through its gateway (#1367).</summary>
     bool IsOnPremises = false);
 
 /// <summary>

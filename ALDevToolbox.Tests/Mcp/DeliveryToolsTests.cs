@@ -37,7 +37,11 @@ public sealed class DeliveryToolsTests : IDisposable
 
     private DeliveryTools NewTools(AppDbContext ctx, HttpMessageHandler? api = null) =>
         new(new DeliveryService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext),
-                new DeliveryTargetFactory(new ThrowingTokenSource(), new ThrowingAppManagementClient(), new ThrowingAdminClient()), _queue,
+                new DeliveryTargetFactory(new ThrowingTokenSource(), new ThrowingAppManagementClient(), new ThrowingAdminClient(),
+                    new GatewayTargetServices(ctx,
+                        new ALDevToolbox.Services.Gateways.GatewayCommandService(ctx, _db.OrgContext, new ALDevToolbox.Services.Gateways.GatewayCommandSignal(),
+                            TimeProvider.System, NullLogger<ALDevToolbox.Services.Gateways.GatewayCommandService>.Instance),
+                        TimeProvider.System, NullLogger<GatewayDeliveryTarget>.Instance)), _queue,
                 new ALDevToolbox.Services.ObjectExplorer.Bc.BcPanelCache(TimeProvider.System),
                 _db.NewToolEnablement(ctx),
                 TimeProvider.System,
@@ -162,6 +166,71 @@ public sealed class DeliveryToolsTests : IDisposable
         delivery.Status.Should().Be(ProjectDeliveryStatus.Scheduled);
         delivery.ScheduledFor.Should().BeBefore(DateTime.UtcNow.AddMinutes(1), "an allowed agent deployment runs now, unconfirmed");
         delivery.DiagnosticsLog.Should().Contain("Started by an AI assistant").And.Contain("without the confirmation step");
+    }
+
+    [Fact]
+    public async Task Publish_build_refuses_an_on_premises_production_tier_even_when_the_organisation_allows_production()
+    {
+        // The organisation's "agents may deploy to production" covers Business Central
+        // online only; on-premises production starts as a person's decision (#1367).
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Production");
+            await LinkOnPremisesAsync(ctx, seed);
+            await AllowAgentsToDeployToProductionAsync(ctx);
+        }
+
+        await using var read = _db.NewContext();
+        var act = () => NewTools(read).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        (await act.Should().ThrowAsync<McpException>()).Which.Message
+            .Should().Contain(DeliveryService.OnPremisesProductionRefusedForAgents("Production"));
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectDeliveries.AsNoTracking().AnyAsync(d => d.ReleasePipelineId == seed.ReleasePipelineId))
+            .Should().BeFalse("nothing is queued when the agent is refused");
+    }
+
+    [Fact]
+    public async Task Publish_build_deploys_to_an_on_premises_test_tier_and_list_deployments_shows_it()
+    {
+        Seed seed;
+        await using (var ctx = _db.NewContext())
+        {
+            seed = await SeedAsync(ctx, new[] { "CRONUS Core" }, envType: "Sandbox");
+            await LinkOnPremisesAsync(ctx, seed);
+        }
+
+        await using var read = _db.NewContext();
+        var result = await NewTools(read).PublishBuildAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        await using var list = _db.NewContext();
+        var rows = await NewTools(list).ListDeliveriesAsync(seed.ReleasePipelineId);
+        rows.Should().ContainSingle(r => r.Id == result.DeploymentId && r.Status == ProjectDeliveryStatus.Scheduled);
+    }
+
+    /// <summary>Turns the seeded environment into a linked on-premises tier on an approved, online gateway.</summary>
+    private static async Task LinkOnPremisesAsync(AppDbContext ctx, Seed seed)
+    {
+        var now = DateTime.UtcNow;
+        var gateway = new ALDevToolbox.Domain.Entities.Gateway
+        {
+            OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS hosting", MachineName = "CRONUS-GW01",
+            KeyFingerprint = Guid.NewGuid().ToString("N"),
+            State = ALDevToolbox.Domain.Entities.GatewayState.Approved, RegisteredAt = now, KeyRegisteredAt = now, LastSeenAt = now,
+        };
+        var instance = new ALDevToolbox.Domain.Entities.GatewayInstance
+        {
+            OrganizationId = TestDb.DefaultOrgId, Gateway = gateway, Machine = "CRONUS-BC01", Name = "BC250", State = "Running",
+            FirstReportedAt = now, ReportedAt = now, ReadAt = now,
+        };
+        ctx.GatewayInstances.Add(instance);
+        await ctx.SaveChangesAsync();
+        var envId = await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId).Select(r => r.ProjectEnvironmentId).SingleAsync();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == envId).ExecuteUpdateAsync(u => u
+            .SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises)
+            .SetProperty(e => e.TenantId, "default")
+            .SetProperty(e => e.GatewayInstanceId, instance.Id));
     }
 
     private static async Task AllowAgentsToDeployToProductionAsync(AppDbContext ctx)

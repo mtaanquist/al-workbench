@@ -312,7 +312,7 @@ public sealed class PipelinesDashboardService
                     kind, at, actor, d.TriggeredByName, d.ProjectId, d.ProjectName,
                     BuildId: d.BuildId, ReleasePipelineId: d.ReleasePipelineId, EnvironmentName: d.EnvironmentName,
                     CurrentApp: live?.CurrentApp ?? 0, AppCount: live?.AppCount ?? 0,
-                    FailedAppName: d.Apps.FirstOrDefault(a => a.Status == ProjectDeliveryResultStatus.Failed)?.AppName,
+                    FailedAppName: d.Apps.FirstOrDefault(a => a.Status == ProjectDeliveryResultStatus.Failed || a.Status == ProjectDeliveryResultStatus.Refused)?.AppName,
                     Detail: d.FailureMessage));
             }
         }

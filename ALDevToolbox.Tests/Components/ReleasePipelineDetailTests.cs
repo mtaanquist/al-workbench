@@ -97,6 +97,104 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
     }
 
     [Fact]
+    public void An_app_the_gateway_refused_reads_as_refused_not_failed()
+    {
+        var look = ReleasePipelineDetail.AppLook(ProjectDeliveryResultStatus.Refused);
+
+        look.Word.Should().Be("Refused");
+        look.Icon.Should().Be("shield-alert", "told apart from a failure by its glyph as well as its word");
+    }
+
+    /// <summary>Makes the seeded environment a linked on-premises test tier, as the page reads it.</summary>
+    private async Task MakeOnPremisesAsync(Seed seed)
+    {
+        await using var ctx = _db.NewContext();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises).SetProperty(e => e.TenantId, "default"));
+    }
+
+    [Fact]
+    public async Task An_on_premises_refusal_names_the_refused_app_and_says_nothing_was_changed_for_it()
+    {
+        var seed = await SeedAsync();
+        await MakeOnPremisesAsync(seed);
+        var start = DateTime.UtcNow.AddHours(-1);
+        const string refusal = "The gateway refused CRONUS Base 2.3.0.118: Not allowed by the customer's gateway settings: unsigned apps may not be published on CRONUS-BC01 / BC250.";
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Failed, start, d =>
+        {
+            d.StartedAt = start.AddSeconds(5);
+            d.FinishedAt = start.AddSeconds(30);
+            d.FailureMessage = refusal;
+            d.TiersRestarted = false;
+            d.DiagnosticsLog = "02:00:05  Publishing 3 app(s) to Test through the gateway.\n02:00:29  REFUSED CRONUS Base 2.3.0.118: Not allowed.\n02:00:30  Delivery failed.\n";
+        },
+        Result(0, "CRONUS Base", ProjectDeliveryResultStatus.Refused, "2.2.0.104", start.AddSeconds(5), start.AddSeconds(29), "Not allowed by the customer's gateway settings: unsigned apps may not be published on CRONUS-BC01 / BC250."),
+        Result(1, "CRONUS Warehouse", ProjectDeliveryResultStatus.Skipped, "2.2.0.104", null, null),
+        Result(2, "CRONUS Reports", ProjectDeliveryResultStatus.Skipped, "2.2.0.104", null, null));
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".rp-summary__sentence").TextContent.Should().Contain(": the gateway refused CRONUS Base.");
+            cut.Find(".rp-what__text").TextContent.Should().Be(refusal);
+            cut.FindAll(".rp-app__end .rp-strong").Select(e => e.TextContent).Should().Equal("Refused", "Skipped", "Skipped");
+            cut.FindAll(".rp-app__msg").Select(e => e.TextContent).Should()
+                .Contain("Nothing was changed for this app.").And.Contain("Skipped after the gateway refused CRONUS Base.");
+            cut.FindAll(".rp-log__line--err").Should().HaveCount(2, "the refusal is tinted like a failure");
+            cut.FindAll(".rp-next").Should().BeEmpty("no Force sync is offered for a refusal");
+            cut.FindAll(".rp-summary__label").Select(e => e.TextContent).Should().Contain(l => l.Contains("From the gateway"));
+        });
+    }
+
+    [Fact]
+    public async Task A_running_on_premises_deployment_shows_the_gateways_latest_lines()
+    {
+        var seed = await SeedAsync();
+        await MakeOnPremisesAsync(seed);
+        var start = DateTime.UtcNow.AddMinutes(-2);
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Installing, start, d =>
+        {
+            d.ClaimedAt = start;
+            d.StartedAt = start.AddSeconds(1);
+            d.InstallStartedAt = start.AddSeconds(2);
+            d.DiagnosticsLog = "02:00:01  Publishing 3 app(s) to Test through the gateway.\n02:00:02  Queued for the gateway as command 41.\n"
+                + "02:00:09  Gateway: Publishing CRONUS Base 2.3.0.118 on CRONUS-BC01 / BC250.\n02:00:15  Gateway: Syncing CRONUS Base (Add).\n";
+        },
+        Result(0, "CRONUS Base", ProjectDeliveryResultStatus.Installing, "2.2.0.104", start.AddSeconds(2), null),
+        Result(1, "CRONUS Warehouse", ProjectDeliveryResultStatus.Pending, "2.2.0.104", null, null),
+        Result(2, "CRONUS Reports", ProjectDeliveryResultStatus.Pending, "2.2.0.104", null, null));
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            var lines = cut.FindAll(".rp-gateway .rp-log__line").Select(e => e.TextContent).ToList();
+            lines.Should().Equal("02:00:09 Publishing CRONUS Base 2.3.0.118 on CRONUS-BC01 / BC250.", "02:00:15 Syncing CRONUS Base (Add).");
+        });
+    }
+
+    [Fact]
+    public async Task A_deployed_on_premises_deployment_says_the_service_tiers_were_not_restarted()
+    {
+        var seed = await SeedAsync();
+        await MakeOnPremisesAsync(seed);
+        var start = DateTime.UtcNow.AddHours(-1);
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Deployed, start, d =>
+        {
+            d.StartedAt = start.AddSeconds(1);
+            d.FinishedAt = start.AddMinutes(3);
+            d.TiersRestarted = false;
+        },
+        Result(0, "CRONUS Base", ProjectDeliveryResultStatus.Completed, "2.2.0.104", start.AddSeconds(2), start.AddMinutes(1)));
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+            cut.Find(".rp-summary__sentence").TextContent.Should().EndWith("The service tiers were not restarted."));
+    }
+
+    [Fact]
     public async Task A_failed_release_opens_with_the_whole_failure_its_apps_in_words_and_the_log()
     {
         var seed = await SeedAsync();
