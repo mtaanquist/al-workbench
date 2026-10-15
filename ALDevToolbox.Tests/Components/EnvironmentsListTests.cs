@@ -777,7 +777,7 @@ public sealed class EnvironmentsListTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             cut.Find("#bac-title").TextContent.Trim().Should().Be("Set the AppSource update cadence for 2 selected environments");
-            cut.FindAll(".bac-row").Should().BeEmpty("nothing is previewed until a cadence is chosen");
+            cut.FindAll(".bac-name").Should().BeEmpty("nothing is previewed until a cadence is chosen");
             cut.FindAll(".confirm-dialog__actions button").Last().HasAttribute("disabled").Should().BeTrue();
         });
 
@@ -785,12 +785,15 @@ public sealed class EnvironmentsListTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             var heads = cut.FindAll(".bac-group__head").Select(h => h.TextContent.Trim()).ToList();
-            heads.Should().Equal(new[] { "Will change (1)", "Skipped - already on this cadence (1)" }, cut.Find(".confirm-dialog").OuterHtml);
-            var rows = cut.FindAll(".bac-row");
-            rows[0].TextContent.Should().Contain("CRONUS Denmark - Production")
-                .And.Contain("Microsoft's default → Only with major updates");
-            rows[1].TextContent.Trim().Should().Be("CRONUS Denmark - Test");
-            cut.Find(".bac-count").TextContent.Should().Be("1 environment will change, and it is production.");
+            heads.Should().Equal(new[]
+            {
+                "Microsoft's default → Only with major updates (1)",
+                "Skipped - already on this cadence (1)",
+            }, cut.Find(".confirm-dialog").OuterHtml);
+            var names = cut.FindAll(".bac-name").Select(n => n.TextContent.Trim()).ToList();
+            names.Should().Equal("CRONUS Denmark - Production", "CRONUS Denmark - Test");
+            cut.Find(".bac-fold").HasAttribute("open").Should().BeFalse("the skipped ones start folded");
+            cut.Find(".bac-count").TextContent.Should().Be("1 environment will change, and it is production. 1 skipped.");
             cut.FindAll(".confirm-dialog__actions button").Last().TextContent.Trim()
                 .Should().Be("Set cadence on 1 environment");
         });

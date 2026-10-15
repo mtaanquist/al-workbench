@@ -49,3 +49,37 @@
 
 /* ::deep: the pill is rendered by StatusPill, outside this file's scope. */
 .bac-row__who ::deep .bac-prod { margin-left: var(--space-2); font-weight: var(--fw-semibold); }
+
+/* Names only, several to a line: fifty environments are a few lines per group, not
+   fifty rows of two. */
+.bac-names {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+    gap: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+}
+.bac-name { color: var(--ink); }
+.bac-names--skip .bac-name { color: var(--ink-4); }
+.bac-name ::deep .bac-prod { margin-left: var(--space-1); }
+
+.bac-group__head--done { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--success-text); }
+
+/* The skipped groups start folded: a heading with its count, opened on demand. */
+.bac-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: var(--space-1); }
+.bac-fold > summary::-webkit-details-marker { display: none; }
+.bac-fold > summary::before {
+    content: "";
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid var(--ink-4);
+    border-bottom: 1.5px solid var(--ink-4);
+    transform: rotate(-45deg);
+    transition: transform var(--transition-fast);
+}
+.bac-fold[open] > summary::before { transform: rotate(45deg); }
+.bac-fold > summary:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.bac-fold__why { margin: 0 0 var(--space-1); font-size: var(--text-sm); color: var(--ink-3); }

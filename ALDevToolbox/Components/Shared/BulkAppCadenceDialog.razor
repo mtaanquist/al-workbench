@@ -300,42 +300,65 @@
         if (changing.Count == 0) return "Every selected environment already has this cadence or can't be changed.";
         var production = changing.Count(p => p.IsProduction);
         var lead = $"{Plural(changing.Count)} will change";
-        return production == 0 ? $"{lead}, none of them production."
+        var line = production == 0 ? $"{lead}, none of them production."
             : changing.Count == 1 ? $"{lead}, and it is production."
             : production == changing.Count ? $"{lead}, all of them production."
             : $"{lead}, {production} of them production.";
+        // The skipped groups are folded at the bottom of a list that can scroll, so their
+        // count is said up here too.
+        var skipped = preview.Count - changing.Count;
+        return skipped > 0 ? $"{line} {skipped} skipped." : line;
     }
 
+    /// <summary>
+    /// The preview, built to stay readable at fifty or a hundred environments: the rows
+    /// that change are grouped by the cadence they move from, so the change is said once
+    /// per group rather than once per row, and each group lists only names, several to a
+    /// line. The skipped groups start folded - they are the part nobody needs to read
+    /// row by row - and say their reason once.
+    /// </summary>
     private RenderFragment PreviewList(List<AppCadenceChangePreviewRow> preview) => @<div class="bac-groups">
-        @foreach (var group in GroupOrder)
+        @foreach (var from in preview.Where(p => p.Group == AppCadenceChangeGroup.WillChange)
+                     .GroupBy(p => p.CurrentCadence)
+                     .OrderByDescending(g => g.Count()))
+        {
+            var rows = from.ToList();
+            var title = from.Key is null
+                ? $"Current setting not known yet → {NewCadence}"
+                : $"{BcAppUpdateCadence.Display(from.Key)} → {NewCadence}";
+            <section aria-label="@title">
+                <p class="bac-group__head">@title (@rows.Count)</p>
+                @Names(rows.Select(r => (Who(r), ShowProductionPill(r))).ToList(), "bac-names")
+            </section>
+        }
+        @foreach (var group in GroupOrder.Where(g => g != AppCadenceChangeGroup.WillChange))
         {
             var rows = preview.Where(p => p.Group == group).ToList();
             if (rows.Count == 0) continue;
-            var skipped = group != AppCadenceChangeGroup.WillChange;
-            <section aria-label="@GroupTitle(group)">
-                <p class="bac-group__head">@GroupTitle(group) (@rows.Count)</p>
-                <ul class="bac-list">
-                    @foreach (var row in rows)
-                    {
-                        var rowState = skipped ? "bac-row bac-row--skip" : "bac-row";
-                        <li class="@rowState">
-                            <span class="bac-row__who">
-                                @Who(row)
-                                @if (ShowProductionPill(row))
-                                {
-                                    <StatusPill Tone="muted" Class="bac-prod"><span>Production</span></StatusPill>
-                                }
-                            </span>
-                            @if (group != AppCadenceChangeGroup.AlreadySet)
-                            {
-                                <span class="bac-row__what">@What(row)</span>
-                            }
-                        </li>
-                    }
-                </ul>
-            </section>
+            <details class="bac-fold">
+                <summary class="bac-group__head">@GroupTitle(group) (@rows.Count)</summary>
+                @if (group != AppCadenceChangeGroup.AlreadySet)
+                {
+                    <p class="bac-fold__why">@What(rows[0])</p>
+                }
+                @Names(rows.Select(r => (Who(r), false)).ToList(), "bac-names bac-names--skip")
+            </details>
         }
     </div>;
+
+    /// <summary>Environment names, several to a line, with a pill on a production one named something else.</summary>
+    private RenderFragment Names(List<(string Name, bool Production)> names, string cssClass) => @<ul class="@cssClass">
+        @foreach (var (name, production) in names)
+        {
+            <li class="bac-name">
+                @name
+                @if (production)
+                {
+                    <StatusPill Tone="muted" Class="bac-prod"><span>Production</span></StatusPill>
+                }
+            </li>
+        }
+    </ul>;
 
     private string ResultLine(List<AppCadenceChangeResult> results)
     {
@@ -350,27 +373,52 @@
         return line;
     }
 
+    /// <summary>
+    /// After the run: what failed first, each with its reason, because that is the part
+    /// somebody has to act on; then the names that changed, and the skipped ones folded.
+    /// </summary>
     private RenderFragment ResultList(List<AppCadenceChangeResult> results) => @<div class="bac-groups">
-        <ul class="bac-list">
-            @foreach (var result in results)
-            {
-                var rowState = result.Outcome == AppCadenceChangeOutcome.Skipped ? "bac-row bac-row--skip" : "bac-row";
-                <li class="@rowState">
-                    <span class="bac-row__who">@Who(result.Row)</span>
-                    @if (result.Outcome == AppCadenceChangeOutcome.Changed)
+        @{
+            var failed = results.Where(r => r.Outcome == AppCadenceChangeOutcome.Failed).ToList();
+            var changed = results.Where(r => r.Outcome == AppCadenceChangeOutcome.Changed).ToList();
+            var skipped = results.Where(r => r.Outcome == AppCadenceChangeOutcome.Skipped).ToList();
+        }
+        @if (failed.Count > 0)
+        {
+            <section aria-label="Couldn't be changed">
+                <p class="bac-group__head">Couldn't be changed (@failed.Count)</p>
+                <ul class="bac-list">
+                    @foreach (var result in failed)
                     {
-                        <span class="bac-row__what bac-row__what--done"><Icon Name="check" Width="13" Height="13" /> Now @NewCadence</span>
+                        <li class="bac-row">
+                            <span class="bac-row__who">@Who(result.Row)</span>
+                            <span class="bac-row__what bac-row__what--failed"><Icon Name="triangle-alert" Width="13" Height="13" /> @result.Error</span>
+                        </li>
                     }
-                    else if (result.Outcome == AppCadenceChangeOutcome.Failed)
+                </ul>
+            </section>
+        }
+        @if (changed.Count > 0)
+        {
+            <section aria-label="Updated">
+                <p class="bac-group__head bac-group__head--done"><Icon Name="check" Width="13" Height="13" /> Now @NewCadence (@changed.Count)</p>
+                @Names(changed.Select(r => (Who(r.Row), false)).ToList(), "bac-names")
+            </section>
+        }
+        @if (skipped.Count > 0)
+        {
+            <details class="bac-fold">
+                <summary class="bac-group__head">Skipped (@skipped.Count)</summary>
+                <ul class="bac-list">
+                    @foreach (var result in skipped)
                     {
-                        <span class="bac-row__what bac-row__what--failed"><Icon Name="triangle-alert" Width="13" Height="13" /> @result.Error</span>
+                        <li class="bac-row bac-row--skip">
+                            <span class="bac-row__who">@Who(result.Row)</span>
+                            <span class="bac-row__what">@What(result.Row)</span>
+                        </li>
                     }
-                    else
-                    {
-                        <span class="bac-row__what">Skipped - @What(result.Row)</span>
-                    }
-                </li>
-            }
-        </ul>
+                </ul>
+            </details>
+        }
     </div>;
 }
