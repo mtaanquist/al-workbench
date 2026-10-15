@@ -566,24 +566,26 @@
                             }
 
                             @* The build's objects against the customer's licence on each linked
-                               on-premises Production tier (#1370). A warning, never a failure:
-                               the files are fine, but the deployment to that tier will refuse
-                               them until the licence covers them. "Not checked" is said out
-                               loud rather than read as a pass. *@
+                               on-premises tier that is Production or that a deployment pipeline
+                               targets (#1370). A warning, never a failure: the files are fine, but
+                               AL Workbench will not deploy them to that tier until the licence covers
+                               them. "Not checked" is said out loud, with what to do, rather than read
+                               as a pass. *@
                             @if (_latest.Status == "ready" && _latest.LicenceChecks is { Count: > 0 } licenceChecks)
                             {
                                 @foreach (var check in licenceChecks)
                                 {
+                                    var them = check.OutsideCount == 1 ? "it" : "them";
                                     @if (check.IsOutside)
                                     {
                                         <Alert Tone="AlertTone.Warn" Block="true" Class="pb-licence">
                                             <div class="pb-licence__body">
                                                 <p>
                                                     <b>@(check.OutsideCount == 1
-                                                        ? $"1 object is outside the customer's licence on {check.EnvironmentName}."
-                                                        : $"{check.OutsideCount} objects are outside the customer's licence on {check.EnvironmentName}.")</b>
-                                                    Deploying this build to @check.EnvironmentName will be refused until the licence covers @(check.OutsideCount == 1 ? "it" : "them").
-                                                    Ask the customer to add @(check.OutsideCount == 1 ? "it" : "them") to their licence, or give @(check.OutsideCount == 1 ? "it an id" : "them ids") the licence covers.
+                                                        ? $"Can't be deployed to {check.EnvironmentName}: 1 object is outside the customer's licence."
+                                                        : $"Can't be deployed to {check.EnvironmentName}: {check.OutsideCount} objects are outside the customer's licence.")</b>
+                                                    AL Workbench will not deploy this build to @check.EnvironmentName until the licence covers @them.
+                                                    Ask the customer to add @them to their licence, or renumber @them to object IDs the licence covers.
                                                 </p>
                                                 <ul class="pb-licence__list">
                                                     @foreach (var finding in check.Findings.Take(LicenceFindingsShown))
@@ -595,16 +597,24 @@
                                                         <li class="pb-licence__more">and @(check.OutsideCount - Math.Min(check.Findings.Count, LicenceFindingsShown)) more</li>
                                                     }
                                                 </ul>
+                                                <p class="pb-licence__when">@LicenceWhen(check)</p>
                                             </div>
                                         </Alert>
                                     }
                                     else if (check.IsNotChecked)
                                     {
-                                        <p class="pb-note"><b>Licence not checked</b> for @check.EnvironmentName: @check.Reason</p>
+                                        <p class="pb-note">
+                                            <b>Licence not checked for @check.EnvironmentName.</b> @check.Reason
+                                            <a href="@($"/environments/{check.EnvironmentId}")">Open @check.EnvironmentName</a>
+                                            <span class="pb-licence__when">@LicenceWhen(check)</span>
+                                        </p>
                                     }
                                     else
                                     {
-                                        <p class="pb-note">Every object in this build is inside the customer's licence on @(check.EnvironmentName).</p>
+                                        <p class="pb-note">
+                                            Every object in this build is inside the customer's licence on @(check.EnvironmentName).
+                                            <span class="pb-licence__when">@LicenceWhen(check)</span>
+                                        </p>
                                     }
                                 }
                             }
@@ -964,6 +974,12 @@
 @code {
     /// <summary>Objects outside the licence listed on the build before "and N more".</summary>
     private const int LicenceFindingsShown = 20;
+
+    /// <summary>When the build was compared with the licence, and when that licence was read.</summary>
+    private string LicenceWhen(ALDevToolbox.Services.Gateways.LicenceCheck check) =>
+        check.LicenceReadAt is { } read
+            ? $"Checked {Zone.Format(check.CheckedAt, "d MMM HH:mm")}, against the licence read {Zone.Format(read, "d MMM HH:mm")}."
+            : $"Checked {Zone.Format(check.CheckedAt, "d MMM HH:mm")}.";
 
     [Parameter] public int PipelineId { get; set; }
 

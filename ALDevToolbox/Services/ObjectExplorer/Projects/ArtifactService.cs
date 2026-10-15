@@ -1041,15 +1041,26 @@ public sealed record BuildRow(
     /// <summary>When a worker picked the build up; <see cref="StartedAt"/> is when it was queued. Null for older builds.</summary>
     DateTime? BuildingStartedAt = null,
     /// <summary>
-    /// The build's objects against the licence of each linked on-premises Production
-    /// environment (#1370), as the build recorded them once it was ready. Null for an online
-    /// Solution, one with no linked Production tier, and builds made before the check.
+    /// The build's objects against the licence of each linked on-premises environment it
+    /// was checked for (#1370), as the build recorded them once it was ready, objects and
+    /// all, for the pages. Null for an online Solution, one with no such tier, and builds
+    /// made before the check. Not serialised: a list of builds carries
+    /// <see cref="LicenceCheckRows"/> instead.
     /// </summary>
+    [property: JsonIgnore]
     IReadOnlyList<LicenceCheck>? LicenceChecks = null)
 {
     /// <summary>The branch to show: the one built, its default branch's name, or a plain "(default branch)".</summary>
     [JsonIgnore]
     public string ShownBranch => Branch ?? DefaultBranch ?? "(default branch)";
+
+    /// <summary>
+    /// <see cref="LicenceChecks"/> as a list of builds carries them: the outcome, how many
+    /// objects are outside and the summary per environment, without the objects, which
+    /// one build's detail (<c>get_solution_build</c>) carries.
+    /// </summary>
+    [JsonPropertyName("licenceChecks")]
+    public IReadOnlyList<LicenceCheckRow>? LicenceCheckRows => LicenceChecks?.Select(LicenceCheckRow.From).ToList();
 
     /// <summary>True for a build against a preview version: check-only, never deployable or published.</summary>
     public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);

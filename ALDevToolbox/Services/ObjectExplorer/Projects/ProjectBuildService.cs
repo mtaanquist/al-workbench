@@ -1070,8 +1070,9 @@ public sealed class ProjectBuildService
 
     /// <summary>
     /// Compares the objects the build behind <paramref name="releaseId"/> produced with the
-    /// licence of each linked on-premises Production environment of its Solution, and keeps
-    /// the answer on the build (#1370). Called once the build is ready and its objects are
+    /// licence of each linked on-premises environment of its Solution that is Production or
+    /// that a deployment pipeline of the build's pipeline targets, and keeps the answer on
+    /// the build (#1370). Called once the build is ready and its objects are
     /// indexed. Best-effort: an object outside the licence is a warning on the build, and a
     /// check that cannot run must never fail a build that compiled, so anything thrown is
     /// logged and the build stays as it is. See <c>.design/on-prem-gateway.md</c>, "Licensed

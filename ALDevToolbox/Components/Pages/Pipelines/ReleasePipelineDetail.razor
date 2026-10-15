@@ -221,6 +221,23 @@
             </Alert>
         }
 
+        @* The newest build is outside the customer's licence on this tier (#1370). A
+           deployment the pipeline would have made or prepared on its own was refused
+           before anything was sent; this is where that is said, not only in a log. *@
+        @if (_newestBuildLicence is { } refused && !Disabled)
+        {
+            <Alert Tone="AlertTone.Warn">
+                <span>
+                    <b>@(refused.OutsideCount == 1
+                        ? $"Build #{_newestBuildId} can't be deployed to {refused.EnvironmentName}: 1 object is outside the customer's licence."
+                        : $"Build #{_newestBuildId} can't be deployed to {refused.EnvironmentName}: {refused.OutsideCount} objects are outside the customer's licence.")</b>
+                    AL Workbench will not deploy it here until the licence covers @(refused.OutsideCount == 1 ? "it" : "them"),
+                    so no deployment of it was made or prepared.
+                    <a href="@SourceHref">See which objects on the build</a>.
+                </span>
+            </Alert>
+        }
+
         @if (_historyLoading)
         {
             <div class="card">
@@ -907,6 +924,13 @@
     /// <summary>The target is a linked on-premises service tier, deployed to through its gateway (#1367).</summary>
     private bool _isOnPremises;
 
+    /// <summary>
+    /// The newest deployable build's licence check for this pipeline's tier when it found
+    /// objects outside the licence (#1370); null otherwise.
+    /// </summary>
+    private ALDevToolbox.Services.Gateways.LicenceCheck? _newestBuildLicence;
+    private int? _newestBuildId;
+
     /// <summary>The linked tier and its gateway as last reported; null for Business Central online.</summary>
     private OnPremisesTargetInfo? _onPrem;
     private string EnvHref => $"/environments/{_rp?.ProjectEnvironmentId}";
@@ -979,6 +1003,8 @@
 
         _fromReleases = _rp.ArtifactSource == ReleaseArtifactSource.GithubRelease;
         _successfulBuilds = new();
+        _newestBuildLicence = null;
+        _newestBuildId = null;
         _releaseOptions = new();
         _releasesError = null;
 
@@ -1017,6 +1043,12 @@
             // to be installed before the consultant confirms (#714).
             var appsByBuild = await Artifacts.ListBuildAppsAsync(buildPipelineId, builds.Select(b => b.Id).ToList());
             _successfulBuilds = ReleaseBuildDialog.OptionsFrom(builds, appsByBuild, Zone);
+            // What the newest build's licence check said about this pipeline's tier (#1370).
+            var newest = builds.OrderByDescending(b => b.Id).FirstOrDefault();
+            _newestBuildId = newest?.Id;
+            _newestBuildLicence = _isOnPremises
+                ? newest?.LicenceChecks?.FirstOrDefault(c => c.EnvironmentId == _rp.ProjectEnvironmentId && c.IsOutside)
+                : null;
         }
 
         _loading = false;

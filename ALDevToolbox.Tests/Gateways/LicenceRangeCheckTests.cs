@@ -45,7 +45,7 @@ public sealed class LicenceRangeCheckTests
         outside[0].ObjectType.Should().Be("Table");
         outside[0].ObjectId.Should().Be(50120);
         outside[0].ObjectName.Should().Be("CRONUS Rating");
-        outside[0].Message.Should().Be("Table 50120 \"CRONUS Rating\" is outside the licence (50000-50099)");
+        outside[0].Message.Should().Be("Table 50120 \"CRONUS Rating\" is not in the licensed table range 50000-50099");
     }
 
     [Fact]
@@ -60,7 +60,7 @@ public sealed class LicenceRangeCheckTests
         checkedCount.Should().Be(6);
         outside.Select(f => (f.ObjectType, f.ObjectId)).Should().Equal(
             ("Table", 50120), ("Report", 50060), ("XMLport", 50010));
-        outside.Single(f => f.ObjectType == "XMLport").Message.Should().Be("XMLport 50010 \"xmlport 50010\" is outside the licence (50000-50009)");
+        outside.Single(f => f.ObjectType == "XMLport").Message.Should().Be("XMLport 50010 \"xmlport 50010\" is not in the licensed XMLport range 50000-50009");
     }
 
     [Fact]
@@ -70,7 +70,7 @@ public sealed class LicenceRangeCheckTests
 
         var (outside, _) = LicenceRangeCheck.Evaluate([O("query", 50000, "Open Orders")], ranges, Bc25);
 
-        outside.Single().Message.Should().Be("Query 50000 \"Open Orders\" is outside the licence (it licenses no query ids)");
+        outside.Single().Message.Should().Be("Query 50000 \"Open Orders\" is not in the licence, which has no query ranges");
     }
 
     [Fact]
@@ -97,7 +97,7 @@ public sealed class LicenceRangeCheckTests
         checkedCount.Should().Be(2, "both enums, and not the interface");
         outside.Should().ContainSingle();
         outside[0].ObjectType.Should().Be("Enum");
-        outside[0].Message.Should().Be("Enum 50130 \"Rating Source\" needs table 50130 in the licence (BC 14)");
+        outside[0].Message.Should().Be("Enum 50130 \"Rating Source\" is not in the licensed table range 50000-50099, which BC 14 checks enums against");
     }
 
     [Fact]
@@ -137,7 +137,7 @@ public sealed class LicenceRangeCheckTests
 
         var (outside, _) = LicenceRangeCheck.Evaluate([O("table", 59999, "Far")], ranges, Bc25);
 
-        outside.Single().Message.Should().Be("Table 59999 \"Far\" is outside the licence (50000-50009, 50100-50109, 50200-50209, 50300-50309 and 2 more)");
+        outside.Single().Message.Should().Be("Table 59999 \"Far\" is not in the licensed table ranges 50000-50009, 50100-50109, 50200-50209, 50300-50309 and 2 more");
     }
 
     [Theory]
@@ -152,6 +152,10 @@ public sealed class LicenceRangeCheckTests
     [InlineData("None", false)]
     [InlineData("None None None None None", false)]
     [InlineData("- - - - -", false)]
+    [InlineData("Execute: No", false)]
+    [InlineData("Read: No, Execute: No", false)]
+    [InlineData("Read: No, Execute: Yes", true)]
+    [InlineData("X: -", false)]
     public void A_range_counts_when_it_grants_any_permission_or_says_none_at_all(string? permissions, bool counts)
     {
         LicenceRangeCheck.Grants(permissions).Should().Be(counts);
@@ -165,7 +169,7 @@ public sealed class LicenceRangeCheckTests
         var (outside, _) = LicenceRangeCheck.Evaluate([O("table", 50010), O("table", 50110)], ranges, Bc25);
 
         outside.Select(f => f.ObjectId).Should().Equal(50010);
-        outside[0].Message.Should().EndWith("(50100-50199)", "only the ranges that count are named");
+        outside[0].Message.Should().EndWith("range 50100-50199", "only the ranges that count are named");
     }
 
     [Fact]
@@ -187,17 +191,64 @@ public sealed class LicenceRangeCheckTests
     }
 
     [Fact]
-    public void The_refusal_names_every_object_and_what_to_do()
+    public void A_bc14_enum_with_no_table_ranges_says_so()
+    {
+        var (outside, _) = LicenceRangeCheck.Evaluate([O("enum", 50130, "Source")], [new("Page", 50000, 50099, null)], Bc14);
+
+        outside.Single().Message.Should().Be(
+            "Enum 50130 \"Source\" is not in the licence, which has no table ranges for BC 14 to check enums against");
+    }
+
+    [Fact]
+    public void The_refusal_names_the_objects_and_what_to_do()
     {
         var check = new LicenceCheck(7, "Production", LicenceCheckOutcome.OutsideLicence, null,
             [
-                new("Table", 50120, "Rating", "Table 50120 \"Rating\" is outside the licence (50000-50099)"),
-                new("Enum", 50130, "Source", "Enum 50130 \"Source\" needs table 50130 in the licence (BC 14)"),
-            ], 2, 10, "14.0.1.0", DateTime.UtcNow);
+                new("Table", 50120, "Rating", "Table 50120 \"Rating\" is not in the licensed table range 50000-50099"),
+                new("Report", 50060, "List", "Report 50060 \"List\" is not in the licensed report range 50000-50049"),
+            ], 2, 10, "25.0.1.0", DateTime.UtcNow);
 
         check.RefusalFor(42).Should().Be(
             "Build #42 can't be deployed to Production: 2 objects are outside the customer's licence there, so nothing was sent. "
-            + "Table 50120 \"Rating\" is outside the licence (50000-50099); Enum 50130 \"Source\" needs table 50130 in the licence (BC 14). "
-            + "Ask the customer to add these objects to their licence, or give them ids the licence covers, then deploy again.");
+            + "Table 50120 \"Rating\" is not in the licensed table range 50000-50099; Report 50060 \"List\" is not in the licensed report range 50000-50049. "
+            + "Ask the customer to add these objects to their licence, or renumber them to object IDs the licence covers, then deploy again.");
+    }
+
+    [Fact]
+    public void The_refusal_names_the_first_200_objects_and_counts_the_rest()
+    {
+        var findings = Enumerable.Range(0, 250)
+            .Select(i => new LicenceCheckFinding("Table", 60000 + i, null, $"Table {60000 + i} is not in the licensed table range 50000-50099"))
+            .ToList();
+        var check = new LicenceCheck(7, "Production", LicenceCheckOutcome.OutsideLicence, null, findings, 250, 250, "25.0.1.0", DateTime.UtcNow);
+
+        var refusal = check.RefusalFor(42);
+
+        refusal.Should().Contain("Table 60199 is not in the licensed").And.NotContain("Table 60200 ")
+            .And.Contain("Table 60199 is not in the licensed table range 50000-50099; and 50 more. Ask the customer");
+    }
+
+    [Fact]
+    public void A_list_row_carries_the_outcome_and_summary_without_the_objects()
+    {
+        var check = new LicenceCheck(7, "Production", LicenceCheckOutcome.OutsideLicence, null,
+            [new("Table", 50120, "Rating", "Table 50120 \"Rating\" is not in the licensed table range 50000-50099")], 1, 4, "25.0.1.0",
+            new DateTime(2026, 10, 15, 9, 10, 0, DateTimeKind.Utc));
+
+        var row = LicenceCheckRow.From(check);
+
+        row.Should().Be(new LicenceCheckRow(7, "Production", LicenceCheckOutcome.OutsideLicence, 1,
+            "Can't be deployed to Production: 1 object is outside the customer's licence.", check.CheckedAt));
+    }
+
+    [Fact]
+    public void A_licence_with_a_line_too_long_to_read_or_too_many_ranges_has_incomplete_ranges()
+    {
+        const string Head = "Licensed to : CRONUS A/S\nTable 50000 50099 Direct\n";
+        GatewayLicenceParser.Parse(Head).RangesComplete.Should().BeTrue();
+        GatewayLicenceParser.Parse(Head + new string('x', GatewayLicenceParser.MaxLineChars + 1)).RangesComplete.Should().BeFalse();
+
+        var many = string.Concat(Enumerable.Range(0, GatewayLicenceParser.MaxRanges + 1).Select(i => $"Page {i} {i} Direct\n"));
+        GatewayLicenceParser.Parse(Head + many).RangesComplete.Should().BeFalse();
     }
 }

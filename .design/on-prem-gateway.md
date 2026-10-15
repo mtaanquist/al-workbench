@@ -1575,80 +1575,124 @@ function (`Evaluate`: the build's objects, the licence's ranges, the tier's vers
 that load what it needs: `ForBuildAsync` for a build and `ForDeploymentAsync` for one target. Both
 read under the query filter; there is no new `IgnoreQueryFilters()`.
 
-**Which objects.** The objects are the build's own, as the Object Explorer indexed them
-(`oe_module_objects` of the build's release, which holds the build's apps and nothing else, carried
-apps included). Checked, each against the ranges of its own type: `table` against **Table** (not
-TableData: a table object needs the object range, its data permissions are another line), `page`,
-`report`, `codeunit`, `query` (**Query**) and `xmlport` (**XMLport**). A `permissionset` is checked
-against **PermissionSet** ranges only when the licence lists at least one: older licences predate
-permission set objects and say nothing about them, and flagging every permission set against a
-licence that has no such line would be noise nobody can act on. Never checked: enums, interfaces,
-every extension object (`tableextension`, `pageextension`, `reportextension`, `enumextension`,
-`permissionsetextension`), and the kinds without an id (control add-ins, profiles). On a tier whose
-major version is 14 or lower, an `enum` is checked against the **Table** ranges. The version is the
-tier's own, from the inventory (`gateway_instances.version`), never the build's. An object the index
-holds twice is one finding. On a BC 14 hybrid server only the AL objects in the build are checked;
-the C/AL objects in the database are not ours to read.
+**Which objects.** The objects are the build's own. When the Object Explorer indexed the build, they
+come from `oe_module_objects` of the build's release, which holds the build's apps and nothing else,
+carried apps included. A build with no index (staged from a GitHub release, or one whose index was
+removed) is read from the symbols of its own `.app` files (`oe_project_build_artifacts`, through
+`AppPackageReader`, one file at a time). A file that cannot be read, such as an NEA-encrypted one,
+makes the answer "not checked" for that build. Checked, each against the ranges of its own type:
+`table` against **Table** (not TableData: a table object needs the object range, its data permissions
+are another line), `page`, `report`, `codeunit`, `query` (**Query**) and `xmlport` (**XMLport**). A
+`permissionset` is checked against **PermissionSet** ranges only when the licence lists at least one:
+older licences predate permission set objects and say nothing about them, and flagging every
+permission set against a licence that has no such line would be noise nobody can act on. Never
+checked: enums, interfaces, every extension object (`tableextension`, `pageextension`,
+`reportextension`, `enumextension`, `permissionsetextension`), and the kinds without an id (control
+add-ins, profiles). On a tier whose major version is 14 or lower, an `enum` is checked against the
+**Table** ranges; on a newer tier enums are not even read. The version is the tier's own, from the
+inventory (`gateway_instances.version`), never the build's. An object read twice is one finding. On a
+BC 14 hybrid server only the AL objects in the build are checked; the C/AL objects in the database are
+not ours to read.
 
 **Which ranges count: any permission.** The parser keeps a range's permissions as the text after
 its two ids, trimmed, so which column a word stood in (read, insert, modify, delete, execute) is
 gone. The rule is therefore "any permission": a range with no permission text at all counts (the
-`.bclicense` layout prints none), and so does one with any word other than `None`, `No`, `0`, `N/A`
-or a run of dashes (`Direct`, `Indirect`, `RIMDX`, `R----` all count; `-----` and `None` do not).
-Reading the execute column specifically would need the parser to keep positions; it is a to-verify
-item below rather than a guess.
+`.bclicense` layout prints none), and so does one with any word other than `None`, `No`, `0`, `N/A`,
+`False` or a run of dashes (`Direct`, `Indirect`, `RIMDX`, `R----` all count; `-----` and `None` do
+not). Text written as labels and values is judged by its values only, `:` separating them, so
+`Execute: No` does not count and `Read: No, Execute: Yes` does. Reading the execute column
+specifically would need the parser to keep positions; it is a to-verify item below rather than a
+guess.
 
-**When it is not checked.** "Not checked" is an answer with a reason, never a silent pass, when:
-the environment is no longer linked; its gateway is not online (offline, revoked, waiting for
-approval); the gateway no longer reports the tier or its tenant; the licence was never read; it was
-last read more than an hour ago (`OnPremisesTierFacts.StaleAfter`, four missed rounds); its text was
-cut to size by the gateway (ranges past the cut are unknown); it has no ranges the parser could read
-(everything would be flagged otherwise); the tier's version is unknown (the BC 14 rule needs it); or
-the build's objects were never indexed (a build staged from a GitHub release, or one whose index was
-removed). An online Solution (hosting set to Microsoft's cloud) and an online environment are never
+**When it is not checked.** "Not checked" is an answer with a reason, never a silent pass. The reason
+is shown to the consultant as it is, so it names AL Workbench and the customer's server rather than
+the gateway, and says what to do next; the build page and the Deploy dialog link the environment page
+beside it. It is not checked when: the environment is no longer linked; the customer's server is not
+connected (offline, revoked, waiting for approval); AL Workbench no longer sees the tier or its tenant
+(tenant ids compared trimmed and in any case, as the inventory compares them); the licence was never
+read; it was last read more than an hour ago (`OnPremisesTierFacts.StaleAfter`, four missed rounds);
+its text was cut to size by the gateway; it has no ranges the parser could read; **only part of its
+ranges could be read** (a line too long or too slow to match was skipped, or ranges past
+`GatewayLicenceParser.MaxRanges` were dropped: the missing range may be the one that covers an object,
+so flagging it would be a false refusal); the tier's version is unknown (the BC 14 rule needs it); or
+the build's objects can't be read (no `.app` files, or one that does not open). The stored licence keeps
+only the parser's problem sentences, so when it has any, the check reads the stored text again to learn
+whether a range was lost (`ParsedLicence.RangesComplete`); no column was added for it. The read-again
+reasons say that AL Workbench reads the licence every 15 minutes while the customer's server is
+connected, and to check the environment page if that does not change: "Licence not checked for
+Production. AL Workbench has not read the licence on CRONUS-BC11 / BC140 yet. It reads it every
+15 minutes while the customer's server is connected; check the environment page if this does not
+change." An online Solution (hosting set to Microsoft's cloud) and an online environment are never
 checked at all, and get no answer rather than "not checked".
 
-**On the build: a warning.** Once a build is ready and its objects indexed, the import worker calls
-`ProjectBuildService.RecordLicenceCheckAsync`, for pipeline builds and pull-request builds alike;
-a preview check is skipped (it is never deployed). It checks the Solution's on-premises environments
-whose type is Production, linked and not missing, each on its own, and stores the answers as
+**On the build: a warning, per environment.** Once a build is ready and its objects indexed, the
+import worker calls `ProjectBuildService.RecordLicenceCheckAsync`, for pipeline builds and
+pull-request builds alike, before it prepares or makes any automatic deployment; a preview check is
+skipped (it is never deployed). It checks each linked, not-missing on-premises environment of the
+Solution that is **Production, or that a deployment pipeline drawing from the build's pipeline
+targets** (a test tier included), each on its own, and stores the answers as
 `oe_project_builds.licence_check` (jsonb, migration `20270210000000_RecordBuildLicenceCheck`): per
-environment the outcome (`passed`, `outside_licence`, `not_checked`), the reason, the findings (at
-most 200 kept, the count whole), how many objects were asked about, the tier's version and when. It
-is best-effort: anything thrown is logged and the build stays ready. It is a snapshot of the day the
-build was made; deploying checks again. The pipeline page's latest-build card shows, under the
-files: a warning naming each object outside the licence (the first 20, then "and N more"), that
-deploying to that environment will be refused until the licence covers them, and what to ask the
-customer; "**Licence not checked** for Production: (reason)"; or "Every object in this build is
-inside the customer's licence on Production.". The messages are "Table 50120 \"CRONUS Rating Entry\"
-is outside the licence (50000-50099)" (the first four ranges of that type, then "and N more", or "it
-licenses no query ids") and "Enum 50130 \"CRONUS Rating Source\" needs table 50130 in the licence
-(BC 14)".
+environment the outcome (`passed`, `outside_licence`, `not_checked`), the reason, the findings (at most
+200 kept, the count whole), how many objects were asked about, the tier's version, when it was checked
+and when the licence it was compared with was read. It is best-effort: anything thrown is logged and
+the build stays ready. It is a snapshot of the day the build was made; deploying checks again. The
+pipeline page's latest-build card shows, under the files, per environment: a warning headed by the
+consequence, "**Can't be deployed to Production: 2 objects are outside the customer's licence.** AL
+Workbench will not deploy this build to Production until the licence covers them. Ask the customer to
+add them to their licence, or renumber them to object IDs the licence covers.", the objects (the first
+20, then "and N more"), and "Checked 15 Oct 09:10, against the licence read 15 Oct 09:04."; "**Licence
+not checked for Production.** (reason) Open Production"; or "Every object in this build is inside the
+customer's licence on Production.". The findings read "Table 50120 \"CRONUS Tasting Note\" is not in
+the licensed table range 50000-50099" (several ranges: "ranges 50000-50099, 50200-50249", the first
+four then "and N more"; none: "is not in the licence, which has no query ranges") and, on BC 14, "Enum
+50130 \"CRONUS Pallet Type\" is not in the licensed table range 50000-50099, which BC 14 checks enums
+against". The finding keeps its sentence as well as type, id and name, because the sentence names the
+licensed ranges as they were when it was checked.
+
+**Automatic deployments say why where people look.** A deployment pipeline that deploys a new build
+on its own, or prepares one for approval, goes through the same refusal, so a build outside the licence
+is neither deployed nor prepared. That is not left to a log line: the build page shows the warning for
+the pipeline's tier (above), and the deployment pipeline's own page shows, while its newest deployable
+build is the refused one, "**Build #42 can't be deployed to Test: 2 objects are outside the customer's
+licence.** AL Workbench will not deploy it here until the licence covers them, so no deployment of it
+was made or prepared. See which objects on the build".
 
 **At deploy time: a refusal, before anything is made or sent.** `DeliveryService.ResolveReleaseAsync`
 checks the build against the **target** environment (whatever its type) after the `shared_restart`
 rule, so a deployment made by hand, an approval, a prepared deployment and `deploy_build` are all
 refused there, keyed `Build`, with no deployment row and no gateway command: "Build #42 can't be
 deployed to Production: 2 objects are outside the customer's licence there, so nothing was sent.
-Table 50120 ... ; Enum 50130 .... Ask the customer to add these objects to their licence, or give
-them ids the licence covers, then deploy again." The run checks again when it claims the deployment
-(`PublishAsync`, after the live status re-read and before the hand-off transaction), because the
-customer's licence can change while a deployment waits for its window: a refusal there fails the
-deployment with the same sentence, every app Skipped and no command queued. A licence that cannot be
-checked does not refuse; the run's log says "Licence not checked for Production: (reason)", and a
-pass says "Licence checked against Production: every object in this build is inside the licence."
-The Deploy dialog reads `DeliveryService.CheckLicenceAsync` for the picked build (again whenever
-another is picked, Deploy disabled meanwhile): outside the licence is an error listing every object
-that holds Deploy disabled and hides the Production acknowledgement, and "not checked" is a note
-that Business Central refuses the install if the licence does not cover every object. A GitHub
-release has no indexed objects before it is staged, so the dialog says nothing for one; deploying it
-logs "not checked".
+Table 50120 ... ; Report 50060 .... Ask the customer to add these objects to their licence, or renumber
+them to object IDs the licence covers, then deploy again." **The refusal names the first 200 objects,
+then "and N more"** (`LicenceRangeCheck.MaxStoredFindings`): the issue asked for every object, and the
+maintainer capped it, because a refusal is a validation message and an MCP error, and a build with
+thousands of objects outside a licence (a renumbering gone wrong) would make either unreadable. The
+whole count is always given, and the build page and `get_solution_build` carry the same first 200. The
+run checks again when it claims the deployment (`PublishAsync`, after the live status re-read and before
+the hand-off transaction), because the customer's licence can change while a deployment waits for its
+window: a refusal there fails the deployment with the same sentence, every app Skipped and no command
+queued. A licence that cannot be checked does not refuse; the run's log says "Licence not checked for
+Production. (reason)", and a pass says "Licence checked against Production: every object in this build
+is inside the licence." The Deploy dialog reads `DeliveryService.CheckLicenceAsync` for the picked
+build (again whenever another is picked, Deploy disabled meanwhile; a read for a build no longer picked
+changes nothing): outside the licence is an error naming the objects (the first 20, then "and N more")
+and when AL Workbench read the licence, which holds Deploy disabled and hides both the restart warning
+and the Production acknowledgement; "not checked" is a note with the reason, a link to the environment
+page, and "You can still deploy. If the licence does not cover every object, Business Central refuses
+the install." A GitHub release is not checked in the dialog, which lists its files before they are
+downloaded; deploying it checks the files it stages.
 
-**MCP.** `list_pipeline_builds`, `list_solution_builds` and `get_solution_build` carry
-`licenceChecks` (null when none was made), each with `outcome`, `reason`, `findings`, `outsideCount`,
-`summary` and the environment; `deploy_build` returns the refusal text ("Couldn't deploy that build:
-Build #42 can't be deployed ..."). Agents still cannot deploy to an on-premises Production tier, so
-for them the refusal is met on test tiers.
+**MCP.** `get_solution_build` carries `licenceChecks` (null when none was made), each with the
+environment, `outcome`, `reason`, `findings` (at most 200), `outsideCount`, `checkedObjectCount`,
+`summary`, `checkedAt` and `licenceReadAt`. `list_pipeline_builds` and `list_solution_builds` carry a
+shorter `licenceChecks` per build: the environment, `outcome`, `outsideCount`, `summary` and
+`checkedAt`, without the objects, so a list of twenty builds stays small. `deploy_build` returns the
+refusal text ("Couldn't deploy that build: Build #42 can't be deployed ..."). Agents still cannot deploy
+to an on-premises Production tier, so for them the refusal is met on test tiers.
+
+**Also in this change.** The pipeline page scrolled sideways at phone width, with or without the
+licence warning: the build history table set the width of the page's main column. The column is now
+pinned to the screen and the table scrolls inside its own card.
 
 **To verify on real servers:**
 
@@ -1658,7 +1702,7 @@ for them the refusal is met on test tiers.
 - Whether the printed ranges carry their permissions in columns (RIMDX) on either format, and if they
   do, whether Business Central requires **execute** on the Table, Page, Report, Codeunit, Query and
   XMLport range to publish; if so, the parser should keep column positions and `LicenceRangeCheck.Grants`
-  should ask for execute.
+  should ask for execute. Also whether any layout writes permissions as labels and values.
 - That a BC 14 tier refuses to publish an extension whose enum id is outside the licensed table
   ranges, and that BC 15 and later do not.
 - Whether a current version checks permission set objects against a PermissionSet range, and what a
@@ -1695,9 +1739,10 @@ server configuration (`Set-NAVServerConfiguration`) is out of scope. **Before it
 - **No write tools** for licences or tier actions in this milestone, as environment actions are
   web-only today. As built (#1369): `get_environment` carries an on-premises environment's
   `licence` (licensee, serial number, expiry, object ranges and the last upload with its import
-  state), and `onPremisesTier` its licensee. As built (#1370): `list_pipeline_builds`,
-  `list_solution_builds` and `get_solution_build` carry the build's `licenceChecks`, and
-  `deploy_build` returns the licence refusal ("Licensed object ranges, as built").
+  state), and `onPremisesTier` its licensee. As built (#1370): `get_solution_build` carries the build's
+  `licenceChecks` with the objects outside the licence, `list_pipeline_builds` and
+  `list_solution_builds` the outcome per environment without them, and `deploy_build` returns
+  the licence refusal ("Licensed object ranges, as built").
 
 ## Security
 

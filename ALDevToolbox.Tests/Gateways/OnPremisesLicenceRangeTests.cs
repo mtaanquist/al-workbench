@@ -63,7 +63,7 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         var check = (await StoredAsync(seed)).Should().ContainSingle().Subject;
         check.Outcome.Should().Be(LicenceCheckOutcome.OutsideLicence);
         check.EnvironmentName.Should().Be("Production");
-        check.Findings.Select(f => f.Message).Should().Equal("Table 50120 \"CRONUS Rating Entry\" is outside the licence (50000-50099)");
+        check.Findings.Select(f => f.Message).Should().Equal("Table 50120 \"CRONUS Rating Entry\" is not in the licensed table range 50000-50099");
         check.CheckedObjectCount.Should().Be(4, "the table, page, codeunit and the new table; not the extension, enum or interface");
         await using var read = _db.NewContext();
         (await read.OeProjectBuilds.SingleAsync(b => b.Id == seed.BuildId)).Status.Should().Be(ProjectBuildStatus.Ready,
@@ -92,8 +92,8 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
 
         var check = (await StoredAsync(seed)).Single();
         check.Findings.Select(f => f.Message).Should().BeEquivalentTo(
-            "Enum 50130 \"CRONUS Rating Source\" needs table 50130 in the licence (BC 14)",
-            "Enum 70100 \"CRONUS Rating Level\" needs table 70100 in the licence (BC 14)");
+            "Enum 50130 \"CRONUS Rating Source\" is not in the licensed table range 50000-50099, which BC 14 checks enums against",
+            "Enum 70100 \"CRONUS Rating Level\" is not in the licensed table range 50000-50099, which BC 14 checks enums against");
     }
 
     [Fact]
@@ -105,8 +105,11 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
 
         var check = (await StoredAsync(seed)).Single();
         check.IsNotChecked.Should().BeTrue();
-        check.Reason.Should().Be("the gateway has not read the licence on CRONUS-BC01 / BC250 yet.");
-        check.Summary.Should().StartWith("Licence not checked for Production: ");
+        check.Reason.Should().Be("AL Workbench has not read the licence on CRONUS-BC01 / BC250 yet. "
+            + "It reads it every 15 minutes while the customer's server is connected; check the environment page if this does not change.");
+        check.Reason.Should().NotContainEquivalentOf("gateway", "the consultant reads this");
+        check.Summary.Should().StartWith("Licence not checked for Production. AL Workbench has not read");
+        check.LicenceReadAt.Should().BeNull();
     }
 
     [Fact]
@@ -114,13 +117,15 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
     {
         var offline = await SeedAsync(gatewayLastSeen: DateTime.UtcNow.AddHours(-3));
         await RecordAsync(offline);
-        (await StoredAsync(offline)).Single().Reason.Should().Be(
-            "the gateway for CRONUS-BC01 / BC250 is offline, so the licence it last read may be out of date.");
+        (await StoredAsync(offline)).Single().Reason.Should().StartWith(
+            "The connection to the customer's server is offline, so the licence AL Workbench last read on CRONUS-BC01 / BC250 may be out of date.");
 
         var stale = await SeedAsync(licenceReadAt: DateTime.UtcNow.AddHours(-2));
         await RecordAsync(stale);
-        (await StoredAsync(stale)).Single().Reason.Should().Be(
-            "the licence on CRONUS-BC01 / BC250 has not been read in the last hour, so it may be out of date.");
+        var staleCheck = (await StoredAsync(stale)).Single();
+        staleCheck.Reason.Should().StartWith(
+            "AL Workbench last read the licence on CRONUS-BC01 / BC250 more than an hour ago, so it may be out of date.");
+        staleCheck.LicenceReadAt.Should().NotBeNull("the page says when the licence was read");
     }
 
     [Fact]
@@ -135,11 +140,19 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
     }
 
     [Fact]
-    public async Task Only_linked_production_tiers_are_checked_on_the_build_and_preview_builds_never()
+    public async Task A_build_is_checked_for_production_and_for_every_tier_a_deployment_pipeline_targets_and_preview_builds_never()
     {
-        var sandbox = await SeedAsync(environmentType: "Sandbox", objects: [("table", 60000, "Outside")]);
-        await RecordAsync(sandbox);
-        (await StoredAsync(sandbox)).Should().BeEmpty();
+        // A test tier a deployment pipeline deploys to: an automatic deployment there is
+        // refused, so the build says why.
+        var targeted = await SeedAsync(environmentType: "Sandbox", objects: [("table", 60000, "Outside")]);
+        await RecordAsync(targeted);
+        var check = (await StoredAsync(targeted)).Should().ContainSingle().Subject;
+        check.IsOutside.Should().BeTrue();
+        check.Summary.Should().Be("Can't be deployed to Production: 1 object is outside the customer's licence.");
+
+        var untargeted = await SeedAsync(environmentType: "Sandbox", releasePipeline: false, objects: [("table", 60000, "Outside")]);
+        await RecordAsync(untargeted);
+        (await StoredAsync(untargeted)).Should().BeEmpty("no Production tier, and nothing deploys to this one");
 
         var preview = await SeedAsync(objects: [("table", 60000, "Outside")]);
         await using (var ctx = _db.NewContext())
@@ -165,9 +178,9 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         var refusal = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Build"];
         refusal.Should().Be(
             $"Build #{seed.BuildId} can't be deployed to Production: 2 objects are outside the customer's licence there, so nothing was sent. "
-            + "Table 50120 \"CRONUS Rating Entry\" is outside the licence (50000-50099); "
-            + "Report 50060 \"CRONUS Rating List\" is outside the licence (50000-50049). "
-            + "Ask the customer to add these objects to their licence, or give them ids the licence covers, then deploy again.");
+            + "Table 50120 \"CRONUS Rating Entry\" is not in the licensed table range 50000-50099; "
+            + "Report 50060 \"CRONUS Rating List\" is not in the licensed report range 50000-50049. "
+            + "Ask the customer to add these objects to their licence, or renumber them to object IDs the licence covers, then deploy again.");
         await using var read = _db.NewContext();
         (await read.OeProjectDeliveries.CountAsync()).Should().Be(0);
         (await read.GatewayCommands.CountAsync()).Should().Be(0, "nothing reaches the gateway");
@@ -199,7 +212,7 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         var delivery = await read.OeProjectDeliveries.Include(d => d.Results).SingleAsync(d => d.Id == id);
         delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
         delivery.FailureMessage.Should().StartWith($"Build #{seed.BuildId} can't be deployed to Production: 1 object is outside")
-            .And.Contain("Table 50090 \"CRONUS Rating Entry\" is outside the licence (50000-50049)");
+            .And.Contain("Table 50090 \"CRONUS Rating Entry\" is not in the licensed table range 50000-50049");
         delivery.Results.Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped, "no app was sent");
         (await read.GatewayCommands.CountAsync()).Should().Be(0, "nothing reaches the gateway");
     }
@@ -221,7 +234,7 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
 
         await using var read = _db.NewContext();
         var delivery = await read.OeProjectDeliveries.SingleAsync(d => d.Id == id);
-        delivery.DiagnosticsLog.Should().Contain("Licence not checked for Production: the gateway has not read the licence on CRONUS-BC01 / BC250 yet.");
+        delivery.DiagnosticsLog.Should().Contain("Licence not checked for Production. AL Workbench has not read the licence on CRONUS-BC01 / BC250 yet.");
         (await read.GatewayCommands.CountAsync()).Should().Be(1, "a licence nobody could read is no reason to stop");
     }
 
@@ -266,6 +279,112 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_licence_read_only_in_part_is_not_checked_rather_than_refused()
+    {
+        var seed = await SeedAsync(environmentType: "Sandbox", objects: [.. InsideObjects, ("table", 50120, "CRONUS Rating Entry")]);
+        await using (var ctx = _db.NewContext())
+        {
+            // A line too long to read: the range on it may be the one that covers 50120.
+            var text = "Licensed to : CRONUS A/S\nTable 50000 50099 Direct\n" + new string(' ', GatewayLicenceParser.MaxLineChars) + "Table 50100 50199 Direct\n";
+            var parsed = GatewayLicenceParser.Parse(text);
+            await ctx.GatewayInstanceLicences.Where(l => l.InstanceId == seed.InstanceId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(l => l.Text, text)
+                    .SetProperty(l => l.ParseProblems, string.Join("\n", parsed.Problems)));
+        }
+
+        await RecordAsync(seed);
+        await using (var ctx = _db.NewContext())
+        {
+            var check = await NewService(ctx).CheckLicenceAsync(seed.ReleasePipelineId, seed.BuildId);
+            check!.IsNotChecked.Should().BeTrue("a range that could not be read may be the one that covers the object");
+            check.Reason.Should().StartWith("AL Workbench could read only some of the object ranges in the licence on CRONUS-BC01 / BC250");
+            (await NewService(ctx).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId)).Should().BePositive("nothing is refused on a guess");
+        }
+        (await StoredAsync(seed)).Single().IsNotChecked.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_licence_with_a_problem_that_lost_no_range_is_still_checked()
+    {
+        var seed = await SeedAsync(environmentType: "Sandbox", objects: [.. InsideObjects, ("table", 50120, "CRONUS Rating Entry")]);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.GatewayInstanceLicences.Where(l => l.InstanceId == seed.InstanceId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(l => l.Text, "Table 50000 50099 Direct\n")
+                    .SetProperty(l => l.ParseProblems, "The licensee could not be found in the licence information."));
+        }
+
+        await using var read = _db.NewContext();
+        (await NewService(read).CheckLicenceAsync(seed.ReleasePipelineId, seed.BuildId))!.IsOutside.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_build_without_an_object_index_is_checked_from_its_app_files()
+    {
+        // A build staged from a GitHub release has no Object Explorer index: its objects are
+        // read from the .app files it would deploy.
+        var seed = await SeedAsync(environmentType: "Sandbox", tierVersion: "14.0.29530.0", objects: [],
+            appSymbols: """
+                {"RuntimeVersion":"3.0",
+                 "Tables":[{"Id":50000,"Name":"CRONUS Rating"},{"Id":50120,"Name":"CRONUS Rating Entry"}],
+                 "Codeunits":[{"Id":50002,"Name":"CRONUS Rating Mgt."}],
+                 "EnumTypes":[{"Id":50130,"Name":"CRONUS Rating Source"}],
+                 "TableExtensions":[{"Id":70000,"Name":"CRONUS Customer Ext"}]}
+                """);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectBuilds.Where(b => b.Id == seed.BuildId).ExecuteUpdateAsync(s => s.SetProperty(b => b.ReleaseId, (int?)null));
+        }
+
+        await using var read = _db.NewContext();
+        var act = () => NewService(read).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+
+        var refusal = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["Build"];
+        refusal.Should().Contain("2 objects are outside the customer's licence there")
+            .And.Contain("Table 50120 \"CRONUS Rating Entry\" is not in the licensed table range 50000-50099")
+            .And.Contain("Enum 50130 \"CRONUS Rating Source\" is not in the licensed table range 50000-50099, which BC 14 checks enums against")
+            .And.NotContain("70000");
+        (await read.OeProjectDeliveries.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_build_whose_app_files_cannot_be_read_is_not_checked()
+    {
+        var seed = await SeedAsync(environmentType: "Sandbox", objects: []);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectBuilds.Where(b => b.Id == seed.BuildId).ExecuteUpdateAsync(s => s.SetProperty(b => b.ReleaseId, (int?)null));
+            await ctx.OeProjectBuildArtifacts.Where(a => a.ProjectBuildId == seed.BuildId)
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.Content, new byte[] { 1, 2, 3 }));
+        }
+
+        await using var read = _db.NewContext();
+        var check = await NewService(read).CheckLicenceAsync(seed.ReleasePipelineId, seed.BuildId);
+        check!.IsNotChecked.Should().BeTrue();
+        check.Reason.Should().Be("AL Workbench could not read the objects in CRONUS_CRONUSCore_1.0.0.0.app, so there is nothing to compare with the licence.");
+    }
+
+    [Fact]
+    public async Task A_tenant_the_tier_no_longer_reports_is_matched_in_any_case()
+    {
+        var seed = await SeedAsync(environmentType: "Sandbox", objects: [.. InsideObjects, ("table", 50120, "CRONUS Rating Entry")]);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectEnvironments.Where(e => e.GatewayInstanceId == seed.InstanceId)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.TenantId, " DEFAULT"));
+            await ctx.GatewayInstanceTenants.Where(t => t.InstanceId == seed.InstanceId)
+                .ExecuteUpdateAsync(s => s.SetProperty(t => t.MissingSince, DateTime.UtcNow));
+        }
+
+        await using var read = _db.NewContext();
+        var check = await NewService(read).CheckLicenceAsync(seed.ReleasePipelineId, seed.BuildId);
+        check!.IsNotChecked.Should().BeTrue();
+        check.Reason.Should().Be("AL Workbench no longer sees CRONUS-BC01 / BC250 on the customer's server. Check the environment page.");
+    }
+
     // ── MCP ────────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -277,13 +396,26 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         await using var ctx = _db.NewContext();
         var tools = NewArtifactsTools(ctx);
 
-        var listed = (await tools.ListPipelineBuildsAsync(seed.PipelineId)).Single();
-        listed.LicenceChecks!.Single().Outcome.Should().Be(LicenceCheckOutcome.OutsideLicence);
-        (await tools.ListProjectBuildsAsync(seed.ProjectId.ToString())).Single().LicenceChecks.Should().ContainSingle();
+        // A list of builds carries the outcome per environment, not the objects.
+        foreach (var listed in new[]
+                 {
+                     (await tools.ListPipelineBuildsAsync(seed.PipelineId)).Single(),
+                     (await tools.ListProjectBuildsAsync(seed.ProjectId.ToString())).Single(),
+                 })
+        {
+            var row = listed.LicenceCheckRows!.Single();
+            row.Outcome.Should().Be(LicenceCheckOutcome.OutsideLicence);
+            row.OutsideCount.Should().Be(1);
+            row.Summary.Should().Be("Can't be deployed to Production: 1 object is outside the customer's licence.");
+            var json = System.Text.Json.JsonSerializer.SerializeToNode(listed, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
+            var check = json["licenceChecks"]!.AsArray().Single()!;
+            check["outcome"]!.GetValue<string>().Should().Be(LicenceCheckOutcome.OutsideLicence);
+            check["findings"].Should().BeNull("get_solution_build names the objects");
+        }
 
         var detail = await tools.GetProjectBuildAsync(seed.BuildId);
         detail.LicenceChecks!.Single().Findings.Single().Message
-            .Should().Be("Table 50120 \"CRONUS Rating Entry\" is outside the licence (50000-50099)");
+            .Should().Be("Table 50120 \"CRONUS Rating Entry\" is not in the licensed table range 50000-50099");
     }
 
     [Fact]
@@ -296,7 +428,12 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
 
         await using var ctx = _db.NewContext();
         var tools = NewArtifactsTools(ctx);
-        (await tools.GetProjectBuildAsync(notRead.BuildId)).LicenceChecks!.Single().Outcome.Should().Be(LicenceCheckOutcome.NotChecked);
+        var notChecked = (await tools.GetProjectBuildAsync(notRead.BuildId)).LicenceChecks!.Single();
+        notChecked.Outcome.Should().Be(LicenceCheckOutcome.NotChecked);
+        notChecked.Reason.Should().StartWith("AL Workbench has not read the licence");
+        (await tools.ListPipelineBuildsAsync(notRead.PipelineId)).Single().LicenceCheckRows!.Single().Summary
+            .Should().StartWith("Licence not checked for Production. AL Workbench has not read");
+        (await tools.ListPipelineBuildsAsync(online.PipelineId)).Single().LicenceCheckRows.Should().BeNull();
         (await tools.GetProjectBuildAsync(online.BuildId)).LicenceChecks.Should().BeNull();
     }
 
@@ -310,7 +447,7 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
 
         (await act.Should().ThrowAsync<McpException>()).Which.Message.Should()
             .StartWith($"Couldn't deploy that build: Build #{seed.BuildId} can't be deployed to Production: 1 object is outside the customer's licence there")
-            .And.Contain("Table 50120 \"CRONUS Rating Entry\" is outside the licence (50000-50099)");
+            .And.Contain("Table 50120 \"CRONUS Rating Entry\" is not in the licensed table range 50000-50099");
         await using var read = _db.NewContext();
         (await read.GatewayCommands.CountAsync()).Should().Be(0);
     }
@@ -331,7 +468,9 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         string tierVersion = "25.0.12345.0",
         bool licence = true,
         DateTime? licenceReadAt = null,
-        DateTime? gatewayLastSeen = null)
+        DateTime? gatewayLastSeen = null,
+        bool releasePipeline = true,
+        string? appSymbols = null)
     {
         await using var ctx = _db.NewContext();
         var now = DateTime.UtcNow;
@@ -405,7 +544,7 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         ctx.OeProjectEnvironments.Add(env);
         await ctx.SaveChangesAsync();
 
-        return await AddBuildAsync(ctx, project.Id, pipeline.Id, env.Id, instance.Id, objects ?? InsideObjects);
+        return await AddBuildAsync(ctx, project.Id, pipeline.Id, env.Id, instance.Id, objects ?? InsideObjects, releasePipeline, appSymbols);
     }
 
     /// <summary>A Business Central online Solution with an online Production environment and the same build.</summary>
@@ -436,9 +575,13 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         OrganizationId = TestDb.DefaultOrgId, ObjectType = type, FromId = from, ToId = to, Permissions = permissions,
     };
 
-    /// <summary>A ready build with one app, its objects indexed as the build's release, and a deployment pipeline to the environment.</summary>
+    /// <summary>
+    /// A ready build with one app (its symbols <paramref name="appSymbols"/>, when given), its
+    /// objects indexed as the build's release, and a deployment pipeline to the environment
+    /// unless <paramref name="withReleasePipeline"/> is false.
+    /// </summary>
     private static async Task<Seed> AddBuildAsync(AppDbContext ctx, int projectId, int pipelineId, int environmentId, int instanceId,
-        (string Kind, int Id, string Name)[] objects)
+        (string Kind, int Id, string Name)[] objects, bool withReleasePipeline = true, string? appSymbols = null)
     {
         var now = DateTime.UtcNow;
         var release = new OeRelease
@@ -471,22 +614,31 @@ public sealed class OnPremisesLicenceRangeTests : IDisposable
         };
         ctx.OeProjectBuilds.Add(build);
         await ctx.SaveChangesAsync();
-        var bytes = SyntheticApp.Build(CoreId, "CRONUS Core", "CRONUS", "1.0.0.0");
+        var bytes = SyntheticApp.Build(CoreId, "CRONUS Core", "CRONUS", "1.0.0.0", symbolReferenceJson: appSymbols);
         ctx.OeProjectBuildArtifacts.Add(new OeProjectBuildArtifact
         {
             OrganizationId = TestDb.DefaultOrgId, ProjectBuildId = build.Id, FileName = "CRONUS_CRONUSCore_1.0.0.0.app",
             AppId = CoreId, AppName = "CRONUS Core", AppVersion = "1.0.0.0", SizeBytes = bytes.Length, Content = bytes, CreatedAt = now,
         });
-        var releasePipeline = new OeReleasePipeline
+        var releasePipelineId = 0;
+        if (withReleasePipeline)
         {
-            OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "Build → Production",
-            BuildPipelineId = pipelineId, ProjectEnvironmentId = environmentId,
-            DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
-            CreatedAt = now, UpdatedAt = now,
-        };
-        ctx.OeReleasePipelines.Add(releasePipeline);
-        await ctx.SaveChangesAsync();
-        return new Seed(projectId, pipelineId, instanceId, releasePipeline.Id, build.Id, release.Id);
+            var releasePipeline = new OeReleasePipeline
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = projectId, Name = "Build → Production",
+                BuildPipelineId = pipelineId, ProjectEnvironmentId = environmentId,
+                DeploymentSchedule = BcDeploymentSchedule.Immediate, SchemaSyncMode = BcSyncMode.Add,
+                CreatedAt = now, UpdatedAt = now,
+            };
+            ctx.OeReleasePipelines.Add(releasePipeline);
+            await ctx.SaveChangesAsync();
+            releasePipelineId = releasePipeline.Id;
+        }
+        else
+        {
+            await ctx.SaveChangesAsync();
+        }
+        return new Seed(projectId, pipelineId, instanceId, releasePipelineId, build.Id, release.Id);
     }
 
     /// <summary>What the worker does once a build is ready.</summary>

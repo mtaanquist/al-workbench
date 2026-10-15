@@ -153,6 +153,34 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_newest_build_outside_the_licence_says_here_why_it_was_not_deployed()
+    {
+        // An automatic deployment of a build outside the customer's licence is refused
+        // before anything is made (#1370); the pipeline's page is where that is said.
+        var seed = await SeedAsync();
+        await MakeOnPremisesAsync(seed);
+        var check = new ALDevToolbox.Services.Gateways.LicenceCheck(seed.EnvironmentId, "Test",
+            ALDevToolbox.Services.Gateways.LicenceCheckOutcome.OutsideLicence, null,
+            [new("Table", 50120, "CRONUS Rating Entry", "Table 50120 \"CRONUS Rating Entry\" is not in the licensed table range 50000-50099")],
+            1, 4, "25.0.1.0", DateTime.UtcNow, DateTime.UtcNow);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectBuilds.Where(b => b.Id == seed.BuildId)
+                .ExecuteUpdateAsync(s => s.SetProperty(b => b.LicenceCheckJson, ALDevToolbox.Services.Gateways.LicenceRangeCheck.Serialize(new[] { check })));
+        }
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            var alert = cut.FindAll(".alert").Single(a => a.TextContent.Contains("outside the customer's licence"));
+            alert.TextContent.Should().Contain($"Build #{seed.BuildId} can't be deployed to Test: 1 object is outside the customer's licence.")
+                .And.Contain("so no deployment of it was made or prepared");
+            alert.QuerySelector("a")!.TextContent.Should().Be("See which objects on the build");
+        });
+    }
+
+    [Fact]
     public async Task A_running_on_premises_deployment_shows_the_gateways_latest_lines()
     {
         var seed = await SeedAsync();

@@ -177,23 +177,39 @@
                                     : $"This build can't be deployed to {_envName}: {outside.OutsideCount} objects are outside {_customerName}'s licence there.")</b>
                             </p>
                             <ul class="rb-licence__list">
-                                @foreach (var finding in outside.Findings)
+                                @foreach (var finding in outside.Findings.Take(LicenceFindingsShown))
                                 {
                                     <li>@finding.Message</li>
                                 }
+                                @if (outside.OutsideCount > Math.Min(outside.Findings.Count, LicenceFindingsShown))
+                                {
+                                    <li class="rb-licence__more">and @(outside.OutsideCount - Math.Min(outside.Findings.Count, LicenceFindingsShown)) more</li>
+                                }
                             </ul>
-                            <p>Ask the customer to add @(outside.OutsideCount == 1 ? "it" : "them") to their licence, or give @(outside.OutsideCount == 1 ? "it an id" : "them ids") the licence covers, then deploy again.</p>
+                            <p>
+                                @(outside.OutsideCount == 1
+                                    ? "Ask the customer to add it to their licence, or renumber it to an object ID the licence covers, then deploy again."
+                                    : "Ask the customer to add them to their licence, or renumber them to object IDs the licence covers, then deploy again.")
+                                @LicenceReadSentence(outside)
+                            </p>
                         </div>
                     </Alert>
                 }
                 else if (_licence is { IsNotChecked: true } notChecked)
                 {
                     <Alert Tone="AlertTone.Info" Class="rb-licence">
-                        <span><b>Licence not checked:</b> @notChecked.Reason If the licence doesn't cover every object in the build, Business Central refuses the install.</span>
+                        <span>
+                            <b>Licence not checked.</b> @notChecked.Reason
+                            <a href="@($"/environments/{notChecked.EnvironmentId}")" target="_blank" rel="noopener">Open @_envName</a>
+                            <br />
+                            You can still deploy. If the licence does not cover every object, Business Central refuses the install.
+                        </span>
                     </Alert>
                 }
 
-                @if (_restartPlan is { } restart)
+                @* A deployment the licence refuses restarts nothing, so the restart warning
+                   goes with the acknowledgement below it. *@
+                @if (_restartPlan is { } restart && _licence?.IsOutside != true)
                 {
                     @if (restart.DialogRefusal is { } shared)
                     {
@@ -490,9 +506,17 @@
         }
         finally
         {
-            _licenceLoading = false;
+            // Only for the build still picked: another pick has its own read in flight.
+            if (buildId == _buildId) _licenceLoading = false;
         }
     }
+
+    /// <summary>Objects named in the refusal before "and N more"; the deployment's own refusal names up to 200.</summary>
+    private const int LicenceFindingsShown = 20;
+
+    /// <summary>When AL Workbench read the licence the build was compared with.</summary>
+    private string? LicenceReadSentence(ALDevToolbox.Services.Gateways.LicenceCheck check) =>
+        check.LicenceReadAt is { } read ? $"AL Workbench read this licence {Zone.Format(read, "d MMM HH:mm")}." : null;
 
     /// <summary>True while the restart plan is read: the dialog cannot say yet what the deployment restarts, so it cannot be confirmed.</summary>
     private bool _planLoading;
