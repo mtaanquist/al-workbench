@@ -10,10 +10,17 @@ namespace ALWorkbench.Gateway.Core;
 /// <param name="Command">The command as AL Workbench sent it.</param>
 /// <param name="Files">Local path of each of the command's files, by file id.</param>
 /// <param name="Progress">Adds a line to the command's log. Cheap: lines are batched before they are sent.</param>
+/// <param name="RefreshInventory">
+/// Reads one tier again and sends what it read to AL Workbench, as a <c>refresh-inventory</c>
+/// for that tier would; answers null when it went through, otherwise why not. For a verb
+/// whose change should show at once rather than at the next round (a licence import, #1369).
+/// Null where the loop has no inventory to read with.
+/// </param>
 public sealed record GatewayCommandContext(
     GatewayCommandMessage Command,
     IReadOnlyDictionary<long, string> Files,
-    Action<string> Progress);
+    Action<string> Progress,
+    Func<Policy.TierRef, CancellationToken, Task<string?>>? RefreshInventory = null);
 
 /// <summary>How a verb ended, as reported to AL Workbench.</summary>
 public sealed record GatewayCommandOutcome(bool Succeeded, JsonObject? Result = null, string? FailureMessage = null)

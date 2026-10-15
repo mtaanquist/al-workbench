@@ -140,10 +140,16 @@ allow_unsigned = true
 #                   Restarting signs everyone on these tiers out. The gateway waits
 #                   up to 5 minutes for a tier to stop and 10 for it to run again.
 #   shared_restart  true only if restarting these tiers may affect more than one
-#                   customer; otherwise AL Workbench refuses a deployment whose
-#                   restart would reach tiers linked to more than one solution
+#                   customer; otherwise AL Workbench refuses a deployment or a
+#                   licence import whose restart would reach tiers linked to more
+#                   than one solution
 #   licence_target  where licences are imported: "NavDatabase", "Master",
 #                   "Default" or "Tenant". Leave it out to refuse licence imports.
+#                   A licence import runs on the publish_on tier (which needs
+#                   "licence"), then restarts the tiers above (each needs
+#                   "restart"), because a tier reads a new licence only when it
+#                   starts. "Tenant" imports into the tenant the solution is
+#                   linked to; the tiers still restart for every tenant on them.
 #   before, after   optional: the full path of your own PowerShell script (.ps1,
 #                   on a local drive, with no [ or ] in it) to run before a
 #                   deployment and after the restart. The tier needs "scripts" in
