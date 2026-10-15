@@ -854,14 +854,23 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// cached column so the page agrees with the tenant. The row write is what puts this
     /// in the audit log — see <c>AuditInterceptor.EnvironmentSettingColumns</c>.
     /// </summary>
-    public async Task SetAppUpdateCadenceAsync(int projectId, int environmentId, string cadence, CancellationToken ct = default)
+    public Task SetAppUpdateCadenceAsync(int projectId, int environmentId, string cadence, CancellationToken ct = default) =>
+        SetAppUpdateCadenceCoreAsync(projectId, environmentId, cadence, EnvironmentGate.Manage, ct);
+
+    /// <summary>
+    /// The cadence write behind both the environment page (gated on managing the
+    /// solution) and the Upgrades page's bulk action (gated on the environment-updates
+    /// grant, like the page's other bulk moves).
+    /// </summary>
+    private async Task SetAppUpdateCadenceCoreAsync(
+        int projectId, int environmentId, string cadence, EnvironmentGate gate, CancellationToken ct)
     {
         if (BcAppUpdateCadence.Normalize(cadence) is not { } value)
         {
             throw Validation("Cadence", "Choose how often Marketplace apps should update.");
         }
 
-        var env = await ResolveEnvironmentAsync(projectId, environmentId, ct);
+        var env = await ResolveEnvironmentAsync(projectId, environmentId, ct, gate);
         try
         {
             await _adminClient.SetAppUpdateCadenceAsync(env.Token, env.Family, env.Name, value, ct);
@@ -2316,7 +2325,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         var ids = environmentIds.Distinct().ToList();
         if (ids.Count == 0) return [];
 
-        var (found, canManage) = await LoadBulkTargetsAsync(ids, ct);
+        var (found, canManage) = await LoadBulkTargetsAsync(ids, EnvironmentGate.Manage, ct);
 
         // A deployment already booked for the environment's current window keeps its time
         // while that time falls in the new window, and otherwise moves to the new window's
@@ -2400,8 +2409,10 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// <see cref="AppCadenceChangeGroup.WillChange"/>, <see cref="AppCadenceChangeGroup.AlreadySet"/>,
     /// <see cref="AppCadenceChangeGroup.NoAccess"/> or <see cref="AppCadenceChangeGroup.Missing"/>.
     /// Reads only our own mirror, so "already set" is what the last refresh saw; a row
-    /// whose cadence was never read counts as a change. The grouping and the access
-    /// rules are the bulk delivery window's (#961).
+    /// whose cadence was never read counts as a change. The grouping is the bulk delivery
+    /// window's (#961); the access rule is the Upgrades page's: <see cref="AppCadenceChangeGroup.NoAccess"/>
+    /// means the caller lacks the environment-updates grant on the solution, which is what
+    /// the page's other bulk moves ask for.
     /// </summary>
     public async Task<List<AppCadenceChangePreviewRow>> PreviewAppUpdateCadenceForManyAsync(
         IReadOnlyCollection<int> environmentIds, string cadence, CancellationToken ct = default)
@@ -2416,7 +2427,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         var ids = environmentIds.Distinct().ToList();
         if (ids.Count == 0) return [];
 
-        var (found, canManage) = await LoadBulkTargetsAsync(ids, ct);
+        var (found, canManage) = await LoadBulkTargetsAsync(ids, EnvironmentGate.UpdateOps, ct);
         var rows = new List<AppCadenceChangePreviewRow>(ids.Count);
         foreach (var id in ids)
         {
@@ -2441,8 +2452,9 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
     /// Sets the AppSource apps update cadence on many environments at once. Groups first
     /// with <see cref="PreviewAppUpdateCadenceForManyAsync"/>, then writes each
     /// <see cref="AppCadenceChangeGroup.WillChange"/> row through
-    /// <see cref="SetAppUpdateCadenceAsync"/>, so the access check, the write to the
-    /// customer's tenant and the audited row update are the single-environment ones. Every
+    /// the same write as <see cref="SetAppUpdateCadenceAsync"/>, re-checking the
+    /// environment-updates grant per row, so the write to the customer's tenant and the
+    /// audited row update are the single-environment ones. Every
     /// other row is skipped. A row that fails is reported and does not stop the rest.
     /// </summary>
     public async Task<List<AppCadenceChangeResult>> SetAppUpdateCadenceForManyAsync(
@@ -2460,7 +2472,7 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             }
             try
             {
-                await SetAppUpdateCadenceAsync(row.ProjectId!.Value, row.EnvironmentId, value, ct);
+                await SetAppUpdateCadenceCoreAsync(row.ProjectId!.Value, row.EnvironmentId, value, EnvironmentGate.UpdateOps, ct);
                 results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Changed, null));
             }
             catch (PlanValidationException ex)
@@ -2523,13 +2535,14 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
 
     /// <summary>
     /// The environments a bulk settings change was asked for, as far as the caller can see
-    /// them, and whether the caller manages each one's solution - asked once per solution,
-    /// not once per row. An environment of a solution the caller cannot see is left out,
+    /// them, and whether the caller may make the change on each one's solution under
+    /// <paramref name="gate"/> (<see cref="EnvironmentGate.Manage"/> or
+    /// <see cref="EnvironmentGate.UpdateOps"/>) - asked once per solution, not once per row. An environment of a solution the caller cannot see is left out,
     /// so it answers as one that does not exist, as
     /// <see cref="UpgradeFleetService.GetEnvironmentAsync"/> does.
     /// </summary>
     private async Task<(Dictionary<int, BulkTarget> Found, Dictionary<int, bool> CanManage)> LoadBulkTargetsAsync(
-        List<int> ids, CancellationToken ct)
+        List<int> ids, EnvironmentGate gate, CancellationToken ct)
     {
         var snapshot = await _access.GetSnapshotAsync(ct);
         var visible = ProjectAccess.VisibleProjectPredicate(snapshot);
@@ -2555,7 +2568,9 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         var canManage = new Dictionary<int, bool>();
         foreach (var project in found.Values.Where(e => !e.ProjectDeleted).GroupBy(e => e.ProjectId))
         {
-            canManage[project.Key] = await _access.CanManageAsync(project.Key, project.First().OwnerId, ct);
+            canManage[project.Key] = gate == EnvironmentGate.UpdateOps
+                ? await _access.CanManageEnvironmentUpdatesAsync(project.Key, ct)
+                : await _access.CanManageAsync(project.Key, project.First().OwnerId, ct);
         }
         return (found, canManage);
     }
@@ -3210,13 +3225,13 @@ public sealed record DeliveryWindowChangeResult(
 /// <summary>Where one environment lands in the preview of a bulk AppSource cadence change.</summary>
 public enum AppCadenceChangeGroup
 {
-    /// <summary>The cadence differs from the one asked for (or was never read), and the caller manages the solution.</summary>
+    /// <summary>The cadence differs from the one asked for (or was never read), and the caller may change the solution's updates.</summary>
     WillChange,
 
     /// <summary>The environment already has this cadence; skipped.</summary>
     AlreadySet,
 
-    /// <summary>The caller cannot manage the environment's solution; skipped.</summary>
+    /// <summary>The caller lacks the environment-updates grant on the environment's solution; skipped.</summary>
     NoAccess,
 
     /// <summary>The environment, or its solution, no longer exists, or the customer deleted it; skipped.</summary>

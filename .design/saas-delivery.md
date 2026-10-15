@@ -321,14 +321,6 @@ environment's current window (`scheduled_by_delivery_window`) keeps its time if 
 in the new window, and otherwise moves to the new window's next opening when its turn comes (the
 rule below); the preview says so.
 
-The same bulk bar offers **Set AppSource cadence...**: one AppSource apps update cadence for every
-ticked row. `PreviewAppUpdateCadenceForManyAsync` groups the selection the same four ways from the
-mirrored `app_source_apps_update_cadence` (a row never read counts as a change), and
-`SetAppUpdateCadenceForManyAsync` writes each changing row through `SetAppUpdateCadenceAsync` - so
-each write goes to the customer's tenant and updates the audited column, exactly as the
-environment page's own select does. Rows already on the chosen cadence are skipped, one row's
-failure does not stop the rest, and the result says how many were updated and how many skipped.
-
 This **supersedes `OeReleasePipeline.default_publish_time`** as the source of the schedule prefill: the
 window lives on the environment (where it's reused across every deployment pipeline targeting it and
 matches the BC mental model), rather than being re-entered per deployment pipeline. Keep
@@ -594,6 +586,12 @@ that names the environment and says what the click does there:
   updated. The one write that also touches a row of ours: the cached
   `app_source_apps_update_cadence` is refreshed from the value we just set, so the page
   agrees with the tenant without waiting for a Refresh.
+  Many environments at once: the Upgrades page's fleet view has **Set AppSource cadence...**
+  (see `environment-updates.md`, "The page"). `PreviewAppUpdateCadenceForManyAsync` groups the
+  selection from the mirrored column (will change, already set, no access, missing; a cadence
+  never read counts as a change) and `SetAppUpdateCadenceForManyAsync` writes each changing row
+  the same way as the single write. Unlike the environment page, the bulk write is gated on the
+  environment-updates grant, as the Upgrades page's other bulk moves are.
 - **Access with Microsoft 365 licences** — whether people holding only an M365 licence can
   sign in. It changes who can get into the environment, so the confirm says so in those
   words.

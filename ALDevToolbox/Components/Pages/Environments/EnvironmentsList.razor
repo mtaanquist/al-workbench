@@ -494,7 +494,6 @@
 
 <UploadAppDialog @ref="_uploadDialog" />
 <BulkDeliveryWindowDialog @ref="_bulkWindowDialog" OnApplied="OnBulkWindowApplied" />
-<BulkAppCadenceDialog @ref="_bulkCadenceDialog" OnApplied="OnBulkCadenceApplied" />
 <CopyEnvironmentDialog @ref="_copyDialog" />
 <ConfirmDialog @ref="_confirm" />
 
@@ -514,7 +513,6 @@
     private bool _busy;
     private UploadAppDialog? _uploadDialog;
     private BulkDeliveryWindowDialog? _bulkWindowDialog;
-    private BulkAppCadenceDialog? _bulkCadenceDialog;
 
     /// <summary>
     /// The ticked rows, by environment id. A search, a filter or a view leaves them
@@ -734,7 +732,7 @@
         {
             // A re-read waits for the next tick rather than moving the rows under the
             // dialog while it works.
-            if (BulkDialogWorking) return;
+            if (_bulkWindowDialog?.IsWorking == true) return;
             await LoadAsync(ownScope: true);
             if (DateTime.UtcNow >= _pollUntilUtc)
             {
@@ -841,7 +839,7 @@
         }
         // Never beside a Refresh or its re-reads, and never while the dialog works on
         // the rows.
-        if (_refreshing || BulkDialogWorking) return;
+        if (_refreshing || _bulkWindowDialog?.IsWorking == true) return;
         try
         {
             await RequestRefreshAsync(force: false);
@@ -911,11 +909,6 @@
                     <Icon Name="clock" Width="14" Height="14" />
                     <span>Set delivery window...</span>
                 </button>
-                <button type="button" class="btn btn--sm" @onclick="OpenBulkCadenceAsync" disabled="@_busy"
-                        title="Choose how often AppSource apps update on the selected environments">
-                    <Icon Name="package" Width="14" Height="14" />
-                    <span>Set AppSource cadence...</span>
-                </button>
                 <button type="button" class="btn btn--sm @(_selection.ShowSelectedOnly ? "is-active" : "")"
                         aria-pressed="@(_selection.ShowSelectedOnly ? "true" : "false")"
                         @onclick="() => _selection.ShowSelected(!_selection.ShowSelectedOnly, FilterKey())">
@@ -945,21 +938,6 @@
     /// nothing to re-read. The ticks have done their job.
     /// </summary>
     private void OnBulkWindowApplied(List<DeliveryWindowChangeResult> results) => _selection.Clear();
-
-    private async Task OpenBulkCadenceAsync()
-    {
-        if (_bulkCadenceDialog is null || _rows is null) return;
-        // Every ticked row, on screen or not, as for the delivery window.
-        var rows = _rows.Where(r => _selection.Contains(r.EnvironmentId)).ToList();
-        if (rows.Count == 0) return;
-        await _bulkCadenceDialog.OpenAsync(rows);
-    }
-
-    /// <summary>The list shows no cadence either, so there is nothing to re-read. The ticks have done their job.</summary>
-    private void OnBulkCadenceApplied(List<AppCadenceChangeResult> results) => _selection.Clear();
-
-    /// <summary>True while either bulk dialog reads or writes on the context the page shares with it.</summary>
-    private bool BulkDialogWorking => _bulkWindowDialog?.IsWorking == true || _bulkCadenceDialog?.IsWorking == true;
 
     /// <summary>True when only a tab is narrowing the list — the search and both dropdowns are clear.</summary>
     private bool NoOtherFilters() =>

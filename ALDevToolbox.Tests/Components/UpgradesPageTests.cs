@@ -142,6 +142,63 @@ public sealed class UpgradesPageTests : IDisposable
     }
 
     /// <summary>
+    /// "Set AppSource cadence..." lives in the bar's More menu beside Move dates, and its
+    /// preview sorts the ticked rows by what would change: the one already on the chosen
+    /// cadence is folded away as skipped rather than listed with the rest.
+    /// </summary>
+    [Fact]
+    public async Task The_cadence_command_previews_the_ticked_rows_and_skips_the_ones_already_set()
+    {
+        await SeedOneEnvironmentAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            var project = await ctx.OeProjects.SingleAsync();
+            ctx.OeProjectEnvironments.Add(new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId,
+                ProjectId = project.Id,
+                Name = "Sandbox",
+                Type = "Sandbox",
+                ApplicationFamily = "BusinessCentral",
+                Status = "Active",
+                Version = "27.5.12345.0",
+                FetchedAt = DateTime.UtcNow,
+                AppSourceAppsUpdateCadence = BcAppUpdateCadence.DuringMajorUpgrade,
+            });
+            var production = await ctx.OeProjectEnvironments.SingleAsync(e => e.Name == "Production");
+            production.AppSourceAppsUpdateCadence = BcAppUpdateCadence.Default;
+            await ctx.SaveChangesAsync();
+        }
+
+        var cut = RenderFleet();
+        cut.WaitForAssertion(() => cut.FindAll(".data-table tbody tr").Should().HaveCount(2));
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("thead .data-table__col-check input").Change(true);
+            CadenceCommand(cut).HasAttribute("disabled").Should().BeFalse();
+        });
+        cut.WaitForAssertion(() =>
+        {
+            CadenceCommand(cut).Click();
+            cut.Find("#bac-cadence").Should().NotBeNull();
+        });
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find("#bac-cadence").Change(BcAppUpdateCadence.DuringMajorUpgrade);
+            cut.Find(".bac-count").TextContent.Should().Contain("1 environment will change");
+        });
+
+        var heads = cut.FindAll(".bac-group__head").Select(h => h.TextContent.Trim()).ToList();
+        heads.Should().HaveCount(2);
+        heads[0].Should().EndWith("(1)").And.Contain("→");
+        heads[1].Should().StartWith("Skipped - already on this cadence");
+    }
+
+    private static AngleSharp.Dom.IElement CadenceCommand(IRenderedComponent<UpgradesPage> cut) =>
+        cut.FindAll(".cmdbar .ra__menu .menu__item").First(i => i.TextContent.Trim() == "Set AppSource cadence...");
+
+    /// <summary>
     /// The page exists to move update dates, and a deleted environment's date cannot be
     /// moved: Business Central offers it no update at all. It is dropped in the fleet
     /// query rather than in the page, so the counts, the checkbox selection and the two

@@ -4487,7 +4487,9 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     /// <summary>
     /// A connected solution with one of each: a row that changes, a row already on the
     /// target cadence, one never read, a deleted one, and - on a Read-only solution
-    /// someone else owns - one the owner cannot manage.
+    /// someone else owns - one the caller has no update grant on. The bulk cadence is an
+    /// Upgrades page action, so it asks for the environment-updates grant: the calls that
+    /// follow run as the team member who holds it on the first solution.
     /// </summary>
     private async Task<(int Changes, int AlreadySet, int NeverRead, int Deleted, int Foreign)> SeedCadenceFleetAsync()
     {
@@ -4513,6 +4515,8 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         var foreign = Env(theirs, "Production", BcAppUpdateCadence.Default);
         ctx.OeProjectEnvironments.AddRange(already, neverRead, deleted, foreign);
         await ctx.SaveChangesAsync();
+        await SeedUpdateOpsTeamAsync(mine);
+        _db.OrgContext.CurrentUserId = FlagUserId;
         return (changes, already.Id, neverRead.Id, deleted.Id, foreign.Id);
     }
 
@@ -4656,6 +4660,27 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         await using var verify = _db.NewContext();
         (await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == hiddenEnv))
             .AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.Default);
+    }
+
+    [Fact]
+    public async Task Managing_a_solution_is_not_enough_for_the_bulk_cadence()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        // The owner manages the solution and can change its cadence from the environment
+        // page, but holds no update grant, which is what the Upgrades page asks for.
+        _db.OrgContext.CurrentUserId = OwnerUserId;
+        var admin = new FakeAdminClient();
+
+        List<AppCadenceChangeResult> results;
+        await using (var ctx = _db.NewContext())
+        {
+            results = await Svc(ctx, TokenOk(), admin).SetAppUpdateCadenceForManyAsync(
+                [fleet.Changes], BcAppUpdateCadence.DuringMajorUpgrade);
+        }
+
+        results.Single().Row.Group.Should().Be(AppCadenceChangeGroup.NoAccess);
+        results.Single().Outcome.Should().Be(AppCadenceChangeOutcome.Skipped);
+        admin.CadenceWrites.Should().BeEmpty();
     }
 
     [Fact]

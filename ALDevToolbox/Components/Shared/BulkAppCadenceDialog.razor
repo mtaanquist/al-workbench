@@ -5,7 +5,7 @@
 @inject ILogger<BulkAppCadenceDialog> Log
 
 @*
-    "Set AppSource cadence..." for the rows ticked on the Environments list. One cadence
+    "Set AppSource cadence..." for the rows ticked on the Upgrades page's fleet view. One cadence
     for every selected environment; a preview grouped the way the bulk delivery window
     groups its rows (BulkDeliveryWindowDialog), with the ones already on that cadence
     skipped; then the per-row result. The grouping and the writes are
@@ -93,8 +93,6 @@
 }
 
 @code {
-    /// <summary>Raised after a run, with the per-row results.</summary>
-    [Parameter] public EventCallback<List<AppCadenceChangeResult>> OnApplied { get; set; }
 
     private bool _open;
     private bool _focusPending;
@@ -117,6 +115,9 @@
     /// database context, so the page holds back its own background re-read meanwhile.
     /// </summary>
     public bool IsWorking => _previewLoading || _saving;
+
+    /// <summary>True while the dialog is on screen. The Upgrades page holds its poll and its watch meanwhile.</summary>
+    public bool IsOpen => _open;
 
     private int ChangeCount => _preview?.Count(p => p.Group == AppCadenceChangeGroup.WillChange) ?? 0;
 
@@ -225,7 +226,6 @@
         try
         {
             _results = await Connection.SetAppUpdateCadenceForManyAsync(_ids, cadence);
-            await OnApplied.InvokeAsync(_results);
         }
         catch (PlanValidationException ex)
         {
@@ -283,7 +283,7 @@
             ? $"Current setting not known yet → {NewCadence}"
             : $"{BcAppUpdateCadence.Display(row.CurrentCadence)} → {NewCadence}",
         AppCadenceChangeGroup.AlreadySet => "Already on this cadence",
-        AppCadenceChangeGroup.NoAccess => "Only people who manage this solution can change it - ask one of them",
+        AppCadenceChangeGroup.NoAccess => "You can't change updates for this solution",
         _ => "Not found in Business Central, or being deleted",
     };
 

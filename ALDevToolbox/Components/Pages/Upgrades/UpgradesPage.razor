@@ -291,6 +291,12 @@
                             <Icon Name="tag" Width="15" Height="15" Css="menu__icon" />
                             <span>Change the next version...</span>
                         </button>
+                        <button type="button" class="menu__item" role="menuitem" disabled="@ActionsDisabled"
+                                title="Choose how often AppSource apps update on the selected environments"
+                                @onclick="OpenAppCadenceAsync">
+                            <Icon Name="package" Width="15" Height="15" Css="menu__icon" />
+                            <span>Set AppSource cadence...</span>
+                        </button>
                     </RowActions>
                 </div>
             </div>
@@ -602,6 +608,10 @@
    one, and the two row-menu confirms. *@
 <NewUpgradeDialog @ref="_newUpgrade" Versions="_offeredVersions" OnCreated="OnUpgradeCreated" />
 <AddToUpgradeDialog @ref="_addToUpgrade" Versions="_offeredVersions" OnAdded="OnAddedToUpgradeAsync" />
+
+@* The AppSource cadence for every ticked environment: its own preview and result, since
+   it writes a setting rather than moving an update. *@
+<BulkAppCadenceDialog @ref="_appCadence" />
 
 @* Mark done names what is still unchecked before anything moves (PageUpgrade.dc.html,
    the "Mark done" confirm): marking done is never a blind click. *@
@@ -979,6 +989,19 @@
     private Task ConfirmSelectVersionAsync(UpgradeFleetRow? only = null) =>
         _runner?.ConfirmSelectVersionAsync(Target(only)) ?? Task.CompletedTask;
 
+    private BulkAppCadenceDialog? _appCadence;
+
+    /// <summary>
+    /// The AppSource cadence for every ticked row, on screen or not; the dialog names each
+    /// one before it writes. The selection is left as it is afterwards, as after a run: the
+    /// team often follows a cadence change with another move on the same customers.
+    /// </summary>
+    private Task OpenAppCadenceAsync()
+    {
+        var rows = SelectedRows();
+        return rows.Count == 0 || _appCadence is null ? Task.CompletedTask : _appCadence.OpenAsync(rows);
+    }
+
     /// <summary>A run owns the table while it lasts: no refresh poll, and no old summary.</summary>
     private void OnRunStarted()
     {
@@ -1070,7 +1093,7 @@
 
     /// <summary>Never while a batch is mid-flight or a dialog is open: those own the table.</summary>
     private bool PollPaused =>
-        Running || _denied || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true;
+        Running || _denied || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true || _appCadence?.IsOpen == true;
 
     private async Task PollTickAsync()
     {
@@ -1152,7 +1175,7 @@
     /// refresh poll must not read alongside them.
     /// </summary>
     private bool DialogOpen => _runner?.IsDialogOpen == true
-        || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true;
+        || _newUpgrade?.IsOpen == true || _addToUpgrade?.IsOpen == true || _appCadence?.IsOpen == true;
 
     // ── Bookings, the activity feed, and cancelling ─────────────────────
 
