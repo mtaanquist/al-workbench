@@ -26,6 +26,7 @@ public sealed class S3ProviderListTests : IDisposable
     private readonly HttpListener _listener = new();
     private readonly string _endpoint;
     private string _responseXml = string.Empty;
+    private string? _secondPageXml;
     private volatile string? _lastQuery;
 
     public S3ProviderListTests()
@@ -67,7 +68,8 @@ public sealed class S3ProviderListTests : IDisposable
             }
 
             _lastQuery = ctx.Request.Url?.Query;
-            var bytes = Encoding.UTF8.GetBytes(_responseXml);
+            var continued = ctx.Request.QueryString["continuation-token"] is { Length: > 0 };
+            var bytes = Encoding.UTF8.GetBytes(continued && _secondPageXml is not null ? _secondPageXml : _responseXml);
             ctx.Response.StatusCode = 200;
             ctx.Response.ContentType = "application/xml";
             ctx.Response.ContentLength64 = bytes.Length;
@@ -113,7 +115,7 @@ public sealed class S3ProviderListTests : IDisposable
         """;
 
         using var provider = NewProvider();
-        var objects = await provider.ListAsync("aldevtoolbox/", maxObjects: 100, topLevelOnly: false, CancellationToken.None);
+        var objects = await provider.ListAsync("aldevtoolbox/", topLevelOnly: false, CancellationToken.None);
 
         objects.Should().HaveCount(2);
         objects[0].Key.Should().Be("aldevtoolbox/2026-08-01.dump");
@@ -140,7 +142,7 @@ public sealed class S3ProviderListTests : IDisposable
         """;
 
         using var provider = NewProvider();
-        var objects = await provider.ListAsync("aldevtoolbox/", maxObjects: 100, topLevelOnly: false, CancellationToken.None);
+        var objects = await provider.ListAsync("aldevtoolbox/", topLevelOnly: false, CancellationToken.None);
 
         objects.Should().BeEmpty();
     }
@@ -161,11 +163,52 @@ public sealed class S3ProviderListTests : IDisposable
         """;
 
         using var provider = NewProvider();
-        await provider.ListAsync("aldevtoolbox/", maxObjects: 100, topLevelOnly: true, CancellationToken.None);
+        await provider.ListAsync("aldevtoolbox/", topLevelOnly: true, CancellationToken.None);
         _lastQuery.Should().Contain("delimiter=%2F");
 
-        await provider.ListAsync("aldevtoolbox/", maxObjects: 100, topLevelOnly: false, CancellationToken.None);
+        await provider.ListAsync("aldevtoolbox/", topLevelOnly: false, CancellationToken.None);
         _lastQuery.Should().NotContain("delimiter");
+    }
+
+    /// <summary>
+    /// A listing pages to the end of the prefix: the service sorts by date and
+    /// only then cuts, so stopping early kept the alphabetically first keys
+    /// and dropped the newest (#1333).
+    /// </summary>
+    [Fact]
+    public async Task A_truncated_listing_is_followed_to_its_last_page()
+    {
+        _responseXml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+          <Name>backups</Name>
+          <IsTruncated>true</IsTruncated>
+          <NextContinuationToken>page-2</NextContinuationToken>
+          <Contents>
+            <Key>aldevtoolbox/tenants/alpha/a.tenant.zip</Key>
+            <LastModified>2026-08-01T09:30:00.000Z</LastModified>
+            <Size>1</Size>
+          </Contents>
+        </ListBucketResult>
+        """;
+        _secondPageXml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+          <Name>backups</Name>
+          <IsTruncated>false</IsTruncated>
+          <Contents>
+            <Key>aldevtoolbox/tenants/zulu/z.tenant.zip</Key>
+            <LastModified>2026-08-02T09:30:00.000Z</LastModified>
+            <Size>1</Size>
+          </Contents>
+        </ListBucketResult>
+        """;
+
+        using var provider = NewProvider();
+        var objects = await provider.ListAsync("aldevtoolbox/", topLevelOnly: false, CancellationToken.None);
+
+        objects.Select(o => o.Key).Should().Equal(
+            "aldevtoolbox/tenants/alpha/a.tenant.zip", "aldevtoolbox/tenants/zulu/z.tenant.zip");
     }
 
     public void Dispose()

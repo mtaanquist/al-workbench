@@ -17,8 +17,9 @@ namespace ALDevToolbox.Services.Generation;
 /// </summary>
 /// <remarks>
 /// The DB remains the source of truth: parsing validates the referenced template
-/// and module keys against live rows, refusing imports that point at deleted or
-/// missing entities. Publisher is derived from the picked template's defaults
+/// against live rows, refusing a file that points at a deleted or missing one.
+/// Module keys are kept as saved, deleted or not: the list records what the
+/// workspace was generated with (#1328). Publisher is derived from the picked template's defaults
 /// rather than persisted in the config file, so a reused workspace config always
 /// reflects the current template setup.
 /// </remarks>
@@ -149,8 +150,9 @@ public class WorkspaceConfigService
     /// Parses the supplied TOML and validates it against the live database.
     /// Returns whichever shape the file declared via its <c>kind</c> key. Throws
     /// <see cref="PlanValidationException"/> when the file is malformed, points
-    /// at a missing/deleted template, or references unknown module keys; the
-    /// errors dictionary is keyed for inline display by the caller.
+    /// at a missing/deleted template; the errors dictionary is keyed for inline
+    /// display by the caller. Module keys that name no live module are kept as
+    /// saved, not refused: see <c>BuildWorkspaceImportAsync</c>.
     /// </summary>
     public async Task<WorkspaceConfigImport> ParseAsync(string toml, CancellationToken ct = default)
     {
@@ -258,22 +260,12 @@ public class WorkspaceConfigService
             }
         }
 
-        // Validate every referenced module key against the live, non-deleted set.
-        var unknownModules = new List<string>();
-        if (section.Modules.Count > 0)
-        {
-            var liveKeys = await _db.Modules
-                .AsNoTracking()
-                .Where(m => m.DeletedAt == null && section.Modules.Contains(m.Key))
-                .Select(m => m.Key)
-                .ToListAsync(ct);
-            var liveSet = liveKeys.ToHashSet(StringComparer.Ordinal);
-            unknownModules = section.Modules.Where(k => !liveSet.Contains(k)).ToList();
-            if (unknownModules.Count > 0)
-            {
-                errors["Modules"] = $"Unknown or deleted module key(s): {string.Join(", ", unknownModules)}.";
-            }
-        }
+        // Module keys are not checked against the catalogue. The list records
+        // what the workspace was generated with, and a module deleted since is
+        // still in it; every caller reads the file back to add an extension
+        // beside the existing ones, which needs only the template and the saved
+        // extensions (#1328). Generating a new workspace refuses a key that
+        // names no live module on its own.
 
         if (errors.Count > 0) throw new PlanValidationException(errors);
 

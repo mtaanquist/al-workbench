@@ -495,6 +495,10 @@ public sealed class GitHubAccessService
 
         var reachable = await ReachableInstallationRepositoriesAsync(userId, ct);
         var visible = new List<string>(candidates.Count);
+        // Once GitHub has given no answer - a rate limit, usually the secondary one
+        // this very burst trips - the rest of the per-repository questions would
+        // only be refused too and keep the limit hot, so they are not asked (#1340).
+        var unanswered = 0;
         foreach (var name in candidates)
         {
             if (reachable is { } set && set.Names.Contains(name))
@@ -505,10 +509,25 @@ public sealed class GitHubAccessService
             }
             else if (reachable is null || reachable.Value.Truncated)
             {
-                if (await CanAccessRepoAsync(userId, name, ct)) visible.Add(name);
+                if (unanswered > 0)
+                {
+                    unanswered++;
+                    continue;
+                }
+                switch (await TryCanAccessRepoAsync(userId, name, ct))
+                {
+                    case true: visible.Add(name); break;
+                    case null: unanswered++; break;
+                }
             }
         }
 
+        if (unanswered > 0)
+        {
+            _logger.LogWarning(
+                "GitHub gave no answer for user {UserId}, so {UnansweredCount} repositories were left out unasked.",
+                userId, unanswered);
+        }
         _logger.LogInformation(
             "User {UserId} can see {VisibleCount} of {RepositoryCount} repositories in the connected organisation.",
             userId, visible.Count, candidates.Count);

@@ -28,7 +28,10 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
         EnvironmentRefreshQueue queue,
         IServiceProvider services,
         ILogger<EnvironmentRefreshWorker> logger,
-        WorkerHeartbeatRegistry heartbeats)
+        WorkerHeartbeatRegistry heartbeats,
+        // Optional so a worker built by hand keeps compiling; production DI always
+        // supplies the singleton.
+        Operations.MaintenanceModeState? maintenance = null)
         // One project is a token call plus two admin-center calls per environment, so 15
         // minutes is ample even for a customer with many sandboxes while still catching a
         // wedged job.
@@ -37,7 +40,10 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
         _queue = queue;
         _services = services;
         _logger = logger;
+        _maintenance = maintenance;
     }
+
+    private readonly Operations.MaintenanceModeState? _maintenance;
 
     /// <summary>
     /// A breath between one customer and the next. The sweep is a run of back-to-back
@@ -57,6 +63,15 @@ public sealed class EnvironmentRefreshWorker : QueueDrainWorker<EnvironmentRefre
 
     protected override async Task RunJobAsync(EnvironmentRefreshJob job, CancellationToken ct)
     {
+        // A queued job is dropped while a restore runs or a failed one holds the
+        // site closed (#1321): it only refreshes a mirror, which the next run
+        // refreshes again, and the rows it would write to may not be there.
+        if (_maintenance?.IsActive == true)
+        {
+            _logger.LogInformation("Skipping {Job}: maintenance mode is active.", Describe(job));
+            return;
+        }
+
         if (_runSolutions == 0) _runStarted = System.Diagnostics.Stopwatch.GetTimestamp();
 
         using var orgScope = AmbientOrganizationScope.Enter(job.Identity);

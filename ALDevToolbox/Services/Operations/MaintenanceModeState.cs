@@ -14,23 +14,45 @@ namespace ALDevToolbox.Services.Operations;
 /// </summary>
 public sealed class MaintenanceModeState
 {
-    private volatile string? _reason;
-    private DateTime _startedAt;
+    /// <summary>Everything the flag holds, so a caller can put back exactly what was there.</summary>
+    public sealed record Snapshot(string? Reason, DateTime StartedAtUtc, bool HeldAfterFailedRestore);
 
-    public bool IsActive => _reason is not null;
-    public string? Reason => _reason;
-    public DateTime StartedAtUtc => _startedAt;
+    private volatile Snapshot _state = new(null, default, false);
+
+    public bool IsActive => _state.Reason is not null;
 
     /// <summary>
-    /// Flips the flag on. The caller owns the <c>try/finally</c> that calls
-    /// <see cref="Exit"/> so a thrown restore never leaves the app stuck in
-    /// maintenance.
+    /// Why the site is closed. Shown to SiteAdmins only: it can name a backup
+    /// file, so the public maintenance page uses its own generic wording.
     /// </summary>
-    public void Enter(string reason)
-    {
-        _reason = reason;
-        _startedAt = DateTime.UtcNow;
-    }
+    public string? Reason => _state.Reason;
 
-    public void Exit() => _reason = null;
+    public DateTime StartedAtUtc => _state.StartedAtUtc;
+
+    /// <summary>
+    /// True when a restore failed after the database was dropped and the site is
+    /// being held closed until a SiteAdmin restores another backup (#1321).
+    /// </summary>
+    public bool IsHeldAfterFailedRestore => _state.HeldAfterFailedRestore;
+
+    /// <summary>
+    /// Flips the flag on for work in progress. The caller owns the
+    /// <c>try/finally</c> that calls <see cref="Exit"/> (or <see cref="Restore"/>).
+    /// </summary>
+    public void Enter(string reason) => _state = new(reason, DateTime.UtcNow, false);
+
+    /// <summary>
+    /// Keeps the flag on after a restore failed once the database was dropped.
+    /// Nothing calls <see cref="Exit"/> for it: it stays until a SiteAdmin
+    /// restores another backup or the process restarts (#1321).
+    /// </summary>
+    public void HoldAfterFailedRestore(string reason) => _state = new(reason, DateTime.UtcNow, true);
+
+    /// <summary>The current state, to hand back to <see cref="Restore"/>.</summary>
+    public Snapshot Capture() => _state;
+
+    /// <summary>Puts back a state taken with <see cref="Capture"/>.</summary>
+    public void Restore(Snapshot snapshot) => _state = snapshot;
+
+    public void Exit() => _state = new(null, default, false);
 }

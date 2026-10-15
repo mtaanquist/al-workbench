@@ -102,17 +102,19 @@ public sealed class OAuthClientAdminService
     /// independent consents on it.
     ///
     /// <para>
-    /// Three authorisation modes, since the consent table is read with
-    /// <c>IgnoreQueryFilters()</c> and can't lean on the tenant filter:
+    /// Three authorisation modes:
     /// </para>
     /// <list type="bullet">
-    /// <item>Self-service (<paramref name="ignoreOrgScope"/> = false): the
-    /// consent must belong to <paramref name="actorUserId"/>.</item>
+    /// <item>Self-service (<paramref name="ignoreOrgScope"/> = false): read
+    /// inside the tenant filter, and the consent must belong to
+    /// <paramref name="actorUserId"/>.</item>
     /// <item>Org admin (<paramref name="ignoreOrgScope"/> = true and
-    /// <paramref name="expectedOrganizationId"/> set): the consent must belong
-    /// to that org, so an admin can only revoke inside their own tenant.</item>
+    /// <paramref name="expectedOrganizationId"/> set): read inside the tenant
+    /// filter, skipping only the per-user ownership check, and the consent
+    /// must also belong to that org.</item>
     /// <item>SiteAdmin (<paramref name="ignoreOrgScope"/> = true and
-    /// <paramref name="expectedOrganizationId"/> = null): no org restriction.</item>
+    /// <paramref name="expectedOrganizationId"/> = null): the only mode that
+    /// reads with <c>IgnoreQueryFilters()</c>, so no org restriction.</item>
     /// </list>
     /// The org-scope guard is defence in depth against a future caller passing a
     /// user-supplied consent id (today they come from row-bound handlers). See #488.
@@ -121,8 +123,9 @@ public sealed class OAuthClientAdminService
     {
         var query = _db.OAuthConsents.AsQueryable();
         // Fence category 2 (SiteAdmin cross-org console): the bypass is opt-in and only the
-        // SiteAdmin page passes ignoreOrgScope; org-scoped callers stay inside the filter.
-        if (ignoreOrgScope) query = query.IgnoreQueryFilters();
+        // SiteAdmin page passes ignoreOrgScope without an org; org-scoped callers, the org
+        // Admin page included, stay inside the filter (#1337).
+        if (ignoreOrgScope && expectedOrganizationId is null) query = query.IgnoreQueryFilters();
         var consent = await query.FirstOrDefaultAsync(c => c.Id == consentId, cancellationToken);
         if (consent is null || consent.RevokedAt is not null) return;
         if (!ignoreOrgScope && consent.UserId != actorUserId)
@@ -188,6 +191,8 @@ public sealed class OAuthClientAdminService
         // client as revoked so the lists show a consistent picture.
         var now = _clock.GetUtcNow().UtcDateTime;
         var consents = await _db.OAuthConsents
+            // Fence category 2 (SiteAdmin cross-org console): only caller is
+            // /site-admin/oauth-clients, gated by [Authorize(Roles = SiteAdminRole)].
             .IgnoreQueryFilters()
             .Where(c => c.ClientId == clientId && c.RevokedAt == null)
             .ToListAsync(cancellationToken);

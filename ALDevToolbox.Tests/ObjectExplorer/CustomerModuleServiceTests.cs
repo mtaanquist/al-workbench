@@ -276,6 +276,33 @@ public sealed class CustomerModuleServiceTests : IDisposable
         seen.Select(a => (a.Name, a.Solutions)).Should().Equal(("ForNAV", 2), ("CRONUS Warehouse Add-on", 1));
     }
 
+    /// <summary>
+    /// A deleted Solution's apps are not offered: the catalogue counts leave deleted
+    /// Solutions out, and the list to pick from has to agree with them (#1342).
+    /// </summary>
+    [Fact]
+    public async Task Apps_to_pick_from_leave_out_apps_only_a_deleted_solution_had()
+    {
+        var fornav = Guid.NewGuid();
+        var orphan = Guid.NewGuid();
+        var keeps = await SeedSolutionAsync("CRONUS Denmark", null);
+        var gone = await SeedSolutionAsync("CRONUS Norway", null);
+        await SeedEnvironmentAsync(keeps, "Production", "Production", (fornav, "ForNAV", "ForNAV", "8.1"));
+        await SeedEnvironmentAsync(gone, "Production", "Production",
+            (fornav, "ForNAV", "ForNAV", "8.1"), (orphan, "CRONUS Warehouse Add-on", "CRONUS International", "1.0"));
+        await using (var del = _db.NewContext())
+        {
+            var project = await del.OeProjects.SingleAsync(p => p.Id == gone);
+            project.DeletedAt = DateTime.UtcNow;
+            await del.SaveChangesAsync();
+        }
+
+        await using var ctx = _db.NewContext();
+        var seen = await Svc(ctx).ListSeenAppsAsync();
+
+        seen.Select(a => (a.Name, a.Solutions)).Should().Equal(("ForNAV", 1));
+    }
+
     [Fact]
     public async Task Removing_a_module_from_the_catalogue_takes_the_typed_versions_with_it()
     {

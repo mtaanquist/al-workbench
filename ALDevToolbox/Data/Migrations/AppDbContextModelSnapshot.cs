@@ -194,6 +194,11 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("offsite_uploaded_at");
 
+                    b.Property<string>("RecoveredFromDeploymentId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("recovered_from_deployment_id");
+
                     b.HasKey("Id");
 
                     b.HasIndex("CreatedAt");
@@ -6636,6 +6641,10 @@ namespace ALDevToolbox.Data.Migrations
                     b.Property<DateTime?>("LastUsedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_used_at");
+
+                    b.Property<long?>("LastUsedTimeStep")
+                        .HasColumnType("bigint")
+                        .HasColumnName("last_used_time_step");
 
                     b.Property<string>("SecretEncrypted")
                         .IsRequired()

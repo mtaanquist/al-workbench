@@ -4049,6 +4049,7 @@ function buildTreeRow(node, depth, viewRelease) {
         const label = spanWith("otree__name");
         label.textContent = node.name;
         el.appendChild(label);
+        if (node.isHidden) el.hidden = true;
         return el;
     }
 
@@ -4117,6 +4118,9 @@ function buildTreeRow(node, depth, viewRelease) {
         id.textContent = node.badge;
         el.appendChild(id);
     }
+    // A row under a section that starts folded: present, so the section opens
+    // without a fetch, but not drawn until it does.
+    if (node.isHidden) el.hidden = true;
     return el;
 }
 

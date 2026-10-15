@@ -43,12 +43,15 @@ public sealed class ObjectExplorerTools
     }
 
     [McpServerTool(Name = "list_releases", ReadOnly = true)]
-    [Description("Lists every BC release (the version snapshots from which Object Explorer was populated), including Microsoft (kind 'first_party'), third-party ('third_party'), and legacy C/AL TXT imports ('cal'). Returns each release's id, Label (e.g. 'BC 28.1'), kind, BC version, status, and IsPrerelease — true for a Microsoft preview build of an upcoming version imported from the insider channel, which is replaced once that version ships; prefer a non-preview release for anything that has to match what customers run.")]
+    [Description("Lists the BC releases you can search (the version snapshots from which Object Explorer was populated) - the same list the Releases page shows - including Microsoft (kind 'first_party'), third-party ('third_party'), and legacy C/AL TXT imports ('cal'). Releases still importing or whose import failed are left out, as are the empty symbol packages builds fetch. Returns each release's id, Label (e.g. 'BC 28.1'), kind, BC version, status, and IsPrerelease — true for a Microsoft preview build of an upcoming version imported from the insider channel, which is replaced once that version ships; prefer a non-preview release for anything that has to match what customers run.")]
     public async Task<IReadOnlyList<ReleaseListItem>> ListReleasesAsync(CancellationToken ct = default) =>
         // Project builds are excluded — they're served through the Artifacts surface
         // (list_pipelines / list_pipeline_builds / get_solution_build), not the general
         // Object Explorer release list. See .design/artifacts.md.
-        await _explorer.ListReleasesAsync(includeSoftDeleted: false, ct: ct);
+        // browsableOnly: the Releases page's list. A failed or importing release
+        // cannot be searched, and the empty symbol packages builds pull would grow
+        // the list without bound (#1344).
+        await _explorer.ListReleasesAsync(includeSoftDeleted: false, browsableOnly: true, ct: ct);
 
     [McpServerTool(Name = "compare_releases", ReadOnly = true)]
     [Description("Diffs two releases at the object level, matched by (kind, object id). Returns each object's Status — 'added' (in the second only), 'removed' (in the first only), 'modified' (source differs), or 'unchanged' — plus the LeftFileId / RightFileId for a side-by-side source diff; Truncated and Note say whether anything was left out. Capped at 200 rows ordered by kind, then id — two Business Central versions differ in far more objects than that, so pass kind and/or namePattern to narrow it. Built for the legacy C/AL Base-vs-Customer comparison: pass the bare-Microsoft 'Base' release first and the customer export second.")]
@@ -339,16 +342,24 @@ public sealed class ObjectExplorerTools
     private const int MaxProcedureSourceLines = 200;
 
     [McpServerTool(Name = "list_release_modules", ReadOnly = true)]
-    [Description("Lists every module (extension) in a BC release with its identity, flags, and whether a SymbolReference.json was stored for it at import time. Use this to discover the modules you can pass to search_objects, find_references, get_object_outline, and download_symbol_reference. Sorted alphabetically by name; capped at the standard result limit.")]
-    public async Task<IReadOnlyList<ReleaseModuleSummary>> ListReleaseModulesAsync(
+    [Description("Lists the modules (extensions) in a BC release with their identity, flags, and whether a SymbolReference.json was stored for each at import time. Use this to discover the modules you can pass to search_objects, find_references, get_object_outline, and download_symbol_reference. Sorted alphabetically by name and capped at 200 rows; Truncated and Note say whether more were left out — a full Business Central release has more modules than that, so pass namePattern (e.g. 'System Application') to find one late in the alphabet.")]
+    public async Task<ReleaseModuleListResult> ListReleaseModulesAsync(
         [Description("Release Label ('BC 28.1') or numeric id.")] string releaseLabelOrId,
+        [Description("Optional case-insensitive substring of the module name. Null lists every module.")] string? namePattern = null,
         CancellationToken ct = default)
     {
         var releaseId = await _explorer.ResolveReleaseAsync(releaseLabelOrId, ct);
-        var rows = await _explorer.ListReleaseModulesForMcpAsync(releaseId, MaxResults, ct);
-        return rows.Select(m => new ReleaseModuleSummary(
-            m.Id, m.Name, m.Publisher, m.Version, m.AppId,
-            m.IsTest, m.IsInternal, m.IsLanguagePack, m.DependencyCount, m.HasStoredSymbolReference)).ToList();
+        // One past the cap, so a cut list says so instead of reading as complete (#1344).
+        var rows = await _explorer.ListReleaseModulesForMcpAsync(releaseId, MaxResults + 1, namePattern, ct);
+        var truncated = rows.Count > MaxResults;
+        return new ReleaseModuleListResult(
+            rows.Take(MaxResults).Select(m => new ReleaseModuleSummary(
+                m.Id, m.Name, m.Publisher, m.Version, m.AppId,
+                m.IsTest, m.IsInternal, m.IsLanguagePack, m.DependencyCount, m.HasStoredSymbolReference)).ToList(),
+            truncated,
+            truncated
+                ? $"Showing the first {MaxResults} modules (ordered by name); more were left out. Pass namePattern to narrow the list."
+                : null);
     }
 
     [McpServerTool(Name = "download_symbol_reference", ReadOnly = true)]
@@ -452,6 +463,17 @@ public sealed record SymbolReferenceDownloadLink(
     string ContentHash,
     int ContentLength,
     string DownloadPath);
+
+/// <summary>
+/// What <c>list_release_modules</c> returns: at most the tool's cap of modules,
+/// with <see cref="Truncated"/> and <see cref="Note"/> saying when more were left
+/// out, the same shape as <see cref="ReferenceSearchResult"/>. The list used to
+/// stop at the cap without a word, so modules late in the alphabet looked absent (#1344).
+/// </summary>
+public sealed record ReleaseModuleListResult(
+    IReadOnlyList<ReleaseModuleSummary> Rows,
+    bool Truncated,
+    string? Note);
 
 /// <summary>
 /// One row returned by the <c>list_release_modules</c> MCP tool — the per-release

@@ -171,6 +171,42 @@ public sealed class GitHubReleaseServiceTests : IDisposable
         api.Calls.Should().NotContain(c => c.Contains("/releases"));
     }
 
+    /// <summary>
+    /// Disabling a pipeline is how a person stops a bad release going out, and it can
+    /// happen while the build compiles. The build stays ready; only the release is held
+    /// back, with the reason on the build (#1335).
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_build_whose_pipeline_was_stopped_while_it_ran_is_not_published(bool deleted)
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: true, apps: [("CRONUS Core", "1.0.0.0")]);
+        await using (var stop = _db.NewContext())
+        {
+            await stop.OePipelines.Where(p => p.Id == seed.PipelineId)
+                .ExecuteUpdateAsync(u =>
+                {
+                    if (deleted) u.SetProperty(p => p.DeletedAt, DateTime.UtcNow);
+                    else u.SetProperty(p => p.DisabledAt, DateTime.UtcNow);
+                });
+        }
+        var api = PublishableApi(existingRelease: false);
+
+        await using (var ctx = _db.NewContext())
+        {
+            var result = await NewService(ctx, api).PublishBuildAsync(seed.BuildId);
+            result.Published.Should().BeFalse();
+            result.Error.Should().Be(deleted
+                ? GitHubReleaseService.PipelineDeletedNotPublished
+                : GitHubReleaseService.PipelineDisabledNotPublished);
+        }
+
+        api.Calls.Should().BeEmpty("nothing reaches GitHub once the pipeline is stopped");
+        await AssertBuildStillReadyAsync(seed.BuildId, "while this build ran");
+    }
+
     [Fact]
     public async Task A_build_with_nobody_recorded_as_starting_it_is_not_published()
     {
@@ -650,6 +686,58 @@ public sealed class GitHubReleaseServiceTests : IDisposable
             .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId")
             .WhoseValue.Should().Contain("couldn't be reached");
         api.Calls.Should().NotContain(c => c.Contains("/releases"));
+    }
+
+    /// <summary>
+    /// GitHub's rate limits also answer 403: the primary limit with no requests left,
+    /// the secondary limit with a <c>retry-after</c> header and requests still left
+    /// (#1340). Both are "ask again later", not "this person may not".
+    /// </summary>
+    [Theory]
+    [InlineData("0", null, "API rate limit exceeded for user ID 1.")]
+    [InlineData("4987", "60", "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.")]
+    [InlineData("4987", "60", "Slow down.")]
+    [InlineData("4987", null, "You have exceeded a secondary rate limit.")]
+    public async Task Staging_says_to_retry_when_github_answers_a_rate_limit_with_403(
+        string remaining, string? retryAfter, string message)
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var headers = new List<(string, string)> { ("x-ratelimit-remaining", remaining) };
+        if (retryAfter is not null) headers.Add(("retry-after", retryAfter));
+        var api = StageableApi()
+            .OnWithHeaders(HttpMethod.Get, $"/repos/{Repo}", _ => (
+                HttpStatusCode.Forbidden,
+                System.Text.Json.JsonSerializer.Serialize(new { message }),
+                headers.ToArray()));
+
+        await using var ctx = _db.NewContext();
+        var stage = () => NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+
+        (await stage.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId")
+            .WhoseValue.Should().Contain("couldn't be reached");
+        api.Calls.Should().NotContain(c => c.Contains("/releases"));
+    }
+
+    /// <summary>A 403 with no sign of a rate limit is still a definite no.</summary>
+    [Fact]
+    public async Task Staging_treats_a_plain_403_as_no_access()
+    {
+        await ConnectOrganisationAsync();
+        var seed = await SeedAsync(publishTo: false, apps: [("CRONUS Core", "1.0.0.0")], releaseSourced: true);
+        var api = StageableApi()
+            .OnWithHeaders(HttpMethod.Get, $"/repos/{Repo}", _ => (
+                HttpStatusCode.Forbidden,
+                "{\"message\":\"Resource not accessible by integration\"}",
+                [("x-ratelimit-remaining", "4987")]));
+
+        await using var ctx = _db.NewContext();
+        var stage = () => NewService(ctx, api).StageReleaseAsync(seed.ReleasePipelineId, "v1.0.0.0");
+
+        (await stage.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("GithubReleaseRepositoryId")
+            .WhoseValue.Should().NotContain("couldn't be reached").And.Contain(Repo);
     }
 
     [Fact]

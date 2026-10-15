@@ -565,6 +565,32 @@ public sealed class GitHubAccessServiceTests : IDisposable
         visible.Should().Equal("cronus-dk/alpha", "cronus-dk/gamma");
     }
 
+    /// <summary>
+    /// #1340: the per-repository burst is what trips GitHub's secondary rate limit,
+    /// so once one answer comes back rate limited the rest are not asked.
+    /// </summary>
+    [Fact]
+    public async Task Filtering_stops_asking_after_github_rate_limits_an_answer()
+    {
+        await ConfigureDeploymentAsync();
+        var api = LinkableApi()
+            .On(HttpMethod.Get, "repos/cronus-dk/alpha", HttpStatusCode.OK, "{}")
+            .OnWithHeaders(HttpMethod.Get, "repos/cronus-dk/beta", _ => (
+                HttpStatusCode.Forbidden,
+                "{\"message\":\"You have exceeded a secondary rate limit.\"}",
+                [("retry-after", "60"), ("x-ratelimit-remaining", "4987")]))
+            .On(HttpMethod.Get, "repos/cronus-dk/gamma", HttpStatusCode.OK, "{}");
+        var (service, ctx) = NewService(api);
+        await using var _ = ctx;
+        await service.LinkAsync("the-code");
+
+        var visible = await service.FilterAccessibleAsync(
+            UserId, ["cronus-dk/alpha", "cronus-dk/beta", "cronus-dk/gamma"]);
+
+        visible.Should().Equal("cronus-dk/alpha");
+        api.Calls.Should().NotContain(c => c.Contains("repos/cronus-dk/gamma"));
+    }
+
     [Fact]
     public async Task Asking_the_same_question_twice_in_one_burst_only_asks_github_once()
     {

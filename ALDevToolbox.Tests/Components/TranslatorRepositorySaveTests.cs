@@ -44,6 +44,37 @@ public sealed class TranslatorRepositorySaveTests
         unit.Dirty.Should().BeTrue();
     }
 
+    /// <summary>
+    /// Saving in place and exporting keep every edit in what they send, so the
+    /// memory is told only about the ones whose text changed since it last
+    /// learned them - otherwise each save added another hit to every unit touched
+    /// since the file was opened (#1343).
+    /// </summary>
+    [Fact]
+    public void Only_edits_with_new_text_since_the_last_save_are_learned()
+    {
+        var edits = new Dictionary<string, TargetEdit>(StringComparer.Ordinal)
+        {
+            ["a"] = new("Beloeb", "translated"),
+            ["b"] = new("Bogfoeringsdato", "translated"),
+            ["c"] = new("Dato", "translated"),
+            ["d"] = new("", "needs-translation"),
+        };
+        var learned = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["a"] = "Beloeb",
+            ["b"] = "Bogfoert",
+        };
+
+        var learn = TranslatorPage.UnitsToLearn(edits, learned);
+
+        learn.Should().BeEquivalentTo(new Dictionary<string, string>
+        {
+            ["b"] = "Bogfoeringsdato",
+            ["c"] = "Dato",
+        }, "a is unchanged since it was learned, and d has no text to learn");
+    }
+
     private static TranslatorPage.UnitVm Unit(string id, string target, string state) => new()
     {
         Id = id,

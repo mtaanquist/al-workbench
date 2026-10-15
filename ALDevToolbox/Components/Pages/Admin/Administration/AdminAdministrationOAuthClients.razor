@@ -122,9 +122,10 @@
     {
         // Org admin revokes consent without owning it; ignoreOrgScope=true so the
         // per-user ownership check doesn't bounce us. Authorisation is enforced by
-        // the [Authorize(Roles="Admin")] attribute on the page, and scoping the
-        // revoke to our own org (expectedOrganizationId) keeps an admin from ever
-        // reaching another tenant's consent. See #488.
+        // the [Authorize(Roles="Admin")] attribute on the page. Passing our own org
+        // (expectedOrganizationId) keeps the read inside the tenant filter and
+        // re-checks the row's org, so an admin never reaches another tenant's
+        // consent. See #488 and #1337.
         var orgId = Org.CurrentOrganizationId;
         if (orgId is null) return;
         await Clients.RevokeConsentAsync(consentId, actorUserId: 0, ignoreOrgScope: true, expectedOrganizationId: orgId.Value);

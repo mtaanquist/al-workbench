@@ -190,6 +190,45 @@ public sealed class DeliveryQueueTests
         told.Should().ContainSingle().Which.Title.Should().StartWith("Deployment failed");
     }
 
+    /// <summary>
+    /// While a restore runs, or a failed one holds the site closed over a database
+    /// that may be half-loaded, a queued deployment must not reach Business
+    /// Central. It stays scheduled, so the scheduler queues it again once the site
+    /// reopens. See issue #1321.
+    /// </summary>
+    [Fact]
+    public async Task A_queued_deployment_is_held_back_while_maintenance_mode_is_on()
+    {
+        using var db = new TestDb();
+        var seed = await DeliveryHost.SeedAsync(db, DateTime.UtcNow);
+        var deliveryId = await DeliveryHost.AddDeliveryAsync(db, seed, ProjectDeliveryStatus.Scheduled, DateTime.UtcNow.AddMinutes(-1));
+        var tokens = new TokensUntilShutdown();
+        var queue = new DeliveryQueue();
+        await using var services = DeliveryHost.Build(db, TimeProvider.System, () => tokens, queue);
+        var maintenance = new ALDevToolbox.Services.Operations.MaintenanceModeState();
+        maintenance.HoldAfterFailedRestore("Restoring backup x failed.");
+        var worker = new DeliveryWorker(1, queue, services, new RecordingLogger(), new WorkerHeartbeatRegistry(), maintenance);
+        var job = new DeliveryJob(deliveryId,
+            AmbientOrganizationScope.OrganizationIdentity.ForOrganization(TestDb.DefaultOrgId, isSystem: false));
+        queue.TryEnqueue(job).Should().BeTrue();
+
+        await worker.StartAsync(CancellationToken.None);
+        // The id is free to queue again only once the worker has finished with the job.
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        var finished = false;
+        while (!finished && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+            finished = queue.TryEnqueue(job);
+        }
+        await worker.StopAsync(CancellationToken.None);
+
+        finished.Should().BeTrue("the worker let go of the job");
+        tokens.Asked.Task.IsCompleted.Should().BeFalse("nothing was sent to Business Central");
+        (await DeliveryHost.StatusAsync(db, deliveryId)).Should().Be(ProjectDeliveryStatus.Scheduled,
+            "the deployment waits for the site to reopen");
+    }
+
     /// <summary>Holds the run at its first call to Business Central until the worker is stopped.</summary>
     private sealed class TokensUntilShutdown : IDeliveryTokenSource
     {

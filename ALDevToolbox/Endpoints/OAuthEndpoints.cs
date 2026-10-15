@@ -263,7 +263,7 @@ internal static class OAuthEndpoints
                 userId, canonicalScopes, clientId, orgId);
 
             await ctx.SignInAsync(OpenIddictServerAspNetCoreDefaults.AuthenticationScheme, principal);
-        });
+        }).RequireCurrentCredentials();
     }
 
     private static bool IsScopeSupported(string scope)
@@ -279,10 +279,12 @@ internal static class OAuthEndpoints
         DateTime? strongAuthAt,
         CancellationToken cancellationToken)
     {
-        // Use IgnoreQueryFilters so the lookup hits the unique index across
-        // the unfiltered table — preserves the "one row per (user, client, org)"
-        // shape even when an admin revoked the consent earlier.
+        // Unfiltered so the lookup hits the unique index across the whole
+        // table — preserves the "one row per (user, client, org)" shape even
+        // when an admin revoked the consent earlier.
         var existing = await db.OAuthConsents
+            // Fence category 4 (explicitly scoped user-id lookup): pinned to
+            // c.UserId == userId and c.OrganizationId == orgId, both read from the cookie.
             .IgnoreQueryFilters()
             .FirstOrDefaultAsync(c =>
                 c.UserId == userId

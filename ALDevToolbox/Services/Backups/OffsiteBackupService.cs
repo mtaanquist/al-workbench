@@ -20,8 +20,11 @@ public sealed record OffsiteTestResult(bool Success, string Message);
 /// directly. <c>FileName</c> is the catalogue's natural identity — what
 /// the row will be stored under locally; <c>Key</c> includes the bucket
 /// prefix and is the value the download endpoint takes back in.
+/// <c>FromAnotherDeployment</c> is set when the object carries another
+/// installation's stamp: the download refuses it, unless this is a fresh
+/// installation recovering that one (#1322).
 /// </summary>
-public sealed record OffsiteObjectInfo(string Key, string FileName, long Size, DateTime LastModified);
+public sealed record OffsiteObjectInfo(string Key, string FileName, long Size, DateTime LastModified, bool FromAnotherDeployment = false);
 
 /// <summary>
 /// One per-tenant snapshot object returned by
@@ -66,9 +69,6 @@ public sealed class OffsiteBackupService
     /// and map it back on read, so this canonical form is all the service sees.
     /// </summary>
     public const string DeploymentMetadataKey = "deployment-id";
-
-    /// <summary>Upper bound for the prune listing — effectively "every object under the prefix".</summary>
-    private const int PruneListCap = int.MaxValue;
 
     /// <summary>
     /// Number of most-recent whole-DB dumps the off-site prune keeps regardless
@@ -240,16 +240,18 @@ public sealed class OffsiteBackupService
     }
 
     /// <summary>
-    /// Lists every dump-shaped object under the configured prefix, newest
-    /// first. Drives the off-site catalogue on <c>/site-admin/backups</c>;
-    /// returns an empty list when off-site isn't configured rather than
-    /// throwing, so the page renders the "not configured" hint cleanly.
+    /// Lists the newest <paramref name="maxObjects"/> dump-shaped objects under
+    /// the configured prefix, newest first. Drives the off-site catalogue on
+    /// <c>/site-admin/backups</c>; returns an empty list when off-site isn't
+    /// configured rather than throwing, so the page renders the "not
+    /// configured" hint cleanly. With <paramref name="flagOtherDeployments"/>
+    /// the stamps of the rows returned are read to set
+    /// <see cref="OffsiteObjectInfo.FromAnotherDeployment"/>.
     /// </summary>
-    /// <param name="maxObjects">Upper bound on results returned. The
-    /// catalogue is meant for picking a recent DR snapshot, not for paging
-    /// a giant bucket — a small cap keeps the page fast and the bill
-    /// predictable.</param>
-    public async Task<IReadOnlyList<OffsiteObjectInfo>> ListAsync(int maxObjects, CancellationToken ct)
+    /// <param name="maxObjects">Upper bound on results returned. The whole
+    /// prefix is listed and sorted first, so the cut keeps the newest (#1333);
+    /// a backend listing comes back in key order, not date order.</param>
+    public async Task<IReadOnlyList<OffsiteObjectInfo>> ListAsync(int maxObjects, bool flagOtherDeployments, CancellationToken ct)
     {
         var settings = await _systemSettings.ResolveOffsiteAsync(ct);
         if (settings is null) return Array.Empty<OffsiteObjectInfo>();
@@ -257,86 +259,190 @@ public sealed class OffsiteBackupService
 
         var prefix = settings.Prefix ?? string.Empty;
         var provider = _providerFactory.Create(settings);
-        IReadOnlyList<OffsiteStorageObject> objects;
         try
         {
             // Dumps sit directly under the prefix; stepping over the per-tenant
-            // subtree keeps it from filling the cap.
-            objects = await provider.ListAsync(
-                prefix.Length == 0 ? string.Empty : EnsureTrailingSlash(prefix), maxObjects, topLevelOnly: true, ct);
-        }
-        finally
-        {
-            DisposeProvider(provider);
-        }
+            // subtree keeps the listing to the dumps alone.
+            var objects = await provider.ListAsync(
+                prefix.Length == 0 ? string.Empty : EnsureTrailingSlash(prefix), topLevelOnly: true, ct);
 
-        var results = new List<OffsiteObjectInfo>(capacity: Math.Min(maxObjects, 256));
-        foreach (var obj in objects)
-        {
-            if (!IsWholeDbDumpKey(obj.Key, prefix, out var fileName)) continue;
-            results.Add(new OffsiteObjectInfo(obj.Key, fileName, obj.Size, obj.LastModifiedUtc));
-            if (results.Count >= maxObjects) break;
-        }
-
-        results.Sort((a, b) => b.LastModified.CompareTo(a.LastModified));
-        return results;
-    }
-
-    /// <summary>
-    /// Lists every per-tenant snapshot under
-    /// <c>&lt;prefix&gt;tenants/&lt;slug&gt;/</c>, newest first. Drives the
-    /// off-site catalogue on <c>/site-admin/tenant-backups</c>; returns an
-    /// empty list when off-site isn't configured. With
-    /// <paramref name="flagOtherDeployments"/> each object's stamp is read to
-    /// set <see cref="OffsitePerTenantObjectInfo.FromAnotherDeployment"/>.
-    /// </summary>
-    public async Task<IReadOnlyList<OffsitePerTenantObjectInfo>> ListPerTenantAsync(int maxObjects, bool flagOtherDeployments, CancellationToken ct)
-    {
-        var settings = await _systemSettings.ResolveOffsiteAsync(ct);
-        if (settings is null) return Array.Empty<OffsitePerTenantObjectInfo>();
-        if (maxObjects < 1) maxObjects = 1;
-
-        var prefix = settings.Prefix ?? string.Empty;
-        var tenantPrefix = (prefix.Length == 0 ? string.Empty : EnsureTrailingSlash(prefix)) + PerTenantKeyPrefix;
-        var provider = _providerFactory.Create(settings);
-        var results = new List<OffsitePerTenantObjectInfo>(capacity: Math.Min(maxObjects, 256));
-        try
-        {
-            var objects = await provider.ListAsync(tenantPrefix, maxObjects, topLevelOnly: false, ct);
+            var results = new List<OffsiteObjectInfo>();
             foreach (var obj in objects)
             {
-                // Expected shape: "<slug>/<filename>.tenant.zip". Reject
-                // anything with extra path segments or the wrong suffix.
-                if (!TryParsePerTenantKey(obj.Key, tenantPrefix, out var slug, out var fileName)) continue;
-                results.Add(new OffsitePerTenantObjectInfo(
-                    obj.Key, slug, fileName, obj.Size, obj.LastModifiedUtc));
-                if (results.Count >= maxObjects) break;
+                if (!IsWholeDbDumpKey(obj.Key, prefix, out var fileName)) continue;
+                results.Add(new OffsiteObjectInfo(obj.Key, fileName, obj.Size, obj.LastModifiedUtc));
             }
+            results = results
+                .OrderByDescending(r => r.LastModified)
+                .Take(maxObjects)
+                .ToList();
 
-            // Flag a neighbour deployment's snapshots, so the catalogue can say
-            // so instead of offering a download that will be refused (#1257).
-            // One small request per object, so only the page that shows the
-            // flag asks for it.
-            if (flagOtherDeployments)
+            // Flag another installation's dumps, so the catalogue can offer the
+            // recovery path for them instead of a download that will be refused
+            // (#1322). Only the rows shown are read.
+            if (flagOtherDeployments && _deployment.IsPersistent)
             {
                 var owners = await ReadOwnersAsync(provider, results.Select(r => r.Key), ct);
                 for (var i = 0; i < results.Count; i++)
                 {
-                    if (owners[results[i].Key] == OffsiteOwner.Foreign && _deployment.IsPersistent)
+                    if (owners[results[i].Key] == OffsiteOwner.Foreign)
                     {
                         results[i] = results[i] with { FromAnotherDeployment = true };
                     }
                 }
             }
+            return results;
         }
         finally
         {
             DisposeProvider(provider);
         }
-
-        results.Sort((a, b) => b.LastModified.CompareTo(a.LastModified));
-        return results;
     }
+
+    /// <summary>
+    /// Lists the newest <paramref name="maxPerOrganization"/> per-tenant
+    /// snapshots of each organisation under
+    /// <c>&lt;prefix&gt;tenants/&lt;slug&gt;/</c>, grouped by organisation and
+    /// newest first within each. Drives the off-site catalogue on
+    /// <c>/site-admin/tenant-backups</c>; returns an empty list when off-site
+    /// isn't configured. With <paramref name="flagOtherDeployments"/> the
+    /// stamps of the rows returned are read to set
+    /// <see cref="OffsitePerTenantObjectInfo.FromAnotherDeployment"/>.
+    /// </summary>
+    /// <param name="maxPerOrganization">How many snapshots to keep per
+    /// organisation. The cut is per organisation and after sorting by date: a
+    /// single overall cap over a key-ordered listing kept the oldest snapshots
+    /// of the alphabetically first organisations and hid everyone else (#1333).</param>
+    public async Task<IReadOnlyList<OffsitePerTenantObjectInfo>> ListPerTenantAsync(int maxPerOrganization, bool flagOtherDeployments, CancellationToken ct)
+    {
+        var settings = await _systemSettings.ResolveOffsiteAsync(ct);
+        if (settings is null) return Array.Empty<OffsitePerTenantObjectInfo>();
+        if (maxPerOrganization < 1) maxPerOrganization = 1;
+
+        var prefix = settings.Prefix ?? string.Empty;
+        var tenantPrefix = (prefix.Length == 0 ? string.Empty : EnsureTrailingSlash(prefix)) + PerTenantKeyPrefix;
+        var provider = _providerFactory.Create(settings);
+        try
+        {
+            var parsed = new List<OffsitePerTenantObjectInfo>();
+            foreach (var obj in await provider.ListAsync(tenantPrefix, topLevelOnly: false, ct))
+            {
+                // Expected shape: "<slug>/<filename>.tenant.zip". Reject
+                // anything with extra path segments or the wrong suffix.
+                if (!TryParsePerTenantKey(obj.Key, tenantPrefix, out var slug, out var fileName)) continue;
+                parsed.Add(new OffsitePerTenantObjectInfo(
+                    obj.Key, slug, fileName, obj.Size, obj.LastModifiedUtc));
+            }
+            var groups = parsed
+                .GroupBy(r => r.Slug, StringComparer.Ordinal)
+                .OrderBy(g => g.Key, StringComparer.Ordinal)
+                .ToList();
+            var perOrganization = PerOrganizationLimit(maxPerOrganization, groups.Count);
+            var results = groups
+                .SelectMany(g => g.OrderByDescending(r => r.LastModified).Take(perOrganization))
+                .ToList();
+
+            // Flag a neighbour deployment's snapshots, so the catalogue can say
+            // so instead of offering a download that will be refused (#1257).
+            // One small request per object, so only the rows shown are read,
+            // the rows shown are capped through PerOrganizationLimit, and only
+            // the page that shows the flag asks for it.
+            if (flagOtherDeployments && _deployment.IsPersistent)
+            {
+                var owners = await ReadOwnersAsync(provider, results.Select(r => r.Key), ct);
+                for (var i = 0; i < results.Count; i++)
+                {
+                    if (owners[results[i].Key] == OffsiteOwner.Foreign)
+                    {
+                        results[i] = results[i] with { FromAnotherDeployment = true };
+                    }
+                }
+            }
+            return results;
+        }
+        finally
+        {
+            DisposeProvider(provider);
+        }
+    }
+
+    /// <summary>
+    /// Most stamps one tenant-catalogue load reads. Each is a request to the
+    /// store; 200 was the old overall listing cap (#1333).
+    /// </summary>
+    public const int MaxStampReadsPerListing = 200;
+
+    /// <summary>
+    /// How many snapshots per organisation the tenant catalogue shows:
+    /// <paramref name="requested"/>, lowered so the rows shown (and so the
+    /// stamps read) stay within <see cref="MaxStampReadsPerListing"/>, but
+    /// never below one per organisation.
+    /// </summary>
+    public static int PerOrganizationLimit(int requested, int organizations) =>
+        Math.Max(1, Math.Min(requested, MaxStampReadsPerListing / Math.Max(1, organizations)));
+
+    /// <summary>
+    /// The file name of the whole-database dump at <paramref name="objectKey"/>,
+    /// or <see langword="null"/> when the key is not a dump directly under the
+    /// configured prefix or no such object exists. The download endpoint checks
+    /// a submitted key with this rather than against a listing, which a cap
+    /// could cut the key out of (#1333).
+    /// </summary>
+    public async Task<string?> FindDumpAsync(string objectKey, CancellationToken ct)
+    {
+        var settings = await _systemSettings.ResolveOffsiteAsync(ct);
+        if (settings is null) return null;
+        var prefix = settings.Prefix ?? string.Empty;
+        var listPrefix = prefix.Length == 0 ? string.Empty : EnsureTrailingSlash(prefix);
+        if (!objectKey.StartsWith(listPrefix, StringComparison.Ordinal)
+            || !IsWholeDbDumpKey(objectKey, prefix, out var fileName))
+        {
+            return null;
+        }
+        return await ExistsAsync(settings, objectKey, ct) ? fileName : null;
+    }
+
+    /// <summary>
+    /// The file name of the per-tenant snapshot at <paramref name="objectKey"/>,
+    /// or <see langword="null"/> when the key is not shaped
+    /// <c>&lt;prefix&gt;tenants/&lt;slug&gt;/&lt;name&gt;.tenant.zip</c> or no
+    /// such object exists. The per-tenant twin of <see cref="FindDumpAsync"/>.
+    /// </summary>
+    public async Task<string?> FindPerTenantSnapshotAsync(string objectKey, CancellationToken ct)
+    {
+        var settings = await _systemSettings.ResolveOffsiteAsync(ct);
+        if (settings is null) return null;
+        var prefix = settings.Prefix ?? string.Empty;
+        var tenantPrefix = (prefix.Length == 0 ? string.Empty : EnsureTrailingSlash(prefix)) + PerTenantKeyPrefix;
+        if (!TryParsePerTenantKey(objectKey, tenantPrefix, out _, out var fileName)) return null;
+        return await ExistsAsync(settings, objectKey, ct) ? fileName : null;
+    }
+
+    private async Task<bool> ExistsAsync(ResolvedOffsiteSettings settings, string objectKey, CancellationToken ct)
+    {
+        // Only a not-found answer means missing; an auth or network failure
+        // surfaces as itself rather than as "no longer in the bucket".
+        var provider = _providerFactory.Create(settings);
+        try
+        {
+            return await provider.ExistsAsync(objectKey, ct);
+        }
+        finally
+        {
+            DisposeProvider(provider);
+        }
+    }
+
+    /// <summary>
+    /// Whether this installation is still fresh enough to recover another
+    /// one's backup; see <see cref="BackupService.CanRecoverAnotherInstallationAsync"/>.
+    /// Only meaningful in a SiteAdmin request.
+    /// </summary>
+    public Task<bool> CanRecoverAnotherInstallationAsync(CancellationToken ct) =>
+        _backups.CanRecoverAnotherInstallationAsync(ct);
+
+    /// <summary>The reason behind <see cref="CanRecoverAnotherInstallationAsync"/>; see <see cref="BackupService.RecoveryBlockerAsync"/>.</summary>
+    public Task<string?> RecoveryBlockerAsync(CancellationToken ct) => _backups.RecoveryBlockerAsync(ct);
 
     /// <summary>
     /// Downloads a single object from the store into the local backups
@@ -353,14 +459,35 @@ public sealed class OffsiteBackupService
     /// renamed atomically on completion so a crash mid-download doesn't
     /// leave a half-written dump masquerading as a valid backup.
     /// </para>
+    ///
+    /// <para>
+    /// A dump stamped by another installation is refused, unless
+    /// <paramref name="recoverFromAnotherInstallation"/> is set: the SiteAdmin
+    /// is rebuilding the installation that made it (#1322). The download then
+    /// only marks the row with that installation's id
+    /// (<see cref="Backup.RecoveredFromDeploymentId"/>); nothing is trusted
+    /// here. Whether the host is fresh enough, and the takeover of the other
+    /// installation's backups, are decided by
+    /// <see cref="BackupService.RestoreAsync"/> in the SiteAdmin's request,
+    /// since this runs on the download worker with no request to check against.
+    /// </para>
     /// </summary>
     /// <returns>The id of the inserted <c>backups</c> row.</returns>
-    public async Task<int> DownloadAsync(string objectKey, IProgress<(long BytesDownloaded, long? TotalBytes)>? progress, CancellationToken ct)
+    public async Task<int> DownloadAsync(
+        string objectKey,
+        IProgress<(long BytesDownloaded, long? TotalBytes)>? progress,
+        bool recoverFromAnotherInstallation,
+        CancellationToken ct)
     {
         var settings = await _systemSettings.ResolveOffsiteAsync(ct)
             ?? throw new InvalidOperationException("Off-site backup is not configured.");
 
-        var fileName = StripPrefix(objectKey, settings.Prefix ?? string.Empty);
+        var dumpPrefix = settings.Prefix ?? string.Empty;
+        if (dumpPrefix.Length > 0 && !objectKey.StartsWith(EnsureTrailingSlash(dumpPrefix), StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Refusing to download object outside the configured prefix: {objectKey}");
+        }
+        var fileName = StripPrefix(objectKey, dumpPrefix);
         if (string.IsNullOrEmpty(fileName)
             || fileName.Contains('/') || fileName.Contains('\\') || fileName.Contains("..", StringComparison.Ordinal))
         {
@@ -387,6 +514,7 @@ public sealed class OffsiteBackupService
             File.Delete(stagingPath);
         }
 
+        string? recoveredFrom = null;
         var provider = _providerFactory.Create(settings);
         try
         {
@@ -399,10 +527,21 @@ public sealed class OffsiteBackupService
             download.Metadata.TryGetValue(DeploymentMetadataKey, out var stampedDeployment);
             if (_deployment.IsForeign(stampedDeployment))
             {
-                throw new InvalidOperationException(
-                    $"Refusing to import '{fileName}': it was created by a different deployment " +
-                    "(deployment-id mismatch). Restoring it would overwrite this database with " +
-                    "another deployment's data.");
+                if (!recoverFromAnotherInstallation)
+                {
+                    throw new InvalidOperationException(
+                        $"Refusing to import '{fileName}': it was created by a different deployment " +
+                        "(deployment-id mismatch). Restoring it would overwrite this database with " +
+                        "another deployment's data.");
+                }
+                if (!DeploymentIdentity.IsWellFormed(stampedDeployment))
+                {
+                    throw new InvalidOperationException($"Refusing to recover from '{fileName}': its installation stamp is malformed.");
+                }
+                recoveredFrom = stampedDeployment;
+                _logger.LogWarning(
+                    "Downloading off-site object {Key}, made by another deployment, for recovery. Nothing is taken over until it is restored.",
+                    objectKey);
             }
             if (string.IsNullOrEmpty(stampedDeployment))
             {
@@ -439,6 +578,7 @@ public sealed class OffsiteBackupService
             IsPinned = true,
             OffsiteObjectKey = objectKey,
             OffsiteUploadedAt = _clock.GetUtcNow().UtcDateTime,
+            RecoveredFromDeploymentId = recoveredFrom,
         };
         _db.Backups.Add(row);
         try
@@ -484,7 +624,11 @@ public sealed class OffsiteBackupService
 
         var prefix = settings.Prefix ?? string.Empty;
         var tenantPrefix = (prefix.Length == 0 ? string.Empty : EnsureTrailingSlash(prefix)) + PerTenantKeyPrefix;
-        var remainder = StripPrefix(objectKey, tenantPrefix);
+        if (!objectKey.StartsWith(tenantPrefix, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Refusing to download per-tenant object outside the configured prefix: {objectKey}");
+        }
+        var remainder = objectKey[tenantPrefix.Length..];
         var slash = remainder.IndexOf('/');
         if (slash <= 0 || slash == remainder.Length - 1)
         {
@@ -613,7 +757,8 @@ public sealed class OffsiteBackupService
     /// The bucket and prefix may be shared with another deployment (#1258).
     /// Ownership is read from the deployment stamp on each object, since a key
     /// says nothing about who wrote it: another deployment's objects are never
-    /// deleted and never count towards the newest kept. Objects with no stamp
+    /// deleted and never count towards the newest kept, and neither are the
+    /// objects of the installation this one was rebuilt from (#1322). Objects with no stamp
     /// were uploaded before stamping existed; they are treated as this
     /// deployment's only while no whole-database dump under the prefix carries
     /// another deployment's stamp, and otherwise left alone with a warning.
@@ -632,19 +777,21 @@ public sealed class OffsiteBackupService
         {
             // Top level only: the per-tenant subtree holds a snapshot per
             // organisation per night and is pruned on its own below.
-            var dumps = (await provider.ListAsync(listPrefix, PruneListCap, topLevelOnly: true, ct))
+            var dumps = (await provider.ListAsync(listPrefix, topLevelOnly: true, ct))
                 .Where(o => IsWholeDbDumpKey(o.Key, prefix, out _))
                 .ToList();
             // Every dump's stamp is read: there are few of them, and whether any
             // belongs to a neighbour decides how unstamped objects are treated.
             var owners = await ReadOwnersAsync(provider, dumps.Select(o => o.Key), ct);
-            var shared = owners.Values.Any(o => o == OffsiteOwner.Foreign);
+            // The former installation's dumps make the prefix shared too: an
+            // unstamped object there may well be one of its own.
+            var shared = owners.Values.Any(o => o is OffsiteOwner.Foreign or OffsiteOwner.Former);
 
             var tally = new PruneTally();
             var staleDumps = await SelectStaleAsync(provider, dumps, owners, shared, cutoff, tally, ct);
 
             var tenantPrefix = listPrefix + PerTenantKeyPrefix;
-            var snapshots = (await provider.ListAsync(tenantPrefix, PruneListCap, topLevelOnly: false, ct))
+            var snapshots = (await provider.ListAsync(tenantPrefix, topLevelOnly: false, ct))
                 .Select(o => (Object: o, Slug: TryParsePerTenantKey(o.Key, tenantPrefix, out var slug, out _) ? slug : null))
                 .Where(x => x.Slug is not null)
                 .GroupBy(x => x.Slug!, x => x.Object, StringComparer.Ordinal)
@@ -692,6 +839,12 @@ public sealed class OffsiteBackupService
         Ours,
         /// <summary>Stamped with another deployment's id.</summary>
         Foreign,
+        /// <summary>
+        /// Stamped by the installation this one was rebuilt from (#1322). It can
+        /// be restored here, but retention leaves it alone: whether those
+        /// backups are still wanted is the SiteAdmin's call, not ours.
+        /// </summary>
+        Former,
         /// <summary>No stamp: uploaded before stamping existed.</summary>
         Unstamped,
         /// <summary>The stamp could not be read (the object went away, or the read failed).</summary>
@@ -769,9 +922,10 @@ public sealed class OffsiteBackupService
             var metadata = await provider.GetMetadataAsync(key, ct);
             metadata.TryGetValue(DeploymentMetadataKey, out var stamp);
             if (string.IsNullOrEmpty(stamp)) return OffsiteOwner.Unstamped;
-            return string.Equals(stamp, _deployment.Id, StringComparison.Ordinal)
-                ? OffsiteOwner.Ours
-                : OffsiteOwner.Foreign;
+            if (string.Equals(stamp, _deployment.Id, StringComparison.Ordinal)) return OffsiteOwner.Ours;
+            // The installation this one was rebuilt from (#1322): offered for
+            // restore, but never ours to delete.
+            return _deployment.IsFormer(stamp) ? OffsiteOwner.Former : OffsiteOwner.Foreign;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -38,15 +38,15 @@ public sealed class IgnoreQueryFiltersBaselineTests
         ["ALDevToolbox/Endpoints/AccountAuthEndpoints.cs"] = 2,
         ["ALDevToolbox/Endpoints/AccountEndpoints.cs"] = 2,
         ["ALDevToolbox/Endpoints/AccountMfaEndpoints.cs"] = 2,
-        ["ALDevToolbox/Endpoints/AdminUserEndpoints.cs"] = 4,
+        ["ALDevToolbox/Endpoints/AdminUserEndpoints.cs"] = 2,
         ["ALDevToolbox/Endpoints/CookieSessionRevalidation.cs"] = 1,
         ["ALDevToolbox/Endpoints/OAuthEndpoints.cs"] = 1,
         ["ALDevToolbox/Endpoints/StartupTasks.cs"] = 4,
         ["ALDevToolbox/Endpoints/StrongAuthGate.cs"] = 3,
-        ["ALDevToolbox/Services/Account/AccountService.cs"] = 7,
+        ["ALDevToolbox/Services/Account/AccountService.cs"] = 5,
         ["ALDevToolbox/Services/Account/AuthService.cs"] = 4,
         ["ALDevToolbox/Services/Account/EmailMfaService.cs"] = 4,
-        ["ALDevToolbox/Services/Account/EntraSignInService.cs"] = 12,
+        ["ALDevToolbox/Services/Account/EntraSignInService.cs"] = 13,
         ["ALDevToolbox/Services/Account/InviteService.cs"] = 5,
         ["ALDevToolbox/Services/Account/PasskeyService.cs"] = 10,
         ["ALDevToolbox/Services/Account/PasswordResetService.cs"] = 4,
@@ -126,7 +126,30 @@ public sealed class IgnoreQueryFiltersBaselineTests
             "see the fence paragraph in CLAUDE.md");
     }
 
-    private sealed record Site(int Line, bool HasComment);
+    /// <summary>
+    /// Any comment used to satisfy the check above, so a site sitting under
+    /// an unrelated remark ("Use IgnoreQueryFilters so the lookup hits the
+    /// unique index") passed without saying why crossing the fence is safe
+    /// (#1336). The comment now has to name the category by number, which is
+    /// what lets a reviewer check the site against that category's invariant.
+    /// </summary>
+    [Fact]
+    public void Every_call_site_comment_names_its_fence_category()
+    {
+        var unnamed = ScanRepository()
+            .SelectMany(f => f.Sites.Where(s => s.HasComment && !s.NamesCategory).Select(s => $"{f.Path}:{s.Line}"))
+            .ToList();
+
+        unnamed.Should().BeEmpty(
+            "every IgnoreQueryFilters() justification comment must name its sanctioned category " +
+            "(\"Fence category N (...)\", N from 1 to 6, see the fence paragraph in CLAUDE.md) and the predicate " +
+            "that pins the read");
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex CategoryName =
+        new(@"\bcategory\s+[1-6]\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private sealed record Site(int Line, bool HasComment, bool NamesCategory);
 
     private sealed record ScannedFile(string Path, IReadOnlyList<Site> Sites);
 
@@ -166,18 +189,21 @@ public sealed class IgnoreQueryFiltersBaselineTests
     /// Strips comments the way a reader does — <c>//</c> to end of line, plus
     /// <c>/* */</c> and Razor's <c>@* *@</c> blocks — then reports each line of
     /// remaining code that calls <c>IgnoreQueryFilters(</c>, and whether a
-    /// comment sits on that line or on one of the three lines above it.
+    /// comment sits on that line or on one of the three lines above it, and
+    /// whether that comment names a fence category.
     /// </summary>
     private static List<Site> ScanFile(IReadOnlyList<string> raw)
     {
         var code = new string[raw.Count];
         var commented = new bool[raw.Count];
+        var commentText = new string[raw.Count];
         var inBlock = false;
 
         for (var i = 0; i < raw.Count; i++)
         {
             var line = raw[i];
             var buffer = new System.Text.StringBuilder(line.Length);
+            var comment = new System.Text.StringBuilder();
             var hasComment = false;
             var j = 0;
             while (j < line.Length)
@@ -186,11 +212,12 @@ public sealed class IgnoreQueryFiltersBaselineTests
                 {
                     hasComment = true;
                     if (Starts(line, j, "*/") || Starts(line, j, "*@")) { inBlock = false; j += 2; }
-                    else j++;
+                    else { comment.Append(line[j]); j++; }
                 }
                 else if (Starts(line, j, "//"))
                 {
                     hasComment = true;
+                    comment.Append(line, j, line.Length - j);
                     break;
                 }
                 else if (Starts(line, j, "/*") || Starts(line, j, "@*"))
@@ -207,6 +234,7 @@ public sealed class IgnoreQueryFiltersBaselineTests
             }
             code[i] = buffer.ToString();
             commented[i] = hasComment;
+            commentText[i] = comment.ToString();
         }
 
         var sites = new List<Site>();
@@ -217,14 +245,29 @@ public sealed class IgnoreQueryFiltersBaselineTests
 
             // A comment on the call's own line counts; so does a pure comment
             // line within the three lines above it (the shape CLAUDE.md asks for).
+            // The text checked for a category is that line's comment plus the
+            // whole run of pure comment lines the nearest one belongs to, so a
+            // justification that wraps, or sits under a longer remark, still
+            // reads as one comment.
             var documented = commented[i];
-            for (var k = Math.Max(0, i - 3); !documented && k < i; k++)
+            var text = new System.Text.StringBuilder(commented[i] ? commentText[i] : string.Empty);
+            var nearest = -1;
+            for (var k = i - 1; k >= Math.Max(0, i - 3); k--)
             {
-                documented = commented[k] && code[k].Trim().Length == 0;
+                if (commented[k] && code[k].Trim().Length == 0) { nearest = k; break; }
             }
+            if (nearest >= 0)
+            {
+                documented = true;
+                for (var k = nearest; k >= 0 && commented[k] && code[k].Trim().Length == 0; k--)
+                {
+                    text.Insert(0, commentText[k] + " ");
+                }
+            }
+            var namesCategory = documented && CategoryName.IsMatch(text.ToString());
             for (var n = 0; n < occurrences; n++)
             {
-                sites.Add(new Site(i + 1, documented));
+                sites.Add(new Site(i + 1, documented, namesCategory));
             }
         }
         return sites;

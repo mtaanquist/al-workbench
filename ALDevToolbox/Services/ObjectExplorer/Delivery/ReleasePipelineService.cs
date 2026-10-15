@@ -916,20 +916,24 @@ public sealed record ReleasePipelineInput(
     /// </summary>
     bool DeployWithoutApproval = false);
 
-/// <summary>List-row projection of a deployment pipeline with its source and target resolved for display.</summary>
+/// <summary>
+/// List-row projection of a deployment pipeline with its source and target resolved for display.
+/// <c>list_deployment_pipelines</c> hands this row to agents as it is, so the fields that
+/// name the solution and its environment carry the product's words on the wire (#1344).
+/// </summary>
 public sealed record ReleasePipelineRow(
     int Id,
-    int ProjectId,
+    [property: System.Text.Json.Serialization.JsonPropertyName("solutionId")] int ProjectId,
     /// <summary>
     /// The owning project's name. Added when the Deployment pipelines browser moved onto the
     /// list archetype: its table needs a Project column, and until this existed
     /// the page could only link the literal word "Project".
     /// </summary>
-    string ProjectName,
+    [property: System.Text.Json.Serialization.JsonPropertyName("solutionName")] string ProjectName,
     string Name,
     int? BuildPipelineId,
     string BuildPipelineName,
-    int ProjectEnvironmentId,
+    [property: System.Text.Json.Serialization.JsonPropertyName("environmentId")] int ProjectEnvironmentId,
     string EnvironmentName,
     string EnvironmentType,
     bool EnvironmentMissing,

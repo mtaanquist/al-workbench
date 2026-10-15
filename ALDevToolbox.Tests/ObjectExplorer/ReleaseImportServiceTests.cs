@@ -33,7 +33,7 @@ public sealed class ReleaseImportServiceTests : IDisposable
 
     private ReleaseImportService NewService(Data.AppDbContext ctx) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
-            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), NullLogger<TranslationImportService>.Instance),
+            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
             NullLogger<ReleaseImportService>.Instance);
 
@@ -671,6 +671,38 @@ public sealed class ReleaseImportServiceTests : IDisposable
         await act.Should().ThrowAsync<OperationCanceledException>();
         await using var read = _db.NewContext();
         (await read.OeReleases.AsNoTracking().SingleAsync(r => r.Id == releaseId)).Status.Should().Be("ingesting");
+    }
+
+    [Fact]
+    public async Task A_direct_upload_cancelled_mid_ingest_leaves_the_release_failed()
+    {
+        // The direct .app upload runs inside the request, so nothing else is left to
+        // decide what the release becomes when the admin closes the tab (#1331).
+        await using var ctx = _db.NewContext();
+        var svc = NewService(ctx);
+        using var cts = new CancellationTokenSource();
+        await using var upload = new FailingStream(() =>
+        {
+            cts.Cancel();
+            return new OperationCanceledException(cts.Token);
+        });
+
+        var act = () => svc.ImportReleaseAsync(new ReleaseImportRequest(
+            Label: "Tab closed",
+            Kind: "first_party",
+            ParentReleaseId: null,
+            ApplicationVersionId: null,
+            Uploads: [new AppFileUpload("CRONUS.app", upload, null)]), cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await using var read = _db.NewContext();
+        var release = await read.OeReleases.AsNoTracking().SingleAsync(r => r.Label == "Tab closed");
+        release.Status.Should().Be("failed", "a release nobody is importing must not stay ingesting");
+        release.StatusMessage.Should().Be(ReleaseImportService.InterruptedUploadMessage);
+        svc.Ingests.IsRunning(release.Id).Should().BeFalse();
+        await using var retry = _db.NewContext();
+        await NewService(retry).Invoking(s => s.ReopenForRetryAsync(release.Id)).Should().NotThrowAsync(
+            "a failed release can be retried, which the stuck ingesting one refused");
     }
 
     [Fact]

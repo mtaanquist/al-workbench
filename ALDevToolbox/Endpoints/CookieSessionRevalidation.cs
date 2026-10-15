@@ -63,8 +63,8 @@ internal static class CookieSessionRevalidation
             return;
         }
 
-        // Read across the tenant fence by the cookie's user id — the same trust
-        // posture StrongAuthGate uses for its per-request enrolment re-check.
+        // Fence category 4 (explicitly scoped user-id lookup): pinned to u.Id == userId,
+        // the cookie's own user id - the same posture as StrongAuthGate's re-check.
         var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
         var user = await db.Users.IgnoreQueryFilters()
             .Include(u => u.Organization)
@@ -100,6 +100,57 @@ internal static class CookieSessionRevalidation
         context.ReplacePrincipal(new ClaimsPrincipal(rebuilt));
         context.Properties.Items[LastValidatedKey] = now.ToString("o", CultureInfo.InvariantCulture);
         context.ShouldRenew = true;
+    }
+
+    /// <summary>
+    /// Endpoint filter for the endpoints that hand out a credential that
+    /// outlives the cookie: an access token, a passkey, an authenticator app,
+    /// recovery codes, a Microsoft link, an assistant's consent. The check
+    /// above runs at most once per <see cref="ValidationInterval"/>, so a
+    /// cookie validated just before the owner reset their password could
+    /// otherwise still mint one of these for up to five minutes, and since it
+    /// would be dated after the reset nothing would refuse it later (#1336).
+    /// This applies the same cut-off on the request itself, with no throttle.
+    /// A refused session is signed out: a form post goes to the sign-in page,
+    /// a script call gets a 401.
+    /// </summary>
+    public static RouteHandlerBuilder RequireCurrentCredentials(this RouteHandlerBuilder builder) =>
+        builder.AddEndpointFilter(async (filterContext, next) =>
+        {
+            var ctx = filterContext.HttpContext;
+            if (!await SessionPredatesCredentialChangeAsync(ctx)) return await next(filterContext);
+
+            await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+            // The 401 carries a body: a bare one is re-executed by the status
+            // pages as a POST to /not-found, which fails antiforgery and
+            // reaches the script as a 400.
+            return ctx.Request.HasFormContentType
+                ? Results.Redirect(RouteConstants.Login)
+                : Results.Json(new { error = "Your session has ended. Sign in again." },
+                    statusCode: StatusCodes.Status401Unauthorized);
+        });
+
+    /// <summary>
+    /// True when this request's cookie session started before the user's
+    /// last credential change, or the user is no longer there to ask. A
+    /// request with no cookie session is left to the endpoint's own
+    /// authorisation.
+    /// </summary>
+    internal static async Task<bool> SessionPredatesCredentialChangeAsync(HttpContext ctx)
+    {
+        var cookie = await ctx.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        if (!cookie.Succeeded || cookie.Properties is null) return false;
+        var userId = ctx.RequestServices.GetRequiredService<IOrganizationContext>().CurrentUserId;
+        if (userId is null) return false;
+
+        // Filtered: the cookie's own user, inside the organisation its claims name.
+        var db = ctx.RequestServices.GetRequiredService<AppDbContext>();
+        var row = await db.Users.AsNoTracking()
+            .Where(u => u.Id == userId.Value)
+            .Select(u => new { u.CredentialsChangedAt })
+            .FirstOrDefaultAsync(ctx.RequestAborted);
+        if (row is null) return true;
+        return row.CredentialsChangedAt is { } changedAt && SignedInAt(cookie.Properties) < changedAt;
     }
 
     /// <summary>

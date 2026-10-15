@@ -766,6 +766,36 @@ public sealed class UpgradeDetailTests : IAsyncDisposable
     private static AngleSharp.Dom.IElement RowMenuItem(IRenderedComponent<UpgradeDetail> cut, string solution, string label) =>
         Row(cut, solution).QuerySelectorAll(".ra__menu .menu__item").Single(i => i.TextContent.Trim() == label);
 
+    [Fact]
+    public void A_batch_notice_counts_lines_already_gone_in_one_sentence_and_keeps_the_named_refusals()
+    {
+        var result = new UpgradeLinesChangeResult([1], new Dictionary<string, string>
+        {
+            ["2"] = EnvironmentUpgradeService.NoLongerOnUpgrade,
+            ["3"] = "You can't manage updates for CRONUS Sverige, so Production was left as it was.",
+            ["4"] = EnvironmentUpgradeService.NoLongerOnUpgrade,
+        });
+
+        var notice = UpgradeDetail.LinesNotice(result, "Took 1 environment off the upgrade.");
+
+        notice.Tone.Should().Be("warn");
+        notice.Text.Should().Be("Took 1 environment off the upgrade. "
+            + "You can't manage updates for CRONUS Sverige, so Production was left as it was. "
+            + "2 of the environments you picked were already taken off the upgrade. Reload to see it as it is now.");
+    }
+
+    [Fact]
+    public void A_batch_notice_with_one_line_already_gone_keeps_the_single_sentence()
+    {
+        var result = new UpgradeLinesChangeResult([], new Dictionary<string, string>
+        {
+            ["2"] = EnvironmentUpgradeService.NoLongerOnUpgrade,
+        });
+
+        UpgradeDetail.LinesNotice(result, "No environments were taken off the upgrade.").Text
+            .Should().Be("No environments were taken off the upgrade. " + EnvironmentUpgradeService.NoLongerOnUpgrade);
+    }
+
     private static AngleSharp.Dom.IElement HeadPrimary(IRenderedComponent<UpgradeDetail> cut) =>
         cut.FindAll(".page-head__actions > .btn--primary").Single();
 

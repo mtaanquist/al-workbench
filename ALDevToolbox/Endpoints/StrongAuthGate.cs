@@ -77,10 +77,10 @@ internal static class StrongAuthGate
             }
 
             var db = ctx.RequestServices.GetRequiredService<AppDbContext>();
-            // One DB round-trip per gated request. Reads bypass the EF query
-            // filter because we're joining users → organization_settings
-            // across the tenant fence using the cookie's user id directly.
+            // One DB round-trip per gated request.
             var status = await db.Users
+                // Fence category 4 (explicitly scoped user-id lookup): pinned to
+                // u.Id == userId, the id on the request's own auth cookie.
                 .IgnoreQueryFilters()
                 .Where(u => u.Id == userId.Value)
                 .Select(u => new

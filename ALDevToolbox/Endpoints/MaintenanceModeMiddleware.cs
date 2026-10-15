@@ -53,15 +53,22 @@ internal static class MaintenanceModeMiddleware
         return app;
     }
 
+    /// <summary>
+    /// The page everyone but a SiteAdmin sees. It does not show
+    /// <see cref="MaintenanceModeState.Reason"/>, which names the backup file and
+    /// is meant for the SiteAdmin; and it only promises a quick return while a
+    /// restore is running, not while a failed one holds the site closed (#1321).
+    /// </summary>
     private static string BuildBody(MaintenanceModeState maintenance)
     {
-        var reason = System.Net.WebUtility.HtmlEncode(
-            maintenance.Reason ?? "The application is restoring from a backup.");
+        var message = maintenance.IsHeldAfterFailedRestore
+            ? "AL Workbench is closed while a site administrator restores it from a backup. Please try again later."
+            : "AL Workbench is being restored from a backup. It will be back shortly.";
         return "<!doctype html><html><head><title>Maintenance · AL Workbench</title></head>"
             + "<body style=\"font-family: system-ui, sans-serif; padding: 2rem;\">"
             + "<h1>Maintenance in progress</h1>"
-            + $"<p>{reason}</p>"
-            + $"<p>Started: {maintenance.StartedAtUtc:yyyy-MM-dd HH:mm 'UTC'}. The service will return shortly.</p>"
+            + $"<p>{message}</p>"
+            + $"<p>Started: {maintenance.StartedAtUtc:yyyy-MM-dd HH:mm 'UTC'}.</p>"
             + "</body></html>";
     }
 }

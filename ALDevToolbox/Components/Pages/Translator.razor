@@ -72,7 +72,7 @@
                 @* Click is wired in Translator.razor.js (initPicker), not via
                    @onclick — showOpenFilePicker must run inside the user gesture,
                    which a SignalR round-trip would drop. *@
-                <span class="tdrop__hint">.xlf or .xliff · up to @(_maxFileMb) MB · your edits save straight back to this file</span>
+                <span class="tdrop__hint">.xlf or .xliff · up to @(_maxFileMb) MB · your edits save straight back to the file you open (a build-generated .g.xlf is saved as a new language file instead)</span>
                 <button type="button" class="btn btn--primary tdrop__btn" disabled="@_busy">
                     <Icon Name="folder-open" Width="15" Height="15" Css="btn__icon" /> Choose file
                 </button>
@@ -212,7 +212,7 @@ else
                 else
                 {
                     <button type="button" class="pw__file tr-rename" @onclick="() => _editingName = true"
-                            title="@(_canSaveInPlace ? "Rename the copy you export - the file you opened keeps its name" : "Rename the file you export")">
+                            title="@(_fromGeneratedFile ? "Rename the translation file you download" : _canSaveInPlace ? "Rename the copy you export - the file you opened keeps its name" : "Rename the file you export")">
                         @_fileName
                         <Icon Name="pencil" Width="12" Height="12" />
                     </button>
@@ -273,6 +273,17 @@ else
                     <Icon Name="download" Width="14" Height="14" Css="btn__icon" /><span>Export a copy</span>
                 </button>
             }
+            else if (_fromGeneratedFile)
+            {
+                @* The file opened is the one the build generates and rewrites
+                   every time, so saving into it would lose the translation on
+                   the next build (#1325). The work goes out as a language file
+                   of its own instead, named in the head. *@
+                <button type="button" class="btn btn--sm btn--primary" @onclick="ExportCopyAsync" disabled="@_busy"
+                        title="Download your translation as @_fileName and put it next to the file you opened in your Translations folder. The file you opened is rebuilt by every build, so it is left as it is.">
+                    <Icon Name="download" Width="14" Height="14" Css="btn__icon" /><span>Download translation@(_unsaved ? $" ({DirtyCount()})" : "")</span>
+                </button>
+            }
             else if (_canSaveInPlace)
             {
                 <button type="button" class="btn btn--sm btn--primary" @onclick="ExportAsync" disabled="@_busy"
@@ -296,6 +307,34 @@ else
         </div>
 
         <div class="pw__bar">
+            @if (_fromGeneratedFile && !_generatedNoteDismissed)
+            {
+                @* The header shows a different file name from the one the user
+                   opened, and the language was chosen for them; without this
+                   they would think they opened the wrong file (#1325). Inside
+                   the bar, full width, because the frame's grid has a fixed
+                   row for each of head, bar, body and foot. *@
+                <Alert Tone="AlertTone.Info" Block="true" Role="status" Class="tr-gennote">
+                    <span class="tr-gennote__text">
+                        @if (_openedFileName is not null)
+                        {
+                            <strong>@_openedFileName</strong>
+                        }
+                        else
+                        {
+                            <text>The file you opened</text>
+                        }
+                        is the file your build creates, and every build overwrites it. Your translation is saved as a new file, <strong>@_fileName</strong>,
+                        to put next to it in your Translations folder. The language is set to
+                        @LanguageLabel(_targetLang) - change it above if you are translating into another
+                        language, and the file name follows.
+                    </span>
+                    <button type="button" class="btn btn--sm btn--ghost btn--icon" aria-label="Dismiss"
+                            title="Dismiss" @onclick="() => _generatedNoteDismissed = true">
+                        <Icon Name="x" Width="14" Height="14" />
+                    </button>
+                </Alert>
+            }
             @* One tab per state, and every badge is the number of rows its own
                tab produces. The three-tab version showed 88 on a tab that
                filtered to 175, because the filter counted units needing review
@@ -681,6 +720,12 @@ else
                     <Icon Name="folder-git-2" Width="11" Height="11" />@_repoSource.Repository.Name
                 </span>
             }
+            else if (_fromGeneratedFile && _openedFileName is not null)
+            {
+                @* The head shows the language file's name; this keeps the name
+                   of the file actually opened in view beside it. *@
+                <span class="tr-foot__orig">started from @_openedFileName</span>
+            }
             else if (!string.IsNullOrEmpty(_original))
             {
                 <span class="tr-foot__orig">from @_original</span>
@@ -694,7 +739,10 @@ else
                    view renders. Advertising it in the grid was a lie. *@
                 <span class="kbd-hint"><span class="kbd-hint__label">Apply suggestion</span><span class="kbd">Alt</span> <span>+</span> <span class="kbd">1</span>&#8211;<span class="kbd">9</span></span>
             }
-            <span class="kbd-hint"><span class="kbd-hint__label">@(_canSaveInPlace ? "Save" : "Export")</span><span class="kbd">Ctrl</span><span class="kbd">S</span></span>
+            @if (!_fromGeneratedFile)
+            {
+                <span class="kbd-hint"><span class="kbd-hint__label">@(_canSaveInPlace ? "Save" : "Export")</span><span class="kbd">Ctrl</span><span class="kbd">S</span></span>
+            }
 
             <div class="tprog" role="img" aria-label="@c.Pct% translated: @c.Final final, @c.Translated translated, @c.Review needing review, @c.Todo untranslated">
                 <div class="tprog__bar" aria-hidden="true">
@@ -718,6 +766,7 @@ else
             <input type="hidden" name="FileName" id="tr-export-filename" />
             <input type="hidden" name="OriginalXml" id="tr-export-original" />
             <input type="hidden" name="Edits" id="tr-export-edits" />
+            <input type="hidden" name="Learn" id="tr-export-learn" />
             <input type="hidden" name="TargetLanguage" id="tr-export-target-language" />
         </form>
     </div>
@@ -807,6 +856,14 @@ else
         [JsonPropertyName("sourceLang")] public string? SourceLang { get; set; }
         [JsonPropertyName("targetLang")] public string? TargetLang { get; set; }
         [JsonPropertyName("edits")] public Dictionary<string, EditDto> Edits { get; set; } = new();
+        [JsonPropertyName("learned")] public LearnedDto? Learned { get; set; }
+    }
+
+    /// <summary>What each unit last taught the translation memory, per scope (#1343).</summary>
+    private sealed class LearnedDto
+    {
+        [JsonPropertyName("local")] public Dictionary<string, string> Local { get; set; } = new();
+        [JsonPropertyName("repository")] public Dictionary<string, string> Repository { get; set; } = new();
     }
 
     private readonly int _maxFileMb = 100;
@@ -830,6 +887,17 @@ else
     private bool _editingName;
 
     private List<UnitVm> _units = new();
+
+    // The target each unit last taught the translation memory, by unit id, for
+    // this file. Saving in place and exporting leave units marked as edited, so
+    // without this every save re-taught - and added a hit to - every unit
+    // touched since the file was opened (#1343). Kept per scope: an export
+    // teaches the organisation-wide memory, a repository save teaches it under
+    // that repository (#1324), and one must not stand in for the other. Kept in
+    // the browser's session record with the edits, so a reload does not start
+    // over.
+    private readonly Dictionary<string, string> _learnedLocally = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _learnedToRepository = new(StringComparer.Ordinal);
     private List<UnitVm> _filtered = new();
     private string _filter = "todo";
     private string _kind = "All kinds";
@@ -868,6 +936,14 @@ else
     // drop on a supported browser), so Save writes in place instead of
     // downloading. Reset whenever a file loads without one.
     private bool _canSaveInPlace;
+    // True when a file opened from disk holds no translation yet - the
+    // compiler's generated file. It is never saved in place and exports as a
+    // language file named for _targetLang. See AdoptGeneratedFileAsync.
+    private bool _fromGeneratedFile;
+    // The generated file's own name, shown beside the language file's name so
+    // the two are never confused, and whether its explanation was dismissed.
+    private string? _openedFileName;
+    private bool _generatedNoteDismissed;
 
     // True when there are edits that haven't been exported. Drives both the
     // in-app navigation guard (the modal) and the browser-level beforeunload
@@ -1099,6 +1175,7 @@ else
             }
 
             LoadParsed(file.Name, parsed);
+            await AdoptGeneratedFileAsync(parsed, persist: false, openedFileName: file.Name);
 
             // Hand the verbatim original to IndexedDB via a stream (off the
             // 32 KB interop arg path), so a refresh can restore it.
@@ -1167,6 +1244,7 @@ else
 
         LoadParsed(fileName, parsed);
         _canSaveInPlace = true; // opened with a writable handle
+        await AdoptGeneratedFileAsync(parsed, persist: true, openedFileName: fileName);
         await SelectAsync(_filtered.FirstOrDefault()?.Id ?? _units.FirstOrDefault()?.Id);
     }
 
@@ -1177,12 +1255,15 @@ else
         _targetLang = string.IsNullOrEmpty(parsed.TargetLanguage) ? _targetLang : parsed.TargetLanguage;
         _original = parsed.OriginalName;
         _units = parsed.Units.Select(ToVm).ToList();
+        _learnedLocally.Clear();
+        _learnedToRepository.Clear();
         _hasFile = true;
         // Default to download-only; the picker/drop/restore paths flip this on
         // when they carry a writable handle, and the repository path sets its
         // own source afterwards. Clearing here means an upload can never
         // inherit the last file's repository and save into it.
         _canSaveInPlace = false;
+        _fromGeneratedFile = false;
         ForgetRepositorySource();
         _restoreName = null;
         Coordinator.ClearCaches();
@@ -1191,6 +1272,42 @@ else
         _search = "";
         SetUnsaved(false);
         RecomputeFiltered();
+    }
+
+    /// <summary>
+    /// For a file opened from disk: when it holds no translation yet - the
+    /// compiler's generated <c>.g.xlf</c> - turn off saving in place and name
+    /// the export as the language file it should become (#1325). The build
+    /// rewrites the generated file, so a translation saved into it would be
+    /// lost on the next build, and it would still say it is in the source
+    /// language. The repository path already saves such a file beside it
+    /// (<see cref="DerivedSource"/>); this is the same rule for a local file.
+    /// </summary>
+    /// <param name="persist">
+    /// True when the browser's session record was written before this ran, so
+    /// the export it sends later carries the language and name chosen here.
+    /// The upload path writes the record afterwards and passes false.
+    /// </param>
+    /// <param name="openedFileName">
+    /// The name the file has on disk, for the notice and the footer. Null on a
+    /// restore, whose session only remembers the language file's name.
+    /// </param>
+    private async Task AdoptGeneratedFileAsync(XliffDocument parsed, bool persist, string? openedFileName)
+    {
+        _fromGeneratedFile = TranslationFileRules.IsUntranslatedSource(parsed);
+        if (!_fromGeneratedFile) return;
+
+        _openedFileName = openedFileName;
+        _generatedNoteDismissed = false;
+        _canSaveInPlace = false;
+        // Same as the repository path: "translate English into English" is
+        // what the file says, not what anybody wants.
+        if (string.Equals(_targetLang, _sourceLang, StringComparison.OrdinalIgnoreCase))
+        {
+            _targetLang = Languages.First(l => !string.Equals(l.Code, _sourceLang, StringComparison.OrdinalIgnoreCase)).Code;
+        }
+        _fileName = TranslationFileRules.LanguageFileName(_fileName, _targetLang);
+        if (persist && _module is not null) await _module.InvokeVoidAsync("putMeta", _fileName, _targetLang);
     }
 
     private static UnitVm ToVm(XliffTransUnit u)
@@ -1245,8 +1362,10 @@ else
 
             // If the session was opened with a writable handle, it survives in
             // IndexedDB — re-enable in-place Save. Write permission is re-checked
-            // (and re-prompted) on the Save gesture itself, not here.
+            // (and re-prompted) on the Save gesture itself, not here. Never for
+            // the generated file, which only ever exports (#1325).
             _canSaveInPlace = await _module.InvokeAsync<bool>("hasHandle");
+            await AdoptGeneratedFileAsync(parsed, persist: true, openedFileName: null);
 
             // Re-apply the saved edit overlay.
             var byId = _units.ToDictionary(u => u.Id, StringComparer.Ordinal);
@@ -1256,6 +1375,13 @@ else
                 vm.Target = ed.T;
                 if (!string.IsNullOrEmpty(ed.S)) vm.State = ed.S!;
                 vm.Dirty = true;
+            }
+            // What the memory already learned from this session, so the next
+            // save does not teach it the same units again (#1343).
+            if (meta.Learned is { } learnedBefore)
+            {
+                foreach (var (id, target) in learnedBefore.Local) _learnedLocally[id] = target;
+                foreach (var (id, target) in learnedBefore.Repository) _learnedToRepository[id] = target;
             }
             // A restored session with edits is unsaved until it's exported.
             if (meta.Edits.Count > 0) SetUnsaved(true);
@@ -1279,8 +1405,11 @@ else
         if (_module is not null) await _module.InvokeVoidAsync("clear");
         SetUnsaved(false);
         _canSaveInPlace = false;
+        _fromGeneratedFile = false;
         _hasFile = false;
         _units = new();
+        _learnedLocally.Clear();
+        _learnedToRepository.Clear();
         _filtered = new();
         _sel = null;
         _selId = null;
@@ -1503,8 +1632,9 @@ else
                 await _module.InvokeVoidAsync("putBaseStream", _fileName, _sourceLang, _targetLang, saved);
             }
             // Edits typed while the save was in flight are not in that base,
-            // so they go back into the overlay a refresh restores from.
-            if (_unsaved) PersistEditsSoon();
+            // so they go back into the overlay a refresh restores from - as does
+            // what the memory has learned, which the new base record dropped.
+            PersistEditsSoon();
 
             _toast?.Show(
                 save.IsNewPullRequest
@@ -1516,11 +1646,16 @@ else
             // the same learning an export does, so a translation saved to a
             // repository still feeds the suggestions for the next file. Only
             // the units this save committed, and behind the coordinator's gate
-            // - a suggestion lookup may be using the circuit's context.
+            // - a suggestion lookup may be using the circuit's context. The
+            // repository goes with the pairs: without it they would be
+            // suggested to everyone in the organisation, even when only a
+            // Private solution's team may see that repository (#1324).
             try
             {
-                await Coordinator.LearnGatedAsync(xml, _repoSource.FileName,
-                    committed.Where(e => !string.IsNullOrEmpty(e.Value.Target)).Select(e => e.Key).ToList());
+                var learn = UnitsToLearn(committed, _learnedToRepository);
+                await Coordinator.LearnGatedAsync(xml, _repoSource.FileName, learn.Keys.ToList(),
+                    _repoSource.Repository.FullName, _repoSource.Path);
+                RememberLearned(_learnedToRepository, learn);
             }
             catch (Exception ex)
             {
@@ -2058,6 +2193,11 @@ else
             _fileName = _repoSource.FileName;
             _pullRequest = null;
         }
+        else if (_fromGeneratedFile)
+        {
+            // Likewise for one opened from disk: the export is named for it.
+            _fileName = TranslationFileRules.LanguageFileName(_fileName, _targetLang);
+        }
 
         if (_module is not null) await _module.InvokeVoidAsync("putMeta", _fileName, _targetLang);
         await LoadSuggestionsAsync();
@@ -2118,13 +2258,16 @@ else
     // File System Access flow in Translator.razor.js.
     private async Task SaveInPlaceAsync(string editsJson)
     {
+        var learn = PendingLearning(editsJson);
         _busy = true;
         try
         {
-            var status = await _module!.InvokeAsync<string>("saveInPlace", _fileName, editsJson);
+            var status = await _module!.InvokeAsync<string>("saveInPlace", _fileName, editsJson,
+                JsonSerializer.Serialize(learn.Keys));
             switch (status)
             {
                 case "saved":
+                    RememberLearned(_learnedLocally, learn);
                     // Edits typed while the save was in flight are not in the
                     // file, so the unsaved guard stays up for them and they go
                     // back into the overlay a refresh restores from (#1268, L44).
@@ -2162,6 +2305,7 @@ else
 
     private async Task DownloadExportAsync(string editsJson)
     {
+        var learn = PendingLearning(editsJson);
         // Exporting *is* saving: the user now has a copy on disk. Drop the
         // unsaved-changes guard *before* the submit so the form POST (which the
         // browser treats as a navigation) doesn't trip the leave-confirm modal
@@ -2169,11 +2313,55 @@ else
         // LocationChanging handler stays quiet; the JS side detaches the
         // beforeunload listener synchronously right before `form.submit()`.
         SetUnsaved(false);
-        var ok = await _module!.InvokeAsync<bool>("exportNow", _fileName, editsJson);
-        if (!ok)
+        var ok = await _module!.InvokeAsync<bool>("exportNow", _fileName, editsJson,
+            JsonSerializer.Serialize(learn.Keys));
+        if (ok)
+        {
+            RememberLearned(_learnedLocally, learn);
+        }
+        else
         {
             Flash("Nothing to export yet", ToastKind.Warn);
         }
+    }
+
+    /// <summary>The units in <paramref name="editsJson"/> the translation memory has not yet learned with their current text.</summary>
+    private Dictionary<string, string> PendingLearning(string editsJson)
+    {
+        var posted = JsonSerializer.Deserialize<Dictionary<string, EditDto>>(editsJson) ?? new();
+        return UnitsToLearn(posted.ToDictionary(e => e.Key, e => new TargetEdit(e.Value.T, e.Value.S)), _learnedLocally);
+    }
+
+    private void RememberLearned(Dictionary<string, string> scope, IReadOnlyDictionary<string, string> learned)
+    {
+        if (learned.Count == 0) return;
+        foreach (var (id, target) in learned) scope[id] = target;
+        PersistEditsSoon();
+    }
+
+    private string SerializeLearned() => JsonSerializer.Serialize(new LearnedDto
+    {
+        Local = new(_learnedLocally, StringComparer.Ordinal),
+        Repository = new(_learnedToRepository, StringComparer.Ordinal),
+    });
+
+    /// <summary>
+    /// The edits worth teaching the translation memory, by unit id with the
+    /// target they carry: those with text that differs from what the unit last
+    /// taught it (#1343). A save that changed nothing about a unit since the
+    /// last one adds no further hit to it.
+    /// </summary>
+    internal static Dictionary<string, string> UnitsToLearn(
+        IReadOnlyDictionary<string, TargetEdit> edits, IReadOnlyDictionary<string, string> learned)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (id, edit) in edits)
+        {
+            if (string.IsNullOrEmpty(edit.Target)) continue;
+            if (learned.TryGetValue(id, out var last) && string.Equals(last, edit.Target, StringComparison.Ordinal)) continue;
+            result[id] = edit.Target;
+        }
+        return result;
     }
 
     // ── Keyboard (from Translator.razor.js) ───────────────────────────────
@@ -2183,7 +2371,17 @@ else
     [JSInvokable]
     public async Task SaveFromKey()
     {
-        if (_module is null || _busy || !_canSaveInPlace) return;
+        if (_module is null || _busy) return;
+        if (_fromGeneratedFile && _repoSource is null)
+        {
+            // Ctrl+S out of habit would otherwise do nothing, and nothing
+            // looks a lot like "saved" (#1325).
+            Flash("This file is rebuilt by every build, so your work is not saved into it - use Download translation to keep it.",
+                ToastKind.Warn);
+            StateHasChanged();
+            return;
+        }
+        if (!_canSaveInPlace) return;
         await SaveInPlaceAsync(SerializeEdits());
         StateHasChanged();
     }
@@ -2350,13 +2548,14 @@ else
         _persistCts = new CancellationTokenSource();
         var token = _persistCts.Token;
         var json = SerializeEdits();
+        var learned = SerializeLearned();
         _ = Task.Run(async () =>
         {
             try
             {
                 await Task.Delay(400, token);
                 if (token.IsCancellationRequested || _module is null) return;
-                await _module.InvokeVoidAsync("putEdits", json);
+                await _module.InvokeVoidAsync("putEdits", json, learned);
             }
             catch { /* debounced away or storage unavailable */ }
         });

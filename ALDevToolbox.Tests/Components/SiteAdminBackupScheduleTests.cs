@@ -32,6 +32,7 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
 
     private readonly TestDb _db = new();
     private readonly BunitContext _ctx = new();
+    private readonly MaintenanceModeState _maintenance = new();
     private readonly string _deploymentDir = Path.Combine(Path.GetTempPath(), "aldt-test-deploy-" + Guid.NewGuid().ToString("N"));
 
     public SiteAdminBackupScheduleTests()
@@ -56,7 +57,7 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
         _ctx.Services.AddSingleton<IConfiguration>(config);
         _ctx.Services.AddDataProtection();
         _ctx.Services.AddScoped<SystemSettingsService>();
-        _ctx.Services.AddSingleton(new MaintenanceModeState());
+        _ctx.Services.AddSingleton(_maintenance);
         _ctx.Services.AddScoped<BackupService>();
         _ctx.Services.AddScoped(sp => new PerTenantBackupService(
             sp.GetRequiredService<AppDbContext>(), _db.OrgContext,
@@ -202,6 +203,61 @@ public sealed class SiteAdminBackupScheduleTests : IDisposable
             cut.Find("p.card__sub").TextContent.Should().Contain("daily at 04:00 (Europe/Copenhagen).");
             cut.Markup.Should().NotContain("04:00 UTC").And.NotContain("02:00 UTC.");
             cut.Markup.Should().Contain("2026-07-01 04:00:00", "the listed backup ran at the scheduled time, shown in the same zone");
+        });
+    }
+
+    /// <summary>
+    /// A restore that fails after the drop keeps the site in maintenance mode
+    /// (#1321). The SiteAdmin lands back on the backups page, which has to say
+    /// so, or nothing tells them the site is still closed to everyone else.
+    /// </summary>
+    [Fact]
+    public void After_a_failed_restore_the_backups_page_says_the_site_is_held_closed()
+    {
+        At(Summer);
+        _maintenance.HoldAfterFailedRestore(
+            "Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed. The database may be empty or only partly loaded.");
+
+        var cut = _ctx.Render<SiteAdminBackups>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var alerts = cut.FindAll("[role=alert]");
+            alerts.Should().ContainSingle("one notice, not a failure message beside a maintenance warning");
+            var alert = alerts[0].TextContent;
+            alert.Should().Contain("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump failed.");
+            alert.Should().Contain("may be empty or only partly loaded");
+            alert.Should().Contain("Restore another backup below to reopen it.");
+        });
+    }
+
+    [Fact]
+    public void While_a_restore_runs_the_backups_page_says_the_site_is_closed_until_it_finishes()
+    {
+        At(Summer);
+        _maintenance.Enter("Restoring backup aldevtoolbox-20260701T020000000Z-scheduled.dump");
+
+        var cut = _ctx.Render<SiteAdminBackups>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var alert = cut.Find("[role=alert]").TextContent;
+            alert.Should().Contain("closed to everyone except site administrators until it finishes");
+            alert.Should().NotContain("Restore another backup");
+        });
+    }
+
+    [Fact]
+    public void The_backups_page_has_no_maintenance_notice_when_the_site_is_open()
+    {
+        At(Summer);
+
+        var cut = _ctx.Render<SiteAdminBackups>();
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Markup.Should().Contain("A complete copy of everything on this site.");
+            cut.Markup.Should().NotContain("closed to everyone");
         });
     }
 

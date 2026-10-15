@@ -246,6 +246,19 @@ public sealed class ReleaseComparisonService
             .ToListAsync(ct);
 
     /// <summary>
+    /// The ids of a release's modules that <see cref="OneModulePerApp"/> picks, so
+    /// the object loads can be restricted to them in the query (#1332). Without it
+    /// the object compare and "Compare with..." read whichever of two versions of
+    /// one app the database returned first, usually the older one. A release holds
+    /// tens to a few hundred modules, so picking in memory costs one small read.
+    /// </summary>
+    private async Task<List<long>> LoadWinningModuleIdsAsync(int releaseId, CancellationToken ct)
+        => OneModulePerApp(await LoadModuleCompareRowsAsync(releaseId, ct).ConfigureAwait(false))
+            .Values
+            .Select(m => m.ModuleId)
+            .ToList();
+
+    /// <summary>
     /// File-pair diff for one Changed module. Files are joined on canonical
     /// <c>Path</c>. Returns null when either module id is missing.
     /// </summary>
@@ -496,8 +509,9 @@ public sealed class ReleaseComparisonService
         int releaseId, string kind, int? objectId, string name, CancellationToken ct = default)
     {
         if (!await _access.IsReleaseVisibleAsync(releaseId, ct)) return null;
+        var moduleIds = await LoadWinningModuleIdsAsync(releaseId, ct).ConfigureAwait(false);
         var query = _db.OeModuleObjects.AsNoTracking()
-            .Where(o => o.Module!.ReleaseId == releaseId
+            .Where(o => moduleIds.Contains(o.ModuleId)
                         && o.Kind == kind
                         && o.SourceFileId != null);
         query = objectId is int id
@@ -509,14 +523,22 @@ public sealed class ReleaseComparisonService
             .ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// A release's objects, from the one module per app the module compare picks
+    /// (<see cref="LoadWinningModuleIdsAsync"/>), so a release amended with a newer
+    /// version of an app compares that version's objects (#1332).
+    /// </summary>
     private async Task<List<CompareObject>> LoadCompareObjectsAsync(int releaseId, CancellationToken ct)
-        => await _db.OeModuleObjects.AsNoTracking()
-            .Where(o => o.Module!.ReleaseId == releaseId)
+    {
+        var moduleIds = await LoadWinningModuleIdsAsync(releaseId, ct).ConfigureAwait(false);
+        return await _db.OeModuleObjects.AsNoTracking()
+            .Where(o => moduleIds.Contains(o.ModuleId))
             .Select(o => new CompareObject(
                 o.Kind, o.ObjectId, o.Name, o.SourceFileId,
                 o.SourceFile != null ? o.SourceFile.ContentHash : null,
                 o.Module!.AppId, o.Module.Version, o.Module.AppFileHash))
             .ToListAsync(ct).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Whether two matched objects are the same. The hash is the source file's,
@@ -537,8 +559,11 @@ public sealed class ReleaseComparisonService
         var map = new Dictionary<string, CompareObject>(StringComparer.Ordinal);
         foreach (var o in objects)
         {
-            // (kind, object id) is unique within a release; fall back to name for
-            // id-less objects (AL interfaces). First wins on the rare collision.
+            // The objects come from one module per app (LoadCompareObjectsAsync), and
+            // (kind, object id) is unique across those; a release with two versions
+            // of an app repeats it, which is why the loads keep only the winner.
+            // Fall back to name for id-less objects (AL interfaces). First wins on
+            // the rare collision between two different apps.
             var key = o.ObjectId is int id
                 ? $"{o.Kind}#{id}"
                 : $"{o.Kind}#name:{o.Name.ToLowerInvariant()}";
@@ -590,12 +615,29 @@ public sealed class ReleaseComparisonService
                 ReleaseId = f.Module!.ReleaseId,
                 Label = f.Module!.Release!.Label,
                 FileId = f.Id,
+                f.ModuleId,
                 BcVersion = f.Module!.Release!.BcVersion,
                 ImportedAt = f.Module!.Release!.ImportedAt,
             })
             .ToListAsync(ct);
+        if (candidates.Count == 0) return new();
+
+        // A release holding two versions of this app (an amend) would be listed
+        // once per version, and one entry would open the old file. Keep only the
+        // file of the version that release resolves to, the module compare's pick;
+        // if that version dropped the file, the release is not offered (#1332).
+        var releaseIds = candidates.Select(c => c.ReleaseId).Distinct().ToList();
+        var appModules = await _db.OeModules.AsNoTracking()
+            .Where(m => m.AppId == anchor.AppId && releaseIds.Contains(m.ReleaseId))
+            .Select(m => new { m.ReleaseId, m.Id, m.AppId, m.Name, m.Publisher, m.Version })
+            .ToListAsync(ct);
+        var winningModuleIds = appModules
+            .GroupBy(m => m.ReleaseId)
+            .Select(g => OneModulePerApp(g.Select(m => new ModuleCompareRow(m.Id, m.AppId, m.Name, m.Publisher, m.Version)).ToList())[anchor.AppId].ModuleId)
+            .ToHashSet();
 
         return candidates
+            .Where(c => winningModuleIds.Contains(c.ModuleId))
             .Select(c => new CompareTargetOption(
                 c.ReleaseId, c.Label, c.FileId,
                 TargetIsOlder: IsOlderRelease(c.BcVersion, c.ImportedAt, anchor.BcVersion, anchor.ImportedAt)))

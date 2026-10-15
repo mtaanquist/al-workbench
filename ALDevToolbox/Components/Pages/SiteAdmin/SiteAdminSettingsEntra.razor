@@ -29,7 +29,7 @@
                 <AntiforgeryToken />
                 <div class="setting-list">
                     <SettingRow Name="Redirect URI"
-                                Hint="In the Entra admin center, add a Web platform with this address before you save here. Sign-in fails without it. Under Token configuration, also add xms_edov and auth_time as optional ID token claims. Without xms_edov, people who already have a password account can't sign in with Microsoft the first time; auth_time lets a 'confirm it's you' Microsoft sign-in be checked to have happened just now.">
+                                Hint="In the Entra admin center, add a Web platform with this address before you save here. Sign-in fails without it. Under Token configuration, also add xms_edov and auth_time as optional ID token claims. Without xms_edov, people who already have a password account can't sign in with Microsoft the first time, and new people always wait for an admin's approval; auth_time lets a 'confirm it's you' Microsoft sign-in be checked to have happened just now.">
                         <input class="input input--ro" type="text" value="@RedirectUri" readonly
                                aria-label="Redirect URI to copy into Microsoft Entra" />
                     </SettingRow>

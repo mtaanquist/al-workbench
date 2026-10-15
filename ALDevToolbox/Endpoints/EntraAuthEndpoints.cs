@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using ALDevToolbox.Data;
+using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services;
 using ALDevToolbox.Services.Account;
@@ -39,6 +40,9 @@ internal static class EntraAuthEndpoints
     public const string LoginHintItem = "entra_login_hint";
     /// <summary>Present (as the acting user's id) when the handshake is a /account "connect" rather than a sign-in.</summary>
     public const string LinkUserIdItem = "entra_link_user_id";
+    /// <summary>Present when the handshake accepts an invite: the invite's token and the name the invitee typed.</summary>
+    public const string InviteTokenItem = "entra_invite_token";
+    public const string InviteDisplayNameItem = "entra_invite_display_name";
 
     public static IEndpointRouteBuilder MapEntraAuthEndpoints(this IEndpointRouteBuilder app)
     {
@@ -68,6 +72,47 @@ internal static class EntraAuthEndpoints
             await ctx.ChallengeAsync(AuthenticationScheme, properties);
         });
 
+        // "Accept with Microsoft" on /accept-invite, for an organisation that
+        // signs in only with Microsoft (#1336). The invite names the
+        // organisation, so there is nothing to route; the account is created
+        // in the callback, once Microsoft says who the person is.
+        app.MapPost("/auth/accept-invite/microsoft", async (
+            HttpContext ctx, InviteService invites, EntraSignInService entra, IAntiforgery antiforgery, CancellationToken ct) =>
+        {
+            if (!await ValidateAntiforgeryAsync(ctx, antiforgery, ct)) return;
+            var form = await ctx.Request.ReadFormAsync(ct);
+            var token = form["Token"].ToString();
+            var displayName = form["DisplayName"].ToString().Trim();
+            Invite invite;
+            try
+            {
+                invite = await invites.PrepareMicrosoftAcceptanceAsync(token, displayName, ct);
+            }
+            catch (PlanValidationException ex)
+            {
+                var first = ex.Errors.FirstOrDefault();
+                ctx.Response.Redirect(
+                    $"/accept-invite?token={Uri.EscapeDataString(token)}&err={Uri.EscapeDataString(first.Key)}&msg={Uri.EscapeDataString(first.Value)}");
+                return;
+            }
+
+            var (config, errorCode) = await entra.ResolveChallengeForOrganizationAsync(invite.OrganizationId, ct);
+            if (config is null)
+            {
+                ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}={errorCode}");
+                return;
+            }
+
+            var properties = new AuthenticationProperties { RedirectUri = "/" };
+            properties.Items[OrgIdItem] = config.OrganizationId.ToString();
+            properties.Items[ClientIdItem] = config.ClientId;
+            properties.Items[ConfigSourceItem] = config.ConfigSource;
+            properties.Items[LoginHintItem] = invite.Email;
+            properties.Items[InviteTokenItem] = token;
+            properties.Items[InviteDisplayNameItem] = displayName;
+            await ctx.ChallengeAsync(AuthenticationScheme, properties);
+        });
+
         // "Connect Microsoft account" on /account — same handshake, but the
         // callback links the identity to the already-signed-in user instead
         // of signing anyone in.
@@ -94,7 +139,7 @@ internal static class EntraAuthEndpoints
             properties.Items[ConfigSourceItem] = config.ConfigSource;
             properties.Items[LinkUserIdItem] = userId.Value.ToString();
             await ctx.ChallengeAsync(AuthenticationScheme, properties);
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequireCurrentCredentials();
 
         app.MapPost("/auth/entra/link/{id:int}/remove", async (
             int id, HttpContext ctx, EntraSignInService entra, IAntiforgery antiforgery, CancellationToken ct) =>
@@ -240,6 +285,15 @@ internal static class EntraAuthEndpoints
                 ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}=entra-failed");
                 return;
             }
+            // The link is a lasting credential and the round trip to Microsoft
+            // can outlast a reset made meanwhile, so the cut-off the start of
+            // the handshake applied is applied again here (#1336).
+            if (await CookieSessionRevalidation.SessionPredatesCredentialChangeAsync(ctx.HttpContext))
+            {
+                await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                ctx.Response.Redirect(RouteConstants.Login);
+                return;
+            }
             try
             {
                 await entra.LinkAsync(linkUserId, token, ct);
@@ -253,7 +307,29 @@ internal static class EntraAuthEndpoints
             return;
         }
 
-        var result = await entra.CompleteAsync(token, ResolveIp(ctx.HttpContext), ct);
+        EntraCompletionResult result;
+        if (ctx.Properties?.Items.TryGetValue(InviteTokenItem, out var inviteToken) == true
+            && !string.IsNullOrEmpty(inviteToken))
+        {
+            // Invite mode: checked again here, since the invite may have been
+            // used or revoked while the person was at Microsoft.
+            var invites = ctx.HttpContext.RequestServices.GetRequiredService<InviteService>();
+            var invite = await invites.FindValidByTokenAsync(inviteToken, ct);
+            if (invite is null)
+            {
+                ctx.Response.Redirect(
+                    $"/accept-invite?token={Uri.EscapeDataString(inviteToken)}&err=Token&msg="
+                    + Uri.EscapeDataString("This invite link is no longer valid. Ask the admin for a new one."));
+                return;
+            }
+            var displayName = ctx.Properties.Items.TryGetValue(InviteDisplayNameItem, out var typedName) ? typedName ?? string.Empty : string.Empty;
+            result = await entra.AcceptInviteAsync(token, ResolveIp(ctx.HttpContext),
+                new EntraInviteAcceptance(invite, displayName), ct);
+        }
+        else
+        {
+            result = await entra.CompleteAsync(token, ResolveIp(ctx.HttpContext), ct);
+        }
 
         if (result.Outcome == EntraCompletionOutcome.Success && result.User is not null)
         {
@@ -301,6 +377,7 @@ internal static class EntraAuthEndpoints
             EntraCompletionOutcome.EmailNotVerified => "entra-email-unverified",
             EntraCompletionOutcome.IdentityTakenElsewhere => "entra-identity-taken",
             EntraCompletionOutcome.LinkFromAccountRequired => "entra-link-required",
+            EntraCompletionOutcome.InviteEmailMismatch => "entra-invite-email",
             _ => "entra-failed",
         };
         ctx.Response.Redirect($"{RouteConstants.Login}?{RouteConstants.ErrQuery}={code}");

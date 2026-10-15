@@ -231,8 +231,11 @@ public sealed class PipelineService
 
     /// <summary>
     /// Disables or enables a pipeline. A disabled pipeline starts no build: Build is
-    /// refused, pushes and the nightly preview check pass it by, and automatic builds
-    /// already waiting are refused when their turn comes. Its settings, its builds and
+    /// refused, as are Retry and Recover symbols, pushes and the nightly preview check
+    /// pass it by, and every build already waiting in the queue - one started by hand
+    /// included - is refused when its turn comes (#1335). A build that has already
+    /// started compiling is left to finish, but publishes no GitHub release and is
+    /// neither deployed nor prepared for approval. Its settings, its builds and
     /// the deployment pipelines drawing from it stay as they are (#1131). Anyone who may
     /// manage the solution may do it. Doing it twice changes nothing.
     /// </summary>

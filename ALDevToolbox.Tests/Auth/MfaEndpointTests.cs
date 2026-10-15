@@ -118,6 +118,57 @@ public sealed class MfaEndpointTests : IDisposable
         (await read.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == userId)).TotpEnabled.Should().BeTrue();
     }
 
+    [Fact]
+    public async Task A_microsoft_linked_account_whose_confirmation_lapsed_is_told_to_confirm_again_not_that_its_password_is_wrong()
+    {
+        // The page hides the password box while the session is fresh; when the
+        // window closes before the form is sent, the post arrives with no
+        // password. Here the session was never fresh (password only, no
+        // second factor), which is the same post the server sees.
+        await SeedPasswordOnlyMicrosoftUserAsync("lapsed@cronus.example");
+        var client = _factory.CreateClient();
+        using var loginPage = await client.GetAsync("/login");
+        using var login = await PostAsync(client, "/auth/login",
+            AntiforgeryToken(await loginPage.Content.ReadAsStringAsync()),
+            ("Email", "lapsed@cronus.example"), ("Password", Password));
+        login.Headers.Location!.OriginalString.Should().NotContain("err=");
+
+        using var page = await client.GetAsync("/account/security");
+        using var response = await PostAsync(client, "/auth/account/2fa/email/disable",
+            AntiforgeryToken(await page.Content.ReadAsStringAsync()), ("Password", ""));
+
+        var location = Uri.UnescapeDataString(response.Headers.Location!.OriginalString);
+        location.Should().Contain("Your confirmation has expired");
+        location.Should().NotContain("Password is incorrect");
+    }
+
+    private async Task SeedPasswordOnlyMicrosoftUserAsync(string email)
+    {
+        await using var seed = _db.NewContext();
+        var user = new User
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Email = email,
+            DisplayName = "Nils Consultant",
+            PasswordHash = new AuthService(seed, NullLogger<AuthService>.Instance, TimeProvider.System).HashPassword(Password),
+            Role = UserRole.User,
+            Status = UserStatus.Active,
+            CreatedAt = DateTime.UtcNow,
+        };
+        seed.Users.Add(user);
+        await seed.SaveChangesAsync();
+        seed.UserExternalLogins.Add(new UserExternalLogin
+        {
+            UserId = user.Id,
+            Provider = EntraSignInService.ProviderName,
+            Issuer = "11111111-1111-1111-1111-111111111111",
+            Subject = "oid-" + user.Id,
+            DisplayIdentity = email,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await seed.SaveChangesAsync();
+    }
+
     private async Task<(int UserId, string Secret, IReadOnlyList<string> RecoveryCodes)> SeedTotpUserAsync(
         string email, bool linkMicrosoft = false)
     {

@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using OpenIddict.Abstractions;
 using OpenIddict.Server;
+using Microsoft.AspNetCore;
 using static OpenIddict.Server.OpenIddictServerEvents;
 
 namespace ALDevToolbox.Services.OAuth;
@@ -49,11 +50,19 @@ namespace ALDevToolbox.Services.OAuth;
 /// <see href="https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#client-id-metadata-documents">MCP CIMD spec</see>,
 /// and either creates the application via
 /// <see cref="IOpenIddictApplicationManager"/> or updates the existing row.
-/// Always re-fetching is what lets us survive the issuer rotating its JWKS
-/// or amending its <c>redirect_uris</c> without an admin intervention:
-/// /authorize is rare (once per consent grant) so the extra HTTPS GET is
-/// affordable, and a stale JWKS would otherwise break every refresh attempt
-/// until someone deleted the application row by hand.
+/// Re-fetching is what lets us survive the issuer rotating its JWKS or
+/// amending its <c>redirect_uris</c> without an admin intervention, and a
+/// stale JWKS would otherwise break every refresh attempt until someone
+/// deleted the application row by hand.
+/// </para>
+///
+/// <para>
+/// The request is anonymous, so each fetch is also a way for anyone to make
+/// this server dial a URL and write a row (#1336). Two things bound that: a
+/// row refreshed within <see cref="RefreshInterval"/> is used as it is, with
+/// no fetch (which also covers the consent form posting the same request
+/// back), and every fetch spends a permit from <see cref="CimdFetchLimiter"/>,
+/// the same per-IP budget <c>/oauth/register</c> has.
 /// </para>
 /// </summary>
 public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthorizationRequestContext>
@@ -72,17 +81,29 @@ public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthor
     private static readonly TimeSpan FetchTimeout = TimeSpan.FromSeconds(5);
     private const int MaxBodyBytes = 64 * 1024;
 
+    /// <summary>Application property stamped on every create or refresh from a document.</summary>
+    public const string RefreshedAtProperty = "refreshed_at";
+
+    /// <summary>How long a document-registered row is used without fetching its document again.</summary>
+    public static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(10);
+
     private readonly IOpenIddictApplicationManager _applications;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly CimdFetchLimiter _fetchLimiter;
+    private readonly TimeProvider _clock;
     private readonly ILogger<CimdClientResolver> _logger;
 
     public CimdClientResolver(
         IOpenIddictApplicationManager applications,
         IHttpClientFactory httpClientFactory,
+        CimdFetchLimiter fetchLimiter,
+        TimeProvider clock,
         ILogger<CimdClientResolver> logger)
     {
         _applications = applications;
         _httpClientFactory = httpClientFactory;
+        _fetchLimiter = fetchLimiter;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -93,6 +114,52 @@ public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthor
         if (string.IsNullOrEmpty(clientId)) return;
         if (!Uri.TryCreate(clientId, UriKind.Absolute, out var url)) return;
         if (!string.Equals(url.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)) return;
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var existing = await _applications.FindByClientIdAsync(clientId, context.CancellationToken);
+
+        // Only ever overwrite a row that we ourselves created from a CIMD
+        // document. A DCR- or admin-registered client that happens to use a
+        // URL-shaped client_id must NOT be silently rewritten from an
+        // attacker-controllable metadata document — that would let whoever can
+        // serve (or transiently spoof) that URL replace its redirect_uris,
+        // JWKS, and client type. Checked before the fetch, so such a request
+        // never makes us dial the URL at all.
+        if (existing is not null)
+        {
+            var properties = await _applications.GetPropertiesAsync(existing, context.CancellationToken);
+            var isCimdRow = properties.TryGetValue(RegistrationSourceProperty, out var source)
+                            && source.ValueKind == JsonValueKind.String
+                            && string.Equals(source.GetString(), CimdRegistrationSource, StringComparison.Ordinal);
+            if (!isCimdRow)
+            {
+                _logger.LogWarning(
+                    "Refusing to overwrite client {ClientId} from a CIMD document — it was registered through another channel.",
+                    clientId);
+                context.Reject(
+                    error: OpenIddictConstants.Errors.InvalidClient,
+                    description: "A client with this id is already registered through another channel.");
+                return;
+            }
+            if (properties.TryGetValue(RefreshedAtProperty, out var refreshed)
+                && refreshed.ValueKind == JsonValueKind.String
+                && refreshed.TryGetDateTime(out var refreshedAt)
+                && now - refreshedAt.ToUniversalTime() < RefreshInterval)
+            {
+                // Recently fetched: use the row as it stands.
+                return;
+            }
+        }
+
+        var ip = context.Transaction.GetHttpRequest()?.HttpContext.Connection.RemoteIpAddress?.ToString();
+        if (!_fetchLimiter.TryAcquire(ip))
+        {
+            _logger.LogWarning("CIMD fetch for {ClientId} refused: too many from {Ip}.", clientId, ip);
+            context.Reject(
+                error: OpenIddictConstants.Errors.TemporarilyUnavailable,
+                description: "Too many client metadata requests. Try again in a few minutes.");
+            return;
+        }
 
         CimdMetadata? metadata;
         try
@@ -245,41 +312,12 @@ public sealed class CimdClientResolver : IOpenIddictServerHandler<ValidateAuthor
             return;
         }
         descriptor.Properties[RegistrationSourceProperty] = JsonSerializer.SerializeToElement(CimdRegistrationSource);
-        descriptor.Properties["registered_at"] = JsonSerializer.SerializeToElement(DateTime.UtcNow);
+        descriptor.Properties["registered_at"] = JsonSerializer.SerializeToElement(now);
+        descriptor.Properties[RefreshedAtProperty] = JsonSerializer.SerializeToElement(now);
         descriptor.Properties["token_endpoint_auth_method"] = JsonSerializer.SerializeToElement(authMethod);
         if (!string.IsNullOrWhiteSpace(metadata.ClientUri))
         {
             descriptor.Properties["client_uri"] = JsonSerializer.SerializeToElement(metadata.ClientUri);
-        }
-
-        // Re-fetch every time so the issuer can rotate its JWKS or amend its
-        // redirect_uris without an admin nuking the application row. The
-        // earlier short-circuit on existence is gone; we always create or
-        // update from the freshly-fetched document.
-        var existing = await _applications.FindByClientIdAsync(clientId, context.CancellationToken);
-
-        // Only ever overwrite a row that we ourselves created from a CIMD
-        // document. A DCR- or admin-registered client that happens to use a
-        // URL-shaped client_id must NOT be silently rewritten from an
-        // attacker-controllable metadata document — that would let whoever can
-        // serve (or transiently spoof) that URL replace its redirect_uris,
-        // JWKS, and client type.
-        if (existing is not null)
-        {
-            var properties = await _applications.GetPropertiesAsync(existing, context.CancellationToken);
-            var isCimdRow = properties.TryGetValue(RegistrationSourceProperty, out var source)
-                            && source.ValueKind == JsonValueKind.String
-                            && string.Equals(source.GetString(), CimdRegistrationSource, StringComparison.Ordinal);
-            if (!isCimdRow)
-            {
-                _logger.LogWarning(
-                    "Refusing to overwrite client {ClientId} from a CIMD document — it was registered through another channel.",
-                    clientId);
-                context.Reject(
-                    error: OpenIddictConstants.Errors.InvalidClient,
-                    description: "A client with this id is already registered through another channel.");
-                return;
-            }
         }
 
         try

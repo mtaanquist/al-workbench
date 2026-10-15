@@ -1,7 +1,9 @@
 using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
+using ALDevToolbox.Domain.ValueObjects;
 using ALDevToolbox.Services.Mcp.Tools;
 using ALDevToolbox.Services.Translation;
+using ALDevToolbox.Services.Translation.Providers;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -32,8 +34,8 @@ public sealed class TranslatorToolsTests : IDisposable
     private readonly TestDb _db = new();
     public void Dispose() => _db.Dispose();
 
-    // machine_translate is the only member that touches the machine-translation
-    // service and none of these tests call it, so it is never constructed.
+    // Only machine_translate touches the machine-translation service; the tests
+    // that call it build their own with NewMachineTranslationTools.
     private TranslatorTools NewTools(AppDbContext ctx) =>
         new(new TranslationMemoryService(ctx, _db.OrgContext, NullLogger<TranslationMemoryService>.Instance),
             machineTranslation: null!,
@@ -250,5 +252,53 @@ public sealed class TranslatorToolsTests : IDisposable
         var act = () => NewTools(ctx).VoteTranslationAsync(otherOrgEntry, "up");
 
         (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("not found");
+    }
+    [Fact]
+    public async Task Machine_translate_without_a_provider_set_up_points_at_the_settings()
+    {
+        await using var ctx = _db.NewContext();
+        var tools = NewMachineTranslationTools(ctx, new ThrowingProvider());
+
+        var act = () => tools.MachineTranslateAsync("Hello", "da-DK");
+
+        (await act.Should().ThrowAsync<McpException>()).Which.Message.Should().Contain("not configured");
+    }
+
+    [Fact]
+    public async Task Machine_translate_reports_a_provider_failure_as_a_failure_not_as_missing_setup()
+    {
+        // A used-up quota or a refused language used to read as "not configured"
+        // and sent the admin to a settings page that was already right (#1344).
+        await using var ctx = _db.NewContext();
+        var settings = _db.NewMachineTranslationSettingsService(ctx);
+        await settings.SaveMachineTranslationAsync(new MtSettingsInput("deepl", "k:fx", false, MtTrigger.OnDemand));
+        var tools = NewMachineTranslationTools(ctx, new ThrowingProvider());
+
+        var act = () => tools.MachineTranslateAsync("Hello", "da-DK");
+
+        var ex = (await act.Should().ThrowAsync<McpException>()).Which;
+        ex.Message.Should().Contain("refused or failed");
+        ex.Message.Should().NotContain("not configured");
+    }
+
+    private TranslatorTools NewMachineTranslationTools(AppDbContext ctx, IMachineTranslationProvider provider) =>
+        new(new TranslationMemoryService(ctx, _db.OrgContext, NullLogger<TranslationMemoryService>.Instance),
+            new MachineTranslationService(
+                _db.NewMachineTranslationSettingsService(ctx),
+                new SingleProviderFactory(provider),
+                NullLogger<MachineTranslationService>.Instance),
+            ctx,
+            _db.OrgContext);
+
+    private sealed class SingleProviderFactory(IMachineTranslationProvider provider) : IMachineTranslationProviderFactory
+    {
+        public IMachineTranslationProvider Create(ResolvedMtSettings settings) => provider;
+    }
+
+    private sealed class ThrowingProvider : IMachineTranslationProvider
+    {
+        public Task<MtTestResult> TestConnectionAsync(CancellationToken ct) => Task.FromResult(new MtTestResult(false, "x"));
+        public Task<MtTranslation> TranslateAsync(string sourceText, string? sourceLanguage, string targetLanguage, string? context, CancellationToken ct)
+            => throw new HttpRequestException("Quota exceeded");
     }
 }

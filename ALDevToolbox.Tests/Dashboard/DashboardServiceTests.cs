@@ -2,6 +2,8 @@ using ALDevToolbox.Data;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.ObjectExplorer;
+using ALDevToolbox.Services.ObjectExplorer.Projects;
 using ALDevToolbox.Tests.Builders;
 using ALDevToolbox.Tests.Infrastructure;
 using AwesomeAssertions;
@@ -397,6 +399,51 @@ public sealed class DashboardServiceTests : IDisposable
         // neither is a symbols package from the feeds with no source in it (#1092).
         counts.Releases.Should().Be(1);
         counts.Projects.Should().Be(1);
+    }
+
+    /// <summary>
+    /// #1345 asked for the Solutions count to drop Private solutions the viewer has
+    /// no grant on. It must not: /solutions lists every one of them as a locked,
+    /// name-only row and its total counts them, so filtering the tile would make it
+    /// read lower than the page it links to. The count tells a member nothing the
+    /// list doesn't already show them by name. This pins the two together for a
+    /// plain member, which is the case the issue was worried about.
+    /// </summary>
+    [Fact]
+    public async Task Solutions_count_matches_the_solutions_list_for_a_member_without_a_grant()
+    {
+        int memberId;
+        await using (var seed = _db.NewContext())
+        {
+            var owner = NewUser("owner@cronus.example");
+            var member = NewUser("member@cronus.example");
+            member.Role = UserRole.User;
+            seed.Users.AddRange(owner, member);
+            await seed.SaveChangesAsync();
+            memberId = member.Id;
+
+            seed.OeProjects.AddRange(
+                new OeProject
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Norway",
+                    CreatedByUserId = owner.Id, CreatedAt = Now, UpdatedAt = Now,
+                },
+                new OeProject
+                {
+                    OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Denmark",
+                    Visibility = ProjectVisibility.Private,
+                    CreatedByUserId = owner.Id, CreatedAt = Now, UpdatedAt = Now,
+                });
+            await seed.SaveChangesAsync();
+        }
+
+        _db.OrgContext.CurrentUserId = memberId;
+        await using var ctx = _db.NewContext();
+        var counts = await NewService(ctx).GetToolCountsAsync();
+        var list = await new ArtifactService(ctx, new ProjectAccess(ctx, _db.OrgContext)).ListProjectsAsync();
+
+        list.Should().ContainSingle(r => r.IsLocked, "the member has no grant on the Private solution");
+        counts.Projects.Should().Be(list.Count).And.Be(2);
     }
 
     // ---- fixtures ----

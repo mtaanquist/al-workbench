@@ -87,6 +87,11 @@ public class ReleaseImportService
     /// Creates a Release and ingests every supplied <c>.app</c> upload. Per-app
     /// failures abort the run and flip the Release to <c>failed</c>; partial
     /// modules stay in the DB so an operator can inspect what got through.
+    /// The ingest runs inside the caller's request, so this method is the
+    /// caller <see cref="ProcessReleaseAsync"/> leaves a cancellation to: a
+    /// request that ends early (the admin closed the tab) fails the release
+    /// rather than leaving it <c>ingesting</c> with nobody importing it, which
+    /// would refuse Retry and Add modules until the next restart (#1331).
     /// </summary>
     public async Task<ReleaseImportSummary> ImportReleaseAsync(
         ReleaseImportRequest request,
@@ -101,8 +106,23 @@ public class ReleaseImportService
             });
         }
         var releaseId = await BeginReleaseAsync(ReleaseImportMetadata.From(request), ct).ConfigureAwait(false);
-        return await ProcessReleaseAsync(releaseId, request.Uploads, request.StoreSymbolReference, ct).ConfigureAwait(false);
+        try
+        {
+            return await ProcessReleaseAsync(releaseId, request.Uploads, request.StoreSymbolReference, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Release ingest interrupted because the upload request ended: ReleaseId={ReleaseId}", releaseId);
+            await StampFailedAsync(releaseId, InterruptedUploadMessage, onlyWhileIngesting: true).ConfigureAwait(false);
+            throw;
+        }
     }
+
+    /// <summary>The status message a release gets when its upload request ended mid-ingest (#1331).</summary>
+    internal const string InterruptedUploadMessage =
+        "The upload was interrupted before it finished, because the page was closed or the connection dropped. "
+        + "Soft delete this release and upload the .app files again.";
 
     /// <summary>
     /// Validates the metadata, reserves the label, and inserts the Release row
@@ -288,11 +308,16 @@ public class ReleaseImportService
     /// that does not land leaves the release <c>ingesting</c> with nobody importing
     /// it, and builds parenting onto it wait for it (#1180).
     /// </summary>
-    private async Task StampFailedAsync(int releaseId, string message)
+    /// <param name="onlyWhileIngesting">
+    /// Leaves a release that has already reached another state alone: a cancellation
+    /// that lands after the ingest saved the release <c>ready</c> must not undo that.
+    /// </param>
+    private async Task StampFailedAsync(int releaseId, string message, bool onlyWhileIngesting = false)
     {
         _db.ChangeTracker.Clear();
         var failed = await _db.OeReleases.FindAsync(new object?[] { releaseId }, CancellationToken.None).ConfigureAwait(false);
         if (failed is null) return;
+        if (onlyWhileIngesting && !string.Equals(failed.Status, "ingesting", StringComparison.Ordinal)) return;
         failed.Status = "failed";
         failed.StatusMessage = message;
         failed.UpdatedAt = DateTime.UtcNow;
@@ -742,6 +767,12 @@ public class ReleaseImportService
             throw RetryError($"Only a failed import can be retried (status = {release.Status}).");
         }
 
+        // A retry re-ingests the whole release, so it is a write like Begin/Amend.
+        // Covers the manage page's Retry and the nightly requeue of failed
+        // artifact imports, which both come through here (#1338). After the
+        // state checks, so a release that can't be retried says why first.
+        await _quotaGuard.EnsureCanWriteAsync(ct).ConfigureAwait(false);
+
         release.Status = "ingesting";
         release.StatusMessage = null;
         release.UpdatedAt = DateTime.UtcNow;
@@ -817,14 +848,18 @@ public class ReleaseImportService
     {
         if (string.IsNullOrWhiteSpace(dedupKey)) return;
 
-        var taken = await _db.OeReleases.AsNoTracking()
-            .AnyAsync(r => r.OrganizationId == orgId && r.DeletedAt == null && r.DedupKey == dedupKey, ct)
+        var takenBy = await _db.OeReleases.AsNoTracking()
+            .Where(r => r.OrganizationId == orgId && r.DeletedAt == null && r.DedupKey == dedupKey)
+            .Select(r => r.Label)
+            .FirstOrDefaultAsync(ct)
             .ConfigureAwait(false);
-        if (taken)
+        if (takenBy is not null)
         {
+            // The key is internal; the admin reads this in a banner, so name the
+            // release that already holds it instead (#1338).
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                ["DedupKey"] = $"A Release with dedup key \"{dedupKey}\" already exists in this organisation.",
+                ["DedupKey"] = $"This version is already in the Object Explorer as \"{takenBy}\". Open that release instead of importing it again.",
             });
         }
     }
@@ -852,7 +887,7 @@ public class ReleaseImportService
         {
             throw new PlanValidationException(new Dictionary<string, string>
             {
-                [$"Uploads.{upload.FileName}"] = ex.Message,
+                [$"Uploads.{upload.FileName}"] = $"{upload.FileName}: {ex.Message}",
             });
         }
 
@@ -881,7 +916,7 @@ public class ReleaseImportService
             throw new PlanValidationException(new Dictionary<string, string>
             {
                 [$"Uploads.{upload.FileName}"] =
-                    $".app with AppId {pkg.Manifest.AppId} version {pkg.Manifest.Version} already exists in this Release with a different content hash. Start a new Release instead of overwriting.",
+                    $"{upload.FileName}: this release already has app {pkg.Manifest.AppId} version {pkg.Manifest.Version}, with different contents. Start a new release instead of overwriting it.",
             });
         }
 

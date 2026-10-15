@@ -764,6 +764,25 @@ public sealed class ArtifactService
             .ToListAsync(ct);
     }
 
+    /// <summary>
+    /// The first <paramref name="max"/> compiler errors of a build, in the order the
+    /// compiler reported them, with the file and line each points at. For readers
+    /// that cannot open the log (<c>get_solution_build</c>); the pipeline page shows
+    /// the counts from <see cref="GetBuildDetailAsync"/> and the log itself.
+    /// </summary>
+    public async Task<List<BuildErrorRow>> ListBuildErrorsAsync(int buildId, int max, CancellationToken ct = default)
+    {
+        await EnsureCanViewBuildAsync(buildId, ct);
+        return await _db.OeProjectBuildDiagnostics.AsNoTracking()
+            .Where(d => d.ProjectBuildId == buildId && d.Severity == ProjectBuildDiagnosticSeverity.Error)
+            .OrderBy(d => d.Ordering).ThenBy(d => d.Id)
+            .Take(max)
+            .Select(d => new BuildErrorRow(
+                d.ProjectRepository != null ? d.ProjectRepository.DisplayName : null,
+                d.Path, d.Line, d.Column, d.Code, d.Message))
+            .ToListAsync(ct);
+    }
+
     // ── Project-scoped compare ──────────────────────────────────────────
 
     /// <summary>How many builds the compare pickers offer, newest first.</summary>
@@ -922,12 +941,16 @@ public sealed record BuildSummary(int BuildId, string Status, string? BcVersion,
 /// <summary>A project's header for the Artifacts builds page.</summary>
 public sealed record ProjectHeader(int Id, string Name, string? OwnerName, int? OwnerUserId);
 
-/// <summary>A pipeline row for the Pipelines landing: identity, its project, owner, and its newest build.</summary>
+/// <summary>
+/// A pipeline row for the Pipelines landing: identity, its project, owner, and its newest build.
+/// <c>list_pipelines</c> hands this row to agents as it is, so the solution's fields carry the
+/// product's word on the wire (#1344).
+/// </summary>
 public sealed record PipelineArtifactsRow(
     int Id,
     string Name,
-    int ProjectId,
-    string ProjectName,
+    [property: JsonPropertyName("solutionId")] int ProjectId,
+    [property: JsonPropertyName("solutionName")] string ProjectName,
     string? OwnerName,
     BuildSummary? Latest,
     int? LatestSuccessfulBuildId,
@@ -1078,6 +1101,13 @@ public sealed record BuildDetail(
 /// puts a way to the solution's Symbols tab beside it.
 /// </summary>
 public sealed record FailedAppRow(string AppName, string? Message, bool NeedsSymbols);
+
+/// <summary>
+/// One compiler error of a build. <see cref="RepoName"/> is null when the repository
+/// the file came from is no longer identifiable; <see cref="Line"/> and
+/// <see cref="Column"/> are 0 when the compiler named none.
+/// </summary>
+public sealed record BuildErrorRow(string? RepoName, string Path, int Line, int Column, string Code, string Message);
 
 /// <summary>One repository's pinned commit for a build.</summary>
 public sealed record RepoCommitRow(string RepoName, string RepoUrl, string CommitHash, DateTime? CommittedAt);

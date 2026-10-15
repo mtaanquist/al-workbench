@@ -63,7 +63,8 @@ public sealed class CustomerModuleService
         var known = await _db.CustomerModules.AsNoTracking()
             .Where(m => m.AppId != null).Select(m => m.AppId!.Value).ToListAsync(ct);
         var rows = await _db.OeEnvironmentApps.AsNoTracking()
-            .Where(a => !known.Contains(a.AppId) && a.Publisher != "Microsoft")
+            .Where(a => !known.Contains(a.AppId) && a.Publisher != "Microsoft"
+                && a.Environment!.Project!.DeletedAt == null)
             .GroupBy(a => new { a.AppId, a.Name, a.Publisher })
             .Select(g => new { g.Key.AppId, g.Key.Name, g.Key.Publisher, Solutions = g.Select(a => a.Environment!.ProjectId).Distinct().Count() })
             .ToListAsync(ct);

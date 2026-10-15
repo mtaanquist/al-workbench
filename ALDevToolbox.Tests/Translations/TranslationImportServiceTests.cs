@@ -29,12 +29,12 @@ public sealed class TranslationImportServiceTests : IDisposable
 
     private ReleaseImportService NewImporter(Data.AppDbContext ctx) =>
         new(ctx, _db.OrgContext, _db.NewQuotaGuard(ctx),
-            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), NullLogger<TranslationImportService>.Instance),
+            new TranslationImportService(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance),
             new CallSiteReferenceEmitter(ctx, NullLogger<CallSiteReferenceEmitter>.Instance),
             NullLogger<ReleaseImportService>.Instance);
 
     private TranslationImportService NewTranslator(Data.AppDbContext ctx) =>
-        new(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), NullLogger<TranslationImportService>.Instance);
+        new(ctx, _db.OrgContext, new ALDevToolbox.Services.Translation.TranslationMemoryService(ctx, _db.OrgContext, NullLogger<ALDevToolbox.Services.Translation.TranslationMemoryService>.Instance), _db.NewQuotaGuard(ctx), NullLogger<TranslationImportService>.Instance);
 
     /// <summary>
     /// Seeds a release containing the Microsoft OIOUBL <c>.app</c> fixture
@@ -357,6 +357,54 @@ public sealed class TranslationImportServiceTests : IDisposable
         var act = () => NewTranslator(ctx).ImportZipAsync(releaseId, new MemoryStream(bytes));
         var thrown = await act.Should().ThrowAsync<PlanValidationException>();
         thrown.Which.Errors.Should().ContainKey("ZipFile");
+    }
+
+    [Fact]
+    public async Task Uploads_are_refused_for_an_org_over_its_storage_quota()
+    {
+        // #1338: both upload paths write translation rows, so the quota applies.
+        var (releaseId, moduleId) = await SeedOioublReleaseAsync();
+        await using (var setup = _db.NewContext())
+        {
+            var settings = await setup.SystemSettings.FirstOrDefaultAsync(x => x.Id == 1);
+            if (settings is null)
+            {
+                settings = new ALDevToolbox.Domain.Entities.SystemSettings { Id = 1 };
+                setup.SystemSettings.Add(settings);
+            }
+            // A 0 MB default quota puts every org at or over quota.
+            settings.DefaultStorageQuotaMb = 0;
+            await setup.SaveChangesAsync();
+            // Drop the rows the release import extracted, so a write would show.
+            await setup.OeModuleTranslations.Where(t => t.ModuleId == moduleId).ExecuteDeleteAsync();
+            // The seeding import cached an under-quota decision; drop it.
+            _db.NewQuotaGuard(setup).Invalidate(TestDb.DefaultOrgId);
+        }
+
+        await using var ctx = _db.NewContext();
+        await using (var xlf = File.OpenRead(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf")))
+        {
+            var single = () => NewTranslator(ctx).ImportSingleAsync(releaseId, moduleId, xlf, "OIOUBL.daDK.xlf");
+            (await single.Should().ThrowAsync<PlanValidationException>())
+                .Which.Errors.Should().ContainKey("storage");
+        }
+
+        var zipBuffer = new MemoryStream();
+        using (var archive = new ZipArchive(zipBuffer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var entry = archive.CreateEntry("OIOUBL.daDK.xlf");
+            await using var es = entry.Open();
+            await using var src = File.OpenRead(Path.Combine(FixtureRoot, "OIOUBL.daDK.xlf"));
+            await src.CopyToAsync(es);
+        }
+        zipBuffer.Position = 0;
+        var zip = () => NewTranslator(ctx).ImportZipAsync(releaseId, zipBuffer);
+        (await zip.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Should().ContainKey("storage");
+
+        await using var read = _db.NewContext();
+        (await read.OeModuleTranslations.AsNoTracking().AnyAsync(t => t.ModuleId == moduleId && t.LanguageCode == "da-DK"))
+            .Should().BeFalse("nothing was written");
     }
 
     private static int FindSignature(byte[] bytes, uint signature)

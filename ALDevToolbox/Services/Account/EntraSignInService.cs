@@ -72,9 +72,22 @@ public enum EntraCompletionOutcome
     AccountPending,
     /// <summary>Matched an account that has been disabled.</summary>
     AccountDisabled,
+    /// <summary>
+    /// Accepting an invite with Microsoft, but the Microsoft account's email is
+    /// not the address the invite was sent to. Nothing is created and the
+    /// invite stays valid.
+    /// </summary>
+    InviteEmailMismatch,
 }
 
 public sealed record EntraCompletionResult(EntraCompletionOutcome Outcome, User? User = null);
+
+/// <summary>
+/// An invite being accepted with Microsoft instead of a password (#1336). The
+/// invite must be the tracked row from <see cref="InviteService.FindValidByTokenAsync"/>
+/// on the same context, because accepting stamps it.
+/// </summary>
+public sealed record EntraInviteAcceptance(Invite Invite, string DisplayName);
 
 /// <summary>
 /// Microsoft (Entra ID) sign-in: challenge routing, post-callback account
@@ -215,7 +228,21 @@ public sealed class EntraSignInService
             else return (null, "entra-not-configured");
         }
 
-        // Fence category 1 (pre-auth routing): pinned to the org resolved above.
+        return await ResolveChallengeForOrganizationAsync(orgId.Value, ct);
+    }
+
+    /// <summary>
+    /// The challenge config for one organisation already chosen, for a
+    /// pre-auth flow that knows it without routing: accepting an invite,
+    /// whose organisation the invite names (#1336). Returns
+    /// <c>entra-not-configured</c> when the organisation has no usable
+    /// registration.
+    /// </summary>
+    public async Task<(EntraChallengeConfig? Config, string? ErrorCode)> ResolveChallengeForOrganizationAsync(
+        int orgId, CancellationToken ct = default)
+    {
+        // Fence category 1 (pre-auth routing): pinned to the org the caller resolved
+        // (the routed sign-in's, or the one the invite names).
         var settings = await _db.OrganizationSettings.IgnoreQueryFilters().AsNoTracking()
             .Where(s => s.OrganizationId == orgId && s.EntraEnabled)
             .Select(s => new { s.OrganizationId, s.EntraClientId })
@@ -286,7 +313,28 @@ public sealed class EntraSignInService
     /// the OIDC callback before any cookie is minted, so every read below
     /// bypasses the filter to route the sign-in to exactly one organisation.
     /// </summary>
-    public async Task<EntraCompletionResult> CompleteAsync(EntraTokenIdentity token, string ip, CancellationToken ct = default)
+    public Task<EntraCompletionResult> CompleteAsync(EntraTokenIdentity token, string ip, CancellationToken ct = default) =>
+        CompleteCoreAsync(token, ip, invite: null, ct);
+
+    /// <summary>
+    /// Accepting an invite with Microsoft, for an organisation that signs in
+    /// only with Microsoft, where a password account could never be used
+    /// (#1336). The same routing as <see cref="CompleteAsync"/>, except that
+    /// the invite names the organisation (which must still allow the token's
+    /// tenant), the Microsoft account must carry the invited address, and the
+    /// account is created active with the invite's role and linked in the
+    /// same save. The invite link is the proof that the person holds the
+    /// address, the same proof a password acceptance rests on, so no
+    /// <c>xms_edov</c> is needed for this one account. When an account with
+    /// the address already exists, nothing about the invite applies and the
+    /// sign-in is resolved exactly as <see cref="CompleteAsync"/> would.
+    /// </summary>
+    public Task<EntraCompletionResult> AcceptInviteAsync(
+        EntraTokenIdentity token, string ip, EntraInviteAcceptance invite, CancellationToken ct = default) =>
+        CompleteCoreAsync(token, ip, invite, ct);
+
+    private async Task<EntraCompletionResult> CompleteCoreAsync(
+        EntraTokenIdentity token, string ip, EntraInviteAcceptance? invite, CancellationToken ct)
     {
         var now = _clock.GetUtcNow().UtcDateTime;
         var tid = token.TenantId.Trim().ToLowerInvariant();
@@ -294,6 +342,13 @@ public sealed class EntraSignInService
 
         // 1. Existing link — the fast path for every returning user.
         var link = await FindLinkAsync(tid, token.ObjectId, ct);
+        if (link is not null && invite is not null)
+        {
+            // This Microsoft account already opens an account here; an invite
+            // cannot hand it a second one.
+            return await RefuseAsync(EntraCompletionOutcome.IdentityTakenElsewhere, email, ip, now,
+                $"invite {invite.Invite.Id} accepted with identity {tid}/{token.ObjectId}, which is already linked", ct);
+        }
         if (link is not null)
         {
             // Fence category 1 (pre-auth routing): pinned to the linked user's own org.
@@ -327,6 +382,12 @@ public sealed class EntraSignInService
                 $"token from tenant {tid} carried no email", ct);
         }
 
+        if (invite is not null && !string.Equals(email, invite.Invite.Email, StringComparison.OrdinalIgnoreCase))
+        {
+            return await RefuseAsync(EntraCompletionOutcome.InviteEmailMismatch, email, ip, now,
+                $"invite {invite.Invite.Id} was sent to another address", ct);
+        }
+
         // Email-domain routing decides when several orgs share the tenant.
         var domain = ExtractDomain(email);
         // Fence category 1 (pre-auth routing): email-domain tiebreak, pinned to the domain.
@@ -334,8 +395,16 @@ public sealed class EntraSignInService
             .Where(d => d.Domain == domain)
             .Select(d => (int?)d.OrganizationId)
             .FirstOrDefaultAsync(ct);
-        var resolved = candidates.FirstOrDefault(c => c.OrganizationId == domainOrgId)
-            ?? (candidates.Count == 1 ? candidates[0] : null);
+        // An invite names its organisation; it still has to allow this tenant.
+        var resolved = invite is not null
+            ? candidates.FirstOrDefault(c => c.OrganizationId == invite.Invite.OrganizationId)
+            : candidates.FirstOrDefault(c => c.OrganizationId == domainOrgId)
+                ?? (candidates.Count == 1 ? candidates[0] : null);
+        if (resolved is null && invite is not null)
+        {
+            return await RefuseAsync(EntraCompletionOutcome.TenantNotAllowed, email, ip, now,
+                $"invite {invite.Invite.Id}'s org {invite.Invite.OrganizationId} does not allow tenant {tid}", ct);
+        }
         if (resolved is null)
         {
             return await RefuseAsync(EntraCompletionOutcome.Ambiguous, email, ip, now,
@@ -378,6 +447,28 @@ public sealed class EntraSignInService
                 return await RefuseAsync(EntraCompletionOutcome.LinkFromAccountRequired, email, ip, now,
                     $"email matches a SiteAdmin account with no Microsoft link; tenant {tid}", ct);
             }
+            // An account that has never been used may carry a link from an
+            // unverified JIT sign-in that claimed this address (#1323). A
+            // verified address beats an unverified claim, so drop those links
+            // in the same save as the new one; otherwise the claimant could
+            // sign in once an Admin approves the real owner's account.
+            var superseded = new List<UserExternalLogin>();
+            if (user.Status == UserStatus.Pending && user.LastLoginAt is null)
+            {
+                // Fence category 1 (pre-auth routing): pinned to l.UserId == user.Id, the
+                // account just matched by the verified email inside the routed org.
+                superseded = await _db.UserExternalLogins.IgnoreQueryFilters()
+                    .Where(l => l.UserId == user.Id && l.Provider == ProviderName
+                        && !(l.Issuer == tid && l.Subject == token.ObjectId))
+                    .ToListAsync(ct);
+                if (superseded.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "Verified Entra sign-in from tenant {Tid} replaced {Count} unverified link(s) from tenant(s) {OldTids} on never-used account {UserId}.",
+                        tid, superseded.Count, string.Join(",", superseded.Select(l => l.Issuer).Distinct()), user.Id);
+                    _db.UserExternalLogins.RemoveRange(superseded);
+                }
+            }
             // Saved on its own, ahead of FinishStatusCheckedAsync's bookkeeping,
             // so a lost race is settled while the link insert is the only thing
             // pending — otherwise the failed save takes the login attempt with it
@@ -386,6 +477,11 @@ public sealed class EntraSignInService
             var settled = await SaveLinkSettlingRaceAsync(inserted, user.Id, tid, token.ObjectId, ct);
             if (settled is null)
             {
+                // The bind lost; this sign-in proved nothing, so keep the old links.
+                foreach (var kept in superseded)
+                {
+                    _db.Entry(kept).State = EntityState.Unchanged;
+                }
                 return await RefuseAsync(EntraCompletionOutcome.IdentityTakenElsewhere, email, ip, now,
                     $"identity {tid}/{token.ObjectId} was claimed by another account mid-sign-in", ct);
             }
@@ -398,10 +494,26 @@ public sealed class EntraSignInService
             return await FinishStatusCheckedAsync(user, settled, email, ip, now, ct);
         }
 
+        if (invite is not null)
+        {
+            return await ProvisionFromInviteAsync(invite, token, tid, email, ip, now, ct);
+        }
+
         // 4. JIT provisioning, through the same approval machinery as the
-        // verified signup flow (auto-join only when the email domain is
-        // claimed by the resolved org and it opted in).
-        var autoActive = resolved.OrganizationId == domainOrgId && resolved.AutoJoinVerifiedDomainUsers;
+        // verified signup flow. Auto-join needs three things: the email domain
+        // is claimed by the resolved org, the org opted in, and the tenant
+        // proved it owns the address (xms_edov). Without that proof the email
+        // is whatever an admin in an allow-listed tenant typed, so it may
+        // still route the request but only to a Pending account an Admin has
+        // to approve — the same evidence step 3 demands before binding (#1323).
+        var domainAutoJoin = resolved.OrganizationId == domainOrgId && resolved.AutoJoinVerifiedDomainUsers;
+        var autoActive = domainAutoJoin && token.EmailVerified;
+        if (domainAutoJoin && !token.EmailVerified)
+        {
+            _logger.LogWarning(
+                "Entra sign-in from tenant {Tid} for domain {Domain} in org {OrgId} did not prove email ownership (no xms_edov); provisioning as Pending instead of auto-joining.",
+                tid, domain ?? "(none)", resolved.OrganizationId);
+        }
         user = new User
         {
             OrganizationId = resolved.OrganizationId,
@@ -472,6 +584,66 @@ public sealed class EntraSignInService
         return autoActive
             ? new EntraCompletionResult(EntraCompletionOutcome.Success, user)
             : new EntraCompletionResult(EntraCompletionOutcome.PendingApproval, user);
+    }
+
+    /// <summary>
+    /// Creates the invited account, active with the invite's role and a
+    /// password nobody knows, together with its Microsoft link, and stamps the
+    /// invite accepted, all in one save so a lost race leaves nothing behind.
+    /// No signup request: an invite needs no approval, as with a password
+    /// acceptance (<see cref="InviteService.AcceptAsync"/>).
+    /// </summary>
+    private async Task<EntraCompletionResult> ProvisionFromInviteAsync(
+        EntraInviteAcceptance acceptance, EntraTokenIdentity token, string tid, string email, string ip,
+        DateTime now, CancellationToken ct)
+    {
+        var invite = acceptance.Invite;
+        var user = new User
+        {
+            OrganizationId = invite.OrganizationId,
+            Email = invite.Email,
+            // Microsoft-only account: a random BCrypt hash satisfies the NOT
+            // NULL column and can never verify, as for a JIT account.
+            PasswordHash = _auth.HashPassword(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))),
+            DisplayName = acceptance.DisplayName.Trim(),
+            Role = invite.Role,
+            Status = UserStatus.Active,
+            CreatedAt = now,
+            LastLoginAt = now,
+        };
+        // Load the nav so the Success return can feed BuildIdentity.
+        user.Organization = await _db.Organizations.FirstAsync(o => o.Id == invite.OrganizationId, ct);
+        _db.Users.Add(user);
+        invite.AcceptedAt = now;
+        var inviteLink = AddLink(user.Id, tid, token.ObjectId, email, now, lastLogin: now);
+        inviteLink.User = user;
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex)
+            when (DbErrors.IsUniqueViolation(ex, UserExternalLoginConfiguration.IdentityIndexName)
+                || DbErrors.IsUniqueViolation(ex, "IX_users_email"))
+        {
+            // Nothing committed. Undo the in-memory changes so the refusal's
+            // own save does not retry them, and leave the invite usable.
+            _db.Entry(inviteLink).State = EntityState.Detached;
+            _db.Entry(user).State = EntityState.Detached;
+            invite.AcceptedAt = null;
+            _db.Entry(invite).State = EntityState.Unchanged;
+            var identityTaken = DbErrors.IsUniqueViolation(ex, UserExternalLoginConfiguration.IdentityIndexName);
+            _logger.LogWarning(ex,
+                "Accepting invite {InviteId} with Microsoft lost a race ({What}); no account was created.",
+                invite.Id, identityTaken ? "identity claimed" : "email taken");
+            return await RefuseAsync(
+                identityTaken ? EntraCompletionOutcome.IdentityTakenElsewhere : EntraCompletionOutcome.EmailTakenElsewhere,
+                email, ip, now, $"invite {invite.Id} lost a race while provisioning", ct);
+        }
+        RecordAttempt(email, ip, true, now);
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Invite {InviteId} accepted with Microsoft; user {UserId} ({Email}) activated in org {OrgId} via tenant {Tid}.",
+            invite.Id, user.Id, user.Email, invite.OrganizationId, tid);
+        return new EntraCompletionResult(EntraCompletionOutcome.Success, user);
     }
 
     /// <summary>
@@ -574,6 +746,7 @@ public sealed class EntraSignInService
         // fast, specific refusal - the catch on the save below is what
         // actually guarantees it, for the identity that gets claimed
         // elsewhere between this read and that save (issue #736).
+        // Fence category 6 (existence-only uniqueness probe): projects a bool.
         var takenElsewhere = await _db.UserExternalLogins.IgnoreQueryFilters()
             .AnyAsync(l => l.Provider == ProviderName && l.Issuer == tid && l.Subject == token.ObjectId, ct);
         if (takenElsewhere)
