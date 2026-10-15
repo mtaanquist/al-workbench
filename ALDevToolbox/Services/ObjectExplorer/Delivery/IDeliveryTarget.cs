@@ -160,10 +160,12 @@ public sealed class DeliveryTargetRefusedException : DeliveryTargetException
 
 /// <summary>
 /// A batch the target took whole and finishes later (#1367): the gateway command it was
-/// queued as. The run stores it on the deployment and ends; the deployment is finished
-/// from the command's result.
+/// queued as, and the gateway it is for. The run stores it on the deployment and ends; the
+/// deployment is finished from the command's result. The command is written inside the
+/// run's transaction and becomes visible only when the deployment records it, so the
+/// gateway is woken (<paramref name="GatewayId"/>) after that commit, not before.
 /// </summary>
-public sealed record DeliveryHandOff(long GatewayCommandId);
+public sealed record DeliveryHandOff(long GatewayCommandId, int GatewayId);
 
 /// <summary>
 /// One app of a deployment, as the target is handed it: which build artifact it is, what

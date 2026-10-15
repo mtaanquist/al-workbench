@@ -455,6 +455,83 @@ public sealed class OnPremisesDeliveryTests : IDisposable
     }
 
     [Fact]
+    public async Task A_failure_after_the_command_is_queued_leaves_neither_the_command_nor_the_record_of_it()
+    {
+        var seed = await SeedAsync();
+        var id = await DeployNowAsync(seed);
+
+        // The save that records the command on the deployment fails, as a crash at that
+        // instant would: the command was already written, in the same transaction.
+        await using (var ctx = _db.NewContext(new FailHandOffSave()))
+        {
+            (await NewService(ctx).RunDeliveryAsync(id)).Should().BeTrue();
+        }
+
+        await using (var read = _db.NewContext())
+        {
+            (await read.GatewayCommands.AsNoTracking().AnyAsync(c => c.GatewayId == seed.GatewayId))
+                .Should().BeFalse("a command no deployment records must never reach the gateway");
+            (await read.GatewayCommandFiles.AsNoTracking().AnyAsync()).Should().BeFalse();
+        }
+        var delivery = await LoadAsync(id);
+        delivery.GatewayCommandId.Should().BeNull();
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed, "nothing was sent, so it is a plain failure, not one to follow");
+        (await new FakeGateway(this, seed.GatewayId).ClaimAsync()).Should().BeNull("there is nothing to collect");
+    }
+
+    [Fact]
+    public async Task The_gateway_cannot_collect_the_command_before_the_deployment_records_it()
+    {
+        var seed = await SeedAsync();
+        var id = await DeployNowAsync(seed);
+        GatewayCommandMessage? seenBeforeCommit = null;
+        var probe = new ProbeHandOffSave(async () => seenBeforeCommit = await new FakeGateway(this, seed.GatewayId).ClaimAsync());
+
+        await using (var ctx = _db.NewContext(probe))
+        {
+            (await NewService(ctx).RunDeliveryAsync(id)).Should().BeTrue();
+        }
+
+        probe.Ran.Should().BeTrue();
+        seenBeforeCommit.Should().BeNull("the command is not committed until the deployment records it");
+        (await LoadAsync(id)).GatewayCommandId.Should().Be(await CommandIdAsync(seed.GatewayId));
+    }
+
+    /// <summary>Fails the save that stamps a deployment with its gateway command.</summary>
+    private sealed class FailHandOffSave : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
+    {
+        public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> SavingChangesAsync(
+            Microsoft.EntityFrameworkCore.Diagnostics.DbContextEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (StampsCommand(eventData.Context!)) throw new InvalidOperationException("The database went away.");
+            return base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
+    }
+
+    /// <summary>Runs <c>probe</c> from a second connection just before the stamping save.</summary>
+    private sealed class ProbeHandOffSave(Func<Task> probe) : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
+    {
+        public bool Ran { get; private set; }
+
+        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> SavingChangesAsync(
+            Microsoft.EntityFrameworkCore.Diagnostics.DbContextEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (!Ran && StampsCommand(eventData.Context!))
+            {
+                Ran = true;
+                await probe();
+            }
+            return result;
+        }
+    }
+
+    private static bool StampsCommand(DbContext context) =>
+        context.ChangeTracker.Entries<OeProjectDelivery>().Any(e =>
+            e.State == EntityState.Modified && e.Property(d => d.GatewayCommandId).IsModified && e.Entity.GatewayCommandId is not null);
+
+    [Fact]
     public async Task The_gateways_progress_reaches_the_deployment_while_the_command_runs()
     {
         var seed = await SeedAsync();

@@ -1926,6 +1926,7 @@ public sealed class DeliveryService
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            await AbandonHandOffAsync();
             // Saved and reported as a finished run, so the worker still tells the person
             // behind it: after the restart the row is already failed, and the startup check
             // that reports interrupted deployments passes over it (#1179).
@@ -1934,6 +1935,7 @@ public sealed class DeliveryService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Delivery {DeliveryId} failed unexpectedly.", deliveryId);
+            await AbandonHandOffAsync();
             await FailAsync(delivery, log, "The delivery failed unexpectedly. " + Short(ex.Message), ct);
         }
         return true;
@@ -2258,6 +2260,12 @@ public sealed class DeliveryService
         string? batchRefusal = null;
         if (sending.Count > 0)
         {
+            // A target that queues the batch (the gateway) writes its command inside this
+            // transaction, and HandOffAsync commits it together with the deployment that
+            // records it: a crash in between leaves neither, so no command is ever queued
+            // that no deployment follows. A target that hands nothing off wrote nothing in
+            // it, and it ends straight away.
+            await _db.Database.BeginTransactionAsync(ct);
             try
             {
                 handOff = await target.PrepareInstallsAsync(new DeliveryInstallBatch(
@@ -2276,9 +2284,11 @@ public sealed class DeliveryService
             }
             catch (DeliveryTargetException ex)
             {
+                await AbandonHandOffAsync();
                 await FailAsync(delivery, log, ex.Message, ct);
                 return;
             }
+            if (handOff is null) await AbandonHandOffAsync();
         }
 
         var results = ordered;
@@ -2487,13 +2497,10 @@ public sealed class DeliveryService
                 await HandOffAsync(delivery, log, handOff);
                 return;
             }
-            // Stopped after the command was queued (a deliverable went missing under it):
-            // take the command back while nobody has collected it.
-            if (_targets.GatewayCommands is { } commands)
-            {
-                await commands.CancelQueuedAsync(handOff.GatewayCommandId,
-                    "The deployment stopped before the gateway collected this.", CancellationToken.None);
-            }
+            // Stopped after the command was written (a deliverable went missing under it):
+            // the command was never committed, so rolling back takes it away before any
+            // gateway could see it.
+            await AbandonHandOffAsync();
             foreach (var r in results.Where(r => r.Status == ProjectDeliveryResultStatus.Installing))
             {
                 r.Status = ProjectDeliveryResultStatus.Skipped;
@@ -2527,10 +2534,45 @@ public sealed class DeliveryService
         delivery.UpdatedAt = now;
         Append(log, "Waiting for the gateway to pick it up.");
         delivery.DiagnosticsLog = log.ToString();
-        await _db.SaveChangesAsync(CancellationToken.None);
+        try
+        {
+            await _db.SaveChangesAsync(CancellationToken.None);
+        }
+        catch
+        {
+            // The command is rolled back with this save, so the failure recorded next
+            // must not point at it.
+            delivery.GatewayCommandId = null;
+            throw;
+        }
+        // The command and the deployment that records it become visible together.
+        if (_db.Database.CurrentTransaction is { } tx)
+        {
+            await tx.CommitAsync(CancellationToken.None);
+            await tx.DisposeAsync();
+        }
+        _targets.GatewayCommands?.Wake(handOff.GatewayId);
         _logger.LogInformation(
             "Delivery {DeliveryId} to {Env} handed to gateway command {CommandId}; it is followed from here.",
             delivery.Id, delivery.EnvironmentName, handOff.GatewayCommandId);
+    }
+
+    /// <summary>
+    /// Gives up a hand-off that has not been committed (#1367): rolls back the transaction
+    /// the queued command was written in, so the gateway never sees it, and forgets the
+    /// command rows the context still tracks as saved, so a later save of the deployment
+    /// neither re-sends them nor points at them. A no-op with no transaction open.
+    /// </summary>
+    private async Task AbandonHandOffAsync()
+    {
+        if (_db.Database.CurrentTransaction is not { } tx) return;
+        await tx.RollbackAsync(CancellationToken.None);
+        await tx.DisposeAsync();
+        foreach (var entry in _db.ChangeTracker.Entries()
+                     .Where(e => e.Entity is GatewayCommand or GatewayCommandFile).ToList())
+        {
+            entry.State = EntityState.Detached;
+        }
     }
 
     // ── Following on-premises deployments (#1367) ─────────────────────────────

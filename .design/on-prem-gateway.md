@@ -920,9 +920,13 @@ while the command runs, finishing a command that ended without the gateway ever 
 interrupted, revoked), and giving up after a day. The completion path would cover only the fourth.
 
 There is no foreign key from the deployment to the command: a command that is no longer there reads
-as an unknown outcome rather than blocking a delete. One small gap remains: the command is saved
-before the deployment's `gateway_command_id`, with only in-memory work between them; a crash in that
-instant leaves a queued command no deployment follows, which the queue then expires uncollected.
+as an unknown outcome rather than blocking a delete. The command and the deployment's
+`gateway_command_id` are written in one transaction on the run's context: the run opens it before
+`PrepareInstallsAsync`, the command service saves the command inside it (and, seeing the open
+transaction, leaves waking the gateway to the caller), and `HandOffAsync` commits it with the save
+that records the command, then wakes the gateway. Any other way out of the run rolls it back first.
+So a gateway can never collect a command that no deployment records, even after a crash between the
+two writes, and a deployment never records a command that is not there.
 
 **Restarts and the one-deployment rule.** On start, `FailInterruptedDeliveriesAsync` fails a
 deployment that was mid-run, except an Installing one with a `gateway_command_id`: its command is

@@ -249,7 +249,7 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
         _logger.LogInformation(
             "Queued publish-install command {CommandId} for {Env} on gateway {GatewayId} ({Machine} / {Instance}) with {AppCount} app(s).",
             _commandId, _environment.Name, facts.GatewayId, machine, instance, apps.Count);
-        return new DeliveryHandOff(_commandId.Value);
+        return new DeliveryHandOff(_commandId.Value, facts.GatewayId.Value);
     }
 
     /// <summary>Why a deployment set to Force sync was not sent, when the tier's settings no longer allow it.</summary>

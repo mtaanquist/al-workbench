@@ -310,12 +310,21 @@ public sealed class GatewayCommandService
         _db.GatewayCommands.Add(command);
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
 
-        _signal.Notify(request.GatewayId);
+        // Inside the caller's transaction (a deployment recording the command it queued,
+        // #1367) the row is not visible to the gateway until the caller commits, so waking
+        // it now would only send it back to sleep: the caller wakes it after the commit.
+        if (_db.Database.CurrentTransaction is null) _signal.Notify(request.GatewayId);
         _logger.LogInformation(
             "Queued gateway command {CommandId} ({Verb}) for gateway {GatewayId} with {FileCount} file(s), due {DueAt}, expires {ExpiresAt}.",
             command.Id, GatewayVerbs.ToWire(request.Verb), request.GatewayId, files.Count, due, expires);
         return command.Id;
     }
+
+    /// <summary>
+    /// Wakes <paramref name="gatewayId"/>'s long poll, for a caller that queued a command
+    /// inside its own transaction and has now committed it.
+    /// </summary>
+    public void Wake(int gatewayId) => _signal.Notify(gatewayId);
 
     /// <summary>
     /// Where a command stands, for the feature that queued it and is waiting on it (a
