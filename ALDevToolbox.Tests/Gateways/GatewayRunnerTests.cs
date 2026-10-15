@@ -54,19 +54,19 @@ public sealed class GatewayRunnerTests : IDisposable
     }
 
     private GatewayRunner Runner(TimeSpan? resultGrace = null, IGatewaySettingsStore? settings = null,
-        ALWorkbench.Gateway.Core.Inventory.GatewayInventory? inventory = null) =>
-        new(_workbench.Client(), settings ?? _settings, _keys, _runOnce, _executor, _policy, _clock, _log,
+        ALWorkbench.Gateway.Core.Inventory.GatewayInventory? inventory = null, ICommandExecutor? executor = null) =>
+        new(_workbench.Client(), settings ?? _settings, _keys, _runOnce, executor ?? _executor, _policy, _clock, _log,
             new GatewayRunnerOptions(_folder.WorkFolder, "CRONUS-BC01", "1.0.0")
             {
                 ResultGrace = resultGrace ?? GatewayRunnerOptions.DefaultResultGrace,
             },
             new Random(1362), inventory);
 
-    private async Task<GatewayRunOutcome> RunAsync(ALWorkbench.Gateway.Core.Inventory.GatewayInventory? inventory = null)
+    private async Task<GatewayRunOutcome> RunAsync(ALWorkbench.Gateway.Core.Inventory.GatewayInventory? inventory = null, ICommandExecutor? executor = null)
     {
         try
         {
-            return await Runner(inventory: inventory).RunAsync(_stop.Token).WaitAsync(TimeSpan.FromSeconds(30));
+            return await Runner(inventory: inventory, executor: executor).RunAsync(_stop.Token).WaitAsync(TimeSpan.FromSeconds(30));
         }
         catch (TimeoutException)
         {
@@ -519,6 +519,44 @@ public sealed class GatewayRunnerTests : IDisposable
         result.Succeeded.Should().BeFalse();
         result.FailureMessage.Should().Contain("CRONUS_Coffee.app").And.Contain("SHA-256 does not match").And.Contain("Nothing was run");
         _runOnce.Unfinished().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_publish_install_whose_app_arrives_with_another_hash_never_reaches_PowerShell()
+    {
+        var server = new FakeBusinessCentral();
+        var verb = new ALWorkbench.Gateway.Core.PublishInstall.PublishInstallVerb(
+            new TextPolicy("""
+                [[instance]]
+                machine = "CRONUS-BC01"
+                name = "BC250"
+                environment = "test"
+                allow = ["inventory", "publish", "restart"]
+                allow_unsigned = true
+                """),
+            new ALWorkbench.Gateway.Core.PowerShell.PowerShellRunner(server, new("powershell.exe", "pwsh.exe"), new FakeFileAccess()),
+            new FixedTierLocator(@"C:\BC\Service"), "CRONUS-BC01");
+        var sent = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0");
+        var arrived = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.5.0.0");
+        var file = new GatewayCommandFileMessage { Id = 9, Name = "CRONUS_Coffee.app", Sha256 = Convert.ToHexStringLower(SHA256.HashData(sent)), Size = arrived.Length };
+        var command = Command(53, files: file) with
+        {
+            Verb = GatewayVerb.PublishInstall,
+            Parameters = new GatewayPublishInstallParameters
+            {
+                Machine = "CRONUS-BC01",
+                Instance = "BC250",
+                Apps = [new GatewayPublishInstallApp { File = "CRONUS_Coffee.app", Id = AppFiles.CoffeeId, Name = "CRONUS Coffee", Publisher = "CRONUS Partner", Version = "1.4.0.0" }],
+            }.ToParameters(),
+        };
+        Serve([command], new Dictionary<long, byte[]> { [9] = arrived });
+
+        await RunAsync(executor: new VerbExecutors(new Dictionary<GatewayVerb, ICommandExecutor> { [GatewayVerb.PublishInstall] = verb }));
+
+        server.Runs.Should().BeEmpty();
+        var result = Results().Single().Result;
+        result.Succeeded.Should().BeFalse();
+        result.FailureMessage.Should().Contain("SHA-256 does not match").And.Contain("Nothing was run");
     }
 
     [Fact]

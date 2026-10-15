@@ -1,0 +1,32 @@
+[
+  {
+    "schema": 1,
+    "tenantSpecificProperties": false,
+    "parameters": {
+      "publishScope": true,
+      "publishTenant": true,
+      "syncTenant": true,
+      "installTenant": true,
+      "upgradeTenant": true,
+      "unpublishTenant": false
+    },
+    "versions": {
+      "value": [
+        {
+          "version": "1.3.0.0",
+          "scope": "Global",
+          "isInstalled": "True",
+          "isPublished": "True",
+          "dataVersion": null,
+          "syncState": null
+        }
+      ],
+      "Count": 1
+    },
+    "otherTenants": {
+      "value": [],
+      "Count": 0
+    },
+    "otherTenantsUnknown": null
+  }
+]
