@@ -878,7 +878,7 @@ automated tests: the key store, `sc.exe` and the event log need Windows.
 tag, and reports that version: `release.yml` passes the tag (`v12.1.0` becomes `12.1.0`) to the
 image as `RELEASE_VERSION` and to the gateway's `dotnet publish` as `ReleaseVersion`. So "the
 gateway this AL Workbench expects" is simply its own version, and there is no compatibility table
-to keep. A staging preview reports `0.0.0-staging.<commit>` and a local build `0.0.0-dev`.
+to keep. A staging preview reports `0.0.0-staging.g<commit>` and a local build `0.0.0-dev`.
 
 **Comparing.** `GatewayVersion` (contracts) orders versions the semantic-versioning way: numbers
 as numbers, a pre-release before its release (`12.1.0-rc.1` < `12.1.0`), numeric pre-release parts
@@ -901,7 +901,10 @@ also Offline before long, because its heartbeats are refused.
 
 **The minimum, and the refusal.** `GatewayProtocol.MinimumGatewayVersion` (`11.19.0`, below which
 no gateway was ever released) is raised when a change makes older gateways unsafe or unable to
-work, never above the release that carries the change. Every gateway request carries its version
+work, never above the release that carries the change; `release.yml` refuses to cut a tag below
+it. The comparison ignores pre-release (`GatewayVersion.SatisfiesMinimum`): `11.19.0-rc.1` is
+built from the change that raised the minimum to `11.19.0`, so it satisfies it, where strict
+semver would order it below and refuse a release candidate of its own release. Every gateway request carries its version
 in the `ALWorkbench-Gateway-Version` header (set once on the `HttpClient`, beside the user agent).
 `GatewayVersionGate`, middleware on `/gateway/*` ahead of authentication, answers a release below
 the minimum with **426 Upgrade Required** and a `GatewayErrorResponse` keyed `version` naming the

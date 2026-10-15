@@ -75,8 +75,8 @@ jobs:
 
   # The on-premises gateway (.design/on-prem-gateway.md, "Versions and updates"):
   # self-contained, single file, win-x64, stamped with the tag's version so it
-  # reports the same version as the image it goes with. Runs alongside the gate:
-  # it only builds, and nothing is published until `image` has the gate's answer.
+  # reports the same version as the image it goes with. Waits for the gate, so a
+  # commit that is not green never gets as far as a signed program.
   #
   # Signed through Azure Artifact Signing (formerly Trusted Signing) when the
   # repository variables for it exist; until they do, the build goes out
@@ -85,6 +85,7 @@ jobs:
   # in PROJECT.md. Whether it was signed is read back from the file itself,
   # never assumed from the variables.
   gateway:
+    needs: require-green-build
     runs-on: windows-latest
     # The sign-in uses GitHub's OIDC token, whose subject for a job in an
     # environment is `repo:<owner>/<repo>:environment:<name>` - one federated
@@ -103,6 +104,23 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: Check the release is not below the gateway minimum
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # The app refuses (426) any gateway below GatewayProtocol.MinimumGatewayVersion.
+          # A release below it would ship a program its own image refuses, so stop here.
+          # Pre-release is ignored, as GatewayVersion.SatisfiesMinimum does: v11.19.0-rc.1
+          # already carries the change that raised the minimum to 11.19.0.
+          $source = Get-Content -Raw ALWorkbench.Gateway.Contracts/GatewayProtocol.cs
+          if ($source -notmatch 'MinimumGatewayVersion\s*=\s*"(\d+)\.(\d+)\.(\d+)"') { throw 'MinimumGatewayVersion not found in GatewayProtocol.cs.' }
+          $minimum = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+          if ($env:REF_NAME -notmatch '^v(\d+)\.(\d+)\.(\d+)') { throw "'$env:REF_NAME' is not a release tag." }
+          $tag = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+          if ($tag -lt $minimum) { throw "Tag $env:REF_NAME is below MinimumGatewayVersion $minimum; this release's own gateway would be refused. Raise the tag or lower the minimum." }
+          Write-Host "Tag $env:REF_NAME satisfies MinimumGatewayVersion $minimum."
+
       - name: Publish the gateway
         shell: pwsh
         env:
@@ -118,8 +136,19 @@ jobs:
             -p:ReleaseVersion=$version -o out
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Refuse to sign outside a release tag
+        if: vars.ARTIFACT_SIGNING_ACCOUNT != '' && !startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        # Defence in depth only: the real control is the gateway-signing
+        # environment's deployment rule (tags matching v*), see PROJECT.md.
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          Write-Error "Signing runs only for a release tag (refs/tags/v*); this run is for $env:REF."
+          exit 1
+
       - name: Sign in to Azure for signing
-        if: vars.ARTIFACT_SIGNING_ACCOUNT != ''
+        if: vars.ARTIFACT_SIGNING_ACCOUNT != '' && startsWith(github.ref, 'refs/tags/v')
         # Third-party actions pinned to full commit SHAs, as everywhere in this
         # repository (#393).
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
@@ -129,7 +158,7 @@ jobs:
           allow-no-subscriptions: true
 
       - name: Sign the gateway
-        if: vars.ARTIFACT_SIGNING_ACCOUNT != ''
+        if: vars.ARTIFACT_SIGNING_ACCOUNT != '' && startsWith(github.ref, 'refs/tags/v')
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}

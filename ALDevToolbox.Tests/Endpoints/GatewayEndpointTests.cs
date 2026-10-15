@@ -266,23 +266,49 @@ public sealed class GatewayEndpointTests : IDisposable
         (await ctx.Gateways.SingleAsync()).LastSeenAt.Should().BeNull();
     }
 
-    [Theory]
-    [InlineData("GET", GatewayProtocol.NextCommandPath)]
-    [InlineData("POST", "/gateway/commands/1/progress")]
-    [InlineData("POST", "/gateway/commands/1/result")]
-    [InlineData("GET", "/gateway/commands/1/files/1")]
-    public async Task A_gateway_below_the_minimum_is_refused_every_command_route_before_its_token_is_read(string method, string path)
+    /// <summary>
+    /// Every route the app maps under <see cref="GatewayProtocol.PathPrefix"/>, read from
+    /// the running app's endpoints rather than listed by hand, with each route
+    /// parameter filled in. A route added later is covered without touching this test.
+    /// </summary>
+    private List<(string Method, string Path)> GatewayRoutes()
     {
-        // No token at all: a gateway too old for today's protocol is told to update,
-        // not given a 401 for a token it built the old way.
+        var routes = _factory.Services.GetServices<EndpointDataSource>()
+            .SelectMany(source => source.Endpoints)
+            .OfType<RouteEndpoint>()
+            .Where(e => e.RoutePattern.RawText is { } raw
+                && raw.StartsWith(GatewayProtocol.PathPrefix + "/", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(e => (e.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods ?? ["GET"])
+                .Select(method => (method, System.Text.RegularExpressions.Regex.Replace(e.RoutePattern.RawText!, @"\{[^}]+\}", "1"))))
+            .Distinct()
+            .ToList();
+        return routes;
+    }
+
+    [Fact]
+    public async Task A_gateway_below_the_minimum_is_refused_every_gateway_route_before_its_token_is_read()
+    {
+        var routes = GatewayRoutes();
+        // The ones the protocol names, so an empty or partial enumeration cannot pass.
+        routes.Select(r => r.Path).Should().Contain([
+            GatewayProtocol.RegisterPath, GatewayProtocol.HeartbeatPath, GatewayProtocol.NextCommandPath,
+            GatewayProtocol.CommandProgressPath(1), GatewayProtocol.CommandResultPath(1), GatewayProtocol.CommandFilePath(1, 1),
+        ]);
+
         using var client = _factory.CreateClient();
-        using var request = new HttpRequestMessage(new HttpMethod(method), path);
-        if (method == "POST") request.Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
-        request.Headers.Add(GatewayProtocol.GatewayVersionHeader, TooOld);
+        foreach (var (method, path) in routes)
+        {
+            // No token at all: a gateway too old for today's protocol is told to update,
+            // not given a 401 for a token it built the old way.
+            using var request = new HttpRequestMessage(new HttpMethod(method), path);
+            if (method == "POST") request.Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+            request.Headers.Add(GatewayProtocol.GatewayVersionHeader, TooOld);
 
-        using var response = await client.SendAsync(request);
+            using var response = await client.SendAsync(request);
 
-        await ShouldBeOutdatedAsync(response);
+            ((int)response.StatusCode).Should().Be(GatewayProtocol.OutdatedStatusCode, $"{method} {path} must refuse an old gateway");
+            await ShouldBeOutdatedAsync(response);
+        }
     }
 
     [Theory]

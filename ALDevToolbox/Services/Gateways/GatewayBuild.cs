@@ -92,18 +92,19 @@ public sealed class GatewayBuild
     {
         if (!GatewayVersion.TryParse(reportedVersion, out var reported)) return GatewayVersionState.Unknown;
         if (reported.IsPreview) return GatewayVersionState.Preview;
-        if (reported < Minimum) return GatewayVersionState.Unsupported;
+        if (!reported.SatisfiesMinimum(Minimum)) return GatewayVersionState.Unsupported;
         if (_expected is not null && reported < _expected) return GatewayVersionState.OutOfDate;
         return GatewayVersionState.Current;
     }
 
     /// <summary>
     /// True when <paramref name="reportedVersion"/> is a release older than
-    /// <see cref="GatewayProtocol.MinimumGatewayVersion"/>. A preview build, a missing
+    /// <see cref="GatewayProtocol.MinimumGatewayVersion"/>; a release candidate of the
+    /// minimum is not (<see cref="GatewayVersion.SatisfiesMinimum"/>). A preview build, a missing
     /// version and one that does not parse are not refused for their version.
     /// </summary>
     public static bool IsBelowMinimum(string? reportedVersion) =>
-        GatewayVersion.TryParse(reportedVersion, out var reported) && !reported.IsPreview && reported < Minimum;
+        GatewayVersion.TryParse(reportedVersion, out var reported) && !reported.IsPreview && !reported.SatisfiesMinimum(Minimum);
 
     private static string? NormaliseHash(string? sha256)
     {

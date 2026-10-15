@@ -36,12 +36,14 @@ jobs:
   # gateway changes against its staging instance (#1363). Kept as a workflow
   # artifact on the run, not a GitHub release: a staging preview is for looking
   # at, and a release (even a prerelease) is what operators and customer IT are
-  # told to download. Never signed. It reports 0.0.0-staging.<commit>, which AL
+  # told to download. Never signed. It reports 0.0.0-staging.g<commit>, which AL
   # Workbench treats as a preview: never refused for its version and never
   # listed as out of date. The staging image itself carries no release stamp, so
   # its Gateways page offers no download and says so.
   gateway:
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -55,7 +57,10 @@ jobs:
         env:
           SHA: ${{ github.sha }}
         run: |
-          $version = "0.0.0-staging.$($env:SHA.Substring(0, 7))"
+          # "g" before the commit, as git describe writes it: an all-digit commit with a
+          # leading zero would otherwise be a numeric pre-release part with a leading
+          # zero, which semantic versioning (and NuGet) refuse.
+          $version = "0.0.0-staging.g$($env:SHA.Substring(0, 7))"
           dotnet publish ALWorkbench.Gateway/ALWorkbench.Gateway.csproj -c Release -r win-x64 --self-contained `
             -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=embedded `
             -p:ReleaseVersion=$version -o out

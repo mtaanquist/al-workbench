@@ -67,7 +67,7 @@ public sealed class GatewayDownloadLinkTests : IDisposable
 
     [Theory]
     [InlineData(null)]
-    [InlineData("0.0.0-staging.a1b2c3d")]
+    [InlineData("0.0.0-staging.ga1b2c3d")]
     public void A_local_or_staging_workbench_says_there_is_no_download_and_links_nothing(string? version)
     {
         var cut = Render(new GatewayBuild(version, Hash, signed: true));

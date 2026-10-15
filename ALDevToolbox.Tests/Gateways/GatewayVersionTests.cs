@@ -55,6 +55,8 @@ public sealed class GatewayVersionTests
     [InlineData("12.0.0-rc..1")]
     [InlineData("12.0.0-rc_1")]
     [InlineData("-1.0.0")]
+    [InlineData("01.0.0")] // leading zeros are not allowed in numeric parts
+    [InlineData("0.0.0-staging.0123456")] // why staging writes "g0123456"
     [InlineData("99999999999.0.0")]
     public void Anything_else_is_not_a_version(string? text)
     {
@@ -63,12 +65,23 @@ public sealed class GatewayVersionTests
 
     [Theory]
     [InlineData("0.0.0-dev", true)]
-    [InlineData("0.0.0-staging.a1b2c3d", true)]
+    [InlineData("0.0.0-staging.ga1b2c3d", true)]
     [InlineData("11.19.0", false)]
     [InlineData("12.0.0-rc.1", false)]
     public void Major_version_zero_is_a_preview(string text, bool preview)
     {
         GatewayVersion.Parse(text).IsPreview.Should().Be(preview);
+    }
+
+    [Theory]
+    [InlineData("11.19.0-rc.1", "11.19.0", true)]
+    [InlineData("11.19.0", "11.19.0", true)]
+    [InlineData("11.20.0-alpha", "11.19.0", true)]
+    [InlineData("11.18.9", "11.19.0", false)]
+    [InlineData("11.18.99-rc.1", "11.19.0", false)]
+    public void A_release_candidate_of_the_minimum_satisfies_it(string version, string minimum, bool satisfies)
+    {
+        GatewayVersion.Parse(version).SatisfiesMinimum(GatewayVersion.Parse(minimum)).Should().Be(satisfies);
     }
 
     [Fact]
@@ -91,8 +104,9 @@ public sealed class GatewayVersionTests
     [InlineData(GatewayProtocol.MinimumGatewayVersion, GatewayVersionState.OutOfDate)] // still accepted
     [InlineData("11.18.9", GatewayVersionState.Unsupported)]
     [InlineData("1.0.0", GatewayVersionState.Unsupported)]
+    [InlineData("11.19.0-rc.1", GatewayVersionState.OutOfDate)] // accepted, but older than 12.1.0
     [InlineData("0.0.0-dev", GatewayVersionState.Preview)]
-    [InlineData("0.0.0-staging.a1b2c3d", GatewayVersionState.Preview)]
+    [InlineData("0.0.0-staging.ga1b2c3d", GatewayVersionState.Preview)]
     [InlineData(null, GatewayVersionState.Unknown)]
     [InlineData("not a version", GatewayVersionState.Unknown)]
     public void A_release_workbench_lists_each_gateway_by_how_its_version_compares(string? reported, GatewayVersionState expected)
@@ -116,7 +130,10 @@ public sealed class GatewayVersionTests
 
     [Theory]
     [InlineData("11.18.9", true)]
+    [InlineData("11.18.9-rc.1", true)]
     [InlineData("1.0.0", true)]
+    [InlineData("11.19.0-rc.1", false)] // a release candidate of the minimum carries its change
+    [InlineData("11.19.1-rc.1", false)]
     [InlineData(GatewayProtocol.MinimumGatewayVersion, false)]
     [InlineData("13.0.0", false)]
     [InlineData("0.0.0-dev", false)] // a preview is never refused for its version
@@ -154,7 +171,7 @@ public sealed class GatewayVersionTests
     [Theory]
     [InlineData(null)]
     [InlineData("")]
-    [InlineData("0.0.0-staging.a1b2c3d")]
+    [InlineData("0.0.0-staging.ga1b2c3d")]
     [InlineData("not a version")]
     public void A_local_or_staging_workbench_offers_no_download(string? version)
     {

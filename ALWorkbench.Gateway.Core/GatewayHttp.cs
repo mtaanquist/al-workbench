@@ -43,7 +43,7 @@ public static class GatewayHttp
 
     /// <summary>
     /// The gateway program's version, as reported to AL Workbench: the release it was
-    /// published with (release.yml stamps it from the tag), <c>0.0.0-staging.&lt;commit&gt;</c>
+    /// published with (release.yml stamps it from the tag), <c>0.0.0-staging.g&lt;commit&gt;</c>
     /// for a staging preview, or <c>0.0.0-dev</c> for a local build.
     /// </summary>
     public static string ProgramVersion { get; } =

@@ -11,7 +11,7 @@ namespace ALWorkbench.Gateway.Contracts;
 /// <c>.design/on-prem-gateway.md</c>, "Versions and updates".
 ///
 /// <para>Major version 0 is not a release: an unstamped local build reports
-/// <c>0.0.0-dev</c> and a staging preview <c>0.0.0-staging.&lt;commit&gt;</c>.
+/// <c>0.0.0-dev</c> and a staging preview <c>0.0.0-staging.g&lt;commit&gt;</c>.
 /// <see cref="IsPreview"/> says so, and neither side compares one against a
 /// release: a preview is never refused for its version and never called out of date.</para>
 /// </summary>
@@ -56,13 +56,16 @@ public sealed class GatewayVersion : IComparable<GatewayVersion>, IEquatable<Gat
             preRelease = value[(dash + 1)..].Split('.');
             value = value[..dash];
             if (preRelease.Any(p => p.Length == 0 || !p.All(c => char.IsAsciiLetterOrDigit(c) || c == '-'))) return false;
+            // Semantic versioning forbids a leading zero in a numeric part ("staging.0123456");
+            // NuGet refuses one, which is why staging writes its commit as "g0123456".
+            if (preRelease.Any(p => p.Length > 1 && p[0] == '0' && p.All(char.IsAsciiDigit))) return false;
         }
         var parts = value.Split('.');
         if (parts.Length != 3) return false;
         var numbers = new int[3];
         for (var i = 0; i < 3; i++)
         {
-            if (parts[i].Length == 0 || !parts[i].All(char.IsAsciiDigit)
+            if (parts[i].Length == 0 || !parts[i].All(char.IsAsciiDigit) || (parts[i].Length > 1 && parts[i][0] == '0')
                 || !int.TryParse(parts[i], NumberStyles.None, CultureInfo.InvariantCulture, out numbers[i]))
             {
                 return false;
@@ -75,6 +78,19 @@ public sealed class GatewayVersion : IComparable<GatewayVersion>, IEquatable<Gat
     /// <summary>Like <see cref="TryParse"/>, for versions known to be well formed (the constants).</summary>
     public static GatewayVersion Parse(string text) =>
         TryParse(text, out var version) ? version : throw new FormatException($"'{text}' is not a version.");
+
+    /// <summary>
+    /// True when this version is at or above <paramref name="minimum"/> by
+    /// major.minor.patch alone, so a release candidate of the minimum satisfies it:
+    /// <c>11.19.0-rc.1</c> meets a minimum of <c>11.19.0</c>. The minimum is raised to
+    /// the release that carries a change, and that release's candidates carry the same
+    /// change; strict ordering would make a candidate refuse its own gateway.
+    /// </summary>
+    public bool SatisfiesMinimum(GatewayVersion minimum)
+    {
+        ArgumentNullException.ThrowIfNull(minimum);
+        return (Major, Minor, Patch).CompareTo((minimum.Major, minimum.Minor, minimum.Patch)) >= 0;
+    }
 
     public int CompareTo(GatewayVersion? other)
     {
