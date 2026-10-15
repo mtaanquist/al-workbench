@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374) and the gateway side of `publish-install` (#1375) exist; the other verbs, and deploying through the gateway from AL Workbench (#1367), do not yet. Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374), the gateway side of `publish-install` (#1375) and deploying through the gateway from AL Workbench (#1367) exist; the restart group and scripts (#1368), licences and the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -168,8 +168,9 @@ As built (#1361), in `Services/Gateways/GatewayCommandService.cs`:
   answer, accepted without appending its lines again. A post without a number (0) is always appended.
 - A heartbeat's running and interrupted lists are applied only for an approved gateway.
 - Files are stored with the command (`gateway_command_files.content`), not referenced from the
-  artifact row. Whether command files reference the build's artifacts instead is left to #1367,
-  which builds the command; the gateway only sees a file id and its hash either way. A file
+  artifact row. Since #1367 a command built from a deployment references the build's artifacts
+  instead (`project_build_artifact_id`; see "Deploying to on-premises, as built"); the gateway only
+  sees a file id and its hash either way. A file
   is at most 128 MB (an .app the BC admin API accepts is at most 50 MB), the download is streamed
   rather than buffered, and the sweep drops the content once the command is final, keeping its
   name, hash and size.
@@ -761,12 +762,10 @@ multitenant server. Where it differs from, or adds to, the decision above:
 - **Multitenant is inferred when the flag is unknown.** A server reporting more than one live tenant
   is multitenant even when the gateway could not read the configuration flag, in the link dialog, in
   `LinkAsync` (which then wants a tenant) and on the environment page.
-- **Deploying is refused for now.** `DeliveryService` refuses an on-premises target, both when a
-  release is resolved and when a scheduled one is claimed, with "... Deploying to on-premises through
-  the gateway isn't available yet, so nothing was sent."; the pipeline editor does not offer an
-  on-premises target, and `ReleasePipelineService` refuses one sent past the editor with a
-  `ProjectEnvironmentId` error. All three lift with #1367; since #1374 the delivery refusal
-  comes from `DeliveryTargetFactory.Unavailable`.
+- **Deploying was refused until #1367.** `DeliveryService`, the pipeline editor and
+  `ReleasePipelineService` refused an on-premises target; #1367 lifted all three (see "Deploying to
+  on-premises, as built"). `DeliveryTargetFactory.Unavailable` now only refuses when no gateway services are
+  registered; a row with no tier linked reads as a missing environment instead.
 - **What the environment page shows:** Overview (the service tier, its database, tenant, sessions,
   licence expiry and the gateway), Apps (from the mirror) and Workbench history. Operations and
   Sessions are Business Central online's live reads and are not offered; an address naming them lands
@@ -783,7 +782,7 @@ Every reader decides whether on-premises rows belong:
 | `UpgradeFleetService`, `EnvironmentUpgradeService`, `UpgradeActionService`, `UpgradeActionWorker` (Upgrades page) | **Excluded** - Microsoft's platform updates only |
 | `EnvironmentUpdateNotifier` | **Excluded** - Microsoft's update notices only |
 | `HeldInstalls` | **Excluded** - Microsoft's deferred schedules only |
-| `DeliveryService`, `ReleasePipelineService` | Included, through the delivery seam (#1374, #1367). **Until then refused** with a plain message, and the pipeline editor does not offer an on-premises target |
+| `DeliveryService`, `ReleasePipelineService` | Included, through the delivery seam: `GatewayDeliveryTarget` (#1367). A row with no tier linked reads as missing |
 | `PipelinesDashboardService` | Included |
 | `ProjectCustomerInfoService` (production facts) | Included, with a new predicate: today `ReadProductionFactsAsync` requires `MicrosoftCloud` hosting and a configured connection (`ConfiguredProjects`); it becomes *(online, configured, Production row)* or *(on-premises, linked Production row)* |
 | `ArtifactService` (what is shipped to production) | Included |
@@ -840,8 +839,9 @@ deployment is resolved and again when it is claimed, and only a target that has 
 held installs. Still in `DeliveryService`: the downgrade refusal (it compares the build with the
 installed list the target returns), writing the live status back to the environment row, the
 not-a-sandbox rule for unapproved and agent deployments, and the rest of the shared list above.
-Until #1367 the factory has no on-premises target: `DeliveryTargetFactory.Unavailable` gives the
-refusal below, which the run now checks before signing in rather than after.
+Until #1367 the factory had no on-premises target and `DeliveryTargetFactory.Unavailable` refused
+one before signing in; since #1367 it builds `GatewayDeliveryTarget` (see "Deploying to on-premises,
+as built").
 
 On-premises differences:
 
@@ -879,9 +879,114 @@ that everyone's sessions will drop.
 *before* script stops the deployment before anything is published; a failing *after* script fails
 the deployment with the install reported as done. Output goes to the deployment log.
 
+### Deploying to on-premises, as built (#1367)
+
+The AL Workbench side of `publish-install`. The restart group and the before and after scripts are
+still #1368's: the command carries no restart, and the deployment says so (below).
+
+**The target.** `GatewayDeliveryTarget` (`Services/ObjectExplorer/Delivery/`) is the second
+`IDeliveryTarget`, built by `DeliveryTargetFactory` for an `OnPremises` row with a linked tier, from
+`GatewayTargetServices` (the database, the command queue and the clock). It reports `DeferredSchedules = false`.
+Everything it reads about the tier comes from the inventory mirror, through `OnPremisesDeployFacts`
+(`Services/Gateways/`): the tier and its gateway, the publishing tier for the database, what the
+customer's gateway settings allow (`allow_force_sync`, and a refusal sentence when the tier is not
+in the settings at all), the gateway's online state, the installed apps and the open sessions.
+Nothing is read from the tier live, so `DeliveryTargetStatus.ReadLive` is false and the shared code
+does not write the status back: the row is already written from the same inventory.
+
+**One command per build.** The shared run is per app; the gateway is per command. They meet through
+`IDeliveryTarget.PrepareInstallsAsync`, which the run calls once with every app still to send
+(after skip-if-already-installed, so an app the mirror shows on the build's version is never in the
+command): the gateway target queues one `publish-install` with `GatewayPublishInstallParameters`,
+each app's id, publisher and version read from its manifest, and `signed` from the `.app` header.
+`StartInstallAsync` then sends nothing and only notes the app; the first `WaitForInstallAsync` waits
+for the whole command, passing its progress lines on as they arrive, and each wait answers with its
+own app's line of the command's result. A failed app short-circuits the rest exactly as online: the
+gateway stops at the first failure and the run marks what follows Skipped. A command that failed
+before the verb ran (expired uncollected, the gateway restarted, refused by the policy check) has no
+result, and its message becomes the first app's failure. The run waits for the command rather than
+per app; the queue ends a command long before, and a 24-hour limit stops a run waiting for ever with
+the sweep switched off. A command queued in the delivery window must be claimed before the window
+closes (`GatewayCommandService.ClaimDeadline`), so a gateway that comes back after the window does
+not install outside it.
+
+**Files are referenced, not copied.** A command file names its `project_build_artifacts` row
+(`gateway_command_files.project_build_artifact_id`, `ON DELETE SET NULL`) and stores no content. The
+hash and size are computed from the artifact when the command is queued; the download reads
+`COALESCE(f.content, a.content)` joined on the artifact in the command's organisation. A build is
+up to 50 MB per app and already stored once; copying it per command doubled that for nothing, and
+the gateway only ever sees a file id and its hash either way. If the artifact is deleted while the
+command waits, the download is refused and the command fails. The copy path stays for a file that is
+not a build artifact.
+
+**Per-app outcomes.** The gateway's result per app maps to the result row: `installed` and
+`upgraded` to Completed (an upgrade records the version it came from), `already installed` and
+`skipped` to Skipped ("Already on {version}" for the first, which the gateway finds for itself
+when the mirror was stale), and **`refused` to a new status, Refused** (`OeProjectDeliveryResult`
+status is text, so no migration). Anything else is Failed. A refusal is the customer's rule, not a fault: the deployment
+fails with "The gateway refused {app}: {reason}", the page shows the app as Refused with a shield
+icon and "Nothing was changed for this app.", the collapsed row says only "The gateway refused
+{app}", and the apps after it read "Skipped after the gateway refused {app}". The dashboard and the
+pipeline's last-deployment line treat Refused as the app that stopped the run. Log lines from the
+gateway land in the deployment log; a `REFUSED` line is tinted like a failure.
+
+**Restarts are not done yet (#1368).** The command's result carries `restarted`, always false today;
+it is stored as `oe_project_deliveries.tiers_restarted` (null online). A deployed on-premises run
+says "Service tiers were not restarted" and the summary adds "The service tiers were not restarted.",
+so nobody assumes a BC 14 tier has dropped its old subscribers.
+
+**What on-premises refuses, and where.** The rules are enforced in the services, not only the editor:
+
+- **Deferred schedules:** `ReleasePipelineService` refuses saving one against an on-premises target,
+  and the run checks `DeferredSchedules` when a deployment is resolved and when it is claimed, with
+  `WaitsForUpdateRefusal`. Moving a held deployment (`MoveHeldInstallAsync`) checks the capability
+  first and throws a `PlanValidationException` rather than asking the target for held installs.
+- **ForceSync:** offered by the editor only when the tier's settings allow it; refused on save, when
+  a deployment is resolved, and for a one-time "deploy with Force sync" (`CreateDeliveryAsync`), and
+  the gateway refuses it again itself. The "Deploy again with Force sync" button only appears for
+  Business Central online's `ExtensionChangeFailed`, so it never appears on-premises.
+- **Offline gateway:** `ConnectAsync` refuses at once when the gateway is offline, revoked or not yet
+  approved, and nothing is queued: "The gateway was offline, so nothing was sent. Check that the
+  gateway service is running on {machine}, then deploy again."
+- **A tier no longer linked** (`GatewayInstanceId` null) reads as a missing environment, in the
+  editor and in the run.
+
+**Open sessions** come back as `OpenSessionsCheck` (sessions and tiers) instead of a list of
+`BcSession`: the target sums the sessions of every tier the gateway reports on the environment's
+database (matched on database server, instance and name; a server named only as this machine counts
+only on the same gateway), so a session on a non-publishing tier still holds the deployment.
+
+**The editor** (`ReleasePipelineEdit.razor`) offers linked on-premises tiers as targets, marked
+"(on-premises, production/test)", names the gateway and the publishing tier under the picker, warns
+when the tier is unlinked, outside the gateway's settings, or its gateway is revoked, waiting for
+approval or offline (the pipeline can still be saved), offers only *Now* and the delivery window,
+offers Force sync only when allowed, and has **"Remove the previous version after upgrading"**
+(`oe_release_pipelines.unpublish_previous`, default on, sent as `unpublishPrevious`). A pipeline
+whose saved schedule is deferred has to have it chosen again before it saves. The deployment page
+names the tier "through its gateway", labels the steps "Sent to the gateway" rather than "Uploaded",
+and while a run is active shows the last lines "Latest from the gateway". The pipelines dashboard
+already included every environment kind.
+
+**Seam questions from #1374, answered:**
+
+- *Exceptions:* `DeliveryTargetException` is the base the run catches; `BcApiException` (the
+  Admin Center's errors) is now a subclass of it. The gateway target throws the base.
+- *Shapes:* `BcAppOperation` and `BcInstalledApp` stay the seam's records. The gateway target fills
+  what it has and leaves the rest at `Guid.Empty` or an empty version; nothing shared reads those
+  fields for on-premises.
+- *Status write-back:* only when the target read the status live (`ReadLive`), which is online only.
+- *Sessions:* `OpenSessionsCheck` replaces the session list, so the check can span tiers.
+- *Batching:* `PrepareInstallsAsync`, once per run, a no-op online.
+- *Progress:* `WaitForInstallAsync` takes an `onProgress` callback; the run appends the lines to the
+  deployment log as they arrive, which is what the page polls.
+
+**Migration** `20270205000000_DeployToOnPremises`: `oe_release_pipelines.unpublish_previous`
+(default true), `oe_project_deliveries.tiers_restarted`, and
+`gateway_command_files.project_build_artifact_id` with its index and foreign key.
+
 ### The `publish-install` verb, as built (#1375)
 
-The gateway side only: nothing in AL Workbench sends the command yet (#1367), and the restart group
+The gateway side only (AL Workbench sends the command since #1367, above), and the restart group
 and the before and after scripts are #1368's. In `ALWorkbench.Gateway.Core/PublishInstall/`;
 `PublishInstallVerb` is an `ICommandExecutor`, routed to by `VerbExecutors`, which the Windows
 service gives the loop.
@@ -1113,6 +1218,10 @@ server configuration (`Set-NAVServerConfiguration`) is out of scope.
 - **Deploy:** `deploy_build` and `list_deployments` work for on-premises targets **except
   production**. `agents_may_deploy_to_production` does not cover on-premises targets: a deployment
   there also restarts the customer's tiers, and that starts as a person's decision in the web UI.
+  As built (#1367): `deploy_build` refuses an on-premises Production target from an agent whatever
+  the organisation's setting, and otherwise runs the same path as the web UI, including the
+  offline-gateway failure; `list_deployment_pipelines` carries `targetIsOnPremises`, and
+  `list_deployments` reports `refused` app statuses and `tiersRestarted`.
 - **No write tools** for licences or tier actions in this milestone, as environment actions are
   web-only today.
 
