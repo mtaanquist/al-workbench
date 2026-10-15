@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using ALWorkbench.Gateway.Contracts;
+using ALWorkbench.Gateway.Core;
 using ALWorkbench.Gateway.Core.Policy;
 using ALWorkbench.Gateway.Core.PowerShell;
 using ALWorkbench.Gateway.Core.PublishInstall;
@@ -136,7 +137,10 @@ internal sealed class FakeBusinessCentral : IProcessRunner
         new(this, new PowerShellExecutables("powershell.exe", "pwsh.exe"), access ?? new FakeFileAccess());
 
     /// <summary>The restart group's runner over this fake's service tiers, on <paramref name="machine"/>.</summary>
-    public RestartGroupRunner Restarts(string machine = "CRONUS-BC01") => new(Runner(), machine);
+    public RestartGroupRunner Restarts(string machine = "CRONUS-BC01", IRunOnceStore? ledger = null) => new(Runner(), machine, ledger: ledger);
+
+    /// <summary>Called after each service stop or start with its timeline entry, e.g. to stop the command part-way.</summary>
+    public Action<string>? AfterServiceControl { get; set; }
 
     /// <summary>Customer IT's scripts, run by this fake, with their files checked by <paramref name="access"/>.</summary>
     public CustomerScripts ScriptRunner(IFileAccessCheck? access = null)
@@ -195,6 +199,7 @@ internal sealed class FakeBusinessCentral : IProcessRunner
             ServiceStates[key] = timedOut ? "StartPending" : "Running";
         }
         Timeline.Add($"{action} {key} {method}");
+        AfterServiceControl?.Invoke($"{action} {key} {method}");
         return Answer([new JsonObject { ["before"] = before, ["state"] = ServiceStates[key], ["timedOut"] = timedOut }], marker, string.Empty);
     }
 
@@ -399,14 +404,14 @@ internal sealed class TextPolicy : IGatewayPolicy
 
     public IReadOnlyList<string> Start() => [];
 
-    public PolicySnapshot Refresh() => new(InForce.ToReport(GatewayPolicyStates.Valid, []), 1);
+    public PolicySnapshot Refresh() => new(InForce.ToReport(GatewayPolicyStates.Valid, []), 1) { Policy = InForce };
 
     public PolicyDecision Check(GatewayCommandMessage command)
     {
         Checks++;
         var request = PolicyRequest.FromCommand(command, out var problem);
-        return request is null
+        return (request is null
             ? PolicyDecision.Refuse(problem!)
-            : PolicyEnforcer.Check(InForce, request, DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
+            : PolicyEnforcer.Check(InForce, request, DateTimeOffset.UtcNow, TimeZoneInfo.Utc)) with { Policy = InForce };
     }
 }

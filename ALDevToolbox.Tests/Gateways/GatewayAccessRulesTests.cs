@@ -40,6 +40,44 @@ public sealed class GatewayAccessRulesTests
         Allow("S-1-15-2-1", ReadAndExecute, toChildren: true),
     ];
 
+    /// <summary>What Windows gives a system drive's root: users may create folders there, and own what they create.</summary>
+    private static readonly AccessEntry[] DriveRootDefaults =
+    [
+        Allow(AccessRules.SystemSid, FullControl, toChildren: true),
+        Allow(AccessRules.AdministratorsSid, FullControl, toChildren: true),
+        Allow(Users, ReadAndExecute, toChildren: true),
+        Allow(AuthenticatedUsers, AppendData),
+        Allow(AuthenticatedUsers, Modify, inheritOnly: true, toChildren: true),
+        Allow(AccessRules.CreatorOwnerSid, GenericAll, inheritOnly: true, toChildren: true),
+    ];
+
+    [Fact]
+    public void A_drive_root_with_its_defaults_is_a_safe_folder_above_a_script()
+    {
+        // Creating a new folder in C:\ is allowed; renaming or replacing an existing one
+        // is not, and an inherit-only entry reaches only folders created later.
+        AccessRules.EvaluateAncestor(AccessRules.TrustedInstallerSid, DriveRootDefaults).Others.Should().BeEmpty();
+        AccessRules.Evaluate(AccessRules.TrustedInstallerSid, DriveRootDefaults, isFolder: true).Others.Should().Contain(AuthenticatedUsers,
+            "by the full rule the root is open, which is why the folders above a script get their own rule");
+    }
+
+    [Theory]
+    [InlineData(Modify)]
+    [InlineData(0x40)] // delete child
+    [InlineData(0x10000)] // delete
+    [InlineData(ChangePermissions)]
+    [InlineData(TakeOwnership)]
+    public void A_folder_above_a_script_others_can_rename_or_replace_things_in_is_not_safe(int rights)
+    {
+        AccessRules.EvaluateAncestor(AccessRules.AdministratorsSid, [Allow(Users, rights)]).Others.Should().Equal(Users);
+    }
+
+    [Fact]
+    public void A_folder_above_a_script_owned_by_someone_else_is_not_safe()
+    {
+        AccessRules.EvaluateAncestor(Users, []).OwnerTrusted.Should().BeFalse();
+    }
+
     [Fact]
     public void A_folder_with_the_Program_Files_defaults_is_safe()
     {

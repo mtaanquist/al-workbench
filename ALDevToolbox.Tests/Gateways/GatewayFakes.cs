@@ -278,6 +278,17 @@ internal sealed class FakeFileAccess : ALWorkbench.Gateway.Core.Policy.IFileAcce
 
     public bool Exists(string path) => Existing.Contains(path) || File.Exists(path);
 
+    /// <summary>Folders above a script's own that others can rename or replace things in, by the weaker ancestor rule.</summary>
+    public Dictionary<string, string> AncestorProblems { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public List<string> AskedAncestors { get; } = [];
+
+    public string? AncestorProblem(string folder)
+    {
+        AskedAncestors.Add(folder);
+        return AncestorProblems.GetValueOrDefault(folder);
+    }
+
     /// <summary>What <see cref="Contents"/> lists for a folder; a folder not given lists nothing.</summary>
     public Dictionary<string, List<string>> FolderContents { get; } = new(StringComparer.OrdinalIgnoreCase);
 

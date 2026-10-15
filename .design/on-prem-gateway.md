@@ -1253,17 +1253,43 @@ then the **after script**. A failing before script skips every app ("Not started
 before script failed."), records the after script as not run, and fails the command with "No app was
 published.". An app that fails records the after script as not run and restarts nothing. When every
 app was already installed nothing changed, so nothing is restarted and the after script does not
-run either. The settings are read again just before the restart: if they no longer allow `restart`
-on a group tier, the command fails with the apps installed and nothing restarted.
+run either. The settings are read again just before the restart, and the group, the after script
+and the permissions all come from that read: if they no longer allow `restart` on a group tier, the
+command fails with the apps installed and nothing restarted; if they no longer allow `scripts` on the
+publishing tier, the after script is "not run" and the command fails with the tiers restarted.
+Everything before that comes from the settings the policy check judged (`PolicyDecision.Policy`),
+never from a later read, so what runs is what was allowed.
 
 **The group.** The tiers are the `restart` list of the `[[database]]` the publishing tier is listed
 under (`publish_on` when the list is left out), in the file's order; a tier no database names is
 restarted on its own. Only tiers the file lists are ever touched, whatever the command says.
 `stop-all-then-start-all` stops each tier in order until one fails, then starts every tier it
-stopped, so a failure never leaves a tier down that was running; the tiers it did not reach are "not
-restarted". `one-by-one` stops and starts each tier before the next, and stops at the first that does
-not come back; the rest are "Not restarted, because X did not come back.". The gateway waits up to 5
-minutes for a tier to stop and 10 for it to run again. These are fixed, not settings.
+stopped; the tiers it did not reach are "not restarted". `one-by-one` stops and starts each tier
+before the next, and stops at the first that does not come back; the rest are "Not restarted,
+because X did not come back." (or "did not stop."). The gateway waits up to 5 minutes for a tier to
+stop and 10 for it to run again. These are fixed, not settings.
+
+**Every tier sent a stop is sent a start.** That includes a tier whose stop timed out (the start
+waits for a stop still pending, then starts it), one whose PowerShell died, and every tier stopped
+before the command was cancelled, whether AL Workbench failed it or the service is stopping. The
+starts ignore cancellation; each keeps its own 10-minute limit. The tier's line keeps its failure
+and adds where it was left ("The gateway started it again, and it is running.", or why not), and a
+tier that was stopped and started though the group was not restarted says so. A deployment stopped
+after the restart records the after script as not run and returns its result, which the gateway
+keeps and reports, rather than being reported as interrupted.
+
+**Tiers left stopped.** Before it sends a stop, the gateway records the tier in its run-once state
+file; once it has tried the start it removes it. If the service stops or the computer goes down in
+between, the next start (`StoppedTierRecovery`) starts every recorded tier before it takes any
+command, logs it (events 1010, tiers left stopped; 1011, started again; 1012, could not be started
+again, start it by hand), and reports the command as failed with what it did, instead of as
+interrupted. A result already saved for the command is kept. A stop of the service waits for the
+starts: the host's shutdown timeout covers one start (12 minutes with the process margin) plus the
+result grace, and the service asks Windows for that time when it is stopped
+(`GatewayServiceLifetime`, `RequestAdditionalTime`), since Windows otherwise gives a service about
+20 seconds. When the computer itself shuts down, Windows does not wait that long whatever the
+service asks; the record covers that case. Recovery waits for gateway settings that are not
+unsafe, like everything else.
 
 **Service control** (`Core/RestartGroup/ServiceControlScript.cs`, `RestartGroupRunner.cs`) always
 runs in Windows PowerShell 5.1, whatever the tier's `powershell` setting, and never loads the
@@ -1277,18 +1303,39 @@ and instance go in as parameters, never into the script text. It calls the servi
 `Stop()`/`Start()` and `WaitForStatus` with the timeout, not `Stop-Service`, because `Stop-Service`
 waits without a limit. A remote tier needs its `[[machine]]` section; the check refuses one without.
 
-**Scripts** (`Core/RestartGroup/CustomerScripts.cs`) are named only in the settings file. Before
-each run the gateway checks the file exists and that it and its folder are writable only by
-Administrators and SYSTEM (the same `AccessRules` as the program folder), and refuses otherwise. It
-runs the script in Windows PowerShell 5.1 as the service account, with its path passed as data, for
-up to 30 minutes; every line it prints goes to the deployment log as "before script: ..." or "after
-script: ...". A non-zero exit code, an error that stops it, or the timeout fails it. The tier needs
-`scripts` in its allow list (the policy check asks for it when the database names a script).
+**Scripts** (`Core/RestartGroup/CustomerScripts.cs`) are named only in the settings file, as the
+full path of a `.ps1` on a local drive with no `[` or `]` (PowerShell reads those as a pattern,
+which could pick another file than the one checked) and no `:` after the drive (an alternate data
+stream). Before each run, and whenever the settings are read, the gateway checks the file exists,
+that it and its folder are writable only by Administrators and SYSTEM (the same `AccessRules` as the
+program folder), and that nobody else can rename, delete or replace anything in the folders above
+it, up to the drive root (`AccessRules.EvaluateAncestor`: creating a new folder is allowed there,
+since every drive root allows it, and entries that reach only folders created later do not count).
+Otherwise a writable parent would let someone move the script's folder aside and put their own in
+its place. It refuses otherwise. It
+runs the script in its own Windows PowerShell 5.1 process (`powershell.exe -File`, inside the same
+job object) as the service account, with its path passed as data, for up to 30 minutes; every line
+it prints goes to the deployment log as "before script: ..." or "after script: ...". **What fails a
+script:** an explicit `exit N` with N other than 0, an error that stops it, or the timeout. That is
+the exit code `-File` gives: a script that ends normally exits 0 whatever the last program it ran
+returned, so a trailing `robocopy` that returns 1 ("files copied") does not fail it, and a script
+that wants a program's result to count ends with `exit $LASTEXITCODE`. `gateway.example.toml` says
+the same to customer IT. The tier needs `scripts` in its allow list (the policy check asks for it
+when the database names a script).
+
+**Messages are cut short.** A script can write megabytes to its error stream, and a result must stay
+inside the 4 MB request limit. The gateway cuts each script's and tier's message to 2,000 characters
+(`GatewayStepText`), and AL Workbench cuts them again before storing them, keeps at most 20 steps,
+and shortens every message to 300 characters if the steps would still pass 32,000 characters as
+JSON. The whole output stays in the command's log.
 
 **The `restart-group` verb** (`RestartGroupVerb`) restarts a database's group on its own, for
 licence imports (#1369) and the environment page's restart (#1371). Its parameters are the machine
 and instance of any tier of the group; the check needs `service_control` on every group tier. It
-runs no scripts. It succeeds when every tier came back and otherwise fails with the first failed
+runs no scripts. **It does not check `shared_restart`**: only AL Workbench knows which Solutions a
+tier serves, so whatever sends this verb (#1371, and #1369's licence import) must refuse a shared
+group in AL Workbench first, with `RestartGroupPlan.Refusal`, exactly as deployments do. Nothing
+sends it yet; #1371 is not done until that check is in place. It succeeds when every tier came back and otherwise fails with the first failed
 tier's message, the result attached.
 
 **The result.** `GatewayPublishInstallResult` gained `restart` (`GatewayRestartGroupResult`: the
@@ -1307,16 +1354,25 @@ installed, but CRONUS-BC02 / BC140 did not restart.", or "The apps were installe
 tiers restarted, but the customer's after script (after-restart.ps1) failed."; otherwise the
 gateway's own message. The deployment page shows a "Service tiers and scripts" list under the apps,
 the timeline's last step says "Installed, restart failed" or "Installed, after script failed", the
-next step says what to ask the customer's IT, and "Deploy again" is not offered when the apps went
-in, since the same build would change nothing and restart nothing. `list_deployments` returns the
-steps as `gatewaySteps`.
+next step says what to ask the customer's IT ("The apps are installed. Ask the customer's IT to
+start CRONUS-BC02 / BC140 and run after-restart.ps1 by hand. You don't need to deploy again.", the
+script named only when the restart skipped it), and "Deploy again" is not offered when the apps went
+in, since the same build would change nothing and restart nothing. The log line says "Deployment
+failed:", and the log wraps long lines rather than scrolling sideways. On premises the summary's
+health is labelled with the linked tier ("Health of CRONUS-BC01 / BC140"), so its "Running" beside
+another tier's restart failure is not read as all clear. `list_deployments` returns the steps as
+`gatewaySteps`.
 
 **The Deploy dialog** reads `RestartGroupPlan` (`Services/Gateways/`) through
 `DeliveryService.GetRestartPlanAsync` once it is open: the tiers that restart, how, the scripts, and
 the tiers the inventory reports on the same database (by `DatabaseKey`) that the group leaves out.
 It warns, before the person commits, that those tiers restart and that everyone signed in is signed
-out and loses unsaved work. Before the gateway has reported valid settings it says at least the
-linked tier restarts.
+out and loses unsaved work; a tier on the same database that the group leaves out is listed with
+them, marked "not restarted". Before the gateway has reported valid settings it says at least the
+linked tier restarts. Deploy stays disabled until the plan has been read, and if the read fails the
+dialog says so and keeps it disabled, rather than showing the online wording. On Production the
+acknowledgement reads "I understand this installs into CRONUS's live Production environment and
+signs everyone out of the 2 service tiers listed.".
 
 **`shared_restart` is enforced by AL Workbench.** `RestartGroupPlan.Refusal` refuses when another
 Solution has a live on-premises environment linked to one of the group's tiers and the database does
@@ -1329,15 +1385,19 @@ both report. A rule on the gateway was considered and rejected: the only thing i
 tenant list, and several tenants of one customer on one server is a normal setup that it would have
 refused. The dialog gives a count of the other Solutions, not their names, so a deployment does not
 tell one customer's consultant another customer's name; that differs from "Shared multitenant tiers"
-above, which says to list them.
+above, which says to list them. The dialog ends the refusal with what to do next (ask the customer's
+IT to allow a shared restart of the named tiers, or link each Solution to its own tiers, then try
+again) and hides the Production acknowledgement, since there is nothing to acknowledge.
 
-**To verify on real servers:** `Get-Service -ComputerName` against a remote BC 14 tier with the
+**To verify on real servers:** that `powershell.exe -File` exits 0 for a script that ends with a
+`robocopy` returning 1 and no `exit`, 2 for `exit 2`, and 1 for a `throw`; that `RequestAdditionalTime`
+holds a service stop open while a tier starts; `Get-Service -ComputerName` against a remote BC 14 tier with the
 service account's rights, and the error it gives without them; `Invoke-Command` with the same
 script block where WinRM is on; how long a BC 14 tier with many companies takes to stop and start
 against the 5 and 10 minute limits; that a service that never reaches Running surfaces as the
 timeout and not as a hang; a before and an after script under 5.1 as the service account,
 including one that writes to the error stream and one that calls `exit 2`; and that the folder
-check accepts the default rights on `C:\Program Files\AL Workbench Gateway\scripts`.
+check accepts the default rights on `C:\Program Files\AL Workbench Gateway\scripts` and, by the rule for the folders above a script, on `C:\Program Files` and the drive root.
 
 ## Licences
 
@@ -1378,7 +1438,9 @@ and deployment say "Licence not checked".
 Restart, stop and start a tier, or restart the whole group, from the environment page. The
 confirmation shows the open sessions across the database's tiers; Production asks again, as online
 Production deliveries do. Manage rights only, audited, and the policy file still decides. Changing
-server configuration (`Set-NAVServerConfiguration`) is out of scope.
+server configuration (`Set-NAVServerConfiguration`) is out of scope. **Before it sends a
+`restart-group` command, AL Workbench must refuse a group that `RestartGroupPlan.Refusal` refuses
+(`shared_restart`)**: the gateway does not check it ("The restart group, as built").
 
 ## MCP parity
 

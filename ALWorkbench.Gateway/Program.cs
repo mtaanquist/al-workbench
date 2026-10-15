@@ -9,6 +9,7 @@ using ALWorkbench.Gateway.Core;
 using ALWorkbench.Gateway.Core.Inventory;
 using ALWorkbench.Gateway.Core.Policy;
 using ALWorkbench.Gateway.Core.PowerShell;
+using ALWorkbench.Gateway.Core.RestartGroup;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.WindowsServices;
@@ -364,16 +365,28 @@ internal static class GatewayProgram
         return ok;
     }
 
-    /// <summary>How long stopping may take: the result grace plus room for the rest.</summary>
-    internal static readonly TimeSpan ShutdownTimeout = GatewayRunnerOptions.DefaultResultGrace + TimeSpan.FromSeconds(15);
+    /// <summary>
+    /// How long stopping may take: one service tier's start (a restart group the stop
+    /// caught with tiers down starts them before the verb returns, #1368), then the
+    /// result grace, plus room for the rest. A stop with nothing running takes seconds.
+    /// </summary>
+    internal static readonly TimeSpan ShutdownTimeout = RestartTimeouts.Default.Start + ServiceControlScript.ProcessMargin
+        + GatewayRunnerOptions.DefaultResultGrace + TimeSpan.FromSeconds(15);
 
     private static async Task<int> RunAsync(string[] args)
     {
         var builder = Host.CreateApplicationBuilder(args);
         builder.Services.AddWindowsService(options => options.ServiceName = ServiceInstaller.ServiceName);
-        // Room for a finished command's result to reach AL Workbench while stopping
-        // (GatewayRunnerOptions.ResultGrace), well inside the time Windows waits for a
-        // service to stop.
+        if (WindowsServiceHelpers.IsWindowsService())
+        {
+            // Replaces the lifetime AddWindowsService registered, to ask Windows for the
+            // time below when it stops the service.
+            builder.Services.AddSingleton<IHostLifetime, GatewayServiceLifetime>();
+        }
+        // Room for tiers stopped by a restart group to be started again, and for a
+        // finished command's result to reach AL Workbench while stopping
+        // (GatewayRunnerOptions.ResultGrace). Anything that runs out of time is put right
+        // on the next start (StoppedTierRecovery, the saved result).
         builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = ShutdownTimeout);
         builder.Services.AddSingleton(Folder);
         builder.Services.AddHostedService<GatewayWorker>();

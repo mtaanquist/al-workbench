@@ -2714,7 +2714,7 @@ public sealed class DeliveryService
             tally.StepFailure = DeliveryGatewaySteps.FailureLine(steps)
                 ?? (string.IsNullOrWhiteSpace(progress.FailureMessage)
                     ? "The gateway reported the deployment as failed without saying why."
-                    : progress.FailureMessage.Trim());
+                    : GatewayStepText.Cap(progress.FailureMessage.Trim()));
         }
         SettleRun(delivery, results, tally, log);
         await _db.SaveChangesAsync(ct);
@@ -2856,7 +2856,7 @@ public sealed class DeliveryService
         {
             delivery.Status = ProjectDeliveryStatus.Failed;
             delivery.FailureMessage = tally.StepFailure;
-            Append(log, "Delivery failed: " + tally.StepFailure);
+            Append(log, "Deployment failed: " + tally.StepFailure);
         }
         else if (tally.Unconfirmed is not null)
         {
@@ -3227,7 +3227,7 @@ public sealed class DeliveryService
         delivery.FailureMessage = message;
         delivery.FinishedAt = now;
         delivery.UpdatedAt = now;
-        Append(log, "Delivery failed: " + message);
+        Append(log, "Deployment failed: " + message);
         delivery.DiagnosticsLog = log.ToString();
         SettleUnfinishedApps(delivery.Results, now);
         // Saved whatever the token says: on shutdown it is already cancelled, and a failure

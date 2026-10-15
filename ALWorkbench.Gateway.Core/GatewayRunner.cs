@@ -78,6 +78,7 @@ public sealed class GatewayRunner
     private readonly GatewayRunnerOptions _options;
     private readonly Random? _random;
     private readonly GatewayInventory? _inventory;
+    private readonly RestartGroup.StoppedTierRecovery? _recovery;
 
     private readonly Lock _lock = new();
     private readonly HashSet<long> _running = [];
@@ -105,8 +106,10 @@ public sealed class GatewayRunner
         ILogger logger,
         GatewayRunnerOptions options,
         Random? random = null,
-        GatewayInventory? inventory = null)
+        GatewayInventory? inventory = null,
+        RestartGroup.StoppedTierRecovery? recovery = null)
     {
+        _recovery = recovery;
         _http = http;
         _settings = settings;
         _keys = keys;
@@ -154,6 +157,9 @@ public sealed class GatewayRunner
         _fingerprint = settings.KeyFingerprint;
         // The policy source logs what is wrong, in words for customer IT.
         if (_policy.Start().Count > 0) return GatewayRunOutcome.PolicyUnsafe;
+        // Service tiers a restart group stopped and the last run never started again
+        // (#1368): started before any command, and their command reported as failed.
+        if (_recovery is not null) await _recovery.RecoverAsync(_policy.InForce).ConfigureAwait(false);
         // Results that finished before the last stop but never arrived: listed as
         // running until they are posted, not reported as interrupted.
         var savedResults = _runOnce.PendingResults();

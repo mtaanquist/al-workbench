@@ -40,11 +40,23 @@ public sealed record RestartGroupPlan(
     /// Why the deployment may not run: its restart would reach environments of other
     /// solutions, and the settings do not say that is allowed. Null when it may.
     /// </summary>
-    public string? Refusal => Known && !SharedRestart && OtherSolutions > 0
-        ? $"{OnPremisesDeployFacts.NotAllowed}: the service tiers this deployment restarts also run "
-          + (OtherSolutions == 1 ? "another solution's environment" : $"the environments of {OtherSolutions} other solutions")
-          + ", and restarting them would sign their users out too. Ask the customer's IT to allow a shared restart, or link each solution to its own service tiers. Nothing was sent."
+    public string? Refusal => Refused
+        ? $"{OnPremisesDeployFacts.NotAllowed}: {SharedReason} Ask the customer's IT to allow a shared restart, or link each solution to its own service tiers. Nothing was sent."
         : null;
+
+    /// <summary>
+    /// <see cref="Refusal"/> as the Deploy dialog says it, before anything could be sent:
+    /// ending with what to do next, naming the tiers.
+    /// </summary>
+    public string? DialogRefusal => Refused
+        ? $"{OnPremisesDeployFacts.NotAllowed}: {SharedReason} Ask the customer's IT to allow a shared restart of {string.Join(", ", Tiers)}, or to link each solution to its own service tiers, then try again."
+        : null;
+
+    private bool Refused => Known && !SharedRestart && OtherSolutions > 0;
+
+    private string SharedReason => "the service tiers this deployment restarts also run "
+        + (OtherSolutions == 1 ? "another solution's environment" : $"the environments of {OtherSolutions} other solutions")
+        + ", and restarting them would sign their users out too.";
 
     /// <summary>The plan for <paramref name="environmentId"/>, or null when it is not a linked on-premises environment.</summary>
     public static async Task<RestartGroupPlan?> LoadAsync(AppDbContext db, int environmentId, CancellationToken ct)

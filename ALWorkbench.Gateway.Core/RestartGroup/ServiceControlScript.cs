@@ -79,7 +79,13 @@ public static class ServiceControlScript
             $timedOut = $false
             if ([string]$controller.Status -ne $wanted) {
                 if ($Action -eq 'stop' -and [string]$controller.Status -ne 'StopPending') { $controller.Stop() }
-                if ($Action -eq 'start' -and [string]$controller.Status -ne 'StartPending') { $controller.Start() }
+                if ($Action -eq 'start' -and [string]$controller.Status -eq 'StopPending') {
+                    # A stop that ran out of time may still finish: give it a minute (inside the
+                    # process margin), then start it if it stopped.
+                    try { $controller.WaitForStatus('Stopped', [TimeSpan]::FromSeconds([Math]::Min($Seconds, 60))) } catch { }
+                    $controller.Refresh()
+                }
+                if ($Action -eq 'start' -and [string]$controller.Status -eq 'Stopped') { $controller.Start() }
                 try {
                     $controller.WaitForStatus($wanted, [TimeSpan]::FromSeconds($Seconds))
                 } catch {

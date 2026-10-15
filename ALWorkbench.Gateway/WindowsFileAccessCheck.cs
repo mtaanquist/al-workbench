@@ -41,7 +41,11 @@ internal sealed class WindowsFileAccessCheck : IFileAccessCheck
         }
     }
 
-    public string? Problem(string path)
+    public string? Problem(string path) => Judge(path, ancestor: false);
+
+    public string? AncestorProblem(string folder) => Judge(folder, ancestor: true);
+
+    private static string? Judge(string path, bool ancestor)
     {
         FileSystemSecurity security;
         bool isFolder;
@@ -80,14 +84,16 @@ internal sealed class WindowsFileAccessCheck : IFileAccessCheck
                 rule.InheritanceFlags != InheritanceFlags.None));
         }
 
-        var verdict = AccessRules.Evaluate(owner?.Value, entries, isFolder);
+        var verdict = ancestor ? AccessRules.EvaluateAncestor(owner?.Value, entries) : AccessRules.Evaluate(owner?.Value, entries, isFolder);
         if (!verdict.OwnerTrusted)
         {
             return $"{Name(owner)} owns {path}, and an owner can always change it. Make Administrators the owner.";
         }
         return verdict.Others.Count == 0
             ? null
-            : $"{string.Join(", ", verdict.Others.Select(s => Name(new SecurityIdentifier(s))))} can change {path}. Only Administrators and SYSTEM may.";
+            : ancestor
+                ? $"{string.Join(", ", verdict.Others.Select(s => Name(new SecurityIdentifier(s))))} can rename or replace what is in {path}, which holds a script's folder. Only Administrators and SYSTEM may."
+                : $"{string.Join(", ", verdict.Others.Select(s => Name(new SecurityIdentifier(s))))} can change {path}. Only Administrators and SYSTEM may.";
     }
 
     /// <summary>The account's name, or its SID when Windows cannot name it (a deleted account, an unreachable domain).</summary>

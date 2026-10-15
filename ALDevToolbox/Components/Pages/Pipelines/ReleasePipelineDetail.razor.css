@@ -278,13 +278,15 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     line-height: 1.7;
-    min-width: max-content;
+    min-width: 0;
 }
 /* The time is an inline-block rather than a grid cell so the copied text keeps each
    line as "02:00:00 message" instead of splitting it across two lines. */
-.rp-log__line { padding: 0 var(--space-3); color: var(--ink-2); white-space: pre; }
+/* Long lines wrap, indented under their message, so a failure line reads whole
+   without scrolling sideways. */
+.rp-log__line { padding: 0 var(--space-3) 0 calc(64px + var(--space-3) * 2); text-indent: calc(-64px - var(--space-3)); color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .rp-log__line--err { color: var(--danger-text); background: var(--danger-bg); }
-.rp-log__t { display: inline-block; width: 64px; margin-right: var(--space-3); color: var(--ink-4); }
+.rp-log__t { display: inline-block; width: 64px; margin-right: var(--space-3); color: var(--ink-4); text-indent: 0; }
 
 .rp-foot { justify-content: center; }
 
@@ -309,10 +311,6 @@
     .rp-rel__phone-acts--one { grid-template-columns: 1fr; }
     .rp-rel__phone-acts .btn { height: 44px; justify-content: center; }
     .rp-summary__block--bc { border-left: 0; border-top: 1px solid var(--border); }
-    /* On a phone the log wraps rather than scrolls sideways, so a failure line reads whole. */
-    .rp-log__lines { min-width: 0; }
-    .rp-log__line { white-space: pre-wrap; overflow-wrap: anywhere; padding-left: calc(64px + var(--space-3) * 2); text-indent: calc(-64px - var(--space-3)); }
-    .rp-log__t { text-indent: 0; }
 }
 
 /* ── Waiting for approval (#934): the band above the newest deployment ───────── */

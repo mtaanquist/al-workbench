@@ -357,7 +357,7 @@
                                 </span>
                             </span>
                             <span class="meta-item rp-fact">
-                                <span class="meta-item__label">Health</span>
+                                <span class="meta-item__label">@HealthLabel</span>
                                 @if (GatewayHealth is { } gatewayHealth)
                                 {
                                     <span class="meta-item__value rp-tone--failed">@gatewayHealth</span>
@@ -1120,7 +1120,8 @@
             _rp.DeploymentSchedule, _rp.SchemaSyncMode, _successfulBuilds,
             _rp.Project?.BcTimeZone, _rp.ProjectEnvironment.UpdateWindowStart, _rp.ProjectEnvironment.UpdateWindowEnd,
             _secretExpiresAt,
-            selectedBuildId: buildId);
+            selectedBuildId: buildId,
+            onPremises: _isOnPremises);
     }
 
     private async Task OpenReleaseAsync()
@@ -1132,7 +1133,8 @@
             _rp.Project?.BcTimeZone, _rp.ProjectEnvironment.UpdateWindowStart, _rp.ProjectEnvironment.UpdateWindowEnd,
             _secretExpiresAt,
             _fromReleases ? _releaseOptions : null,
-            _fromReleases ? SourceName : null);
+            _fromReleases ? SourceName : null,
+            onPremises: _isOnPremises);
     }
 
     private async Task OnReleasedAsync(int _)
@@ -1254,7 +1256,12 @@
         var notBack = steps.Where(s => s.Kind == DeliveryGatewaySteps.Restart && s.Outcome != DeliveryGatewaySteps.Done && s.Message is not null).ToList();
         if (notBack.Count > 0)
         {
-            return $"The apps are installed. Ask the customer's IT to start {string.Join(", ", notBack.Select(s => s.Name))} and check that people can sign in. Deploying again would change nothing.";
+            // The after script is named only when it was skipped because of the restart.
+            var skipped = steps.FirstOrDefault(s => s.Kind == DeliveryGatewaySteps.AfterScript && s.Outcome == DeliveryGatewaySteps.NotDone);
+            var tiers = string.Join(", ", notBack.Select(s => s.Name));
+            return skipped is null
+                ? $"The apps are installed. Ask the customer's IT to start {tiers}. You don't need to deploy again."
+                : $"The apps are installed. Ask the customer's IT to start {tiers} and run {DeliveryGatewaySteps.ScriptName(skipped.Name)} by hand. You don't need to deploy again.";
         }
         if (steps.FirstOrDefault(s => s.Kind == DeliveryGatewaySteps.AfterScript && s.Outcome == DeliveryGatewaySteps.Failed) is { } after)
         {
@@ -1793,6 +1800,15 @@
             };
         }
     }
+
+    /// <summary>
+    /// On premises the health is the linked tier's, which is not every tier a deployment
+    /// restarts: the label names it, so "Running" beside a restart failure on another tier
+    /// is not read as all clear (#1368).
+    /// </summary>
+    private string HealthLabel => _isOnPremises && _onPrem is { Unlinked: false } linked
+        ? $"Health of {linked.TierName}"
+        : "Health";
 
     private string EnvHealth => _rp?.ProjectEnvironment?.MissingSince is not null
         ? (_isOnPremises ? "No longer linked" : "No longer in Business Central")

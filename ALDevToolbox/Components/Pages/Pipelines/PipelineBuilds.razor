@@ -1396,7 +1396,8 @@
                 rp.DeploymentSchedule, rp.SchemaSyncMode, options,
                 rp.Project?.BcTimeZone, env.UpdateWindowStart, env.UpdateWindowEnd,
                 secretExpiresAt,
-                selectedBuildId: buildId);
+                selectedBuildId: buildId,
+                onPremises: env.Kind == OeEnvironmentKind.OnPremises);
         }
         catch (ProjectAccessDeniedException)
         {

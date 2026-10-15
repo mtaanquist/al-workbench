@@ -81,7 +81,9 @@ public sealed class PublishInstallVerb : ICommandExecutor
         if (!decision.Allowed) return Refuse((decision.Reason ?? "Not allowed by the customer's gateway settings.") + " Nothing was changed.");
         var request = PolicyRequest.FromCommand(command, out var problem);
         if (request?.Target is null) return Refuse((problem ?? "The command does not say which service tier it is for.") + " Nothing was changed.");
-        var tier = _policy.InForce.Find(request.Target);
+        // Everything below comes from the policy that was just judged, not a later one.
+        var judged = decision.Policy ?? _policy.InForce;
+        var tier = judged.Find(request.Target);
         if (tier is null) return Refuse($"{request.Target} is not listed in the customer's gateway settings (gateway.toml). Nothing was changed.");
 
         // Read and checked by PolicyRequest; checked here against the tier in force too,
@@ -142,7 +144,7 @@ public sealed class PublishInstallVerb : ICommandExecutor
 
         // Customer IT's before script, once every file is checked and before anything is
         // published (#1368). A failure stops the deployment here.
-        var database = _policy.InForce.DatabaseOf(tier.Tier);
+        var database = judged.DatabaseOf(tier.Tier);
         var scripts = new List<GatewayScriptResult>();
         if (database?.Before is { } before)
         {
@@ -178,7 +180,7 @@ public sealed class PublishInstallVerb : ICommandExecutor
             return Finish(reports, failure + after, scripts);
         }
 
-        return await RestartGroupAsync(reports, tier, database, scripts, context.Progress, ct).ConfigureAwait(false);
+        return await RestartGroupAsync(reports, tier, judged, scripts, command.Id, context.Progress, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -190,26 +192,34 @@ public sealed class PublishInstallVerb : ICommandExecutor
     /// does not come back, or an after script that fails, fails the command with every app
     /// still reported as installed.
     /// </summary>
-    private async Task<GatewayCommandOutcome> RestartGroupAsync(List<AppReport> reports, EffectiveInstance tier, PolicyDatabase? database,
-        List<GatewayScriptResult> scripts, Action<string> progress, CancellationToken ct)
+    private async Task<GatewayCommandOutcome> RestartGroupAsync(List<AppReport> reports, EffectiveInstance tier, GatewayPolicy judged,
+        List<GatewayScriptResult> scripts, long commandId, Action<string> progress, CancellationToken ct)
     {
         const string NotRestarted = "Not run, because the service tiers were not restarted.";
         var changed = reports.Any(r => r.Outcome is GatewayPublishInstallOutcomes.Installed or GatewayPublishInstallOutcomes.Upgraded);
         if (!changed)
         {
-            var nothing = RestartGroupRunner.NotRun(_policy.InForce, tier.Tier, "Every app was already installed, so nothing changed and the service tiers were not restarted.");
+            var nothing = RestartGroupRunner.NotRun(judged, tier.Tier, "Every app was already installed, so nothing changed and the service tiers were not restarted.");
             progress(nothing.Message!);
-            if (database?.After is { } notAfter) scripts.Add(CustomerScripts.NotRun(GatewayScriptStages.After, notAfter, NotRestarted));
+            if (judged.DatabaseOf(tier.Tier)?.After is { } notAfter) scripts.Add(CustomerScripts.NotRun(GatewayScriptStages.After, notAfter, NotRestarted));
             return GatewayCommandOutcome.Success(Result(reports, nothing, scripts));
         }
 
         progress("All apps are installed. Restarting the service tiers, so nobody keeps running the previous version.");
+        // The settings as they are now: the group, the after script and the permissions
+        // all come from this read, never from the one before the apps.
         var snapshot = _policy.Refresh();
-        var policy = _policy.InForce;
+        var policy = snapshot.Policy ?? _policy.InForce;
+        var current = policy.Find(tier.Tier);
+        var database = policy.DatabaseOf(tier.Tier);
         string? refusal = null;
         if (snapshot.Report.State != GatewayPolicyStates.Valid)
         {
             refusal = "the customer's gateway settings changed while the apps were installed and now only allow reading, so the service tiers were not restarted.";
+        }
+        else if (current is null)
+        {
+            refusal = $"{tier.Tier} is no longer listed in the customer's gateway settings, so the service tiers were not restarted.";
         }
         else if (RestartGroupRunner.GroupOf(policy, tier.Tier).Tiers.FirstOrDefault(t => policy.Find(t)?.Allows(PolicyPermission.Restart) != true) is { } notAllowed)
         {
@@ -223,18 +233,37 @@ public sealed class PublishInstallVerb : ICommandExecutor
             return GatewayCommandOutcome.Failure($"All apps were installed, but {refusal}", Result(reports, notRun, scripts));
         }
 
-        var restart = await _restarts.RunAsync(policy, tier.Tier, progress, ct).ConfigureAwait(false);
+        var restart = await _restarts.RunAsync(policy, tier.Tier, progress, ct, commandId).ConfigureAwait(false);
         if (!restart.Restarted)
         {
             var failed = restart.Tiers.FirstOrDefault(t => t.Outcome == GatewayRestartTierOutcomes.Failed);
             if (database?.After is { } notAfter) scripts.Add(CustomerScripts.NotRun(GatewayScriptStages.After, notAfter, "Not run, because the service tiers were not all restarted."));
             return GatewayCommandOutcome.Failure(
-                $"All apps were installed, but the service tiers were not all restarted: {failed?.Message ?? restart.Message ?? "the gateway did not say why."}",
+                $"All apps were installed, but the service tiers were not all restarted: {failed?.Message ?? restart.Message ?? restart.Tiers.FirstOrDefault(t => t.Message is not null)?.Message ?? "the gateway did not say why."}",
                 Result(reports, restart, scripts));
         }
 
         if (database?.After is { } after)
         {
+            // The after script needs 'scripts' under the settings as they are now, too.
+            if (!current!.Allows(PolicyPermission.Scripts))
+            {
+                var why = $"Not run, because the customer's gateway settings no longer allow 'scripts' on {tier.Tier}.";
+                progress("FAILED " + why);
+                scripts.Add(CustomerScripts.NotRun(GatewayScriptStages.After, after, why));
+                return GatewayCommandOutcome.Failure(
+                    $"All apps were installed and the service tiers restarted, but the after script {after} was not run: the customer's gateway settings no longer allow 'scripts' on {tier.Tier}.",
+                    Result(reports, restart, scripts));
+            }
+            if (ct.IsCancellationRequested)
+            {
+                const string stopping = "Not run, because the command was stopped (the gateway service is stopping, or AL Workbench closed the command).";
+                progress("FAILED " + stopping);
+                scripts.Add(CustomerScripts.NotRun(GatewayScriptStages.After, after, stopping));
+                return GatewayCommandOutcome.Failure(
+                    $"All apps were installed and the service tiers restarted, but the after script {after} was not run, because the command was stopped.",
+                    Result(reports, restart, scripts));
+            }
             var ran = await _scripts.RunAsync(GatewayScriptStages.After, after, progress, ct).ConfigureAwait(false);
             scripts.Add(ran);
             if (ran.Outcome != GatewayScriptOutcomes.Succeeded)

@@ -384,6 +384,9 @@ public sealed class GatewayPolicyParserTests
     [InlineData("before = 'before-deploy.ps1'", "before must be the full path of a .ps1 file on this computer")]
     [InlineData("after = '\\\\fileserver\\share\\after.ps1'", "after must be the full path of a .ps1 file on this computer")]
     [InlineData("before = 'C:\\ALWorkbench\\before-deploy.cmd'", "before must be the full path of a .ps1 file")]
+    [InlineData("before = 'C:\\ALWorkbench\\[1]\\before-deploy.ps1'", "before must not contain [ or ], which PowerShell reads as a pattern")]
+    [InlineData("after = 'C:\\ALWorkbench\\after-restart[x].ps1'", "after must not contain [ or ]")]
+    [InlineData("after = 'C:\\ALWorkbench\\log.txt:after.ps1'", "after must be the full path of a .ps1 file")]
     public void A_bad_database_value_is_a_mistake(string line, string message)
     {
         Errors($$"""

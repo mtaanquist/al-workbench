@@ -68,6 +68,30 @@ public static class AccessRules
 
     public static bool IsTrusted(string? sid) => sid is not null && Trusted.Contains(sid);
 
+    /// <summary>The rights that rename, delete or replace a folder or what is in it.</summary>
+    public const int ReplaceRights = DeleteChild | Delete | ChangePermissions | TakeOwnership | GenericAll;
+
+    /// <summary>
+    /// The rule for a folder above a script's own (<see cref="IFileAccessCheck.AncestorProblem"/>):
+    /// an administrator owns it, and nobody else may delete or rename it or what is in it,
+    /// or change its rights. Creating something new in it is allowed, and so are entries
+    /// passed on only to what is created later: an existing child carries its own entries
+    /// and is checked itself.
+    /// </summary>
+    public static AccessVerdict EvaluateAncestor(string? ownerSid, IEnumerable<AccessEntry> entries)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        var others = new List<string>();
+        foreach (var entry in entries)
+        {
+            if (!entry.Allow || entry.InheritOnly) continue;
+            if (Trusted.Contains(entry.Sid) || Placeholders.Contains(entry.Sid)) continue;
+            if ((entry.Rights & ReplaceRights) == 0) continue;
+            if (!others.Contains(entry.Sid, StringComparer.OrdinalIgnoreCase)) others.Add(entry.Sid);
+        }
+        return new AccessVerdict(IsTrusted(ownerSid), others);
+    }
+
     public static AccessVerdict Evaluate(string? ownerSid, IEnumerable<AccessEntry> entries, bool isFolder)
     {
         ArgumentNullException.ThrowIfNull(entries);

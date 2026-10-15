@@ -178,6 +178,28 @@ public sealed class GatewayPolicySourceTests : IDisposable
     }
 
     [Fact]
+    public void A_folder_above_a_script_others_can_replace_things_in_makes_the_file_unsafe()
+    {
+        const string script = @"C:\IT\Gateway\before-deploy.ps1";
+        File.WriteAllText(_file, Good + """
+
+            [[database]]
+            name = "CRONUS-SQL/BC140"
+            publish_on = { machine = "CRONUS-BC01", instance = "BC140" }
+            before = 'C:\IT\Gateway\before-deploy.ps1'
+            """);
+        _access.Existing.Add(script);
+        var source = Source();
+        source.Refresh().Report.State.Should().Be(GatewayPolicyStates.Valid);
+        _access.AskedAncestors.Should().Contain([@"C:\IT", @"C:\"]);
+
+        _access.AncestorProblems[@"C:\IT"] = @"BUILTIN\Users can rename or replace what is in C:\IT, which holds a script's folder.";
+        var unsafeNow = source.Refresh().Report;
+        unsafeNow.State.Should().Be(GatewayPolicyStates.Unsafe, "renaming C:\\IT\\Gateway aside and putting another folder in its place swaps the script");
+        unsafeNow.Problems.Should().Contain(@"BUILTIN\Users can rename or replace what is in C:\IT, which holds a script's folder.");
+    }
+
+    [Fact]
     public void A_file_that_cannot_be_read_allows_only_reading_until_a_read_succeeds()
     {
         File.WriteAllText(_file, Good);

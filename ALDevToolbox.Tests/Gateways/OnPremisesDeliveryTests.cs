@@ -950,6 +950,32 @@ public sealed class OnPremisesDeliveryTests : IDisposable
         delivery.TiersRestarted.Should().BeTrue();
         delivery.FailureMessage.Should().Be(
             "The apps were installed and the service tiers restarted, but the customer's after script (after-restart.ps1) failed. It ended with exit code 1.");
+        delivery.DiagnosticsLog.Should().Contain("Deployment failed: The apps were installed and the service tiers restarted",
+            "the log says deployment, as the page does").And.NotContain("Delivery failed:");
+    }
+
+    [Fact]
+    public void A_steps_message_is_cut_short_and_the_stored_steps_stay_small()
+    {
+        var huge = new string('x', 500_000);
+        var result = new GatewayPublishInstallResult
+        {
+            Restart = Restart(Enumerable.Range(1, 30).Select(i => ($"CRONUS-BC{i:00}", GatewayRestartTierOutcomes.Failed, huge)).ToArray()),
+            Scripts = [Script(GatewayScriptStages.Before, BeforeScript, GatewayScriptOutcomes.Succeeded)],
+        };
+
+        var steps = DeliveryGatewaySteps.From(result);
+
+        steps.Should().HaveCount(DeliveryGatewaySteps.MaxSteps);
+        DeliveryGatewaySteps.ToJson(steps)!.Length.Should().BeLessThanOrEqualTo(DeliveryGatewaySteps.MaxStoredChars + DeliveryGatewaySteps.MaxSteps * 10);
+        steps.Where(s => s.Message is not null).Should().OnlyContain(s => s.Message!.Length <= GatewayStepText.MaxMessageChars);
+
+        var one = DeliveryGatewaySteps.From(new GatewayPublishInstallResult
+        {
+            Scripts = [Script(GatewayScriptStages.After, AfterScript, GatewayScriptOutcomes.Failed, huge)],
+        }).Single();
+        one.Message!.Length.Should().Be(GatewayStepText.MaxMessageChars);
+        one.Message.Should().EndWith("...");
     }
 
     [Fact]

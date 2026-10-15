@@ -223,7 +223,7 @@ public sealed class RestartGroupTests : IDisposable
     }
 
     [Fact]
-    public async Task A_tier_that_does_not_stop_ends_the_stopping_and_the_stopped_tiers_are_started_again()
+    public async Task A_tier_that_does_not_stop_ends_the_stopping_and_is_itself_started_again()
     {
         _server.NeverStops.Add("CRONUS-BC01 / BC140");
 
@@ -231,8 +231,180 @@ public sealed class RestartGroupTests : IDisposable
 
         outcome.Succeeded.Should().BeFalse();
         _server.Timeline.Where(s => s.StartsWith("stop", StringComparison.Ordinal) || s.StartsWith("start", StringComparison.Ordinal))
-            .Should().Equal("stop CRONUS-BC01 / BC140 local");
-        Result(outcome).Restart!.Tiers.Select(t => t.Outcome).Should().Equal(GatewayRestartTierOutcomes.Failed, GatewayRestartTierOutcomes.NotRestarted);
+            .Should().Equal("stop CRONUS-BC01 / BC140 local", "start CRONUS-BC01 / BC140 local");
+        var tiers = Result(outcome).Restart!.Tiers;
+        tiers.Select(t => t.Outcome).Should().Equal(GatewayRestartTierOutcomes.Failed, GatewayRestartTierOutcomes.NotRestarted);
+        tiers[0].Message.Should().StartWith("CRONUS-BC01 / BC140 did not stop within 5 minutes")
+            .And.EndWith("The gateway started it again, and it is running.", "the result says where the tier was left");
+        tiers[1].Message.Should().Be("Not restarted, because CRONUS-BC01 / BC140 did not stop.");
+        _server.ServiceStates["CRONUS-BC01 / BC140"].Should().Be("Running", "a stop that was sent is always followed by a start");
+    }
+
+    [Fact]
+    public async Task A_tier_whose_PowerShell_dies_on_the_stop_is_still_sent_a_start()
+    {
+        _server.ServiceErrors["CRONUS-BC02 / BC140"] = "The RPC server is unavailable.";
+
+        var outcome = await DeployAsync();
+
+        outcome.Succeeded.Should().BeFalse();
+        _server.Timeline.Should().NotContain(t => t.Contains("CRONUS-BC02", StringComparison.Ordinal), "the fake records only what reached the tier");
+        _server.Runs.Where(r => r.Operation == "service-control" && r.Parameters["machine"]!.GetValue<string>() == "CRONUS-BC02")
+            .Select(r => r.Parameters["action"]!.GetValue<string>())
+            .Should().Equal(["stop", "start"], "the stop may have gone through before PowerShell died");
+        var bc02 = Result(outcome).Restart!.Tiers[1];
+        bc02.Outcome.Should().Be(GatewayRestartTierOutcomes.Failed);
+        bc02.Message.Should().Contain("could not be told to stop").And.Contain("Then: CRONUS-BC02 / BC140 could not be told to start");
+    }
+
+    [Fact]
+    public async Task One_by_one_starts_a_tier_that_did_not_stop_and_leaves_the_rest_alone()
+    {
+        _policy = new TextPolicy(Policy(mode: "one-by-one", scripts: false));
+        _server.NeverStops.Add("CRONUS-BC01 / BC140");
+
+        var outcome = await DeployAsync();
+
+        outcome.Succeeded.Should().BeFalse();
+        _server.Timeline.Where(s => s.StartsWith("stop", StringComparison.Ordinal) || s.StartsWith("start", StringComparison.Ordinal))
+            .Should().Equal("stop CRONUS-BC01 / BC140 local", "start CRONUS-BC01 / BC140 local");
+        var tiers = Result(outcome).Restart!.Tiers;
+        tiers[0].Message.Should().EndWith("The gateway started it again, and it is running.");
+        tiers[1].Message.Should().Be("Not restarted, because CRONUS-BC01 / BC140 did not stop.");
+    }
+
+    // ---------------------------------------------------------------- stopped part-way
+
+    [Fact]
+    public async Task A_command_stopped_with_a_tier_down_still_starts_it_and_reports_the_rest_as_not_restarted()
+    {
+        using var stop = new CancellationTokenSource();
+        _server.AfterServiceControl = entry =>
+        {
+            // AL Workbench fails the command (or the service stops) right after the first stop.
+            if (entry == "stop CRONUS-BC01 / BC140 local") stop.Cancel();
+        };
+        var verb = new RestartGroupVerb(_policy, _server.Restarts());
+
+        var outcome = await verb.ExecuteAsync(RestartCommand("CRONUS-BC01", "BC140"), stop.Token);
+
+        outcome.Succeeded.Should().BeFalse("the group was not restarted, but the verb returns its result rather than throwing it away");
+        _server.Timeline.Should().Equal("stop CRONUS-BC01 / BC140 local", "start CRONUS-BC01 / BC140 local");
+        _server.ServiceStates["CRONUS-BC01 / BC140"].Should().Be("Running");
+        var result = GatewayRestartGroupResult.FromJson(outcome.Result)!;
+        result.Restarted.Should().BeFalse();
+        result.Tiers[0].Message.Should().Be("Stopped and started again, but the group was not restarted, because the command was stopped.");
+        result.Tiers[1].Outcome.Should().Be(GatewayRestartTierOutcomes.NotRestarted);
+        result.Tiers[1].Message.Should().Be("Not restarted, because the command was stopped before the gateway reached it.");
+    }
+
+    [Fact]
+    public async Task A_deployment_stopped_during_the_restart_skips_the_after_script_and_keeps_its_result()
+    {
+        using var stop = new CancellationTokenSource();
+        _server.AfterServiceControl = entry =>
+        {
+            if (entry == "start CRONUS-BC02 / BC140 service-manager") stop.Cancel();
+        };
+
+        var outcome = await Verb().ExecuteAsync(await CommandAsync(), stop.Token);
+
+        outcome.Succeeded.Should().BeFalse();
+        outcome.FailureMessage.Should().Be($"All apps were installed and the service tiers restarted, but the after script {After} was not run, because the command was stopped.");
+        _server.Timeline.Should().NotContain($"script {After}");
+        var result = Result(outcome);
+        result.Restarted.Should().BeTrue();
+        result.Scripts.Last().Outcome.Should().Be(GatewayScriptOutcomes.NotRun);
+    }
+
+    [Fact]
+    public async Task The_tiers_waiting_for_their_start_are_kept_on_disk_until_it_has_been_tried()
+    {
+        var store = new FileRunOnceStore(Path.Combine(_scratch.Path, "run-once.json"), new FakeGatewayClock());
+        store.MarkStarted(1371);
+        var seen = new List<string>();
+        _server.AfterServiceControl = entry => seen.Add(entry + " -> " + string.Join(", ", store.StoppedTiers().GetValueOrDefault(1371) ?? []));
+        var verb = new RestartGroupVerb(_policy, _server.Restarts(ledger: store));
+
+        await verb.ExecuteAsync(RestartCommand("CRONUS-BC01", "BC140"), CancellationToken.None);
+
+        seen.Should().Equal(
+            "stop CRONUS-BC01 / BC140 local -> CRONUS-BC01 / BC140",
+            "stop CRONUS-BC02 / BC140 service-manager -> CRONUS-BC01 / BC140, CRONUS-BC02 / BC140",
+            "start CRONUS-BC01 / BC140 local -> CRONUS-BC01 / BC140, CRONUS-BC02 / BC140",
+            "start CRONUS-BC02 / BC140 service-manager -> CRONUS-BC02 / BC140");
+        store.StoppedTiers().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task On_the_next_start_the_gateway_starts_the_tiers_a_stop_left_down_and_reports_the_command_as_failed()
+    {
+        var path = Path.Combine(_scratch.Path, "run-once.json");
+        var before = new FileRunOnceStore(path, new FakeGatewayClock());
+        before.MarkStarted(1368);
+        before.SetStoppedTiers(1368, [new StoppedTier { Machine = "CRONUS-BC01", Instance = "BC140" }, new StoppedTier { Machine = "CRONUS-BC02", Instance = "BC140" }]);
+        _server.ServiceStates["CRONUS-BC01 / BC140"] = "Stopped";
+        _server.ServiceStates["CRONUS-BC02 / BC140"] = "Stopped";
+        var store = new FileRunOnceStore(path, new FakeGatewayClock());
+        var log = new ListLogger();
+
+        await new StoppedTierRecovery(_server.Restarts(), store, log).RecoverAsync(_policy.InForce);
+
+        _server.Timeline.Should().Equal("start CRONUS-BC01 / BC140 local", "start CRONUS-BC02 / BC140 service-manager");
+        _server.ServiceStates.Values.Should().AllBe("Running");
+        store.StoppedTiers().Should().BeEmpty();
+        store.Unfinished().Should().BeEmpty("it is reported with a result, not as merely interrupted");
+        var reported = store.PendingResults()[1368];
+        reported.Succeeded.Should().BeFalse();
+        reported.FailureMessage.Should().Be("The gateway service stopped while it was restarting the service tiers, with CRONUS-BC01 / BC140, CRONUS-BC02 / BC140 stopped. "
+            + "When it started again it started them: CRONUS-BC01 / BC140 is running again. CRONUS-BC02 / BC140 is running again.");
+        log.Messages(GatewayLog.TiersLeftStoppedId).Should().ContainSingle().Which.Should().Contain("Command 1368 stopped these service tiers");
+        log.Messages(GatewayLog.TierStartedAgainId).Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task A_tier_the_gateway_cannot_start_again_is_logged_as_an_error_and_named_in_the_report()
+    {
+        var store = new FileRunOnceStore(Path.Combine(_scratch.Path, "run-once.json"), new FakeGatewayClock());
+        store.MarkStarted(1368);
+        store.SetStoppedTiers(1368, [new StoppedTier { Machine = "CRONUS-BC01", Instance = "BC140" }]);
+        _server.ServiceStates["CRONUS-BC01 / BC140"] = "Stopped";
+        _server.NeverStarts.Add("CRONUS-BC01 / BC140");
+        var log = new ListLogger();
+
+        await new StoppedTierRecovery(_server.Restarts(), store, log).RecoverAsync(_policy.InForce);
+
+        log.Messages(GatewayLog.TierNotStartedAgainId).Should().ContainSingle().Which.Should().EndWith("Start it by hand.");
+        store.PendingResults()[1368].FailureMessage.Should().Contain("CRONUS-BC01 / BC140 did not report running within 10 minutes");
+        store.StoppedTiers().Should().BeEmpty("it is tried once; customer IT has the event");
+    }
+
+    [Fact]
+    public async Task Recovery_keeps_a_result_that_was_already_saved()
+    {
+        var store = new FileRunOnceStore(Path.Combine(_scratch.Path, "run-once.json"), new FakeGatewayClock());
+        store.MarkStarted(1368);
+        store.SetStoppedTiers(1368, [new StoppedTier { Machine = "CRONUS-BC01", Instance = "BC140" }]);
+        store.SaveResult(1368, new GatewayCommandResultRequest { Succeeded = false, FailureMessage = "The verb's own result." });
+
+        await new StoppedTierRecovery(_server.Restarts(), store, new ListLogger()).RecoverAsync(_policy.InForce);
+
+        store.PendingResults()[1368].FailureMessage.Should().Be("The verb's own result.");
+        _server.Timeline.Should().Equal("start CRONUS-BC01 / BC140 local");
+    }
+
+    [Fact]
+    public void The_stopped_tiers_survive_a_restart_of_the_gateway_and_go_when_the_command_is_finished()
+    {
+        var path = Path.Combine(_scratch.Path, "run-once.json");
+        var store = new FileRunOnceStore(path, new FakeGatewayClock());
+        store.MarkStarted(7);
+        store.SetStoppedTiers(7, [new StoppedTier { Machine = "CRONUS-BC01", Instance = "BC140" }]);
+
+        new FileRunOnceStore(path, new FakeGatewayClock()).StoppedTiers()[7].Should().Equal(new StoppedTier { Machine = "CRONUS-BC01", Instance = "BC140" });
+
+        store.MarkFinished(7);
+        new FileRunOnceStore(path, new FakeGatewayClock()).StoppedTiers().Should().BeEmpty();
     }
 
     [Fact]
@@ -287,6 +459,48 @@ public sealed class RestartGroupTests : IDisposable
         _server.Runs.Should().NotContain(r => r.Operation == "service-control");
     }
 
+    [Fact]
+    public async Task The_after_script_comes_from_the_settings_read_again_before_the_restart()
+    {
+        const string NewAfter = @"C:\ALWorkbench\after-restart-v2.ps1";
+        _files.Existing.Add(NewAfter);
+        var changed = new TextPolicy(Policy().Replace(After, NewAfter, StringComparison.Ordinal));
+        var outcome = await new PublishInstallVerb(new FlippingPolicy(_policy, changed), _server.Runner(),
+            new FixedTierLocator(@"C:\BC\Service", new Version(14, 0, 0, 0)), "CRONUS-BC01", _server.Restarts(), _server.ScriptRunner(_files))
+            .ExecuteAsync(await CommandAsync(), CancellationToken.None);
+
+        outcome.Succeeded.Should().BeTrue(outcome.FailureMessage);
+        _server.Timeline.Should().Contain($"script {NewAfter}").And.NotContain($"script {After}");
+    }
+
+    [Fact]
+    public async Task Settings_that_no_longer_allow_scripts_when_the_apps_are_in_skip_the_after_script()
+    {
+        var changed = new TextPolicy(Policy(bc01Allow: """["inventory", "publish", "restart", "service_control"]"""));
+        var outcome = await new PublishInstallVerb(new FlippingPolicy(_policy, changed), _server.Runner(),
+            new FixedTierLocator(@"C:\BC\Service", new Version(14, 0, 0, 0)), "CRONUS-BC01", _server.Restarts(), _server.ScriptRunner(_files))
+            .ExecuteAsync(await CommandAsync(), CancellationToken.None);
+
+        outcome.Succeeded.Should().BeFalse();
+        outcome.FailureMessage.Should().Be($"All apps were installed and the service tiers restarted, but the after script {After} was not run: the customer's gateway settings no longer allow 'scripts' on CRONUS-BC01 / BC140.");
+        _server.Timeline.Should().NotContain($"script {After}");
+        Result(outcome).Scripts.Last().Outcome.Should().Be(GatewayScriptOutcomes.NotRun);
+    }
+
+    [Fact]
+    public async Task The_restart_group_verb_restarts_the_group_of_the_policy_it_judged()
+    {
+        // A file read after the check that drops BC02 from the group does not change what
+        // was allowed: the verb uses the policy the decision was made on.
+        var changed = new TextPolicy(Policy().Replace("""  { machine = "CRONUS-BC02", instance = "BC140" },""", "", StringComparison.Ordinal));
+        var verb = new RestartGroupVerb(new FlippingPolicy(_policy, changed, flipOnInForce: true), _server.Restarts());
+
+        var outcome = await verb.ExecuteAsync(RestartCommand("CRONUS-BC01", "BC140"), CancellationToken.None);
+
+        outcome.Succeeded.Should().BeTrue(outcome.FailureMessage);
+        _server.Timeline.Should().Contain("stop CRONUS-BC02 / BC140 service-manager");
+    }
+
     private async Task<GatewayCommandContext> CommandAsync()
     {
         var bytes = AppFiles.Build(AppFiles.CoffeeId, "CRONUS Coffee", "CRONUS Partner", "1.4.0.0", packageId: ThisBuild);
@@ -311,11 +525,12 @@ public sealed class RestartGroupTests : IDisposable
     }
 
     /// <summary>Checks commands against one file, then reports another as in force once the file is read again.</summary>
-    private sealed class FlippingPolicy(TextPolicy first, TextPolicy then) : ALWorkbench.Gateway.Core.Policy.IGatewayPolicy
+    private sealed class FlippingPolicy(TextPolicy first, TextPolicy then, bool flipOnInForce = false) : ALWorkbench.Gateway.Core.Policy.IGatewayPolicy
     {
         private bool _flipped;
 
-        public ALWorkbench.Gateway.Core.Policy.GatewayPolicy InForce => _flipped ? then.InForce : first.InForce;
+        /// <summary>With <c>flipOnInForce</c>, any read of the policy in force after the check already sees the new file.</summary>
+        public ALWorkbench.Gateway.Core.Policy.GatewayPolicy InForce => _flipped || flipOnInForce ? then.InForce : first.InForce;
 
         public IReadOnlyList<string> Start() => [];
 
@@ -399,6 +614,64 @@ public sealed class RestartGroupTests : IDisposable
 
         outcome.Succeeded.Should().BeFalse();
         _server.Runs.Should().NotContain(r => r.Operation == "script");
+    }
+
+    [Fact]
+    public async Task A_folder_above_the_script_others_can_rename_things_in_is_refused_too()
+    {
+        _files.AncestorProblems[@"C:\"] = @"BUILTIN\Users can rename or replace what is in C:\, which holds a script's folder.";
+
+        var outcome = await DeployAsync();
+
+        outcome.Succeeded.Should().BeFalse();
+        outcome.FailureMessage.Should().Contain(@"BUILTIN\Users can rename or replace what is in C:\");
+        _server.Runs.Should().NotContain(r => r.Operation == "script");
+        _files.AskedAncestors.Should().Contain(@"C:\", "every folder up to the drive root is checked");
+    }
+
+    [Fact]
+    public void Every_folder_above_a_script_is_checked_up_to_the_drive_root()
+    {
+        var files = new FakeFileAccess();
+
+        ALWorkbench.Gateway.Core.Policy.FileAccessChecks.ScriptProblems(files, @"C:\IT\Gateway\scripts\after.ps1");
+
+        files.Asked.Should().Equal(@"C:\IT\Gateway\scripts\after.ps1", @"C:\IT\Gateway\scripts");
+        files.AskedAncestors.Should().Equal(@"C:\IT\Gateway", @"C:\IT", @"C:\");
+    }
+
+    [Fact]
+    public async Task A_script_that_writes_megabytes_of_errors_is_reported_in_a_short_message()
+    {
+        _server.ScriptErrors[Before] = new string('x', 500_000);
+
+        var outcome = await DeployAsync();
+
+        var before = Result(outcome).Scripts.First();
+        before.Message!.Length.Should().BeLessThanOrEqualTo(GatewayStepText.MaxMessageChars);
+        before.Message.Should().EndWith("...");
+        outcome.FailureMessage!.Length.Should().BeLessThan(3_000, "the result must stay far inside the request limit");
+    }
+
+    [Fact]
+    public async Task A_tier_failure_with_a_long_error_is_cut_short_too()
+    {
+        _server.ServiceErrors["CRONUS-BC02 / BC140"] = new string('y', 100_000);
+
+        var outcome = await DeployAsync();
+
+        Result(outcome).Restart!.Tiers[1].Message!.Length.Should().BeLessThanOrEqualTo(GatewayStepText.MaxMessageChars);
+    }
+
+    [Fact]
+    public void A_script_fails_only_on_an_explicit_exit_or_an_error_that_stops_it()
+    {
+        // -File reports exit N's N, 1 for a terminating error, and otherwise 0: a trailing
+        // robocopy that returns 1 is not the script's own exit code. Checked against a
+        // real server in "To verify on real servers".
+        CustomerScripts.Run.Script.Should().Contain("-File $path")
+            .And.Contain("[int]$LASTEXITCODE")
+            .And.NotContain("& $path", "running the script in the gateway's own session would pick up a program's leftover exit code");
     }
 
     [Fact]

@@ -44,7 +44,15 @@
                 <h2 id="rb-title" class="confirm-dialog__title">Deploy to @_customerName — @_envName</h2>
             </div>
             <div class="confirm-dialog__body">
-                @if (_restartPlan is not null)
+                @if (_planLoading)
+                {
+                    <LoadingBlock Text="Checking what this deployment changes..." />
+                }
+                else if (_planError is { } planError)
+                {
+                    <Alert Tone="AlertTone.Danger"><span>@planError</span></Alert>
+                }
+                else if (_restartPlan is not null)
                 {
                     <p>
                         Installs the build's apps in <b>@_envName</b> on <b>@_customerName</b>'s own Business Central server@(IsImmediate ? "" : " at the time below")@(_schemaSyncMode == BcSyncMode.ForceSync ? ", using Force sync (which can drop columns)" : ""),
@@ -158,7 +166,7 @@
 
                 @if (_restartPlan is { } restart)
                 {
-                    @if (restart.Refusal is { } shared)
+                    @if (restart.DialogRefusal is { } shared)
                     {
                         <Alert Tone="AlertTone.Danger" Class="rb-restart"><span>@shared</span></Alert>
                     }
@@ -176,6 +184,10 @@
                                     {
                                         <li>@tier</li>
                                     }
+                                    @foreach (var missing in restart.MissingFromGroup)
+                                    {
+                                        <li class="rb-restart__left-out">@missing — not restarted</li>
+                                    }
                                 </ul>
                                 <p><b>Everyone signed in is signed out and loses unsaved work.</b> @RestartModeSentence(restart)</p>
                                 @if (ScriptsSentence(restart) is { } scripts)
@@ -186,8 +198,8 @@
                                 {
                                     <p>
                                         @(restart.MissingFromGroup.Count == 1
-                                            ? $"{restart.MissingFromGroup[0]} uses the same database but is not restarted, so people signed in there keep the previous version until it is. Ask the customer's IT to add it to the tiers that restart."
-                                            : $"{string.Join(", ", restart.MissingFromGroup)} use the same database but are not restarted, so people signed in there keep the previous version until they are. Ask the customer's IT to add them to the tiers that restart.")
+                                            ? "The tier marked not restarted uses the same database, so people signed in there keep the previous version until it restarts. Ask the customer's IT to add it to the tiers that restart."
+                                            : "The tiers marked not restarted use the same database, so people signed in there keep the previous version until they restart. Ask the customer's IT to add them to the tiers that restart.")
                                     </p>
                                 }
                             </div>
@@ -195,13 +207,24 @@
                     }
                 }
 
-                @if (_isProduction)
+                @if (_isProduction && !_planLoading && _planError is null && _restartPlan?.Refusal is null)
                 {
                     <label class="check check--ack @(_prodAck ? "is-checked" : "")">
                         <input type="checkbox" checked="@_prodAck"
                                @onchange="e => _prodAck = (bool)(e.Value ?? false)" disabled="@_releasing" />
                         <span class="check__box"><Icon Name="check" Width="12" Height="12" /></span>
-                        @if (_envNameIsProduction)
+                        @if (_restartPlan is { } restarting)
+                        {
+                            @if (_envNameIsProduction)
+                            {
+                                <span>I understand this installs into <b>@_customerName</b>'s live <b>Production</b> environment and signs everyone out of @TiersListed(restarting).</span>
+                            }
+                            else
+                            {
+                                <span>I understand this installs into <b>@_envName</b>, <b>@_customerName</b>'s live <b>Production</b> environment, and signs everyone out of @TiersListed(restarting).</span>
+                            }
+                        }
+                        else if (_envNameIsProduction)
                         {
                             <span>I understand this installs the apps into <b>@_customerName</b>'s live <b>Production</b> environment.</span>
                         }
@@ -399,7 +422,18 @@
             ? _tag.Length > 0 && SelectedReleaseFiles.Count > 0
             : _buildId != 0 && _builds.Count > 0)
         && (!_isProduction || _prodAck)
+        && !_planLoading
+        && _planError is null
         && _restartPlan?.Refusal is null;
+
+    /// <summary>True while the restart plan is read: the dialog cannot say yet what the deployment restarts, so it cannot be confirmed.</summary>
+    private bool _planLoading;
+
+    /// <summary>Set when the restart plan could not be read: the dialog then refuses rather than guess that nothing restarts.</summary>
+    private string? _planError;
+
+    private static string TiersListed(ALDevToolbox.Services.Gateways.RestartGroupPlan plan) =>
+        plan.Tiers.Count == 1 ? "the service tier listed" : $"the {plan.Tiers.Count} service tiers listed";
 
     /// <summary>
     /// What the deployment restarts on premises, as the customer's gateway settings last
@@ -441,14 +475,16 @@
     /// environment's update window (both null = none). <paramref name="selectedBuildId"/>
     /// preselects one of <paramref name="builds"/> - the build list opens the dialog
     /// from a specific build's row (#938); it falls back to the latest when that build
-    /// is not among them.
+    /// is not among them. <paramref name="onPremises"/> is true for a customer's own server:
+    /// the dialog then reads what the deployment restarts before Deploy can be pressed.
     /// </summary>
     public async Task OpenAsync(int releasePipelineId, string customerName, string envName, string envType, string deploymentSchedule, string schemaSyncMode,
         IReadOnlyList<ReleasableBuildOption> builds, string? timeZone, TimeOnly? windowStart, TimeOnly? windowEnd,
         DateTime? secretExpiresAt = null,
         IReadOnlyList<GitHubReleaseOption>? releases = null,
         string? repositoryName = null,
-        int? selectedBuildId = null)
+        int? selectedBuildId = null,
+        bool onPremises = false)
     {
         _releasePipelineId = releasePipelineId;
         _fromReleases = releases is not null;
@@ -488,23 +524,32 @@
         _windowOpeningLocal = _scheduledLocal;
 
         _restartPlan = null;
+        _planError = null;
+        _planLoading = onPremises;
 
         _open = true;
         _focusPending = true;
         StateHasChanged();
 
-        // Read after the dialog is up: it says what restarts, and is no reason to keep the
-        // dialog from opening. A failed read leaves the warning out; the deployment is
-        // still checked before anything is sent.
+        // Read after the dialog is up, so it opens at once; until the read is back the
+        // dialog cannot say what restarts, so Deploy stays disabled. A failed read says so
+        // and keeps it disabled, rather than show the online wording for a deployment that
+        // may sign everyone out of the customer's server.
+        if (!onPremises) return;
         try
         {
             _restartPlan = await Deliveries.GetRestartPlanAsync(releasePipelineId);
-            StateHasChanged();
         }
         catch (Exception ex)
         {
             Log.LogWarning(ex, "Couldn't read the restart group for deployment pipeline {ReleasePipelineId}.", releasePipelineId);
+            _planError = "Couldn't check what this deployment restarts, so it can't be deployed right now. Close this and try again in a moment.";
         }
+        finally
+        {
+            _planLoading = false;
+        }
+        StateHasChanged();
     }
 
     private void SetNextOpening() => _scheduledLocal = _windowOpeningLocal;

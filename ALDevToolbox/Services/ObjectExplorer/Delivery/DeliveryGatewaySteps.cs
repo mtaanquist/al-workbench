@@ -45,6 +45,22 @@ public static class DeliveryGatewaySteps
     public const string Failed = "failed";
     public const string NotDone = "not-done";
 
+    /// <summary>At most this many steps are kept; a restart group is a handful of tiers.</summary>
+    public const int MaxSteps = 20;
+
+    /// <summary>A step's name (a tier, a group's tiers, a script's path) is cut to this.</summary>
+    public const int MaxNameChars = 500;
+
+    /// <summary>
+    /// The most <c>gateway_steps</c> holds, as JSON: past it every message is cut to
+    /// <see cref="ShortMessageChars"/>. Each message is already cut to
+    /// <see cref="GatewayStepText.MaxMessageChars"/>, as the gateway does, since a script can
+    /// write megabytes to its error stream.
+    /// </summary>
+    public const int MaxStoredChars = 32_000;
+
+    public const int ShortMessageChars = 300;
+
     private static readonly JsonSerializerOptions Json = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 
     /// <summary>
@@ -69,9 +85,9 @@ public static class DeliveryGatewaySteps
                 steps.Add(new DeliveryGatewayStep
                 {
                     Kind = Restart,
-                    Name = string.Join(", ", restart.Tiers.Select(t => $"{t.Machine} / {t.Instance}")),
+                    Name = GatewayStepText.Cap(string.Join(", ", restart.Tiers.Select(t => $"{t.Machine} / {t.Instance}")), MaxNameChars)!,
                     Outcome = NotDone,
-                    Message = why,
+                    Message = Clean(why),
                 });
             }
             else
@@ -79,14 +95,14 @@ public static class DeliveryGatewaySteps
                 steps.AddRange(restart.Tiers.Select(t => new DeliveryGatewayStep
                 {
                     Kind = Restart,
-                    Name = $"{t.Machine} / {t.Instance}",
+                    Name = GatewayStepText.Cap($"{t.Machine} / {t.Instance}", MaxNameChars)!,
                     Outcome = t.Outcome switch
                     {
                         GatewayRestartTierOutcomes.Restarted => Done,
                         GatewayRestartTierOutcomes.Failed => Failed,
                         _ => NotDone,
                     },
-                    Message = string.IsNullOrWhiteSpace(t.Message) ? null : t.Message.Trim(),
+                    Message = Clean(t.Message),
                 }));
             }
         }
@@ -94,20 +110,31 @@ public static class DeliveryGatewaySteps
         {
             steps.Add(ScriptStep(AfterScript, script));
         }
-        return steps;
+        return Bounded(steps);
     }
+
+    /// <summary>At most <see cref="MaxSteps"/>, and within <see cref="MaxStoredChars"/> once stored.</summary>
+    private static List<DeliveryGatewayStep> Bounded(List<DeliveryGatewayStep> steps)
+    {
+        var kept = steps.Take(MaxSteps).ToList();
+        if (JsonSerializer.Serialize(kept, Json).Length <= MaxStoredChars) return kept;
+        return kept.Select(s => s with { Message = GatewayStepText.Cap(s.Message, ShortMessageChars) }).ToList();
+    }
+
+    private static string? Clean(string? message) =>
+        string.IsNullOrWhiteSpace(message) ? null : GatewayStepText.Cap(message.Trim());
 
     private static DeliveryGatewayStep ScriptStep(string kind, GatewayScriptResult script) => new()
     {
         Kind = kind,
-        Name = script.Path,
+        Name = GatewayStepText.Cap(script.Path, MaxNameChars)!,
         Outcome = script.Outcome switch
         {
             GatewayScriptOutcomes.Succeeded => Done,
             GatewayScriptOutcomes.Failed => Failed,
             _ => NotDone,
         },
-        Message = string.IsNullOrWhiteSpace(script.Message) ? null : script.Message.Trim(),
+        Message = Clean(script.Message),
     };
 
     public static string? ToJson(IReadOnlyList<DeliveryGatewayStep> steps) =>

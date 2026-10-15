@@ -22,6 +22,15 @@ public interface IFileAccessCheck
     /// </summary>
     string? Problem(string path);
 
+    /// <summary>
+    /// Null when only administrators can rename, delete or replace what is in
+    /// <paramref name="folder"/>, or the folder itself: the rule for the folders above a
+    /// script's own, so nobody can move the script's folder aside and put their own in its
+    /// place. Weaker than <see cref="Problem"/> on purpose: creating a new folder there is
+    /// allowed (every drive root lets users do that), replacing an existing one is not.
+    /// </summary>
+    string? AncestorProblem(string folder) => Problem(folder);
+
     /// <summary>Whether the file exists. Here rather than <c>File.Exists</c> so the Windows paths in a policy file can be tested on Linux.</summary>
     bool Exists(string path);
 
@@ -53,5 +62,36 @@ public static class FileAccessChecks
             problems.Add($"{inside.Count - NamedPerFolder} more files or folders in {folder} can be changed by someone other than administrators.");
         }
         return problems;
+    }
+
+    /// <summary>
+    /// The problems with a script the policy names: the script and its folder by the full
+    /// rule, and every folder above it up to the drive root by
+    /// <see cref="IFileAccessCheck.AncestorProblem"/>, so a parent folder others can change
+    /// cannot be used to swap in another folder with another script.
+    /// </summary>
+    public static List<string> ScriptProblems(IFileAccessCheck access, string script)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        var problems = new List<string>();
+        if (access.Problem(script) is { } own) problems.Add(own);
+        if (GatewayPolicySource.WindowsFolderOf(script) is not { } folder) return problems;
+        if (access.Problem(folder) is { } inFolder) problems.Add(inFolder);
+        foreach (var ancestor in WindowsAncestorsOf(folder))
+        {
+            if (access.AncestorProblem(ancestor) is { } above) problems.Add(above);
+        }
+        return problems;
+    }
+
+    /// <summary>The folders above <paramref name="folder"/>, nearest first, ending with the drive root.</summary>
+    public static IEnumerable<string> WindowsAncestorsOf(string folder)
+    {
+        var current = folder;
+        while (GatewayPolicySource.WindowsFolderOf(current) is { } parent && !string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+        {
+            yield return parent;
+            current = parent;
+        }
     }
 }

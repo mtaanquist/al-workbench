@@ -12,19 +12,29 @@ namespace ALWorkbench.Gateway.Core.RestartGroup;
 /// file on the gateway's computer, and the file itself from customer IT. See
 /// <c>.design/on-prem-gateway.md</c>, "The restart group, as built".
 ///
-/// <para><b>Checked right before it runs.</b> The policy source checks every named script
-/// and its folder on its own schedule (a script anyone else can change makes the whole
+/// <para><b>Checked right before it runs.</b> The policy source checks every named script,
+/// its folder and every folder above it on its own schedule (a script anyone else can change makes the whole
 /// file unsafe); a deployment may run for hours between that check and the after script,
 /// so the same rule (<see cref="IFileAccessCheck"/>, judged by <see cref="AccessRules"/>)
 /// is asked again here, and a script that is gone or that someone other than administrators
 /// can change is not run.</para>
 ///
-/// <para><b>How it runs.</b> In Windows PowerShell 5.1 (<c>powershell.exe</c>), through the
-/// same runner and therefore the same job object as every cmdlet, with a time limit. The
-/// path reaches the fixed <see cref="Run"/> operation as data and is called with
-/// <c>&amp;</c>; nothing is passed to the script. Everything it writes, errors and warnings
-/// included, goes to the command's log. It succeeds when it ends with exit code 0 and
-/// throws nothing; <c>exit 1</c> (or any other code) fails it.</para>
+/// <para><b>How it runs.</b> In its own Windows PowerShell 5.1 process
+/// (<c>powershell.exe -File</c>), started from the same runner and therefore inside the same
+/// job object as every cmdlet, with a time limit. The path reaches the fixed
+/// <see cref="Run"/> operation as data, is checked with <c>-LiteralPath</c> and passed to
+/// <c>-File</c>, which reads it literally; the policy file refuses <c>[</c> and <c>]</c> in
+/// a script path besides, so no pattern ever picks another file. Nothing is passed to the
+/// script. Everything it writes, errors and warnings included, goes to the command's log.</para>
+///
+/// <para><b>What fails it.</b> Only an explicit <c>exit N</c> with N other than 0, an error
+/// that stops the script, or the time limit. That is what <c>-File</c> reports as the exit
+/// code: a script that ends normally exits 0, whatever the last program it ran returned, so
+/// a trailing <c>robocopy</c> that returns 1 ("files copied") does not fail it. A script
+/// that wants a program's failure to count says so with <c>exit $LASTEXITCODE</c>.</para>
+///
+/// <para>A failure's message is cut to <see cref="GatewayStepText.MaxMessageChars"/>
+/// characters; the whole output is in the command's log.</para>
 /// </summary>
 public sealed class CustomerScripts
 {
@@ -32,19 +42,18 @@ public sealed class CustomerScripts
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(30);
 
     /// <summary>
-    /// Calls the script at <c>$Parameters.path</c>. Preferences are put back to PowerShell's
-    /// defaults first, so a script runs as it would from a prompt (a non-terminating error
-    /// is logged, not fatal), and every stream is folded into the log.
+    /// Runs the script at <c>$Parameters.path</c> in a child <c>powershell.exe -File</c>, so
+    /// its exit code is the one <c>-File</c> gives: <c>exit N</c>'s N, 1 for an error that
+    /// stopped it, otherwise 0. A non-terminating error is logged, not fatal, as from a
+    /// prompt, and both output streams are folded into the log.
     /// </summary>
     public static readonly PowerShellOperation Run = new("customer-script", """
         $path = [string]$Parameters.path
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw ('The script ' + $path + ' does not exist.') }
         $ErrorActionPreference = 'Continue'
-        $global:LASTEXITCODE = 0
-        & $path *>&1 | ForEach-Object { Write-GatewayLog ([string]$_) }
-        $code = $global:LASTEXITCODE
-        if ($null -eq $code) { $code = 0 }
-        [pscustomobject]@{ exitCode = [int]$code }
+        $exe = Join-Path $PSHOME 'powershell.exe'
+        & $exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path 2>&1 | ForEach-Object { Write-GatewayLog ([string]$_) }
+        [pscustomobject]@{ exitCode = [int]$LASTEXITCODE }
         """, NeedsAdminModule: false);
 
     private readonly PowerShellRunner _runner;
@@ -74,6 +83,7 @@ public sealed class CustomerScripts
         var name = stage == GatewayScriptStages.Before ? "before script" : "after script";
         GatewayScriptResult Failed(string message, int? exitCode = null)
         {
+            message = GatewayStepText.Cap(message)!;
             progress($"FAILED The {name} {path}: {message}");
             return new GatewayScriptResult { Stage = stage, Path = path, Outcome = GatewayScriptOutcomes.Failed, ExitCode = exitCode, Message = message };
         }
@@ -82,17 +92,25 @@ public sealed class CustomerScripts
         {
             return Failed("it does not exist, so it was not run.");
         }
-        var problems = new List<string>();
-        if (_access.Problem(path) is { } own) problems.Add(own);
-        if (GatewayPolicySource.WindowsFolderOf(path) is { } folder && _access.Problem(folder) is { } inFolder) problems.Add(inFolder);
+        // The script, its folder and every folder above it, up to the drive root.
+        var problems = FileAccessChecks.ScriptProblems(_access, path);
         if (problems.Count > 0)
         {
             return Failed("someone other than administrators can change it, so it was not run. " + string.Join(" ", problems));
         }
 
         progress($"Running the {name} {path}.");
-        var ran = await _runner.RunAsync(Run, new PowerShellTarget(PowerShellEdition.WindowsPowerShell, null),
-            new JsonObject { ["path"] = path }, _timeout, line => progress($"{name}: {line}"), ct).ConfigureAwait(false);
+        PowerShellResult ran;
+        try
+        {
+            ran = await _runner.RunAsync(Run, new PowerShellTarget(PowerShellEdition.WindowsPowerShell, null),
+                new JsonObject { ["path"] = path }, _timeout, line => progress($"{name}: {line}"), ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The result still matters: what ran before it went through.
+            return Failed("it was stopped, with everything it started, because the command was stopped while it ran.");
+        }
         if (ran.TimedOut)
         {
             return Failed($"it did not finish within {ServiceControlScript.Duration(_timeout)} and was stopped, with everything it started.");

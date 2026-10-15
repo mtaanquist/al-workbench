@@ -151,3 +151,26 @@ public static class GatewayScriptOutcomes
     /// <summary>Not run, because something before it did not go through.</summary>
     public const string NotRun = "not-run";
 }
+
+/// <summary>
+/// The length a step's message is cut to (a script's error, a tier's failure), on the
+/// gateway before the result is sent and in AL Workbench before it is stored: a script
+/// can write megabytes to its error stream, and a result must stay well inside
+/// <see cref="GatewayProtocol.MaxRequestBodyBytes"/>. The whole output is in the command's log.
+/// </summary>
+public static class GatewayStepText
+{
+    public const int MaxMessageChars = 2_000;
+
+    /// <summary><paramref name="text"/>, or its first <see cref="MaxMessageChars"/> characters ending in "...".</summary>
+    public static string? Cap(string? text) => Cap(text, MaxMessageChars);
+
+    /// <summary><paramref name="text"/>, or its first <paramref name="max"/> characters ending in "...".</summary>
+    public static string? Cap(string? text, int max)
+    {
+        if (text is null || text.Length <= max) return text;
+        var cut = max - 3;
+        if (char.IsHighSurrogate(text[cut - 1])) cut--;
+        return text[..cut] + "...";
+    }
+}

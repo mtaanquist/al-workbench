@@ -6,6 +6,13 @@ namespace ALWorkbench.Gateway.Core.Policy;
 /// <summary>Allowed, or refused with a sentence saying why.</summary>
 public sealed record PolicyDecision(bool Allowed, string? Reason)
 {
+    /// <summary>
+    /// The policy the decision was judged against (set by <see cref="IGatewayPolicy.Check"/>).
+    /// A verb reads tiers, databases and scripts from this one, never from a later
+    /// <see cref="IGatewayPolicy.InForce"/>, so what it acts on is what was allowed.
+    /// </summary>
+    public GatewayPolicy? Policy { get; init; }
+
     public static readonly PolicyDecision Allow = new(true, null);
 
     public static PolicyDecision Refuse(string reason) => new(false, reason);
