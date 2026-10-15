@@ -1,12 +1,32 @@
+/* The icon sits on the first line of the note, however many lines it wraps to. */
 .gw-refresh-note {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: var(--space-2);
     margin: 0 0 var(--space-3);
 }
 
+.gw-refresh-note ::deep svg {
+    flex: none;
+    margin-top: 0.2em;
+}
+
 .gw-tiers {
     overflow-x: auto;
+}
+
+/* "4 (1 no longer reported)" wraps on a phone rather than being cut short. */
+.gw-meta-wrap {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+}
+
+/* A tier's cell can run to several lines (machine, what was not read); the
+   table's fixed row height has no vertical padding to keep them off the borders. */
+.gw-tiers tbody td {
+    padding-top: var(--space-2);
+    padding-bottom: var(--space-2);
 }
 
 .gw-tiers .tag {
@@ -57,9 +77,10 @@
         border-bottom: 0;
     }
 
+    /* Label and value on one line; a long value wraps inside its own column. */
     .gw-tiers tbody td {
         display: flex;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
         gap: var(--space-1) var(--space-2);
         align-items: baseline;
         width: auto;
@@ -76,6 +97,6 @@
     .gw-tiers tbody td[data-label]::before {
         content: attr(data-label) ":";
         color: var(--ink-3);
-        min-width: 8rem;
+        flex: 0 0 8rem;
     }
 }

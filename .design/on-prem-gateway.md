@@ -529,7 +529,11 @@ an error instead of being read.
 
 **When.** At start once approved, then every 15 minutes, two minutes after a round that could not
 be sent, and after every command that is not itself a refresh (anything a verb does may change
-what a tier looks like). Not while the gateway's files are unsafe. A round is not a command: it
+what a tier looks like). Not while the gateway's files are unsafe, and not while no policy is in
+force (no `gateway.toml`, or a broken one with no earlier good version): an empty roster would have
+AL Workbench mark every tier missing, so the gateway reports nothing and AL Workbench keeps what it
+last knew; a `refresh-inventory` then fails saying so. A valid file that lists no tiers is different,
+and its empty roster is meant. A round is not a command: it
 runs between polls, like one, with heartbeats going on. A restarted gateway therefore inventories
 first, which is what "Run once, across restarts" needs; the server queues nothing for it.
 
@@ -549,12 +553,23 @@ at 2 MB, against the 4 MB body limit) is split by tenants, the whole tenant list
 each tenant's apps in exactly one. One post per tier every 15 minutes is far inside the gateway rate
 limit.
 
+**A refused tier does not stop the round.** A tier AL Workbench refuses (a 4xx such as a report
+over a limit, or a 500 it answers for that report) is logged (event 1008) and skipped, and the round
+goes on to the next tier; it is sent again with the next reading, not in two minutes. Only an
+AL Workbench that cannot be reached, or a 502, 503 or 504 from in front of it, ends the round for the
+two-minute retry. A 409 means two posts created the same new tier, tenant or app at the same moment
+(the unique index caught it, nothing of that post was kept); the gateway sends it again, up to three
+times.
+
 **Bounds.** The gateway cuts each list to its limit (`GatewayInventoryLimits`: 1,000 tenants per
 tier, 1,000 apps per tenant, 500 session users, 512 KB of licence text, 200 tiers) and flags what it
 cut (`tenantsTruncated`, `appsTruncated`, `truncated`). AL Workbench refuses a report over any limit
 whole, with a field-keyed 400: only a gateway that does not cut can send one, and refusing is
-clearer than storing part of it silently. A cut list marks nothing missing, since what was cut is
-unknown.
+clearer than storing part of it silently. So is a report with no list of tiers, a licence without its
+text, or a PowerShell version word over 10 characters. Every other text field is cut to 1,000
+characters on the server whatever the gateway sent. A cut list marks nothing missing, since what was
+cut is unknown; the script says when it stopped at the tenant limit (`tenantsTruncated`), so tenants
+past it are not marked missing either.
 
 **Storing.** `GatewayInventoryService` upserts by gateway + machine + instance, tenant id, and app id
 + version, all without regard to case, so ids are stable and the latest spelling is kept. What is
@@ -572,14 +587,20 @@ read wrongly is fixed with a deployment rather than a manual update on every cus
 It reads the licensee, serial number, expiry date (ISO, day-first with `-` or `.`, `/` when only one
 reading is possible; one that reads both ways is a parse problem rather than a guess) and object
 ranges by type (`50000 50099`, `50000..50099` or `50000-50099`, with the permissions after them).
-What it cannot read is kept as parse problems next to the text.
+What it cannot read is kept as parse problems next to the text. Lines over 1,000 characters are
+skipped (both patterns backtrack on long runs of spaces), each match has a 200 ms limit, and a year
+outside 1900 to 9999 is a parse problem rather than a date.
 
 **The page.** The gateway's name on Administration → Gateways opens its page
 (`/admin/administration/gateways/{id}`, Admin only): status, last seen, version, and a table of
 tiers with machine, version, state, database, tenants, installed apps, licence expiry (marked when
 expired or within 30 days), when it was last read and whether it is missing, with the parts not
-read listed under a tier. Empty states say what to do for a gateway still waiting for approval, a
-revoked one, and one that has not reported yet.
+read listed under a tier. A tier that could not be read says why in plain words (the server took too
+long, there is no such service, the program files are not safe) and what to do, with the gateway's
+own message under "What the gateway said". Empty states say what to do for a gateway still waiting
+for approval, a revoked one, an offline one (check that the service is running on that server), and
+one that has not reported yet; a refresh asked of an offline gateway says it will read when it
+reconnects.
 
 **`ALWorkbench.Gateway check --inventory <folder>`** runs the script for every readable tier on this
 computer and writes each raw result to `inventory-<machine>-<instance>.json`. It sends nothing. That

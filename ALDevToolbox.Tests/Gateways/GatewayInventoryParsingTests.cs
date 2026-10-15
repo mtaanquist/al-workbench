@@ -295,6 +295,21 @@ public sealed class GatewayInventoryParsingTests
         InventoryNormaliser.FromScriptOutput(output, Tier("BC250")).TenantsTruncated.Should().BeFalse();
     }
 
+    [Theory]
+    [InlineData("PowerShell did not finish in time and was stopped.", "took too long")]
+    [InlineData("CRONUS-BC02 is another computer. This version of the gateway reads only the service tiers on its own computer (CRONUS-BC01).", "another computer")]
+    [InlineData("There is no Business Central service for BC999 on CRONUS-BC01 (no Windows service MicrosoftDynamicsNavServer$BC999).", "no Business Central service by this name")]
+    [InlineData("Someone other than administrators can change the Business Central administration module the gateway would load for this tier, so it does not run anything there.", "for safety")]
+    [InlineData("System.Management.Automation.RuntimeException: boom", "Try Refresh now")]
+    public void A_read_error_is_told_to_the_admin_in_plain_words(string raw, string expected)
+    {
+        var plain = ALDevToolbox.Components.Pages.Admin.Administration.GatewayStatusText.PlainReadError(raw);
+
+        plain.Should().MatchRegex("^(Could not be read|Not read)");
+        plain.Should().Contain(expected);
+        plain.Should().NotContain("PowerShell").And.NotContain("Exception").And.NotContain("$");
+    }
+
     // ---------------------------------------------------------------- a round that AL Workbench refuses in part
 
     private static Func<GatewayInventoryReport, CancellationToken, Task> Refusing(string instance, Exception refusal, List<GatewayInventoryReport> taken) =>
