@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363) and the inventory (#1365) exist; the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365) and linking service tiers to a Solution (#1366) exist; the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -683,6 +683,44 @@ everywhere.
   delete, ring, geo) stay null for on-premises rows. Our own delivery window
   (`UpdateWindowStart/End`) applies to both.
 
+#### As built (#1366)
+
+`OnPremisesEnvironmentService` (`Services/Gateways/`) links and unlinks; the Solution's
+**Environments** tab (`ProjectDetailEnvironments.razor`, on-premises Solutions only, readable by
+anyone who can see the Solution) is where an Admin does it, with one "Link service tier" button and
+a picker grouped by gateway that names each choice `SERVER / INSTANCE`, plus the tenant on a
+multitenant server. Where it differs from, or adds to, the decision above:
+
+- **The unique index is also filtered to `missing_since IS NULL`**
+  (`ix_oe_project_environments_gateway_tenant`: `kind = 'OnPremises' AND missing_since IS NULL`).
+  Filtered to the kind alone, an unlinked row would hold its tier forever, and a customer who moves
+  from one Solution to another could never be linked to the new one. Linking the tier back to the
+  Solution that had it still revives that Solution's own row.
+- **`gateway_instance_id` is `ON DELETE SET NULL`.** Inventory rows are never deleted today, but a
+  gateway deleted outright must not take a Solution's environment (and its pipelines' target) with
+  it.
+- **Linking needs on-premises hosting.** A Solution set to Microsoft's cloud is refused with a
+  `HostingType` error, the mirror of the rule below that refuses Microsoft cloud while a tier is
+  linked.
+- **Status:** a tier the gateway reads as `Running` is stored as `Active`, the word the existing
+  checks treat as running; any other state (`Stopped`, `Starting`, ...) is kept as the server said
+  it. `BcEnvironmentStatus.StatusWord` and the list's row state learned those words.
+- **Apps:** only installed apps that are still reported are mirrored, one row per app id (the
+  installed version, else the newer). A tenant whose apps were never read, or read as none, leaves
+  the mirror alone, as an online read with no apps does.
+- **Freshness:** an on-premises row says "Gateway offline since <time>" when its gateway is offline
+  (the gateway's own state, `GatewayService.StatusOf`), "Not read since <time>" when the gateway is
+  online but the tier has not been read for an hour, and that the gateway "no longer reports" it when
+  the instance is stamped missing. Those three are the only states with a warning colour.
+- **Deploying is refused for now.** `DeliveryService` refuses an on-premises target, both when a
+  release is resolved and when a scheduled one is claimed, with "... Deploying to on-premises through
+  the gateway isn't available yet, so nothing was sent."; the pipeline editor does not offer an
+  on-premises target. Both lift with #1374 and #1367.
+- **What the environment page shows:** Overview (the service tier, its database, tenant, sessions,
+  licence expiry and the gateway), Apps (from the mirror) and Workbench history. Operations and
+  Sessions are Business Central online's live reads and are not offered; an address naming them lands
+  on Overview. Upload and Copy are not offered.
+
 ### Readers of `OeProjectEnvironments`
 
 Every reader decides whether on-premises rows belong:
@@ -694,7 +732,7 @@ Every reader decides whether on-premises rows belong:
 | `UpgradeFleetService`, `EnvironmentUpgradeService`, `UpgradeActionService`, `UpgradeActionWorker` (Upgrades page) | **Excluded** - Microsoft's platform updates only |
 | `EnvironmentUpdateNotifier` | **Excluded** - Microsoft's update notices only |
 | `HeldInstalls` | **Excluded** - Microsoft's deferred schedules only |
-| `DeliveryService`, `ReleasePipelineService` | Included, through the delivery seam (#1374, #1367) |
+| `DeliveryService`, `ReleasePipelineService` | Included, through the delivery seam (#1374, #1367). **Until then refused** with a plain message, and the pipeline editor does not offer an on-premises target |
 | `PipelinesDashboardService` | Included |
 | `ProjectCustomerInfoService` (production facts) | Included, with a new predicate: today `ReadProductionFactsAsync` requires `MicrosoftCloud` hosting and a configured connection (`ConfiguredProjects`); it becomes *(online, configured, Production row)* or *(on-premises, linked Production row)* |
 | `ArtifactService` (what is shipped to production) | Included |
@@ -720,6 +758,13 @@ Every reader decides whether on-premises rows belong:
   exists. It changes to: refused while any **online** row exists. The mirror rule is new: switching to
   Microsoft cloud is refused while any **on-premises** row is linked.
 - Not coming back: the Upgrades page (Microsoft's platform updates), which stays online-only.
+
+As built (#1366): both hosting rules are in `ProjectCustomerInfoService.SaveBasicsAsync`, and the
+Microsoft-cloud refusal says an administrator can unlink the tiers on the Environments tab.
+`ReadProductionFactsAsync` takes *(online, configured, Production)* or *(on-premises hosting, linked
+Production)*, and `CustomerModuleService` reads module versions from the linked Production tier
+while one exists (typed module versions are refused meanwhile and come back on unlink). The Solution
+gains an **Environments** tab in place of the Business Central tab, and the palette offers it.
 
 ## Deploying to on-premises
 
@@ -811,7 +856,11 @@ server configuration (`Set-NAVServerConfiguration`) is out of scope.
 ## MCP parity
 
 - **Reads:** `list_environments`, `get_environment`, `get_solution` and the deployment reads include
-  on-premises environments, marked `onPremises: true`, with the gateway's online state.
+  on-premises environments, marked `onPremises: true`, with the gateway's online state. As built
+  (#1366): `list_environments` and `get_environment` carry `onPremisesTier` (gateway, whether it is
+  online and when it was last seen, server, instance, tenant, the customer's own word for the tier,
+  database, when it was read, whether it is still reported, and the licence expiry); `get_solution`'s
+  environments carry `onPremises` and `gatewayOnline`.
 - **Deploy:** `deploy_build` and `list_deployments` work for on-premises targets **except
   production**. `agents_may_deploy_to_production` does not cover on-premises targets: a deployment
   there also restarts the customer's tiers, and that starts as a person's decision in the web UI.

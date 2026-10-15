@@ -57,14 +57,22 @@ Workspace must keep working with none of them set.
 disagree. Null counts as online because every Solution that exists today is, and must
 not lose its tabs on the day this ships.
 
-**What on-premises turns off.** The Business Central tab, release pipelines, and the
-Solution's rows on Environments and Upgrades - the surfaces that call the admin API.
-General, Repositories, Customer (below) and Access stay; so do pipelines that only build.
-Setting an on-premises hosting type is refused while Business Central online reports
-environments for the Solution, rather than silently hiding live ones. The on-premises
-gateway (`on-prem-gateway.md`, being built in milestone #8) brings environments and
-deployment pipelines back for an on-premises Solution with linked service tiers; that
-document has the revised rule, and this section changes with it when #1366 ships.
+**What on-premises turns off.** The Business Central tab (the online connection: tenant,
+Entra app, secret), the Upgrades page (Microsoft's platform updates), and release
+pipelines that deploy - the surfaces that call the admin API. General, Repositories,
+Customer (below) and Access stay; so do pipelines that only build.
+
+An on-premises Solution gets an **Environments** tab instead, where an org Admin links the
+customer's service tiers from an on-premises gateway (`on-prem-gateway.md`, "An on-premises
+environment is an OeProjectEnvironment row"). A linked tier is an environment like any
+other on the Environments list, the environment page, the palette and the MCP reads,
+showing only what on-premises has. Deploying to one waits for #1367.
+
+The two hosting rules mirror each other, so a Solution never has both kinds of
+environment: setting an on-premises hosting type is refused while Business Central
+**online** reports environments for the Solution (rather than silently hiding live ones),
+and setting Microsoft's cloud is refused while an **on-premises** service tier is linked
+(an Admin unlinks them first).
 
 **The tenant id is not the test.** It is the customer's Microsoft tenant, and most
 on-premises customers have one too. It stays the one `bc_tenant_id` column: the Business
@@ -77,20 +85,22 @@ at the next update. So a Solution shows the version and the address of its produ
 environment, as the mirror last read them (`oe_project_environments.version` and
 `web_client_login_url`, rewritten by every refresh), when all of these hold:
 
-- it is online (`hosting_type` `MicrosoftCloud` or null);
-- its connection is configured - a tenant id and a registration with a stored secret, its
-  own or the organisation's. The same test the nightly refresh uses to pick what to sweep
+- it is online (`hosting_type` `MicrosoftCloud` or null) and its connection is configured
+  - a tenant id and a registration with a stored secret, its own or the organisation's.
+  The same test the nightly refresh uses to pick what to sweep
   (`ProjectConnectionService.ConfiguredProjects`); it asks whether a secret is stored and
-  never decrypts one;
-- it has a **Production** environment that is still there (not missing, not soft-deleted)
-  and has reported a version or an address. Among several, the first by name.
+  never decrypts one. **Or** it is on-premises and the environment below is a linked
+  service tier, whose version and address the gateway's inventory writes (#1366);
+- it has a **Production** environment that is still there (not missing, not soft-deleted;
+  for a service tier, still linked) and has reported a version or an address. Among
+  several, the first by name.
 
 Only Production counts: a sandbox's version is not what support means by "the customer's
 version", so a sandbox-only tenant keeps what was typed. The address is the login URL
 Microsoft returns for the environment, not a vanity address a customer may also use.
 
-Otherwise - on-premises, no connection yet, no production environment yet - the typed
-values show, exactly as before. The typed columns are **kept, not blanked**, while
+Otherwise - on-premises with no linked Production tier, no connection yet, no production
+environment yet - the typed values show, exactly as before. The typed columns are **kept, not blanked**, while
 Business Central's win: if the connection is later removed they come back rather than the
 field going empty, and the save leaves both alone in that state, so a form opened before
 the connection was made cannot overwrite them.
@@ -182,7 +192,9 @@ widespread first. **Add by hand** is for an old NAV add-on that is not an app.
 Which modules a Solution has comes from one of two places, never both:
 
 - **On-premises Solutions** - typed in. `oe_project_modules`: a catalogue module, a
-  version, a note; one row per module. Manage-gated.
+  version, a note; one row per module. Manage-gated. **With a linked Production service
+  tier** (#1366) they are read from it the way an online Solution's are, and typing is
+  refused; the typed rows are kept and come back when the tier is unlinked.
 - **Online Solutions** - read, not typed, and the service refuses a typed row. The list is
   the catalogue matched against `oe_environment_apps` for the Solution's production
   environment (a sandbox only when there is no production): by app id, or by name and
