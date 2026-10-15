@@ -78,6 +78,10 @@ internal sealed class GatewayWorker : BackgroundService
             [ALWorkbench.Gateway.Contracts.GatewayVerb.PublishInstall] = new PublishInstallVerb(policy, powerShell, locator, Environment.MachineName, restarts, scripts),
             [ALWorkbench.Gateway.Contracts.GatewayVerb.RestartGroup] = new RestartGroupVerb(policy, restarts),
             [ALWorkbench.Gateway.Contracts.GatewayVerb.ImportLicence] = new ImportLicenceVerb(policy, powerShell, locator, Environment.MachineName, restarts),
+            // Restart, stop and start one tier from the environment page (#1371).
+            [ALWorkbench.Gateway.Contracts.GatewayVerb.RestartInstance] = new ServiceTierVerb(policy, restarts),
+            [ALWorkbench.Gateway.Contracts.GatewayVerb.StopInstance] = new ServiceTierVerb(policy, restarts),
+            [ALWorkbench.Gateway.Contracts.GatewayVerb.StartInstance] = new ServiceTierVerb(policy, restarts),
         });
         var runner = new GatewayRunner(
             http,
