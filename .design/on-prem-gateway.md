@@ -899,16 +899,58 @@ does not write the status back: the row is already written from the same invento
 (after skip-if-already-installed, so an app the mirror shows on the build's version is never in the
 command): the gateway target queues one `publish-install` with `GatewayPublishInstallParameters`,
 each app's id, publisher and version read from its manifest, and `signed` from the `.app` header.
-`StartInstallAsync` then sends nothing and only notes the app; the first `WaitForInstallAsync` waits
-for the whole command, passing its progress lines on as they arrive, and each wait answers with its
-own app's line of the command's result. A failed app short-circuits the rest exactly as online: the
-gateway stops at the first failure and the run marks what follows Skipped. A command that failed
-before the verb ran (expired uncollected, the gateway restarted, refused by the policy check) has no
-result, and its message becomes the first app's failure. The run waits for the command rather than
-per app; the queue ends a command long before, and a 24-hour limit stops a run waiting for ever with
-the sweep switched off. A command queued in the delivery window must be claimed before the window
-closes (`GatewayCommandService.ClaimDeadline`), so a gateway that comes back after the window does
-not install outside it.
+It answers a `DeliveryHandOff` naming the command; online answers null and the run goes on app by
+app exactly as before. A `DeliveryTargetRefusedException` from it refuses the whole batch before
+anything is sent: the first app is Refused, the rest Skipped.
+
+**The run hands off; a follower finishes.** A command can run for hours (a large data upgrade), so
+no `DeliveryWorker` lane waits on it. With a hand-off the run marks every app Installing, stores the
+command on the deployment (`oe_project_deliveries.gateway_command_id`, plus `gateway_log_offset`,
+how much of the command's progress is already copied), logs "Waiting for the gateway to pick it
+up." and returns, releasing its lane and its `DbContext`. `GatewayDeliveryFollower`
+(`Services/ObjectExplorer/Delivery/`), a `PolledScheduler` on a 5-second poll that opts out with
+`DISABLE_GATEWAY_DELIVERY_FOLLOWER=1`, visits each organisation inside its
+`AmbientOrganizationScope` and calls `DeliveryService.FollowGatewayDeliveriesAsync`: new progress
+lines are appended to the deployment log ("Gateway: ...", which the page polls as before), and once
+the command has ended each Installing app takes its own line of the result, in order, through the
+same outcome mapping and first-failure Skipped as online, then the deployment settles and
+`DeploymentNotifier` tells the person behind it. A scheduler rather than a hook in the command
+service's completion path because three of the four things it does need a clock: copying progress
+while the command runs, finishing a command that ended without the gateway ever reporting (expired,
+interrupted, revoked), and giving up after a day. The completion path would cover only the fourth.
+
+There is no foreign key from the deployment to the command: a command that is no longer there reads
+as an unknown outcome rather than blocking a delete. One small gap remains: the command is saved
+before the deployment's `gateway_command_id`, with only in-memory work between them; a crash in that
+instant leaves a queued command no deployment follows, which the queue then expires uncollected.
+
+**Restarts and the one-deployment rule.** On start, `FailInterruptedDeliveriesAsync` fails a
+deployment that was mid-run, except an Installing one with a `gateway_command_id`: its command is
+still the gateway's, so the follower keeps following it. While such a deployment is Installing,
+another deployment to the same environment stays scheduled rather than starting, which is the
+existing one-deployment-per-environment rule, now holding across a restart.
+
+**Giving up.** A deployment still waiting 24 hours after it handed off is given up. A command still
+Queued is cancelled first (`GatewayCommandService.CancelQueuedAsync`, a compare-and-set from Queued
+to Failed), so the apps fail with "AL Workbench stopped waiting after a day, and the gateway had not
+picked this up, so nothing was sent." A command the gateway already collected cannot be pulled back,
+so its apps are Unconfirmed instead (below). A command queued in the delivery window must be claimed
+before the window closes (`GatewayCommandService.ClaimDeadline`), so a gateway that comes back after
+the window does not install outside it; the queue's own sweep expires it, and the follower reads that
+as nothing sent.
+
+**Unconfirmed.** A command that ended with no result is mapped by whether it ever left the queue
+(`GatewayCommandProgress.LeftQueue`: claimed, or Claimed/Running). Never collected: the command's
+message becomes the first app's failure and the rest are Skipped. Collected and then lost (the
+gateway restarted mid-run, went quiet): each app is **Unconfirmed**, "Not confirmed: the gateway
+stopped before it said what became of this app. Check the environment's apps after the gateway's
+next inventory.", and the deployment fails with "...whether the apps went in is not known. Check the
+apps on {environment} after the gateway's next inventory, then deploy again if they are not there."
+The deployment status stays Failed (no new terminal status, which a dozen readers would have to
+learn); the page reads it as "Not confirmed" and the banner as "Last deployment not confirmed". The
+same reading applies to an online deployment a restart left with Unconfirmed apps. A collected
+command whose message ends "Nothing was changed." is the exception: the verb refused before doing
+anything, so a settings refusal reads as Refused and anything else as Failed.
 
 **Files are referenced, not copied.** A command file names its `project_build_artifacts` row
 (`gateway_command_files.project_build_artifact_id`, `ON DELETE SET NULL`) and stores no content. The
@@ -942,8 +984,11 @@ so nobody assumes a BC 14 tier has dropped its old subscribers.
   `WaitsForUpdateRefusal`. Moving a held deployment (`MoveHeldInstallAsync`) checks the capability
   first and throws a `PlanValidationException` rather than asking the target for held installs.
 - **ForceSync:** offered by the editor only when the tier's settings allow it; refused on save, when
-  a deployment is resolved, and for a one-time "deploy with Force sync" (`CreateDeliveryAsync`), and
-  the gateway refuses it again itself. The "Deploy again with Force sync" button only appears for
+  a deployment is resolved, for a one-time "deploy with Force sync" (`CreateDeliveryAsync`), and once
+  more when the run claims the deployment, since the customer may have changed the settings in
+  between: `PrepareInstallsAsync` then refuses the batch ("Not allowed by the customer's gateway
+  settings: {tier} does not allow Force sync, so nothing was sent.") and the app shows as Refused.
+  The gateway refuses it again itself. The "Deploy again with Force sync" button only appears for
   Business Central online's `ExtensionChangeFailed`, so it never appears on-premises.
 - **Offline gateway:** `ConnectAsync` refuses at once when the gateway is offline, revoked or not yet
   approved, and nothing is queued: "The gateway was offline, so nothing was sent. Check that the
@@ -953,19 +998,41 @@ so nobody assumes a BC 14 tier has dropped its old subscribers.
 
 **Open sessions** come back as `OpenSessionsCheck` (sessions and tiers) instead of a list of
 `BcSession`: the target sums the sessions of every tier the gateway reports on the environment's
-database (matched on database server, instance and name; a server named only as this machine counts
-only on the same gateway), so a session on a non-publishing tier still holds the deployment.
+database, so a session on a non-publishing tier still holds the deployment. Tiers are matched on a
+key from `DatabaseKey.For` (`Services/Gateways/`): a `tcp:` prefix and `,port` suffix are dropped,
+`host\instance` is split, the local spellings (`.`, `(local)`, `localhost`, `127.0.0.1`, `::1`) become
+the reporting gateway's machine, the host compares on its first DNS label case-insensitively (an IP
+address whole), a null instance, `""` and `MSSQLSERVER` are one default instance, and the database
+name compares case-insensitively. A tier whose gateway is not online is not counted, because its
+session count is stale; the confirmation says how many were left out ("1 more service tier on the
+same database was not counted, because its gateway is offline.") and asks to confirm.
 
 **The editor** (`ReleasePipelineEdit.razor`) offers linked on-premises tiers as targets, marked
-"(on-premises, production/test)", names the gateway and the publishing tier under the picker, warns
+"(on-premises, production/test)", says under the picker 'Sent through the "{gateway}" gateway to
+{server} / {tier}.' (plus "{tier} shares a database with {publisher}; apps are published on
+{publisher}." when another tier publishes), warns
 when the tier is unlinked, outside the gateway's settings, or its gateway is revoked, waiting for
 approval or offline (the pipeline can still be saved), offers only *Now* and the delivery window,
 offers Force sync only when allowed, and has **"Remove the previous version after upgrading"**
 (`oe_release_pipelines.unpublish_previous`, default on, sent as `unpublishPrevious`). A pipeline
-whose saved schedule is deferred has to have it chosen again before it saves. The deployment page
-names the tier "through its gateway", labels the steps "Sent to the gateway" rather than "Uploaded",
-and while a run is active shows the last lines "Latest from the gateway". The pipelines dashboard
-already included every environment kind.
+whose saved schedule is deferred has to have it chosen again before it saves. Add is described by
+what it does (`Sync-NAVApp -Mode Add` applies additive schema changes and fails on a destructive
+one): "new tables and fields only; a change that would remove data stops the deployment". At phone
+width the editor's head is no longer pinned (`.page-head--sticky` unpins below 700px for every edit
+page) and its cards and selects shrink to the viewport.
+
+The deployment page names the tier "through its gateway", labels the steps "Picked up" and "Sent to
+the gateway" rather than "Claimed" and "Uploaded", says "Running for" while a run is active, and
+shows the last lines "Latest from the gateway". The pipeline's facts show the delivery window only
+when deployments install in it. When the gateway is not online, the environment's health reads
+"Gateway offline, last heard from {time}" rather than the tier's last reported state. A deployment
+the customer's gateway settings refused offers no "Deploy again" (the same build meets the same
+rule); its suggested next step comes from `GatewayRefusalAdvice` by kind: publisher, signer,
+unsigned, Force sync, or a generic "ask the customer's IT to allow this in the gateway settings for
+{tier}". A failure with no app to name (the gateway was offline) gives its reason in the banner. A
+deployed run that did not restart the tiers adds "Restart the service tiers, or ask the customer's
+IT to, when users can be signed out." The pipelines dashboard already included every environment
+kind.
 
 **Seam questions from #1374, answered:**
 
@@ -976,12 +1043,14 @@ already included every environment kind.
   fields for on-premises.
 - *Status write-back:* only when the target read the status live (`ReadLive`), which is online only.
 - *Sessions:* `OpenSessionsCheck` replaces the session list, so the check can span tiers.
-- *Batching:* `PrepareInstallsAsync`, once per run, a no-op online.
-- *Progress:* `WaitForInstallAsync` takes an `onProgress` callback; the run appends the lines to the
-  deployment log as they arrive, which is what the page polls.
+- *Batching:* `PrepareInstallsAsync`, once per run, a no-op online (it answers null).
+- *Progress:* `WaitForInstallAsync` takes an `onProgress` callback online. On-premises the run hands
+  off instead, and the follower appends the gateway's lines to the deployment log, which is what the
+  page polls; the gateway target's `StartInstallAsync` and `WaitForInstallAsync` are never called.
 
 **Migration** `20270205000000_DeployToOnPremises`: `oe_release_pipelines.unpublish_previous`
-(default true), `oe_project_deliveries.tiers_restarted`, and
+(default true), `oe_project_deliveries.tiers_restarted`, `gateway_command_id` (no foreign key, as
+above) and `gateway_log_offset` (default 0), and
 `gateway_command_files.project_build_artifact_id` with its index and foreign key.
 
 ### The `publish-install` verb, as built (#1375)
