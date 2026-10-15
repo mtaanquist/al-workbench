@@ -225,6 +225,7 @@ public class AppDbContext : DbContext
     public DbSet<OeReleasePipeline> OeReleasePipelines => Set<OeReleasePipeline>();
     public DbSet<OeProjectDelivery> OeProjectDeliveries => Set<OeProjectDelivery>();
     public DbSet<OeProjectDeliveryResult> OeProjectDeliveryResults => Set<OeProjectDeliveryResult>();
+    public DbSet<OeProjectLicense> OeProjectLicenses => Set<OeProjectLicense>();
     public DbSet<OeProjectRepository> OeProjectRepositories => Set<OeProjectRepository>();
     public DbSet<OeProjectBuildResult> OeProjectBuildResults => Set<OeProjectBuildResult>();
     public DbSet<OeProjectSymbol> OeProjectSymbols => Set<OeProjectSymbol>();
@@ -367,6 +368,7 @@ public class AppDbContext : DbContext
         ScopeToOrganization<OeReleasePipeline>(modelBuilder);
         ScopeToOrganization<OeProjectDelivery>(modelBuilder);
         ScopeToOrganization<OeProjectDeliveryResult>(modelBuilder);
+        ScopeToOrganization<OeProjectLicense>(modelBuilder);
         ScopeToOrganization<OeProjectRepository>(modelBuilder);
         ScopeToOrganization<OeProjectBuildResult>(modelBuilder);
         ScopeToOrganization<OeProjectSymbol>(modelBuilder);

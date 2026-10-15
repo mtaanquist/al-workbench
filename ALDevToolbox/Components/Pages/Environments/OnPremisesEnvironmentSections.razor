@@ -78,7 +78,31 @@ else
     <span class="meta-item"><span class="meta-item__label">Tenant</span><span class="meta-item__value">@TenantText(tier)</span></span>
     <span class="meta-item"><span class="meta-item__label">Delivery window</span><span class="meta-item__value">@DeliveryWindow</span></span>
     <span class="meta-item"><span class="meta-item__label">Apps installed</span><span class="meta-item__value">@(Apps is { Count: > 0 } a ? a.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "—")</span></span>
+    <span class="meta-item"><span class="meta-item__label">Licence expires</span><span class="meta-item__value">@* The date alone: the alert below says how soon. *@@(tier?.LicenceExpiresOn is { } headExpires ? LicenceDate(headExpires) : tier is null ? "—" : LicenceText(tier))</span></span>
 </div>
+
+@* A licence that runs out stops everyone signing in, so a month ahead it is said above
+   the tabs, on every tab, with the way to fix it. *@
+@if (tier?.LicenceExpiresOn is { } expiresOn && expiresOn.DayNumber - Today.DayNumber <= OnPremisesLicenceService.ExpiryWarningDays)
+{
+    var daysLeft = expiresOn.DayNumber - Today.DayNumber;
+    <Alert Tone="@(daysLeft <= 0 ? AlertTone.Danger : AlertTone.Warn)" Block="true">
+        <span>
+            <b>@(daysLeft <= 0
+                ? $"The Business Central licence expired on {LicenceDate(expiresOn)}."
+                : $"The Business Central licence expires on {LicenceDate(expiresOn)}, in {(daysLeft == 1 ? "1 day" : $"{daysLeft} days")}.")</b>
+            @(daysLeft <= 0 ? " Nobody can sign in to Business Central until a new one is imported." : " Ask the customer for their new licence file.")
+            @if (CanManage)
+            {
+                <text> Upload it under </text><b>Licence</b><text> on the Overview tab.</text>
+            }
+            else
+            {
+                <text> Someone who manages this solution can upload it here.</text>
+            }
+        </span>
+    </Alert>
+}
 
 }
 else if (!ShowApps)
@@ -119,6 +143,119 @@ else if (!ShowApps)
                 </p>
             }
         </div>
+    </div>
+
+    @* The licence: what the tier runs, the last upload, and the one action. An outline
+       button - nothing on this page is the primary action. *@
+    <div class="card">
+        <div class="card__head">
+            <div>
+                <h2 class="card__title">Licence</h2>
+                <p class="card__sub">The Business Central licence the service tier runs, as the gateway last read it.</p>
+            </div>
+            @if (CanManage && tier is not null)
+            {
+                <button type="button" class="btn btn--sm @(UploadingLicence ? "btn--loading" : "")"
+                        @onclick="OnUploadLicence" disabled="@UploadingLicence">
+                    <Icon Name="upload" Width="14" Height="14" />
+                    <span class="btn__label">@(UploadingLicence ? "Sending the licence" : "Upload licence...")</span>
+                </button>
+            }
+        </div>
+        @if (LicenceError is { } licenceError)
+        {
+            <div class="card__body"><FieldError Message="@licenceError" /></div>
+        }
+        else if (Licence is null)
+        {
+            <div class="card__body"><LoadingBlock Text="Loading the licence..." /></div>
+        }
+        else
+        {
+            @if (Licence.Installed is not { } installed)
+            {
+                <EmptyState Icon="key-round" Title="No licence read yet">
+                    <Text>The gateway reads the licence with the rest of the service tier every 15 minutes while it is online. It appears here after its next reading.</Text>
+                </EmptyState>
+            }
+            else
+            {
+                <div class="card__body">
+                    <div class="kv-grid">
+                        <span class="meta-item"><span class="meta-item__label">Licensed to</span><span class="meta-item__value">@(installed.Licensee ?? "Not stated")</span></span>
+                        <span class="meta-item"><span class="meta-item__label">Expires</span><span class="meta-item__value">@LicenceText(tier!)</span></span>
+                        <span class="meta-item"><span class="meta-item__label">Serial number</span><span class="meta-item__value meta-item__value--mono">@(installed.SerialNumber ?? "Not stated")</span></span>
+                        <span class="meta-item"><span class="meta-item__label">Read</span><span class="meta-item__value"><Timestamp Value="@installed.ReadAt" Relative="true" /></span></span>
+                    </div>
+                    @if (installed.ParseProblems is { } problems)
+                    {
+                        <p class="u-muted onprem__note">Some of the licence could not be read: @problems</p>
+                    }
+                    @if (installed.Ranges.Count > 0)
+                    {
+                        <details class="onprem__ranges">
+                            <summary>Object ranges (@installed.Ranges.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))</summary>
+                            <table class="data-table">
+                                <thead>
+                                    <tr><th scope="col">Object type</th><th scope="col">From</th><th scope="col">To</th></tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var range in installed.Ranges)
+                                    {
+                                        <tr>
+                                            <td>@range.ObjectType</td>
+                                            <td class="u-num">@range.FromId</td>
+                                            <td class="u-num">@range.ToId</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </details>
+                    }
+                </div>
+            }
+            <div class="card__body onprem__upload">
+                @if (Licence.LastUpload is { } upload)
+                {
+                    <p class="onprem__upload-line">
+                        <StatusPill Tone="@UploadTone(upload.State)">@UploadWord(upload.State)</StatusPill>
+                        <span>
+                            Last upload:
+                            @if (Licence.CanManage)
+                            {
+                                <a href="@($"/licences/{upload.Id}/file")" download>@upload.FileName</a>
+                            }
+                            else
+                            {
+                                <span>@upload.FileName</span>
+                            }
+                            by @(upload.UploadedBy ?? "a former member") <Timestamp Value="@upload.UploadedAt" Relative="true" />,
+                            into @OnPremisesLicenceService.Where(upload.LicenceTarget, tier?.TenantId ?? OnPremisesEnvironmentService.DefaultTenant).
+                        </span>
+                    </p>
+                    @if (upload.State is LicenceImportState.Waiting)
+                    {
+                        <p class="u-muted onprem__upload-detail">Waiting for the gateway to pick it up. It checks for work every few seconds while it is online.</p>
+                    }
+                    else if (upload.State is LicenceImportState.Running)
+                    {
+                        <p class="u-muted onprem__upload-detail">The gateway is importing it and restarting the service tiers. This page shows the result when it is done.</p>
+                    }
+                    else if (upload.Message is { } message)
+                    {
+                        <FieldError Class="onprem__upload-detail" Message="@message" />
+                    }
+                }
+                else
+                {
+                    <p class="u-muted onprem__upload-line">No licence has been uploaded here yet.</p>
+                }
+                @if (!Licence.CanManage)
+                {
+                    <p class="u-muted onprem__upload-detail">Only people who manage this solution can upload a licence.</p>
+                }
+            </div>
+        }
     </div>
 }
 else
@@ -182,6 +319,44 @@ else
 
     /// <summary>True for an Admin, who may open the gateway's own page.</summary>
     [Parameter] public bool CanSeeGateway { get; set; }
+
+    /// <summary>The licence card's content; null while it is read. Only read on the Overview tab.</summary>
+    [Parameter] public OnPremisesLicenceView? Licence { get; set; }
+
+    /// <summary>Why the licence could not be read, when it could not.</summary>
+    [Parameter] public string? LicenceError { get; set; }
+
+    /// <summary>True for someone who manages the Solution: they may upload a licence.</summary>
+    [Parameter] public bool CanManage { get; set; }
+
+    /// <summary>True while an upload is being sent.</summary>
+    [Parameter] public bool UploadingLicence { get; set; }
+
+    /// <summary>Opens the upload dialog.</summary>
+    [Parameter] public EventCallback OnUploadLicence { get; set; }
+
+    private DateOnly Today => DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
+
+    private static string LicenceDate(DateOnly date) =>
+        ALDevToolbox.Components.Pages.Admin.Administration.GatewayStatusText.LicenceDate(date);
+
+    private static string UploadTone(LicenceImportState state) => state switch
+    {
+        LicenceImportState.Imported => "success",
+        LicenceImportState.ImportedWithProblems => "warn",
+        LicenceImportState.Failed => "danger",
+        LicenceImportState.Running => "running",
+        _ => "queued",
+    };
+
+    private static string UploadWord(LicenceImportState state) => state switch
+    {
+        LicenceImportState.Imported => "Imported",
+        LicenceImportState.ImportedWithProblems => "Imported, with problems",
+        LicenceImportState.Failed => "Not imported",
+        LicenceImportState.Running => "Importing",
+        _ => "Waiting",
+    };
 
     private static string GatewayHref(OnPremisesTierFacts tier) =>
         $"/admin/administration/gateways/{tier.GatewayId.ToString(System.Globalization.CultureInfo.InvariantCulture)}";

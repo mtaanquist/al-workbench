@@ -78,6 +78,11 @@ public sealed class DeliverToolsTests : IDisposable
                 TimeProvider.System, NullLogger<EnvironmentUpgradeService>.Instance),
             new CustomerModuleService(ctx, _db.OrgContext, access, NullLogger<CustomerModuleService>.Instance),
             new DeliveryFeedService(ctx, access),
+            new ALDevToolbox.Services.Gateways.OnPremisesLicenceService(ctx, _db.OrgContext, access,
+                new ALDevToolbox.Services.Gateways.GatewayCommandService(ctx, _db.OrgContext,
+                    new ALDevToolbox.Services.Gateways.GatewayCommandSignal(), TimeProvider.System,
+                    NullLogger<ALDevToolbox.Services.Gateways.GatewayCommandService>.Instance),
+                TimeProvider.System, NullLogger<ALDevToolbox.Services.Gateways.OnPremisesLicenceService>.Instance),
             access,
             _db.OrgContext,
             NullLogger<DeliverTools>.Instance);

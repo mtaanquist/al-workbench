@@ -29,7 +29,7 @@ Agreed with the maintainer on 2026-10-03:
 | Builds | Build failed, build working again (manual builds and nightly checks; pull request builds are left to GitHub) | #1035 |
 | Deployments | Waiting for approval, deployed, failed | #1036 |
 | Upgrades | A change someone scheduled on an environment ran, failed or could not be confirmed; an environment someone is to check on a planned upgrade reached the target version (ready to check) | #1046, #1047 |
-| Solutions | Update scheduled, update moved, latest date a week away, for solutions you follow | #1049 |
+| Solutions | Update scheduled, update moved, latest date a week away, for solutions you follow; an on-premises environment's licence expiring in 30 days, in 7 days, or expired | #1049, #1369 |
 | Gateways | An on-premises gateway went offline (three missed heartbeats) or came back; to the organisation's Admins only, so only they see its row on the account page. See `on-prem-gateway.md`, "Online and offline" | #1361 |
 
 ## How it works
@@ -224,6 +224,16 @@ and two refreshes of the same environment overlapping can both announce one chan
 stored flag: it fires on the read where the date first comes within the week, which the
 previous read's own time says. Dates are shown in the environment's update-window time
 zone when Business Central reports one, otherwise in UTC, said so.
+
+## On-premises licence expiry (#1369)
+
+The followers of a solution hear, in the Solutions category, when the Business Central licence
+on one of its linked on-premises environments expires in 30 days, in 7 days, and once it has
+expired, by the expiry date the gateway last read from the tier. Each of the three is sent once:
+the environment row records the expiry date and the nearest threshold already sent, claimed
+before anything goes out, so an hourly sweep never repeats one, and a licence first seen inside a
+threshold sends only the nearest. A new expiry date starts again. See `on-prem-gateway.md`,
+"Licences, as built".
 
 ## Digests (#1037)
 

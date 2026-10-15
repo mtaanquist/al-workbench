@@ -742,6 +742,49 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
         var brief = (await tools.GetSolutionAsync("CRONUS Danmark")).Environments.Should().ContainSingle().Subject;
         brief.OnPremises.Should().BeTrue();
         brief.GatewayOnline.Should().NotBeNull("an on-premises row says whether its gateway is online");
+        detail.Licence.Should().NotBeNull("an on-premises tier says what it knows about its licence, even when it has read none");
+        detail.Licence!.Licensee.Should().BeNull();
+        detail.Licence.LastUpload.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Get_environment_gives_an_on_premises_tiers_licence_as_the_environment_page_does()
+    {
+        await ReportAsync(Tier("BC250", "test", Tenant("default")));
+        var solution = await SolutionAsync("CRONUS Danmark");
+        var id = await LinkAsync(solution, "BC250", "Test");
+        await using (var seed = _db.NewContext())
+        {
+            var instance = await seed.GatewayInstances.SingleAsync(i => i.Name == "BC250");
+            seed.GatewayInstanceLicences.Add(new GatewayInstanceLicence
+            {
+                OrganizationId = TestDb.DefaultOrgId, InstanceId = instance.Id, Licensee = "CRONUS A/S", SerialNumber = "1234567",
+                ExpiresOn = new DateOnly(2027, 3, 31), Text = "licence", TextSha256 = new string('0', 64), ReadAt = DateTime.UtcNow,
+                Ranges = [new GatewayInstanceLicenceRange { OrganizationId = TestDb.DefaultOrgId, ObjectType = "Table", FromId = 50000, ToId = 50099 }],
+            });
+            seed.OeProjectLicenses.Add(new OeProjectLicense
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = solution, ProjectEnvironmentId = id, FileName = "CRONUS.bclicense",
+                Content = [1, 2, 3], Size = 3, Sha256 = new string('a', 64), LicenceTarget = GatewayLicenceTargets.NavDatabase,
+                UploadedByUserId = _admin.Id, UploadedAt = DateTime.UtcNow,
+            });
+            await seed.SaveChangesAsync();
+        }
+        ActAs(_editor);
+
+        await using var ctx = _db.NewContext();
+        var tools = Tools(ctx);
+        var detail = await tools.GetEnvironmentAsync(id);
+
+        detail.Environment.OnPremisesTier!.Licensee.Should().Be("CRONUS A/S");
+        detail.Environment.OnPremisesTier.LicenceExpiresOn.Should().Be("2027-03-31");
+        var licence = detail.Licence!;
+        (licence.Licensee, licence.SerialNumber, licence.ExpiresOn).Should().Be(("CRONUS A/S", "1234567", "2027-03-31"));
+        licence.ObjectRanges.Should().ContainSingle().Which.Should().Be(new LicenceObjectRange("Table", 50000, 50099));
+        licence.LastUpload!.FileName.Should().Be("CRONUS.bclicense");
+        licence.LastUpload.UploadedBy.Should().Be("admin@cronus.example");
+        licence.LastUpload.ImportedInto.Should().Be("the application database");
+        licence.LastUpload.ImportState.Should().Be("Failed", "an upload with no command was never sent");
     }
 
     private DeliverTools Tools(AppDbContext ctx)
@@ -764,6 +807,9 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
             new EnvironmentUpgradeService(ctx, _db.OrgContext, access, Fleet(ctx), TimeProvider.System, NullLogger<EnvironmentUpgradeService>.Instance),
             Modules(ctx),
             new DeliveryFeedService(ctx, access),
+            new OnPremisesLicenceService(ctx, _db.OrgContext, access,
+                new GatewayCommandService(ctx, _db.OrgContext, new GatewayCommandSignal(), _clock, NullLogger<GatewayCommandService>.Instance),
+                _clock, NullLogger<OnPremisesLicenceService>.Instance),
             access,
             _db.OrgContext,
             NullLogger<DeliverTools>.Instance);

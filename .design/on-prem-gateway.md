@@ -1,6 +1,6 @@
 # On-premises gateway - managing on-premises Business Central from AL Workbench
 
-> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374), the gateway side of `publish-install` (#1375), deploying through the gateway from AL Workbench (#1367) and the restart group with the customer's before and after scripts (#1368) exist; licences and the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
+> **Status: being built.** Contracts, registration, the command queue (#1360, #1361), the Windows service frame (#1362), the policy file and PowerShell runner (#1373), the download with each release (#1363), the inventory (#1365), linking service tiers to a Solution (#1366), the delivery seam (#1374), the gateway side of `publish-install` (#1375), deploying through the gateway from AL Workbench (#1367) the restart group with the customer's before and after scripts (#1368) and uploading and importing a licence, with its expiry notices (#1369), exist; the licence range check and the other verbs do not yet. Milestone #8, issues #1359 to #1376. Built on the
 > `staging/on-prem-gateway` branch and merged to `main` in one PR when the milestone is done.
 > The feasibility study that led here is summarised in "Why a gateway" below.
 
@@ -661,7 +661,7 @@ New tables, all org-scoped with the usual query filter:
 | `gateway_instance_apps` | Tenant, app id, name, publisher, version, data version, scope, installed, published, sync state, missing since |
 | `gateway_instance_licences` | Instance (one each), licensee, serial number, expiry, the text as read, its SHA-256, cut to size, parse problems, read at |
 | `gateway_instance_licence_ranges` | Licence, object type, from and to id, permissions |
-| `oe_project_licenses` | Solution, file name, bytes (at most 1 MB), SHA-256, uploaded by and at (code spells it `License`, as `OeProject.LicenseType` does; copy says licence) |
+| `oe_project_licenses` | Solution, environment, file name, bytes (at most 1 MB), size, SHA-256, the `licence_target` it went to, uploaded by and at, the `import-licence` command (code spells it `License`, as `OeProject.LicenseType` does; copy says licence). As built (#1369): one row per upload, written once; see "Licences, as built" |
 
 The inventory tables are a stable upsert keyed by gateway + machine + instance (+ tenant, + app id
 and version); an instance, tenant or app that stops being reported is stamped `missing_since`, never
@@ -1330,10 +1330,11 @@ and shortens every message to 300 characters if the steps would still pass 32,00
 JSON. The whole output stays in the command's log.
 
 **The `restart-group` verb** (`RestartGroupVerb`) restarts a database's group on its own, for
-licence imports (#1369) and the environment page's restart (#1371). Its parameters are the machine
+the environment page's restart (#1371); a licence import does not send it, since `import-licence`
+restarts the group itself ("Licences, as built"). Its parameters are the machine
 and instance of any tier of the group; the check needs `service_control` on every group tier. It
 runs no scripts. **It does not check `shared_restart`**: only AL Workbench knows which Solutions a
-tier serves, so whatever sends this verb (#1371, and #1369's licence import) must refuse a shared
+tier serves, so whatever sends this verb (#1371) must refuse a shared
 group in AL Workbench first, with `RestartGroupPlan.Refusal`, exactly as deployments do. Nothing
 sends it yet; #1371 is not done until that check is in place. It succeeds when every tier came back and otherwise fails with the first failed
 tier's message, the result attached.
@@ -1402,15 +1403,15 @@ check accepts the default rights on `C:\Program Files\AL Workbench Gateway\scrip
 ## Licences
 
 **Upload and import (#1369).** On an on-premises environment a person who manages the Solution
-uploads the licence file, picks database or tenant (as the policy allows), and confirms that the
-listed tiers will restart. The `import-licence` verb runs `Import-NAVServerLicense` on the publishing
+uploads the licence file, sees where it goes (database or tenant, as the policy sets it), and
+confirms that the listed tiers will restart. The `import-licence` verb runs `Import-NAVServerLicense` on the publishing
 tier with `-Database` set as the policy's `licence_target` says (`NavDatabase`, `Master`, `Default`,
 or `Tenant` with `-Tenant`), then the restart group (tiers only read a new licence on restart), then
 a fresh inventory. A database-level import on a shared server reaches every tenant and follows the
 shared-tier rule above. Format: `.flf` before BC 22, `.bclicense` from BC 22. Whether BC 22 and later
-still accept an `.flf` is checked against a real server when #1369 is built; until then a file
-the target's version cannot import is refused with a message naming both, and that rule follows the
-finding. The file follows the Solution's visibility. AL
+still accept an `.flf` has not been checked against a real server yet ("Licences, as built", To verify);
+until it is, a file the target's version cannot import is refused with a message naming both, and
+that rule follows the finding. The file follows the Solution's visibility. AL
 Workbench never parses licence files; what it shows is the gateway's parse of
 `Export-NAVServerLicenseInformation`.
 
@@ -1432,6 +1433,101 @@ A build for a Solution with a linked Production tier gets a **warning** ("Table 
 licence (50000-50099)"); the customer can still buy the object pack. At deploy time the same check
 against the target is a **refusal** before anything is uploaded. With no licence read yet, the build
 and deployment say "Licence not checked".
+
+### Licences, as built (#1369)
+
+**Who and where.** The environment page of a linked on-premises environment has a **Licence** card on
+its Overview tab: the licence the linked tier runs as the gateway last read it (licensed to, expiry,
+serial number, when it was read, and the object ranges folded under "Object ranges (N)"), the last
+upload (file, who, when, where it went, and how its import went: Waiting, Importing, Imported,
+Imported with problems, Not imported, with the gateway's sentence), and an outline **Upload
+licence...** button for people who can manage the Solution (`ProjectAccess.CanManageAsync`). Anyone
+who can see the Solution sees the card; the file itself downloads (`GET /licences/{id}/file`) only
+for a manager, and anything else answers 404. The meta row above the tabs carries "Licence expires",
+and from 30 days before the expiry a warning sits above the tabs on every tab, a danger alert once it
+has expired.
+
+**Where the licence goes is shown, not chosen.** The policy file sets one `licence_target` per
+database, so there is nothing for the person to pick: the dialog says "Imported into the application
+database" (or the master database, for every tenant; the server's default database; the tenant X
+only), by which tier, and which file type that tier's version takes. The command carries the target
+the person was shown (`licenceTarget`), and the gateway refuses it if its settings now say anything
+else, so what runs is what was confirmed. A database with no `licence_target` refuses the upload.
+
+**The dialog** (`UploadLicenceDialog`) reads `OnPremisesLicenceService.GetImportPlanAsync`: target,
+importing tier, version and format, and the `RestartGroupPlan`. It warns, as the Deploy dialog does
+and in the same shape, that Business Central reads a new licence only when it starts, lists the tiers
+that restart (and any tier on the same database left out of the group), and that everyone signed in
+is signed out. The file input takes `accept=".flf,.bclicense"`; the file's format and size are
+checked as soon as it is chosen, by the same rule the service applies. Anything that would refuse the
+import is shown as an error and holds **Import licence** disabled.
+
+**Checked by AL Workbench, in this order, before anything is stored or sent**
+(`OnPremisesLicenceService.UploadAndImportAsync`): manage rights (`ProjectAccessDeniedException`);
+then the file, keyed `file` (a name, not empty, at most 1 MB, a `.flf` or `.bclicense`, and the
+format the importing tier's version takes, naming both); then the environment, keyed `environment`:
+linked, the tier and tenant still reported, the gateway online, settings reported and valid, the
+publishing tier listed with `licence`, a `licence_target` set, the tenant allowed for a `Tenant`
+target, `restart` on every group tier, the publishing tier running, its version known, and finally
+`RestartGroupPlan.Refusal`. The upload row and the command are written in one transaction, then the
+gateway is woken, so a crash in between leaves neither.
+
+**`shared_restart` applies to every target, `Tenant` included.** A `Tenant` import changes the
+licence of one tenant only, but the restart that follows restarts the service tiers, and a restarted
+tier signs out every tenant on it. So a Tenant import whose restart group reaches another Solution's
+environment is refused exactly as a deployment is, by `RestartGroupPlan.Refusal`, before any command
+is sent; the gateway never sees it, because only AL Workbench knows which Solutions share a tier.
+
+**The `import-licence` verb** (`Core/Licence/ImportLicenceVerb.cs`) checks the command against the
+settings again (the publishing tier, `licence`, the tenant for a Tenant target, `restart` on every
+group tier, the confirmed target), the file (one, present, at most 1 MB, its SHA-256, and the
+format for the tier's version), then runs **import, restart, refresh** in that order:
+`Import-NAVServerLicense -ServerInstance -LicenseFile -Database <target>` (with `-Tenant` for a
+Tenant target, refusing rather than importing server-wide when the cmdlet has no `-Tenant`, and
+`-Force` when the cmdlet has it, so a non-interactive session is never asked to confirm) on the
+publishing tier, in the tier's PowerShell; then the database's restart group through
+`RestartGroupRunner`, after reading the settings again (if they no longer allow it the tiers keep
+running and the command fails with the licence imported); then it reads every tier of the database
+again (`GatewayCommandContext.RefreshInventory`) and posts the inventory, so the page shows the new
+licence before the result arrives. A failed import restarts nothing ("Nothing was restarted, so the
+service tiers keep the licence they had."); a failed restart or reading afterwards fails or notes it
+with "The licence was imported, but ...". The result (`GatewayImportLicenceResult`: target,
+`imported`, `restart`, `refreshed`, `refreshMessage`) is additive; the schema stays 1. No before or
+after scripts run for a licence import.
+
+**Storage and audit.** `oe_project_licenses` (migration `20270208000000_AddProjectLicenses`) keeps
+each upload once, never changed afterwards, so its one audit row (`ProjectLicense`, "Licence file")
+is the upload itself; the bytes are recorded as `ContentSha256`, never copied. How the import went is
+read from the command, not stored on the row. The command carries its own copy of the file.
+
+**Expiry notices.** `LicenceExpiryScheduler` (hourly per organisation, off with
+`DISABLE_LICENCE_EXPIRY_NOTICES=1`) runs `LicenceExpiryNotifier`, which tells the Solution's followers
+(category Solutions; in the app, and by email for those who chose it) 30 days before the expiry the
+linked tier's licence states, 7 days before, and once on the day it has expired. Each threshold is
+claimed on the environment row (`license_expiry_notice_for`, `license_expiry_notice_days`) with a
+compare-and-set before anything is sent, so it sends once however often the sweep runs; a licence
+first seen inside a threshold sends only the nearest one, and a new expiry date starts the thresholds
+again. Unlinked environments are skipped.
+
+**MCP.** `get_environment` gives an on-premises environment's `licence`: licensee, serial number,
+expiry, when read, the object ranges, and the last upload (file, who, when, where it went, its import
+state and message). `onPremisesTier` also carries the licensee. There is no write tool.
+
+**To verify on real servers:**
+
+- Whether Business Central 22 and later still import an `.flf`. Until then AL Workbench and the
+  gateway refuse an `.flf` from 22 on, naming both formats; if 22+ accepts one, relax
+  `GatewayLicenceFormats.Refusal` in one place.
+- `Import-NAVServerLicense`'s parameters on BC 14 and on a current version: that `-Database` takes
+  the four targets, whether `-Tenant` exists on BC 14 (the script refuses a Tenant import without
+  it), and whether `-Force` exists and is what keeps a non-interactive session from being asked to
+  confirm.
+- That the cmdlet's error for an invalid or wrong-format file comes back as an error the script
+  reports, not a prompt or a hang.
+- That a tier reads the new licence after the restart, and that the inventory read straight after it
+  shows the new expiry and ranges.
+- That a `Master` import reaches every tenant of a multitenant server, and a `Tenant` import only
+  the one tenant.
 
 ## Service tier actions (#1371)
 
@@ -1459,7 +1555,9 @@ server configuration (`Set-NAVServerConfiguration`) is out of scope. **Before it
   `list_deployments` reports `refused` app statuses and `tiersRestarted`, and from #1368
   `gatewaySteps` (each script and tier restart, in order).
 - **No write tools** for licences or tier actions in this milestone, as environment actions are
-  web-only today.
+  web-only today. As built (#1369): `get_environment` carries an on-premises environment's
+  `licence` (licensee, serial number, expiry, object ranges and the last upload with its import
+  state), and `onPremisesTier` its licensee.
 
 ## Security
 

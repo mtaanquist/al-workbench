@@ -106,6 +106,7 @@ internal static class TenantTableCatalog
         "oe_project_build_diagnostics",
         "oe_project_deliveries",
         "oe_project_delivery_results",
+        "oe_project_licenses",
         "recipes",
         "recipe_files",
         "recipe_downloads",

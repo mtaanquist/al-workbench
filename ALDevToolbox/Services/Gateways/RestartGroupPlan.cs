@@ -54,7 +54,7 @@ public sealed record RestartGroupPlan(
 
     private bool Refused => Known && !SharedRestart && OtherSolutions > 0;
 
-    private string SharedReason => "the service tiers this deployment restarts also run "
+    private string SharedReason => "the service tiers that would restart also run "
         + (OtherSolutions == 1 ? "another solution's environment" : $"the environments of {OtherSolutions} other solutions")
         + ", and restarting them would sign their users out too.";
 

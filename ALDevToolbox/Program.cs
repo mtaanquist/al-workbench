@@ -138,6 +138,7 @@ app.MapHealthChecks("/healthz/workers", new Microsoft.AspNetCore.Diagnostics.Hea
 // Endpoint groups (see Endpoints/ — one extension per concern).
 app.MapGenerationEndpoints();
 app.MapArtifactEndpoints();
+app.MapLicenceEndpoints();
 app.MapTranslatorEndpoints();
 app.MapAdminEndpoints();
 app.MapAccountEndpoints();

@@ -90,6 +90,10 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
             // The heartbeat columns are written with ExecuteUpdateAsync and never get here.
             [typeof(Gateway)] = AuditEntityType.Gateway,
             [typeof(GatewayRegistrationCode)] = AuditEntityType.GatewayRegistrationCode,
+            // A licence uploaded to a Solution and imported on its service tiers (#1369):
+            // who changed what a customer's server is licensed for. Written once; the
+            // file's bytes are hashed, not copied (OriginalValuesToDict).
+            [typeof(OeProjectLicense)] = AuditEntityType.ProjectLicense,
             // Deliberately absent: GatewaySeenToken, the replay table - one row per
             // gateway request, and nobody's decision.
             // Deliberately absent: GatewayInstance and its tenants, apps, licence and
@@ -409,7 +413,7 @@ public sealed class AuditInterceptor : SaveChangesInterceptor
         var dict = new Dictionary<string, object?>();
         var hashContent = entry.Entity is WorkspaceExtensionFile or ModuleExtensionFile or OrganizationFile;
         var hashRecipeContent = entry.Entity is RecipeFile or RecipeSuggestionFile;
-        var hashAssetBytes = entry.Entity is OrganizationAsset;
+        var hashAssetBytes = entry.Entity is OrganizationAsset or OeProjectLicense;
         // SystemSettings carries the encrypted SMTP password, the encrypted
         // off-site storage access/secret keys, and the GitHub App's client secret
         // and private key. None of the ciphertext lands in

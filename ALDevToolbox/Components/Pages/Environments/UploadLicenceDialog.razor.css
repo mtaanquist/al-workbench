@@ -1,0 +1,33 @@
+/* The upload-licence dialog (#1369). The restart warning matches the Deploy dialog's. */
+.lic-dialog__facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--space-1) var(--space-3);
+    margin: 0 0 var(--space-3);
+    font-size: var(--text-sm);
+}
+.lic-dialog__facts dt { color: var(--ink-3); }
+.lic-dialog__facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.lic-dialog__mono, .lic-dialog__tiers { font-family: var(--font-mono); font-size: var(--text-xs); }
+
+.lic-dialog__file {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+    min-width: 0;
+}
+.lic-dialog__name { font-weight: 500; overflow-wrap: anywhere; min-width: 0; }
+
+.lic-dialog__restart { display: grid; gap: var(--space-2); min-width: 0; }
+.lic-dialog__restart p { margin: 0; }
+.lic-dialog__tiers { margin: 0; padding-left: var(--space-4); overflow-wrap: anywhere; }
+.lic-dialog__left-out { color: var(--ink-3); }
+.lic-dialog { min-width: 0; }
+.lic-dialog ::deep .lic-dialog__alert { margin: var(--space-3) 0 0; }
+
+@media (max-width: 560px) {
+    .lic-dialog__facts { grid-template-columns: minmax(0, 1fr); }
+    .lic-dialog__facts dd { margin-bottom: var(--space-1); }
+}

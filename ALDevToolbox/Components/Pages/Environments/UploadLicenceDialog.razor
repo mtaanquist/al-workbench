@@ -1,0 +1,217 @@
+@*
+    Upload a new Business Central licence to a linked on-premises environment and import
+    it on its service tiers (#1369). Named user: a consultant whose customer bought an
+    object pack and sent over the new licence, who needs it on the server and knows
+    nothing about the gateway.
+
+    The dialog says, before anything is sent, where the licence goes, which tier imports
+    it and in which format, and which tiers restart - the restart is the part with a cost,
+    so it is the warning. Where the licence goes is the customer's IT's setting, so it is
+    shown, not asked. Anything that would refuse the import is said here and holds the
+    button; the file's own problems (wrong format, too large) are said beside the file.
+
+    The dialog only collects the file. The caller sends it
+    (OnPremisesLicenceService.UploadAndImportAsync), which checks everything again, and
+    reports the outcome at the top of the page like the page's other writes. See
+    .design/on-prem-gateway.md, "Licences".
+*@
+@using ALDevToolbox.Services.Gateways
+@using ALWorkbench.Gateway.Contracts
+@inject OnPremisesLicenceService Licences
+@inject ILogger<UploadLicenceDialog> Log
+
+<ConfirmDialog @ref="_confirm" Wide="true" ConfirmDisabled="@(_file is null || _plan is null || _plan.Refusal is not null || _error is not null)">
+    <div class="lic-dialog">
+    @if (_planError is { } planError)
+    {
+        <Alert Tone="AlertTone.Danger"><span>@planError</span></Alert>
+    }
+    else if (_plan is null)
+    {
+        <LoadingBlock Text="Reading the gateway's settings..." />
+    }
+    else
+    {
+        @if (_plan.Refusal is { } refusal)
+        {
+            <Alert Tone="AlertTone.Danger" Class="lic-dialog__alert"><span>@refusal</span></Alert>
+        }
+        else
+        {
+            <dl class="lic-dialog__facts">
+                <dt>Imported into</dt>
+                <dd>@Capitalise(_plan.Where)</dd>
+                <dt>By the service tier</dt>
+                <dd class="lic-dialog__mono">@_plan.ImportTier</dd>
+                @if (_plan.Version is { } version && _plan.Format is { } format)
+                {
+                    <dt>File type</dt>
+                    <dd>@format <span class="u-muted">- Business Central @version.Major takes @format licence files</span></dd>
+                }
+            </dl>
+
+            <div class="lic-dialog__file">
+                <label class="btn btn--sm btn--file" for="upload-licence-file">
+                    <Icon Name="upload" Width="14" Height="14" />
+                    <span>@(_file is null ? "Choose the licence file..." : "Choose a different file...")</span>
+                    <InputFile id="upload-licence-file" OnChange="OnChosenAsync" accept="@OnPremisesLicenceService.Accept" />
+                </label>
+                @if (_reading)
+                {
+                    <span class="u-muted" role="status">Reading the file...</span>
+                }
+                else if (_error is { } error)
+                {
+                    <FieldError Message="@error" />
+                }
+                else if (_file is { } file)
+                {
+                    <span class="lic-dialog__name">@file.FileName</span>
+                    <span class="u-muted">@FileSize(file.Bytes.Length)</span>
+                }
+                else
+                {
+                    <span class="u-muted">Choose the licence file the customer sent, ending in @(_plan.Format ?? ".flf or .bclicense").</span>
+                }
+            </div>
+
+            @if (_plan.Restart is { } restart)
+            {
+                <Alert Tone="AlertTone.Warn" Role="" Block="true" Class="lic-dialog__alert">
+                    <div class="lic-dialog__restart">
+                        <p>
+                            @(restart.Known
+                                ? (restart.Tiers.Count == 1 ? "Business Central reads a new licence only when it starts, so after the import this service tier restarts:" : $"Business Central reads a new licence only when it starts, so after the import these {restart.Tiers.Count} service tiers restart:")
+                                : "Business Central reads a new licence only when it starts, so after the import the service tiers restart. The customer's gateway has not said which yet, so at least this one does:")
+                        </p>
+                        <ul class="lic-dialog__tiers">
+                            @foreach (var tier in restart.Tiers)
+                            {
+                                <li>@tier</li>
+                            }
+                            @foreach (var missing in restart.MissingFromGroup)
+                            {
+                                <li class="lic-dialog__left-out">@missing — not restarted</li>
+                            }
+                        </ul>
+                        <p><b>Everyone signed in is signed out and loses unsaved work.</b> @RestartModeSentence(restart)</p>
+                        @if (restart.MissingFromGroup.Count > 0)
+                        {
+                            <p>
+                                @(restart.MissingFromGroup.Count == 1
+                                    ? "The tier marked not restarted uses the same database, so it keeps the old licence until it next starts. Ask the customer's IT to add it to the tiers that restart."
+                                    : "The tiers marked not restarted use the same database, so they keep the old licence until they next start. Ask the customer's IT to add them to the tiers that restart.")
+                            </p>
+                        }
+                    </div>
+                </Alert>
+            }
+        }
+    }
+    </div>
+</ConfirmDialog>
+
+@code {
+    /// <summary>The file the person chose.</summary>
+    public sealed record ChosenLicence(string FileName, byte[] Bytes);
+
+    private ConfirmDialog? _confirm;
+    private LicenceImportPlan? _plan;
+    private string? _planError;
+    private ChosenLicence? _file;
+    private string? _error;
+    private bool _reading;
+
+    /// <summary>
+    /// Asks for the licence file for <paramref name="environmentId"/>, after saying what
+    /// the import will do. Null when the person backed out.
+    /// </summary>
+    public async Task<ChosenLicence?> OpenAsync(int environmentId, string environmentName)
+    {
+        if (_confirm is null) return null;
+        _plan = null;
+        _planError = null;
+        _file = null;
+        _error = null;
+        StateHasChanged();
+
+        var opening = _confirm.OpenAsync(
+            $"Upload a new licence to {environmentName}?",
+            "For a new Business Central licence from the customer, for example after they bought more objects. "
+            + "The gateway imports it on the customer's server, then restarts the service tiers so they use it.",
+            "Import licence", "btn--danger");
+        try
+        {
+            _plan = await Licences.GetImportPlanAsync(environmentId);
+            if (_plan is null) _planError = "This environment is not an on-premises one, so a licence cannot be imported here.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.LogWarning(ex, "Reading the licence import plan for environment {EnvironmentId} failed.", environmentId);
+            _planError = "Couldn't read the gateway's settings. Close this and try again.";
+        }
+        StateHasChanged();
+
+        var confirmed = await opening;
+        var file = _file;
+        _file = null;
+        return confirmed ? file : null;
+    }
+
+    private async Task OnChosenAsync(InputFileChangeEventArgs e)
+    {
+        _file = null;
+        _error = null;
+        var chosen = e.File;
+        // The same rule the upload is checked by: not a licence at all, or the wrong
+        // format for the tier's version (when the version is known).
+        var formatProblem = GatewayLicenceFormats.FormatOf(chosen.Name) is null || _plan?.Version is not null
+            ? GatewayLicenceFormats.Refusal(chosen.Name, _plan?.Version)
+            : null;
+        if (formatProblem is not null)
+        {
+            _error = formatProblem;
+            return;
+        }
+        if (chosen.Size > GatewayLicenceFormats.MaxBytes)
+        {
+            _error = $"{chosen.Name} is larger than 1 MB. A Business Central licence is a few kilobytes: check that this is the licence file.";
+            return;
+        }
+        if (chosen.Size == 0)
+        {
+            _error = $"{chosen.Name} is empty. Choose the licence file again.";
+            return;
+        }
+
+        _reading = true;
+        StateHasChanged();
+        try
+        {
+            await using var stream = chosen.OpenReadStream(GatewayLicenceFormats.MaxBytes);
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer);
+            _file = new ChosenLicence(chosen.Name, buffer.ToArray());
+        }
+        catch (IOException ex)
+        {
+            Log.LogWarning(ex, "Reading an uploaded licence failed.");
+            _error = "Couldn't read the file. Choose it again.";
+        }
+        finally
+        {
+            _reading = false;
+        }
+    }
+
+    private static string RestartModeSentence(RestartGroupPlan plan) =>
+        plan.Tiers.Count < 2
+            ? "Business Central is unavailable for the few minutes the restart takes."
+            : plan.OneByOne
+                ? "They restart one at a time, so one of them is always running."
+                : "They all stop, then all start again, so Business Central is unavailable for the few minutes that takes.";
+
+    private static string Capitalise(string text) => text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text[1..];
+
+    private static string FileSize(int bytes) => $"{Math.Max(1, bytes / 1024)} KB";
+}

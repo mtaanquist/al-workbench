@@ -180,6 +180,7 @@ The container terminates HTTP only; run TLS at a reverse proxy. `app.UseForwarde
 | `DISABLE_APPLICATION_VERSION_SYNC`            | `1` to stop adding newly shipped Business Central release waves to each organisation's application versions list every day. | unset |
 | `DISABLE_DELIVERY_SCHEDULER`                  | `1` to disable the scheduler that enqueues due deliveries, so scheduled publishes never fire. | unset |
 | `DISABLE_GATEWAY_COMMAND_SWEEP`               | `1` to stop the on-premises gateway sweep: work nobody collected no longer expires, work a gateway went quiet on is no longer failed, and administrators are not told when a gateway goes offline or comes back. | unset |
+| `DISABLE_LICENCE_EXPIRY_NOTICES`              | `1` to stop telling a solution's followers that an on-premises environment's Business Central licence expires in 30 days, in 7 days, or has expired. The environment page still shows the expiry. | unset |
 | `DISABLE_GATEWAY_DELIVERY_FOLLOWER`           | `1` to stop following on-premises deployments once their gateway has the work: their progress no longer shows, they stay installing until it is back on, and no second deployment to the same service tier starts meanwhile. | unset |
 | `DISABLE_PREVIEW_CHECK_SCHEDULER`             | `1` to disable the nightly preview check, so pipelines never build against the next minor or next major preview. | unset |
 | `DISABLE_BUILD_RESOURCE_MONITOR`              | `1` to stop warning when running pipeline builds are short of processor or memory. | unset |

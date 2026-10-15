@@ -28,6 +28,8 @@ public static class OrganizationRegistration
         // The on-premises mirror the gateways report into (#1365).
         services.AddScoped<ALDevToolbox.Services.Gateways.GatewayInventoryService>();
         services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesEnvironmentService>();
+        // Licence uploads and imports on on-premises environments (#1369).
+        services.AddScoped<ALDevToolbox.Services.Gateways.OnPremisesLicenceService>();
         // Build-time stamps only: the gateway download and the version gateways are compared with (#1363).
         services.AddSingleton(ALDevToolbox.Services.Gateways.GatewayBuild.FromAssembly(typeof(ALDevToolbox.Services.Gateways.GatewayBuild).Assembly));
         return services;

@@ -48,6 +48,7 @@ public sealed class DeliverTools
     private readonly EnvironmentUpgradeService _plannedUpgrades;
     private readonly CustomerModuleService _modules;
     private readonly DeliveryFeedService _deliveries;
+    private readonly Gateways.OnPremisesLicenceService _licences;
     private readonly ProjectAccess _access;
     private readonly IOrganizationContext _orgContext;
     private readonly ILogger<DeliverTools> _logger;
@@ -64,6 +65,7 @@ public sealed class DeliverTools
         EnvironmentUpgradeService plannedUpgrades,
         CustomerModuleService modules,
         DeliveryFeedService deliveries,
+        Gateways.OnPremisesLicenceService licences,
         ProjectAccess access,
         IOrganizationContext orgContext,
         ILogger<DeliverTools> logger)
@@ -76,6 +78,7 @@ public sealed class DeliverTools
         _plannedUpgrades = plannedUpgrades;
         _modules = modules;
         _deliveries = deliveries;
+        _licences = licences;
         _access = access;
         _orgContext = orgContext;
         _logger = logger;
@@ -168,7 +171,7 @@ public sealed class DeliverTools
     }
 
     [McpServerTool(Name = "get_environment", ReadOnly = true)]
-    [Description("Returns one Business Central environment in full, online or a linked on-premises service tier (onPremises = true, with the gateway's online state in onPremisesTier): everything list_environments gives, plus its country and Azure region, the daily window our own deliveries prefer, how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history.")]
+    [Description("Returns one Business Central environment in full, online or a linked on-premises service tier (onPremises = true, with the gateway's online state in onPremisesTier): everything list_environments gives, plus its country and Azure region, the daily window our own deliveries prefer, how AppSource apps update, the apps Business Central last reported installed (name, publisher, version, and whether this workbench has delivered it), and the latest few lines of its Workbench history. For an on-premises service tier it also gives the Business Central licence the tier runs (licensee, serial number, expiry date and licensed object ranges, as the gateway last read it) and the last licence file uploaded to it in this workbench (who, when, and how its import went); licences are uploaded on the environment page, not here. All of it is the workbench's mirror as of the nightly sweep or the last Refresh, not a live read - installedAppsReadAt says when the app list was read, and is null when it never has been. Business Central's own operations log and who is signed in are live reads and are not available here; list_environment_history has the full Workbench history.")]
     public async Task<EnvironmentDetail> GetEnvironmentAsync(
         [Description("Environment id (from list_environments or get_solution).")] int environmentId,
         CancellationToken ct = default)
@@ -176,6 +179,9 @@ public sealed class DeliverTools
         var row = await _fleet.GetEnvironmentAsync(environmentId, ct) ?? throw EnvironmentNotFound(environmentId);
         var apps = await _fleet.ListInstalledAppsAsync(environmentId, ct) ?? [];
         var history = await Guard(environmentId, () => _upgradeActions.ListEnvironmentActivityAsync(row.Fleet.ProjectId, environmentId, ct));
+        var licence = row.Fleet.IsOnPremises
+            ? await Guard(environmentId, () => _licences.GetViewAsync(environmentId, ct))
+            : null;
 
         return new EnvironmentDetail(
             ToSummary(row),
@@ -187,8 +193,25 @@ public sealed class DeliverTools
             row.AppSourceAppsUpdateCadence,
             apps.Select(a => new InstalledApp(a.AppId, a.Name, a.Publisher, a.Version, a.DeliveredFromWorkbench)).ToList(),
             apps.Count == 0 ? null : apps.Max(a => a.FetchedAt),
-            history.Take(RecentHistoryCount).Select(ToHistory).ToList());
+            history.Take(RecentHistoryCount).Select(ToHistory).ToList(),
+            licence is null ? null : ToLicence(licence, row.Fleet.OnPremises?.TenantId));
     }
+
+    private static OnPremisesLicenceDetail ToLicence(Gateways.OnPremisesLicenceView view, string? tenant) => new(
+        view.Installed?.Licensee,
+        view.Installed?.SerialNumber,
+        view.Installed?.ExpiresOn?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+        view.Installed?.ReadAt,
+        view.Installed?.Ranges.Select(r => new LicenceObjectRange(r.ObjectType, r.FromId, r.ToId)).ToList() ?? [],
+        view.LastUpload is { } upload
+            ? new LicenceUploadSummary(
+                upload.FileName,
+                upload.UploadedBy,
+                upload.UploadedAt,
+                Gateways.OnPremisesLicenceService.Where(upload.LicenceTarget, tenant ?? Gateways.OnPremisesEnvironmentService.DefaultTenant),
+                upload.State.ToString(),
+                upload.Message)
+            : null);
 
     [McpServerTool(Name = "list_environment_history", ReadOnly = true)]
     [Description("Lists an environment's Workbench history, newest first: what was done to it from this workbench and by whom - update dates moved, updates started or booked for a later slot (and cancelled), apps updated or uploaded, sessions ended, copies made, deleted environments recovered - with each line's status ('Pending', 'Sent', 'Failed', 'Cancelled') and outcome. Work done in Business Central's admin centre, or by Microsoft, is not in it. At most the latest 50 lines.")]
@@ -536,7 +559,8 @@ public sealed class DeliverTools
             tier.Database,
             tier.ReadAt,
             tier.NoLongerReportedSince is not null,
-            tier.LicenceExpiresOn?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+            tier.LicenceExpiresOn?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            tier.Licensee);
     }
 
     private static NextPlatformUpdate? ToNextUpdate(UpgradeFleetRow r) => r.HasUpdate
@@ -650,6 +674,7 @@ public sealed record SolutionEnvironmentBrief(
 /// <param name="ReadAt">When the gateway last read the tier; null when it never has.</param>
 /// <param name="NoLongerReported">True when the gateway stopped reporting the tier; the facts are the last ones known.</param>
 /// <param name="LicenceExpiresOn">The licence's expiry date (yyyy-MM-dd) as the licence states it; null when none or unread.</param>
+/// <param name="Licensee">Who the licence is for, as the licence states it; null when unread.</param>
 public sealed record OnPremisesTierSummary(
     string Gateway,
     bool GatewayOnline,
@@ -661,7 +686,8 @@ public sealed record OnPremisesTierSummary(
     string? Database,
     DateTime? ReadAt,
     bool NoLongerReported,
-    string? LicenceExpiresOn);
+    string? LicenceExpiresOn,
+    string? Licensee = null);
 
 /// <summary>A daily window, as clock times in <paramref name="TimeZone"/> (IANA).</summary>
 public sealed record TimeWindow(string Start, string End, string TimeZone);
@@ -705,6 +731,7 @@ public sealed record EnvironmentSummary(
 /// <summary>One environment in full, for <c>get_environment</c>.</summary>
 /// <param name="DeliveryWindow">The daily window our own deliveries prefer, in the solution's time zone; null for "any time".</param>
 /// <param name="InstalledAppsReadAt">When the installed apps were last read; null when never.</param>
+/// <param name="Licence">For an on-premises service tier, its licence and the last upload; null for Business Central online.</param>
 public sealed record EnvironmentDetail(
     EnvironmentSummary Environment,
     string? CountryCode,
@@ -713,7 +740,36 @@ public sealed record EnvironmentDetail(
     string? AppSourceAppsUpdateCadence,
     IReadOnlyList<InstalledApp> InstalledApps,
     DateTime? InstalledAppsReadAt,
-    IReadOnlyList<EnvironmentHistoryEntry> RecentHistory);
+    IReadOnlyList<EnvironmentHistoryEntry> RecentHistory,
+    OnPremisesLicenceDetail? Licence = null);
+
+/// <summary>An on-premises service tier's licence, for <c>get_environment</c> (#1369).</summary>
+/// <param name="ExpiresOn">The expiry date (yyyy-MM-dd) as the licence states it; null when it states none or it was not read.</param>
+/// <param name="ReadAt">When the gateway last read the licence; null when it never has.</param>
+/// <param name="LastUpload">The last licence file uploaded to this environment in the workbench; null when none.</param>
+public sealed record OnPremisesLicenceDetail(
+    string? Licensee,
+    string? SerialNumber,
+    string? ExpiresOn,
+    DateTime? ReadAt,
+    IReadOnlyList<LicenceObjectRange> ObjectRanges,
+    LicenceUploadSummary? LastUpload);
+
+/// <summary>One licensed object range, e.g. Table 50000..50099.</summary>
+public sealed record LicenceObjectRange(string ObjectType, int From, int To);
+
+/// <summary>A licence file uploaded in the workbench and how its import went.</summary>
+/// <param name="UploadedBy">Who uploaded it; null when the account is gone.</param>
+/// <param name="ImportedInto">Where it was imported, in words, e.g. "the application database".</param>
+/// <param name="ImportState">'Waiting', 'Running', 'Imported', 'ImportedWithProblems' or 'Failed'.</param>
+/// <param name="Message">What went wrong or what to check, when the import did not simply succeed.</param>
+public sealed record LicenceUploadSummary(
+    string FileName,
+    string? UploadedBy,
+    DateTime UploadedAt,
+    string ImportedInto,
+    string ImportState,
+    string? Message);
 
 /// <summary>An app Business Central last reported installed.</summary>
 public sealed record InstalledApp(Guid AppId, string Name, string Publisher, string Version, bool DeliveredFromWorkbench);

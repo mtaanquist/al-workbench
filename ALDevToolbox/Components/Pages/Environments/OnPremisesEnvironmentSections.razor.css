@@ -1,2 +1,10 @@
 /* The closing note under the service tier facts. */
 .onprem__note { margin: var(--space-4) 0 0; }
+
+/* The licence card (#1369): the object ranges fold away, there can be dozens. */
+.onprem__ranges { margin-top: var(--space-4); }
+.onprem__ranges summary { cursor: pointer; font-size: var(--text-sm); color: var(--ink-2); }
+.onprem__ranges .data-table { margin-top: var(--space-2); }
+.onprem__upload { border-top: 1px solid var(--border); display: grid; gap: var(--space-2); }
+.onprem__upload-line { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); min-width: 0; overflow-wrap: anywhere; }
+.onprem__upload-detail { margin: 0; }

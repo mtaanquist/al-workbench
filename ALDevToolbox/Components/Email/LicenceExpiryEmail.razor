@@ -1,0 +1,66 @@
+@*
+    An on-premises environment's Business Central licence expires soon, or has expired
+    (issue #1369). Sent to the solution's followers once per threshold (30 days, 7 days,
+    expired): see .design/on-prem-gateway.md, "Licences", and .design/notifications.md.
+*@
+<EmailLayout Preheader="@Lead" OrganizationName="@OrganizationName" Reason="You received this because you follow this solution." SettingsUrl="@SettingsUrl">
+    <EmailParagraph>Hi @DisplayName,</EmailParagraph>
+    <EmailParagraph>@Lead</EmailParagraph>
+    @if (DaysLeft <= 0)
+    {
+        <EmailParagraph>Business Central stops letting people sign in once its licence has expired. Ask the customer for their new licence file, then upload it on the environment's page: AL Workbench imports it on the service tiers and restarts them.</EmailParagraph>
+    }
+    else
+    {
+        <EmailParagraph>Ask the customer for their new licence file in good time, then upload it on the environment's page: AL Workbench imports it on the service tiers and restarts them, so pick a quiet moment for it.</EmailParagraph>
+    }
+    <EmailButton Href="@EnvironmentUrl">Open @EnvironmentName</EmailButton>
+</EmailLayout>
+
+@code {
+    [Parameter, EditorRequired] public string DisplayName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string OrganizationName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SolutionName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string EnvironmentName { get; set; } = string.Empty;
+    /// <summary>The expiry date, already formatted ("Sat 14 Nov 2026").</summary>
+    [Parameter, EditorRequired] public string ExpiresOn { get; set; } = string.Empty;
+    /// <summary>Days until it expires on the day the notice is sent; 0 or less when it has expired.</summary>
+    [Parameter] public int DaysLeft { get; set; }
+    [Parameter, EditorRequired] public string EnvironmentUrl { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string SettingsUrl { get; set; } = string.Empty;
+
+    private string Lead => DaysLeft <= 0
+        ? $"The Business Central licence on {EnvironmentName} for {SolutionName} expired on {ExpiresOn}."
+        : $"The Business Central licence on {EnvironmentName} for {SolutionName} expires on {ExpiresOn}, in {DaysWord(DaysLeft)}.";
+
+    private static string DaysWord(int days) => days == 1 ? "1 day" : $"{days} days";
+
+    public static string SubjectFor(string solutionName, string environmentName, int daysLeft) => daysLeft <= 0
+        ? $"Licence expired: {solutionName} - {environmentName}"
+        : $"Licence expires in {DaysWord(daysLeft)}: {solutionName} - {environmentName}";
+
+    public static Task<EmailContent> RenderAsync(
+        EmailRenderer renderer,
+        string displayName,
+        string organizationName,
+        string solutionName,
+        string environmentName,
+        string expiresOn,
+        int daysLeft,
+        string environmentUrl,
+        string settingsUrl,
+        CancellationToken ct = default)
+        => renderer.RenderAsync<LicenceExpiryEmail>(
+            SubjectFor(solutionName, environmentName, daysLeft),
+            new Dictionary<string, object?>
+            {
+                [nameof(DisplayName)] = displayName,
+                [nameof(OrganizationName)] = organizationName,
+                [nameof(SolutionName)] = solutionName,
+                [nameof(EnvironmentName)] = environmentName,
+                [nameof(ExpiresOn)] = expiresOn,
+                [nameof(DaysLeft)] = daysLeft,
+                [nameof(EnvironmentUrl)] = environmentUrl,
+                [nameof(SettingsUrl)] = settingsUrl,
+            }, ct);
+}
