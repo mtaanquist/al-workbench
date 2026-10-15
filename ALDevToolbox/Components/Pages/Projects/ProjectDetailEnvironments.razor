@@ -108,10 +108,10 @@ else if (_done is { } done)
                                 <span class="cell-stack__sub">@(row.OnPremises is { Multitenant: true } t ? $"Tenant {t.TenantId}" : "Single tenant")</span>
                             </span>
                         </td>
-                        <td class="u-num">@(row.Version ?? "—")</td>
+                        <td class="u-num" data-label="Version">@(row.Version ?? "—")</td>
                         <td>
                             <span class="cell-stack">
-                                <span class="cell-stack__main"><Timestamp Value="@row.OnPremises?.ReadAt" Relative="true" Placeholder="Not yet" /></span>
+                                <span class="cell-stack__main" data-label="Last read"><Timestamp Value="@row.OnPremises?.ReadAt" Relative="true" Placeholder="Not yet" /></span>
                                 <span class="cell-stack__sub"><OnPremisesTierState Row="row" /></span>
                             </span>
                         </td>

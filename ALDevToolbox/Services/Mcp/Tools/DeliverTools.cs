@@ -535,7 +535,7 @@ public sealed class DeliverTools
             tier.EnvironmentLabel,
             tier.Database,
             tier.ReadAt,
-            tier.InstanceMissingSince is not null,
+            tier.NoLongerReportedSince is not null,
             tier.LicenceExpiresOn?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
     }
 

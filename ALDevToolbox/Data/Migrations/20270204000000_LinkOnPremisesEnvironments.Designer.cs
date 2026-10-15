@@ -4443,7 +4443,13 @@ namespace ALDevToolbox.Data.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("GatewayInstanceId")
+                        .HasDatabaseName("ix_oe_project_environments_gateway_instance_id");
+
                     b.HasIndex("OrganizationId");
+
+                    b.HasIndex("ProjectId")
+                        .HasDatabaseName("ix_oe_project_environments_project_id");
 
                     b.HasIndex("GatewayInstanceId", "TenantId")
                         .IsUnique()
@@ -4452,7 +4458,8 @@ namespace ALDevToolbox.Data.Migrations
 
                     b.HasIndex("ProjectId", "Name")
                         .IsUnique()
-                        .HasDatabaseName("ix_oe_project_environments_project_name");
+                        .HasDatabaseName("ix_oe_project_environments_project_name")
+                        .HasFilter("missing_since IS NULL OR kind = 'Online'");
 
                     b.ToTable("oe_project_environments", (string)null);
                 });

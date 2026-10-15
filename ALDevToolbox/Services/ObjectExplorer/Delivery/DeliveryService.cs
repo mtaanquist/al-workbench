@@ -1947,6 +1947,7 @@ public sealed class DeliveryService
         // Management URL is built from it.
         var family = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.ProjectId == delivery.ProjectId && e.Name == delivery.EnvironmentName)
+            .Where(EnvironmentQueries.HoldsName)
             .Select(e => e.ApplicationFamily)
             .FirstOrDefaultAsync(ct)
             ?? BcConstants.DefaultApplicationFamily;
@@ -2377,6 +2378,7 @@ public sealed class DeliveryService
     {
         var env = await _db.OeProjectEnvironments.AsNoTracking()
             .Where(e => e.ProjectId == delivery.ProjectId && e.Name == delivery.EnvironmentName)
+            .Where(EnvironmentQueries.HoldsName)
             .Select(e => new { e.Id, e.ApplicationFamily, e.Type, e.Kind })
             .FirstOrDefaultAsync(ct);
         // The claim-time half of the on-premises refusal in ResolveReleaseAsync.

@@ -75,7 +75,7 @@ else if (_editing)
                     <section class="field">
                         <span class="field__label">Version</span>
                         <span class="cust__fixed">@(_basics.EffectiveVersion ?? NotReported)</span>
-                        <small class="field__hint">@ReadFrom <a href="@($"/solutions/{Id}/bc")">Refresh it on the Business Central tab.</a></small>
+                        <small class="field__hint">@ReadFrom @RefreshHint</small>
                     </section>
                 }
                 else
@@ -125,7 +125,7 @@ else if (_editing)
                         {
                             <span class="cust__fixed">@NotReported</span>
                         }
-                        <small class="field__hint">@ReadFrom <a href="@($"/solutions/{Id}/bc")">Refresh it on the Business Central tab.</a></small>
+                        <small class="field__hint">@ReadFrom @RefreshHint</small>
                     </section>
                 }
                 else
@@ -207,7 +207,13 @@ else
         <div class="card__body">
             <div class="kv-grid cust__grid">
                 <span class="meta-item"><span class="meta-item__label">Hosted by</span><span class="meta-item__value">@(_basics.HostingType is { } h ? HostingText(h) : "—")</span></span>
-                <span class="meta-item"><span class="meta-item__label">Version</span><span class="meta-item__value">@(_basics.EffectiveVersion ?? "—")</span></span>
+                <span class="meta-item">
+                    <span class="meta-item__label">Version</span><span class="meta-item__value">@(_basics.EffectiveVersion ?? "—")</span>
+                    @if (ReadFrom is { } from)
+                    {
+                        <span class="cust__from">@from</span>
+                    }
+                </span>
                 <span class="meta-item"><span class="meta-item__label">Licence</span><span class="meta-item__value">@(_basics.LicenseType is { } l ? LicenceText(l) : "—")</span></span>
                 <span class="meta-item"><span class="meta-item__label">Experience</span><span class="meta-item__value">@(_basics.UserExperience?.ToString() ?? "—")</span></span>
                 <span class="meta-item"><span class="meta-item__label">Voice account number</span><span class="meta-item__value meta-item__value--mono">@(_basics.VoiceAccountNumber ?? "—")</span></span>
@@ -218,6 +224,10 @@ else
                 <p class="meta-item cust__url">
                     <span class="meta-item__label">Business Central address</span>
                     <a href="@url" target="_blank" rel="noopener noreferrer">@url</a>
+                    @if (ReadFrom is { } urlFrom)
+                    {
+                        <span class="cust__from">@urlFrom</span>
+                    }
                 </p>
             }
         </div>
@@ -296,8 +306,17 @@ else
     private const string NotReported = "Business Central hasn't reported this yet.";
 
     private RenderFragment? ReadFrom => _basics?.Production is { } p
-        ? @<text>From the @p.EnvironmentName environment, read <Timestamp Value="@p.FetchedAt" Relative="true" />.</text>
+        ? @<text>From the @p.EnvironmentName @(p.FromServiceTier ? "service tier" : "environment"), read <Timestamp Value="@p.FetchedAt" Relative="true" />.</text>
         : null;
+
+    /// <summary>
+    /// How to get a newer reading. An online environment is refreshed from the Business
+    /// Central tab; a service tier is read by the customer's gateway on its own, so there
+    /// is nothing to press.
+    /// </summary>
+    private RenderFragment? RefreshHint => _basics?.Production is { FromServiceTier: true }
+        ? @<text>The gateway reads it every 15 minutes.</text>
+        : @<a href="@($"/solutions/{Id}/bc")">Refresh it on the Business Central tab.</a>;
 
     private bool EditIsOnPremises =>
         Enum.TryParse<ProjectHostingType>(_edit.Hosting, out var chosen) && chosen != ProjectHostingType.MicrosoftCloud;

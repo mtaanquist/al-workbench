@@ -64,7 +64,9 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
     private OnPremisesEnvironmentService Service(AppDbContext ctx) =>
         new(ctx, _db.OrgContext, _clock, NullLogger<OnPremisesEnvironmentService>.Instance);
 
-    private async Task ReportAsync(params GatewayInstanceInventory[] instances)
+    private Task ReportAsync(params GatewayInstanceInventory[] instances) => ReportToAsync(_gateway, instances);
+
+    private async Task ReportToAsync(int gatewayId, params GatewayInstanceInventory[] instances)
     {
         await using var ctx = _db.NewContext();
         var service = new GatewayInventoryService(ctx, _db.OrgContext,
@@ -75,7 +77,7 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
             Roster = instances.Select(i => new GatewayPolicyTier { Machine = i.Machine, Instance = i.Name }).ToList(),
             Instances = instances,
         };
-        (await service.ApplyReportAsync(_gateway, report)).Should().BeTrue();
+        (await service.ApplyReportAsync(gatewayId, report)).Should().BeTrue();
     }
 
     private static GatewayInstanceInventory Tier(string name, string environment, params GatewayTenantInventory[] tenants) => new()
@@ -109,10 +111,12 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
         return project.Id;
     }
 
-    private async Task<int> InstanceIdAsync(string name)
+    private async Task<int> InstanceIdAsync(string name, int? gatewayId = null)
     {
         await using var ctx = _db.NewContext();
-        return await ctx.GatewayInstances.AsNoTracking().Where(i => i.Name == name).Select(i => i.Id).SingleAsync();
+        return await ctx.GatewayInstances.AsNoTracking()
+            .Where(i => i.Name == name && i.MissingSince == null && (gatewayId == null || i.GatewayId == gatewayId))
+            .Select(i => i.Id).SingleAsync();
     }
 
     private async Task<int> LinkAsync(int projectId, string instance, string name, string tenant = "default")
@@ -280,6 +284,231 @@ public sealed class OnPremisesEnvironmentServiceTests : IDisposable
         var row = await RowAsync(id);
         (row.MissingSince, row.Name).Should().Be((null, "Live"));
         (await AppsAsync(id)).Should().ContainSingle().Which.Name.Should().Be("CRONUS Freight");
+    }
+
+    // ---------------------------------------------------------------- an unlinked row gives its name up (#1398)
+
+    [Fact]
+    public async Task A_rebuilt_gateways_tier_can_be_linked_as_production_again()
+    {
+        await ReportAsync(Tier("BC250", "production", Tenant("default")));
+        var solution = await SolutionAsync("CRONUS Danmark");
+        var old = await LinkAsync(solution, "BC250", "Production");
+        await using (var ctx = _db.NewContext()) await Service(ctx).UnlinkAsync(solution, old);
+
+        // The customer's IT rebuilds the gateway: a new registration, reporting the same
+        // server as a tier AL Workbench has never seen.
+        using var key = GatewayTestKit.NewKey();
+        var rebuilt = (await GatewayTestKit.RegisterAsync(_db, _clock, TestDb.DefaultOrgId, _admin.Id, key, approve: true)).GatewayId;
+        await ReportToAsync(rebuilt, Tier("BC250", "production", Tenant("default")));
+        ActAs(_admin);
+
+        int linked;
+        await using (var ctx = _db.NewContext())
+            linked = await Service(ctx).LinkAsync(solution, new LinkTierInput(await InstanceIdAsync("BC250", rebuilt), "default", "Production"));
+
+        linked.Should().NotBe(old, "it is a different tier, so it is a different row");
+        var row = await RowAsync(linked);
+        (row.Name, row.MissingSince).Should().Be(("Production", (DateTime?)null));
+        (await RowAsync(old)).MissingSince.Should().NotBeNull("the old row stays unlinked for its pipelines' history");
+    }
+
+    [Fact]
+    public async Task Relinking_under_a_name_another_live_row_has_taken_is_refused()
+    {
+        await ReportAsync(Tier("BC250", "production", Tenant("default")), Tier("BC250NEW", "production", Tenant("default")));
+        var solution = await SolutionAsync("CRONUS Danmark");
+        var old = await LinkAsync(solution, "BC250", "Production");
+        await using (var ctx = _db.NewContext()) await Service(ctx).UnlinkAsync(solution, old);
+        await LinkAsync(solution, "BC250NEW", "Production");
+
+        // The old tier comes back under the name the new one now holds: refused, rather
+        // than reviving a second "Production" or renaming either behind the user's back.
+        var same = () => LinkAsync(solution, "BC250", "production");
+        (await same.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("Name");
+        (await RowAsync(old)).MissingSince.Should().NotBeNull();
+
+        // Under a name of its own it revives its own row.
+        (await LinkAsync(solution, "BC250", "Old production")).Should().Be(old);
+        (await RowAsync(old)).Name.Should().Be("Old production");
+    }
+
+    [Fact]
+    public async Task A_failed_link_leaves_the_context_usable_for_the_next_one()
+    {
+        await ReportAsync(Tier("BC250", "production", Tenant("default")), Tier("BC250TEST", "test", Tenant("default")));
+        var denmark = await SolutionAsync("CRONUS Danmark");
+        var sweden = await SolutionAsync("CRONUS Sverige");
+        var production = await InstanceIdAsync("BC250");
+        var test = await InstanceIdAsync("BC250TEST");
+
+        // Another Admin links the same tier to another Solution between this link's
+        // checks and its save, so the database refuses it.
+        var race = new RaceInterceptor(async () =>
+        {
+            await using var other = _db.NewContext();
+            other.OeProjectEnvironments.Add(new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = sweden, Name = "Production", Type = "Production",
+                Kind = OeEnvironmentKind.OnPremises, GatewayInstanceId = production, TenantId = "default", FetchedAt = DateTime.UtcNow,
+            });
+            await other.SaveChangesAsync();
+        });
+        await using var ctx = _db.NewContext(race);
+        var service = Service(ctx);
+
+        var lost = () => service.LinkAsync(denmark, new LinkTierInput(production, "default", "Production"));
+        await lost.Should().ThrowAsync<PlanValidationException>();
+
+        // The same context (a Blazor circuit's) links the next tier without dragging the
+        // failed row along.
+        var next = await service.LinkAsync(denmark, new LinkTierInput(test, "default", "Test"));
+        (await RowAsync(next)).Name.Should().Be("Test");
+        await using var read = _db.NewContext();
+        (await read.OeProjectEnvironments.AsNoTracking().CountAsync(e => e.ProjectId == denmark)).Should().Be(1);
+    }
+
+    private sealed class RaceInterceptor(Func<Task> once) : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
+    {
+        private Func<Task>? _once = once;
+
+        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> SavingChangesAsync(
+            Microsoft.EntityFrameworkCore.Diagnostics.DbContextEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (_once is { } run)
+            {
+                _once = null;
+                await run();
+            }
+            return result;
+        }
+    }
+
+    [Fact]
+    public async Task Another_organisations_service_tier_cannot_be_linked()
+    {
+        var otherAdmin = await GatewayTestKit.SeedUserAsync(_db, TestDb.OtherOrgId, UserRole.Admin, "admin@cronus-other.example");
+        using var key = GatewayTestKit.NewKey();
+        var theirs = (await GatewayTestKit.RegisterAsync(_db, _clock, TestDb.OtherOrgId, otherAdmin.Id, key, approve: true)).GatewayId;
+        int theirTier;
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        _db.OrgContext.CurrentUserId = otherAdmin.Id;
+        try
+        {
+            await ReportToAsync(theirs, Tier("BC250", "production", Tenant("default")));
+            theirTier = await InstanceIdAsync("BC250", theirs);
+        }
+        finally
+        {
+            _db.OrgContext.CurrentOrganizationId = TestDb.DefaultOrgId;
+            ActAs(_admin);
+        }
+        var solution = await SolutionAsync("CRONUS Danmark");
+
+        await using var ctx = _db.NewContext();
+        var link = () => Service(ctx).LinkAsync(solution, new LinkTierInput(theirTier, "default", "Production"));
+
+        (await link.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("InstanceId");
+        (await ctx.OeProjectEnvironments.CountAsync()).Should().Be(0);
+        (await Service(ctx).ListLinkableTiersAsync(solution)).Should().BeEmpty("another organisation's gateway is not listed either");
+    }
+
+    [Fact]
+    public async Task A_server_reporting_two_tenants_is_multitenant_even_without_the_flag()
+    {
+        // The gateway could not read the server's configuration, so the flag is unknown;
+        // two tenants say it all the same.
+        await ReportAsync(Tier("BC250", "production", Tenant("cronus-dk"), Tenant("cronus-se")) with
+        {
+            Configuration = new GatewayInstanceConfiguration { DatabaseServer = "CRONUS-SQL", DatabaseName = "BC250", Multitenant = null },
+        });
+        var solution = await SolutionAsync("CRONUS Danmark");
+
+        await using (var ctx = _db.NewContext())
+        {
+            var tiers = await Service(ctx).ListLinkableTiersAsync(solution);
+            tiers.Select(t => (t.TenantId, t.Multitenant)).Should().BeEquivalentTo([("cronus-dk", true), ("cronus-se", true)]);
+            var noTenant = () => Service(ctx).LinkAsync(solution, new LinkTierInput(tiers[0].InstanceId, null, "Production"));
+            (await noTenant.Should().ThrowAsync<PlanValidationException>()).Which.Errors.Should().ContainKey("TenantId");
+        }
+
+        var id = await LinkAsync(solution, "BC250", "Production", tenant: "cronus-se");
+        (await RowAsync(id)).TenantId.Should().Be("cronus-se");
+    }
+
+    // ---------------------------------------------------------------- what the gateway stops reporting
+
+    [Fact]
+    public async Task A_failed_read_keeps_the_time_of_the_last_good_one()
+    {
+        await ReportAsync(Tier("BC250", "production", Tenant("default")));
+        var solution = await SolutionAsync("CRONUS Danmark");
+        var id = await LinkAsync(solution, "BC250", "Production");
+        var first = (await RowAsync(id)).FetchedAt;
+
+        _clock.Advance(TimeSpan.FromMinutes(15));
+        await ReportAsync(Tier("BC250", "production", Tenant("default")) with { Error = "Access is denied." });
+
+        (await RowAsync(id)).FetchedAt.Should().Be(first, "nothing was read, so the facts are as old as they were");
+    }
+
+    [Fact]
+    public async Task A_tenant_the_gateway_stops_reporting_keeps_its_facts_as_no_longer_reported()
+    {
+        await ReportAsync(Tier("BC250", "production",
+            Tenant("cronus-dk", App(AppA, "Document Capture", "25.1.0.0", "Continia Software")), Tenant("cronus-se")));
+        var solution = await SolutionAsync("CRONUS Danmark", bcVersion: "BC 25 (typed)");
+        await using (var ctx = _db.NewContext())
+            await Modules(ctx).SaveCatalogModuleAsync(null, new CatalogModuleInput("Continia Document Capture", "Continia Software", AppA));
+        var id = await LinkAsync(solution, "BC250", "Production", tenant: "cronus-dk");
+        (await BasicsAsync(solution)).FromBusinessCentral.Should().BeTrue();
+
+        // The customer's IT removes the tenant and upgrades the server.
+        _clock.Advance(TimeSpan.FromMinutes(15));
+        await ReportAsync(Tier("BC250", "production", Tenant("cronus-se")) with { Version = "26.0.1.2" });
+
+        var row = await RowAsync(id);
+        row.Version.Should().Be("25.4.29661.29927", "the server's new version is not the version of a tenant that is gone");
+        (await AppsAsync(id)).Should().ContainSingle();
+
+        await using var read = _db.NewContext();
+        var fleetRow = (await Fleet(read).GetEnvironmentAsync(id))!.Fleet;
+        fleetRow.OnPremises!.NoLongerReportedSince.Should().Be(Start.UtcDateTime.AddMinutes(15));
+        ALDevToolbox.Components.Shared.FleetRowState.IsOutOfTouch(fleetRow, _clock.GetUtcNow().UtcDateTime).Should().BeTrue();
+        ALDevToolbox.Components.Shared.FleetRowState.StatusWord(fleetRow, _clock.GetUtcNow().UtcDateTime).Should().Be("Last seen running");
+
+        (await BasicsAsync(solution)).EffectiveVersion.Should().Be("BC 25 (typed)", "a tenant that is gone is not the customer's current version");
+        (await Modules(read).GetSolutionModulesAsync(solution)).ReadFromEnvironment.Should().BeFalse();
+        var capture = (await Modules(read).ListCatalogAsync()).Single().Id;
+        (await Modules(read).ListProjectIdsWithModuleAsync(capture)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task The_module_filter_matches_the_card_for_a_linked_tier()
+    {
+        // Production has Document Capture; only the test tier has the sales app. The
+        // card reads Production, so the Solutions filter must find the first and not the
+        // second.
+        await ReportAsync(
+            Tier("BC250", "production", Tenant("default", App(AppA, "Document Capture", "25.1.0.0", "Continia Software"))),
+            Tier("BC250TEST", "test", Tenant("default", App(AppB, "CRONUS Sales", "2.0.0.0"))));
+        var solution = await SolutionAsync("CRONUS Danmark");
+        await LinkAsync(solution, "BC250", "Production");
+        await LinkAsync(solution, "BC250TEST", "Test");
+
+        await using var ctx = _db.NewContext();
+        var modules = Modules(ctx);
+        await modules.SaveCatalogModuleAsync(null, new CatalogModuleInput("Continia Document Capture", "Continia Software", AppA));
+        await modules.SaveCatalogModuleAsync(null, new CatalogModuleInput("CRONUS Sales", "CRONUS Partner A/S", AppB));
+        var catalog = await modules.ListCatalogAsync();
+        var capture = catalog.Single(m => m.AppId == Guid.Parse(AppA)).Id;
+        var sales = catalog.Single(m => m.AppId == Guid.Parse(AppB)).Id;
+
+        (await modules.ListProjectIdsWithModuleAsync(capture)).Should().Equal(solution);
+        (await modules.ListProjectIdsWithModuleAsync(sales)).Should().BeEmpty("the card shows Production's apps, not the test tier's");
+        (await modules.GetSolutionModulesAsync(solution)).Modules.Select(m => m.Name).Should().Equal("Continia Document Capture");
     }
 
     [Fact]

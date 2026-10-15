@@ -853,6 +853,10 @@ public sealed class EnvironmentDetailTests : IAsyncDisposable
         cut.FindAll(".header-tab").Select(t => t.TextContent).Should().Equal("Overview", "Apps", "Workbench history");
         cut.Markup.Should().Contain("On-premises service tier in CRONUS Denmark");
         cut.FindAll("button").Should().NotContain(b => b.TextContent.Contains("Copy"), "a service tier cannot be copied from here");
+        // No gateway reports this tier, so its last state is not vouched for in green.
+        var pill = cut.Find(".status-pill");
+        pill.TextContent.Trim().Should().StartWith("Last seen");
+        pill.ClassList.Should().Contain("status-pill--muted");
 
         // An address naming Business Central online's live tabs lands on Overview.
         Render(envId, "operations");

@@ -397,8 +397,12 @@ public sealed class GatewayInventoryService
         foreach (var environment in linked)
         {
             var instance = applied.First(i => i.Id == environment.GatewayInstanceId);
-            OnPremisesEnvironmentService.Apply(environment, instance, now);
             var tenant = instance.Tenants.FirstOrDefault(t => environment.TenantId is not null && SameName(t.TenantId, environment.TenantId));
+            // A tenant the gateway stopped reporting: its environment keeps its last facts,
+            // which the readers then show as no longer reported (EnvironmentQueries.StillReported),
+            // rather than having the server's newer version written onto a tenant that is gone.
+            if (tenant?.MissingSince is not null) continue;
+            OnPremisesEnvironmentService.Apply(environment, instance, now);
             if (tenant is null) continue;
             var apps = _db.Entry(tenant).Collection(t => t.Apps);
             if (tenant.Id != 0 && !apps.IsLoaded) await apps.LoadAsync(ct).ConfigureAwait(false);

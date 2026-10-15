@@ -21,39 +21,31 @@
 
 @if (Head)
 {
-<div class="freshness @StripClass">
-    <Icon Name="server" Width="15" Height="15" Css="freshness__icon" />
-    <span class="freshness__text">
-        @if (tier?.ReadAt is { } read)
-        {
-            <text>Read from the service tier by the on-premises gateway <span class="freshness__age"><Timestamp Value="@read" Relative="true" /></span>. The gateway reads it every 15 minutes.</text>
-        }
-        else
-        {
-            <text>The on-premises gateway hasn't read this service tier yet.</text>
-        }
-    </span>
-</div>
-
+@* When the gateway has gone quiet the warning is the whole story: a freshness line
+   beside it ("read 3 days ago, reads every 15 minutes") would only argue with it. *@
 @if (tier is null)
 {
     <Alert Tone="AlertTone.Warn" Block="true">
         <span><b>The gateway no longer reports this service tier.</b> What is shown is what it last reported. An administrator can check the gateway's list of service tiers.</span>
     </Alert>
 }
-else if (tier.IsGatewayOffline(now) || tier.InstanceMissingSince is not null)
+else if (tier.NeedsAttention(now))
 {
     <Alert Tone="AlertTone.Warn" Block="true">
         <span>
             <b><OnPremisesTierState Row="Row" />.</b>
             What is shown is what it last reported, so the version and apps may have changed since.
-            @if (tier.InstanceMissingSince is not null && !tier.IsGatewayOffline(now))
+            @if (tier.IsGatewayOffline(now))
+            {
+                <text> Ask the customer's IT to check that the AL Workbench gateway service is running on @tier.Machine's network.</text>
+            }
+            else if (tier.NoLongerReportedSince is not null)
             {
                 <text> The customer's IT may have taken it out of the gateway's settings file.</text>
             }
             else
             {
-                <text> Ask the customer's IT to check that the AL Workbench gateway service is running on @tier.Machine's network.</text>
+                <text> The gateway is connected but can't read the service tier. Ask the customer's IT to check that the server is running.</text>
             }
             @if (CanSeeGateway)
             {
@@ -62,11 +54,27 @@ else if (tier.IsGatewayOffline(now) || tier.InstanceMissingSince is not null)
         </span>
     </Alert>
 }
+else
+{
+    <div class="freshness">
+        <Icon Name="server" Width="15" Height="15" Css="freshness__icon" />
+        <span class="freshness__text">
+            @if (tier.ReadAt is { } read)
+            {
+                <text>Read from the service tier by the on-premises gateway <span class="freshness__age"><Timestamp Value="@read" Relative="true" /></span>. The gateway reads it every 15 minutes.</text>
+            }
+            else
+            {
+                <text>The on-premises gateway hasn't read this service tier yet. It reads it every 15 minutes.</text>
+            }
+        </span>
+    </div>
+}
 
 <div class="meta-row">
     <span class="meta-item"><span class="meta-item__label">Type</span><span class="meta-item__value">@(tier?.EnvironmentLabel ?? Row.EnvironmentType)</span></span>
     <span class="meta-item"><span class="meta-item__label">BC version</span><span class="meta-item__value meta-item__value--mono">@(Row.Version ?? "—")</span></span>
-    <span class="meta-item"><span class="meta-item__label">Server</span><span class="meta-item__value">@(tier?.TierName ?? "—")</span></span>
+    <span class="meta-item"><span class="meta-item__label">Server</span><span class="meta-item__value">@(tier?.Machine ?? "—")</span></span>
     <span class="meta-item"><span class="meta-item__label">Tenant</span><span class="meta-item__value">@TenantText(tier)</span></span>
     <span class="meta-item"><span class="meta-item__label">Delivery window</span><span class="meta-item__value">@DeliveryWindow</span></span>
     <span class="meta-item"><span class="meta-item__label">Apps installed</span><span class="meta-item__value">@(Apps is { Count: > 0 } a ? a.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "—")</span></span>
@@ -93,12 +101,12 @@ else if (!ShowApps)
                     <span class="meta-item"><span class="meta-item__label">Server</span><span class="meta-item__value">@tier.Machine</span></span>
                     <span class="meta-item"><span class="meta-item__label">Instance</span><span class="meta-item__value">@tier.InstanceName</span></span>
                     <span class="meta-item"><span class="meta-item__label">Tenant</span><span class="meta-item__value">@TenantText(tier)</span></span>
-                    <span class="meta-item"><span class="meta-item__label">State</span><span class="meta-item__value">@BcEnvironmentStatus.StatusWord(Row.Status)</span></span>
+                    <span class="meta-item"><span class="meta-item__label">State</span><span class="meta-item__value">@FleetRowState.StatusWord(Row, now)</span></span>
                     <span class="meta-item"><span class="meta-item__label">Database</span><span class="meta-item__value">@(tier.Database ?? "Not read yet")</span></span>
                     <span class="meta-item"><span class="meta-item__label">Open sessions</span><span class="meta-item__value">@(tier.SessionCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "Not read")</span></span>
                     <span class="meta-item"><span class="meta-item__label">Licence expires</span><span class="meta-item__value">@LicenceText(tier)</span></span>
                     <span class="meta-item"><span class="meta-item__label">Gateway</span><span class="meta-item__value">@tier.GatewayName</span></span>
-                    <span class="meta-item"><span class="meta-item__label">Our delivery window</span><span class="meta-item__value">@DeliveryWindow</span></span>
+                    <span class="meta-item"><span class="meta-item__label">Delivery window</span><span class="meta-item__value">@DeliveryWindow</span></span>
                 </div>
                 @if (tier.ReadError is { } error)
                 {
@@ -177,17 +185,6 @@ else
 
     private static string GatewayHref(OnPremisesTierFacts tier) =>
         $"/admin/administration/gateways/{tier.GatewayId.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
-
-    /// <summary>Unknown, unread for too long, or its gateway offline: the strip turns to its warning colour.</summary>
-    private string StripClass
-    {
-        get
-        {
-            var now = Clock.GetUtcNow().UtcDateTime;
-            var tier = Row.OnPremises;
-            return tier is null || tier.IsStale(now) || tier.IsGatewayOffline(now) ? "freshness--stale" : string.Empty;
-        }
-    }
 
     /// <summary>A single-tenant server's one tenant is "default" in BC; the page says what that means.</summary>
     private static string TenantText(OnPremisesTierFacts? tier) =>

@@ -1,4 +1,5 @@
 using ALDevToolbox.Components.Pages.Projects;
+using ALDevToolbox.Components.Shared;
 using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Services;
@@ -162,5 +163,65 @@ public sealed class ProjectDetailEnvironmentsTests : IDisposable
         var reader = Render(id);
         reader.Markup.Should().Contain("CRONUS-BC01 / BC250");
         reader.FindAll("button").Should().NotContain(b => b.TextContent.Trim() == "Unlink");
+    }
+
+    // ---------------------------------------------------------------- the environment page's head
+
+    private async Task<UpgradeFleetRow> FleetRowAsync(int solution)
+    {
+        await using var ctx = _db.NewContext();
+        var id = await ctx.OeProjectEnvironments.AsNoTracking().Where(e => e.ProjectId == solution).Select(e => e.Id).SingleAsync();
+        var fleet = new UpgradeFleetService(ctx, _db.OrgContext, new ProjectAccess(ctx, _db.OrgContext), new EnvironmentRefreshQueue(),
+            NullLogger<UpgradeFleetService>.Instance);
+        return (await fleet.GetEnvironmentAsync(id))!.Fleet;
+    }
+
+    private IRenderedComponent<ALDevToolbox.Components.Pages.Environments.OnPremisesEnvironmentSections> RenderHead(UpgradeFleetRow row, bool admin) =>
+        _ctx.Render<ALDevToolbox.Components.Pages.Environments.OnPremisesEnvironmentSections>(p => p
+            .Add(c => c.Row, row).Add(c => c.Head, true).Add(c => c.CanSeeGateway, admin));
+
+    [Fact]
+    public async Task An_offline_gateways_tier_shows_only_the_warning_and_only_an_admin_gets_the_gateway_link()
+    {
+        var id = await SolutionAsync();
+        await LinkAsync(id);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.Gateways.Where(g => g.Id == _gateway)
+                .ExecuteUpdateAsync(s => s.SetProperty(g => g.LastSeenAt, DateTime.UtcNow.AddDays(-2)));
+        }
+        var row = await FleetRowAsync(id);
+
+        var admin = RenderHead(row, admin: true);
+        admin.FindAll(".alert").Should().ContainSingle().Which.TextContent.Should().Contain("Gateway offline since");
+        admin.FindAll(".freshness").Should().BeEmpty("a freshness line beside the warning would only argue with it");
+        admin.Markup.Should().NotContain("every 15 minutes");
+        admin.FindAll("a").Should().Contain(a => a.TextContent == "Open the gateway");
+
+        var consultant = RenderHead(row, admin: false);
+        consultant.FindAll(".alert").Should().ContainSingle();
+        consultant.FindAll("a").Should().NotContain(a => a.TextContent == "Open the gateway");
+    }
+
+    [Fact]
+    public async Task A_tier_its_gateway_is_reading_shows_how_fresh_it_is_and_no_warning()
+    {
+        var id = await SolutionAsync();
+        await LinkAsync(id);
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.Gateways.Where(g => g.Id == _gateway)
+                .ExecuteUpdateAsync(s => s.SetProperty(g => g.LastSeenAt, DateTime.UtcNow));
+        }
+        var row = await FleetRowAsync(id);
+
+        var cut = RenderHead(row, admin: false);
+
+        cut.FindAll(".alert").Should().BeEmpty();
+        cut.Find(".freshness").TextContent.Should().Contain("every 15 minutes");
+        // The header's Server is the machine; the instance is on the Overview card.
+        cut.FindAll(".meta-item").Single(m => m.TextContent.StartsWith("Server")).QuerySelector(".meta-item__value")!
+            .TextContent.Should().Be("CRONUS-BC01");
+        FleetRowState.StatusWord(row, DateTime.UtcNow).Should().Be("Running");
     }
 }

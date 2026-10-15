@@ -19,6 +19,63 @@ a.cell-stack__main {
 .env-storage__note--warn { color: var(--warning-text); }
 .env-storage__note--danger { color: var(--danger-text); font-weight: var(--fw-semibold); }
 
+/* "Not scheduled (on-premises)" is the whole answer for a service tier, so it wraps
+   rather than ending in an ellipsis. */
+.env-fleet__wrap { white-space: normal; }
+
+/* On a phone each environment is a short card instead of eight columns pushing the
+   page sideways: the name and its menu on top, then what it is on now, then the rest,
+   each with the column's name in front of it - the same shape the gateway page uses
+   for its service tiers. The edge bar moves from the last cell to the card. */
+@media (max-width: 640px) {
+    .env-fleet thead { display: none; }
+    .env-fleet, .env-fleet tbody { display: block; }
+    .env-fleet tbody tr {
+        display: grid;
+        grid-template-columns: auto auto minmax(0, 1fr) auto;
+        align-items: center;
+        column-gap: var(--space-2);
+        padding: var(--space-3);
+        border-bottom: 1px solid var(--border);
+    }
+    .env-fleet tbody tr:last-child { border-bottom: 0; }
+    .env-fleet tbody tr:hover { background: var(--surface-2); }
+    .env-fleet tbody tr.is-selected { background: var(--primary-weak); }
+    .data-table.env-fleet tbody tr td,
+    .data-table.env-fleet tbody tr:hover td,
+    .data-table.env-fleet tbody tr.is-selected td {
+        width: auto;
+        height: auto;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        box-shadow: none;
+    }
+    .env-fleet tbody td[data-label] {
+        grid-column: 1 / -1;
+        order: 2;
+        display: flex;
+        align-items: baseline;
+        gap: var(--space-2);
+        padding-top: var(--space-1);
+        text-align: left;
+    }
+    .env-fleet tbody td.env-fleet__version { order: 1; padding-top: var(--space-2); }
+    .env-fleet tbody td[data-label]::before {
+        content: attr(data-label);
+        flex: 0 0 6.5rem;
+        color: var(--ink-3);
+        font-size: var(--text-sm);
+    }
+    .env-fleet tbody td[data-label] > * { min-width: 0; }
+    .env-fleet .env-storage { min-width: 0; flex: 1; }
+    .env-fleet tbody tr.is-published { box-shadow: inset -4px 0 0 var(--bar-published); }
+    .env-fleet tbody tr.is-running { box-shadow: inset -4px 0 0 var(--bar-running); }
+    .env-fleet tbody tr.is-queued { box-shadow: inset -4px 0 0 var(--bar-queued); }
+    .env-fleet tbody tr.is-failed { box-shadow: inset -4px 0 0 var(--bar-failed); }
+    .env-fleet tbody tr.is-draft { box-shadow: inset -4px 0 0 var(--bar-draft); }
+}
+
 /* The auto-refresh switch sits in the freshness strip, so it takes the strip's type size
    rather than a form's. */
 .freshness__auto { font-size: var(--text-sm); }

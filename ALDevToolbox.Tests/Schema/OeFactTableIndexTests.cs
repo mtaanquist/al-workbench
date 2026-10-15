@@ -14,6 +14,19 @@ namespace ALDevToolbox.Tests.Schema;
 /// </summary>
 public sealed class OeFactTableIndexTests
 {
+    /// <summary>
+    /// Foreign keys whose only covering index was already a filtered one when the check
+    /// learned that a filtered index does not count (#1366). Each is a real gap - its
+    /// referential action seq-scans - left for its own change rather than fixed in
+    /// passing. This list only shrinks.
+    /// </summary>
+    private static readonly string[] KnownPartiallyCovered =
+    [
+        // Cascade from organizations; ix_oe_releases_org_dedup_key_active is filtered to
+        // live rows with a dedup key. Only an organisation delete pays for it.
+        "oe_releases(organization_id)",
+    ];
+
     private static readonly string[] FactTables =
     [
         "oe_module_objects", "oe_module_references", "oe_module_symbols",
@@ -69,13 +82,29 @@ public sealed class OeFactTableIndexTests
         var uncovered = ctx.Model.GetEntityTypes()
             .Where(e => e.GetTableName() is not null && !FactTables.Contains(e.GetTableName()))
             .SelectMany(e => e.GetForeignKeys().Select(fk => (Entity: e, Fk: fk)))
-            .Where(x => !x.Entity.GetIndexes().Any(i => Covers(i.Properties, x.Fk.Properties))
+            // A filtered (partial) index cannot serve the referential action: Postgres looks
+            // up every referencing row, and the filter leaves some of them out. The one
+            // filter that leaves out none of them is "<fk column> IS NOT NULL", since a
+            // null never references anything.
+            .Where(x => !x.Entity.GetIndexes().Any(i => ServesReferences(i, x.Fk) && Covers(i.Properties, x.Fk.Properties))
                         && !x.Entity.GetKeys().Any(k => Covers(k.Properties, x.Fk.Properties)))
             .Select(x => $"{x.Entity.GetTableName()}({string.Join(",", x.Fk.Properties.Select(p => p.GetColumnName()))})")
+            .Where(s => !KnownPartiallyCovered.Contains(s))
             .OrderBy(s => s)
             .ToList();
 
         uncovered.Should().BeEmpty("the replaced convention must behave like the stock one everywhere else");
+    }
+
+    private static bool ServesReferences(
+        Microsoft.EntityFrameworkCore.Metadata.IReadOnlyIndex index,
+        Microsoft.EntityFrameworkCore.Metadata.IReadOnlyForeignKey fk)
+    {
+        var filter = index.GetFilter();
+        if (filter is null) return true;
+        var bare = filter.Replace("\"", string.Empty, StringComparison.Ordinal).Trim().Trim('(', ')').Trim();
+        return fk.Properties.Count == 1
+               && string.Equals(bare, $"{fk.Properties[0].GetColumnName()} IS NOT NULL", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool Covers(

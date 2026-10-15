@@ -47,6 +47,34 @@ public static class FleetRowState
         };
     }
 
+    /// <summary>
+    /// True for an on-premises row whose state is the last one its gateway sent rather
+    /// than a current one: the gateway is offline, stopped reporting the tier, or has not
+    /// read it for over an hour. Such a row must not read as healthy, whatever it last said.
+    /// An on-premises row with no tier behind it at all counts too.
+    /// </summary>
+    public static bool IsOutOfTouch(UpgradeFleetRow row, DateTime now) =>
+        row.IsOnPremises && (row.OnPremises is not { } tier || tier.NeedsAttention(now));
+
+    /// <summary>
+    /// <see cref="StatusWord(UpgradeFleetRow)"/>, except that an out-of-touch on-premises
+    /// row says it is the last state seen ("Last seen running").
+    /// </summary>
+    public static string StatusWord(UpgradeFleetRow row, DateTime now) => IsOutOfTouch(row, now)
+        ? StateUnknown(row) ? "No current state" : $"Last seen {StatusWord(row).ToLowerInvariant()}"
+        : StatusWord(row);
+
+    /// <summary>
+    /// <see cref="RowState(UpgradeFleetRow)"/>, except that an out-of-touch on-premises row
+    /// takes the warning keyline (the sheet's draft colour) whatever it last reported.
+    /// </summary>
+    public static string RowState(UpgradeFleetRow row, DateTime now) =>
+        IsOutOfTouch(row, now) ? "is-draft" : RowState(row);
+
+    /// <summary><see cref="StatusIcon(UpgradeFleetRow)"/>, with the warning glyph for an out-of-touch row.</summary>
+    public static string StatusIcon(UpgradeFleetRow row, DateTime now) =>
+        IsOutOfTouch(row, now) ? "triangle-alert" : StatusIcon(row);
+
     public static string StatusIcon(UpgradeFleetRow row)
     {
         // Checked before the keyline state, because unread and suspended share that

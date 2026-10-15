@@ -7,6 +7,7 @@
 @inject ILogger<EnvironmentsList> Log
 @inject ALDevToolbox.Services.Organizations.DisplayTimeZone Zone
 @inject IServiceScopeFactory ScopeFactory
+@inject TimeProvider Clock
 @using ALDevToolbox.Components.Shared
 @using ALDevToolbox.Domain.ValueObjects
 @using ALDevToolbox.Services.ObjectExplorer.Bc
@@ -284,7 +285,7 @@
         {
             @BulkBar(shownIds)
         }
-        <table class="data-table data-table--edge">
+        <table class="data-table data-table--edge env-fleet">
             <thead>
                 <tr>
                     <th class="data-table__col-check">
@@ -319,7 +320,7 @@
                 @foreach (var row in shown)
                 {
                     var picked = _selection.Contains(row.EnvironmentId);
-                    var rowState = RowState(row) + (picked ? " is-selected" : "");
+                    var rowState = RowState(row, Now) + (picked ? " is-selected" : "");
                     <tr class="@rowState">
                         @* A deleted environment has nothing to set: Business Central is only
                            keeping it so it can be brought back. *@
@@ -340,8 +341,8 @@
                                touch - so for every state but Running the word is also
                                written out under Next update, where the design puts it. *@
                             <span class="data-table__state data-table__state--icon" role="img"
-                                  aria-label="@StatusWord(row)" title="@StatusWord(row)">
-                                <Icon Name="@StatusIcon(row)" Width="15" Height="15" />
+                                  aria-label="@StatusWord(row, Now)" title="@StatusWord(row, Now)">
+                                <Icon Name="@StatusIcon(row, Now)" Width="15" Height="15" />
                             </span>
                         </td>
                         @* The environment leads: this is a list of environments, so the
@@ -352,26 +353,26 @@
                                 <span class="cell-stack__sub">@TypeLabel(row)</span>
                             </span>
                         </td>
-                        <td>
+                        <td data-label="Solution">
                             <a href="@row.SolutionHref">@row.ProjectName</a>
                             @if (!string.IsNullOrWhiteSpace(row.ProjectShortName))
                             {
                                 <span class="sol-list__short" title="Short name">@row.ProjectShortName</span>
                             }
                         </td>
-                        <td class="u-num">@(row.Version ?? "—")</td>
-                        <td>
+                        <td class="u-num env-fleet__version" data-label="Now on">@(row.Version ?? "—")</td>
+                        <td data-label="@(_tab == Tab.Deleted ? "Gone for good" : "Next update")">
                             @* For a deleted environment the deadline takes the bold line
                                the version would have had: it is the fact the row is here
                                for, and a dash in bold over it in grey reads backwards. *@
                             <span class="cell-stack">
-                                <span class="cell-stack__main" style="font-weight: var(--fw-semibold)">
+                                <span class="@(row.IsOnPremises ? "cell-stack__main env-fleet__wrap" : "cell-stack__main")" style="font-weight: var(--fw-semibold)">
                                     @if (row.IsOnPremises)
                                     {
                                         @* Microsoft's platform updates do not reach an on-premises
-                                           tier; what is worth this cell is whether its gateway
-                                           is still telling us anything. *@
-                                        <text>On-premises</text>
+                                           tier, so nothing is ever scheduled; the line under it
+                                           says whether its gateway is still telling us anything. *@
+                                        <text>Not scheduled (on-premises)</text>
                                     }
                                     else if (!row.IsSoftDeleted)
                                     {
@@ -410,7 +411,7 @@
                                 </span>
                             </span>
                         </td>
-                        <td>
+                        <td data-label="Storage">
                             @* The size is this environment's; the bar is the customer's whole
                                tenant against its allowance, because that is what runs out. It
                                repeats on each of a customer's rows so it is never a scroll away. *@
@@ -433,7 +434,7 @@
                                 <span class="u-muted">—</span>
                             }
                         </td>
-                        <td class="u-muted">
+                        <td class="u-muted" data-label="Last checked">
                             @* fetched_at is NOT NULL on the row, so this always has a real
                                answer; the dash is only for a projection that somehow didn't
                                carry it. *@
@@ -990,7 +991,7 @@
     /// particular it is not something that "needs attention", which is a list of things
     /// somebody has to go and do.
     /// </summary>
-    private static bool MatchesTab(UpgradeFleetRow row, Tab tab) => tab switch
+    private bool MatchesTab(UpgradeFleetRow row, Tab tab) => tab switch
     {
         Tab.Deleted => row.IsSoftDeleted,
         _ when row.IsSoftDeleted => false,
@@ -1009,9 +1010,15 @@
     /// <para>A customer at or over their storage allowance counts too: nothing is broken
     /// yet, but it is a conversation somebody has to have. Filling up (amber) does not -
     /// the bar already says so, and a list of things to do should not grow on a warning.</para>
+    /// <para>An on-premises tier whose gateway has gone quiet counts as well: what the
+    /// row shows is the last state it heard, and nobody can tell from here whether the
+    /// server is still up. See .design/on-prem-gateway.md.</para>
     /// </summary>
-    private static bool NeedsAttention(UpgradeFleetRow row) =>
-        StateUnknown(row) || RowState(row) is "is-failed" or "is-queued" || row.TenantStorageUse >= 1;
+    private bool NeedsAttention(UpgradeFleetRow row) =>
+        StateUnknown(row) || RowState(row, Now) is "is-failed" or "is-queued" or "is-draft" || row.TenantStorageUse >= 1;
+
+    /// <summary>The clock the out-of-touch test reads, from the injected TimeProvider so tests can pin it.</summary>
+    private DateTime Now => Clock.GetUtcNow().UtcDateTime;
 
     // ── Presentation ─────────────────────────────────────────────────────
 

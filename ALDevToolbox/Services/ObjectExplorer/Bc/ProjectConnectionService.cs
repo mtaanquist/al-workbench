@@ -2489,12 +2489,14 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
         var existing = await _db.OeProjectEnvironments
             .Where(e => e.ProjectId == project.Id && e.Kind == OeEnvironmentKind.Online)
             .ToListAsync(ct);
-        // A name an on-premises row holds cannot be inserted (the name is unique per
+        // A name a linked on-premises row holds cannot be inserted (the name is unique per
         // Solution), so such an environment is left out with a warning rather than
         // failing the whole refresh. Only a Solution that is online and has linked tiers
-        // left over can meet it, which the hosting rules otherwise refuse.
+        // left over can meet it, which the hosting rules otherwise refuse. An unlinked
+        // tier holds no name (the index leaves it out), so a customer who moved online
+        // gets their "Production" back.
         var onPremisesNames = (await _db.OeProjectEnvironments.AsNoTracking()
-                .Where(e => e.ProjectId == project.Id && e.Kind == OeEnvironmentKind.OnPremises)
+                .Where(e => e.ProjectId == project.Id && e.Kind == OeEnvironmentKind.OnPremises && e.MissingSince == null)
                 .Select(e => e.Name)
                 .ToListAsync(ct))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);

@@ -283,6 +283,26 @@ public sealed class ReleasePipelineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateReleasePipelineAsync_rejects_an_on_premises_service_tier()
+    {
+        // #1366: deploying through the gateway is not built yet, so the editor does not
+        // offer a linked service tier; the service refuses one sent past it.
+        await using var ctx = _db.NewContext();
+        var projectId = await SeedProjectAsync(ctx);
+        var buildId = await SeedBuildPipelineAsync(ctx, projectId);
+        var envId = await SeedEnvironmentAsync(ctx, projectId, name: "Production");
+        await ctx.OeProjectEnvironments.Where(e => e.Id == envId)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises).SetProperty(e => e.TenantId, "default"));
+
+        var act = () => NewService(ctx).CreateReleasePipelineAsync(
+            new ReleasePipelineInput(projectId, "Rel", buildId, envId, BcDeploymentSchedule.Immediate, BcSyncMode.Add));
+
+        var error = (await act.Should().ThrowAsync<PlanValidationException>()).Which.Errors["ProjectEnvironmentId"];
+        error.Should().Contain("on-premises service tier");
+        (await ctx.OeReleasePipelines.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
     public async Task CreateReleasePipelineAsync_rejects_an_environment_that_cannot_take_an_install()
     {
         await using var ctx = _db.NewContext();

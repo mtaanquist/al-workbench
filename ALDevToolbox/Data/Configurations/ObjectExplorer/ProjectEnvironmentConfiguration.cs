@@ -79,11 +79,15 @@ internal sealed class ProjectEnvironmentConfiguration : IEntityTypeConfiguration
 
         // A linked service tier. SetNull rather than Restrict: the mirror never deletes a
         // tier, and if one ever goes the environment reads as unlinked instead of
-        // blocking the delete. The partial unique index below covers the foreign key.
+        // blocking the delete. The partial unique index below cannot serve that SET NULL
+        // lookup (it leaves unlinked rows out), so the foreign key has a plain index of
+        // its own - see OeFactTableIndexTests.
         entity.HasOne(e => e.GatewayInstance)
             .WithMany()
             .HasForeignKey(e => e.GatewayInstanceId)
             .OnDelete(DeleteBehavior.SetNull);
+        entity.HasIndex(e => e.GatewayInstanceId)
+            .HasDatabaseName("ix_oe_project_environments_gateway_instance_id");
 
         // One service tier and tenant belongs to one Solution at a time. Unlinked rows
         // (missing_since set) are left out, so a tier unlinked from one Solution can be
@@ -96,9 +100,17 @@ internal sealed class ProjectEnvironmentConfiguration : IEntityTypeConfiguration
             .HasDatabaseName("ix_oe_project_environments_gateway_tenant");
 
         // The refresh upsert matches on (project_id, name); a unique index keeps
-        // it one row per environment per project and backs the lookup.
+        // it one row per environment per project and backs the lookup. An unlinked
+        // on-premises row keeps its row (pipelines point at it) but not its name: a
+        // customer who moves online, or a tier relinked after a gateway is rebuilt, takes
+        // the name again. Online rows hold their name whether present or not, as before.
         entity.HasIndex(e => new { e.ProjectId, e.Name })
             .IsUnique()
+            .HasFilter("missing_since IS NULL OR kind = 'Online'")
             .HasDatabaseName("ix_oe_project_environments_project_name");
+        // Now that the index above is filtered it no longer serves the project foreign
+        // key's cascade, which has to find every row of a deleted project.
+        entity.HasIndex(e => e.ProjectId)
+            .HasDatabaseName("ix_oe_project_environments_project_id");
     }
 }

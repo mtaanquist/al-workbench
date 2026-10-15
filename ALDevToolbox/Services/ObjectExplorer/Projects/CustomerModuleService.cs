@@ -169,6 +169,7 @@ public sealed class CustomerModuleService
             .Where(EnvironmentQueries.NotSoftDeleted)
             .Where(e => e.ProjectId == projectId && e.MissingSince == null)
             .Where(e => !onPremises || e.Kind == OeEnvironmentKind.OnPremises)
+            .Where(EnvironmentQueries.StillReported)
             .Select(e => new { e.Id, e.Name, e.Type })
             .ToListAsync(ct);
         var chosen = environments
@@ -247,20 +248,25 @@ public sealed class CustomerModuleService
         var module = await _db.CustomerModules.AsNoTracking().FirstOrDefaultAsync(m => m.Id == moduleId, ct);
         if (module is null) return [];
 
-        var ids = await _db.OeProjectModules.AsNoTracking()
+        // Every solution that could have it - typed in, or installed in a live
+        // environment - then read the way the card reads each one, so the filter and the
+        // card cannot disagree: an on-premises solution's typed row stops counting once a
+        // Production service tier is linked, and a tier's apps count only while linked.
+        var candidates = await _db.OeProjectModules.AsNoTracking()
             .Where(m => m.ModuleId == moduleId).Select(m => m.ProjectId).ToListAsync(ct);
-        if (module.AppId is { } appId)
-        {
-            // The same environments the card reads from, so the filter and the card
-            // cannot disagree about which customers have a module.
-            var live = _db.OeProjectEnvironments.AsNoTracking()
-                .Where(EnvironmentQueries.NotSoftDeleted)
-                .Where(e => e.MissingSince == null);
-            ids.AddRange(await _db.OeEnvironmentApps.AsNoTracking()
-                .Where(a => a.AppId == appId && live.Any(e => e.Id == a.EnvironmentId))
-                .Select(a => a.Environment!.ProjectId).ToListAsync(ct));
-        }
-        return ids.ToHashSet();
+        var live = _db.OeProjectEnvironments.AsNoTracking()
+            .Where(EnvironmentQueries.NotSoftDeleted)
+            .Where(e => e.MissingSince == null);
+        var moduleName = module.Name.ToLower();
+        var installed = module.AppId is { } appId
+            ? _db.OeEnvironmentApps.AsNoTracking().Where(a => a.AppId == appId)
+            : _db.OeEnvironmentApps.AsNoTracking().Where(a => a.Name.ToLower() == moduleName);
+        candidates.AddRange(await installed
+            .Where(a => live.Any(e => e.Id == a.EnvironmentId))
+            .Select(a => a.Environment!.ProjectId).ToListAsync(ct));
+
+        var holdings = await GetModuleAcrossSolutionsAsync(moduleId, candidates.Distinct().ToList(), ct);
+        return holdings.Where(h => h.Module is not null).Select(h => h.ProjectId).ToHashSet();
     }
 
     /// <summary>
@@ -304,6 +310,7 @@ public sealed class CustomerModuleService
                 .Where(EnvironmentQueries.NotSoftDeleted)
                 .Where(e => onlineIds.Contains(e.ProjectId) && e.MissingSince == null)
                 .Where(e => !linkedIds.Contains(e.ProjectId) || e.Kind == OeEnvironmentKind.OnPremises)
+                .Where(EnvironmentQueries.StillReported)
                 .Select(e => new { e.Id, e.ProjectId, e.Name, e.Type })
                 .ToListAsync(ct);
         var chosen = environments
@@ -367,6 +374,10 @@ public sealed class CustomerModuleService
                         && e.Kind == OeEnvironmentKind.OnPremises
                         && e.MissingSince == null
                         && e.Type.Trim().ToUpper() == "PRODUCTION"
+                        // A tier the gateway stopped reporting is not what the customer runs now.
+                        && e.GatewayInstance != null
+                        && e.GatewayInstance.MissingSince == null
+                        && !e.GatewayInstance.Tenants.Any(t => t.TenantId == e.TenantId && t.MissingSince != null)
                         && e.Project!.HostingType != null && e.Project.HostingType != ProjectHostingType.MicrosoftCloud)
             .Select(e => e.ProjectId)
             .Distinct()

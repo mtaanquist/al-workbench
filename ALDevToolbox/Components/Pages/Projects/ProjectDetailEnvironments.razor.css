@@ -11,7 +11,16 @@
         border-bottom: 1px solid var(--border);
     }
     .pd-tiers tr:last-child { border-bottom: 0; }
-    .pd-tiers td { padding: 0; border: 0; grid-column: 1; background: transparent; height: auto; }
+    /* No grey behind a cell: the table's hover tint stays on the whole card. */
+    .pd-tiers tbody tr td,
+    .pd-tiers tbody tr:hover td { padding: 0; border: 0; grid-column: 1; background: transparent; height: auto; }
+    .pd-tiers tbody tr:hover { background: var(--surface-2); }
+    /* The two values that are only a number or a time say what they are; the name, the
+       server and the state already do. */
+    .pd-tiers [data-label]::before {
+        content: attr(data-label) ": ";
+        color: var(--ink-3);
+    }
     .pd-tiers td.data-table__actions { grid-column: 2; grid-row: 1; align-self: start; }
     .pd-tiers td.u-num { text-align: left; }
 }

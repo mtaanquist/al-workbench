@@ -16,7 +16,7 @@ namespace ALDevToolbox.Services.Gateways;
 /// <param name="PolicyEnvironment">The policy file's word for the tier: <c>production</c>, <c>test</c> or <c>development</c>.</param>
 /// <param name="WebClientUrl">The environment's web client address, as the inventory wrote it.</param>
 /// <param name="ReadAt">When the gateway last read the tier; null when it never has.</param>
-/// <param name="InstanceMissingSince">Set when the gateway stopped reporting the tier.</param>
+/// <param name="NoLongerReportedSince">Set when the gateway stopped reporting the tier, or the tenant on it.</param>
 public sealed record OnPremisesTierFacts(
     int GatewayId,
     string GatewayName,
@@ -36,7 +36,7 @@ public sealed record OnPremisesTierFacts(
     int? SessionCount,
     DateTime ReportedAt,
     DateTime? ReadAt,
-    DateTime? InstanceMissingSince,
+    DateTime? NoLongerReportedSince,
     string? ReadError,
     DateOnly? LicenceExpiresOn,
     string? Licensee,
@@ -60,7 +60,18 @@ public sealed record OnPremisesTierFacts(
     /// no longer reports the tier at all. Either way the facts are the last ones known.
     /// </summary>
     public bool IsStale(DateTime now) =>
-        InstanceMissingSince is not null || ReadAt is not { } read || now - read > StaleAfter;
+        NoLongerReportedSince is not null || ReadAt is not { } read || now - read > StaleAfter;
+
+    /// <summary>
+    /// True when the tier's state cannot be taken as current at <paramref name="now"/>:
+    /// the gateway is not online, it no longer reports the tier or its tenant, or its last
+    /// read is older than <see cref="StaleAfter"/>. A tier the gateway has not read yet is
+    /// not counted - that is a fresh link waiting for its first round, not a problem.
+    /// </summary>
+    public bool NeedsAttention(DateTime now) =>
+        IsGatewayOffline(now)
+        || NoLongerReportedSince is not null
+        || (ReadAt is { } read && now - read > StaleAfter);
 
     /// <summary>The policy file's word as copy: "Production", "Test" or "Development".</summary>
     public string EnvironmentLabel => OnPremisesEnvironmentService.EnvironmentLabel(PolicyEnvironment);
@@ -185,13 +196,14 @@ public sealed class OnPremisesEnvironmentService
         foreach (var i in instances)
         {
             // A single-tenant server always has its one tenant, read or not.
-            var tenants = i.Tenants.Count > 0 || i.Multitenant == true ? i.Tenants : [DefaultTenant];
+            var multitenant = i.Multitenant == true || i.Tenants.Count > 1;
+            var tenants = i.Tenants.Count > 0 || multitenant ? i.Tenants : [DefaultTenant];
             foreach (var tenant in tenants)
             {
                 var link = linked.FirstOrDefault(l => l.GatewayInstanceId == i.Id && l.TenantId is not null && SameTenant(l.TenantId, tenant));
                 rows.Add(new LinkableTier(
                     i.GatewayId, i.GatewayName, GatewayService.StatusOf(i.State, i.LastSeenAt, i.RevokedAt, now),
-                    i.Id, i.Machine, i.Name, i.Environment, i.Version, i.Multitenant == true, tenant,
+                    i.Id, i.Machine, i.Name, i.Environment, i.Version, multitenant, tenant,
                     link?.ProjectName, link?.ProjectId == projectId));
             }
         }
@@ -265,7 +277,7 @@ public sealed class OnPremisesEnvironmentService
         GatewayInstanceTenant? tenant = null;
         if (instance is not null)
         {
-            if (instance.Multitenant == true)
+            if (IsMultitenant(instance))
             {
                 tenant = tenantId is null ? null
                     : instance.Tenants.FirstOrDefault(t => t.MissingSince is null && SameTenant(t.TenantId, tenantId));
@@ -299,7 +311,14 @@ public sealed class OnPremisesEnvironmentService
         var revived = rows.FirstOrDefault(e => e.Kind == OeEnvironmentKind.OnPremises
                                                && e.GatewayInstanceId == instance!.Id
                                                && e.TenantId is not null && SameTenant(e.TenantId, tenantId!));
-        if (rows.Any(e => e != revived && string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase)))
+        // The rule the (project_id, name) index enforces: an unlinked tier keeps its row
+        // but gives up its name, so a tier relinked after a gateway is rebuilt, or an
+        // online environment of the same name, can have it. Relinking a tier whose old
+        // name another environment has taken since is refused here, by name, rather
+        // than silently renamed: the Admin picks the name in the dialog anyway.
+        if (rows.Any(e => e != revived
+                          && (e.Kind == OeEnvironmentKind.Online || e.MissingSince == null)
+                          && string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase)))
         {
             throw Invalid("Name", $"This Solution already has an environment called {name}. Choose another name.");
         }
@@ -337,7 +356,10 @@ public sealed class OnPremisesEnvironmentService
         }
         catch (DbUpdateException ex) when (DbErrors.IsUniqueViolation(ex))
         {
-            // Another Admin linked the same tier, or used the name, a moment earlier.
+            // Another Admin linked the same tier, or used the name, a moment earlier. The
+            // context is scoped to the circuit, so the rows that failed to save are let go
+            // here; left tracked, every later save on the page would fail the same way.
+            _db.ChangeTracker.Clear();
             throw Invalid("InstanceId", "This service tier or name was taken a moment ago. Reload and try again.");
         }
 
@@ -395,7 +417,11 @@ public sealed class OnPremisesEnvironmentService
                 : Cut(instance.State.Trim(), 50);
         row.StatusFetchedAt = instance.ReadAt;
         row.WebClientLoginUrl = WebClientUrl(instance, row.TenantId);
-        row.FetchedAt = now;
+        // When the gateway read the tier, not when this ran: a report that could not read
+        // it must not make the row look fresh. A tier never read at all is born with the
+        // time it was linked, the column being required.
+        if (instance.ReadAt is { } readAt) row.FetchedAt = readAt;
+        else if (row.FetchedAt == default) row.FetchedAt = now;
     }
 
     /// <summary>
@@ -466,12 +492,20 @@ public sealed class OnPremisesEnvironmentService
     {
         if (string.IsNullOrWhiteSpace(instance.PublicWebBaseUrl)) return null;
         var url = instance.PublicWebBaseUrl.Trim();
-        if (instance.Multitenant == true && tenantId is not null && !SameTenant(tenantId, DefaultTenant))
+        if (IsMultitenant(instance) && tenantId is not null && !SameTenant(tenantId, DefaultTenant))
         {
             url += (url.Contains('?') ? "&" : "?") + "tenant=" + Uri.EscapeDataString(tenantId);
         }
         return Cut(url, 500);
     }
+
+    /// <summary>
+    /// A server that says it is multitenant, or reports more than one tenant: the
+    /// configuration is not always read, and a server with two tenants is multitenant
+    /// whatever was missed.
+    /// </summary>
+    internal static bool IsMultitenant(GatewayInstance instance) =>
+        instance.Multitenant == true || instance.Tenants.Count(t => t.MissingSince is null) > 1;
 
     private static bool SameTenant(string a, string b) =>
         string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);

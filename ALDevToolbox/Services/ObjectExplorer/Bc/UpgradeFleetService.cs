@@ -335,7 +335,7 @@ public sealed class UpgradeFleetService
                     e.GatewayInstance.Name,
                     e.TenantId ?? OnPremisesEnvironmentService.DefaultTenant,
                     e.GatewayInstance.Environment,
-                    e.GatewayInstance.Multitenant,
+                    e.GatewayInstance.Multitenant == true || e.GatewayInstance.Tenants.Count(t => t.MissingSince == null) > 1,
                     e.GatewayInstance.DatabaseServer,
                     e.GatewayInstance.DatabaseInstance,
                     e.GatewayInstance.DatabaseName,
@@ -343,7 +343,9 @@ public sealed class UpgradeFleetService
                     e.GatewayInstance.SessionCount,
                     e.GatewayInstance.ReportedAt,
                     e.GatewayInstance.ReadAt,
-                    e.GatewayInstance.MissingSince,
+                    // The tier, or the tenant on it, that the gateway stopped reporting.
+                    e.GatewayInstance.MissingSince
+                        ?? e.GatewayInstance.Tenants.Where(t => t.TenantId == e.TenantId).Select(t => t.MissingSince).FirstOrDefault(),
                     e.GatewayInstance.ReadError,
                     e.GatewayInstance.Licence == null ? null : e.GatewayInstance.Licence.ExpiresOn,
                     e.GatewayInstance.Licence == null ? null : e.GatewayInstance.Licence.Licensee,

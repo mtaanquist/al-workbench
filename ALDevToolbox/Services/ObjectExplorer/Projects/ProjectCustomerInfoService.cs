@@ -95,7 +95,9 @@ public sealed class ProjectCustomerInfoService
                 && e.MissingSince == null
                 && e.Type.Trim().ToUpper() == "PRODUCTION"
                 && (e.Version != null || e.WebClientLoginUrl != null))
-            .Select(e => new { e.ProjectId, e.Name, e.Version, e.WebClientLoginUrl, e.FetchedAt })
+            // A tier, or tenant, the gateway no longer reports is not the customer's current version.
+            .Where(EnvironmentQueries.StillReported)
+            .Select(e => new { e.ProjectId, e.Name, e.Version, e.WebClientLoginUrl, e.FetchedAt, OnPremises = e.Kind == OeEnvironmentKind.OnPremises })
             .ToListAsync(ct);
 
         return rows
@@ -103,7 +105,7 @@ public sealed class ProjectCustomerInfoService
             .ToDictionary(
                 g => g.Key,
                 g => g.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
-                    .Select(r => new ProductionEnvironmentFacts(r.Name, Blank(r.Version), Blank(r.WebClientLoginUrl), r.FetchedAt))
+                    .Select(r => new ProductionEnvironmentFacts(r.Name, Blank(r.Version), Blank(r.WebClientLoginUrl), r.FetchedAt, r.OnPremises))
                     .First());
 
         static string? Blank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
@@ -589,7 +591,8 @@ public sealed record CustomerBasics(
 }
 
 /// <summary>What Business Central last reported for a solution's production environment. See <see cref="ProjectCustomerInfoService.ReadProductionFactsAsync"/>.</summary>
-public sealed record ProductionEnvironmentFacts(string EnvironmentName, string? Version, string? WebClientLoginUrl, DateTime FetchedAt);
+/// <param name="FromServiceTier">True when it is a linked on-premises service tier rather than a Business Central online environment.</param>
+public sealed record ProductionEnvironmentFacts(string EnvironmentName, string? Version, string? WebClientLoginUrl, DateTime FetchedAt, bool FromServiceTier = false);
 
 public sealed record CustomerBasicsInput(
     ProjectHostingType? HostingType,

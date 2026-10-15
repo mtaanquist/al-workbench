@@ -31,7 +31,7 @@ else
     {
         <span class="tier-state--warn">Gateway @tier.GatewayName is not connected yet</span>
     }
-    else if (tier.InstanceMissingSince is not null)
+    else if (tier.NoLongerReportedSince is not null)
     {
         <span class="tier-state--warn">The gateway no longer reports this service tier</span>
     }

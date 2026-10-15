@@ -658,6 +658,42 @@ public sealed class ProjectConnectionServiceTests : IDisposable
         rows.Should().Contain(e => e.Name == "Sandbox" && e.Kind == OeEnvironmentKind.Online);
     }
 
+    [Fact]
+    public async Task A_customer_who_moved_online_gets_the_name_an_unlinked_tier_had()
+    {
+        // #1366: "Production" was an on-premises service tier, unlinked when the customer
+        // moved to Business Central online. The row stays for its pipelines' history but
+        // gives its name up, so the first refresh brings the online Production in.
+        var id = await SeedProjectAsync();
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk()).SaveConnectionAsync(id, ValidConnection());
+        int tierId;
+        await using (var seed = _db.NewContext())
+        {
+            var tier = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = id, Name = "Production", Type = "Production",
+                Kind = OeEnvironmentKind.OnPremises, TenantId = "default", Version = "25.4.0.0",
+                FetchedAt = DateTime.UtcNow.AddDays(-2), MissingSince = DateTime.UtcNow.AddDays(-1),
+            };
+            seed.OeProjectEnvironments.Add(tier);
+            await seed.SaveChangesAsync();
+            tierId = tier.Id;
+        }
+
+        var admin = new FakeAdminClient { OnList = () => new[] { new BcEnvironment("Production", "Production") } };
+        await using (var ctx = _db.NewContext())
+            await Svc(ctx, TokenOk(), admin).RefreshEnvironmentsAsync(id);
+
+        var rows = await EnvironmentsAsync(id);
+        rows.Should().HaveCount(2);
+        var online = rows.Single(e => e.Kind == OeEnvironmentKind.Online);
+        (online.Name, online.MissingSince).Should().Be(("Production", (DateTime?)null));
+        var old = rows.Single(e => e.Id == tierId);
+        old.MissingSince.Should().NotBeNull("the unlinked tier keeps its row, unlinked");
+        old.Kind.Should().Be(OeEnvironmentKind.OnPremises);
+    }
+
     // ── Default delivery windows for new environments (issue #962) ─────────
 
     private async Task SetDefaultWindowsAsync(DefaultDeliveryWindows windows)
