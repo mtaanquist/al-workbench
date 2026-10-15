@@ -26,6 +26,9 @@
 
 .rb-restart__left-out { color: var(--ink-3); }
 
+/* The objects outside the customer's licence (#1370), in the refusal above the restart. */
+.rb-licence__list { margin: 0; padding-left: var(--space-4); font-size: var(--text-sm); overflow-wrap: anywhere; }
+
 /* A long dialog - the restart warning, a phone screen - scrolls its body and keeps
    Cancel and Deploy on screen. */
 .confirm-dialog { display: flex; flex-direction: column; max-height: calc(100dvh - 2 * var(--space-5)); }

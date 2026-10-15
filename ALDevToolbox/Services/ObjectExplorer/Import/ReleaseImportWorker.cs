@@ -290,6 +290,7 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                     await importer.ProcessReleaseAsync(job.ReleaseId, outcome.Uploads, job.StoreSymbolReference, ct).ConfigureAwait(false);
                     await buildService.MarkCompiledResultsIngestedAsync(job.ReleaseId, ct).ConfigureAwait(false);
                     await buildService.MarkBuildReadyAsync(job.ReleaseId, outcome.BcVersion, ct).ConfigureAwait(false);
+                    await buildService.RecordLicenceCheckAsync(job.ReleaseId, ct).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) when (superseded.IsCancellationRequested && !ct.IsCancellationRequested)
@@ -480,6 +481,9 @@ public class ReleaseImportWorker : QueueDrainWorker<ReleaseImportJob>
                     }
                     // Flip the first-class build row ready alongside the Release.
                     await buildService.MarkBuildReadyAsync(job.ReleaseId, outcome.BcVersion, ct).ConfigureAwait(false);
+                    // An on-premises Solution's build is compared with the customer's licence
+                    // once its objects are indexed (#1370). A preview check is skipped inside.
+                    await buildService.RecordLicenceCheckAsync(job.ReleaseId, ct).ConfigureAwait(false);
                     await NotifyBuildFinishedAsync(scope.ServiceProvider, job.ReleaseId, ct).ConfigureAwait(false);
                     // The build is final at this point, so publishing it to GitHub can
                     // only ever add to it: a pipeline that names a repository gets a

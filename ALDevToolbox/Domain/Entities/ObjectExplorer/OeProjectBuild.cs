@@ -177,6 +177,16 @@ public class OeProjectBuild
     /// </summary>
     public string? GithubReleaseError { get; set; }
 
+    /// <summary>
+    /// The build's objects compared with the licence of each linked on-premises Production
+    /// environment of its Solution, as JSON written once the build is ready (#1370): a list
+    /// of <c>LicenceCheck</c>, read through <c>LicenceRangeCheck.Parse</c>. Null for an
+    /// online Solution, one with no linked Production tier, a preview build, and builds made
+    /// before the check existed. A warning, never a failure: deploying checks again against
+    /// the target. See <c>.design/on-prem-gateway.md</c>, "Licensed object ranges, as built".
+    /// </summary>
+    public string? LicenceCheckJson { get; set; }
+
     /// <summary>When the build was queued. Despite the name, this includes the wait for a free worker.</summary>
     public DateTime StartedAt { get; set; }
 

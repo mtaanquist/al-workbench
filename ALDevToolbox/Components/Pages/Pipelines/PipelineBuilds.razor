@@ -565,6 +565,50 @@
                                 </Alert>
                             }
 
+                            @* The build's objects against the customer's licence on each linked
+                               on-premises Production tier (#1370). A warning, never a failure:
+                               the files are fine, but the deployment to that tier will refuse
+                               them until the licence covers them. "Not checked" is said out
+                               loud rather than read as a pass. *@
+                            @if (_latest.Status == "ready" && _latest.LicenceChecks is { Count: > 0 } licenceChecks)
+                            {
+                                @foreach (var check in licenceChecks)
+                                {
+                                    @if (check.IsOutside)
+                                    {
+                                        <Alert Tone="AlertTone.Warn" Block="true" Class="pb-licence">
+                                            <div class="pb-licence__body">
+                                                <p>
+                                                    <b>@(check.OutsideCount == 1
+                                                        ? $"1 object is outside the customer's licence on {check.EnvironmentName}."
+                                                        : $"{check.OutsideCount} objects are outside the customer's licence on {check.EnvironmentName}.")</b>
+                                                    Deploying this build to @check.EnvironmentName will be refused until the licence covers @(check.OutsideCount == 1 ? "it" : "them").
+                                                    Ask the customer to add @(check.OutsideCount == 1 ? "it" : "them") to their licence, or give @(check.OutsideCount == 1 ? "it an id" : "them ids") the licence covers.
+                                                </p>
+                                                <ul class="pb-licence__list">
+                                                    @foreach (var finding in check.Findings.Take(LicenceFindingsShown))
+                                                    {
+                                                        <li>@finding.Message</li>
+                                                    }
+                                                    @if (check.OutsideCount > Math.Min(check.Findings.Count, LicenceFindingsShown))
+                                                    {
+                                                        <li class="pb-licence__more">and @(check.OutsideCount - Math.Min(check.Findings.Count, LicenceFindingsShown)) more</li>
+                                                    }
+                                                </ul>
+                                            </div>
+                                        </Alert>
+                                    }
+                                    else if (check.IsNotChecked)
+                                    {
+                                        <p class="pb-note"><b>Licence not checked</b> for @check.EnvironmentName: @check.Reason</p>
+                                    }
+                                    else
+                                    {
+                                        <p class="pb-note">Every object in this build is inside the customer's licence on @(check.EnvironmentName).</p>
+                                    }
+                                }
+                            }
+
                             @if (_latestDetail is { HasObjects: true, ReleaseId: { } relId })
                             {
                                 <div class="pb-explore">
@@ -918,6 +962,9 @@
                ConfirmLabel="Delete pipeline" ConfirmButtonClass="btn--danger" ConfirmIcon="trash-2" />
 
 @code {
+    /// <summary>Objects outside the licence listed on the build before "and N more".</summary>
+    private const int LicenceFindingsShown = 20;
+
     [Parameter] public int PipelineId { get; set; }
 
     [CascadingParameter] private Task<Microsoft.AspNetCore.Components.Authorization.AuthenticationState>? AuthState { get; set; }

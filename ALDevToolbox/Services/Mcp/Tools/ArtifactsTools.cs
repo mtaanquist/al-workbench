@@ -56,7 +56,7 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "list_solution_builds", ReadOnly = true)]
-    [Description("Lists a solution's builds, newest first. Each build is a compile of the solution's repositories at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version, timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'); a build with isPreview true is check-only and can't be deployed. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit.")]
+    [Description("Lists a solution's builds, newest first. Each build is a compile of the solution's repositories at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version, timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'); a build with isPreview true is check-only and can't be deployed. licenceChecks is set for a solution on the customer's own servers with a linked Production service tier: for each such environment, whether the build's objects are inside the customer's licence (outcome 'passed', 'outside_licence' with the objects in findings, or 'not_checked' with the reason, for instance when the licence has not been read yet); it is a warning only, and deploy_build refuses a build whose objects are outside the target's licence. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit.")]
     public async Task<IReadOnlyList<BuildRow>> ListProjectBuildsAsync(
         [Description("Solution name or numeric id (from list_solutions).")] string solutionNameOrId,
         [Description(McpListLimit.Description)] int limit = McpListLimit.Default,
@@ -74,7 +74,7 @@ public sealed class ArtifactsTools
         await _artifacts.ListPipelinesAsync(search, ct);
 
     [McpServerTool(Name = "list_pipeline_builds", ReadOnly = true)]
-    [Description("Lists one pipeline's builds, newest first. Each build is a run of the pipeline — a compile of its chosen extensions at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version (bcArtifactVersion is the exact Business Central build it compiled against), timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'). A build with isPreview true is one of the nightly preview check's builds, compiled against an upcoming Business Central version to check for breaking changes: it is never published as a GitHub release and can't be deployed. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit.")]
+    [Description("Lists one pipeline's builds, newest first. Each build is a run of the pipeline — a compile of its chosen extensions at a point in time; returns its id, status ('queued'/'building'/'ready'/'failed'), BC version (bcArtifactVersion is the exact Business Central build it compiled against), timings, who started it, the number of downloadable .app files, the Object Explorer release id (when ready), and its bcTarget ('current', 'next_minor' or 'next_major'). A build with isPreview true is one of the nightly preview check's builds, compiled against an upcoming Business Central version to check for breaking changes: it is never published as a GitHub release and can't be deployed. licenceChecks is set for a solution on the customer's own servers with a linked Production service tier: for each such environment, whether the build's objects are inside the customer's licence (outcome 'passed', 'outside_licence' with the objects in findings, or 'not_checked' with the reason, for instance when the licence has not been read yet); it is a warning only, and deploy_build refuses a build whose objects are outside the target's licence. Use a build id with get_solution_build. Returns the newest 20 unless you ask for more with limit.")]
     public async Task<IReadOnlyList<BuildRow>> ListPipelineBuildsAsync(
         [Description("Pipeline id (from list_pipelines).")] int pipelineId,
         [Description(McpListLimit.Description)] int limit = McpListLimit.Default,
@@ -91,7 +91,7 @@ public sealed class ArtifactsTools
     }
 
     [McpServerTool(Name = "get_solution_build", ReadOnly = true)]
-    [Description("Returns one build's full detail: the per-repository commit it was built from, the changelog since the solution's last successful build (grouped by repository), and the downloadable deliverables. Each deliverable and the whole-build zip and raw log carry a DownloadPath the user appends to the app's base URL to fetch (the bytes are not returned inline). When the build is ready it also returns the Object Explorer release id so its objects can be searched/compared. bcTarget says which Business Central version it compiled against ('current', 'next_minor' or 'next_major') and bcArtifactVersion the exact build; a build with isPreview true is check-only and can't be deployed.")]
+    [Description("Returns one build's full detail: the per-repository commit it was built from, the changelog since the solution's last successful build (grouped by repository), and the downloadable deliverables. Each deliverable and the whole-build zip and raw log carry a DownloadPath the user appends to the app's base URL to fetch (the bytes are not returned inline). When the build is ready it also returns the Object Explorer release id so its objects can be searched/compared. bcTarget says which Business Central version it compiled against ('current', 'next_minor' or 'next_major') and bcArtifactVersion the exact build; a build with isPreview true is check-only and can't be deployed. licenceChecks is set for a solution on the customer's own servers with a linked Production service tier: for each such environment, whether the build's objects are inside the customer's licence (outcome 'passed', 'outside_licence' with the objects in findings, or 'not_checked' with the reason, for instance when the licence has not been read yet); it is a warning only, and deploy_build refuses a build whose objects are outside the target's licence.")]
     public async Task<ProjectBuildDetailResult> GetProjectBuildAsync(
         [Description("Build id (from list_solution_builds).")] int buildId,
         CancellationToken ct = default)
@@ -134,7 +134,8 @@ public sealed class ArtifactsTools
             DownloadAllPath: apps.Count > 0 ? $"/artifacts/build/{buildId}/all" : null,
             RawLogPath: detail.Logs.Count > 0 ? $"/artifacts/build/{buildId}/log" : null,
             BcTarget: detail.BcTarget,
-            BcArtifactVersion: detail.BcArtifactVersion);
+            BcArtifactVersion: detail.BcArtifactVersion,
+            LicenceChecks: detail.LicenceChecks);
     }
 
     [McpServerTool(Name = "compare_solution_builds", ReadOnly = true)]
@@ -192,7 +193,9 @@ public sealed record ProjectBuildDetailResult(
     string? DownloadAllPath,
     string? RawLogPath,
     string BcTarget = ProjectBuildTarget.Current,
-    string? BcArtifactVersion = null)
+    string? BcArtifactVersion = null,
+    /// <summary>The build's objects against each linked on-premises Production environment's licence (#1370); null when none was checked.</summary>
+    IReadOnlyList<ALDevToolbox.Services.Gateways.LicenceCheck>? LicenceChecks = null)
 {
     /// <summary>True for a build against a preview version: check-only, never deployable or published.</summary>
     public bool IsPreview => ProjectBuildTarget.IsPreview(BcTarget);

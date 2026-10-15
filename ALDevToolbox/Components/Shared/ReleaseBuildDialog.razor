@@ -103,7 +103,7 @@
                     <div class="field">
                         <label class="field__label" for="rb-build">Build to deploy</label>
                         <SelectBox>
-                            <select id="rb-build" class="select" @bind="_buildId" disabled="@_releasing">
+                            <select id="rb-build" class="select" @bind="_buildId" @bind:after="LoadLicenceAsync" disabled="@_releasing">
                                 @foreach (var b in _builds)
                                 {
                                     <option value="@b.Id">@b.Label</option>
@@ -164,6 +164,35 @@
                     </div>
                 }
 
+                @* The build's objects against the target's licence (#1370). Outside it is a
+                   refusal before anything is sent; a licence that could not be read is said,
+                   not taken as a pass. *@
+                @if (_licence is { IsOutside: true } outside)
+                {
+                    <Alert Tone="AlertTone.Danger" Block="true" Class="rb-restart">
+                        <div class="rb-restart__body">
+                            <p>
+                                <b>@(outside.OutsideCount == 1
+                                    ? $"This build can't be deployed to {_envName}: 1 object is outside {_customerName}'s licence there."
+                                    : $"This build can't be deployed to {_envName}: {outside.OutsideCount} objects are outside {_customerName}'s licence there.")</b>
+                            </p>
+                            <ul class="rb-licence__list">
+                                @foreach (var finding in outside.Findings)
+                                {
+                                    <li>@finding.Message</li>
+                                }
+                            </ul>
+                            <p>Ask the customer to add @(outside.OutsideCount == 1 ? "it" : "them") to their licence, or give @(outside.OutsideCount == 1 ? "it an id" : "them ids") the licence covers, then deploy again.</p>
+                        </div>
+                    </Alert>
+                }
+                else if (_licence is { IsNotChecked: true } notChecked)
+                {
+                    <Alert Tone="AlertTone.Info" Class="rb-restart">
+                        <span><b>Licence not checked:</b> @notChecked.Reason If the licence doesn't cover every object in the build, Business Central refuses the install.</span>
+                    </Alert>
+                }
+
                 @if (_restartPlan is { } restart)
                 {
                     @if (restart.DialogRefusal is { } shared)
@@ -207,7 +236,7 @@
                     }
                 }
 
-                @if (_isProduction && !_planLoading && _planError is null && _restartPlan?.Refusal is null)
+                @if (_isProduction && !_planLoading && _planError is null && _restartPlan?.Refusal is null && _licence?.IsOutside != true)
                 {
                     <label class="check check--ack @(_prodAck ? "is-checked" : "")">
                         <input type="checkbox" checked="@_prodAck"
@@ -424,7 +453,46 @@
         && (!_isProduction || _prodAck)
         && !_planLoading
         && _planError is null
-        && _restartPlan?.Refusal is null;
+        && _restartPlan?.Refusal is null
+        && !_licenceLoading
+        && _licence?.IsOutside != true;
+
+    /// <summary>
+    /// The picked build against the target's licence, on premises (#1370); null online, for a
+    /// GitHub release, and while it is read. Read again whenever another build is picked.
+    /// </summary>
+    private ALDevToolbox.Services.Gateways.LicenceCheck? _licence;
+
+    /// <summary>True while the licence check for the picked build is read; Deploy waits for it.</summary>
+    private bool _licenceLoading;
+
+    /// <summary>True when the dialog is for a customer's own server, where the licence is checked.</summary>
+    private bool _onPremises;
+
+    /// <summary>
+    /// Compares the picked build with the target's licence. A failed read is logged and
+    /// leaves the dialog as it was: deploying checks again and refuses then.
+    /// </summary>
+    private async Task LoadLicenceAsync()
+    {
+        _licence = null;
+        if (!_onPremises || _fromReleases || _buildId == 0) return;
+        var buildId = _buildId;
+        _licenceLoading = true;
+        try
+        {
+            var check = await Deliveries.CheckLicenceAsync(_releasePipelineId, buildId);
+            if (buildId == _buildId) _licence = check;
+        }
+        catch (Exception ex)
+        {
+            Log.LogWarning(ex, "Couldn't check build {BuildId} against the licence for deployment pipeline {ReleasePipelineId}.", buildId, _releasePipelineId);
+        }
+        finally
+        {
+            _licenceLoading = false;
+        }
+    }
 
     /// <summary>True while the restart plan is read: the dialog cannot say yet what the deployment restarts, so it cannot be confirmed.</summary>
     private bool _planLoading;
@@ -526,6 +594,9 @@
         _restartPlan = null;
         _planError = null;
         _planLoading = onPremises;
+        _onPremises = onPremises;
+        _licence = null;
+        _licenceLoading = false;
 
         _open = true;
         _focusPending = true;
@@ -536,6 +607,7 @@
         // and keeps it disabled, rather than show the online wording for a deployment that
         // may sign everyone out of the customer's server.
         if (!onPremises) return;
+        await LoadLicenceAsync();
         try
         {
             _restartPlan = await Deliveries.GetRestartPlanAsync(releasePipelineId);
