@@ -540,7 +540,15 @@ credential, where there is no user (phase 2, #627).
 - **Save.** One Contents API `PUT` with the remembered SHA, onto
   `aldt/translate-<lang>`, with the user's token. The branch is reused while its PR
   is open (found by head), so repeated saves add commits to one PR rather than opening
-  five. A 409 is the conflict signal and surfaces as "this file changed in the
+  five; while it is open, opening that language's file reads it from the branch. Once
+  the PR is merged or closed, a kept branch is history: opening reads the default
+  branch, and the next save first moves the branch to the default branch's head
+  before committing and opening a new PR (#1329) - by fast-forward when its commits
+  are all on the default branch, or by reset only when its head is the head of its
+  latest closed or merged PR (GitHub keeps that commit under the PR). A branch holding
+  commits no PR carried is left alone and the save walks on to `-2`, `-3`, ... up to
+  ten names, the walk recipe delivery uses; opening and saving both take the first of
+  those with an open PR. A 409 is the conflict signal and surfaces as "this file changed in the
   repository since you opened it" with a re-open - never a silent overwrite.
 
 Five details settled while building it.
@@ -574,7 +582,14 @@ it gets its own refusal: open that file instead.
 A save feeds the **translation memory** exactly as an export does
 (`TranslationMemoryService.LearnFromXliffAsync`, which both paths now share).
 Taking delivery through GitHub rather than through a download should not cost the
-organisation what it just learned.
+organisation what it just learned. Unlike an export, the save records the repository
+and path it wrote to, so its pairs are hidden from readers who cannot see a solution
+tracking that repository exactly as the ingest's are (#1252, #1324). Two limits:
+pairs a save learned before #1324 carry no repository and stay visible to everyone -
+they are not backfilled, because `Origin` holds only the file name - and the hidden
+set is built from each Solution's stored repository URL, so a repository renamed on
+GitHub after a Solution started tracking it is compared by its old name until the URL
+is updated.
 
 The one thing the page shows that the service does not decide: the toolbar's
 primary button becomes **Save to repository** when the open file came from one,

@@ -1,0 +1,18 @@
+/* One header row per organisation in the off-site snapshot list, so the
+   newest snapshots of each read as a group rather than a long run of rows. */
+.data-table__group th {
+    background: var(--surface-2);
+    text-align: left;
+    font-weight: var(--fw-medium);
+}
+.data-table__group .tag { margin-left: var(--space-2); }
+/* Each row action posts its own form; keep them on one line instead of
+   stacking one per line, which made the Actions column a tall column of
+   buttons. */
+.data-table__actions form { display: inline-block; }
+.data-table__actions form + form,
+.data-table__actions a + form,
+.data-table__actions form + .u-muted { margin-left: var(--space-2); }
+/* Put the off-site Refresh button at the end of its heading row, where the
+   Whole site tab has it. */
+.card header.u-row { justify-content: space-between; }

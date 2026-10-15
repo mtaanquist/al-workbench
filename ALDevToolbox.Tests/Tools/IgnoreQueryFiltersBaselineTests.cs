@@ -46,7 +46,7 @@ public sealed class IgnoreQueryFiltersBaselineTests
         ["ALDevToolbox/Services/Account/AccountService.cs"] = 7,
         ["ALDevToolbox/Services/Account/AuthService.cs"] = 4,
         ["ALDevToolbox/Services/Account/EmailMfaService.cs"] = 4,
-        ["ALDevToolbox/Services/Account/EntraSignInService.cs"] = 12,
+        ["ALDevToolbox/Services/Account/EntraSignInService.cs"] = 13,
         ["ALDevToolbox/Services/Account/InviteService.cs"] = 5,
         ["ALDevToolbox/Services/Account/PasskeyService.cs"] = 10,
         ["ALDevToolbox/Services/Account/PasswordResetService.cs"] = 4,

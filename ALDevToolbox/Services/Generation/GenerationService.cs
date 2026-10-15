@@ -454,9 +454,10 @@ public class GenerationService
         }
 
         // A key that names no live module used to be skipped, yet the saved
-        // settings still listed it - and reading those settings back refuses
-        // unknown keys, so every extension added to the workspace later lost
-        // its naming and prefix (#1242). Refuse the plan instead.
+        // settings still listed it, so the file described a module the
+        // workspace does not contain (#1242). Refuse the plan instead. Reading
+        // saved settings back accepts such keys, since a module can be
+        // deleted after the workspace was generated (#1328).
         if (missing.Count > 0)
         {
             throw new PlanValidationException(new Dictionary<string, string>

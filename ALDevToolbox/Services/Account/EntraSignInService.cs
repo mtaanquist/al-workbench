@@ -378,6 +378,28 @@ public sealed class EntraSignInService
                 return await RefuseAsync(EntraCompletionOutcome.LinkFromAccountRequired, email, ip, now,
                     $"email matches a SiteAdmin account with no Microsoft link; tenant {tid}", ct);
             }
+            // An account that has never been used may carry a link from an
+            // unverified JIT sign-in that claimed this address (#1323). A
+            // verified address beats an unverified claim, so drop those links
+            // in the same save as the new one; otherwise the claimant could
+            // sign in once an Admin approves the real owner's account.
+            var superseded = new List<UserExternalLogin>();
+            if (user.Status == UserStatus.Pending && user.LastLoginAt is null)
+            {
+                // Fence category 1 (pre-auth routing): pinned to l.UserId == user.Id, the
+                // account just matched by the verified email inside the routed org.
+                superseded = await _db.UserExternalLogins.IgnoreQueryFilters()
+                    .Where(l => l.UserId == user.Id && l.Provider == ProviderName
+                        && !(l.Issuer == tid && l.Subject == token.ObjectId))
+                    .ToListAsync(ct);
+                if (superseded.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "Verified Entra sign-in from tenant {Tid} replaced {Count} unverified link(s) from tenant(s) {OldTids} on never-used account {UserId}.",
+                        tid, superseded.Count, string.Join(",", superseded.Select(l => l.Issuer).Distinct()), user.Id);
+                    _db.UserExternalLogins.RemoveRange(superseded);
+                }
+            }
             // Saved on its own, ahead of FinishStatusCheckedAsync's bookkeeping,
             // so a lost race is settled while the link insert is the only thing
             // pending — otherwise the failed save takes the login attempt with it
@@ -386,6 +408,11 @@ public sealed class EntraSignInService
             var settled = await SaveLinkSettlingRaceAsync(inserted, user.Id, tid, token.ObjectId, ct);
             if (settled is null)
             {
+                // The bind lost; this sign-in proved nothing, so keep the old links.
+                foreach (var kept in superseded)
+                {
+                    _db.Entry(kept).State = EntityState.Unchanged;
+                }
                 return await RefuseAsync(EntraCompletionOutcome.IdentityTakenElsewhere, email, ip, now,
                     $"identity {tid}/{token.ObjectId} was claimed by another account mid-sign-in", ct);
             }
@@ -399,9 +426,20 @@ public sealed class EntraSignInService
         }
 
         // 4. JIT provisioning, through the same approval machinery as the
-        // verified signup flow (auto-join only when the email domain is
-        // claimed by the resolved org and it opted in).
-        var autoActive = resolved.OrganizationId == domainOrgId && resolved.AutoJoinVerifiedDomainUsers;
+        // verified signup flow. Auto-join needs three things: the email domain
+        // is claimed by the resolved org, the org opted in, and the tenant
+        // proved it owns the address (xms_edov). Without that proof the email
+        // is whatever an admin in an allow-listed tenant typed, so it may
+        // still route the request but only to a Pending account an Admin has
+        // to approve — the same evidence step 3 demands before binding (#1323).
+        var domainAutoJoin = resolved.OrganizationId == domainOrgId && resolved.AutoJoinVerifiedDomainUsers;
+        var autoActive = domainAutoJoin && token.EmailVerified;
+        if (domainAutoJoin && !token.EmailVerified)
+        {
+            _logger.LogWarning(
+                "Entra sign-in from tenant {Tid} for domain {Domain} in org {OrgId} did not prove email ownership (no xms_edov); provisioning as Pending instead of auto-joining.",
+                tid, domain ?? "(none)", resolved.OrganizationId);
+        }
         user = new User
         {
             OrganizationId = resolved.OrganizationId,

@@ -520,6 +520,38 @@ public sealed class GitHubToolsTests : IDisposable
         written.Should().Contain("<target state=\"translated\">Bogfort</target>");
     }
 
+    [Fact]
+    public async Task After_the_pull_request_was_merged_a_new_round_builds_on_main_not_the_kept_branch()
+    {
+        // #1329: the first round was merged and its branch kept, as GitHub does
+        // by default. The string with PostedId was added on main since, so the
+        // branch's copy does not have it. Reading the branch refused every edit
+        // to it as "no strings with these ids".
+        await ReadyAsync();
+        var stale = GeneratedXliff.Replace("target-language=\"en-US\"", "target-language=\"da-DK\"", StringComparison.Ordinal);
+        FakeGitHubApi api = null!;
+        api = WritableApi()
+            .On(HttpMethod.Get, $"/repos/{Repo}/git/ref/heads/aldt/translate-da-DK", HttpStatusCode.OK,
+                "{\"ref\":\"refs/heads/aldt/translate-da-DK\",\"object\":{\"sha\":\"merged-branch-head\"}}")
+            .On(HttpMethod.Patch, $"/repos/{Repo}/git/refs/heads/", HttpStatusCode.OK, FakeGitHubApi.ShaJson(BaseSha))
+            .On(HttpMethod.Get, $"/repos/{Repo}/contents/{FilePath}", request =>
+                request.RequestUri!.Query.Contains("ref=aldt", StringComparison.Ordinal)
+                    && !api.Calls.Any(c => c.StartsWith("PATCH", StringComparison.Ordinal))
+                    ? (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, stale, "stale-branch-sha"))
+                    : (HttpStatusCode.OK, FakeGitHubApi.FileContentsJson(FilePath, Xliff, LoadedSha)));
+        var (tools, ctx) = NewTools(api);
+        await using var _ = ctx;
+
+        var result = await tools.OpenTranslationPullRequestAsync(
+            Repo, FilePath, "da-DK", [new TranslationUnitEditInput(PostedId, "Bogfoert igen", "translated")]);
+
+        result.IsNewPullRequest.Should().BeTrue("the merged pull request is done; this round gets its own");
+        BodyOf(api, "PATCH", "/git/refs/heads/").Should().Contain($"\"sha\":\"{BaseSha}\"",
+            "the kept branch is moved onto main before the write");
+        BodyOf(api, "PUT", "/contents/").Should().Contain($"\"sha\":\"{LoadedSha}\"");
+        WrittenXml(api).Should().Contain("<target state=\"translated\">Bogfoert igen</target>");
+    }
+
     // --- helpers ------------------------------------------------------------
 
     private (GitHubTools Tools, ALDevToolbox.Data.AppDbContext Context) NewTools(FakeGitHubApi api)

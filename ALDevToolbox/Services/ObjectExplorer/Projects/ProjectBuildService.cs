@@ -152,11 +152,18 @@ public sealed class ProjectBuildService
         // persistence then no-ops, leaving the old per-app report as the record.
         var build = await _db.OeProjectBuilds
             .FirstOrDefaultAsync(b => b.ReleaseId == releaseId, ct).ConfigureAwait(false);
-        // Only on the first run: a Retry or Recover symbols is a person's own choice, made
-        // and run as them, so it is not the pipeline's automation to check.
+        // The automation settings are checked on the first run only: a Retry or Recover
+        // symbols is a person's own choice, made and run as them. Whether the pipeline was
+        // deleted or disabled is checked on every pickup - a first run, a build resumed
+        // after a restart, a Retry or a Recover symbols - because each can wait in the
+        // queue, and the page promises a disabled pipeline won't build (#1335).
         if (build is { Trigger: ProjectBuildTrigger.Push or ProjectBuildTrigger.PreviewCheck, FinishedAt: null })
         {
             await EnsureAutomationStillOnAsync(build, project.CreatedByUserId, ct).ConfigureAwait(false);
+        }
+        else if (build is { PipelineId: not null })
+        {
+            await EnsurePipelineStillBuildsAsync(build, ct).ConfigureAwait(false);
         }
         if (build is not null)
         {
@@ -1085,6 +1092,27 @@ public sealed class ProjectBuildService
         PipelineDeletedRefusal, PipelineDisabledRefusal, PushTurnedOffRefusal, PreviewCheckTurnedOffRefusal,
         TakenOverRefusal, InactiveRefusal, NoAccessRefusal,
     ];
+
+    /// <summary>
+    /// Refuses a pipeline build whose pipeline was deleted or disabled while it waited
+    /// in the queue: the part of <see cref="EnsureAutomationStillOnAsync"/> that holds
+    /// for every build, by hand or rerun as well (#1335). The worker fails the build
+    /// with the reason.
+    /// </summary>
+    private async Task EnsurePipelineStillBuildsAsync(OeProjectBuild build, CancellationToken ct)
+    {
+        var pipeline = await _db.OePipelines.AsNoTracking()
+            .Where(p => p.Id == build.PipelineId && p.DeletedAt == null)
+            .Select(p => new { Disabled = p.DisabledAt != null })
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        var reason = pipeline is null ? PipelineDeletedRefusal
+            : pipeline.Disabled ? PipelineDisabledRefusal
+            : null;
+        if (reason is not null)
+        {
+            throw new PlanValidationException(new Dictionary<string, string> { ["Build"] = reason });
+        }
+    }
 
     /// <summary>
     /// Refuses a build the pipeline started on its own once that is no longer what the

@@ -146,6 +146,78 @@ public sealed class TemplateImportServiceTests : IDisposable
             .Should().Be(0);
     }
 
+    /// <summary>
+    /// #1327: a module retired in the system org, but still linked as one of
+    /// the template's defaults there, is neither cloned into the importing
+    /// org nor linked as a default.
+    /// </summary>
+    [Fact]
+    public async Task Import_skips_a_default_module_deleted_in_the_system_org()
+    {
+        await SeedSystemCatalogueAsync();
+        await using (var seed = _db.NewContext())
+        {
+            seed.Modules.IgnoreQueryFilters()
+                .Single(m => m.OrganizationId == TestDb.DefaultOrgId && m.Key == "payment")
+                .DeletedAt = DateTime.UtcNow;
+            await seed.SaveChangesAsync();
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        int systemTemplateId = await ResolveSystemTemplateIdAsync("runtime-system");
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).ImportTemplateAsync(systemTemplateId);
+        }
+
+        await using var verify = _db.NewContext();
+        (await verify.Modules.IgnoreQueryFilters().CountAsync(m => m.OrganizationId == TestDb.OtherOrgId))
+            .Should().Be(0);
+        (await verify.RuntimeTemplateDefaultModules.IgnoreQueryFilters()
+                .CountAsync(d => d.OrganizationId == TestDb.OtherOrgId))
+            .Should().Be(0);
+        (await verify.RuntimeTemplates.IgnoreQueryFilters()
+                .CountAsync(t => t.OrganizationId == TestDb.OtherOrgId && t.Key == "runtime-system"))
+            .Should().Be(1);
+    }
+
+    /// <summary>
+    /// #1327: when the importing org deleted its own copy of a default module,
+    /// the imported template leaves it out of its defaults instead of linking
+    /// the deleted module, and the module stays deleted.
+    /// </summary>
+    [Fact]
+    public async Task Import_leaves_out_a_default_module_the_importing_org_deleted()
+    {
+        await SeedSystemCatalogueAsync();
+        int localModuleId;
+        await using (var seed = _db.NewContext())
+        {
+            var local = ModuleBuilder.Default("payment", "Payment", organizationId: TestDb.OtherOrgId);
+            local.DeletedAt = DateTime.UtcNow;
+            seed.Modules.Add(local);
+            await seed.SaveChangesAsync();
+            localModuleId = local.Id;
+        }
+        _db.OrgContext.CurrentOrganizationId = TestDb.OtherOrgId;
+        int systemTemplateId = await ResolveSystemTemplateIdAsync("runtime-system");
+
+        await using (var ctx = _db.NewContext())
+        {
+            await NewService(ctx).ImportTemplateAsync(systemTemplateId);
+        }
+
+        await using var verify = _db.NewContext();
+        var modules = await verify.Modules.IgnoreQueryFilters()
+            .Where(m => m.OrganizationId == TestDb.OtherOrgId)
+            .ToListAsync();
+        modules.Should().ContainSingle().Which.Id.Should().Be(localModuleId);
+        modules.Single().DeletedAt.Should().NotBeNull();
+        (await verify.RuntimeTemplateDefaultModules.IgnoreQueryFilters()
+                .CountAsync(d => d.OrganizationId == TestDb.OtherOrgId))
+            .Should().Be(0);
+    }
+
     [Fact]
     public async Task Import_refuses_when_acting_org_is_the_system_org()
     {
