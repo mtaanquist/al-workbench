@@ -4620,6 +4620,45 @@ public sealed class ProjectConnectionServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_private_solution_the_caller_cannot_see_reads_as_missing_and_is_never_written()
+    {
+        var fleet = await SeedCadenceFleetAsync();
+        var hidden = await SeedProjectAsync("Northwind");
+        int hiddenEnv;
+        await using (var seed = _db.NewContext())
+        {
+            (await seed.OeProjects.SingleAsync(p => p.Id == hidden)).CreatedByUserId = 9802;
+            var env = new OeProjectEnvironment
+            {
+                OrganizationId = TestDb.DefaultOrgId, ProjectId = hidden, Name = "Secret", Type = "Production",
+                ApplicationFamily = "BusinessCentral", FetchedAt = DateTime.UtcNow,
+                AppSourceAppsUpdateCadence = BcAppUpdateCadence.Default,
+            };
+            seed.OeProjectEnvironments.Add(env);
+            await seed.SaveChangesAsync();
+            hiddenEnv = env.Id;
+        }
+        await NarrowAsync(hidden, ProjectVisibility.Private);
+        var admin = new FakeAdminClient();
+
+        List<AppCadenceChangeResult> results;
+        await using (var ctx = _db.NewContext())
+        {
+            results = await Svc(ctx, TokenOk(), admin).SetAppUpdateCadenceForManyAsync(
+                [hiddenEnv, fleet.Changes], BcAppUpdateCadence.DuringMajorUpgrade);
+        }
+
+        results[0].Row.Group.Should().Be(AppCadenceChangeGroup.Missing);
+        results[0].Row.EnvironmentName.Should().BeNull("nothing about a hidden solution reaches the caller");
+        results[0].Outcome.Should().Be(AppCadenceChangeOutcome.Skipped);
+        admin.CadenceWrites.Should().Equal("Production");
+
+        await using var verify = _db.NewContext();
+        (await verify.OeProjectEnvironments.AsNoTracking().SingleAsync(e => e.Id == hiddenEnv))
+            .AppSourceAppsUpdateCadence.Should().Be(BcAppUpdateCadence.Default);
+    }
+
+    [Fact]
     public async Task An_unknown_bulk_cadence_is_refused_before_anything_is_written()
     {
         var fleet = await SeedCadenceFleetAsync();

@@ -2472,11 +2472,24 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             {
                 results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Failed, ex.Message));
             }
+            catch (DbUpdateException ex)
+            {
+                // Business Central took the change; only our copy of it failed to save.
+                // The row must not stay modified on the context, or the next row's save
+                // (or a later save on the page) would write it again.
+                ForgetPendingEnvironmentChange(row.EnvironmentId);
+                _logger.LogError(ex,
+                    "Saving the AppSource update cadence for environment {EnvironmentId} of solution {ProjectId} failed after Business Central accepted it.",
+                    row.EnvironmentId, row.ProjectId);
+                results.Add(new AppCadenceChangeResult(row, AppCadenceChangeOutcome.Failed,
+                    "Business Central took the change, but it couldn't be saved here. Refresh the solution to see the current setting."));
+            }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 // Each row is a call to a different customer's tenant, so one network
                 // failure must not cost the rest of the batch. The detail goes to the log;
                 // the row gets words a consultant can act on.
+                ForgetPendingEnvironmentChange(row.EnvironmentId);
                 _logger.LogError(ex,
                     "Setting the AppSource update cadence on environment {EnvironmentId} of solution {ProjectId} failed.",
                     row.EnvironmentId, row.ProjectId);
@@ -2492,6 +2505,20 @@ public sealed class ProjectConnectionService : IDeliveryTokenSource
             results.Count(r => r.Outcome == AppCadenceChangeOutcome.Skipped),
             results.Count(r => r.Outcome == AppCadenceChangeOutcome.Failed));
         return results;
+    }
+
+    /// <summary>
+    /// Drops an environment row a failed write left modified on the context, so a later
+    /// save in the same batch - or on the page that shares the context - does not write it.
+    /// </summary>
+    private void ForgetPendingEnvironmentChange(int environmentId)
+    {
+        foreach (var entry in _db.ChangeTracker.Entries<OeProjectEnvironment>()
+                     .Where(e => e.Entity.Id == environmentId && e.State != EntityState.Unchanged)
+                     .ToList())
+        {
+            entry.State = EntityState.Detached;
+        }
     }
 
     /// <summary>

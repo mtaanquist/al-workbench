@@ -244,7 +244,9 @@
 
     private void Close()
     {
-        if (_saving) return;
+        // Not while a preview reads either: reopening would start a second read on the
+        // context the page shares while the first is still running.
+        if (_saving || _previewLoading) return;
         _open = false;
     }
 
