@@ -38,7 +38,7 @@
 
 <PageTitle>@HeadTitle · Pipelines · AL Workbench</PageTitle>
 
-<EditPage Title="@HeadTitle" Sticky="true"
+<EditPage Title="@HeadTitle" Sticky="true" PageClass="rpe-page"
           IsLoading="@_loadingPage" IsNotFound="@_notFound"
           Trail="@Trail">
     <SubtitleContent>
@@ -266,7 +266,7 @@
                                     @if (ChosenEnvironment is { IsOnPremises: true } && _onPremises is { } tier)
                                     {
                                         <small class="field__hint" id="rpe-onprem-hint">
-                                            Deployed through the gateway @(tier.GatewayName) to @(tier.PublishingTier)@(tier.PublishingTier == tier.TierName ? "" : $", the service tier that publishes for {tier.TierName}'s database").
+                                            Sent through the "@(tier.GatewayName)" gateway to @(tier.TierName).@(tier.PublishingTier == tier.TierName ? "" : $" {tier.TierName} shares a database with {tier.PublishingTier}; apps are published on {tier.PublishingTier}.")
                                         </small>
                                     }
                                 </div>
@@ -323,7 +323,6 @@
                                             }
                                         </select>
                                     </SelectBox>
-                                    <small class="field__hint">A deployment starts when you press Deploy or approve a prepared one. This is when it installs.@(ChosenIsOnPremises ? " An on-premises service tier installs right away or in its delivery window." : "")</small>
                                     @if (ChosenEnvironment is { } chosenEnv && !ChosenEnvironmentHasWindow)
                                     {
                                         @if (BcDeploymentSchedule.IsOurDeliveryWindow(_deploymentSchedule))
@@ -337,11 +336,6 @@
                                         else
                                         {
                                             <small class="field__hint">@ScheduleHint</small>
-                                            <small class="field__hint">
-                                                To install in @(chosenEnv.Name)'s delivery window, first
-                                                <a href="@($"/environments/{chosenEnv.Id}")" target="_blank" rel="noopener">set one on the environment's page</a>
-                                                (opens in a new tab).
-                                            </small>
                                         }
                                     }
                                     else
@@ -366,11 +360,11 @@
                                     </SelectBox>
                                     @if (ChosenIsOnPremises && !ForceSyncAllowed)
                                     {
-                                        <small class="field__hint" id="rpe-sync-onprem"><b>Add</b> only ever adds. Force sync isn't offered: the customer's gateway settings don't allow it on this service tier.</small>
+                                        <small class="field__hint" id="rpe-sync-onprem"><b>Add</b>: new tables and fields only; a change that would remove data stops the deployment. Force sync isn't offered: the customer's gateway settings don't allow it on this service tier.</small>
                                     }
                                     else
                                     {
-                                        <small class="field__hint"><b>Add</b> only ever adds — the safe default. <b>Force sync</b> can drop table columns and lose data.</small>
+                                        <small class="field__hint"><b>Add</b>: new tables and fields only; a change that would remove data stops the deployment — the safe default. <b>Force sync</b> can drop table columns and lose data.</small>
                                     }
                                 </div>
 

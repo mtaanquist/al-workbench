@@ -469,7 +469,7 @@ public sealed class PipelineEditPagesTests : IDisposable
         cut.FindAll("#rpe-sync option").Select(o => o.GetAttribute("value")).Should().Equal(BcSyncMode.Add);
         cut.Find("#rpe-sync-onprem").TextContent.Should().Contain("Force sync isn't offered");
         cut.Find("#rpe-unpublish").HasAttribute("checked").Should().BeTrue("removing the previous version is the default");
-        cut.Find("#rpe-onprem-hint").TextContent.Should().Contain("CRONUS hosting").And.Contain("CRONUS-BC01 / BC250");
+        cut.Find("#rpe-onprem-hint").TextContent.Trim().Should().Be("Sent through the \"CRONUS hosting\" gateway to CRONUS-BC01 / BC250.");
         cut.FindAll("#rpe-onprem-warning").Should().BeEmpty("the gateway is online and its settings allow publishing");
     }
 

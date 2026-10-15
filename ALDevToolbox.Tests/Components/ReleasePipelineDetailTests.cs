@@ -4,6 +4,7 @@ using ALDevToolbox.Domain.Entities;
 using ALDevToolbox.Domain.Entities.ObjectExplorer;
 using ALDevToolbox.Domain.ValueObjects.ObjectExplorer;
 using ALDevToolbox.Services;
+using ALDevToolbox.Services.Gateways;
 using ALDevToolbox.Services.ObjectExplorer;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
 using ALDevToolbox.Services.ObjectExplorer.Delivery;
@@ -142,7 +143,11 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
             cut.FindAll(".rp-app__msg").Select(e => e.TextContent).Should()
                 .Contain("Nothing was changed for this app.").And.Contain("Skipped after the gateway refused CRONUS Base.");
             cut.FindAll(".rp-log__line--err").Should().HaveCount(2, "the refusal is tinted like a failure");
-            cut.FindAll(".rp-next").Should().BeEmpty("no Force sync is offered for a refusal");
+            cut.Find(".rp-next__text").TextContent.Should().Be(
+                "Sign the app, or ask the customer's IT to allow unsigned apps on Test, then deploy again.");
+            cut.FindAll(".rp-next__acts").Should().BeEmpty("no Force sync is offered for a refusal");
+            cut.FindAll("button").Select(b => b.TextContent).Should().NotContain(t => t.Contains("Deploy again"),
+                "the same build would meet the same rule; the next step is the customer's settings, not a retry");
             cut.FindAll(".rp-summary__label").Select(e => e.TextContent).Should().Contain(l => l.Contains("From the gateway"));
         });
     }
@@ -158,7 +163,7 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
             d.ClaimedAt = start;
             d.StartedAt = start.AddSeconds(1);
             d.InstallStartedAt = start.AddSeconds(2);
-            d.DiagnosticsLog = "02:00:01  Publishing 3 app(s) to Test through the gateway.\n02:00:02  Queued for the gateway as command 41.\n"
+            d.DiagnosticsLog = "02:00:01  Publishing 3 app(s) to Test through the gateway.\n02:00:02  Waiting for the gateway to pick it up.\n"
                 + "02:00:09  Gateway: Publishing CRONUS Base 2.3.0.118 on CRONUS-BC01 / BC250.\n02:00:15  Gateway: Syncing CRONUS Base (Add).\n";
         },
         Result(0, "CRONUS Base", ProjectDeliveryResultStatus.Installing, "2.2.0.104", start.AddSeconds(2), null),
@@ -171,7 +176,148 @@ public sealed class ReleasePipelineDetailTests : IAsyncDisposable
         {
             var lines = cut.FindAll(".rp-gateway .rp-log__line").Select(e => e.TextContent).ToList();
             lines.Should().Equal("02:00:09 Publishing CRONUS Base 2.3.0.118 on CRONUS-BC01 / BC250.", "02:00:15 Syncing CRONUS Base (Add).");
+            cut.Find(".rp-rel__took").TextContent.Should().StartWith("Running for ", "it has not finished, so it has not taken anything yet");
+            cut.FindAll(".rp-step__label").Select(e => e.TextContent).Should().Contain("Picked up").And.NotContain("Claimed");
         });
+    }
+
+    /// <summary>Links the seeded environment to a tier behind a gateway last heard from <paramref name="lastSeen"/>.</summary>
+    private async Task LinkGatewayAsync(Seed seed, DateTime lastSeen)
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var instance = new GatewayInstance
+        {
+            OrganizationId = TestDb.DefaultOrgId,
+            Gateway = new Gateway
+            {
+                OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS hosting", MachineName = "CRONUS-GW01",
+                KeyFingerprint = Guid.NewGuid().ToString("N"), State = GatewayState.Approved,
+                RegisteredAt = now.AddDays(-30), KeyRegisteredAt = now.AddDays(-30), LastSeenAt = lastSeen,
+            },
+            Machine = "CRONUS-BC01", Name = "BC250", State = "Running",
+            FirstReportedAt = now.AddDays(-30), ReportedAt = lastSeen, ReadAt = lastSeen,
+        };
+        ctx.GatewayInstances.Add(instance);
+        await ctx.SaveChangesAsync();
+        await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId).ExecuteUpdateAsync(s => s
+            .SetProperty(e => e.Kind, OeEnvironmentKind.OnPremises)
+            .SetProperty(e => e.TenantId, "default")
+            .SetProperty(e => e.GatewayInstanceId, instance.Id));
+    }
+
+    [Fact]
+    public async Task A_tier_whose_gateway_is_offline_says_so_rather_than_its_last_reported_state()
+    {
+        var seed = await SeedAsync();
+        await LinkGatewayAsync(seed, DateTime.UtcNow.AddHours(-3));
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            var health = cut.Find(".rp-tone--failed").TextContent;
+            health.Should().StartWith("Gateway offline, last heard from ");
+            cut.Markup.Should().NotContain(">Running<", "Running was true three hours ago, not now");
+        });
+    }
+
+    [Fact]
+    public async Task A_tier_whose_gateway_is_online_shows_the_tiers_own_state()
+    {
+        var seed = await SeedAsync();
+        await LinkGatewayAsync(seed, DateTime.UtcNow);
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.FindAll(".rp-fact").Should().NotBeEmpty();
+            cut.Markup.Should().NotContain("Gateway offline");
+        });
+    }
+
+    [Fact]
+    public async Task A_deployment_that_found_the_gateway_offline_gives_the_reason_in_the_banner()
+    {
+        var seed = await SeedAsync();
+        await MakeOnPremisesAsync(seed);
+        var start = DateTime.UtcNow.AddMinutes(-25);
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Failed, start, d =>
+        {
+            d.ClaimedAt = start;
+            d.FinishedAt = start;
+            d.FailureMessage = "The gateway was offline, so nothing was sent. Check that the gateway service is running on CRONUS-GW01, then deploy again.";
+        },
+        Result(0, "CRONUS Base", ProjectDeliveryResultStatus.Skipped, "2.2.0.104", null, null),
+        Result(1, "CRONUS Warehouse", ProjectDeliveryResultStatus.Skipped, "2.2.0.104", null, null));
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".rp-summary__title").TextContent.Should().Be("Last deployment failed");
+            cut.Find(".rp-summary__sentence").TextContent.Should().Contain(": the gateway was offline, so nothing was sent.");
+            cut.Find(".rp-rel__acts .btn").TextContent.Should().Be("Deploy again", "an offline gateway is worth another try once it is back");
+        });
+    }
+
+    [Fact]
+    public async Task A_deployment_the_gateway_stopped_reporting_on_reads_as_not_confirmed()
+    {
+        var seed = await SeedAsync();
+        await MakeOnPremisesAsync(seed);
+        var start = DateTime.UtcNow.AddHours(-2);
+        var unknown = "The gateway stopped before it reported what it installed, so whether the apps went in is not known. "
+            + "Check the apps on Test after the gateway's next inventory, then deploy again if they are not there.";
+        await AddDeliveryAsync(seed, ProjectDeliveryStatus.Failed, start, d =>
+        {
+            d.ClaimedAt = start;
+            d.StartedAt = start.AddSeconds(1);
+            d.InstallStartedAt = start.AddSeconds(2);
+            d.FinishedAt = start.AddMinutes(30);
+            d.FailureMessage = unknown;
+        },
+        Result(0, "CRONUS Base", ProjectDeliveryResultStatus.Unconfirmed, "2.2.0.104", start.AddSeconds(2), start.AddMinutes(30), GatewayDeliveryTarget.UnconfirmedAppMessage),
+        Result(1, "CRONUS Warehouse", ProjectDeliveryResultStatus.Unconfirmed, "2.2.0.104", start.AddSeconds(2), start.AddMinutes(30), GatewayDeliveryTarget.UnconfirmedAppMessage));
+
+        var cut = Render(seed.ReleasePipelineId);
+
+        cut.WaitForAssertion(() =>
+        {
+            cut.Find(".rp-summary__title").TextContent.Should().Be("Last deployment not confirmed");
+            cut.FindAll(".rp-fact .rp-strong").Select(e => e.TextContent).Should().Contain("Not confirmed").And.NotContain("Failed");
+            cut.Find(".rp-summary__sentence").TextContent.Should().Contain("Check the apps on Test after the gateway's next inventory");
+            cut.FindAll(".rp-app__end .rp-strong").Select(e => e.TextContent).Should().Equal("Not confirmed", "Not confirmed");
+        });
+    }
+
+    [Fact]
+    public async Task The_delivery_window_is_shown_only_when_deployments_install_in_it()
+    {
+        var seed = await SeedAsync();
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeProjectEnvironments.Where(e => e.Id == seed.EnvironmentId).ExecuteUpdateAsync(s => s
+                .SetProperty(e => e.UpdateWindowStart, new TimeOnly(22, 0))
+                .SetProperty(e => e.UpdateWindowEnd, new TimeOnly(4, 0)));
+        }
+
+        var immediate = Render(seed.ReleasePipelineId);
+        immediate.WaitForAssertion(() =>
+        {
+            immediate.FindAll(".rp-fact .meta-item__label").Select(e => e.TextContent).Should()
+                .Contain("When you deploy").And.NotContain("Delivery window", "it installs right away, so the window decides nothing");
+        });
+
+        await using (var ctx = _db.NewContext())
+        {
+            await ctx.OeReleasePipelines.Where(r => r.Id == seed.ReleasePipelineId)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeploymentSchedule, BcDeploymentSchedule.OurDeliveryWindow));
+        }
+        var windowed = Render(seed.ReleasePipelineId);
+        windowed.WaitForAssertion(() =>
+            windowed.FindAll(".rp-fact .meta-item__label").Select(e => e.TextContent).Should().Contain("Delivery window"));
     }
 
     [Fact]

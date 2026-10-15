@@ -15,6 +15,7 @@
 @using System.Globalization
 @using System.Text.RegularExpressions
 @using Microsoft.Extensions.DependencyInjection
+@using ALDevToolbox.Services.Gateways
 @using ALDevToolbox.Services.ObjectExplorer.Bc
 @using ALDevToolbox.Services.ObjectExplorer.Delivery
 @using ALDevToolbox.Services.ObjectExplorer.Projects
@@ -282,7 +283,8 @@
                                 <span class="meta-item__label">When you deploy</span>
                                 <span class="meta-item__value">@DeliveryModeDisplay.ScheduleSentence(_rp.DeploymentSchedule)</span>
                             </span>
-                            @if (DeliveryWindow is { } window)
+                            @* Only where it decides when installs run: next to "Installs right away" it reads as a rule it isn't (#1367). *@
+                            @if (DeliveryWindow is { } window && BcDeploymentSchedule.IsOurDeliveryWindow(_rp.DeploymentSchedule))
                             {
                                 <span class="meta-item rp-fact">
                                     <span class="meta-item__label">Delivery window</span>
@@ -305,7 +307,7 @@
                                 <span class="meta-item__value">
                                     @if (LastRelease is { } last)
                                     {
-                                        var lastLook = DeliveryLook(last.Status);
+                                        var lastLook = LookOf(last);
                                         var rowState = $"rp-strong rp-tone--{lastLook.Tone}";
                                         <span class="@rowState">@lastLook.Word</span>
                                         <span class="u-muted"> <Timestamp Value="@LastWhen(last)" Relative="true" /></span>
@@ -356,7 +358,14 @@
                             </span>
                             <span class="meta-item rp-fact">
                                 <span class="meta-item__label">Health</span>
-                                <span class="meta-item__value">@EnvHealth</span>
+                                @if (GatewayHealth is { } gatewayHealth)
+                                {
+                                    <span class="meta-item__value rp-tone--failed">@gatewayHealth</span>
+                                }
+                                else
+                                {
+                                    <span class="meta-item__value">@EnvHealth</span>
+                                }
                             </span>
                             @if (!string.IsNullOrWhiteSpace(_rp.ProjectEnvironment.Version))
                             {
@@ -861,6 +870,9 @@
 
     /// <summary>The target is a linked on-premises service tier, deployed to through its gateway (#1367).</summary>
     private bool _isOnPremises;
+
+    /// <summary>The linked tier and its gateway as last reported; null for Business Central online.</summary>
+    private OnPremisesTargetInfo? _onPrem;
     private string EnvHref => $"/environments/{_rp?.ProjectEnvironmentId}";
 
     /// <summary>True when there is at least one build (or deployment) the person could send.</summary>
@@ -923,6 +935,7 @@
 
         _isProduction = string.Equals(_rp.ProjectEnvironment?.Type, "Production", StringComparison.OrdinalIgnoreCase);
         _isOnPremises = _rp.ProjectEnvironment?.Kind == OeEnvironmentKind.OnPremises;
+        _onPrem = _isOnPremises ? await Releases.GetOnPremisesTargetAsync(_rp.ProjectId, _rp.ProjectEnvironmentId) : null;
         _tz = UpdateWindow.ResolveTimeZone(_rp.Project?.BcTimeZone);
         var tzId = _rp.Project?.BcTimeZone;
         _tzCity = string.IsNullOrWhiteSpace(tzId) ? "UTC" : tzId![(tzId!.LastIndexOf('/') + 1)..].Replace('_', ' ');
@@ -1148,7 +1161,15 @@
     // ── Deploy again (failed deployments only, #931) ────────────────────────────
 
     /// <summary>A failed deployment can be deployed again by someone who manages the pipeline.</summary>
-    private bool CanReleaseAgain(DeliveryHistoryRow d) => _canManage && !Disabled && d.Status == ProjectDeliveryStatus.Failed;
+    private bool CanReleaseAgain(DeliveryHistoryRow d) =>
+        _canManage && !Disabled && d.Status == ProjectDeliveryStatus.Failed && !RefusedBySettings(d);
+
+    /// <summary>
+    /// The customer's gateway settings refused an app (#1367): deploying the same build
+    /// again meets the same rule, so the page offers the next step instead of a retry.
+    /// </summary>
+    private bool RefusedBySettings(DeliveryHistoryRow d) =>
+        _isOnPremises && d.Apps.Any(a => a.Status == ProjectDeliveryResultStatus.Refused && GatewayRefusalAdvice.IsSettingsRefusal(a.Message));
 
     /// <summary>
     /// The failure's next step offers Force sync only where it is the fix: Business Central
@@ -1528,10 +1549,16 @@
         }
 
         var last = LastRelease;
+        if (last is { Status: ProjectDeliveryStatus.Failed } && IsUnconfirmed(last))
+        {
+            var lostAt = LastWhen(last);
+            return new HealthView("queued", "circle-alert", "Last deployment not confirmed",
+                @<text>Deployment @last.Number stopped <Timestamp Value="@lostAt" Relative="true" /> before it was confirmed. @last.FailureMessage</text>);
+        }
         if (last is { Status: ProjectDeliveryStatus.Failed })
         {
             var failedApp = last.Apps.FirstOrDefault(a => IsStopper(a.Status));
-            var sentence = failedApp is null ? "."
+            var sentence = failedApp is null ? (_isOnPremises ? WhyInBrief(last.FailureMessage) : ".")
                 : failedApp.Status == ProjectDeliveryResultStatus.Refused ? $": the gateway refused {failedApp.AppName}."
                 : $" on {failedApp.AppName}.";
             // The apps before the failure did install, so the environment is on a mix of
@@ -1645,6 +1672,27 @@
         }
     }
 
+    /// <summary>
+    /// On-premises, the tier's state is only as fresh as its gateway: with the gateway away,
+    /// "Running" would be a reading from whenever it was last heard from (#1367). Null when
+    /// the gateway is online, or for Business Central online.
+    /// </summary>
+    private string? GatewayHealth
+    {
+        get
+        {
+            if (!_isOnPremises || _onPrem is not { Unlinked: false } target || _rp?.ProjectEnvironment?.MissingSince is not null) return null;
+            return target.GatewayStatus switch
+            {
+                GatewayStatus.Online => null,
+                GatewayStatus.Revoked => "Gateway revoked",
+                GatewayStatus.WaitingForApproval => "Gateway waiting for approval",
+                _ when target.GatewayLastSeenAt is { } seen => $"Gateway offline, last heard from {When(seen).ToLowerInvariant()}",
+                _ => "Gateway not connected yet",
+            };
+        }
+    }
+
     private string EnvHealth => _rp?.ProjectEnvironment?.MissingSince is not null
         ? (_isOnPremises ? "No longer linked" : "No longer in Business Central")
         : BcEnvironmentStatus.StatusWord(_rp?.ProjectEnvironment?.Status);
@@ -1692,6 +1740,7 @@
     /// </summary>
     private static Look LookOf(DeliveryHistoryRow d) => d.IsDismissed && d.ReplacedByBuildId is not null
         ? new("cancelled", "x", false, "Replaced")
+        : IsUnconfirmed(d) ? new("queued", "circle-alert", false, "Not confirmed")
         : DeliveryLook(d.Status);
 
     /// <summary>
@@ -1734,11 +1783,33 @@
         status is ProjectDeliveryResultStatus.Failed or ProjectDeliveryResultStatus.Refused;
 
     /// <summary>
+    /// A deployment that stopped while its apps were on their way and nothing says how it
+    /// ended: a restart (#1115) or a gateway that went quiet (#1367). Not "failed": some of
+    /// the apps may well have gone in.
+    /// </summary>
+    private static bool IsUnconfirmed(DeliveryHistoryRow d) =>
+        d.Status == ProjectDeliveryStatus.Failed
+        && d.Apps.Any(a => a.Status == ProjectDeliveryResultStatus.Unconfirmed)
+        && !d.Apps.Any(a => IsStopper(a.Status));
+
+    /// <summary>": the gateway was offline, so nothing was sent." from the stored failure's first sentence.</summary>
+    private static string WhyInBrief(string? failure)
+    {
+        if (string.IsNullOrWhiteSpace(failure)) return ".";
+        var text = failure.Trim();
+        var end = text.IndexOf(". ", StringComparison.Ordinal);
+        var first = end > 0 ? text[..(end + 1)] : text;
+        if (!first.EndsWith('.')) first += ".";
+        return ": " + char.ToLowerInvariant(first[0]) + first[1..];
+    }
+
+    /// <summary>
     /// Said after an on-premises deployment that went through, because the gateway does
     /// not restart service tiers yet (#1368).
     /// </summary>
     private const string NotRestartedSentence =
-        "Service tiers were not restarted. People who stay signed in keep running the previous version until each service tier is restarted.";
+        "Service tiers were not restarted. People who stay signed in keep running the previous version until each service tier is restarted. "
+        + "Restart the service tiers, or ask the customer's IT to, when users can be signed out.";
 
     /// <summary>The lines the gateway posted, as the run copied them into the log.</summary>
     private static List<LogLine> GatewayLines(DeliveryHistoryRow d) =>
@@ -1770,7 +1841,7 @@
     private static string? Took(DeliveryHistoryRow d) =>
         d.FinishedAt is { } end && (StartOf(d) ?? (d.Status is ProjectDeliveryStatus.Cancelled or ProjectDeliveryStatus.Dismissed ? null : d.CreatedAt)) is { } start
             ? Duration(end - start)
-            : d.IsActive && StartOf(d) is { } running ? Duration(DateTime.UtcNow - running) : null;
+            : d.IsActive && StartOf(d) is { } running ? $"Running for {Duration(DateTime.UtcNow - running)}" : null;
 
     private static string AppsSummary(DeliveryHistoryRow d)
     {
@@ -1784,6 +1855,8 @@
             ProjectDeliveryStatus.Cancelled when IsMoved(d) => "Moved",
             ProjectDeliveryStatus.Cancelled => done == 0 ? "None installed" : $"{done} of {n} installed",
             ProjectDeliveryStatus.Dismissed => "None sent",
+            ProjectDeliveryStatus.Installing when d.Apps.Count(a => a.Status == ProjectDeliveryResultStatus.Installing) > 1
+                => $"{d.Apps.Count(a => a.Status == ProjectDeliveryResultStatus.Installing)} apps with the gateway",
             ProjectDeliveryStatus.Claimed or ProjectDeliveryStatus.Uploading or ProjectDeliveryStatus.Installing
                 => $"App {Math.Min(n, done + 1)} of {n}",
             _ => $"{done} of {n} installed",
@@ -1792,6 +1865,13 @@
 
     private string RunningSentence(DeliveryHistoryRow d)
     {
+        if (_isOnPremises && d.Status == ProjectDeliveryStatus.Installing)
+        {
+            var sent = d.Apps.Count(a => a.Status == ProjectDeliveryResultStatus.Installing);
+            return GatewayLines(d).Count == 0
+                ? "Waiting for the gateway to pick it up."
+                : $"The gateway is installing {(sent == 1 ? "1 app" : $"{sent} apps")}; its latest lines are below.";
+        }
         var current = d.Apps.FirstOrDefault(a => a.Status is ProjectDeliveryResultStatus.Uploading or ProjectDeliveryResultStatus.Installing);
         if (current is null) return "Connecting to the environment.";
         var index = d.Apps.ToList().IndexOf(current) + 1;
@@ -1886,12 +1966,12 @@
         if (d.ClaimedAt is { } claimed)
         {
             var wait = claimed - d.ScheduledFor;
-            steps.Add(new("Claimed", "running", Clock(claimed), Exact(claimed),
+            steps.Add(new(_isOnPremises ? "Picked up" : "Claimed", "running", Clock(claimed), Exact(claimed),
                 wait > TimeSpan.FromSeconds(1) ? $"after {(wait.TotalSeconds < 60 ? $"{(int)wait.TotalSeconds}s" : Duration(wait))}" : ""));
         }
         else if (d.IsScheduled)
         {
-            steps.Add(new("Claim", "pending", "-", null, ""));
+            steps.Add(new(_isOnPremises ? "Pick up" : "Claim", "pending", "-", null, ""));
         }
 
         if (d.InstallStartedAt is { } uploaded)
@@ -2043,8 +2123,10 @@
             var ours = stored ?? failedApp?.Message ?? "The deployment failed.";
             // A refusal's sentence carries the customer's whole rule; the closed row only
             // needs to say which app it stopped at (#1367).
-            var collapsed = failedApp is { Status: ProjectDeliveryResultStatus.Refused } ? $"The gateway refused {label}" : ours;
-            return new FailureView(collapsed, null, ours, null, null, null, failedApp, false);
+            var refused = failedApp is { Status: ProjectDeliveryResultStatus.Refused };
+            var collapsed = refused ? $"The gateway refused {label}" : ours;
+            var next = refused ? GatewayRefusalAdvice.NextStep(failedApp!.Message, _onPrem is { Unlinked: false } tier ? tier.TierName : EnvName) : null;
+            return new FailureView(collapsed, null, ours, null, next, null, failedApp, false);
         }
 
         var code = parsed.Code.Length > 0 ? parsed.Code : null;

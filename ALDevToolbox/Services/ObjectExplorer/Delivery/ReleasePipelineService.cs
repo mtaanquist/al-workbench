@@ -329,7 +329,8 @@ public sealed class ReleasePipelineService
             facts.GatewayStatusAt(DateTime.UtcNow),
             facts.EnvironmentUnlinked,
             facts.AllowForceSync,
-            facts.PolicyRefusal);
+            facts.PolicyRefusal,
+            facts.GatewayLastSeenAt);
     }
 
     /// <summary>A single active deployment pipeline, or null when not found in this org.</summary>
@@ -943,6 +944,7 @@ public sealed class ReleasePipelineService
 /// <param name="Unlinked">The tier is gone from the gateway's inventory, or was never linked.</param>
 /// <param name="AllowForceSync">The customer's gateway settings let a deployment sync with Force sync.</param>
 /// <param name="PolicyRefusal">Why the gateway would refuse a deployment now, as it last reported its settings; null when it would not.</param>
+/// <param name="GatewayLastSeenAt">When the gateway was last heard from; null when never.</param>
 public sealed record OnPremisesTargetInfo(
     string TierName,
     string PublishingTier,
@@ -950,7 +952,8 @@ public sealed record OnPremisesTargetInfo(
     GatewayStatus GatewayStatus,
     bool Unlinked,
     bool AllowForceSync,
-    string? PolicyRefusal);
+    string? PolicyRefusal,
+    DateTime? GatewayLastSeenAt = null);
 
 /// <summary>Form-post shape for a deployment pipeline: project, source build pipeline, target environment, and modes.</summary>
 public sealed record ReleasePipelineInput(
