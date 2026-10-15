@@ -230,6 +230,8 @@
 
 /* Per-app sub-rows */
 .rp-apps { display: grid; gap: var(--space-2); }
+/* On premises (#1368): the restart group and scripts, a list like the apps above it. */
+.rp-tiers { margin-top: var(--space-2); }
 /* On-premises (#1367): the gateway's latest lines while a deployment runs. */
 .rp-gateway { display: grid; gap: var(--space-2); min-width: 0; }
 .rp-gateway .rp-log__lines { min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); overflow-x: auto; }

@@ -10,6 +10,7 @@ using ALDevToolbox.Services.Gateways;
 using ALDevToolbox.Services.GitHub;
 using ALDevToolbox.Services.Notifications;
 using ALDevToolbox.Services.ObjectExplorer.Bc;
+using ALWorkbench.Gateway.Contracts;
 using Microsoft.EntityFrameworkCore;
 
 namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
@@ -178,6 +179,23 @@ public sealed class DeliveryService
         return await CheckOpenSessionsOnAsync(rp.OwnerId,
             new DeliveryTargetEnvironment(rp.ProjectId, rp.EnvName, rp.Kind, rp.ProjectEnvironmentId, rp.ApplicationFamily),
             releasePipelineId, ct);
+    }
+
+    /// <summary>
+    /// The service tiers a deployment through <paramref name="releasePipelineId"/> restarts
+    /// after its apps are installed, with the customer's scripts, for the Deploy dialog to
+    /// warn with (#1368). Null for Business Central online, and for an on-premises
+    /// environment that is no longer linked.
+    /// </summary>
+    public async Task<RestartGroupPlan?> GetRestartPlanAsync(int releasePipelineId, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var environmentId = await _db.OeReleasePipelines.AsNoTracking()
+            .Where(r => r.Id == releasePipelineId && r.DeletedAt == null
+                        && r.ProjectEnvironment!.Kind == OeEnvironmentKind.OnPremises)
+            .Select(r => (int?)r.ProjectEnvironmentId)
+            .FirstOrDefaultAsync(ct);
+        return environmentId is { } id ? await RestartGroupPlan.LoadAsync(_db, id, ct) : null;
     }
 
     /// <summary>
@@ -566,6 +584,13 @@ public sealed class DeliveryService
         {
             throw Validation("SchemaSyncMode", OnPremisesDeployFacts.ForceSyncRefusal(rp.EnvName)
                 + " Open the deployment pipeline and choose Add.");
+        }
+        // The restart after an on-premises install reaches every tier of the database's
+        // restart group; when other solutions' environments run there too, the customer's
+        // settings must say that is allowed (#1368). Checked again before anything is sent.
+        if (onPremises && await RestartGroupPlan.LoadAsync(_db, rp.ProjectEnvironmentId, ct) is { Refusal: { } sharedRefusal })
+        {
+            throw Validation("ProjectEnvironment", sharedRefusal);
         }
         // Only an environment that can hold an install for a later update takes those
         // timings; on-premises has only now and the delivery window.
@@ -2678,6 +2703,19 @@ public sealed class DeliveryService
             var outcome = GatewayDeliveryTarget.OutcomeFor(progress, index, result.AppVersion);
             ApplyOutcome(result, $"{result.AppName} {result.AppVersion}", i, outcome, tally, log);
         }
+        // What the gateway did around the apps (#1368): the before script, each tier's
+        // restart, the after script. A command that failed though no app did failed in
+        // one of those, so the deployment fails with that step's sentence.
+        var steps = DeliveryGatewaySteps.From(GatewayPublishInstallResult.FromJson(progress.Result));
+        delivery.GatewayStepsJson = DeliveryGatewaySteps.ToJson(steps);
+        tally.HasGatewaySteps = steps.Count > 0;
+        if (progress.Status == GatewayCommandStatus.Failed && tally.FailedIndex < 0 && tally.Unconfirmed is null)
+        {
+            tally.StepFailure = DeliveryGatewaySteps.FailureLine(steps)
+                ?? (string.IsNullOrWhiteSpace(progress.FailureMessage)
+                    ? "The gateway reported the deployment as failed without saying why."
+                    : progress.FailureMessage.Trim());
+        }
         SettleRun(delivery, results, tally, log);
         await _db.SaveChangesAsync(ct);
         _panelCache.InvalidateProject(delivery.ProjectId);
@@ -2717,6 +2755,16 @@ public sealed class DeliveryService
 
         /// <summary>The gateway lost sight of the apps: whether they went in is not known.</summary>
         public string? Unconfirmed { get; set; }
+
+        /// <summary>
+        /// A step around the apps failed though no app did (#1368): the before script (so
+        /// nothing was installed), a service tier's restart, or the after script. The
+        /// deployment fails with this sentence.
+        /// </summary>
+        public string? StepFailure { get; set; }
+
+        /// <summary>The gateway reported its restart group and scripts, so the old "not restarted" note is not needed.</summary>
+        public bool HasGatewaySteps { get; set; }
     }
 
     /// <summary>One app's outcome as the target reported it, written to its result row and the log.</summary>
@@ -2804,6 +2852,12 @@ public sealed class DeliveryService
             delivery.FailureMessage = tally.Refusal ?? tally.FailureLine ?? $"{failed.AppName} {failed.AppVersion} failed: {failed.Message}";
             Append(log, "Delivery failed.");
         }
+        else if (tally.StepFailure is not null)
+        {
+            delivery.Status = ProjectDeliveryStatus.Failed;
+            delivery.FailureMessage = tally.StepFailure;
+            Append(log, "Delivery failed: " + tally.StepFailure);
+        }
         else if (tally.Unconfirmed is not null)
         {
             delivery.Status = ProjectDeliveryStatus.Failed;
@@ -2827,12 +2881,13 @@ public sealed class DeliveryService
             delivery.Status = ProjectDeliveryStatus.Deployed;
             Append(log, "Delivery complete.");
         }
-        // Said as it is: until the gateway restarts tiers (#1368) it reports that it did
-        // not, and a session that stays open keeps the old version's event subscribers.
+        // Said as it is. A gateway from #1368 on reports each tier as its own step; an
+        // older one only reports that it did not restart, and a session that stays open
+        // keeps the old version's event subscribers, so that gets the note.
         if (tally.TiersRestarted is { } restarted)
         {
             delivery.TiersRestarted = restarted;
-            if (!restarted && delivery.Status == ProjectDeliveryStatus.Deployed && tally.UploadedAny)
+            if (!restarted && !tally.HasGatewaySteps && delivery.Status == ProjectDeliveryStatus.Deployed && tally.UploadedAny)
             {
                 Append(log, TiersNotRestartedLine);
             }
@@ -3053,6 +3108,7 @@ public sealed class DeliveryService
                 BuildReleaseTag = d.ProjectBuild != null ? d.ProjectBuild.GithubReleaseTag : null,
                 DiagnosticsLog = d.DiagnosticsLog,
                 TiersRestarted = d.TiersRestarted,
+                GatewayStepsJson = d.GatewayStepsJson,
             })
             .ToListAsync(ct);
 
@@ -3060,7 +3116,12 @@ public sealed class DeliveryService
             rows.Where(r => r.Status == ProjectDeliveryStatus.HandedOff).Select(r => r.Id).ToList(), ct);
         for (var i = 0; i < rows.Count; i++)
         {
-            rows[i] = rows[i] with { Number = total - i, StillHeld = stillHeld.Contains(rows[i].Id) };
+            rows[i] = rows[i] with
+            {
+                Number = total - i,
+                StillHeld = stillHeld.Contains(rows[i].Id),
+                GatewaySteps = DeliveryGatewaySteps.Parse(rows[i].GatewayStepsJson),
+            };
         }
         return rows;
     }
@@ -3434,9 +3495,20 @@ public sealed record DeliveryHistoryRow(
 
     /// <summary>
     /// On-premises: whether the gateway restarted the service tiers after installing (#1367).
-    /// False until the gateway restarts tiers (#1368); null online, where there are none to restart.
+    /// Null online, where there are none to restart. <see cref="GatewaySteps"/> says tier by tier.
     /// </summary>
     public bool? TiersRestarted { get; init; }
+
+    /// <summary>
+    /// On-premises (#1368): the customer's before script, each service tier's restart and
+    /// the after script, in the order the gateway ran them. Empty online and for a
+    /// gateway that does not report them.
+    /// </summary>
+    public IReadOnlyList<DeliveryGatewayStep> GatewaySteps { get; init; } = [];
+
+    /// <summary>The stored form of <see cref="GatewaySteps"/>, read by the query and parsed after it.</summary>
+    [JsonIgnore]
+    public string? GatewayStepsJson { get; init; }
 }
 
 /// <summary>One app's outcome within a delivery, for the history's per-app breakdown.</summary>

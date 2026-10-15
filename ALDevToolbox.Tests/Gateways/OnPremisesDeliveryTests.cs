@@ -845,6 +845,243 @@ public sealed class OnPremisesDeliveryTests : IDisposable
         GatewayRefusalAdvice.NextStep(refusal, "CRONUS-BC01 / BC250").Should().Be(next);
     }
 
+    // ── The restart group and the customer's scripts (#1368) ───────────────────
+
+    private const string BeforeScript = @"C:\Program Files\AL Workbench Gateway\scripts\before-deploy.ps1";
+    private const string AfterScript = @"C:\Program Files\AL Workbench Gateway\scripts\after-restart.ps1";
+
+    [Fact]
+    public async Task Each_tier_the_gateway_restarted_and_each_script_is_its_own_line_on_the_deployment()
+    {
+        var seed = await SeedAsync();
+        var id = await DeployNowAsync(seed);
+
+        await RunWithGatewayAsync(id, seed.GatewayId, (_, _) => Task.FromResult<(string[], GatewayCommandResultRequest)>((
+            ["Restarted CRONUS-BC01 / BC250.", "Restarted CRONUS-BC02 / BC250."],
+            Restarting(succeeded: true, failure: null,
+                Restart(("CRONUS-BC01", GatewayRestartTierOutcomes.Restarted, ""), ("CRONUS-BC02", GatewayRestartTierOutcomes.Restarted, "")),
+                [Script(GatewayScriptStages.Before, BeforeScript, GatewayScriptOutcomes.Succeeded), Script(GatewayScriptStages.After, AfterScript, GatewayScriptOutcomes.Succeeded)],
+                App(CoreId, GatewayPublishInstallOutcomes.Installed), App(SalesId, GatewayPublishInstallOutcomes.Installed), App(ReportsId, GatewayPublishInstallOutcomes.Installed)))));
+
+        var delivery = await LoadAsync(id);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
+        delivery.TiersRestarted.Should().BeTrue();
+        delivery.DiagnosticsLog.Should().NotContain(DeliveryService.TiersNotRestartedLine, "the tiers were restarted")
+            .And.Contain("Gateway: Restarted CRONUS-BC02 / BC250.");
+
+        var history = await NewService(_db.NewContext()).ListDeliveryHistoryAsync(seed.ReleasePipelineId);
+        var steps = history.Single(h => h.Id == id).GatewaySteps;
+        steps.Select(st => (st.Kind, st.Name, st.Outcome)).Should().Equal(
+            (DeliveryGatewaySteps.BeforeScript, BeforeScript, DeliveryGatewaySteps.Done),
+            (DeliveryGatewaySteps.Restart, "CRONUS-BC01 / BC250", DeliveryGatewaySteps.Done),
+            (DeliveryGatewaySteps.Restart, "CRONUS-BC02 / BC250", DeliveryGatewaySteps.Done),
+            (DeliveryGatewaySteps.AfterScript, AfterScript, DeliveryGatewaySteps.Done));
+    }
+
+    [Fact]
+    public async Task A_tier_that_does_not_come_back_fails_the_deployment_with_the_apps_installed()
+    {
+        var seed = await SeedAsync();
+        var id = await DeployNowAsync(seed);
+
+        await RunWithGatewayAsync(id, seed.GatewayId, (_, _) => Task.FromResult<(string[], GatewayCommandResultRequest)>((
+            ["FAILED CRONUS-BC02 / BC250: it was not running again after 10 minutes."],
+            Restarting(succeeded: false,
+                failure: "All apps were installed, but the service tiers were not all restarted: CRONUS-BC02 / BC250 was not running again after 10 minutes.",
+                Restart(("CRONUS-BC01", GatewayRestartTierOutcomes.Restarted, ""),
+                        ("CRONUS-BC02", GatewayRestartTierOutcomes.Failed, "it was not running again after 10 minutes")),
+                [],
+                App(CoreId, GatewayPublishInstallOutcomes.Installed), App(SalesId, GatewayPublishInstallOutcomes.Installed), App(ReportsId, GatewayPublishInstallOutcomes.Installed)))));
+
+        var delivery = await LoadAsync(id);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        delivery.Results.Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Completed, "every app went in");
+        delivery.FailureMessage.Should().Be(
+            "The apps were installed, but CRONUS-BC02 / BC250 did not restart. It was not running again after 10 minutes.");
+        delivery.TiersRestarted.Should().BeFalse();
+        var steps = DeliveryGatewaySteps.Parse(delivery.GatewayStepsJson);
+        DeliveryGatewaySteps.FailedAfterInstall(steps).Should().BeTrue("deploying the same build again would change nothing");
+    }
+
+    [Fact]
+    public async Task A_failing_before_script_fails_the_deployment_and_says_nothing_was_installed()
+    {
+        var seed = await SeedAsync();
+        var id = await DeployNowAsync(seed);
+
+        await RunWithGatewayAsync(id, seed.GatewayId, (_, _) => Task.FromResult<(string[], GatewayCommandResultRequest)>((
+            ["before script: The backup share is not reachable."],
+            Restarting(succeeded: false,
+                failure: $"The before script {BeforeScript} failed: it ended with exit code 2. No app was published.",
+                restart: null,
+                [Script(GatewayScriptStages.Before, BeforeScript, GatewayScriptOutcomes.Failed, "it ended with exit code 2"),
+                 Script(GatewayScriptStages.After, AfterScript, GatewayScriptOutcomes.NotRun, "Not run, because the before script failed.")],
+                App(CoreId, GatewayPublishInstallOutcomes.Skipped, message: "Not started, because the before script failed."),
+                App(SalesId, GatewayPublishInstallOutcomes.Skipped, message: "Not started, because the before script failed."),
+                App(ReportsId, GatewayPublishInstallOutcomes.Skipped, message: "Not started, because the before script failed.")))));
+
+        var delivery = await LoadAsync(id);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed, "not 'every app was already on this version'");
+        delivery.Results.Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Skipped);
+        delivery.FailureMessage.Should().Be(
+            "The customer's before script (before-deploy.ps1) failed, so nothing was installed. It ended with exit code 2.");
+        delivery.DiagnosticsLog.Should().Contain("Gateway: before script: The backup share is not reachable.");
+        DeliveryGatewaySteps.FailedAfterInstall(DeliveryGatewaySteps.Parse(delivery.GatewayStepsJson)).Should().BeFalse(
+            "nothing went in, so deploying again is the way on");
+    }
+
+    [Fact]
+    public async Task A_failing_after_script_fails_the_deployment_with_the_apps_installed_and_the_tiers_restarted()
+    {
+        var seed = await SeedAsync();
+        var id = await DeployNowAsync(seed);
+
+        await RunWithGatewayAsync(id, seed.GatewayId, (_, _) => Task.FromResult<(string[], GatewayCommandResultRequest)>((
+            [],
+            Restarting(succeeded: false,
+                failure: $"All apps were installed and the service tiers restarted, but the after script {AfterScript} failed: it ended with exit code 1.",
+                Restart(("CRONUS-BC01", GatewayRestartTierOutcomes.Restarted, "")),
+                [Script(GatewayScriptStages.After, AfterScript, GatewayScriptOutcomes.Failed, "it ended with exit code 1")],
+                App(CoreId, GatewayPublishInstallOutcomes.Installed), App(SalesId, GatewayPublishInstallOutcomes.Installed), App(ReportsId, GatewayPublishInstallOutcomes.Installed)))));
+
+        var delivery = await LoadAsync(id);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        delivery.Results.Should().OnlyContain(r => r.Status == ProjectDeliveryResultStatus.Completed);
+        delivery.TiersRestarted.Should().BeTrue();
+        delivery.FailureMessage.Should().Be(
+            "The apps were installed and the service tiers restarted, but the customer's after script (after-restart.ps1) failed. It ended with exit code 1.");
+    }
+
+    [Fact]
+    public async Task Settings_that_stop_allowing_the_restart_mid_deployment_fail_it_in_the_gateways_words()
+    {
+        var seed = await SeedAsync();
+        var id = await DeployNowAsync(seed);
+        const string why = "All apps were installed, but the customer's gateway settings no longer allow 'restart' on CRONUS-BC02 / BC250, so the service tiers were not restarted.";
+
+        await RunWithGatewayAsync(id, seed.GatewayId, (_, _) => Task.FromResult<(string[], GatewayCommandResultRequest)>((
+            [],
+            Restarting(succeeded: false, failure: why,
+                new GatewayRestartGroupResult
+                {
+                    Mode = "stop-all-then-start-all",
+                    Restarted = false,
+                    Message = "The customer's gateway settings no longer allow 'restart' on CRONUS-BC02 / BC250.",
+                    Tiers =
+                    [
+                        new GatewayRestartTierResult { Machine = "CRONUS-BC01", Instance = "BC250", Outcome = GatewayRestartTierOutcomes.NotRestarted },
+                        new GatewayRestartTierResult { Machine = "CRONUS-BC02", Instance = "BC250", Outcome = GatewayRestartTierOutcomes.NotRestarted },
+                    ],
+                },
+                [],
+                App(CoreId, GatewayPublishInstallOutcomes.Installed), App(SalesId, GatewayPublishInstallOutcomes.Installed), App(ReportsId, GatewayPublishInstallOutcomes.Installed)))));
+
+        var delivery = await LoadAsync(id);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        delivery.FailureMessage.Should().Be(why);
+        var steps = DeliveryGatewaySteps.Parse(delivery.GatewayStepsJson);
+        steps.Should().ContainSingle("a group nothing was done to is one line, not one per tier");
+        steps[0].Name.Should().Be("CRONUS-BC01 / BC250, CRONUS-BC02 / BC250");
+        steps[0].Outcome.Should().Be(DeliveryGatewaySteps.NotDone);
+    }
+
+    [Fact]
+    public async Task Nothing_installed_means_nothing_restarted_and_the_deployment_is_deployed()
+    {
+        var seed = await SeedAsync();
+        var id = await DeployNowAsync(seed);
+
+        await RunWithGatewayAsync(id, seed.GatewayId, (_, _) => Task.FromResult<(string[], GatewayCommandResultRequest)>((
+            [],
+            Restarting(succeeded: true, failure: null,
+                new GatewayRestartGroupResult
+                {
+                    Restarted = false,
+                    Message = "Every app was already installed, so nothing changed and the service tiers were not restarted.",
+                    Tiers = [new GatewayRestartTierResult { Machine = "CRONUS-BC01", Instance = "BC250", Outcome = GatewayRestartTierOutcomes.NotRestarted }],
+                },
+                [],
+                App(CoreId, GatewayPublishInstallOutcomes.AlreadyInstalled), App(SalesId, GatewayPublishInstallOutcomes.AlreadyInstalled), App(ReportsId, GatewayPublishInstallOutcomes.AlreadyInstalled)))));
+
+        var delivery = await LoadAsync(id);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Deployed);
+        delivery.FailureMessage.Should().BeNull();
+        delivery.DiagnosticsLog.Should().NotContain(DeliveryService.TiersNotRestartedLine);
+    }
+
+    [Fact]
+    public async Task The_restart_plan_names_the_group_its_mode_the_scripts_and_a_tier_on_the_database_left_out()
+    {
+        var seed = await SeedAsync();
+        await AddTiersAsync(seed, ("CRONUS-BC02", "CRONUS Test"), ("CRONUS-BC03", "CRONUS Test"), ("CRONUS-BC04", "CRONUS Other"));
+        await SetRestartGroupAsync(seed.GatewayId, ["CRONUS-BC01", "CRONUS-BC02"], oneByOne: true, before: BeforeScript, after: AfterScript);
+
+        var plan = await NewService(_db.NewContext()).GetRestartPlanAsync(seed.ReleasePipelineId);
+
+        plan.Should().NotBeNull();
+        plan!.Known.Should().BeTrue();
+        plan.Tiers.Should().Equal("CRONUS-BC01 / BC250", "CRONUS-BC02 / BC250");
+        plan.OneByOne.Should().BeTrue();
+        plan.Before.Should().Be(BeforeScript);
+        plan.After.Should().Be(AfterScript);
+        plan.MissingFromGroup.Should().Equal(["CRONUS-BC03 / BC250"], "BC03 is on the same database; BC04 is not");
+        plan.Refusal.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Without_a_database_in_the_settings_only_the_linked_tier_restarts()
+    {
+        var seed = await SeedAsync();
+
+        var plan = await NewService(_db.NewContext()).GetRestartPlanAsync(seed.ReleasePipelineId);
+
+        plan!.Tiers.Should().Equal("CRONUS-BC01 / BC250");
+        plan.OneByOne.Should().BeFalse();
+        plan.Before.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_restart_that_reaches_another_solutions_environment_is_refused_unless_the_settings_share_it()
+    {
+        var seed = await SeedAsync();
+        var other = await AddTiersAsync(seed, ("CRONUS-BC02", "CRONUS Test"));
+        await SetRestartGroupAsync(seed.GatewayId, ["CRONUS-BC01", "CRONUS-BC02"]);
+        await LinkAnotherSolutionAsync(other[0]);
+
+        var plan = await NewService(_db.NewContext()).GetRestartPlanAsync(seed.ReleasePipelineId);
+        plan!.OtherSolutions.Should().Be(1);
+        plan.Refusal.Should().StartWith(OnPremisesDeployFacts.NotAllowed)
+            .And.Contain("another solution's environment");
+
+        var refused = () => NewService(_db.NewContext()).ReleaseBuildNowAsync(seed.ReleasePipelineId, seed.BuildId);
+        (await refused.Should().ThrowAsync<PlanValidationException>())
+            .Which.Errors.Values.Single().Should().Be(plan.Refusal);
+
+        await SetRestartGroupAsync(seed.GatewayId, ["CRONUS-BC01", "CRONUS-BC02"], shared: true);
+        (await NewService(_db.NewContext()).GetRestartPlanAsync(seed.ReleasePipelineId))!.Refusal.Should().BeNull();
+        await DeployNowAsync(seed);
+    }
+
+    [Fact]
+    public async Task A_shared_restart_that_appears_after_the_deployment_was_made_is_refused_when_it_runs_and_nothing_is_sent()
+    {
+        var seed = await SeedAsync();
+        var other = await AddTiersAsync(seed, ("CRONUS-BC02", "CRONUS Test"));
+        await SetRestartGroupAsync(seed.GatewayId, ["CRONUS-BC01", "CRONUS-BC02"]);
+        var id = await DeployNowAsync(seed);
+        // Another solution is linked to the second tier before this one's turn comes.
+        await LinkAnotherSolutionAsync(other[0]);
+
+        await RunAsync(id);
+
+        var delivery = await LoadAsync(id);
+        delivery.Status.Should().Be(ProjectDeliveryStatus.Failed);
+        delivery.FailureMessage.Should().StartWith(OnPremisesDeployFacts.NotAllowed).And.Contain("another solution's environment");
+        delivery.FailureMessage.Should().NotContain("The gateway refused", "AL Workbench refused it, not the gateway");
+        await using var read = _db.NewContext();
+        (await read.GatewayCommands.CountAsync()).Should().Be(0);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private sealed record Seed(int ProjectId, int GatewayId, int InstanceId, int EnvironmentId, int ReleasePipelineId, int BuildId, List<byte[]> Packages);
@@ -1008,6 +1245,90 @@ public sealed class OnPremisesDeliveryTests : IDisposable
         await using var ctx = _db.NewContext();
         await ctx.Gateways.Where(g => g.Id == gatewayId).ExecuteUpdateAsync(s => s
             .SetProperty(g => g.EffectivePolicyJson, System.Text.Json.JsonSerializer.Serialize(policy)));
+    }
+
+    private static GatewayCommandResultRequest Restarting(bool succeeded, string? failure, GatewayRestartGroupResult? restart,
+        IReadOnlyList<GatewayScriptResult> scripts, params GatewayPublishInstallAppResult[] apps) => new()
+    {
+        Succeeded = succeeded,
+        FailureMessage = failure,
+        Result = new GatewayPublishInstallResult
+        {
+            Apps = apps, Restarted = restart?.Restarted == true, Restart = restart, Scripts = scripts,
+        }.ToJson(),
+    };
+
+    private static GatewayRestartGroupResult Restart(params (string Machine, string Outcome, string Message)[] tiers) => new()
+    {
+        Mode = "stop-all-then-start-all",
+        Restarted = tiers.All(t => t.Outcome == GatewayRestartTierOutcomes.Restarted),
+        Tiers = tiers.Select(t => new GatewayRestartTierResult
+        {
+            Machine = t.Machine, Instance = "BC250", Outcome = t.Outcome, Message = t.Message,
+        }).ToList(),
+    };
+
+    private static GatewayScriptResult Script(string stage, string path, string outcome, string message = "") => new()
+    {
+        Stage = stage, Path = path, Outcome = outcome, Message = message,
+        ExitCode = outcome == GatewayScriptOutcomes.Succeeded ? 0 : null,
+    };
+
+    /// <summary>More tiers on the seeded gateway, each with its database; answers their ids.</summary>
+    private async Task<List<int>> AddTiersAsync(Seed seed, params (string Machine, string Database)[] tiers)
+    {
+        await using var ctx = _db.NewContext();
+        var added = tiers.Select(t => Instance(seed.GatewayId, t.Machine, "BC250", sessions: 0, database: t.Database)).ToList();
+        ctx.GatewayInstances.AddRange(added);
+        await ctx.SaveChangesAsync();
+        return added.Select(i => i.Id).ToList();
+    }
+
+    /// <summary>The customer's settings with one database published on BC01 and restarting <paramref name="machines"/>.</summary>
+    private async Task SetRestartGroupAsync(int gatewayId, string[] machines, bool oneByOne = false, bool shared = false,
+        string? before = null, string? after = null)
+    {
+        var policy = new GatewayPolicyReport
+        {
+            State = GatewayPolicyStates.Valid,
+            Instances = machines.Select(m => new GatewayPolicyInstance
+            {
+                Machine = m, Name = "BC250", Environment = "test",
+                Allow = m == "CRONUS-BC01" ? ["inventory", "publish", "restart"] : ["inventory", "restart"],
+            }).ToList(),
+            Databases =
+            [
+                new GatewayPolicyDatabase
+                {
+                    Name = "CRONUS-SQL01/CRONUS Test",
+                    PublishOn = new GatewayPolicyTier { Machine = "CRONUS-BC01", Instance = "BC250" },
+                    Restart = machines.Select(m => new GatewayPolicyTier { Machine = m, Instance = "BC250" }).ToList(),
+                    RestartMode = oneByOne ? "one-by-one" : "stop-all-then-start-all",
+                    SharedRestart = shared,
+                    Before = before,
+                    After = after,
+                },
+            ],
+        };
+        await using var ctx = _db.NewContext();
+        await ctx.Gateways.Where(g => g.Id == gatewayId).ExecuteUpdateAsync(s => s
+            .SetProperty(g => g.EffectivePolicyJson, System.Text.Json.JsonSerializer.Serialize(policy)));
+    }
+
+    /// <summary>Links an environment of a second solution to the tier <paramref name="instanceId"/>.</summary>
+    private async Task LinkAnotherSolutionAsync(int instanceId)
+    {
+        await using var ctx = _db.NewContext();
+        var now = DateTime.UtcNow;
+        var project = new OeProject { OrganizationId = TestDb.DefaultOrgId, Name = "CRONUS Retail " + Guid.NewGuid().ToString("N"), CreatedAt = now, UpdatedAt = now };
+        ctx.OeProjects.Add(project);
+        ctx.OeProjectEnvironments.Add(new OeProjectEnvironment
+        {
+            OrganizationId = TestDb.DefaultOrgId, Project = project, Name = "CRONUS Retail", Type = "Sandbox",
+            Kind = OeEnvironmentKind.OnPremises, GatewayInstanceId = instanceId, TenantId = "default",
+            Status = BcEnvironmentStatus.Active, FetchedAt = now,
+        });
+        await ctx.SaveChangesAsync();
     }
 
     /// <summary>Moves a handed-off deployment's start back past the longest it is followed.</summary>

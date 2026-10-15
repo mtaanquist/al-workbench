@@ -22,7 +22,13 @@
     pickers are instants, shown in the organisation's display zone. Opened imperatively; raises
     OnReleased with the new delivery id. See .design/saas-delivery.md.
 
-    Named user: a BC consultant publishing a finished build to a customer environment.
+    On premises, the install is followed by a restart of every service tier on the
+    database (#1368), which signs everybody out: the dialog says which tiers, before the
+    person commits, and refuses up front when that restart would reach another
+    solution's environments without the customer's say-so. See .design/on-prem-gateway.md.
+
+    Named user: a BC consultant publishing a finished build to a customer environment,
+    or a release manager deploying to a BC 14 customer's own server.
 *@
 
 @if (_open)
@@ -38,11 +44,21 @@
                 <h2 id="rb-title" class="confirm-dialog__title">Deploy to @_customerName — @_envName</h2>
             </div>
             <div class="confirm-dialog__body">
-                <p>
-                    Uploads the build's apps to <b>@_envName</b> in <b>@_customerName</b>'s Business Central@(IsImmediate ? "" : " at the time below").
-                    Business Central installs them
-                    <b>@DeliveryModeDisplay.Schedule(BcDeploymentSchedule.ToWire(_deploymentSchedule) ?? _deploymentSchedule).ToLowerInvariant()</b>@(_schemaSyncMode == BcSyncMode.ForceSync ? ", using Force sync (which can drop columns)" : "").
-                </p>
+                @if (_restartPlan is not null)
+                {
+                    <p>
+                        Installs the build's apps in <b>@_envName</b> on <b>@_customerName</b>'s own Business Central server@(IsImmediate ? "" : " at the time below")@(_schemaSyncMode == BcSyncMode.ForceSync ? ", using Force sync (which can drop columns)" : ""),
+                        then restarts its service tiers.
+                    </p>
+                }
+                else
+                {
+                    <p>
+                        Uploads the build's apps to <b>@_envName</b> in <b>@_customerName</b>'s Business Central@(IsImmediate ? "" : " at the time below").
+                        Business Central installs them
+                        <b>@DeliveryModeDisplay.Schedule(BcDeploymentSchedule.ToWire(_deploymentSchedule) ?? _deploymentSchedule).ToLowerInvariant()</b>@(_schemaSyncMode == BcSyncMode.ForceSync ? ", using Force sync (which can drop columns)" : "").
+                    </p>
+                }
 
                 @if (_fromReleases && _releases.Count == 0)
                 {
@@ -138,6 +154,45 @@
                             }
                         </ul>
                     </div>
+                }
+
+                @if (_restartPlan is { } restart)
+                {
+                    @if (restart.Refusal is { } shared)
+                    {
+                        <Alert Tone="AlertTone.Danger" Class="rb-restart"><span>@shared</span></Alert>
+                    }
+                    else
+                    {
+                        <Alert Tone="AlertTone.Warn" Role="" Block="true" Class="rb-restart">
+                            <div class="rb-restart__body">
+                                <p>
+                                    @(restart.Known
+                                        ? (restart.Tiers.Count == 1 ? "After the install, this service tier restarts:" : $"After the install, these {restart.Tiers.Count} service tiers restart:")
+                                        : "After the install, the service tiers restart. The customer's gateway has not said which yet, so at least this one does:")
+                                </p>
+                                <ul class="rb-restart__tiers">
+                                    @foreach (var tier in restart.Tiers)
+                                    {
+                                        <li>@tier</li>
+                                    }
+                                </ul>
+                                <p><b>Everyone signed in is signed out and loses unsaved work.</b> @RestartModeSentence(restart)</p>
+                                @if (ScriptsSentence(restart) is { } scripts)
+                                {
+                                    <p>@scripts</p>
+                                }
+                                @if (restart.MissingFromGroup.Count > 0)
+                                {
+                                    <p>
+                                        @(restart.MissingFromGroup.Count == 1
+                                            ? $"{restart.MissingFromGroup[0]} uses the same database but is not restarted, so people signed in there keep the previous version until it is. Ask the customer's IT to add it to the tiers that restart."
+                                            : $"{string.Join(", ", restart.MissingFromGroup)} use the same database but are not restarted, so people signed in there keep the previous version until they are. Ask the customer's IT to add them to the tiers that restart.")
+                                    </p>
+                                }
+                            </div>
+                        </Alert>
+                    }
                 }
 
                 @if (_isProduction)
@@ -343,7 +398,31 @@
         && (_fromReleases
             ? _tag.Length > 0 && SelectedReleaseFiles.Count > 0
             : _buildId != 0 && _builds.Count > 0)
-        && (!_isProduction || _prodAck);
+        && (!_isProduction || _prodAck)
+        && _restartPlan?.Refusal is null;
+
+    /// <summary>
+    /// What the deployment restarts on premises, as the customer's gateway settings last
+    /// said; null for Business Central online, and while it is being read.
+    /// </summary>
+    private ALDevToolbox.Services.Gateways.RestartGroupPlan? _restartPlan;
+
+    private static string RestartModeSentence(ALDevToolbox.Services.Gateways.RestartGroupPlan plan) =>
+        plan.Tiers.Count < 2
+            ? "Business Central is unavailable for the few minutes the restart takes."
+            : plan.OneByOne
+                ? "They restart one at a time, so one of them is always running."
+                : "They all stop, then all start again, so Business Central is unavailable for the few minutes that takes.";
+
+    private static string? ScriptsSentence(ALDevToolbox.Services.Gateways.RestartGroupPlan plan) =>
+        (plan.Before, plan.After) switch
+        {
+            ({ } before, { } after) =>
+                $"The customer's script {DeliveryGatewaySteps.ScriptName(before)} runs before anything is installed, and {DeliveryGatewaySteps.ScriptName(after)} after the restart.",
+            ({ } before, null) => $"The customer's script {DeliveryGatewaySteps.ScriptName(before)} runs before anything is installed.",
+            (null, { } after) => $"The customer's script {DeliveryGatewaySteps.ScriptName(after)} runs after the restart.",
+            _ => null,
+        };
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -364,7 +443,7 @@
     /// from a specific build's row (#938); it falls back to the latest when that build
     /// is not among them.
     /// </summary>
-    public Task OpenAsync(int releasePipelineId, string customerName, string envName, string envType, string deploymentSchedule, string schemaSyncMode,
+    public async Task OpenAsync(int releasePipelineId, string customerName, string envName, string envType, string deploymentSchedule, string schemaSyncMode,
         IReadOnlyList<ReleasableBuildOption> builds, string? timeZone, TimeOnly? windowStart, TimeOnly? windowEnd,
         DateTime? secretExpiresAt = null,
         IReadOnlyList<GitHubReleaseOption>? releases = null,
@@ -408,10 +487,24 @@
         _scheduledLocal = Trim(TimeZoneInfo.ConvertTimeFromUtc(prefillUtc, _tz));
         _windowOpeningLocal = _scheduledLocal;
 
+        _restartPlan = null;
+
         _open = true;
         _focusPending = true;
         StateHasChanged();
-        return Task.CompletedTask;
+
+        // Read after the dialog is up: it says what restarts, and is no reason to keep the
+        // dialog from opening. A failed read leaves the warning out; the deployment is
+        // still checked before anything is sent.
+        try
+        {
+            _restartPlan = await Deliveries.GetRestartPlanAsync(releasePipelineId);
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Log.LogWarning(ex, "Couldn't read the restart group for deployment pipeline {ReleasePipelineId}.", releasePipelineId);
+        }
     }
 
     private void SetNextOpening() => _scheduledLocal = _windowOpeningLocal;
