@@ -4071,6 +4071,16 @@ namespace ALDevToolbox.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("finished_at");
 
+                    b.Property<long?>("GatewayCommandId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("gateway_command_id");
+
+                    b.Property<int>("GatewayLogOffset")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0)
+                        .HasColumnName("gateway_log_offset");
+
                     b.Property<DateTime?>("InstallStartedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("install_started_at");

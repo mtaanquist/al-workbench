@@ -27,21 +27,24 @@ namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 /// (#1367). Null for Business Central online.
 /// </param>
 /// <param name="Tiers">On-premises: how many service tiers <paramref name="Sessions"/> was counted on.</param>
+/// <param name="UncountedTiers">On-premises: tiers on the same database left out because their gateway is not online.</param>
 public sealed record OpenSessionsCheck(
-    string EnvironmentName, int EndUsers, int DelegatedUsers, string? Failure = null, int? Sessions = null, int Tiers = 0)
+    string EnvironmentName, int EndUsers, int DelegatedUsers, string? Failure = null, int? Sessions = null, int Tiers = 0,
+    int UncountedTiers = 0)
 {
     /// <summary>The prefix Business Central gives a delegated admin's user name.</summary>
     public const string DelegatedUserPrefix = "USER_";
 
     /// <summary>True when the person should be asked before the deployment goes ahead: somebody is signed in, or we could not tell.</summary>
-    public bool NeedsConfirmation => Failure is not null || EndUsers + DelegatedUsers > 0 || Sessions > 0;
+    public bool NeedsConfirmation => Failure is not null || EndUsers + DelegatedUsers > 0 || Sessions > 0 || UncountedTiers > 0;
 
     /// <summary>
     /// An on-premises count: <paramref name="sessions"/> open on <paramref name="tiers"/>
-    /// service tiers that share the environment's database.
+    /// service tiers that share the environment's database, and <paramref name="uncounted"/>
+    /// more on it that were left out because their gateway is not online.
     /// </summary>
-    public static OpenSessionsCheck OnPremises(string environmentName, int sessions, int tiers) =>
-        new(environmentName, 0, 0, Sessions: sessions, Tiers: tiers);
+    public static OpenSessionsCheck OnPremises(string environmentName, int sessions, int tiers, int uncounted = 0) =>
+        new(environmentName, 0, 0, Sessions: sessions, Tiers: tiers, UncountedTiers: uncounted);
 
     /// <summary>
     /// Counts the people in <paramref name="sessions"/>. One person with three tabs open is
@@ -106,8 +109,14 @@ public sealed record OpenSessionsCheck(
                 // hour old, across every tier on the database: a session on any of them sees
                 // the new version once it is installed.
                 var where = Tiers > 1 ? $"the {Tiers} service tiers of {EnvironmentName}" : EnvironmentName;
+                var uncounted = UncountedTiers switch
+                {
+                    0 => "",
+                    1 => "1 more service tier on the same database was not counted, because its gateway is offline. ",
+                    var n => $"{n} more service tiers on the same database were not counted, because their gateways are offline. ",
+                };
                 return $"There {(sessions == 1 ? "is" : "are")} {Count(sessions, "session", "sessions")} open on {where}, "
-                    + $"as the gateway last counted them. {ask}";
+                    + $"as the gateway last counted them. {uncounted}{ask}";
             }
             return $"There {(EndUsers == 1 ? "is" : "are")} {Count(EndUsers, "end-user", "end-users")} online and "
                 + $"{Count(DelegatedUsers, "delegated user", "delegated users")} online in {EnvironmentName}. {ask}";

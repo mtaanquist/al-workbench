@@ -68,8 +68,9 @@ public sealed class AdminCenterDeliveryTarget : IDeliveryTarget
     public Task<IReadOnlyList<BcInstalledApp>> ListInstalledAppsAsync(CancellationToken ct) =>
         _apps.ListInstalledAppsAsync(Token, Family, _environment.Name, ct);
 
-    /// <summary>The Admin Center takes one app at a time; there is nothing to set up for a batch.</summary>
-    public Task PrepareInstallsAsync(DeliveryInstallBatch batch, CancellationToken ct) => Task.CompletedTask;
+    /// <summary>The Admin Center takes one app at a time; there is nothing to set up for a batch, and the run goes on.</summary>
+    public Task<DeliveryHandOff?> PrepareInstallsAsync(DeliveryInstallBatch batch, CancellationToken ct) =>
+        Task.FromResult<DeliveryHandOff?>(null);
 
     public async Task<BcAppOperation> StartInstallAsync(
         DeliveryPackage package, string schedule, string schemaSyncMode, CancellationToken ct) =>

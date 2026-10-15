@@ -74,8 +74,9 @@ public sealed record GatewayCommandFileDownload(long Id, string FileName, string
 /// </summary>
 /// <param name="NewLog">The log written since the offset asked for, each line stamped with the workbench's clock.</param>
 /// <param name="LogOffset">The offset to ask from next time.</param>
+/// <param name="LeftQueue">Whether the gateway ever collected it: once it has, something may have run, whatever the command says after.</param>
 public sealed record GatewayCommandProgress(
-    GatewayCommandStatus Status, string? FailureMessage, JsonObject? Result, string NewLog, int LogOffset)
+    GatewayCommandStatus Status, string? FailureMessage, JsonObject? Result, string NewLog, int LogOffset, bool LeftQueue = false)
 {
     /// <summary>The command will not change again.</summary>
     public bool IsFinal => Status is GatewayCommandStatus.Succeeded or GatewayCommandStatus.Failed or GatewayCommandStatus.Expired;
@@ -334,13 +335,39 @@ public sealed class GatewayCommandService
                 c.Status,
                 c.FailureMessage,
                 c.ResultJson,
+                c.ClaimedAt,
                 Length = c.Log.Length,
                 Tail = c.Log.Length > offset ? c.Log.Substring(offset) : string.Empty,
             })
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
         if (row is null) return null;
         var result = string.IsNullOrWhiteSpace(row.ResultJson) ? null : JsonNode.Parse(row.ResultJson) as JsonObject;
-        return new GatewayCommandProgress(row.Status, row.FailureMessage, result, row.Tail, Math.Max(offset, row.Length));
+        return new GatewayCommandProgress(row.Status, row.FailureMessage, result, row.Tail, Math.Max(offset, row.Length),
+            LeftQueue: row.ClaimedAt is not null || row.Status is GatewayCommandStatus.Claimed or GatewayCommandStatus.Running);
+    }
+
+    /// <summary>
+    /// Takes back a command nobody has collected yet: a queued one becomes failed with
+    /// <paramref name="message"/>, compare-and-set on its status, so a gateway claiming it
+    /// at the same moment wins. True when it was taken back. One already claimed cannot be:
+    /// the gateway has it, and only the gateway can say what became of it.
+    /// </summary>
+    public async Task<bool> CancelQueuedAsync(long commandId, string message, CancellationToken ct = default)
+    {
+        RequireOrganizationId();
+        var now = Now;
+        var cancelled = await _db.GatewayCommands
+            .Where(c => c.Id == commandId && c.Status == GatewayCommandStatus.Queued)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.Status, GatewayCommandStatus.Failed)
+                .SetProperty(c => c.FinishedAt, now)
+                .SetProperty(c => c.FailureMessage, message), ct)
+            .ConfigureAwait(false);
+        if (cancelled > 0)
+        {
+            _logger.LogInformation("Took back gateway command {CommandId} before the gateway collected it.", commandId);
+        }
+        return cancelled > 0;
     }
 
     /// <summary>

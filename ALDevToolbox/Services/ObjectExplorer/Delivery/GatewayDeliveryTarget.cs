@@ -21,24 +21,24 @@ namespace ALDevToolbox.Services.ObjectExplorer.Delivery;
 /// never DI-registered. See <c>.design/on-prem-gateway.md</c>, "Deploying to on-premises".
 /// <para>
 /// The shared run is per app (start one, wait for it, next), and the gateway is per
-/// command. The two meet like this: <see cref="PrepareInstallsAsync"/> queues the one
-/// command with every app still to send; <see cref="StartInstallAsync"/> sends nothing and
-/// only notes which app the run is on; the first <see cref="WaitForInstallAsync"/> waits for
-/// the command to finish, passing its progress lines on, and each wait then answers with
-/// its own app's outcome from the command's result.
+/// command, which may run for hours. So the two do not wait together:
+/// <see cref="PrepareInstallsAsync"/> queues the one command with every app still to send
+/// and hands the run off (<see cref="DeliveryHandOff"/>); the run records the command on
+/// the deployment and ends, freeing its worker; and
+/// <c>DeliveryService.FollowGatewayDeliveriesAsync</c> copies the command's progress into
+/// the deployment's log and finishes it from the command's result, app by app, through
+/// <see cref="OutcomeFor"/>. <see cref="StartInstallAsync"/> and
+/// <see cref="WaitForInstallAsync"/> are therefore never called.
 /// </para>
 /// </summary>
 public sealed class GatewayDeliveryTarget : IDeliveryTarget
 {
     /// <summary>
-    /// The longest a run waits for one command. The command queue normally ends it long
-    /// before: a command nobody collects expires, and one whose gateway goes quiet is
-    /// failed. This only stops a run waiting for ever with the sweep switched off.
+    /// The longest a deployment follows one command. The command queue normally ends it
+    /// long before: a command nobody collects expires, and one whose gateway goes quiet is
+    /// failed. This only stops a deployment being followed for ever with the sweep switched off.
     /// </summary>
     internal static readonly TimeSpan HardWaitLimit = TimeSpan.FromHours(24);
-
-    /// <summary>The shortest gap between two reads of the command, whatever the run asks.</summary>
-    internal static readonly TimeSpan MinimumPollDelay = TimeSpan.FromMilliseconds(100);
 
     private readonly DeliveryTargetEnvironment _environment;
     private readonly AppDbContext _db;
@@ -47,10 +47,7 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
     private readonly ILogger _logger;
 
     private OnPremisesDeployFacts? _facts;
-    private DeliveryInstallBatch? _batch;
     private long? _commandId;
-    private int _current = -1;
-    private GatewayCommandProgress? _final;
 
     public GatewayDeliveryTarget(
         DeliveryTargetEnvironment environment,
@@ -171,11 +168,17 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
     /// declares each app's id, publisher and version, read from the file's manifest, so the
     /// gateway can check the file is the app it was told about.
     /// </summary>
-    public async Task PrepareInstallsAsync(DeliveryInstallBatch batch, CancellationToken ct)
+    public async Task<DeliveryHandOff?> PrepareInstallsAsync(DeliveryInstallBatch batch, CancellationToken ct)
     {
         var facts = Facts;
-        if (batch.Packages.Count == 0) return;
-        _batch = batch;
+        if (batch.Packages.Count == 0) return null;
+        // Asked again now, not only when the pipeline was saved: a deployment in the
+        // delivery window may have been made days before the customer's IT turned Force
+        // sync off. Said as the refusal it is, and nothing is sent.
+        if (BcSyncMode.Normalize(batch.SchemaSyncMode) == BcSyncMode.ForceSync && !facts.AllowForceSync)
+        {
+            throw new DeliveryTargetRefusedException(ForceSyncRefusedAtClaim(facts.TierName));
+        }
 
         var files = new List<GatewayCommandFileInput>();
         var apps = new List<GatewayPublishInstallApp>();
@@ -246,7 +249,12 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
         _logger.LogInformation(
             "Queued publish-install command {CommandId} for {Env} on gateway {GatewayId} ({Machine} / {Instance}) with {AppCount} app(s).",
             _commandId, _environment.Name, facts.GatewayId, machine, instance, apps.Count);
+        return new DeliveryHandOff(_commandId.Value);
     }
+
+    /// <summary>Why a deployment set to Force sync was not sent, when the tier's settings no longer allow it.</summary>
+    internal static string ForceSyncRefusedAtClaim(string tierName) =>
+        $"{OnPremisesDeployFacts.NotAllowed}: {tierName} does not allow Force sync, so nothing was sent.";
 
     /// <summary>
     /// Whether an <c>.app</c> carries anything after its package, which is where a
@@ -264,78 +272,16 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
         return packageLength < (ulong)(bytes.Length - header);
     }
 
-    /// <summary>
-    /// Nothing is sent per app: the command already carries them all. This only notes
-    /// which app the run is on, for the wait that follows.
-    /// </summary>
+    /// <summary>Never called: <see cref="PrepareInstallsAsync"/> hands the run off with the whole batch.</summary>
     public Task<BcAppOperation> StartInstallAsync(
-        DeliveryPackage package, string schedule, string schemaSyncMode, CancellationToken ct)
-    {
-        if (_batch is null || _commandId is null)
-        {
-            throw new InvalidOperationException("PrepareInstallsAsync must queue the command before an app is started.");
-        }
-        _current = -1;
-        for (var i = 0; i < _batch.Packages.Count; i++)
-        {
-            if (_batch.Packages[i].ArtifactId == package.ArtifactId) { _current = i; break; }
-        }
-        if (_current < 0)
-        {
-            throw new InvalidOperationException($"{package.AppName} was not in the batch the command was queued with.");
-        }
-        // No operation id of Business Central's own (the run records none), and no version
-        // read back: the gateway checks the file's version against the command itself.
-        return Task.FromResult(new BcAppOperation(
-            Guid.Empty, package.AppId, "install", BcAppOperationStatus.Running, string.Empty,
-            string.Empty, string.Empty, null, string.Empty, string.Empty, string.Empty, false, string.Empty,
-            null, null, null));
-    }
+        DeliveryPackage package, string schedule, string schemaSyncMode, CancellationToken ct) =>
+        throw new InvalidOperationException("The gateway installs the whole batch as one command; the run is handed off instead.");
 
-    /// <summary>
-    /// The first call waits for the command to finish, passing on its progress lines; every
-    /// call then answers with its own app's line of the command's result.
-    /// </summary>
-    public async Task<DeliveryInstallOutcome> WaitForInstallAsync(
+    /// <summary>Never called: the deployment is finished from the command's result by DeliveryService.</summary>
+    public Task<DeliveryInstallOutcome> WaitForInstallAsync(
         BcAppOperation started, TimeSpan pollDelay, TimeSpan timeout,
-        Func<IReadOnlyList<string>, CancellationToken, Task>? onProgress, CancellationToken ct)
-    {
-        if (_commandId is not { } commandId || _current < 0)
-        {
-            throw new InvalidOperationException("StartInstallAsync must be called before the install is waited for.");
-        }
-        _final ??= await WaitForCommandAsync(commandId, pollDelay, onProgress, ct);
-        return OutcomeFor(_final, _current, _batch!.Packages[_current]);
-    }
-
-    private async Task<GatewayCommandProgress> WaitForCommandAsync(
-        long commandId, TimeSpan pollDelay, Func<IReadOnlyList<string>, CancellationToken, Task>? onProgress, CancellationToken ct)
-    {
-        var delay = pollDelay < MinimumPollDelay ? MinimumPollDelay : pollDelay;
-        var giveUpAt = Now + HardWaitLimit;
-        var offset = 0;
-        while (true)
-        {
-            var progress = await _commands.ReadProgressAsync(commandId, offset, ct)
-                ?? new GatewayCommandProgress(GatewayCommandStatus.Failed, "The gateway command is no longer there.", null, string.Empty, offset);
-            offset = progress.LogOffset;
-            if (onProgress is not null && GatewayLines(progress.NewLog) is { Count: > 0 } lines)
-            {
-                await onProgress(lines, ct);
-            }
-            if (progress.IsFinal) return progress;
-            if (Now >= giveUpAt)
-            {
-                _logger.LogWarning("Stopped waiting for gateway command {CommandId} after {Limit}.", commandId, HardWaitLimit);
-                return progress with
-                {
-                    Status = GatewayCommandStatus.Failed,
-                    FailureMessage = "AL Workbench stopped waiting for the gateway after a day. Check the environment's installed apps.",
-                };
-            }
-            await Task.Delay(delay, _clock, ct);
-        }
-    }
+        Func<IReadOnlyList<string>, CancellationToken, Task>? onProgress, CancellationToken ct) =>
+        throw new InvalidOperationException("The gateway installs the whole batch as one command; the run is handed off instead.");
 
     /// <summary>
     /// The command's log lines without the workbench's time stamp, which the deployment's
@@ -359,11 +305,13 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
 
     /// <summary>
     /// One app's outcome from the finished command. The gateway lists every app it was
-    /// given, in order; a command that failed before it could say (expired uncollected,
-    /// the gateway restarted, a refusal before the verb ran) has no result, and its own
-    /// message becomes the first app's failure.
+    /// given, in order. A command with no result for the app is read by how far it got:
+    /// one the gateway never collected (expired, taken back) changed nothing, so its message
+    /// is the first app's failure; one refused before the verb ran says "Nothing was
+    /// changed." and is a refusal; any other one the gateway had collected may have
+    /// installed some of the apps before it stopped, so each is unconfirmed, not failed.
     /// </summary>
-    internal static DeliveryInstallOutcome OutcomeFor(GatewayCommandProgress final, int index, DeliveryPackage package)
+    internal static DeliveryInstallOutcome OutcomeFor(GatewayCommandProgress final, int index, string appVersion)
     {
         var result = GatewayPublishInstallResult.FromJson(final.Result);
         var restarted = result?.Restarted;
@@ -371,10 +319,20 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
         var app = result is not null && index < result.Apps.Count ? result.Apps[index] : null;
         if (app is null)
         {
-            var why = final.Status == GatewayCommandStatus.Succeeded
-                ? "The gateway finished without reporting on this app. Check the environment's installed apps."
-                : commandFailure ?? "The gateway reported the deployment as failed without saying why.";
-            return new DeliveryInstallOutcome(false, why, Raw: final.Result?.ToJsonString()) { TiersRestarted = restarted };
+            var nothingChanged = commandFailure?.EndsWith(NothingWasChanged, StringComparison.Ordinal) == true;
+            if (final.LeftQueue && !nothingChanged)
+            {
+                var why = commandFailure is null ? "" : " " + (commandFailure.EndsWith('.') ? commandFailure : commandFailure + ".");
+                return new DeliveryInstallOutcome(false, UnconfirmedAppMessage + why, Raw: final.Result?.ToJsonString())
+                { Outcome = DeliveryAppOutcome.Unconfirmed, TiersRestarted = restarted };
+            }
+            if (nothingChanged && GatewayRefusalAdvice.IsSettingsRefusal(commandFailure))
+            {
+                return new DeliveryInstallOutcome(false, commandFailure, Raw: final.Result?.ToJsonString())
+                { Outcome = DeliveryAppOutcome.Refused, TiersRestarted = restarted };
+            }
+            var failure = commandFailure ?? "The gateway reported the deployment as failed without saying why.";
+            return new DeliveryInstallOutcome(false, failure, Raw: final.Result?.ToJsonString()) { TiersRestarted = restarted };
         }
 
         var signer = app.SignerSubject is { Length: > 0 } subject ? $" Signed by {subject}." : string.Empty;
@@ -388,7 +346,7 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
                     (message ?? (app.FromVersion is { Length: > 0 } from ? $"Upgraded from {from}." : "Upgraded.")) + signer)
                 { FromVersion = app.FromVersion, TiersRestarted = restarted },
             GatewayPublishInstallOutcomes.AlreadyInstalled =>
-                new DeliveryInstallOutcome(false, message ?? $"Already on {package.AppVersion}.")
+                new DeliveryInstallOutcome(false, message ?? $"Already on {appVersion}.")
                 { Outcome = DeliveryAppOutcome.AlreadyInstalled, TiersRestarted = restarted },
             GatewayPublishInstallOutcomes.Refused =>
                 new DeliveryInstallOutcome(false, message ?? commandFailure ?? "The gateway refused this app.", Raw: final.Result?.ToJsonString())
@@ -402,22 +360,34 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
         };
     }
 
+    /// <summary>How the gateway ends a message about a command that ran nothing.</summary>
+    internal const string NothingWasChanged = "Nothing was changed.";
+
+    /// <summary>An app whose fate the gateway did not report, though it may have started on it.</summary>
+    internal const string UnconfirmedAppMessage =
+        "Not confirmed: the gateway stopped before it said what became of this app. Check the environment's apps after the gateway's next inventory.";
+
     /// <summary>
     /// The sessions open across every service tier on the environment's database, as the
-    /// gateway last counted them: a session on any of them sees the new version once it is
-    /// installed. Tiers are matched on the database's server, instance and name. A server
-    /// named only as this machine ("localhost") means nothing on another gateway's network,
-    /// so such a database is matched on the same gateway only. On a multitenant server
-    /// only the environment's own tenant is counted.
+    /// gateways last counted them: a session on any of them sees the new version once it is
+    /// installed. Tiers are matched on the database's server, instance and name, however
+    /// each gateway spelled them (<see cref="DatabaseKey"/>). A tier whose gateway is not
+    /// online is left out, since its count may be hours old, and the question says how
+    /// many were. On a multitenant server only the environment's own tenant is counted.
     /// </summary>
     public async Task<OpenSessionsCheck> CheckOpenSessionsAsync(CancellationToken ct)
     {
         var facts = Facts;
+        var now = Now;
         var tiers = await _db.GatewayInstances.AsNoTracking()
             .Where(i => i.MissingSince == null || i.Id == facts.InstanceId)
             .Select(i => new
             {
-                i.Id, i.GatewayId, i.DatabaseServer, i.DatabaseInstance, i.DatabaseName, i.SessionCount,
+                i.Id, i.DatabaseServer, i.DatabaseInstance, i.DatabaseName, i.SessionCount,
+                GatewayMachine = i.Gateway!.MachineName,
+                GatewayState = i.Gateway.State,
+                GatewayLastSeenAt = i.Gateway.LastSeenAt,
+                GatewayRevokedAt = i.Gateway.RevokedAt,
                 TenantSessions = i.Tenants
                     .Where(t => t.MissingSince == null)
                     .Select(t => new { t.TenantId, t.SessionCount })
@@ -429,19 +399,20 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
         {
             return OpenSessionsCheck.Unknown(_environment.Name, "The gateway no longer reports this service tier.");
         }
-        var known = !string.IsNullOrWhiteSpace(linked.DatabaseName);
-        var local = IsLocalServer(linked.DatabaseServer);
-        var sharing = known
-            ? tiers.Where(t => t.Id == linked.Id
-                || (Same(t.DatabaseServer, linked.DatabaseServer)
-                    && Same(t.DatabaseInstance, linked.DatabaseInstance)
-                    && Same(t.DatabaseName, linked.DatabaseName)
-                    && (!local || t.GatewayId == linked.GatewayId))).ToList()
-            : [linked];
+        var key = DatabaseKey.For(linked.DatabaseServer, linked.DatabaseInstance, linked.DatabaseName, linked.GatewayMachine);
+        var sharing = key is null
+            ? [linked]
+            : tiers.Where(t => t.Id == linked.Id
+                || DatabaseKey.For(t.DatabaseServer, t.DatabaseInstance, t.DatabaseName, t.GatewayMachine) == key).ToList();
+        bool Online(int id) => sharing.First(t => t.Id == id) is var t
+            && GatewayService.StatusOf(t.GatewayState, t.GatewayLastSeenAt, t.GatewayRevokedAt, now) == GatewayStatus.Online;
+        // The linked tier's own gateway is online, or the run would not have got this far.
+        var counted = sharing.Where(t => t.Id == linked.Id || Online(t.Id)).ToList();
+        var offline = sharing.Count - counted.Count;
 
         var tenant = facts.TenantId ?? OnPremisesEnvironmentService.DefaultTenant;
         int? total = null;
-        foreach (var tier in sharing)
+        foreach (var tier in counted)
         {
             int? count = facts.Multitenant
                 ? tier.TenantSessions.FirstOrDefault(t => Same(t.TenantId, tenant))?.SessionCount
@@ -449,7 +420,7 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
             if (count is { } n) total = (total ?? 0) + n;
         }
         return total is { } sessions
-            ? OpenSessionsCheck.OnPremises(_environment.Name, sessions, sharing.Count)
+            ? OpenSessionsCheck.OnPremises(_environment.Name, sessions, counted.Count, offline)
             : OpenSessionsCheck.Unknown(_environment.Name, "The gateway hasn't counted the sessions on these service tiers yet.");
     }
 
@@ -458,14 +429,6 @@ public sealed class GatewayDeliveryTarget : IDeliveryTarget
 
     public Task CancelHeldInstallAsync(Guid appId, string version, string schedule, CancellationToken ct) =>
         throw new InvalidOperationException("An on-premises service tier holds no installs for a later update.");
-
-    private static bool IsLocalServer(string? server)
-    {
-        var name = (server ?? string.Empty).Trim();
-        var host = name.Split('\\', ',')[0].Trim();
-        return host.Length == 0 || host is "." or "(local)" or "127.0.0.1" or "::1"
-               || host.Equals("localhost", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static bool Same(string? a, string? b) =>
         string.Equals(a?.Trim(), b?.Trim(), StringComparison.OrdinalIgnoreCase);

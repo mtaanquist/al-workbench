@@ -38,6 +38,12 @@ public sealed class DeliveryTargetFactory
     }
 
     /// <summary>
+    /// The gateway command queue, for following an on-premises deployment once its run
+    /// has handed it off (#1367); null where on-premises deploying isn't set up.
+    /// </summary>
+    internal GatewayCommandService? GatewayCommands => _gateway?.Commands;
+
+    /// <summary>
     /// Why nothing can be deployed to an environment of <paramref name="kind"/>, in a
     /// sentence for the person; null when <see cref="Create"/> has a target for it. Every
     /// kind has one now; this stays the place a kind without one would say so.

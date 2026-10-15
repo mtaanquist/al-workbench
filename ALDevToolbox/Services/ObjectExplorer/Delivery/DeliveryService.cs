@@ -1780,7 +1780,9 @@ public sealed class DeliveryService
     /// startup, when the worker may already be running a deployment claimed since; the
     /// cut-off keeps that one alone (#1114). The publish isn't safely resumable (partial
     /// uploads to BC), so these are failed, not retried. Returns the ids it failed, so the
-    /// people behind them can be told (#1036).
+    /// people behind them can be told (#1036). An on-premises deployment already handed to
+    /// its gateway command is not one of them: the command carries on whatever happens to
+    /// us, and <see cref="FollowGatewayDeliveriesAsync"/> goes on following it (#1367).
     /// </summary>
     public async Task<List<int>> FailInterruptedDeliveriesAsync(DateTime claimedBeforeUtc, CancellationToken ct = default)
     {
@@ -1788,7 +1790,9 @@ public sealed class DeliveryService
             .Where(d => (d.Status == ProjectDeliveryStatus.Claimed
                          || d.Status == ProjectDeliveryStatus.Uploading
                          || d.Status == ProjectDeliveryStatus.Installing)
-                        && (d.ClaimedAt == null || d.ClaimedAt < claimedBeforeUtc))
+                        && (d.ClaimedAt == null || d.ClaimedAt < claimedBeforeUtc)
+                        // Handed to a gateway command: not orphaned, followed (#1367).
+                        && !(d.Status == ProjectDeliveryStatus.Installing && d.GatewayCommandId != null))
             .Include(d => d.Results)
             .ToListAsync(ct);
         if (orphans.Count == 0) return [];
@@ -1853,6 +1857,15 @@ public sealed class DeliveryService
         if (await EarlierOneWaitsAsync())
         {
             _logger.LogDebug("Delivery {DeliveryId} waits for an earlier deployment to {Env}.", deliveryId, target.EnvironmentName);
+            return false;
+        }
+        // An on-premises deployment handed to its gateway command holds no worker, so the
+        // in-process gate below doesn't see it; the row does, across a restart too (#1367).
+        if (await _db.OeProjectDeliveries.AsNoTracking().AnyAsync(d =>
+                d.Id != deliveryId && d.ProjectId == target.ProjectId && d.EnvironmentName == target.EnvironmentName
+                && d.Status == ProjectDeliveryStatus.Installing && d.GatewayCommandId != null, ct))
+        {
+            _logger.LogDebug("Delivery {DeliveryId} waits: the gateway is still installing an earlier deployment to {Env}.", deliveryId, target.EnvironmentName);
             return false;
         }
         using var environment = _queue.TryEnterEnvironment(target.BcTenantId, target.ProjectId, target.EnvironmentName);
@@ -2238,11 +2251,16 @@ public sealed class DeliveryService
             if (AlreadyWaiting(waiting, appIds[i], ordered[i], delivery) is not null) break;
             sending.Add(PackageFor(i));
         }
+        // A target that takes the whole batch hands the run off (the gateway, #1367); one
+        // whose own rules refuse it says so, and the first app it would have sent carries
+        // the refusal.
+        DeliveryHandOff? handOff = null;
+        string? batchRefusal = null;
         if (sending.Count > 0)
         {
             try
             {
-                await target.PrepareInstallsAsync(new DeliveryInstallBatch(
+                handOff = await target.PrepareInstallsAsync(new DeliveryInstallBatch(
                     sending, delivery.SchemaSyncMode,
                     UnpublishPrevious: await _db.OeReleasePipelines.AsNoTracking()
                         .Where(r => r.Id == delivery.ReleasePipelineId)
@@ -2252,36 +2270,26 @@ public sealed class DeliveryService
                     StartedByAgent: delivery.StartedByAgent,
                     WindowEndsAtUtc: await DeliveryWindowEndAsync(delivery, ct)), ct);
             }
+            catch (DeliveryTargetRefusedException ex)
+            {
+                batchRefusal = ex.Message;
+            }
             catch (DeliveryTargetException ex)
             {
                 await FailAsync(delivery, log, ex.Message, ct);
                 return;
             }
-            if (target is GatewayDeliveryTarget { CommandId: { } commandId })
-            {
-                Append(log, $"Queued for the gateway as command {commandId}.");
-                await SaveResultAsync(delivery, log, ct);
-            }
         }
 
         var results = ordered;
-        var failedIndex = -1;
-        // Whether anything went in (or was handed to Business Central). A run where every
-        // app was already on its version changes nothing, so it ends as deployed, not
-        // handed off.
-        var uploadedAny = false;
-        // What the gateway said about restarting the service tiers, when it said anything.
-        bool? tiersRestarted = null;
-        // The one line the delivery carries when Business Central reported the failure;
-        // the detail (its message) stays on the app, so the two never say the same twice.
-        string? failureLine = null;
-        // A refusal is already the whole sentence; it isn't prefixed like an app's failure.
-        string? refusal = null;
+        var tally = new RunTally();
+        // Whether an app went to the gateway in the command the run was handed off with.
+        var handedOff = false;
 
         for (var i = 0; i < results.Count; i++)
         {
             var result = results[i];
-            if (failedIndex >= 0)
+            if (tally.FailedIndex >= 0)
             {
                 result.Status = ProjectDeliveryResultStatus.Skipped;
                 result.UpdatedAt = DateTime.UtcNow;
@@ -2291,7 +2299,7 @@ public sealed class DeliveryService
             var label = $"{result.AppName} {result.AppVersion}";
             if (i >= artifacts.Count)
             {
-                failedIndex = i;
+                tally.FailedIndex = i;
                 result.Status = ProjectDeliveryResultStatus.Failed;
                 result.FinishedAt = DateTime.UtcNow;
                 result.Message = "The build's deliverables changed under the delivery.";
@@ -2335,14 +2343,40 @@ public sealed class DeliveryService
                     await SaveResultAsync(delivery, log, ct);
                     continue;
                 }
-                failedIndex = i;
-                refusal = waitingRefusal;
+                tally.FailedIndex = i;
+                tally.Refusal = waitingRefusal;
                 result.Status = ProjectDeliveryResultStatus.Failed;
                 result.FinishedAt = DateTime.UtcNow;
                 result.UpdatedAt = result.FinishedAt.Value;
                 result.Message = waitingRefusal;
                 Append(log, waitingRefusal);
                 break;
+            }
+
+            if (batchRefusal is { } refusedBatch)
+            {
+                tally.FailedIndex = i;
+                result.Status = ProjectDeliveryResultStatus.Refused;
+                result.Message = refusedBatch;
+                result.FinishedAt = DateTime.UtcNow;
+                result.UpdatedAt = result.FinishedAt.Value;
+                tally.Refusal = $"The gateway refused {label}: {refusedBatch}";
+                Append(log, $"REFUSED {label}: {refusedBatch}");
+                break;
+            }
+            if (handOff is not null)
+            {
+                // Already sent, with the rest, as the gateway's one command: from here the
+                // deployment is followed, not waited for (FollowGatewayDeliveriesAsync).
+                var sent = PackageFor(i);
+                result.Status = ProjectDeliveryResultStatus.Installing;
+                result.StartedAt = DateTime.UtcNow;
+                result.UpdatedAt = result.StartedAt.Value;
+                delivery.Status = ProjectDeliveryStatus.Installing;
+                delivery.InstallStartedAt ??= result.StartedAt;
+                Append(log, $"Sending {label} ({sent.Size} bytes) to the gateway...");
+                handedOff = true;
+                continue;
             }
 
             try
@@ -2380,7 +2414,7 @@ public sealed class DeliveryService
                 if (!string.IsNullOrEmpty(operation.TargetAppVersion)
                     && !string.Equals(operation.TargetAppVersion, result.AppVersion, StringComparison.OrdinalIgnoreCase))
                 {
-                    failedIndex = i;
+                    tally.FailedIndex = i;
                     result.Status = ProjectDeliveryResultStatus.Failed;
                     result.FinishedAt = DateTime.UtcNow;
                     result.Message = $"Business Central read version {operation.TargetAppVersion} from the uploaded app, but this build says {result.AppVersion}.";
@@ -2393,7 +2427,7 @@ public sealed class DeliveryService
                 {
                     // Nothing left to watch: BC runs this in its own window, and no poll
                     // of ours would ever see it go terminal.
-                    uploadedAny = true;
+                    tally.UploadedAny = true;
                     result.Status = ProjectDeliveryResultStatus.Scheduled;
                     result.FinishedAt = DateTime.UtcNow;
                     Append(log, $"Business Central has scheduled {label}{operationNote}.");
@@ -2419,62 +2453,14 @@ public sealed class DeliveryService
                         delivery.UpdatedAt = DateTime.UtcNow;
                         await SaveResultAsync(delivery, log, token);
                     }, ct);
-                tiersRestarted = outcome.TiersRestarted ?? tiersRestarted;
-                if (outcome.FromVersion is { Length: > 0 } from && result.PreviousVersion is null)
-                {
-                    result.PreviousVersion = from;
-                }
-                if (outcome.Completed)
-                {
-                    uploadedAny = true;
-                    result.Status = ProjectDeliveryResultStatus.Completed;
-                    result.Message = outcome.Message;
-                    Append(log, $"Installed {label}.");
-                }
-                else if (outcome.Outcome is DeliveryAppOutcome.AlreadyInstalled or DeliveryAppOutcome.Skipped)
-                {
-                    // The gateway found it already on this version (#931), or did not start
-                    // it because another app of the same command stopped: neither is this
-                    // app's failure, and the run goes on to the app that did stop.
-                    result.Status = ProjectDeliveryResultStatus.Skipped;
-                    result.Message = outcome.Message;
-                    Append(log, $"Skipped {label}: {outcome.Message}");
-                }
-                else if (outcome.Outcome == DeliveryAppOutcome.Refused)
-                {
-                    // Refused before anything ran for it: told apart from a failure, since
-                    // nothing was changed for this app and the fix is the customer's
-                    // settings or the file, not the environment.
-                    failedIndex = i;
-                    result.Status = ProjectDeliveryResultStatus.Refused;
-                    result.Message = outcome.Message;
-                    refusal = $"The gateway refused {label}: {outcome.Message}";
-                    Append(log, $"REFUSED {label}: {outcome.Message}");
-                }
-                else
-                {
-                    failedIndex = i;
-                    result.Status = ProjectDeliveryResultStatus.Failed;
-                    result.Message = outcome.Message;
-                    // The log keeps Business Central's text whole, wrapper and JSON included:
-                    // it is what support needs, and what the page parses back (#930).
-                    if (outcome.Failure is { } reported)
-                    {
-                        Append(log, $"FAILED {label}: {BcFailureText.ForLog(reported, outcome.Raw)}");
-                        failureLine = BcFailureText.WhatHappened(reported.Code, label);
-                    }
-                    else
-                    {
-                        Append(log, $"FAILED {label}: {outcome.Message}");
-                    }
-                }
+                ApplyOutcome(result, label, i, outcome, tally, log);
                 result.FinishedAt = DateTime.UtcNow;
                 result.UpdatedAt = result.FinishedAt.Value;
                 await SaveResultAsync(delivery, log, ct);
             }
             catch (DeliveryTargetException ex)
             {
-                failedIndex = i;
+                tally.FailedIndex = i;
                 result.Status = ProjectDeliveryResultStatus.Failed;
                 // A refused upload can carry the same Data Plane Admin Service text as a
                 // failed install; when it names a code, say it the same way.
@@ -2482,7 +2468,7 @@ public sealed class DeliveryService
                 if (refused.Code.Length > 0)
                 {
                     result.Message = BcFailureText.AppMessage(refused);
-                    failureLine = BcFailureText.WhatHappened(refused.Code, label);
+                    tally.FailureLine = BcFailureText.WhatHappened(refused.Code, label);
                 }
                 else
                 {
@@ -2494,22 +2480,295 @@ public sealed class DeliveryService
             }
         }
 
-        var endNow = DateTime.UtcNow;
-        if (failedIndex >= 0)
+        if (handOff is not null && handedOff)
         {
-            var failed = results[failedIndex];
+            if (tally.FailedIndex < 0)
+            {
+                await HandOffAsync(delivery, log, handOff);
+                return;
+            }
+            // Stopped after the command was queued (a deliverable went missing under it):
+            // take the command back while nobody has collected it.
+            if (_targets.GatewayCommands is { } commands)
+            {
+                await commands.CancelQueuedAsync(handOff.GatewayCommandId,
+                    "The deployment stopped before the gateway collected this.", CancellationToken.None);
+            }
+            foreach (var r in results.Where(r => r.Status == ProjectDeliveryResultStatus.Installing))
+            {
+                r.Status = ProjectDeliveryResultStatus.Skipped;
+                r.UpdatedAt = DateTime.UtcNow;
+            }
+        }
+
+        SettleRun(delivery, results, tally, log);
+        await _db.SaveChangesAsync(ct);
+
+        // We have just changed what this customer's environment has installed or has
+        // queued to install, so the cached panel is now wrong — and a consultant checking
+        // "did my deployment land?" is exactly who would read it next. A delivery names its
+        // environment rather than carrying its id, so the whole project's entries go.
+        _panelCache.InvalidateProject(delivery.ProjectId);
+    }
+
+    /// <summary>
+    /// Ends the run of an on-premises deployment once its gateway command is queued (#1367):
+    /// the command is recorded on the deployment in the same save that marks its apps as
+    /// installing, and from then on <see cref="FollowGatewayDeliveriesAsync"/> carries it.
+    /// No worker lane waits on a command that may run for hours, and a restart neither
+    /// fails the deployment nor sends it a second time. Saved whatever the token says:
+    /// the command is already queued, so the record of it must not be lost.
+    /// </summary>
+    private async Task HandOffAsync(OeProjectDelivery delivery, StringBuilder log, DeliveryHandOff handOff)
+    {
+        var now = DateTime.UtcNow;
+        delivery.GatewayCommandId = handOff.GatewayCommandId;
+        delivery.GatewayLogOffset = 0;
+        delivery.UpdatedAt = now;
+        Append(log, "Waiting for the gateway to pick it up.");
+        delivery.DiagnosticsLog = log.ToString();
+        await _db.SaveChangesAsync(CancellationToken.None);
+        _logger.LogInformation(
+            "Delivery {DeliveryId} to {Env} handed to gateway command {CommandId}; it is followed from here.",
+            delivery.Id, delivery.EnvironmentName, handOff.GatewayCommandId);
+    }
+
+    // ── Following on-premises deployments (#1367) ─────────────────────────────
+
+    /// <summary>
+    /// One pass over the current organisation's on-premises deployments that are waiting on
+    /// their gateway command: copies what the gateway has said since the last pass into each
+    /// deployment's log (the page shows it live), and finishes each one whose command has
+    /// ended, app by app from the command's result, with the same rules as a run that waits.
+    /// A command followed for longer than <see cref="GatewayDeliveryTarget.HardWaitLimit"/>
+    /// is given up: taken back if the gateway never collected it, otherwise recorded as not
+    /// confirmed, since only the gateway can say what it did. Called by
+    /// <see cref="GatewayDeliveryFollower"/> inside the organisation's ambient scope; returns
+    /// the deployments it finished, so the people behind them can be told.
+    /// </summary>
+    public async Task<List<int>> FollowGatewayDeliveriesAsync(CancellationToken ct = default)
+    {
+        var finished = new List<int>();
+        if (_targets.GatewayCommands is not { } commands) return finished;
+        var ids = await _db.OeProjectDeliveries.AsNoTracking()
+            .Where(d => d.Status == ProjectDeliveryStatus.Installing && d.GatewayCommandId != null)
+            .OrderBy(d => d.Id)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        foreach (var id in ids)
+        {
+            try
+            {
+                if (await FollowGatewayDeliveryAsync(commands, id, ct)) finished.Add(id);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Following delivery {DeliveryId} on its gateway failed; trying again on the next pass.", id);
+            }
+            finally
+            {
+                _db.ChangeTracker.Clear();
+            }
+        }
+        return finished;
+    }
+
+    /// <summary>What a deployment says when it stops following a command the gateway never collected.</summary>
+    internal const string GaveUpUncollected =
+        "AL Workbench stopped waiting after a day, and the gateway had not picked this up, so nothing was sent.";
+
+    /// <summary>What a deployment says when it stops following a command the gateway has.</summary>
+    internal const string GaveUpCollected =
+        "AL Workbench stopped waiting after a day without a report from the gateway.";
+
+    private async Task<bool> FollowGatewayDeliveryAsync(GatewayCommandService commands, int deliveryId, CancellationToken ct)
+    {
+        var delivery = await _db.OeProjectDeliveries
+            .Include(d => d.Results.OrderBy(r => r.Ordering))
+            .FirstOrDefaultAsync(d => d.Id == deliveryId
+                                      && d.Status == ProjectDeliveryStatus.Installing
+                                      && d.GatewayCommandId != null, ct);
+        if (delivery is null) return false;
+        var commandId = delivery.GatewayCommandId!.Value;
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var log = new StringBuilder(delivery.DiagnosticsLog ?? string.Empty);
+
+        var progress = await commands.ReadProgressAsync(commandId, delivery.GatewayLogOffset, ct)
+            ?? new GatewayCommandProgress(GatewayCommandStatus.Failed, "The gateway command is no longer there.", null,
+                string.Empty, delivery.GatewayLogOffset, LeftQueue: true);
+        var lines = GatewayDeliveryTarget.GatewayLines(progress.NewLog);
+        foreach (var line in lines) Append(log, "Gateway: " + line);
+        delivery.GatewayLogOffset = progress.LogOffset;
+
+        if (!progress.IsFinal)
+        {
+            var since = delivery.InstallStartedAt ?? delivery.StartedAt ?? delivery.ClaimedAt ?? now;
+            if (now - since < GatewayDeliveryTarget.HardWaitLimit)
+            {
+                if (lines.Count == 0) return false;
+                delivery.UpdatedAt = now;
+                delivery.DiagnosticsLog = log.ToString();
+                await _db.SaveChangesAsync(ct);
+                return false;
+            }
+            _logger.LogWarning("Stopped following gateway command {CommandId} of delivery {DeliveryId} after {Limit}.",
+                commandId, deliveryId, GatewayDeliveryTarget.HardWaitLimit);
+            progress = await commands.CancelQueuedAsync(commandId, GaveUpUncollected, ct)
+                ? progress with { Status = GatewayCommandStatus.Failed, FailureMessage = GaveUpUncollected, Result = null, LeftQueue = false }
+                : progress with { Status = GatewayCommandStatus.Failed, FailureMessage = GaveUpCollected, Result = null, LeftQueue = true };
+        }
+
+        // The apps the command carried are the ones the run marked installing, in order.
+        var results = delivery.Results.OrderBy(r => r.Ordering).ToList();
+        var tally = new RunTally();
+        var sent = 0;
+        for (var i = 0; i < results.Count; i++)
+        {
+            var result = results[i];
+            if (result.Status != ProjectDeliveryResultStatus.Installing) continue;
+            var index = sent++;
+            if (tally.FailedIndex >= 0)
+            {
+                result.Status = ProjectDeliveryResultStatus.Skipped;
+                result.UpdatedAt = now;
+                continue;
+            }
+            var outcome = GatewayDeliveryTarget.OutcomeFor(progress, index, result.AppVersion);
+            ApplyOutcome(result, $"{result.AppName} {result.AppVersion}", i, outcome, tally, log);
+        }
+        SettleRun(delivery, results, tally, log);
+        await _db.SaveChangesAsync(ct);
+        _panelCache.InvalidateProject(delivery.ProjectId);
+        _logger.LogInformation("Delivery {DeliveryId} finished from gateway command {CommandId}: {Status}.",
+            deliveryId, commandId, delivery.Status);
+        return true;
+    }
+
+    /// <summary>
+    /// What one run of a deployment has found so far: the app that stopped it, and what
+    /// the deployment's end says. Shared by the run and by the follower that finishes an
+    /// on-premises deployment from its gateway command, so both end a deployment alike.
+    /// </summary>
+    private sealed class RunTally
+    {
+        /// <summary>The position of the app that stopped the run; -1 while none has.</summary>
+        public int FailedIndex { get; set; } = -1;
+
+        /// <summary>
+        /// Whether anything went in (or was handed to Business Central). A run where every
+        /// app was already on its version changes nothing, so it ends as deployed, not
+        /// handed off.
+        /// </summary>
+        public bool UploadedAny { get; set; }
+
+        /// <summary>What the gateway said about restarting the service tiers, when it said anything.</summary>
+        public bool? TiersRestarted { get; set; }
+
+        /// <summary>
+        /// The one line the delivery carries when Business Central reported the failure;
+        /// the detail (its message) stays on the app, so the two never say the same twice.
+        /// </summary>
+        public string? FailureLine { get; set; }
+
+        /// <summary>A refusal is already the whole sentence; it isn't prefixed like an app's failure.</summary>
+        public string? Refusal { get; set; }
+
+        /// <summary>The gateway lost sight of the apps: whether they went in is not known.</summary>
+        public string? Unconfirmed { get; set; }
+    }
+
+    /// <summary>One app's outcome as the target reported it, written to its result row and the log.</summary>
+    private static void ApplyOutcome(OeProjectDeliveryResult result, string label, int i, DeliveryInstallOutcome outcome,
+        RunTally tally, StringBuilder log)
+    {
+        tally.TiersRestarted = outcome.TiersRestarted ?? tally.TiersRestarted;
+        if (outcome.FromVersion is { Length: > 0 } from && result.PreviousVersion is null)
+        {
+            result.PreviousVersion = from;
+        }
+        if (outcome.Completed)
+        {
+            tally.UploadedAny = true;
+            result.Status = ProjectDeliveryResultStatus.Completed;
+            result.Message = outcome.Message;
+            Append(log, $"Installed {label}.");
+        }
+        else if (outcome.Outcome is DeliveryAppOutcome.AlreadyInstalled or DeliveryAppOutcome.Skipped)
+        {
+            // The gateway found it already on this version (#931), or did not start
+            // it because another app of the same command stopped: neither is this
+            // app's failure, and the run goes on to the app that did stop.
+            result.Status = ProjectDeliveryResultStatus.Skipped;
+            result.Message = outcome.Message;
+            Append(log, $"Skipped {label}: {outcome.Message}");
+        }
+        else if (outcome.Outcome == DeliveryAppOutcome.Refused)
+        {
+            // Refused before anything ran for it: told apart from a failure, since
+            // nothing was changed for this app and the fix is the customer's
+            // settings or the file, not the environment.
+            tally.FailedIndex = i;
+            result.Status = ProjectDeliveryResultStatus.Refused;
+            result.Message = outcome.Message;
+            tally.Refusal = $"The gateway refused {label}: {outcome.Message}";
+            Append(log, $"REFUSED {label}: {outcome.Message}");
+        }
+        else if (outcome.Outcome == DeliveryAppOutcome.Unconfirmed)
+        {
+            // Neither this app's failure nor a success: the gateway lost sight of it after
+            // it may have started, and of the apps after it in the same way, so the run
+            // goes on through them rather than calling them skipped.
+            result.Status = ProjectDeliveryResultStatus.Unconfirmed;
+            result.Message = outcome.Message;
+            tally.Unconfirmed ??= outcome.Message;
+            Append(log, $"NOT CONFIRMED {label}: {outcome.Message}");
+        }
+        else
+        {
+            tally.FailedIndex = i;
+            result.Status = ProjectDeliveryResultStatus.Failed;
+            result.Message = outcome.Message;
+            // The log keeps Business Central's text whole, wrapper and JSON included:
+            // it is what support needs, and what the page parses back (#930).
+            if (outcome.Failure is { } reported)
+            {
+                Append(log, $"FAILED {label}: {BcFailureText.ForLog(reported, outcome.Raw)}");
+                tally.FailureLine = BcFailureText.WhatHappened(reported.Code, label);
+            }
+            else
+            {
+                Append(log, $"FAILED {label}: {outcome.Message}");
+            }
+        }
+        result.FinishedAt = DateTime.UtcNow;
+        result.UpdatedAt = result.FinishedAt.Value;
+    }
+
+    /// <summary>The deployment's end, from what its apps came to.</summary>
+    private static void SettleRun(OeProjectDelivery delivery, List<OeProjectDeliveryResult> results, RunTally tally, StringBuilder log)
+    {
+        var endNow = DateTime.UtcNow;
+        if (tally.FailedIndex >= 0)
+        {
+            var failed = results[tally.FailedIndex];
             // The branches that stop the loop with a break leave the apps after the
             // failed one pending; they didn't get there either.
-            foreach (var r in results.Skip(failedIndex + 1).Where(r => r.Status == ProjectDeliveryResultStatus.Pending))
+            foreach (var r in results.Skip(tally.FailedIndex + 1).Where(r => r.Status == ProjectDeliveryResultStatus.Pending))
             {
                 r.Status = ProjectDeliveryResultStatus.Skipped;
                 r.UpdatedAt = endNow;
             }
             delivery.Status = ProjectDeliveryStatus.Failed;
-            delivery.FailureMessage = refusal ?? failureLine ?? $"{failed.AppName} {failed.AppVersion} failed: {failed.Message}";
+            delivery.FailureMessage = tally.Refusal ?? tally.FailureLine ?? $"{failed.AppName} {failed.AppVersion} failed: {failed.Message}";
             Append(log, "Delivery failed.");
         }
-        else if (!uploadedAny)
+        else if (tally.Unconfirmed is not null)
+        {
+            delivery.Status = ProjectDeliveryStatus.Failed;
+            delivery.FailureMessage = UnknownOutcome(delivery.EnvironmentName);
+            Append(log, "Delivery not confirmed: " + delivery.FailureMessage);
+        }
+        else if (!tally.UploadedAny)
         {
             delivery.Status = ProjectDeliveryStatus.Deployed;
             Append(log, $"Every app was already on this version in {delivery.EnvironmentName}; nothing to install.");
@@ -2528,10 +2787,10 @@ public sealed class DeliveryService
         }
         // Said as it is: until the gateway restarts tiers (#1368) it reports that it did
         // not, and a session that stays open keeps the old version's event subscribers.
-        if (tiersRestarted is { } restarted)
+        if (tally.TiersRestarted is { } restarted)
         {
             delivery.TiersRestarted = restarted;
-            if (!restarted && delivery.Status == ProjectDeliveryStatus.Deployed && uploadedAny)
+            if (!restarted && delivery.Status == ProjectDeliveryStatus.Deployed && tally.UploadedAny)
             {
                 Append(log, TiersNotRestartedLine);
             }
@@ -2539,14 +2798,15 @@ public sealed class DeliveryService
         delivery.FinishedAt = endNow;
         delivery.UpdatedAt = endNow;
         delivery.DiagnosticsLog = log.ToString();
-        await _db.SaveChangesAsync(ct);
-
-        // We have just changed what this customer's environment has installed or has
-        // queued to install, so the cached panel is now wrong — and a consultant checking
-        // "did my deployment land?" is exactly who would read it next. A delivery names its
-        // environment rather than carrying its id, so the whole project's entries go.
-        _panelCache.InvalidateProject(delivery.ProjectId);
     }
+
+    /// <summary>
+    /// The failure line of an on-premises deployment whose gateway stopped before it said
+    /// what it installed (#1367). Not "failed": some apps may well have gone in.
+    /// </summary>
+    internal static string UnknownOutcome(string environmentName) =>
+        $"The gateway stopped before it reported what it installed, so whether the apps went in is not known. "
+        + $"Check the apps on {environmentName} after the gateway's next inventory, then deploy again if they are not there.";
 
     /// <summary>
     /// The refusal for an app whose exact version Business Central is already holding for

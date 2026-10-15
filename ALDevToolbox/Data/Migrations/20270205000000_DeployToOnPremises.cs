@@ -15,7 +15,20 @@ namespace ALDevToolbox.Data.Migrations
                 table: "oe_release_pipelines",
                 type: "boolean",
                 nullable: false,
-                defaultValue: true);
+                defaultValue: false);
+
+            migrationBuilder.AddColumn<long>(
+                name: "gateway_command_id",
+                table: "oe_project_deliveries",
+                type: "bigint",
+                nullable: true);
+
+            migrationBuilder.AddColumn<int>(
+                name: "gateway_log_offset",
+                table: "oe_project_deliveries",
+                type: "integer",
+                nullable: false,
+                defaultValue: 0);
 
             migrationBuilder.AddColumn<bool>(
                 name: "tiers_restarted",
@@ -57,6 +70,14 @@ namespace ALDevToolbox.Data.Migrations
             migrationBuilder.DropColumn(
                 name: "unpublish_previous",
                 table: "oe_release_pipelines");
+
+            migrationBuilder.DropColumn(
+                name: "gateway_command_id",
+                table: "oe_project_deliveries");
+
+            migrationBuilder.DropColumn(
+                name: "gateway_log_offset",
+                table: "oe_project_deliveries");
 
             migrationBuilder.DropColumn(
                 name: "tiers_restarted",

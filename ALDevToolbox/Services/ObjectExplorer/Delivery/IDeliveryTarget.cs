@@ -72,12 +72,20 @@ public interface IDeliveryTarget
 
     /// <summary>
     /// Told once, before the first <see cref="StartInstallAsync"/>, every app the run is
-    /// going to send, in installation order, with what applies to all of them. The Admin
-    /// Center installs one app at a time and has nothing to do here. The gateway installs
-    /// the whole build in one command, in the order given, and queues it here (#1367).
-    /// Not called when nothing is left to send.
+    /// going to send, in installation order, with what applies to all of them. Not called
+    /// when nothing is left to send.
+    /// <para>
+    /// Null means "go on": the run sends each app with <see cref="StartInstallAsync"/> and
+    /// waits for it, which is what the Admin Center does. A <see cref="DeliveryHandOff"/>
+    /// means the target has taken the whole batch and finishes it later, on its own time:
+    /// the gateway installs the build as one command, which can run for hours (#1367). The
+    /// run then records the hand-off and ends, and <c>DeliveryService.FollowGatewayDeliveriesAsync</c>
+    /// finishes the deployment when the command does, so no worker lane waits on it.
+    /// </para>
+    /// <para>A target may refuse the batch with <see cref="DeliveryTargetRefusedException"/>,
+    /// which the run records as the first app's refusal rather than as a failure.</para>
     /// </summary>
-    Task PrepareInstallsAsync(DeliveryInstallBatch batch, CancellationToken ct);
+    Task<DeliveryHandOff?> PrepareInstallsAsync(DeliveryInstallBatch batch, CancellationToken ct);
 
     /// <summary>
     /// Sends one app and starts its install. Returns as soon as the environment has taken
@@ -136,6 +144,26 @@ public class DeliveryTargetException : Exception
     {
     }
 }
+
+/// <summary>
+/// The target's own rules refused the batch before anything was sent, for a reason the
+/// person fixes outside the environment (the customer's gateway settings). Recorded as the
+/// first app's refusal, not as a failure of the environment.
+/// </summary>
+public sealed class DeliveryTargetRefusedException : DeliveryTargetException
+{
+    public DeliveryTargetRefusedException(string message)
+        : base(message)
+    {
+    }
+}
+
+/// <summary>
+/// A batch the target took whole and finishes later (#1367): the gateway command it was
+/// queued as. The run stores it on the deployment and ends; the deployment is finished
+/// from the command's result.
+/// </summary>
+public sealed record DeliveryHandOff(long GatewayCommandId);
 
 /// <summary>
 /// One app of a deployment, as the target is handed it: which build artifact it is, what
@@ -241,4 +269,6 @@ public enum DeliveryAppOutcome
     AlreadyInstalled,
     /// <summary>Not started, because another app of the same command was refused or failed.</summary>
     Skipped,
+    /// <summary>The target lost sight of it after it may have started: whether it went in is not known.</summary>
+    Unconfirmed,
 }

@@ -35,6 +35,8 @@ internal sealed class ProjectDeliveryConfiguration : IEntityTypeConfiguration<Oe
         entity.Property(e => e.DeployedWithoutApproval).HasColumnName("deployed_without_approval").IsRequired().HasDefaultValue(false);
         entity.Property(e => e.StartedByAgent).HasColumnName("started_by_agent").IsRequired().HasDefaultValue(false);
         entity.Property(e => e.TiersRestarted).HasColumnName("tiers_restarted");
+        entity.Property(e => e.GatewayCommandId).HasColumnName("gateway_command_id");
+        entity.Property(e => e.GatewayLogOffset).HasColumnName("gateway_log_offset").IsRequired().HasDefaultValue(0);
         entity.Property(e => e.FailureMessage).HasColumnName("failure_message");
         entity.Property(e => e.DiagnosticsLog).HasColumnName("diagnostics_log");
         entity.Property(e => e.CreatedAt).HasColumnName("created_at").IsRequired();
